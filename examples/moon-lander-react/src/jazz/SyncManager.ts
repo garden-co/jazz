@@ -2,9 +2,9 @@
  * SyncManager — all Jazz writes for the game.
  *
  * Jazz write APIs used here:
- *   db.insert(table, data, { tier })    — create a new row
- *   db.update(table, id, data, { tier }) — update fields on an existing row
- *   db.deleteFrom(table, id, { tier? })  — delete a row
+ *   db.insertDurable(table, data, { tier })    — create a new row (fires WHERE ENTRY cross-client)
+ *   db.updateDurable(table, id, data, { tier }) — update fields (fires WHERE EXIT/ENTRY cross-client)
+ *   db.deleteDurable(table, id, { tier })  — delete a row (local only — server can't forward deleted objects)
  *
  * The "edge" tier broadcasts the write to all connected clients' live
  * subscriptions, triggering WHERE ENTRY / WHERE EXIT events remotely.
@@ -89,20 +89,19 @@ export class SyncManager {
   // --- Public API (called from game callbacks) ---
 
   collectDeposit(id: string): void {
-    // Record fuelType+positionX now while the deposit is still in allDepositsRaw (uncollected).
-    // Provides a fallback for releaseDeposit (DELETE+INSERT) if WHERE ENTRY hasn't fired yet.
     const dep = this.inputs.allDepositsRaw.find((d) => d.id === id);
-    if (dep) {
-      this.collectedByThis.set(id, { fuelType: dep.fuelType, positionX: dep.positionX });
-    }
-    this.db
-      .update(
-        app.fuel_deposits,
-        id,
-        { collected: true, collectedBy: this.playerId },
-        { tier: "edge" },
-      )
-      .catch(console.error);
+    if (!dep) return;
+
+    // Record fuelType+positionX now while the deposit is still in allDepositsRaw.
+    // Provides a fallback for releaseDeposit/shareFuel before React re-renders.
+    this.collectedByThis.set(id, { fuelType: dep.fuelType, positionX: dep.positionX });
+
+    // Sync update: preserves the row ID so the server can forward WHERE EXIT
+    // to remote clients' where({collected:false}) subscriptions.
+    // Uses db.update (not updateDurable) so the write is emitted to the bridge
+    // outbox immediately — updateDurable on the main thread holds writes until
+    // an edge-tier ack that never arrives (main thread has no durability tier).
+    this.db.update(app.fuel_deposits, id, { collected: true, collectedBy: this.playerId });
   }
 
   refuel(fuelType: FuelType): void {
@@ -123,12 +122,9 @@ export class SyncManager {
       )?.[0];
 
     if (!shareId) return;
-    this.releasingIds.add(shareId);
     this.collectedByThis.delete(shareId);
-    this.db
-      .update(app.fuel_deposits, shareId, { collectedBy: receiverPlayerId }, { tier: "edge" })
-      .finally(() => this.releasingIds.delete(shareId))
-      .catch(console.error);
+    // Sync update: same reason as collectDeposit — updateDurable hangs on main thread.
+    this.db.update(app.fuel_deposits, shareId, { collectedBy: receiverPlayerId });
   }
 
   burstDeposit(fuelType: string): void {
@@ -137,7 +133,7 @@ export class SyncManager {
 
   sendMessage(text: string): void {
     this.db
-      .insert(
+      .insertDurable(
         app.chat_messages,
         { playerId: this.playerId, message: text, createdAt: Math.floor(Date.now() / 1000) },
         { tier: "edge" },
@@ -150,7 +146,7 @@ export class SyncManager {
     if (!this.dbRowId) return;
     if (this.lastSynced && !playerStateChanged(this.lastSynced, state)) return;
     this.lastSynced = { ...state };
-    this.db.update(app.players, this.dbRowId, state, { tier: "edge" }).catch(console.error);
+    this.db.updateDurable(app.players, this.dbRowId, state, { tier: "edge" }).catch(console.error);
   }
 
   setInputs(inputs: SyncInputs): void {
@@ -162,7 +158,7 @@ export class SyncManager {
       if (this.latestState) {
         this.lastSynced = { ...this.latestState };
         this.db
-          .update(app.players, this.dbRowId, this.latestState, { tier: "edge" })
+          .updateDurable(app.players, this.dbRowId, this.latestState, { tier: "edge" })
           .catch(console.error);
       }
     }
@@ -181,10 +177,10 @@ export class SyncManager {
         this.insertingPlayer = true;
         const state = this.latestState;
         this.db
-          .insert(app.players, state, { tier: "edge" })
-          .then((id) => {
+          .insertDurable(app.players, state, { tier: "edge" })
+          .then((row) => {
             if (!this.dbRowId) {
-              this.dbRowId = id;
+              this.dbRowId = row.id;
               this.lastSynced = { ...state };
             }
           })
@@ -203,7 +199,12 @@ export class SyncManager {
           this.releasingIds.add(d.id);
           this.collectedByThis.delete(d.id);
           this.db
-            .update(app.fuel_deposits, d.id, { collected: false, collectedBy: "" })
+            .updateDurable(
+              app.fuel_deposits,
+              d.id,
+              { collected: false, collectedBy: "" },
+              { tier: "edge" },
+            )
             .finally(() => this.releasingIds.delete(d.id))
             .catch(console.error);
         }
@@ -213,7 +214,12 @@ export class SyncManager {
           this.releasingIds.add(id);
           this.collectedByThis.delete(id);
           this.db
-            .update(app.fuel_deposits, id, { collected: false, collectedBy: "" }, { tier: "edge" })
+            .updateDurable(
+              app.fuel_deposits,
+              id,
+              { collected: false, collectedBy: "" },
+              { tier: "edge" },
+            )
             .finally(() => this.releasingIds.delete(id))
             .catch(console.error);
         }
@@ -261,18 +267,18 @@ export class SyncManager {
     this.releasingIds.add(depId);
     this.collectedByThis.delete(depId);
     try {
-      await this.db.deleteFrom(app.fuel_deposits, depId);
-      await this.db.insert(
-        app.fuel_deposits,
-        {
-          fuelType,
-          positionX,
-          createdAt: Math.floor(Date.now() / 1000),
-          collected: false,
-          collectedBy: "",
-        },
-        { tier: "edge" },
-      );
+      // Sync delete + insert updates the local store immediately (immediate_tick),
+      // firing WHERE ENTRY on the where({collected:false}) subscription without
+      // waiting for a durability ack that never arrives on the main thread.
+      // forward_update_to_servers still propagates both ops cross-client.
+      this.db.delete(app.fuel_deposits, depId);
+      this.db.insert(app.fuel_deposits, {
+        fuelType,
+        positionX,
+        createdAt: Math.floor(Date.now() / 1000),
+        collected: false,
+        collectedBy: "",
+      });
     } finally {
       this.releasingIds.delete(depId);
     }
@@ -304,6 +310,10 @@ export async function reconcileDeposits(
     if (arr) arr.push(d);
   }
 
+  // Fire all inserts and trims concurrently so the ServerPayloadBatcher can
+  // accumulate them into a single POST rather than N sequential round-trips.
+  const ops: Promise<unknown>[] = [];
+
   for (let i = 0; i < FUEL_TYPES.length; i++) {
     const ft = FUEL_TYPES[i];
     const deposits = byType.get(ft) ?? [];
@@ -314,31 +324,37 @@ export async function reconcileDeposits(
       for (let j = 0; j < diff; j++) {
         // Deterministic seed so concurrent clients generate the same positions
         const slotSeed = i * 1000 + deposits.length + j;
-        await db.insert(
-          app.fuel_deposits,
-          {
-            fuelType: ft,
-            positionX: Math.floor(seededRand(slotSeed) * MOON_SURFACE_WIDTH),
-            createdAt: nowS,
-            collected: false,
-            collectedBy: "",
-          },
-          { tier: "edge" },
+        ops.push(
+          db.insertDurable(
+            app.fuel_deposits,
+            {
+              fuelType: ft,
+              positionX: Math.floor(seededRand(slotSeed) * MOON_SURFACE_WIDTH),
+              createdAt: nowS,
+              collected: false,
+              collectedBy: "",
+            },
+            { tier: "edge" },
+          ),
         );
       }
     } else if (diff < 0) {
       // Trim excess: remove the newest deposits first (highest createdAt)
       const sorted = [...deposits].sort((a, b) => b.createdAt - a.createdAt);
       for (let j = 0; j < -diff; j++) {
-        await db.update(
-          app.fuel_deposits,
-          sorted[j].id,
-          { collected: true, collectedBy: "__trimmed__" },
-          { tier: "edge" },
+        ops.push(
+          db.updateDurable(
+            app.fuel_deposits,
+            sorted[j].id,
+            { collected: true, collectedBy: "__trimmed__" },
+            { tier: "edge" },
+          ),
         );
       }
     }
   }
+
+  await Promise.all(ops);
 }
 
 /** Returns true if any synced field in PlayerInit has changed meaningfully. */

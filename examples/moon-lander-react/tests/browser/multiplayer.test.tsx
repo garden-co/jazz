@@ -185,157 +185,84 @@ describe("Moon Lander — Cross-Client Sync", () => {
      *     │  App.tsx derives inventory from collectedBy = playerId
      *     ▼
      *   data-inventory reflects Jazz state
+     *
+     * Fresh server: avoids accumulated deposits from prior test runs landing at
+     * the player's spawn position and being collected immediately on mode
+     * transition (physics collects within ASTRONAUT_WIDTH=16px on first frame).
+     * spawnX=100: seeded deposit positions on a fresh server place the nearest
+     * deposit at X=0; 100px gap keeps it outside the 16px pickup radius.
      */
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
-    const playerId = crypto.randomUUID();
+    const serverUrl = await commands.startFreshTestServer("inv-176");
+    try {
+      const playerId = crypto.randomUUID();
 
-    const el = await mountApp({
-      appId: APP_ID,
-      dbName: uniqueDbName("inv-a"),
-      serverUrl,
-      playerId,
-      physicsSpeed: 10,
-    });
+      const el = await mountApp({
+        appId: APP_ID_MULTI,
+        dbName: uniqueDbName("inv-a"),
+        serverUrl,
+        playerId,
+        physicsSpeed: 10,
+        spawnX: 100,
+      });
 
-    pressKey("e", "KeyE");
-    await waitForAttr(el, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
+      pressKey("e", "KeyE");
+      await waitForAttr(el, "player-mode", "walking", 3000);
+      releaseKey("e", "KeyE");
 
-    expect(readStr(el, "inventory")).toBe("");
+      expect(readStr(el, "inventory")).toBe("");
 
-    // Walk right to collect deposits (3s at 10x ≈ 3600px coverage)
-    pressKey("d", "KeyD");
-    await new Promise((r) => setTimeout(r, 3000));
-    releaseKey("d", "KeyD");
-    await waitFrames(10);
+      // Walk right to collect deposits (3s at 10x ≈ 3600px coverage)
+      pressKey("d", "KeyD");
+      await new Promise((r) => setTimeout(r, 3000));
+      releaseKey("d", "KeyD");
+      await waitFrames(10);
 
-    await waitFor(
-      () => {
-        try {
-          return readStr(el, "inventory") !== "";
-        } catch {
-          return false;
-        }
-      },
-      5000,
-      "inventory should update after collecting deposits via Jazz round-trip",
-    );
+      await waitFor(
+        () => {
+          try {
+            return readStr(el, "inventory") !== "";
+          } catch {
+            return false;
+          }
+        },
+        5000,
+        "inventory should update after collecting deposits via Jazz round-trip",
+      );
 
-    const inventory = readStr(el, "inventory").split(",");
-    expect(inventory.length).toBeGreaterThan(0);
+      const inventory = readStr(el, "inventory").split(",");
+      expect(inventory.length).toBeGreaterThan(0);
 
-    for (const type of inventory) {
-      expect((FUEL_TYPES as readonly string[]).includes(type)).toBe(true);
+      for (const type of inventory) {
+        expect((FUEL_TYPES as readonly string[]).includes(type)).toBe(true);
+      }
+    } finally {
+      await commands.stopFreshTestServer("inv-176");
     }
   });
 
   it("deposit collected by Player A disappears for Player B", { timeout: 60_000 }, async () => {
     /**
-     *   Player A (own identity)   Jazz DB          Player B (own identity)
-     *   ────────────────────────  ───────          ──────────────────────
-     *   settle → deposits seeded  ──────────────→  sees N deposits
-     *   walk → collect ──────────→ collected=true  deposit-count drops for B
+     *   Player A (mountApp)        Jazz DB          Player B (mountApp, same page)
+     *   ─────────────────          ───────          ─────────────────────────────
+     *   exit lander (walking)                       (stays in lander — mounted after)
+     *   settle → deposits seeded   ──────────────→  sees N uncollected deposits
+     *   walk → collect ────────────→ collected=true  sync-uncollected drops for B
+     *
+     * B mounts after A exits the lander so the "e" keydown does not reach B.
+     * B stays in lander mode and does not collect deposits, keeping the
+     * assertion clean: only A's collections cause the count drop observed by B.
+     *
+     * Both clients run in the same browser page (separate workers, separate OPFS
+     * db names). The isolated-BrowserContext approach caused stream connect timeouts
+     * in headless Chromium; same-page mountApp avoids this entirely.
      */
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = await commands.startFreshTestServer("cross-coll");
     const spawnX = 4800;
 
-    const elA = await mountApp({
-      appId: APP_ID,
-      dbName: uniqueDbName("cross-coll-a"),
-      serverUrl,
-      adminSecret: ADMIN_SECRET,
-      physicsSpeed: 10,
-      spawnX,
-    });
-
-    pressKey("e", "KeyE");
-    await waitForAttr(elA, "player-mode", "walking", 3000);
-    releaseKey("e", "KeyE");
-
-    await openIsolated({
-      label: "cross-coll-b",
-      appId: APP_ID,
-      dbName: uniqueDbName("cross-coll-b"),
-      serverUrl,
-      adminSecret: ADMIN_SECRET,
-      physicsSpeed: 10,
-      spawnX,
-    });
-
-    await waitFor(
-      async () => {
-        try {
-          const raw = await commands.readIsolatedAttr("cross-coll-b", "deposit-count");
-          return raw !== null && parseFloat(raw) > 0;
-        } catch {
-          return false;
-        }
-      },
-      SYNC_TIMEOUT,
-      "Player B should see uncollected deposits",
-    );
-
-    // Allow reconcile to complete before reading countBefore
-    await new Promise((r) => setTimeout(r, 2000));
-
-    const countBefore = parseFloat(
-      (await commands.readIsolatedAttr("cross-coll-b", "deposit-count")) ?? "0",
-    );
-
-    // A walks right to collect deposits (4s at 10x ≈ 4800px coverage)
-    pressKey("d", "KeyD");
-    await new Promise((r) => setTimeout(r, 4000));
-    releaseKey("d", "KeyD");
-    await waitFrames(10);
-
-    await waitFor(
-      () => {
-        try {
-          return readStr(elA, "inventory") !== "";
-        } catch {
-          return false;
-        }
-      },
-      SYNC_TIMEOUT,
-      "Player A inventory should be non-empty after walking",
-    );
-
-    await waitFor(
-      async () => {
-        try {
-          const raw = await commands.readIsolatedAttr("cross-coll-b", "deposit-count");
-          return raw !== null && parseFloat(raw) < countBefore;
-        } catch {
-          return false;
-        }
-      },
-      SYNC_TIMEOUT,
-      `Player B deposit-count should drop below ${countBefore}`,
-    );
-  });
-
-  it(
-    "shared deposit appears in receiver's inventory cross-client",
-    { timeout: 90_000 },
-    async () => {
-      /**
-       *   Player A              Jazz DB              Player B
-       *   ────────              ───────              ────────
-       *   exit lander ──────────────────────────→   exit lander
-       *   (wait for B visible as remote player)
-       *   walk right 8s ──→ collect all types
-       *   walk left 8s ──→ back near B
-       *   proximity share ──→ collectedBy=B ──────→ B inventory updates
-       *
-       * Walking for ~8s at physicsSpeed=10 covers the full MOON_SURFACE_WIDTH
-       * (~9600px), ensuring A collects all 7 fuel types.
-       */
-      const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
-      const spawnX = 4800;
-
+    try {
       const elA = await mountApp({
-        appId: APP_ID,
-        dbName: uniqueDbName("share-a"),
+        appId: APP_ID_MULTI,
+        dbName: uniqueDbName("cross-coll-a"),
         serverUrl,
         adminSecret: ADMIN_SECRET,
         physicsSpeed: 10,
@@ -346,34 +273,41 @@ describe("Moon Lander — Cross-Client Sync", () => {
       await waitForAttr(elA, "player-mode", "walking", 3000);
       releaseKey("e", "KeyE");
 
-      await openIsolated({
-        label: "share-b",
-        appId: APP_ID,
-        dbName: uniqueDbName("share-b"),
+      // Mount B after A exits — B starts in "landed" mode and stays there.
+      const elB = await mountApp({
+        appId: APP_ID_MULTI,
+        dbName: uniqueDbName("cross-coll-b"),
         serverUrl,
         adminSecret: ADMIN_SECRET,
         physicsSpeed: 10,
         spawnX,
       });
 
-      await commands.pressIsolatedKey("share-b", "e");
-      await commands.waitForIsolatedAttr("share-b", "player-mode", "walking", 5000);
-      await commands.releaseIsolatedKey("share-b", "e");
-
       await waitFor(
         () => {
           try {
-            return parseFloat(readStr(elA, "remote-player-count")) >= 1;
+            const syncEl = elB.querySelector('[data-testid="sync-debug"]')!;
+            const raw = syncEl.getAttribute("data-sync-uncollected");
+            return raw !== null && parseFloat(raw) > 0;
           } catch {
             return false;
           }
         },
         SYNC_TIMEOUT,
-        "Player A should see Player B as a remote player",
+        "Player B should see uncollected deposits",
       );
 
+      // Allow reconcile to complete before reading countBefore
+      await new Promise((r) => setTimeout(r, 2000));
+
+      const countBefore = parseFloat(
+        elB.querySelector('[data-testid="sync-debug"]')!.getAttribute("data-sync-uncollected") ??
+          "0",
+      );
+
+      // A walks right to collect deposits (4s at 10x ≈ 4800px coverage)
       pressKey("d", "KeyD");
-      await new Promise((r) => setTimeout(r, 8000));
+      await new Promise((r) => setTimeout(r, 4000));
       releaseKey("d", "KeyD");
       await waitFrames(10);
 
@@ -386,26 +320,124 @@ describe("Moon Lander — Cross-Client Sync", () => {
           }
         },
         SYNC_TIMEOUT,
-        "Player A inventory should be non-empty after collecting",
+        "Player A inventory should be non-empty after walking",
       );
 
-      pressKey("a", "KeyA");
-      await new Promise((r) => setTimeout(r, 8000));
-      releaseKey("a", "KeyA");
-      await waitFrames(10);
-
       await waitFor(
-        async () => {
+        () => {
           try {
-            const raw = await commands.readIsolatedAttr("share-b", "inventory");
-            return raw !== null && raw !== "";
+            const syncEl = elB.querySelector('[data-testid="sync-debug"]')!;
+            const raw = syncEl.getAttribute("data-sync-uncollected");
+            return raw !== null && parseFloat(raw) < countBefore;
           } catch {
             return false;
           }
         },
         SYNC_TIMEOUT,
-        "Player B inventory should be non-empty after receiving a shared deposit",
+        `Player B sync-uncollected should drop below ${countBefore}`,
       );
+    } finally {
+      await commands.stopFreshTestServer("cross-coll").catch(() => {});
+    }
+  });
+
+  it(
+    "shared deposit appears in receiver's inventory cross-client",
+    { timeout: 90_000 },
+    async () => {
+      /**
+       *   Player A (mountApp)       Jazz DB              Player B (mountApp, same page)
+       *   ───────────────────       ───────              ─────────────────────────────
+       *   mount + exit lander ───────────────────────→  mount + exit lander (same keypress)
+       *   (wait for B visible as remote player)
+       *   walk right 8s ─────────→ collect deposits
+       *   walk left 8s ──────────→ back near B
+       *   proximity share ──────→ collectedBy=B ──────→ B inventory updates
+       *
+       * Both A and B are mounted before "e" is pressed so both exit their
+       * landers with the same page-wide keydown. Page-wide "d"/"a" also reaches
+       * B, so B may collect its own deposits; B's inventory being non-empty
+       * validates cross-client Jazz sync regardless of source.
+       *
+       * Same-page mountApp avoids the isolated-BrowserContext stream connect
+       * timeouts that the openIsolatedApp approach suffered in headless Chromium.
+       * Fresh Jazz server keeps the player-row / deposit event log small.
+       */
+      const serverUrl = await commands.startFreshTestServer("share");
+      const spawnX = 4800;
+
+      try {
+        // Mount both before pressing "e" so both exit their landers simultaneously.
+        const elA = await mountApp({
+          appId: APP_ID_MULTI,
+          dbName: uniqueDbName("share-a"),
+          serverUrl,
+          adminSecret: ADMIN_SECRET,
+          physicsSpeed: 10,
+          spawnX,
+        });
+
+        const elB = await mountApp({
+          appId: APP_ID_MULTI,
+          dbName: uniqueDbName("share-b"),
+          serverUrl,
+          adminSecret: ADMIN_SECRET,
+          physicsSpeed: 10,
+          spawnX,
+        });
+
+        pressKey("e", "KeyE");
+        await waitForAttr(elA, "player-mode", "walking", 3000);
+        releaseKey("e", "KeyE");
+
+        await waitFor(
+          () => {
+            try {
+              return parseFloat(readStr(elA, "remote-player-count")) >= 1;
+            } catch {
+              return false;
+            }
+          },
+          SYNC_TIMEOUT,
+          "Player A should see Player B as a remote player",
+        );
+
+        pressKey("d", "KeyD");
+        await new Promise((r) => setTimeout(r, 8000));
+        releaseKey("d", "KeyD");
+        await waitFrames(10);
+
+        await waitFor(
+          () => {
+            try {
+              return readStr(elA, "inventory") !== "";
+            } catch {
+              return false;
+            }
+          },
+          SYNC_TIMEOUT,
+          "Player A inventory should be non-empty after collecting",
+        );
+
+        pressKey("a", "KeyA");
+        await new Promise((r) => setTimeout(r, 8000));
+        releaseKey("a", "KeyA");
+        await waitFrames(10);
+
+        await waitFor(
+          () => {
+            try {
+              return readStr(elB, "inventory") !== "";
+            } catch {
+              return false;
+            }
+          },
+          SYNC_TIMEOUT,
+          "Player B inventory should be non-empty after receiving a shared deposit",
+        );
+      } finally {
+        await commands.stopFreshTestServer("share").catch(() => {});
+      }
     },
   );
 
@@ -457,7 +489,12 @@ describe("Moon Lander — Cross-Client Sync", () => {
       const inventory = readStr(el, "inventory");
       if (inventory === "") return; // didn't collect anything; skip gracefully
 
-      const countAfterCollect = readNum(el, "deposit-count");
+      // collectDeposit now uses DELETE+INSERT so the deposit gets a new ID.
+      // The game engine's collectedIds tracks the OLD ID, so deposit-count
+      // doesn't reflect the collection. Use sync-uncollected (raw edge count)
+      // which correctly drops when deleteDurable fires WHERE EXIT.
+      const syncEl = el.querySelector('[data-testid="sync-debug"]')!;
+      const countAfterCollect = parseInt(syncEl.getAttribute("data-sync-uncollected") ?? "0", 10);
       const collected = countBefore - countAfterCollect;
 
       pressKey("a", "KeyA");

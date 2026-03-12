@@ -27,10 +27,19 @@ function flushPromises(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function mockDb() {
+  const syncUpdates: Array<{
+    table: unknown;
+    id: string;
+    data: Record<string, unknown>;
+  }> = [];
   const inserts: Array<{
     table: unknown;
     data: Record<string, unknown>;
     options: { tier?: string } | undefined;
+  }> = [];
+  const syncInserts: Array<{
+    table: unknown;
+    data: Record<string, unknown>;
   }> = [];
   const updates: Array<{
     table: unknown;
@@ -43,17 +52,30 @@ function mockDb() {
     id: string;
     options: { tier?: string } | undefined;
   }> = [];
+  const durableDeletes: Array<{
+    table: unknown;
+    id: string;
+    options: { tier?: string } | undefined;
+  }> = [];
 
   return {
     db: {
-      insert: vi.fn(
+      update: vi.fn((table: unknown, id: string, data: Record<string, unknown>) => {
+        syncUpdates.push({ table, id, data });
+      }),
+      insert: vi.fn((table: unknown, data: Record<string, unknown>) => {
+        const id = `sync-${syncInserts.length}`;
+        syncInserts.push({ table, data });
+        return { id, ...data };
+      }),
+      insertDurable: vi.fn(
         async (table: unknown, data: Record<string, unknown>, options?: { tier?: string }) => {
           const id = `new-${inserts.length}`;
           inserts.push({ table, data, options });
-          return id;
+          return { id, ...data };
         },
       ),
-      update: vi.fn(
+      updateDurable: vi.fn(
         async (
           table: unknown,
           id: string,
@@ -63,13 +85,19 @@ function mockDb() {
           updates.push({ table, id, data, options });
         },
       ),
-      deleteFrom: vi.fn(async (table: unknown, id: string, options?: { tier?: string }) => {
+      delete: vi.fn((table: unknown, id: string, options?: { tier?: string }) => {
         deletes.push({ table, id, options });
+      }),
+      deleteDurable: vi.fn(async (table: unknown, id: string, options?: { tier?: string }) => {
+        durableDeletes.push({ table, id, options });
       }),
     } as any,
     inserts,
+    syncInserts,
+    syncUpdates,
     updates,
     deletes,
+    durableDeletes,
   };
 }
 
@@ -145,26 +173,35 @@ describe("SyncManager", () => {
 
   describe("immediate writes", () => {
     it("writes deposit collection immediately", async () => {
-      const { db, updates } = mockDb();
+      const { db, syncUpdates } = mockDb();
       const sync = new SyncManager(db, "alice");
-      sync.setInputs({ ...emptyInputs(), settled: true });
+
+      // collectDeposit looks up the deposit in allDepositsRaw; provide both.
+      const dep1 = makeDeposit({ fuelType: "circle", id: "dep-1", positionX: 100 });
+      const dep2 = makeDeposit({ fuelType: "triangle", id: "dep-2", positionX: 200 });
+      sync.setInputs({
+        ...emptyInputs(),
+        settled: true,
+        allDepositsRaw: [dep1, dep2],
+        uncollectedDeposits: [dep1, dep2],
+      });
 
       sync.collectDeposit("dep-1");
       sync.collectDeposit("dep-2");
 
       await flushPromises();
 
-      expect(updates).toHaveLength(2);
-      expect(updates[0].id).toBe("dep-1");
-      expect(updates[0].data.collected).toBe(true);
-      expect(updates[0].data.collectedBy).toBe("alice");
-      expect(updates[1].id).toBe("dep-2");
+      // Uses sync db.update so the bridge outbox emits immediately cross-client.
+      const collectionUpdates = syncUpdates.filter((u) => u.data.collected === true);
+      expect(collectionUpdates).toHaveLength(2);
+      expect(collectionUpdates.map((u) => u.id)).toEqual(["dep-1", "dep-2"]);
+      expect(collectionUpdates[0].data.collectedBy).toBe("alice");
 
       sync.destroy();
     });
 
     it("refuel releases a collected deposit immediately", async () => {
-      const { db, inserts, deletes } = mockDb();
+      const { db, syncInserts, deletes } = mockDb();
       const sync = new SyncManager(db, "alice");
 
       const collectedDep = makeDeposit({
@@ -185,11 +222,11 @@ describe("SyncManager", () => {
 
       await flushPromises();
 
-      // Should delete the old deposit and insert a new uncollected one
+      // Uses sync delete+insert so local subscription updates immediately.
       const deleteCall = deletes.find((d) => d.id === "dep-circle-1");
       expect(deleteCall).toBeTruthy();
 
-      const releaseInsert = inserts.find(
+      const releaseInsert = syncInserts.find(
         (i) =>
           i.data.fuelType === "circle" && i.data.positionX === 300 && i.data.collected === false,
       );
@@ -200,7 +237,7 @@ describe("SyncManager", () => {
     });
 
     it("burstDeposit releases a collected deposit immediately", async () => {
-      const { db, inserts, deletes } = mockDb();
+      const { db, syncInserts, deletes } = mockDb();
       const sync = new SyncManager(db, "alice");
 
       const collectedDep = makeDeposit({
@@ -224,7 +261,7 @@ describe("SyncManager", () => {
       const deleteCall = deletes.find((d) => d.id === "dep-tri-1");
       expect(deleteCall).toBeTruthy();
 
-      const releaseInsert = inserts.find(
+      const releaseInsert = syncInserts.find(
         (i) =>
           i.data.fuelType === "triangle" && i.data.positionX === 400 && i.data.collected === false,
       );
@@ -234,7 +271,7 @@ describe("SyncManager", () => {
     });
 
     it("shareFuel rewrites collectedBy immediately", async () => {
-      const { db, updates } = mockDb();
+      const { db, syncUpdates } = mockDb();
       const sync = new SyncManager(db, "alice");
 
       const collectedDep = makeDeposit({
@@ -254,7 +291,7 @@ describe("SyncManager", () => {
 
       await flushPromises();
 
-      const shareUpdate = updates.find((u) => u.id === "dep-hex-1");
+      const shareUpdate = syncUpdates.find((u) => u.id === "dep-hex-1");
       expect(shareUpdate).toBeTruthy();
       expect(shareUpdate!.data.collectedBy).toBe("bob-uuid");
 
@@ -281,18 +318,25 @@ describe("SyncManager", () => {
     });
 
     it("each event fires exactly one write (no double processing)", async () => {
-      const { db, updates } = mockDb();
+      const { db, syncUpdates } = mockDb();
       const sync = new SyncManager(db, "alice");
-      sync.setInputs({ ...emptyInputs(), settled: true });
+
+      const dep = makeDeposit({ fuelType: "circle", id: "dep-1" });
+      sync.setInputs({
+        ...emptyInputs(),
+        settled: true,
+        allDepositsRaw: [dep],
+        uncollectedDeposits: [dep],
+      });
 
       sync.collectDeposit("dep-1");
 
       await flushPromises();
-      expect(updates.filter((u) => u.id === "dep-1")).toHaveLength(1);
+      expect(syncUpdates.filter((u) => u.id === "dep-1")).toHaveLength(1);
 
       // No further writes without another event
       await flushPromises();
-      expect(updates.filter((u) => u.id === "dep-1")).toHaveLength(1);
+      expect(syncUpdates.filter((u) => u.id === "dep-1")).toHaveLength(1);
 
       sync.destroy();
     });
