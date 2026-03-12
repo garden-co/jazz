@@ -1105,6 +1105,36 @@ impl QueryManager {
             return;
         }
 
+        // Rollback can remove a branch frontier entirely (e.g. rejected inserts).
+        // In that case, remove any indexed visibility for the previous state.
+        if update.commit_ids.is_empty() {
+            let old_data = if has_prior_history {
+                Some(update.old_content.as_deref().unwrap_or_else(|| {
+                    panic!(
+                        "missing old_content for empty-frontier update: object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
+                        update.object_id,
+                        table,
+                        branch,
+                        update.previous_commit_ids.len(),
+                        update.commit_ids.len(),
+                    )
+                }))
+            } else {
+                update.old_content.as_deref()
+            };
+            let _ = Self::update_indices_for_hard_delete_on_branch(
+                storage,
+                &table,
+                branch,
+                update.object_id,
+                old_data,
+                &descriptor,
+            );
+            self.mark_subscriptions_dirty(&table);
+            self.mark_row_deleted_in_subscriptions(&table, update.object_id);
+            return;
+        }
+
         // Check if incoming update is a hard delete
         if self.is_incoming_hard_delete(update.object_id) {
             let old_data = if has_prior_history {

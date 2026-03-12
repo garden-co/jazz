@@ -47,6 +47,7 @@ pub enum StorageError {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoadedBranch {
     pub commits: Vec<Commit>,
+    pub inactive_commits: HashSet<CommitId>,
     pub tails: HashSet<CommitId>,
 }
 
@@ -176,6 +177,14 @@ pub trait Storage {
         tails: Option<HashSet<CommitId>>,
     ) -> Result<(), StorageError>;
 
+    /// Record which commits on a branch are retained locally but excluded from the active frontier.
+    fn set_branch_inactive_commits(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        inactive_commits: Option<HashSet<CommitId>>,
+    ) -> Result<(), StorageError>;
+
     // ================================================================
     // Persistence ack storage
     // ================================================================
@@ -213,6 +222,12 @@ pub trait Storage {
     fn list_mutation_records_by_outcome(
         &self,
         outcome: MutationOutcomeFilter,
+    ) -> Result<Vec<MutationRecord>, StorageError>;
+
+    /// List all mutation records recorded for one object.
+    fn list_mutation_records_for_object(
+        &self,
+        object_id: ObjectId,
     ) -> Result<Vec<MutationRecord>, StorageError>;
 
     // ================================================================
@@ -355,6 +370,15 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).set_branch_tails(object_id, branch, tails)
     }
 
+    fn set_branch_inactive_commits(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        inactive_commits: Option<HashSet<CommitId>>,
+    ) -> Result<(), StorageError> {
+        (**self).set_branch_inactive_commits(object_id, branch, inactive_commits)
+    }
+
     fn store_ack_tier(
         &mut self,
         commit_id: CommitId,
@@ -390,6 +414,13 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         outcome: MutationOutcomeFilter,
     ) -> Result<Vec<MutationRecord>, StorageError> {
         (**self).list_mutation_records_by_outcome(outcome)
+    }
+
+    fn list_mutation_records_for_object(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Vec<MutationRecord>, StorageError> {
+        (**self).list_mutation_records_for_object(object_id)
     }
 
     fn append_catalogue_manifest_op(
@@ -521,6 +552,7 @@ struct ObjectData {
 #[derive(Debug, Clone, Default)]
 struct BranchData {
     commits: Vec<Commit>,
+    inactive_commits: HashSet<CommitId>,
     tails: HashSet<CommitId>,
 }
 
@@ -677,6 +709,7 @@ impl Storage for MemoryStorage {
         }
         Ok(Some(LoadedBranch {
             commits,
+            inactive_commits: branch_data.inactive_commits.clone(),
             tails: branch_data.tails.clone(),
         }))
     }
@@ -716,6 +749,7 @@ impl Storage for MemoryStorage {
             .and_then(|obj| obj.branches.get_mut(branch))
         {
             branch_data.commits.retain(|c| c.id() != commit_id);
+            branch_data.inactive_commits.remove(&commit_id);
             branch_data.tails.remove(&commit_id);
         }
         Ok(())
@@ -733,6 +767,22 @@ impl Storage for MemoryStorage {
             .and_then(|obj| obj.branches.get_mut(branch))
         {
             branch_data.tails = tails.unwrap_or_default();
+        }
+        Ok(())
+    }
+
+    fn set_branch_inactive_commits(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        inactive_commits: Option<HashSet<CommitId>>,
+    ) -> Result<(), StorageError> {
+        if let Some(branch_data) = self
+            .objects
+            .get_mut(&object_id)
+            .and_then(|obj| obj.branches.get_mut(branch))
+        {
+            branch_data.inactive_commits = inactive_commits.unwrap_or_default();
         }
         Ok(())
     }
@@ -800,6 +850,18 @@ impl Storage for MemoryStorage {
             .mutation_records
             .values()
             .filter(|record| record.matches_filter(outcome))
+            .cloned()
+            .collect())
+    }
+
+    fn list_mutation_records_for_object(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Vec<MutationRecord>, StorageError> {
+        Ok(self
+            .mutation_records
+            .values()
+            .filter(|record| record.object_id == object_id)
             .cloned()
             .collect())
     }

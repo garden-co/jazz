@@ -135,6 +135,8 @@ pub struct Branch {
     pub commits: HashMap<CommitId, Commit>,
     /// Current tips (unmerged heads). Inline storage for ≤2 tips.
     pub tips: SmolSet<[CommitId; 2]>,
+    /// Local-only commits retained after rollback but excluded from the active frontier.
+    pub inactive_commits: SmolSet<[CommitId; 2]>,
     /// Truncation boundary. None = full history from roots.
     /// Some(tails) = history only includes tails and their descendants.
     pub tails: Option<SmolSet<[CommitId; 2]>>,

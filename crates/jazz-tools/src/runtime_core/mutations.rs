@@ -95,44 +95,46 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             }
         }
 
-        for mutation_id in mutation_ids {
-            let Some(mut record) = self
-                .storage
-                .load_mutation_record(mutation_id)
-                .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?
-            else {
-                continue;
-            };
-
-            match &outcome {
-                MutationOutcome::Accepted(_) => {
-                    if matches!(record.outcome, MutationOutcomeState::Accepted) {
-                        continue;
-                    }
-                    record.outcome = MutationOutcomeState::Accepted;
-                    self.storage
-                        .put_mutation_record(record)
-                        .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?;
-                    self.mutation_events
-                        .push(MutationEvent::Accepted { mutation_id });
+        match outcome {
+            MutationOutcome::Accepted(_) => {
+                for mutation_id in mutation_ids {
+                    self.mark_mutation_accepted(mutation_id)?;
                 }
-                MutationOutcome::Rejected(rejection) => {
-                    if matches_rejection(&record.outcome, rejection) {
-                        continue;
-                    }
-                    record.outcome = MutationOutcomeState::Rejected(rejection.clone());
-                    self.storage
-                        .put_mutation_record(record)
-                        .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?;
-                    self.mutation_events.push(MutationEvent::Rejected {
-                        mutation_id,
-                        rejection: rejection.clone(),
-                    });
+            }
+            MutationOutcome::Rejected(rejection) => {
+                for mutation_id in mutation_ids {
+                    self.apply_rejection_to_mutation_chain(mutation_id, rejection.clone())?;
                 }
             }
         }
 
         Ok(())
+    }
+
+    pub(crate) fn acknowledge_mutation_outcome_inner(
+        &mut self,
+        mutation_id: MutationId,
+    ) -> Result<(), RuntimeError> {
+        if !self.mutation_journal_enabled {
+            return Ok(());
+        }
+
+        let Some(record) = self
+            .storage
+            .load_mutation_record(mutation_id)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?
+        else {
+            return Ok(());
+        };
+
+        match &record.outcome {
+            MutationOutcomeState::Pending => Ok(()),
+            MutationOutcomeState::Accepted => self.delete_mutation_record(record),
+            MutationOutcomeState::Rejected(_) => self.acknowledge_rejection_group(record.id),
+            MutationOutcomeState::SupersededByRejection { root_mutation_id } => {
+                self.acknowledge_rejection_group(*root_mutation_id)
+            }
+        }
     }
 
     fn load_mutation_record_for_commit(
@@ -158,6 +160,188 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         }
 
         Ok(record)
+    }
+
+    fn load_mutation_records_for_object(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<Vec<MutationRecord>, RuntimeError> {
+        let records = self
+            .storage
+            .list_mutation_records_for_object(object_id)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?;
+
+        for record in &records {
+            for &commit_id in &record.commit_ids {
+                self.commit_to_mutation.insert(commit_id, record.id);
+            }
+        }
+
+        Ok(records)
+    }
+
+    fn mark_mutation_accepted(&mut self, mutation_id: MutationId) -> Result<(), RuntimeError> {
+        let Some(mut record) = self
+            .storage
+            .load_mutation_record(mutation_id)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?
+        else {
+            return Ok(());
+        };
+
+        if matches!(record.outcome, MutationOutcomeState::Accepted) {
+            return Ok(());
+        }
+
+        record.outcome = MutationOutcomeState::Accepted;
+        self.storage
+            .put_mutation_record(record)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?;
+        self.mutation_events
+            .push(MutationEvent::Accepted { mutation_id });
+        Ok(())
+    }
+
+    fn apply_rejection_to_mutation_chain(
+        &mut self,
+        root_mutation_id: MutationId,
+        rejection: MutationRejection,
+    ) -> Result<(), RuntimeError> {
+        let Some(root_record) = self
+            .storage
+            .load_mutation_record(root_mutation_id)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?
+        else {
+            return Ok(());
+        };
+
+        let deactivated_commit_ids = {
+            let root_commit_ids: HashSet<_> = root_record.commit_ids.iter().copied().collect();
+            self.schema_manager
+                .query_manager_mut()
+                .sync_manager_mut()
+                .object_manager
+                .deactivate_commit_chain(
+                    &mut self.storage,
+                    root_record.object_id,
+                    root_record.branch_name,
+                    root_commit_ids,
+                )
+                .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?
+        };
+
+        let related_records = self.load_mutation_records_for_object(root_record.object_id)?;
+        let mut deactivated_commit_ids: HashSet<_> = deactivated_commit_ids.into_iter().collect();
+        if deactivated_commit_ids.is_empty() {
+            deactivated_commit_ids.extend(root_record.commit_ids.iter().copied());
+        }
+
+        for mut record in related_records.into_iter().filter(|record| {
+            record.branch_name == root_record.branch_name
+                && record
+                    .commit_ids
+                    .iter()
+                    .any(|commit_id| deactivated_commit_ids.contains(commit_id))
+        }) {
+            if record.id == root_mutation_id {
+                if matches_rejection(&record.outcome, &rejection) {
+                    continue;
+                }
+                record.outcome = MutationOutcomeState::Rejected(rejection.clone());
+                self.storage
+                    .put_mutation_record(record)
+                    .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?;
+                self.mutation_events.push(MutationEvent::Rejected {
+                    mutation_id: root_mutation_id,
+                    rejection: rejection.clone(),
+                });
+            } else {
+                if matches!(
+                    record.outcome,
+                    MutationOutcomeState::SupersededByRejection {
+                        root_mutation_id: existing_root
+                    } if existing_root == root_mutation_id
+                ) {
+                    continue;
+                }
+                let mutation_id = record.id;
+                record.outcome = MutationOutcomeState::SupersededByRejection { root_mutation_id };
+                self.storage
+                    .put_mutation_record(record)
+                    .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?;
+                self.mutation_events
+                    .push(MutationEvent::SupersededByRejection {
+                        mutation_id,
+                        root_mutation_id,
+                    });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn acknowledge_rejection_group(
+        &mut self,
+        root_mutation_id: MutationId,
+    ) -> Result<(), RuntimeError> {
+        let Some(root_record) = self
+            .storage
+            .load_mutation_record(root_mutation_id)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?
+        else {
+            return Ok(());
+        };
+
+        let records = self.load_mutation_records_for_object(root_record.object_id)?;
+        let records_to_ack: Vec<_> = records
+            .into_iter()
+            .filter(|record| {
+                record.branch_name == root_record.branch_name
+                    && (record.id == root_mutation_id
+                        || matches!(
+                            record.outcome,
+                            MutationOutcomeState::SupersededByRejection {
+                                root_mutation_id: existing_root
+                            } if existing_root == root_mutation_id
+                        ))
+            })
+            .collect();
+
+        let commit_ids_to_prune: HashSet<_> = records_to_ack
+            .iter()
+            .flat_map(|record| record.commit_ids.iter().copied())
+            .collect();
+
+        self.schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .object_manager
+            .prune_inactive_commits(
+                &mut self.storage,
+                root_record.object_id,
+                root_record.branch_name,
+                &commit_ids_to_prune,
+            )
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?;
+
+        for record in records_to_ack {
+            self.delete_mutation_record(record)?;
+        }
+
+        Ok(())
+    }
+
+    fn delete_mutation_record(&mut self, record: MutationRecord) -> Result<(), RuntimeError> {
+        self.storage
+            .delete_mutation_record(record.id)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?;
+        for commit_id in record.commit_ids {
+            self.commit_to_mutation.remove(&commit_id);
+        }
+        self.mutation_events.push(MutationEvent::Acknowledged {
+            mutation_id: record.id,
+        });
+        Ok(())
     }
 }
 

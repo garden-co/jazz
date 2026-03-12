@@ -20,6 +20,10 @@ pub(super) fn branch_tips_key(object_id: ObjectId, branch: &BranchName) -> Strin
     format!("obj:{}:br:{}:tips", format_uuid(object_id), branch)
 }
 
+pub(super) fn branch_inactive_commits_key(object_id: ObjectId, branch: &BranchName) -> String {
+    format!("obj:{}:br:{}:inactive", format_uuid(object_id), branch)
+}
+
 pub(super) fn commit_key(object_id: ObjectId, branch: &BranchName, commit_id: CommitId) -> String {
     format!(
         "obj:{}:br:{}:c:{}",

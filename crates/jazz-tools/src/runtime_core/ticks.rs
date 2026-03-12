@@ -22,7 +22,57 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         //    was just processed and made the schema available).
         self.schema_manager.process(&mut self.storage);
 
-        // 3. Collect subscription updates
+        // 3. Process received persistence acks — resolve matching watchers
+        let received_acks = self
+            .schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_received_acks();
+        for (commit_id, acked_tier) in received_acks {
+            if let Err(error) = self.advance_mutation_ack(commit_id, acked_tier) {
+                tracing::warn!(?commit_id, ?acked_tier, error = %error, "failed to advance mutation ack");
+            }
+            if let Some(watchers) = self.ack_watchers.remove(&commit_id) {
+                let mut remaining = Vec::new();
+                for (requested_tier, sender) in watchers {
+                    if acked_tier >= requested_tier {
+                        tracing::debug!(
+                            ?commit_id,
+                            ?acked_tier,
+                            ?requested_tier,
+                            "ack watcher resolved"
+                        );
+                        let _ = sender.send(());
+                    } else {
+                        remaining.push((requested_tier, sender));
+                    }
+                }
+                if !remaining.is_empty() {
+                    self.ack_watchers.insert(commit_id, remaining);
+                }
+            }
+        }
+
+        // 4. Process received mutation outcomes.
+        let received_mutation_outcomes = self
+            .schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_received_mutation_outcomes();
+        let had_mutation_outcomes = !received_mutation_outcomes.is_empty();
+        for outcome in received_mutation_outcomes {
+            if let Err(error) = self.handle_received_mutation_outcome(outcome) {
+                tracing::warn!(error = %error, "failed to process mutation outcome");
+            }
+        }
+
+        if had_mutation_outcomes {
+            self.schema_manager.process(&mut self.storage);
+            self.schema_manager.process(&mut self.storage);
+        }
+
+        // 5. Collect subscription updates after mutation outcomes have had a chance
+        // to roll back local state and invalidate queries.
         let subscription_updates = self.schema_manager.query_manager_mut().take_updates();
         let subscription_failures = self
             .schema_manager
@@ -34,14 +84,11 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let mut failed_one_shots: Vec<SubscriptionHandle> = Vec::new();
         let mut callbacks_fired: u64 = 0;
 
-        // 3. Call subscription callbacks AND handle one-shot queries
+        // 6. Call subscription callbacks AND handle one-shot queries.
         for update in &subscription_updates {
             if let Some(&handle) = self.subscription_reverse.get(&update.subscription_id) {
-                // Check if this is a one-shot query
                 if let Some(pending) = self.pending_one_shot_queries.get_mut(&handle) {
-                    // First callback = graph settled, fulfill the future
                     if let Some(sender) = pending.sender.take() {
-                        // Decode rows using the query's output descriptor
                         let results: Vec<(ObjectId, Vec<Value>)> = update
                             .ordered_delta
                             .added
@@ -54,10 +101,8 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                             .collect();
                         let _ = sender.send(Ok(results));
                     }
-                    // Mark for cleanup (unsubscribe happens after loop)
                     completed_one_shots.push(handle);
                 } else if let Some(state) = self.subscriptions.get(&handle) {
-                    // Regular subscription - call callback
                     let delta = SubscriptionDelta {
                         handle,
                         ordered_delta: update.ordered_delta.clone(),
@@ -98,10 +143,8 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             }
         }
 
-        // 2b. Cleanup completed one-shot queries
         for handle in completed_one_shots {
             if let Some(pending) = self.pending_one_shot_queries.remove(&handle) {
-                // Unsubscribe from the underlying subscription
                 self.schema_manager
                     .query_manager_mut()
                     .unsubscribe_with_sync(pending.subscription_id);
@@ -109,58 +152,13 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             }
         }
 
-        // 2c. Cleanup failed one-shot queries.
-        // The underlying subscriptions were already removed by QueryManager.
         for handle in failed_one_shots {
             if let Some(pending) = self.pending_one_shot_queries.remove(&handle) {
                 self.subscription_reverse.remove(&pending.subscription_id);
             }
         }
 
-        // 3b. Process received persistence acks — resolve matching watchers
-        let received_acks = self
-            .schema_manager
-            .query_manager_mut()
-            .sync_manager_mut()
-            .take_received_acks();
-        for (commit_id, acked_tier) in received_acks {
-            if let Err(error) = self.advance_mutation_ack(commit_id, acked_tier) {
-                tracing::warn!(?commit_id, ?acked_tier, error = %error, "failed to advance mutation ack");
-            }
-            if let Some(watchers) = self.ack_watchers.remove(&commit_id) {
-                let mut remaining = Vec::new();
-                for (requested_tier, sender) in watchers {
-                    if acked_tier >= requested_tier {
-                        tracing::debug!(
-                            ?commit_id,
-                            ?acked_tier,
-                            ?requested_tier,
-                            "ack watcher resolved"
-                        );
-                        let _ = sender.send(());
-                    } else {
-                        remaining.push((requested_tier, sender));
-                    }
-                }
-                if !remaining.is_empty() {
-                    self.ack_watchers.insert(commit_id, remaining);
-                }
-            }
-        }
-
-        // 3c. Process received mutation outcomes.
-        let received_mutation_outcomes = self
-            .schema_manager
-            .query_manager_mut()
-            .sync_manager_mut()
-            .take_received_mutation_outcomes();
-        for outcome in received_mutation_outcomes {
-            if let Err(error) = self.handle_received_mutation_outcome(outcome) {
-                tracing::warn!(error = %error, "failed to process mutation outcome");
-            }
-        }
-
-        // 4. Schedule batched_tick if outbound messages exist
+        // 7. Schedule batched_tick if outbound messages exist
         if self.has_outbound() {
             self.scheduler.schedule_batched_tick();
         }

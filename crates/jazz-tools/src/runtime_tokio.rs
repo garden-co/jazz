@@ -27,8 +27,8 @@ use crate::runtime_core::{
 use crate::schema_manager::{QuerySchemaContext, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{
-    ClientId, InboxEntry, MutationEvent, MutationId, MutationOutcome, MutationRecord, OutboxEntry,
-    QueryPropagation, ServerId,
+    ClientId, InboxEntry, MutationEvent, MutationId, MutationOutcome, MutationRecord,
+    ObjectOutcomeState, OutboxEntry, QueryPropagation, ServerId,
 };
 
 // ============================================================================
@@ -389,6 +389,35 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     ) -> Result<Option<MutationRecord>, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.get_mutation_record(mutation_id).map_err(Into::into)
+    }
+
+    /// List mutation journal records associated with one object.
+    pub fn list_mutations_for_object(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Vec<MutationRecord>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.list_mutations_for_object(object_id)
+            .map_err(Into::into)
+    }
+
+    /// Derive the current object-level outcome overlay from the mutation journal.
+    pub fn get_object_outcome(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Option<ObjectOutcomeState>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.get_object_outcome(object_id).map_err(Into::into)
+    }
+
+    /// Acknowledge a surfaced mutation outcome and prune any retained dead commit chain.
+    pub fn acknowledge_mutation_outcome(
+        &self,
+        mutation_id: MutationId,
+    ) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.acknowledge_mutation_outcome(mutation_id)
+            .map_err(Into::into)
     }
 
     /// Set the next expected stream sequence for a server.

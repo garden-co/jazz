@@ -281,6 +281,21 @@ pub enum MutationOutcomeState {
     SupersededByRejection { root_mutation_id: MutationId },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ObjectOutcomeState {
+    Pending {
+        mutation_id: MutationId,
+    },
+    Accepted {
+        mutation_id: MutationId,
+    },
+    Errored {
+        mutation_id: MutationId,
+        code: MutationRejectCode,
+        reason: String,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MutationOutcomeFilter {

@@ -214,9 +214,16 @@ impl ObjectManager {
                 let mut all_ids: HashSet<CommitId> = HashSet::new();
                 let mut parent_ids: HashSet<CommitId> = HashSet::new();
                 for commit in &loaded.commits {
-                    all_ids.insert(commit.id());
+                    let commit_id = commit.id();
+                    if loaded.inactive_commits.contains(&commit_id) {
+                        continue;
+                    }
+
+                    all_ids.insert(commit_id);
                     for parent in &commit.parents {
-                        parent_ids.insert(*parent);
+                        if !loaded.inactive_commits.contains(parent) {
+                            parent_ids.insert(*parent);
+                        }
                     }
                 }
                 let mut tips: SmolSet<[CommitId; 2]> = SmolSet::new();
@@ -233,6 +240,7 @@ impl ObjectManager {
                     Branch {
                         commits,
                         tips,
+                        inactive_commits: loaded.inactive_commits.into_iter().collect(),
                         tails: if loaded.tails.is_empty() {
                             None
                         } else {
@@ -786,6 +794,166 @@ impl ObjectManager {
         }
     }
 
+    /// Mark a commit chain as inactive while retaining the underlying commits for later inspection.
+    ///
+    /// The active frontier is recomputed without the inactive chain and subscribers are notified.
+    pub fn deactivate_commit_chain<H: Storage>(
+        &mut self,
+        io: &mut H,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+        root_commit_ids: HashSet<CommitId>,
+    ) -> Result<Vec<CommitId>, Error> {
+        let branch_name = branch_name.into();
+
+        let (previous_commit_ids, old_content, deactivated_commits, current_commit_ids, inactive) = {
+            let object = self
+                .get(object_id)
+                .ok_or(Error::ObjectNotFound(object_id))?;
+            let branch = object
+                .branches
+                .get(&branch_name)
+                .ok_or(Error::BranchNotFound(branch_name))?;
+
+            let previous_commit_ids = Self::tips_by_timestamp(&branch.commits, &branch.tips);
+            let old_content = previous_commit_ids
+                .last()
+                .and_then(|tip_id| branch.commits.get(tip_id))
+                .map(|commit| commit.content.clone());
+            let deactivated_commits =
+                Self::find_descendants_inclusive(&branch.commits, &root_commit_ids);
+
+            if deactivated_commits.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let mut inactive: SmolSet<[CommitId; 2]> = branch.inactive_commits.clone();
+            for commit_id in &deactivated_commits {
+                inactive.insert(*commit_id);
+            }
+
+            let mut updated_branch = branch.clone();
+            updated_branch.inactive_commits = inactive.clone();
+            updated_branch.tips = Self::recompute_active_tips(&updated_branch);
+
+            (
+                previous_commit_ids,
+                old_content,
+                deactivated_commits,
+                Self::tips_by_timestamp(&updated_branch.commits, &updated_branch.tips),
+                inactive,
+            )
+        };
+
+        let object = self
+            .get_mut(object_id)
+            .expect("object existence already validated");
+        let branch = object.branches.get_mut(&branch_name).unwrap();
+        branch.inactive_commits = inactive;
+        branch.tips = current_commit_ids.iter().copied().collect();
+
+        Self::persist_branch_frontier(io, object_id, &branch_name, branch)?;
+        let inactive_to_store: HashSet<_> = branch.inactive_commits.iter().copied().collect();
+        io.set_branch_inactive_commits(
+            object_id,
+            &branch_name,
+            (!inactive_to_store.is_empty()).then_some(inactive_to_store),
+        )
+        .map_err(Error::StorageError)?;
+
+        self.notify_subscribers_of_commit(object_id, branch_name);
+        self.notify_all_object_subscribers(
+            object_id,
+            branch_name,
+            false,
+            previous_commit_ids,
+            old_content,
+        );
+
+        Ok(deactivated_commits.into_iter().collect())
+    }
+
+    /// Physically delete previously inactivated commits from a branch.
+    pub fn prune_inactive_commits<H: Storage>(
+        &mut self,
+        io: &mut H,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+        commit_ids: &HashSet<CommitId>,
+    ) -> Result<usize, Error> {
+        let branch_name = branch_name.into();
+
+        let Some(object) = self.get(object_id) else {
+            return Ok(0);
+        };
+        let Some(branch) = object.branches.get(&branch_name) else {
+            return Ok(0);
+        };
+
+        let commits_to_delete: HashSet<_> = commit_ids
+            .iter()
+            .copied()
+            .filter(|commit_id| branch.inactive_commits.contains(commit_id))
+            .collect();
+
+        if commits_to_delete.is_empty() {
+            return Ok(0);
+        }
+
+        for commit_id in &commits_to_delete {
+            io.delete_commit(object_id, &branch_name, *commit_id)
+                .map_err(Error::StorageError)?;
+        }
+
+        let (active_tips, inactive_to_store) = {
+            let object = self
+                .get_mut(object_id)
+                .expect("object existence already validated");
+            let branch = object.branches.get_mut(&branch_name).unwrap();
+
+            for commit_id in &commits_to_delete {
+                branch.commits.remove(commit_id);
+                branch.inactive_commits.remove(commit_id);
+            }
+            branch.tips = Self::recompute_active_tips(branch);
+            (
+                branch.tips.iter().copied().collect::<HashSet<_>>(),
+                branch
+                    .inactive_commits
+                    .iter()
+                    .copied()
+                    .collect::<HashSet<_>>(),
+            )
+        };
+
+        let should_remove_branch = active_tips.is_empty() && inactive_to_store.is_empty();
+
+        if should_remove_branch {
+            if let Some(object) = self.get_mut(object_id) {
+                object.branches.remove(&branch_name);
+            }
+            io.set_branch_tails(object_id, &branch_name, None)
+                .map_err(Error::StorageError)?;
+            io.set_branch_inactive_commits(object_id, &branch_name, None)
+                .map_err(Error::StorageError)?;
+        } else {
+            io.set_branch_tails(
+                object_id,
+                &branch_name,
+                (!active_tips.is_empty()).then_some(active_tips),
+            )
+            .map_err(Error::StorageError)?;
+            io.set_branch_inactive_commits(
+                object_id,
+                &branch_name,
+                (!inactive_to_store.is_empty()).then_some(inactive_to_store),
+            )
+            .map_err(Error::StorageError)?;
+        }
+
+        Ok(commits_to_delete.len())
+    }
+
     /// Truncate a branch by removing commits topologically earlier than the specified tails.
     ///
     /// All tips must be descendants of (or equal to) some tail. Commits before the tails
@@ -860,6 +1028,7 @@ impl ObjectManager {
         // Remove deleted commits from memory
         for commit_id in &commits_to_delete {
             branch.commits.remove(commit_id);
+            branch.inactive_commits.remove(commit_id);
         }
 
         TruncateResult::Success {
@@ -937,6 +1106,72 @@ impl ObjectManager {
         }
 
         ancestors
+    }
+
+    fn recompute_active_tips(branch: &Branch) -> SmolSet<[CommitId; 2]> {
+        let mut all_ids = HashSet::new();
+        let mut parent_ids = HashSet::new();
+
+        for (commit_id, commit) in &branch.commits {
+            if branch.inactive_commits.contains(commit_id) {
+                continue;
+            }
+
+            all_ids.insert(*commit_id);
+            for parent in &commit.parents {
+                if branch.commits.contains_key(parent) && !branch.inactive_commits.contains(parent)
+                {
+                    parent_ids.insert(*parent);
+                }
+            }
+        }
+
+        all_ids
+            .into_iter()
+            .filter(|commit_id| !parent_ids.contains(commit_id))
+            .collect()
+    }
+
+    fn find_descendants_inclusive(
+        commits: &HashMap<CommitId, Commit>,
+        starting_points: &HashSet<CommitId>,
+    ) -> HashSet<CommitId> {
+        let mut descendants = starting_points
+            .iter()
+            .copied()
+            .filter(|commit_id| commits.contains_key(commit_id))
+            .collect::<HashSet<_>>();
+        let mut changed = true;
+
+        while changed {
+            changed = false;
+            for (commit_id, commit) in commits {
+                if descendants.contains(commit_id) {
+                    continue;
+                }
+                if commit
+                    .parents
+                    .iter()
+                    .any(|parent| descendants.contains(parent))
+                {
+                    descendants.insert(*commit_id);
+                    changed = true;
+                }
+            }
+        }
+
+        descendants
+    }
+
+    fn persist_branch_frontier<H: Storage>(
+        io: &mut H,
+        object_id: ObjectId,
+        branch_name: &BranchName,
+        branch: &Branch,
+    ) -> Result<(), Error> {
+        let tips: HashSet<_> = branch.tips.iter().copied().collect();
+        io.set_branch_tails(object_id, branch_name, (!tips.is_empty()).then_some(tips))
+            .map_err(Error::StorageError)
     }
 
     // ========================================================================

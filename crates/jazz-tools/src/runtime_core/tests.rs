@@ -50,6 +50,31 @@ fn execute_query(core: &mut TestCore, query: Query) -> Vec<(ObjectId, Vec<Value>
     results
 }
 
+fn reject_mutation(
+    core: &mut TestCore,
+    record: &MutationRecord,
+    reason: &str,
+) -> MutationRejection {
+    let rejection = MutationRejection {
+        object_id: record.object_id,
+        branch_name: record.branch_name,
+        operation: record.operation,
+        commit_ids: record.commit_ids.clone(),
+        previous_commit_ids: record.previous_commit_ids.clone(),
+        code: MutationRejectCode::PermissionDenied,
+        reason: reason.to_string(),
+        rejected_at_micros: 456,
+    };
+
+    core.park_sync_message(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::MutationOutcome(MutationOutcome::Rejected(rejection.clone())),
+    });
+    core.batched_tick();
+
+    rejection
+}
+
 #[test]
 fn test_runtime_core_new() {
     let core = create_test_runtime();
@@ -249,6 +274,10 @@ fn runtime_core_records_local_mutations_and_events() {
     assert!(matches!(record.outcome, MutationOutcomeState::Pending));
     assert_eq!(record.commit_ids.len(), 1);
     assert!(record.previous_commit_ids.is_empty());
+    assert_eq!(
+        core.get_object_outcome(object_id).unwrap(),
+        Some(crate::sync_manager::ObjectOutcomeState::Pending { mutation_id })
+    );
 }
 
 #[test]
@@ -265,11 +294,9 @@ fn runtime_core_can_disable_mutation_journal() {
 
 #[test]
 fn runtime_core_updates_mutation_records_from_rejections() {
-    use crate::object::BranchName;
-
     let mut core = create_test_runtime();
     let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let (object_id, _row_values) = core.insert("users", values, None).unwrap();
+    let (_object_id, _row_values) = core.insert("users", values, None).unwrap();
     let mutation_id = match core.take_mutation_events().as_slice() {
         [MutationEvent::Recorded { mutation_id }] => *mutation_id,
         other => panic!("unexpected mutation events: {other:?}"),
@@ -279,22 +306,7 @@ fn runtime_core_updates_mutation_records_from_rejections() {
         .get_mutation_record(mutation_id)
         .unwrap()
         .expect("mutation record should exist");
-    let rejection = MutationRejection {
-        object_id,
-        branch_name: BranchName::new("main"),
-        operation: MutationOperation::Insert,
-        commit_ids: record.commit_ids.clone(),
-        previous_commit_ids: record.previous_commit_ids.clone(),
-        code: MutationRejectCode::PermissionDenied,
-        reason: "policy denied write".into(),
-        rejected_at_micros: 456,
-    };
-
-    core.park_sync_message(InboxEntry {
-        source: Source::Server(ServerId::new()),
-        payload: SyncPayload::MutationOutcome(MutationOutcome::Rejected(rejection.clone())),
-    });
-    core.batched_tick();
+    let rejection = reject_mutation(&mut core, &record, "policy denied write");
 
     let events = core.take_mutation_events();
     assert!(events.iter().any(|event| matches!(
@@ -310,6 +322,194 @@ fn runtime_core_updates_mutation_records_from_rejections() {
         .unwrap()
         .expect("mutation record should exist");
     assert_eq!(record.outcome, MutationOutcomeState::Rejected(rejection));
+}
+
+#[test]
+fn runtime_core_rejected_insert_rolls_back_dependent_chain_and_acknowledges() {
+    let mut core = create_test_runtime();
+    let row_id = ObjectId::new();
+    let values = vec![Value::Uuid(row_id), Value::Text("Alice".into())];
+    let (object_id, _) = core.insert("users", values, None).unwrap();
+    let insert_mutation_id = match core.take_mutation_events().as_slice() {
+        [MutationEvent::Recorded { mutation_id }] => *mutation_id,
+        other => panic!("unexpected mutation events after insert: {other:?}"),
+    };
+
+    core.update(
+        object_id,
+        vec![("name".to_string(), Value::Text("Bob".into()))],
+        None,
+    )
+    .unwrap();
+    let update_mutation_id = match core.take_mutation_events().as_slice() {
+        [MutationEvent::Recorded { mutation_id }] => *mutation_id,
+        other => panic!("unexpected mutation events after update: {other:?}"),
+    };
+
+    let results = execute_query(&mut core, Query::new("users"));
+    assert_eq!(results[0].1[1], Value::Text("Bob".into()));
+
+    let insert_record = core
+        .get_mutation_record(insert_mutation_id)
+        .unwrap()
+        .expect("insert mutation should exist");
+    let rejection = reject_mutation(&mut core, &insert_record, "policy denied write");
+
+    assert!(execute_query(&mut core, Query::new("users")).is_empty());
+
+    let insert_record = core
+        .get_mutation_record(insert_mutation_id)
+        .unwrap()
+        .expect("insert mutation should still exist");
+    assert_eq!(
+        insert_record.outcome,
+        MutationOutcomeState::Rejected(rejection)
+    );
+    assert_eq!(
+        core.get_object_outcome(object_id).unwrap(),
+        Some(crate::sync_manager::ObjectOutcomeState::Errored {
+            mutation_id: insert_mutation_id,
+            code: MutationRejectCode::PermissionDenied,
+            reason: "policy denied write".into(),
+        })
+    );
+
+    let update_record = core
+        .get_mutation_record(update_mutation_id)
+        .unwrap()
+        .expect("dependent update mutation should still exist");
+    assert_eq!(
+        update_record.outcome,
+        MutationOutcomeState::SupersededByRejection {
+            root_mutation_id: insert_mutation_id,
+        }
+    );
+
+    let events = core.take_mutation_events();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        MutationEvent::Rejected { mutation_id, .. } if *mutation_id == insert_mutation_id
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        MutationEvent::SupersededByRejection {
+            mutation_id,
+            root_mutation_id,
+        } if *mutation_id == update_mutation_id && *root_mutation_id == insert_mutation_id
+    )));
+
+    core.acknowledge_mutation_outcome(update_mutation_id)
+        .unwrap();
+
+    assert!(
+        core.list_mutations_for_object(object_id)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        core.get_mutation_record(insert_mutation_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        core.get_mutation_record(update_mutation_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(core.get_object_outcome(object_id).unwrap().is_none());
+    assert!(execute_query(&mut core, Query::new("users")).is_empty());
+
+    let object = core
+        .schema_manager()
+        .query_manager()
+        .sync_manager()
+        .object_manager
+        .get(object_id)
+        .expect("row object metadata should remain");
+    assert!(
+        object
+            .branches
+            .get(&crate::object::BranchName::new("main"))
+            .is_none(),
+        "rejected insert branch should be pruned after acknowledgement"
+    );
+}
+
+#[test]
+fn runtime_core_rejected_update_restores_previous_row_state() {
+    let mut core = create_test_runtime();
+    let row_id = ObjectId::new();
+    let values = vec![Value::Uuid(row_id), Value::Text("Alice".into())];
+    let (object_id, _) = core.insert("users", values, None).unwrap();
+    let insert_mutation_id = match core.take_mutation_events().as_slice() {
+        [MutationEvent::Recorded { mutation_id }] => *mutation_id,
+        other => panic!("unexpected mutation events after insert: {other:?}"),
+    };
+
+    core.update(
+        object_id,
+        vec![("name".to_string(), Value::Text("Bob".into()))],
+        None,
+    )
+    .unwrap();
+    let update_mutation_id = match core.take_mutation_events().as_slice() {
+        [MutationEvent::Recorded { mutation_id }] => *mutation_id,
+        other => panic!("unexpected mutation events after update: {other:?}"),
+    };
+
+    let update_record = core
+        .get_mutation_record(update_mutation_id)
+        .unwrap()
+        .expect("update mutation should exist");
+    let rejection = reject_mutation(&mut core, &update_record, "policy denied update");
+
+    let results = execute_query(&mut core, Query::new("users"));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1[1], Value::Text("Alice".into()));
+
+    let update_record = core
+        .get_mutation_record(update_mutation_id)
+        .unwrap()
+        .expect("update mutation should remain until acknowledgement");
+    assert_eq!(
+        update_record.outcome,
+        MutationOutcomeState::Rejected(rejection)
+    );
+    assert_eq!(
+        core.get_object_outcome(object_id).unwrap(),
+        Some(crate::sync_manager::ObjectOutcomeState::Errored {
+            mutation_id: update_mutation_id,
+            code: MutationRejectCode::PermissionDenied,
+            reason: "policy denied update".into(),
+        })
+    );
+
+    let insert_record = core
+        .get_mutation_record(insert_mutation_id)
+        .unwrap()
+        .expect("insert mutation should be unaffected");
+    assert!(matches!(
+        insert_record.outcome,
+        MutationOutcomeState::Pending
+    ));
+
+    core.acknowledge_mutation_outcome(update_mutation_id)
+        .unwrap();
+
+    assert!(
+        core.get_mutation_record(update_mutation_id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        core.get_object_outcome(object_id).unwrap(),
+        Some(crate::sync_manager::ObjectOutcomeState::Pending {
+            mutation_id: insert_mutation_id,
+        })
+    );
+    let results = execute_query(&mut core, Query::new("users"));
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1[1], Value::Text("Alice".into()));
 }
 
 // =========================================================================

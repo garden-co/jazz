@@ -10,10 +10,10 @@ use crate::sync_manager::{DurabilityTier, MutationId, MutationOutcomeFilter, Mut
 use crate::query_manager::types::Value;
 
 use super::key_codec::{
-    ack_key, branch_tips_key, catalogue_manifest_op_key, catalogue_manifest_op_prefix, commit_key,
-    commit_prefix, index_entry_key, index_prefix, index_range_scan_bounds, index_value_prefix,
-    mutation_commit_index_key, mutation_record_key, mutation_record_prefix, obj_meta_key,
-    parse_uuid_from_index_key,
+    ack_key, branch_inactive_commits_key, branch_tips_key, catalogue_manifest_op_key,
+    catalogue_manifest_op_prefix, commit_key, commit_prefix, index_entry_key, index_prefix,
+    index_range_scan_bounds, index_value_prefix, mutation_commit_index_key, mutation_record_key,
+    mutation_record_prefix, obj_meta_key, parse_uuid_from_index_key,
 };
 use super::{CatalogueManifest, CatalogueManifestOp, LoadedBranch, StorageError};
 
@@ -87,7 +87,17 @@ pub(super) fn load_branch_core(
         None => HashSet::new(),
     };
 
-    Ok(Some(LoadedBranch { commits, tails }))
+    let inactive_key = branch_inactive_commits_key(object_id, branch);
+    let inactive_commits = match get(&inactive_key)? {
+        Some(data) => decode_json(&data, "inactive commits")?,
+        None => HashSet::new(),
+    };
+
+    Ok(Some(LoadedBranch {
+        commits,
+        inactive_commits,
+        tails,
+    }))
 }
 
 pub(super) fn append_commit_core(
@@ -137,6 +147,19 @@ pub(super) fn delete_commit_core(
         set(&tips_key, &tips_json)?;
     }
 
+    let inactive_key = branch_inactive_commits_key(object_id, branch);
+    if let Some(data) = get(&inactive_key)? {
+        let mut inactive: HashSet<CommitId> = decode_json(&data, "inactive commits")?;
+        if inactive.remove(&commit_id) {
+            if inactive.is_empty() {
+                delete(&inactive_key)?;
+            } else {
+                let inactive_json = encode_json(&inactive, "inactive commits")?;
+                set(&inactive_key, &inactive_json)?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -154,6 +177,23 @@ pub(super) fn set_branch_tails_core(
             set(&tips_key, &json)
         }
         None => delete(&tips_key),
+    }
+}
+
+pub(super) fn set_branch_inactive_commits_core(
+    object_id: ObjectId,
+    branch: &BranchName,
+    inactive_commits: Option<HashSet<CommitId>>,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+    mut delete: impl FnMut(&str) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let inactive_key = branch_inactive_commits_key(object_id, branch);
+    match inactive_commits {
+        Some(commits) if !commits.is_empty() => {
+            let json = encode_json(&commits, "inactive commits")?;
+            set(&inactive_key, &json)
+        }
+        _ => delete(&inactive_key),
     }
 }
 
@@ -250,6 +290,23 @@ pub(super) fn list_mutation_records_by_outcome_core(
     for (_key, data) in entries {
         let record: MutationRecord = decode_json(&data, "mutation record")?;
         if record.matches_filter(outcome) {
+            records.push(record);
+        }
+    }
+
+    Ok(records)
+}
+
+pub(super) fn list_mutation_records_for_object_core(
+    object_id: ObjectId,
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<Vec<MutationRecord>, StorageError> {
+    let entries = scan_prefix(mutation_record_prefix())?;
+    let mut records = Vec::new();
+
+    for (_key, data) in entries {
+        let record: MutationRecord = decode_json(&data, "mutation record")?;
+        if record.object_id == object_id {
             records.push(record);
         }
     }

@@ -41,7 +41,8 @@ use crate::schema_manager::SchemaManager;
 use crate::storage::Storage;
 use crate::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, MutationEvent, MutationId, MutationOutcome,
-    MutationOutcomeFilter, MutationRecord, OutboxEntry, ServerId,
+    MutationOutcomeFilter, MutationOutcomeState, MutationRecord, ObjectOutcomeState, OutboxEntry,
+    ServerId,
 };
 
 // ============================================================================
@@ -421,6 +422,73 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         self.storage
             .list_mutation_records_by_outcome(MutationOutcomeFilter::Rejected)
             .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))
+    }
+
+    /// List mutation journal records associated with one object.
+    pub fn list_mutations_for_object(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Vec<MutationRecord>, RuntimeError> {
+        self.storage
+            .list_mutation_records_for_object(object_id)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))
+    }
+
+    /// Derive the current object-level outcome overlay from the mutation journal.
+    pub fn get_object_outcome(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Option<ObjectOutcomeState>, RuntimeError> {
+        let records = self
+            .storage
+            .list_mutation_records_for_object(object_id)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?;
+
+        let rejected = records
+            .iter()
+            .filter_map(|record| match &record.outcome {
+                MutationOutcomeState::Rejected(rejection) => Some((
+                    rejection.rejected_at_micros,
+                    ObjectOutcomeState::Errored {
+                        mutation_id: record.id,
+                        code: rejection.code,
+                        reason: rejection.reason.clone(),
+                    },
+                )),
+                _ => None,
+            })
+            .max_by_key(|(timestamp, _)| *timestamp)
+            .map(|(_, outcome)| outcome);
+        if rejected.is_some() {
+            return Ok(rejected);
+        }
+
+        let pending = records
+            .iter()
+            .filter(|record| matches!(record.outcome, MutationOutcomeState::Pending))
+            .max_by_key(|record| record.recorded_at_micros)
+            .map(|record| ObjectOutcomeState::Pending {
+                mutation_id: record.id,
+            });
+        if pending.is_some() {
+            return Ok(pending);
+        }
+
+        Ok(records
+            .iter()
+            .filter(|record| matches!(record.outcome, MutationOutcomeState::Accepted))
+            .max_by_key(|record| record.recorded_at_micros)
+            .map(|record| ObjectOutcomeState::Accepted {
+                mutation_id: record.id,
+            }))
+    }
+
+    /// Acknowledge a surfaced mutation outcome and prune any retained dead commit chain.
+    pub fn acknowledge_mutation_outcome(
+        &mut self,
+        mutation_id: MutationId,
+    ) -> Result<(), RuntimeError> {
+        self.acknowledge_mutation_outcome_inner(mutation_id)
     }
 }
 

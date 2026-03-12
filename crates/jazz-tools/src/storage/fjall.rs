@@ -24,9 +24,10 @@ use super::{
         append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
         create_object_core, delete_commit_core, delete_mutation_record_core, index_insert_core,
         index_lookup_core, index_range_core, index_remove_core, index_scan_all_core,
-        list_mutation_records_by_outcome_core, load_branch_core, load_catalogue_manifest_core,
-        load_mutation_record_by_commit_core, load_mutation_record_core, load_object_metadata_core,
-        put_mutation_record_core, set_branch_tails_core, store_ack_tier_core,
+        list_mutation_records_by_outcome_core, list_mutation_records_for_object_core,
+        load_branch_core, load_catalogue_manifest_core, load_mutation_record_by_commit_core,
+        load_mutation_record_core, load_object_metadata_core, put_mutation_record_core,
+        set_branch_inactive_commits_core, set_branch_tails_core, store_ack_tier_core,
     },
 };
 
@@ -281,6 +282,25 @@ impl Storage for FjallStorage {
         })
     }
 
+    fn set_branch_inactive_commits(
+        &mut self,
+        object_id: ObjectId,
+        branch: &BranchName,
+        inactive_commits: Option<HashSet<CommitId>>,
+    ) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
+            set_branch_inactive_commits_core(
+                object_id,
+                branch,
+                inactive_commits,
+                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
+                |key| Self::delete_on_cell(&tx, &inner.keyspace, key),
+            )?;
+            Self::commit_tx(tx.into_inner())
+        })
+    }
+
     fn store_ack_tier(
         &mut self,
         commit_id: CommitId,
@@ -352,6 +372,18 @@ impl Storage for FjallStorage {
         self.with_inner(|inner| {
             let tx = inner.db.read_tx();
             list_mutation_records_by_outcome_core(outcome, |prefix| {
+                Self::scan_prefix(&tx, &inner.keyspace, prefix)
+            })
+        })
+    }
+
+    fn list_mutation_records_for_object(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Vec<MutationRecord>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            list_mutation_records_for_object_core(object_id, |prefix| {
                 Self::scan_prefix(&tx, &inner.keyspace, prefix)
             })
         })
