@@ -273,6 +273,83 @@ impl MutationOutcome {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MutationOutcomeState {
+    Pending,
+    Accepted,
+    Rejected(MutationRejection),
+    SupersededByRejection { root_mutation_id: MutationId },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationOutcomeFilter {
+    Pending,
+    Accepted,
+    Rejected,
+    SupersededByRejection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MutationRecord {
+    pub id: MutationId,
+    pub object_id: ObjectId,
+    pub branch_name: BranchName,
+    pub table: Option<String>,
+    pub operation: MutationOperation,
+    pub commit_ids: Vec<CommitId>,
+    pub previous_commit_ids: Vec<CommitId>,
+    pub recorded_at_micros: u64,
+    pub highest_acked_tier: Option<DurabilityTier>,
+    pub outcome: MutationOutcomeState,
+}
+
+impl MutationRecord {
+    pub fn matches_filter(&self, filter: MutationOutcomeFilter) -> bool {
+        matches!(
+            (&self.outcome, filter),
+            (
+                MutationOutcomeState::Pending,
+                MutationOutcomeFilter::Pending
+            ) | (
+                MutationOutcomeState::Accepted,
+                MutationOutcomeFilter::Accepted
+            ) | (
+                MutationOutcomeState::Rejected(_),
+                MutationOutcomeFilter::Rejected
+            ) | (
+                MutationOutcomeState::SupersededByRejection { .. },
+                MutationOutcomeFilter::SupersededByRejection
+            )
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutationEvent {
+    Recorded {
+        mutation_id: MutationId,
+    },
+    AckAdvanced {
+        mutation_id: MutationId,
+        tier: DurabilityTier,
+    },
+    Accepted {
+        mutation_id: MutationId,
+    },
+    Rejected {
+        mutation_id: MutationId,
+        rejection: MutationRejection,
+    },
+    SupersededByRejection {
+        mutation_id: MutationId,
+        root_mutation_id: MutationId,
+    },
+    Acknowledged {
+        mutation_id: MutationId,
+    },
+}
+
 /// Strongly typed errors for sync operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncError {

@@ -579,6 +579,12 @@ impl WasmRuntime {
         self.core.borrow().sync_sender().set_callback(callback);
     }
 
+    /// Enable or disable local mutation journal ownership for this runtime.
+    #[wasm_bindgen(js_name = setMutationJournalEnabled)]
+    pub fn set_mutation_journal_enabled(&self, enabled: bool) {
+        self.core.borrow_mut().set_mutation_journal_enabled(enabled);
+    }
+
     // =========================================================================
     // CRUD Operations
     // =========================================================================

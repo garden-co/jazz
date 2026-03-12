@@ -1,4 +1,6 @@
 use super::*;
+use crate::object::BranchName;
+use crate::sync_manager::MutationOperation;
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     // =========================================================================
@@ -13,12 +15,22 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         session: Option<&Session>,
     ) -> Result<InsertedRow, RuntimeError> {
         let _span = debug_span!("insert", table).entered();
+        let branch_name = self.schema_manager.branch_name();
         let result = self
             .schema_manager
             .insert_with_session(&mut self.storage, table, &values, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
         let row_id = result.row_id;
+        let row_commit_id = result.row_commit_id;
         let row_values = result.row_values;
+        self.record_local_mutation(
+            row_id,
+            branch_name,
+            Some(table.to_string()),
+            MutationOperation::Insert,
+            vec![row_commit_id],
+            Vec::new(),
+        )?;
         debug!(object_id = %row_id, "inserted");
         self.immediate_tick();
         Ok((row_id, row_values))
@@ -33,11 +45,22 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     ) -> Result<(), RuntimeError> {
         let _span = debug_span!("update", %object_id).entered();
         let current_values = self.merge_row_update_values(object_id, values)?;
+        let (table, branch_name, previous_commit_ids) =
+            self.capture_existing_mutation_context(object_id)?;
 
-        self.schema_manager
+        let commit_id = self
+            .schema_manager
             .query_manager_mut()
             .update_with_session(&mut self.storage, object_id, &current_values, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
+        self.record_local_mutation(
+            object_id,
+            branch_name,
+            Some(table),
+            MutationOperation::Update,
+            vec![commit_id],
+            previous_commit_ids,
+        )?;
 
         self.immediate_tick();
         Ok(())
@@ -50,10 +73,21 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         session: Option<&Session>,
     ) -> Result<(), RuntimeError> {
         let _span = debug_span!("delete", %object_id).entered();
-        self.schema_manager
+        let (table, branch_name, previous_commit_ids) =
+            self.capture_existing_mutation_context(object_id)?;
+        let handle = self
+            .schema_manager
             .query_manager_mut()
             .delete_with_session(&mut self.storage, object_id, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
+        self.record_local_mutation(
+            object_id,
+            branch_name,
+            Some(table),
+            MutationOperation::Delete,
+            vec![handle.delete_commit_id],
+            previous_commit_ids,
+        )?;
         debug!("deleted");
         self.immediate_tick();
         Ok(())
@@ -72,6 +106,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         session: Option<&Session>,
         tier: DurabilityTier,
     ) -> Result<(InsertedRow, oneshot::Receiver<()>), RuntimeError> {
+        let branch_name = self.schema_manager.branch_name();
         let result = self
             .schema_manager
             .insert_with_session(&mut self.storage, table, &values, session)
@@ -79,6 +114,14 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let row_id = result.row_id;
         let row_commit_id = result.row_commit_id;
         let row_values = result.row_values;
+        self.record_local_mutation(
+            row_id,
+            branch_name,
+            Some(table.to_string()),
+            MutationOperation::Insert,
+            vec![row_commit_id],
+            Vec::new(),
+        )?;
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -109,12 +152,22 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         tier: DurabilityTier,
     ) -> Result<oneshot::Receiver<()>, RuntimeError> {
         let current_values = self.merge_row_update_values(object_id, values)?;
+        let (table, branch_name, previous_commit_ids) =
+            self.capture_existing_mutation_context(object_id)?;
 
         let commit_id = self
             .schema_manager
             .query_manager_mut()
             .update_with_session(&mut self.storage, object_id, &current_values, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
+        self.record_local_mutation(
+            object_id,
+            branch_name,
+            Some(table),
+            MutationOperation::Update,
+            vec![commit_id],
+            previous_commit_ids,
+        )?;
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -166,6 +219,29 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         Ok(current_values)
     }
 
+    fn capture_existing_mutation_context(
+        &mut self,
+        object_id: ObjectId,
+    ) -> Result<(String, BranchName, Vec<CommitId>), RuntimeError> {
+        let branch_name = self.schema_manager.branch_name();
+        let table = self
+            .schema_manager
+            .query_manager_mut()
+            .get_row(object_id)
+            .map(|(table, _)| table)
+            .ok_or(RuntimeError::NotFound)?;
+        let previous_commit_ids = self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .object_manager
+            .get_tip_ids(object_id, branch_name)
+            .map(|tips| tips.iter().copied().collect())
+            .unwrap_or_default();
+
+        Ok((table, branch_name, previous_commit_ids))
+    }
+
     /// Delete a row and return a receiver that resolves when the requested
     /// persistence tier (or higher) acknowledges.
     pub fn delete_persisted(
@@ -174,11 +250,21 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         session: Option<&Session>,
         tier: DurabilityTier,
     ) -> Result<oneshot::Receiver<()>, RuntimeError> {
+        let (table, branch_name, previous_commit_ids) =
+            self.capture_existing_mutation_context(object_id)?;
         let handle = self
             .schema_manager
             .query_manager_mut()
             .delete_with_session(&mut self.storage, object_id, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
+        self.record_local_mutation(
+            object_id,
+            branch_name,
+            Some(table),
+            MutationOperation::Delete,
+            vec![handle.delete_commit_id],
+            previous_commit_ids,
+        )?;
 
         let (sender, receiver) = oneshot::channel();
         if self

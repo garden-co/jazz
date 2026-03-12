@@ -40,7 +40,8 @@ use crate::query_manager::types::{OrderedRowDelta, Schema, TableName, Value};
 use crate::schema_manager::SchemaManager;
 use crate::storage::Storage;
 use crate::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, MutationOutcome, OutboxEntry, ServerId,
+    ClientId, DurabilityTier, InboxEntry, MutationEvent, MutationId, MutationOutcome,
+    MutationOutcomeFilter, MutationRecord, OutboxEntry, ServerId,
 };
 
 // ============================================================================
@@ -247,6 +248,15 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
     /// A tier >= requested tier satisfies the watcher (e.g., EdgeServer ack satisfies Worker).
     ack_watchers: HashMap<CommitId, Vec<(DurabilityTier, oneshot::Sender<()>)>>,
 
+    /// Shared raw mutation outcomes received from sync.
+    mutation_outcomes: Vec<MutationOutcome>,
+    /// Higher-level mutation events derived from the local journal.
+    mutation_events: Vec<MutationEvent>,
+    /// In-memory reverse index for fast commit-to-mutation correlation.
+    commit_to_mutation: HashMap<CommitId, MutationId>,
+    /// Whether this runtime owns the local mutation journal.
+    mutation_journal_enabled: bool,
+
     /// Label for tracing (e.g. "worker", "edge", "client").
     tier_label: &'static str,
 }
@@ -268,6 +278,10 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             pending_subscriptions: HashMap::new(),
             pending_one_shot_queries: HashMap::new(),
             ack_watchers: HashMap::new(),
+            mutation_outcomes: Vec::new(),
+            mutation_events: Vec::new(),
+            commit_to_mutation: HashMap::new(),
+            mutation_journal_enabled: true,
             tier_label: "unknown",
         }
     }
@@ -275,6 +289,16 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Set the tier label used in tracing spans.
     pub fn set_tier_label(&mut self, label: &'static str) {
         self.tier_label = label;
+    }
+
+    /// Enable or disable local mutation journal ownership for this runtime.
+    pub fn set_mutation_journal_enabled(&mut self, enabled: bool) {
+        self.mutation_journal_enabled = enabled;
+    }
+
+    /// Whether this runtime owns local mutation journal persistence.
+    pub fn mutation_journal_enabled(&self) -> bool {
+        self.mutation_journal_enabled
     }
 
     /// Get mutable reference to the Storage.
@@ -357,13 +381,50 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
     /// Take mutation outcomes received since the last call.
     pub fn take_mutation_outcomes(&mut self) -> Vec<MutationOutcome> {
-        self.schema_manager
-            .query_manager_mut()
-            .sync_manager_mut()
-            .take_received_mutation_outcomes()
+        std::mem::take(&mut self.mutation_outcomes)
+    }
+
+    /// Take higher-level mutation events derived from the local mutation journal.
+    pub fn take_mutation_events(&mut self) -> Vec<MutationEvent> {
+        std::mem::take(&mut self.mutation_events)
+    }
+
+    /// Load one mutation record by mutation id.
+    pub fn get_mutation_record(
+        &self,
+        mutation_id: MutationId,
+    ) -> Result<Option<MutationRecord>, RuntimeError> {
+        self.storage
+            .load_mutation_record(mutation_id)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))
+    }
+
+    /// Load one mutation record by commit id.
+    pub fn get_mutation_record_by_commit(
+        &self,
+        commit_id: CommitId,
+    ) -> Result<Option<MutationRecord>, RuntimeError> {
+        self.storage
+            .load_mutation_record_by_commit(commit_id)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))
+    }
+
+    /// List pending mutation journal records.
+    pub fn list_pending_mutations(&self) -> Result<Vec<MutationRecord>, RuntimeError> {
+        self.storage
+            .list_mutation_records_by_outcome(MutationOutcomeFilter::Pending)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))
+    }
+
+    /// List rejected mutation journal records.
+    pub fn list_rejected_mutations(&self) -> Result<Vec<MutationRecord>, RuntimeError> {
+        self.storage
+            .list_mutation_records_by_outcome(MutationOutcomeFilter::Rejected)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))
     }
 }
 
+mod mutations;
 mod subscriptions;
 mod sync;
 mod ticks;

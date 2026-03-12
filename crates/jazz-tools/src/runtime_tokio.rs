@@ -27,7 +27,8 @@ use crate::runtime_core::{
 use crate::schema_manager::{QuerySchemaContext, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{
-    ClientId, InboxEntry, MutationOutcome, OutboxEntry, QueryPropagation, ServerId,
+    ClientId, InboxEntry, MutationEvent, MutationId, MutationOutcome, MutationRecord, OutboxEntry,
+    QueryPropagation, ServerId,
 };
 
 // ============================================================================
@@ -366,6 +367,28 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn take_mutation_outcomes(&self) -> Result<Vec<MutationOutcome>, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.take_mutation_outcomes())
+    }
+
+    /// Take mutation journal events received since the last call.
+    pub fn take_mutation_events(&self) -> Result<Vec<MutationEvent>, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.take_mutation_events())
+    }
+
+    /// Enable or disable local mutation journal ownership for this runtime.
+    pub fn set_mutation_journal_enabled(&self, enabled: bool) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.set_mutation_journal_enabled(enabled);
+        Ok(())
+    }
+
+    /// Load one mutation record by mutation id.
+    pub fn get_mutation_record(
+        &self,
+        mutation_id: MutationId,
+    ) -> Result<Option<MutationRecord>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.get_mutation_record(mutation_id).map_err(Into::into)
     }
 
     /// Set the next expected stream sequence for a server.

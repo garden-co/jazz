@@ -124,6 +124,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .sync_manager_mut()
             .take_received_acks();
         for (commit_id, acked_tier) in received_acks {
+            if let Err(error) = self.advance_mutation_ack(commit_id, acked_tier) {
+                tracing::warn!(?commit_id, ?acked_tier, error = %error, "failed to advance mutation ack");
+            }
             if let Some(watchers) = self.ack_watchers.remove(&commit_id) {
                 let mut remaining = Vec::new();
                 for (requested_tier, sender) in watchers {
@@ -142,6 +145,18 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 if !remaining.is_empty() {
                     self.ack_watchers.insert(commit_id, remaining);
                 }
+            }
+        }
+
+        // 3c. Process received mutation outcomes.
+        let received_mutation_outcomes = self
+            .schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .take_received_mutation_outcomes();
+        for outcome in received_mutation_outcomes {
+            if let Err(error) = self.handle_received_mutation_outcome(outcome) {
+                tracing::warn!(error = %error, "failed to process mutation outcome");
             }
         }
 

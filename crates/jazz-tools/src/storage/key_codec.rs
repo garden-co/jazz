@@ -3,6 +3,7 @@ use std::ops::Bound;
 use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
+use crate::sync_manager::MutationId;
 
 use super::encode_value;
 
@@ -34,6 +35,18 @@ pub(super) fn commit_prefix(object_id: ObjectId, branch: &BranchName) -> String 
 
 pub(super) fn ack_key(commit_id: CommitId) -> String {
     format!("ack:{}", hex::encode(commit_id.0))
+}
+
+pub(super) fn mutation_record_key(mutation_id: MutationId) -> String {
+    format!("mut:{}", hex::encode(mutation_id.0.as_bytes()))
+}
+
+pub(super) fn mutation_record_prefix() -> &'static str {
+    "mut:"
+}
+
+pub(super) fn mutation_commit_index_key(commit_id: CommitId) -> String {
+    format!("mutc:{}", hex::encode(commit_id.0))
 }
 
 pub(super) fn catalogue_manifest_op_key(app_id: ObjectId, object_id: ObjectId) -> String {

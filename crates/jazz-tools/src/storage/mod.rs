@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{SchemaHash, Value};
-use crate::sync_manager::DurabilityTier;
+use crate::sync_manager::{DurabilityTier, MutationId, MutationOutcomeFilter, MutationRecord};
 
 // ============================================================================
 // Storage Types
@@ -188,6 +188,34 @@ pub trait Storage {
     ) -> Result<(), StorageError>;
 
     // ================================================================
+    // Mutation journal storage
+    // ================================================================
+
+    /// Insert or replace a mutation journal record.
+    fn put_mutation_record(&mut self, record: MutationRecord) -> Result<(), StorageError>;
+
+    /// Load one mutation record by mutation id.
+    fn load_mutation_record(
+        &self,
+        mutation_id: MutationId,
+    ) -> Result<Option<MutationRecord>, StorageError>;
+
+    /// Load one mutation record by one of its commit ids.
+    fn load_mutation_record_by_commit(
+        &self,
+        commit_id: CommitId,
+    ) -> Result<Option<MutationRecord>, StorageError>;
+
+    /// Delete one mutation record and its commit indexes.
+    fn delete_mutation_record(&mut self, mutation_id: MutationId) -> Result<(), StorageError>;
+
+    /// List mutation records matching one outcome state.
+    fn list_mutation_records_by_outcome(
+        &self,
+        outcome: MutationOutcomeFilter,
+    ) -> Result<Vec<MutationRecord>, StorageError>;
+
+    // ================================================================
     // Catalogue manifest storage
     // ================================================================
 
@@ -335,6 +363,35 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).store_ack_tier(commit_id, tier)
     }
 
+    fn put_mutation_record(&mut self, record: MutationRecord) -> Result<(), StorageError> {
+        (**self).put_mutation_record(record)
+    }
+
+    fn load_mutation_record(
+        &self,
+        mutation_id: MutationId,
+    ) -> Result<Option<MutationRecord>, StorageError> {
+        (**self).load_mutation_record(mutation_id)
+    }
+
+    fn load_mutation_record_by_commit(
+        &self,
+        commit_id: CommitId,
+    ) -> Result<Option<MutationRecord>, StorageError> {
+        (**self).load_mutation_record_by_commit(commit_id)
+    }
+
+    fn delete_mutation_record(&mut self, mutation_id: MutationId) -> Result<(), StorageError> {
+        (**self).delete_mutation_record(mutation_id)
+    }
+
+    fn list_mutation_records_by_outcome(
+        &self,
+        outcome: MutationOutcomeFilter,
+    ) -> Result<Vec<MutationRecord>, StorageError> {
+        (**self).list_mutation_records_by_outcome(outcome)
+    }
+
     fn append_catalogue_manifest_op(
         &mut self,
         app_id: ObjectId,
@@ -445,6 +502,10 @@ pub struct MemoryStorage {
 
     /// Persistence ack tiers per commit.
     ack_tiers: HashMap<CommitId, HashSet<DurabilityTier>>,
+    /// Mutation journal entries keyed by mutation id.
+    mutation_records: HashMap<MutationId, MutationRecord>,
+    /// Commit-to-mutation reverse index for mutation outcomes and ack updates.
+    mutation_records_by_commit: HashMap<CommitId, MutationId>,
     /// Append-only manifest ops keyed by app_id then op object_id.
     catalogue_manifest_ops: HashMap<ObjectId, HashMap<ObjectId, CatalogueManifestOp>>,
 }
@@ -687,6 +748,60 @@ impl Storage for MemoryStorage {
     ) -> Result<(), StorageError> {
         self.ack_tiers.entry(commit_id).or_default().insert(tier);
         Ok(())
+    }
+
+    fn put_mutation_record(&mut self, record: MutationRecord) -> Result<(), StorageError> {
+        if let Some(existing) = self.mutation_records.insert(record.id, record.clone()) {
+            for commit_id in existing.commit_ids {
+                self.mutation_records_by_commit.remove(&commit_id);
+            }
+        }
+
+        for &commit_id in &record.commit_ids {
+            self.mutation_records_by_commit.insert(commit_id, record.id);
+        }
+
+        Ok(())
+    }
+
+    fn load_mutation_record(
+        &self,
+        mutation_id: MutationId,
+    ) -> Result<Option<MutationRecord>, StorageError> {
+        Ok(self.mutation_records.get(&mutation_id).cloned())
+    }
+
+    fn load_mutation_record_by_commit(
+        &self,
+        commit_id: CommitId,
+    ) -> Result<Option<MutationRecord>, StorageError> {
+        let Some(mutation_id) = self.mutation_records_by_commit.get(&commit_id) else {
+            return Ok(None);
+        };
+
+        Ok(self.mutation_records.get(mutation_id).cloned())
+    }
+
+    fn delete_mutation_record(&mut self, mutation_id: MutationId) -> Result<(), StorageError> {
+        if let Some(record) = self.mutation_records.remove(&mutation_id) {
+            for commit_id in record.commit_ids {
+                self.mutation_records_by_commit.remove(&commit_id);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn list_mutation_records_by_outcome(
+        &self,
+        outcome: MutationOutcomeFilter,
+    ) -> Result<Vec<MutationRecord>, StorageError> {
+        Ok(self
+            .mutation_records
+            .values()
+            .filter(|record| record.matches_filter(outcome))
+            .cloned()
+            .collect())
     }
 
     fn append_catalogue_manifest_op(
@@ -1354,5 +1469,55 @@ mod tests {
             },
         );
         assert!(matches!(conflict, Err(StorageError::IoError(_))));
+    }
+
+    #[test]
+    fn memory_storage_mutation_record_lifecycle() {
+        use crate::sync_manager::{
+            MutationId, MutationOperation, MutationOutcomeFilter, MutationOutcomeState,
+            MutationRecord,
+        };
+
+        let mut storage = MemoryStorage::new();
+        let record = MutationRecord {
+            id: MutationId::new(),
+            object_id: ObjectId::new(),
+            branch_name: BranchName::new("main"),
+            table: Some("users".into()),
+            operation: MutationOperation::Insert,
+            commit_ids: vec![CommitId([1; 32])],
+            previous_commit_ids: Vec::new(),
+            recorded_at_micros: 123,
+            highest_acked_tier: None,
+            outcome: MutationOutcomeState::Pending,
+        };
+
+        storage.put_mutation_record(record.clone()).unwrap();
+
+        assert_eq!(
+            storage.load_mutation_record(record.id).unwrap(),
+            Some(record.clone())
+        );
+        assert_eq!(
+            storage
+                .load_mutation_record_by_commit(record.commit_ids[0])
+                .unwrap(),
+            Some(record.clone())
+        );
+        assert_eq!(
+            storage
+                .list_mutation_records_by_outcome(MutationOutcomeFilter::Pending)
+                .unwrap(),
+            vec![record.clone()]
+        );
+
+        storage.delete_mutation_record(record.id).unwrap();
+        assert_eq!(storage.load_mutation_record(record.id).unwrap(), None);
+        assert_eq!(
+            storage
+                .load_mutation_record_by_commit(record.commit_ids[0])
+                .unwrap(),
+            None
+        );
     }
 }

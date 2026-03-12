@@ -227,14 +227,99 @@ fn runtime_core_drains_received_mutation_outcomes() {
     assert!(core.take_mutation_outcomes().is_empty());
 }
 
+#[test]
+fn runtime_core_records_local_mutations_and_events() {
+    let mut core = create_test_runtime();
+    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
+    let (object_id, _row_values) = core.insert("users", values, None).unwrap();
+
+    let events = core.take_mutation_events();
+    let mutation_id = match events.as_slice() {
+        [MutationEvent::Recorded { mutation_id }] => *mutation_id,
+        other => panic!("unexpected mutation events: {other:?}"),
+    };
+
+    let record = core
+        .get_mutation_record(mutation_id)
+        .unwrap()
+        .expect("mutation record should exist");
+    assert_eq!(record.object_id, object_id);
+    assert_eq!(record.table.as_deref(), Some("users"));
+    assert_eq!(record.operation, MutationOperation::Insert);
+    assert!(matches!(record.outcome, MutationOutcomeState::Pending));
+    assert_eq!(record.commit_ids.len(), 1);
+    assert!(record.previous_commit_ids.is_empty());
+}
+
+#[test]
+fn runtime_core_can_disable_mutation_journal() {
+    let mut core = create_test_runtime();
+    core.set_mutation_journal_enabled(false);
+
+    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
+    let _ = core.insert("users", values, None).unwrap();
+
+    assert!(core.take_mutation_events().is_empty());
+    assert!(core.list_pending_mutations().unwrap().is_empty());
+}
+
+#[test]
+fn runtime_core_updates_mutation_records_from_rejections() {
+    use crate::object::BranchName;
+
+    let mut core = create_test_runtime();
+    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
+    let (object_id, _row_values) = core.insert("users", values, None).unwrap();
+    let mutation_id = match core.take_mutation_events().as_slice() {
+        [MutationEvent::Recorded { mutation_id }] => *mutation_id,
+        other => panic!("unexpected mutation events: {other:?}"),
+    };
+
+    let record = core
+        .get_mutation_record(mutation_id)
+        .unwrap()
+        .expect("mutation record should exist");
+    let rejection = MutationRejection {
+        object_id,
+        branch_name: BranchName::new("main"),
+        operation: MutationOperation::Insert,
+        commit_ids: record.commit_ids.clone(),
+        previous_commit_ids: record.previous_commit_ids.clone(),
+        code: MutationRejectCode::PermissionDenied,
+        reason: "policy denied write".into(),
+        rejected_at_micros: 456,
+    };
+
+    core.park_sync_message(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::MutationOutcome(MutationOutcome::Rejected(rejection.clone())),
+    });
+    core.batched_tick();
+
+    let events = core.take_mutation_events();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        MutationEvent::Rejected {
+            mutation_id: event_mutation_id,
+            rejection: event_rejection,
+        } if *event_mutation_id == mutation_id && event_rejection == &rejection
+    )));
+
+    let record = core
+        .get_mutation_record(mutation_id)
+        .unwrap()
+        .expect("mutation record should exist");
+    assert_eq!(record.outcome, MutationOutcomeState::Rejected(rejection));
+}
+
 // =========================================================================
 // Durability API Tests (3-tier: A ↔ B[Worker] ↔ C[EdgeServer])
 // =========================================================================
 
 use crate::sync_manager::{
-    ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, MutationOperation,
-    MutationOutcome, MutationRejectCode, MutationRejection, OutboxEntry, ServerId, Source,
-    SyncPayload,
+    ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, MutationEvent,
+    MutationOperation, MutationOutcome, MutationOutcomeState, MutationRejectCode,
+    MutationRejection, OutboxEntry, ServerId, Source, SyncPayload,
 };
 
 /// Three-tier RuntimeCore setup for durability tests.
@@ -761,6 +846,35 @@ fn rc_insert_persisted_resolves_on_worker_ack() {
         Ok(None) => panic!("Receiver should be resolved after Worker ack"),
         Err(_) => panic!("Receiver was cancelled"),
     }
+}
+
+#[test]
+fn rc_worker_ack_advances_mutation_record() {
+    let mut s = create_3tier_rc();
+    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
+    let ((_id, _row_values), _receiver) =
+        s.a.insert_persisted("users", values, None, DurabilityTier::Worker)
+            .unwrap();
+    let mutation_id = match s.a.take_mutation_events().as_slice() {
+        [MutationEvent::Recorded { mutation_id }] => *mutation_id,
+        other => panic!("unexpected mutation events: {other:?}"),
+    };
+
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+
+    let record =
+        s.a.get_mutation_record(mutation_id)
+            .unwrap()
+            .expect("mutation record should exist");
+    assert_eq!(record.highest_acked_tier, Some(DurabilityTier::Worker));
+    assert!(s.a.take_mutation_events().iter().any(|event| matches!(
+        event,
+        MutationEvent::AckAdvanced {
+            mutation_id: event_mutation_id,
+            tier: DurabilityTier::Worker,
+        } if *event_mutation_id == mutation_id
+    )));
 }
 
 #[test]

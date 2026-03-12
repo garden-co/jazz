@@ -5,14 +5,15 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
-use crate::sync_manager::DurabilityTier;
+use crate::sync_manager::{DurabilityTier, MutationId, MutationOutcomeFilter, MutationRecord};
 
 use crate::query_manager::types::Value;
 
 use super::key_codec::{
     ack_key, branch_tips_key, catalogue_manifest_op_key, catalogue_manifest_op_prefix, commit_key,
     commit_prefix, index_entry_key, index_prefix, index_range_scan_bounds, index_value_prefix,
-    obj_meta_key, parse_uuid_from_index_key,
+    mutation_commit_index_key, mutation_record_key, mutation_record_prefix, obj_meta_key,
+    parse_uuid_from_index_key,
 };
 use super::{CatalogueManifest, CatalogueManifestOp, LoadedBranch, StorageError};
 
@@ -170,6 +171,90 @@ pub(super) fn store_ack_tier_core(
     tiers.insert(tier);
     let json = encode_json(&tiers, "ack")?;
     set(&key, &json)
+}
+
+pub(super) fn put_mutation_record_core(
+    record: MutationRecord,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+    mut delete: impl FnMut(&str) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let record_key = mutation_record_key(record.id);
+
+    if let Some(existing) = get(&record_key)? {
+        let existing_record: MutationRecord = decode_json(&existing, "mutation record")?;
+        for commit_id in existing_record.commit_ids {
+            if !record.commit_ids.contains(&commit_id) {
+                delete(&mutation_commit_index_key(commit_id))?;
+            }
+        }
+    }
+
+    let record_json = encode_json(&record, "mutation record")?;
+    set(&record_key, &record_json)?;
+
+    let mutation_id_json = encode_json(&record.id, "mutation id")?;
+    for &commit_id in &record.commit_ids {
+        let key = mutation_commit_index_key(commit_id);
+        set(&key, &mutation_id_json)?;
+    }
+
+    Ok(())
+}
+
+pub(super) fn load_mutation_record_core(
+    mutation_id: MutationId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<MutationRecord>, StorageError> {
+    let key = mutation_record_key(mutation_id);
+    match get(&key)? {
+        Some(data) => Ok(Some(decode_json(&data, "mutation record")?)),
+        None => Ok(None),
+    }
+}
+
+pub(super) fn load_mutation_record_by_commit_core(
+    commit_id: CommitId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<MutationRecord>, StorageError> {
+    let commit_key = mutation_commit_index_key(commit_id);
+    let Some(mutation_id_bytes) = get(&commit_key)? else {
+        return Ok(None);
+    };
+    let mutation_id: MutationId = decode_json(&mutation_id_bytes, "mutation id")?;
+    load_mutation_record_core(mutation_id, get)
+}
+
+pub(super) fn delete_mutation_record_core(
+    mutation_id: MutationId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+    mut delete: impl FnMut(&str) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    if let Some(record) = load_mutation_record_core(mutation_id, &mut get)? {
+        for commit_id in record.commit_ids {
+            delete(&mutation_commit_index_key(commit_id))?;
+        }
+        delete(&mutation_record_key(mutation_id))?;
+    }
+
+    Ok(())
+}
+
+pub(super) fn list_mutation_records_by_outcome_core(
+    outcome: MutationOutcomeFilter,
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<Vec<MutationRecord>, StorageError> {
+    let entries = scan_prefix(mutation_record_prefix())?;
+    let mut records = Vec::new();
+
+    for (_key, data) in entries {
+        let record: MutationRecord = decode_json(&data, "mutation record")?;
+        if record.matches_filter(outcome) {
+            records.push(record);
+        }
+    }
+
+    Ok(records)
 }
 
 pub(super) fn append_catalogue_manifest_op_core(

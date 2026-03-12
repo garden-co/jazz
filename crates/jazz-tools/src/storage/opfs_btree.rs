@@ -29,17 +29,18 @@ use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
-use crate::sync_manager::DurabilityTier;
+use crate::sync_manager::{DurabilityTier, MutationId, MutationOutcomeFilter, MutationRecord};
 
 use super::{
     CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
     key_codec::increment_bytes,
     storage_core::{
         append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
-        create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
-        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
-        store_ack_tier_core,
+        create_object_core, delete_commit_core, delete_mutation_record_core, index_insert_core,
+        index_lookup_core, index_range_core, index_remove_core, index_scan_all_core,
+        list_mutation_records_by_outcome_core, load_branch_core, load_catalogue_manifest_core,
+        load_mutation_record_by_commit_core, load_mutation_record_core, load_object_metadata_core,
+        put_mutation_record_core, set_branch_tails_core, store_ack_tier_core,
     },
 };
 
@@ -313,6 +314,44 @@ impl Storage for OpfsBTreeStorage {
             |key| self.tree_read(key),
             |key, value| self.tree_insert(key, value),
         )
+    }
+
+    fn put_mutation_record(&mut self, record: MutationRecord) -> Result<(), StorageError> {
+        put_mutation_record_core(
+            record,
+            |key| self.tree_read(key),
+            |key, value| self.tree_insert(key, value),
+            |key| self.tree_delete(key),
+        )
+    }
+
+    fn load_mutation_record(
+        &self,
+        mutation_id: MutationId,
+    ) -> Result<Option<MutationRecord>, StorageError> {
+        load_mutation_record_core(mutation_id, |key| self.tree_read(key))
+    }
+
+    fn load_mutation_record_by_commit(
+        &self,
+        commit_id: CommitId,
+    ) -> Result<Option<MutationRecord>, StorageError> {
+        load_mutation_record_by_commit_core(commit_id, |key| self.tree_read(key))
+    }
+
+    fn delete_mutation_record(&mut self, mutation_id: MutationId) -> Result<(), StorageError> {
+        delete_mutation_record_core(
+            mutation_id,
+            |key| self.tree_read(key),
+            |key| self.tree_delete(key),
+        )
+    }
+
+    fn list_mutation_records_by_outcome(
+        &self,
+        outcome: MutationOutcomeFilter,
+    ) -> Result<Vec<MutationRecord>, StorageError> {
+        list_mutation_records_by_outcome_core(outcome, |prefix| self.tree_scan_prefix(prefix))
     }
 
     fn append_catalogue_manifest_op(

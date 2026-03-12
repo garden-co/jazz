@@ -16,16 +16,17 @@ use fjall::{
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
-use crate::sync_manager::DurabilityTier;
+use crate::sync_manager::{DurabilityTier, MutationId, MutationOutcomeFilter, MutationRecord};
 
 use super::{
     CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
     storage_core::{
         append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
-        create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
-        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
-        store_ack_tier_core,
+        create_object_core, delete_commit_core, delete_mutation_record_core, index_insert_core,
+        index_lookup_core, index_range_core, index_remove_core, index_scan_all_core,
+        list_mutation_records_by_outcome_core, load_branch_core, load_catalogue_manifest_core,
+        load_mutation_record_by_commit_core, load_mutation_record_core, load_object_metadata_core,
+        put_mutation_record_core, set_branch_tails_core, store_ack_tier_core,
     },
 };
 
@@ -294,6 +295,65 @@ impl Storage for FjallStorage {
                 |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
             )?;
             Self::commit_tx(tx.into_inner())
+        })
+    }
+
+    fn put_mutation_record(&mut self, record: MutationRecord) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
+            put_mutation_record_core(
+                record,
+                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
+                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
+                |key| Self::delete_on_cell(&tx, &inner.keyspace, key),
+            )?;
+            Self::commit_tx(tx.into_inner())
+        })
+    }
+
+    fn load_mutation_record(
+        &self,
+        mutation_id: MutationId,
+    ) -> Result<Option<MutationRecord>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            load_mutation_record_core(mutation_id, |key| Self::read_get(&tx, &inner.keyspace, key))
+        })
+    }
+
+    fn load_mutation_record_by_commit(
+        &self,
+        commit_id: CommitId,
+    ) -> Result<Option<MutationRecord>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            load_mutation_record_by_commit_core(commit_id, |key| {
+                Self::read_get(&tx, &inner.keyspace, key)
+            })
+        })
+    }
+
+    fn delete_mutation_record(&mut self, mutation_id: MutationId) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
+            delete_mutation_record_core(
+                mutation_id,
+                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
+                |key| Self::delete_on_cell(&tx, &inner.keyspace, key),
+            )?;
+            Self::commit_tx(tx.into_inner())
+        })
+    }
+
+    fn list_mutation_records_by_outcome(
+        &self,
+        outcome: MutationOutcomeFilter,
+    ) -> Result<Vec<MutationRecord>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            list_mutation_records_by_outcome_core(outcome, |prefix| {
+                Self::scan_prefix(&tx, &inner.keyspace, prefix)
+            })
         })
     }
 
