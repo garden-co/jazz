@@ -304,6 +304,36 @@ commit_to_mutation: HashMap<CommitId, MutationId>,
 
 `commit_to_mutation` may be reconstructed from storage on startup or lazily hydrated.
 
+### Multi-Runtime Client Ownership
+
+Persisted mutation outcome state should exist only in the local runtime that owns durable client storage for a given app database.
+
+This is stricter than "all clients persist outcomes":
+
+1. a browser main-thread cache runtime should not keep its own durable mutation journal
+2. a browser worker runtime backed by OPFS should own the durable mutation journal
+3. native single-runtime clients with local disk storage should own the durable mutation journal in that single runtime
+4. servers and relay peers may emit or forward mutation outcomes, but do not persist client-facing mutation journals
+
+Rationale:
+
+1. there must be exactly one acknowledgement/pruning authority per local app database
+2. duplicating the journal across cooperating runtimes would create split-brain acknowledgement semantics
+3. restart recovery should be sourced from the persistence-owning runtime, not reconstructed independently by each cache/runtime wrapper
+
+For the browser memory-main-thread plus persistent-worker setup, the intended model is:
+
+1. the worker persistent runtime records `MutationRecord`s durably
+2. the worker persistent runtime owns `acknowledge_mutation_outcome(...)` and dead-chain pruning
+3. the main thread receives mirrored mutation events and object outcome overlays as ephemeral state only
+4. on main-thread startup or reconnect, bindings rehydrate visible outcome state from the worker runtime rather than a separate main-thread journal
+
+Object outcome overlay remains derived state:
+
+1. the persistence-owning runtime may rebuild it from the journal on startup
+2. non-owning runtimes may cache or mirror it in memory
+3. non-owning runtimes do not durably persist a second copy
+
 ### Storage
 
 `Storage` should gain first-class mutation journal methods.
