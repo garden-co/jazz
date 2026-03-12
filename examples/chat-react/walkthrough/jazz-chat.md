@@ -68,13 +68,14 @@ table("chats", {
 table("chatMembers", {
   chat: col.ref("chats"),
   userId: col.string(),
+  joinCode: col.string().optional(),
 });
 table("messages", {
   chat: col.ref("chats"),
   text: col.string(),
   sender: col.ref("profiles"),
   senderId: col.string(),
-  createdAt: col.int(),
+  createdAt: col.timestamp(),
 });
 ```
 
@@ -86,7 +87,7 @@ table("reactions", {
 });
 table("canvases", {
   chat: col.ref("chats"),
-  createdAt: col.int(),
+  createdAt: col.timestamp(),
 });
 table("strokes", {
   canvas: col.ref("canvases"),
@@ -94,10 +95,11 @@ table("strokes", {
   color: col.string(),
   width: col.int(),
   pointsJson: col.string(),
-  createdAt: col.int(),
+  createdAt: col.timestamp(),
 });
 table("attachments", {
   message: col.ref("messages"),
+  type: col.string(),
   name: col.string(),
   data: col.string(),
   mimeType: col.string(),
@@ -184,7 +186,7 @@ const handleSend = (html: string) => {
     text: html.trim(),
     sender: myProfile.id,
     senderId: userId,
-    createdAt: Math.floor(Date.now() / 1000),
+    createdAt: new Date(),
   });
 };
 ```
@@ -219,13 +221,12 @@ Row-level security is a schema concern. Components contain no auth logic.
 
 ![bg contain right:38%](screenshots/08-chat-list.png)
 
-The `chats` policy layers four access conditions without any backend logic:
+The `chats` policy layers three access conditions without any backend logic:
 
 ```typescript
 policy.chats.allowRead.where((chat) =>
   anyOf([
     { isPublic: true }, // public rooms
-    { createdBy: session.user_id }, // creator sees their chat immediately
     policy.chatMembers.exists.where({
       // accepted members
       chat: chat.id,
@@ -259,8 +260,8 @@ db.subscribeAll(
   { user_id: userId, claims: { join_code: code } },
 );
 
-// Step 2: once the chat row is local, insert the membership and wait for ack.
-await db.insertDurable(app.chatMembers, { chat: chatId, userId }, { tier: "edge" });
+// Step 2: once the chat row is local, insert the membership and navigate.
+db.insert(app.chatMembers, { chat: chatId, userId, joinCode: code });
 navigate(`/#/chat/${chatId}`);
 ```
 
@@ -303,11 +304,12 @@ const message = db.insert(app.messages, {
   text: "",
   sender: myProfile.id,
   senderId: userId,
-  createdAt: Math.floor(Date.now() / 1000),
+  createdAt: new Date(),
 });
 
 db.insert(app.attachments, {
   message: message.id,
+  type: attachment.type,
   name: attachment.name,
   data: attachment.data, // base64
   mimeType: attachment.mimeType,
@@ -339,16 +341,16 @@ Strokes inherit read access from their canvas, which inherits from the chat. `al
 
 ---
 
-## Waiting for the server
+## Fire-and-forget writes
 
-Most operations use the fire-and-forget path: `db.insert` / `db.delete` return immediately and sync silently. `insertDurable` is for the cases where you need to know the server received it before moving on.
+All writes in this app use the synchronous path: `db.insert` / `db.delete` return immediately. Sync to the edge server happens in the background.
 
 ```typescript
-await db.insertDurable(app.chatMembers, { chat: chatId, userId }, { tier: "edge" });
+db.insert(app.chatMembers, { chat: chatId, userId, joinCode: code });
 navigate(`/#/chat/${chatId}`);
 ```
 
-Here, navigating before the server acknowledges the membership would open an empty room — so we wait.
+The membership row is written locally first. The local database satisfies queries instantly while the server catches up.
 
 ---
 
@@ -363,5 +365,4 @@ Here, navigating before the server acknowledges the membership would open an emp
 | `useAll(query)`                             | React hook — live query, re-renders on every change       |
 | `db.insert` / `db.delete`                   | Synchronous local writes — sync to edge in the background |
 | `db.subscribeAll(query, cb, opts, session)` | Manual subscription with optional session-claim override  |
-| `db.insertDurable(table, data, { tier })`   | Async insert — resolves when the edge server confirms     |
 | `definePermissions`                         | Policy DSL — row-level security compiled into the schema  |
