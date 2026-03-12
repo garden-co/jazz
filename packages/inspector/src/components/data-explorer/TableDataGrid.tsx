@@ -6,8 +6,8 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import type { ColumnType, DynamicTableRow, TableProxy } from "jazz-tools";
-import { useDb } from "jazz-tools/react";
-import { useEffect, useMemo, useState } from "react";
+import { useAll, useDb } from "jazz-tools/react";
+import { useMemo, useState } from "react";
 import { Navigate, useParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
@@ -56,7 +56,6 @@ export function TableDataGrid() {
 
   const { wasmSchema: schema, queryPropagation, runtime } = useDevtoolsContext();
   const db = useDb();
-  const [rows, setRows] = useState<DynamicTableRow[]>([]);
   const [sorting, setSorting] = useState<SortingState>([{ id: "id", desc: false }]);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZE_OPTIONS[0]);
   const [pageIndex, setPageIndex] = useState(0);
@@ -69,7 +68,7 @@ export function TableDataGrid() {
   const sortColumn = activeSort.id;
   const sortDirection = activeSort.desc ? "desc" : "asc";
   const queryOffset = pageIndex * pageSize;
-  const queryLimit = pageSize + 1;
+  const queryLimit = pageSize;
   const queryBuilder = useMemo(() => {
     let builder = new GenericQueryBuilder(table, schema);
     for (const filter of filters) {
@@ -87,22 +86,11 @@ export function TableDataGrid() {
   }, [table, schema, filters, sortColumn, sortDirection, queryLimit, queryOffset]);
   const mutationDurabilityTier = runtime === "standalone" ? "edge" : "worker";
 
-  useEffect(() => {
-    const unsubscribe = db.subscribeAll(
-      queryBuilder,
-      (delta) => {
-        setRows(delta.all);
-      },
-      {
-        propagation: queryPropagation,
-        visibility: "hidden_from_live_query_list",
-      },
-    );
-
-    return () => {
-      unsubscribe();
-    };
-  }, [db, queryBuilder, queryPropagation]);
+  const rows =
+    useAll<DynamicTableRow>(queryBuilder, {
+      propagation: queryPropagation,
+      visibility: "hidden_from_live_query_list",
+    }) ?? [];
 
   const columnDefs = useMemo<ColumnDef<DynamicTableRow>[]>(
     () => [
