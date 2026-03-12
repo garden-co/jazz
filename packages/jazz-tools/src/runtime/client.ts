@@ -32,6 +32,12 @@ import {
   type RuntimeObjectOutcomeBindings,
   RuntimeObjectOutcomeSource,
 } from "./object-outcomes.js";
+import {
+  PersistedMutationError,
+  normalizePersistedMutationError,
+  type MutationOperation,
+  type PersistedMutationErrorData,
+} from "./persisted-mutation-error.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -118,6 +124,8 @@ export interface ResolvedQueryExecutionOptions {
 export interface WriteDurabilityOptions {
   tier?: DurabilityTier;
 }
+
+export { PersistedMutationError, type MutationOperation, type PersistedMutationErrorData };
 
 /**
  * Query row result.
@@ -1140,6 +1148,14 @@ export class JazzClient {
     }
   }
 
+  private wrapPersistedMutationError(error: unknown): unknown {
+    return (
+      normalizePersistedMutationError(error, (mutationId) =>
+        this.acknowledgeMutationOutcome(mutationId),
+      ) ?? error
+    );
+  }
+
   /**
    * Insert a new row into a table without waiting for durability.
    */
@@ -1161,12 +1177,17 @@ export class JazzClient {
     options?: WriteDurabilityOptions,
   ): Promise<Row> {
     const tier = this.resolveWriteTier(options);
-    const row = await this.runtime.insertDurable(table, values, tier);
-    this.drainRuntimeObjectOutcomeSource();
-    return {
-      ...this.withObjectOutcome(row),
-      values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
-    };
+    try {
+      const row = await this.runtime.insertDurable(table, values, tier);
+      this.drainRuntimeObjectOutcomeSource();
+      return {
+        ...this.withObjectOutcome(row),
+        values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
+      };
+    } catch (error) {
+      this.drainRuntimeObjectOutcomeSource();
+      throw this.wrapPersistedMutationError(error);
+    }
   }
 
   /**
@@ -1222,8 +1243,13 @@ export class JazzClient {
     options?: WriteDurabilityOptions,
   ): Promise<void> {
     const tier = this.resolveWriteTier(options);
-    await this.runtime.updateDurable(objectId, updates, tier);
-    this.drainRuntimeObjectOutcomeSource();
+    try {
+      await this.runtime.updateDurable(objectId, updates, tier);
+      this.drainRuntimeObjectOutcomeSource();
+    } catch (error) {
+      this.drainRuntimeObjectOutcomeSource();
+      throw this.wrapPersistedMutationError(error);
+    }
   }
 
   /**
@@ -1239,8 +1265,13 @@ export class JazzClient {
    */
   async deleteDurable(objectId: string, options?: WriteDurabilityOptions): Promise<void> {
     const tier = this.resolveWriteTier(options);
-    await this.runtime.deleteDurable(objectId, tier);
-    this.drainRuntimeObjectOutcomeSource();
+    try {
+      await this.runtime.deleteDurable(objectId, tier);
+      this.drainRuntimeObjectOutcomeSource();
+    } catch (error) {
+      this.drainRuntimeObjectOutcomeSource();
+      throw this.wrapPersistedMutationError(error);
+    }
   }
 
   /**

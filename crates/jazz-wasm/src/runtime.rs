@@ -65,7 +65,9 @@ use jazz_tools::query_manager::session::Session;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::types::{Row, RowDescriptor};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
-use jazz_tools::runtime_core::{ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender};
+use jazz_tools::runtime_core::{
+    PersistedMutationError, ReadDurabilityOptions, RuntimeCore, Scheduler, SyncSender,
+};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::runtime_core::{SubscriptionDelta, SubscriptionHandle};
 #[cfg(target_arch = "wasm32")]
@@ -88,6 +90,23 @@ use crate::types::{
     SubscriptionRowUpdated,
 };
 use crate::types::{WasmObjectOutcomeEvent, WasmObjectOutcomeState};
+
+const PERSISTED_MUTATION_ERROR_CAUSE_PREFIX: &str = "__jazzPersistedMutationError__:";
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WasmPersistedMutationErrorPayload {
+    mutation_id: String,
+    root_mutation_id: String,
+    object_id: String,
+    branch_name: String,
+    operation: String,
+    commit_ids: Vec<String>,
+    previous_commit_ids: Vec<String>,
+    code: String,
+    reason: String,
+    rejected_at_micros: u64,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -150,6 +169,76 @@ fn object_outcome_event_to_wasm(event: ObjectOutcomeEvent) -> WasmObjectOutcomeE
         object_id: event.object_id.uuid().to_string(),
         outcome: event.outcome.map(object_outcome_state_to_wasm),
     }
+}
+
+fn encode_commit_id_hex(bytes: [u8; 32]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn persisted_mutation_error_payload(
+    error: PersistedMutationError,
+) -> WasmPersistedMutationErrorPayload {
+    let rejection = error.rejection;
+    WasmPersistedMutationErrorPayload {
+        mutation_id: error.mutation_id.to_string(),
+        root_mutation_id: error.root_mutation_id.to_string(),
+        object_id: rejection.object_id.uuid().to_string(),
+        branch_name: rejection.branch_name.to_string(),
+        operation: serde_json::to_string(&rejection.operation)
+            .unwrap_or_else(|_| "\"update\"".to_string())
+            .trim_matches('"')
+            .to_string(),
+        commit_ids: rejection
+            .commit_ids
+            .into_iter()
+            .map(|commit_id| encode_commit_id_hex(commit_id.0))
+            .collect(),
+        previous_commit_ids: rejection
+            .previous_commit_ids
+            .into_iter()
+            .map(|commit_id| encode_commit_id_hex(commit_id.0))
+            .collect(),
+        code: serde_json::to_string(&rejection.code)
+            .unwrap_or_else(|_| "\"permission_denied\"".to_string())
+            .trim_matches('"')
+            .to_string(),
+        reason: rejection.reason,
+        rejected_at_micros: rejection.rejected_at_micros,
+    }
+}
+
+fn persisted_mutation_error_to_js_value(error: PersistedMutationError) -> JsValue {
+    let payload = persisted_mutation_error_payload(error);
+    let js_error = js_sys::Error::new(&format!(
+        "mutation {} rejected: {}",
+        payload.mutation_id, payload.reason
+    ));
+    let _ = js_sys::Reflect::set(
+        js_error.as_ref(),
+        &JsValue::from_str("name"),
+        &JsValue::from_str("PersistedMutationError"),
+    );
+
+    if let Ok(payload_value) = serde_wasm_bindgen::to_value(&payload) {
+        let _ = js_sys::Reflect::set(
+            js_error.as_ref(),
+            &JsValue::from_str("jazzPersistedMutationError"),
+            &payload_value,
+        );
+    }
+
+    let cause_payload = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+    let cause = js_sys::Error::new(&format!(
+        "{}{}",
+        PERSISTED_MUTATION_ERROR_CAUSE_PREFIX, cause_payload
+    ));
+    let _ = js_sys::Reflect::set(
+        js_error.as_ref(),
+        &JsValue::from_str("cause"),
+        cause.as_ref(),
+    );
+
+    js_error.into()
 }
 
 fn parse_session_json(session_json: Option<String>) -> Result<Option<Session>, JsError> {
@@ -837,7 +926,7 @@ impl WasmRuntime {
             receiver
                 .await
                 .map_err(|_| JsValue::from_str("Insert durable waiter cancelled"))?
-                .map_err(|err| JsValue::from_str(&err.to_string()))?;
+                .map_err(persisted_mutation_error_to_js_value)?;
             let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
             row.serialize(&serializer)
                 .map_err(|e| JsValue::from_str(&format!("Serialization failed: {:?}", e)))
@@ -873,7 +962,7 @@ impl WasmRuntime {
             receiver
                 .await
                 .map_err(|_| JsValue::from_str("Update durable waiter cancelled"))?
-                .map_err(|err| JsValue::from_str(&err.to_string()))?;
+                .map_err(persisted_mutation_error_to_js_value)?;
             Ok(JsValue::undefined())
         });
 
@@ -899,7 +988,7 @@ impl WasmRuntime {
             receiver
                 .await
                 .map_err(|_| JsValue::from_str("Delete durable waiter cancelled"))?
-                .map_err(|err| JsValue::from_str(&err.to_string()))?;
+                .map_err(persisted_mutation_error_to_js_value)?;
             Ok(JsValue::undefined())
         });
 

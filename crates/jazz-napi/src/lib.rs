@@ -33,8 +33,8 @@ use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
-    ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
-    SyncSender,
+    PersistedMutationError, ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta,
+    SubscriptionHandle, SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::storage::{FjallStorage, MemoryStorage, Storage};
@@ -43,6 +43,23 @@ use jazz_tools::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, MutationId, ObjectOutcomeEvent, ObjectOutcomeState,
     OutboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
+
+const PERSISTED_MUTATION_ERROR_CAUSE_PREFIX: &str = "__jazzPersistedMutationError__:";
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsonPersistedMutationErrorPayload {
+    mutation_id: String,
+    root_mutation_id: String,
+    object_id: String,
+    branch_name: String,
+    operation: String,
+    commit_ids: Vec<String>,
+    previous_commit_ids: Vec<String>,
+    code: String,
+    reason: String,
+    rejected_at_micros: u64,
+}
 
 fn convert_values(values: Vec<Value>) -> Vec<Value> {
     values
@@ -146,6 +163,56 @@ fn object_outcome_event_to_json(event: ObjectOutcomeEvent) -> serde_json::Value 
         "objectId": event.object_id.uuid().to_string(),
         "outcome": event.outcome.map(object_outcome_state_to_json),
     })
+}
+
+fn encode_commit_id_hex(bytes: [u8; 32]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn persisted_mutation_error_payload(
+    error: PersistedMutationError,
+) -> JsonPersistedMutationErrorPayload {
+    let rejection = error.rejection;
+    JsonPersistedMutationErrorPayload {
+        mutation_id: error.mutation_id.to_string(),
+        root_mutation_id: error.root_mutation_id.to_string(),
+        object_id: rejection.object_id.uuid().to_string(),
+        branch_name: rejection.branch_name.to_string(),
+        operation: serde_json::to_string(&rejection.operation)
+            .unwrap_or_else(|_| "\"update\"".to_string())
+            .trim_matches('"')
+            .to_string(),
+        commit_ids: rejection
+            .commit_ids
+            .into_iter()
+            .map(|commit_id| encode_commit_id_hex(commit_id.0))
+            .collect(),
+        previous_commit_ids: rejection
+            .previous_commit_ids
+            .into_iter()
+            .map(|commit_id| encode_commit_id_hex(commit_id.0))
+            .collect(),
+        code: serde_json::to_string(&rejection.code)
+            .unwrap_or_else(|_| "\"permission_denied\"".to_string())
+            .trim_matches('"')
+            .to_string(),
+        reason: rejection.reason,
+        rejected_at_micros: rejection.rejected_at_micros,
+    }
+}
+
+fn persisted_mutation_error_to_napi(error: PersistedMutationError) -> napi::Error {
+    let payload = persisted_mutation_error_payload(error);
+    let mut js_error = napi::Error::from_reason(format!(
+        "mutation {} rejected: {}",
+        payload.mutation_id, payload.reason
+    ));
+    let cause_payload = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+    js_error.set_cause(napi::Error::from_reason(format!(
+        "{}{}",
+        PERSISTED_MUTATION_ERROR_CAUSE_PREFIX, cause_payload
+    )));
+    js_error
 }
 
 fn parse_query(json: &str) -> napi::Result<Query> {
@@ -729,7 +796,7 @@ impl NapiRuntime {
         receiver
             .await
             .map_err(|_| napi::Error::from_reason("Insert durable waiter cancelled"))?
-            .map_err(|err| napi::Error::from_reason(err.to_string()))?;
+            .map_err(persisted_mutation_error_to_napi)?;
         Ok(serde_json::json!({
             "id": object_id.uuid().to_string(),
             "values": row_values,
@@ -765,7 +832,7 @@ impl NapiRuntime {
         receiver
             .await
             .map_err(|_| napi::Error::from_reason("Update durable waiter cancelled"))?
-            .map_err(|err| napi::Error::from_reason(err.to_string()))?;
+            .map_err(persisted_mutation_error_to_napi)?;
         Ok(())
     }
 
@@ -789,7 +856,7 @@ impl NapiRuntime {
         receiver
             .await
             .map_err(|_| napi::Error::from_reason("Delete durable waiter cancelled"))?
-            .map_err(|err| napi::Error::from_reason(err.to_string()))?;
+            .map_err(persisted_mutation_error_to_napi)?;
         Ok(())
     }
 

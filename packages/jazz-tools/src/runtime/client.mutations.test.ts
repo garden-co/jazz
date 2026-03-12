@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { JazzClient, type Runtime } from "./client.js";
+import { JazzClient, PersistedMutationError, type Runtime } from "./client.js";
 import type { AppContext } from "./context.js";
+import { ObjectOutcomeMirror } from "./object-outcomes.js";
+
+const PERSISTED_MUTATION_ERROR_CAUSE_PREFIX = "__jazzPersistedMutationError__:";
 
 function makeClient() {
   const updateCalls: Array<[string, Record<string, unknown>]> = [];
@@ -88,5 +91,89 @@ describe("JazzClient mutation durability split", () => {
 
     expect(updateDurableCalls).toEqual([["row-1", updates, "edge"]]);
     expect(deleteDurableCalls).toEqual([["row-1", "global"]]);
+  });
+
+  it("wraps structured durable mutation rejections with acknowledge()", async () => {
+    const { client } = makeClient();
+    const acknowledgeCalls: string[] = [];
+    client.setObjectOutcomeSource(
+      new ObjectOutcomeMirror(async (mutationId) => {
+        acknowledgeCalls.push(mutationId);
+      }),
+    );
+
+    const runtime = (client as unknown as { runtime: Runtime }).runtime;
+    runtime.updateDurable = async () => {
+      const error = new Error("mutation rejected");
+      Object.assign(error, {
+        name: "PersistedMutationError",
+        jazzPersistedMutationError: {
+          mutationId: "mutation-2",
+          rootMutationId: "mutation-1",
+          objectId: "row-1",
+          branchName: "main",
+          operation: "update",
+          commitIds: ["commit-1"],
+          previousCommitIds: ["commit-0"],
+          code: "permission_denied",
+          reason: "blocked",
+          rejectedAtMicros: 123,
+        },
+      });
+      throw error;
+    };
+
+    const rejection = await client
+      .updateDurable("row-1", { done: { type: "Boolean", value: true } })
+      .catch((error) => error);
+
+    expect(rejection).toBeInstanceOf(PersistedMutationError);
+    expect(rejection).toMatchObject({
+      mutationId: "mutation-2",
+      rootMutationId: "mutation-1",
+      objectId: "row-1",
+      branchName: "main",
+      operation: "update",
+      code: "permission_denied",
+      reason: "blocked",
+      rejectedAtMicros: 123,
+    });
+
+    await rejection.acknowledge();
+    expect(acknowledgeCalls).toEqual(["mutation-2"]);
+  });
+
+  it("parses napi-style durable mutation rejection causes", async () => {
+    const { client } = makeClient();
+    const runtime = (client as unknown as { runtime: Runtime }).runtime;
+    runtime.deleteDurable = async () => {
+      const error = new Error("mutation mutation-3 rejected: blocked");
+      (error as { cause?: unknown }).cause = new Error(
+        `${PERSISTED_MUTATION_ERROR_CAUSE_PREFIX}${JSON.stringify({
+          mutationId: "mutation-3",
+          rootMutationId: "mutation-1",
+          objectId: "row-1",
+          branchName: "main",
+          operation: "delete",
+          commitIds: ["commit-3"],
+          previousCommitIds: ["commit-2"],
+          code: "permission_denied",
+          reason: "blocked",
+          rejectedAtMicros: 456,
+        })}`,
+      );
+      throw error;
+    };
+
+    const rejection = await client.deleteDurable("row-1").catch((error) => error);
+
+    expect(rejection).toBeInstanceOf(PersistedMutationError);
+    expect(rejection).toMatchObject({
+      mutationId: "mutation-3",
+      rootMutationId: "mutation-1",
+      operation: "delete",
+      code: "permission_denied",
+      reason: "blocked",
+    });
   });
 });

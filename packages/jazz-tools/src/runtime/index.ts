@@ -3,6 +3,9 @@ export {
   type LinkExternalIdentityOptions,
   type LinkExternalIdentityResult,
   type LocalUpdatesMode,
+  type MutationOperation,
+  PersistedMutationError,
+  type PersistedMutationErrorData,
   SessionClient,
   loadWasmModule,
   type DurabilityTier,
@@ -57,4 +60,5 @@ export type {
   ObjectOutcomeState,
   RuntimeObjectOutcomeEvent,
 } from "./object-outcomes.js";
+export { isPersistedMutationError } from "./persisted-mutation-error.js";
 export { WorkerBridge, type WorkerBridgeOptions } from "./worker-bridge.js";
