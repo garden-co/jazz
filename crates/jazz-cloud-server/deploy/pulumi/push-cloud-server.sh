@@ -148,7 +148,6 @@ rsync -a \
   "${REPO_ROOT}/Cargo.lock" \
   "${REPO_ROOT}/crates" \
   "${REPO_ROOT}/examples" \
-  "${REPO_ROOT}/patched-crates" \
   "${TMP_CONTEXT}/"
 
 docker buildx build \
