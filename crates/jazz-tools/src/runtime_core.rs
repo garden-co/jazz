@@ -41,8 +41,8 @@ use crate::schema_manager::SchemaManager;
 use crate::storage::Storage;
 use crate::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, MutationEvent, MutationId, MutationOutcome,
-    MutationOutcomeFilter, MutationOutcomeState, MutationRecord, ObjectOutcomeState, OutboxEntry,
-    ServerId,
+    MutationOutcomeFilter, MutationOutcomeState, MutationRecord, MutationRejection,
+    ObjectOutcomeEvent, ObjectOutcomeState, OutboxEntry, ServerId,
 };
 
 // ============================================================================
@@ -144,6 +144,28 @@ impl From<QueryError> for RuntimeError {
 pub type QueryResult = Result<Vec<(ObjectId, Vec<Value>)>, RuntimeError>;
 /// Type alias for inserted row payloads.
 pub type InsertedRow = (ObjectId, Vec<Value>);
+/// Error returned by a persisted mutation waiter when the mutation is rejected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedMutationError {
+    pub mutation_id: MutationId,
+    pub root_mutation_id: MutationId,
+    pub rejection: MutationRejection,
+}
+
+impl std::fmt::Display for PersistedMutationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "mutation {} rejected: {}",
+            self.mutation_id, self.rejection.reason
+        )
+    }
+}
+
+impl std::error::Error for PersistedMutationError {}
+
+pub type PersistedMutationResult = Result<(), PersistedMutationError>;
+pub type PersistedMutationReceiver = oneshot::Receiver<PersistedMutationResult>;
 
 /// Future that resolves to query results.
 ///
@@ -216,6 +238,11 @@ struct PendingOneShotQuery {
     sender: Option<QuerySender>,
 }
 
+struct PersistedMutationWatcher {
+    tier: DurabilityTier,
+    sender: oneshot::Sender<PersistedMutationResult>,
+}
+
 /// Unified runtime core for both native and WASM platforms.
 ///
 /// Generic over `Storage` for data persistence, `Scheduler` for tick scheduling,
@@ -245,14 +272,16 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
     /// Pending one-shot queries (query() calls waiting for first callback).
     pending_one_shot_queries: HashMap<SubscriptionHandle, PendingOneShotQuery>,
 
-    /// Watchers for persistence acks: (commit_id, requested_tier) → senders.
-    /// A tier >= requested tier satisfies the watcher (e.g., EdgeServer ack satisfies Worker).
-    ack_watchers: HashMap<CommitId, Vec<(DurabilityTier, oneshot::Sender<()>)>>,
+    /// Watchers for durable mutation outcomes keyed by local mutation id.
+    /// A tier >= requested tier resolves with `Ok(())`; a rejection resolves with `Err(...)`.
+    ack_watchers: HashMap<MutationId, Vec<PersistedMutationWatcher>>,
 
     /// Shared raw mutation outcomes received from sync.
     mutation_outcomes: Vec<MutationOutcome>,
     /// Higher-level mutation events derived from the local journal.
     mutation_events: Vec<MutationEvent>,
+    /// Derived object-level outcome changes for bindings to invalidate visible rows.
+    object_outcome_events: Vec<ObjectOutcomeEvent>,
     /// In-memory reverse index for fast commit-to-mutation correlation.
     commit_to_mutation: HashMap<CommitId, MutationId>,
     /// Whether this runtime owns the local mutation journal.
@@ -281,6 +310,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             ack_watchers: HashMap::new(),
             mutation_outcomes: Vec::new(),
             mutation_events: Vec::new(),
+            object_outcome_events: Vec::new(),
             commit_to_mutation: HashMap::new(),
             mutation_journal_enabled: true,
             tier_label: "unknown",
@@ -388,6 +418,11 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Take higher-level mutation events derived from the local mutation journal.
     pub fn take_mutation_events(&mut self) -> Vec<MutationEvent> {
         std::mem::take(&mut self.mutation_events)
+    }
+
+    /// Take derived object-outcome change events since the last call.
+    pub fn take_object_outcome_events(&mut self) -> Vec<ObjectOutcomeEvent> {
+        std::mem::take(&mut self.object_outcome_events)
     }
 
     /// Load one mutation record by mutation id.

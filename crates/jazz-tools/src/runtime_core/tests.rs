@@ -55,6 +55,15 @@ fn reject_mutation(
     record: &MutationRecord,
     reason: &str,
 ) -> MutationRejection {
+    reject_mutation_at(core, record, reason, 456)
+}
+
+fn reject_mutation_at(
+    core: &mut TestCore,
+    record: &MutationRecord,
+    reason: &str,
+    rejected_at_micros: u64,
+) -> MutationRejection {
     let rejection = MutationRejection {
         object_id: record.object_id,
         branch_name: record.branch_name,
@@ -63,7 +72,7 @@ fn reject_mutation(
         previous_commit_ids: record.previous_commit_ids.clone(),
         code: MutationRejectCode::PermissionDenied,
         reason: reason.to_string(),
-        rejected_at_micros: 456,
+        rejected_at_micros,
     };
 
     core.park_sync_message(InboxEntry {
@@ -73,6 +82,36 @@ fn reject_mutation(
     core.batched_tick();
 
     rejection
+}
+
+fn expect_persisted_pending(receiver: &mut PersistedMutationReceiver, message: &str) {
+    match receiver.try_recv() {
+        Ok(None) => {}
+        Ok(Some(Ok(()))) => panic!("{message}: receiver resolved successfully"),
+        Ok(Some(Err(err))) => panic!("{message}: {err}"),
+        Err(_) => panic!("{message}: receiver cancelled"),
+    }
+}
+
+fn expect_persisted_ok(receiver: &mut PersistedMutationReceiver, message: &str) {
+    match receiver.try_recv() {
+        Ok(Some(Ok(()))) => {}
+        Ok(Some(Err(err))) => panic!("{message}: {err}"),
+        Ok(None) => panic!("{message}: receiver still pending"),
+        Err(_) => panic!("{message}: receiver cancelled"),
+    }
+}
+
+fn expect_persisted_err(
+    receiver: &mut PersistedMutationReceiver,
+    message: &str,
+) -> PersistedMutationError {
+    match receiver.try_recv() {
+        Ok(Some(Err(err))) => err,
+        Ok(Some(Ok(()))) => panic!("{message}: receiver resolved successfully"),
+        Ok(None) => panic!("{message}: receiver still pending"),
+        Err(_) => panic!("{message}: receiver cancelled"),
+    }
 }
 
 #[test]
@@ -278,6 +317,13 @@ fn runtime_core_records_local_mutations_and_events() {
         core.get_object_outcome(object_id).unwrap(),
         Some(crate::sync_manager::ObjectOutcomeState::Pending { mutation_id })
     );
+    assert_eq!(
+        core.take_object_outcome_events(),
+        vec![crate::sync_manager::ObjectOutcomeEvent {
+            object_id,
+            outcome: Some(crate::sync_manager::ObjectOutcomeState::Pending { mutation_id }),
+        }]
+    );
 }
 
 #[test]
@@ -373,6 +419,13 @@ fn runtime_core_rejected_insert_rolls_back_dependent_chain_and_acknowledges() {
             reason: "policy denied write".into(),
         })
     );
+    assert!(core.take_object_outcome_events().iter().any(|event| matches!(
+        event,
+        crate::sync_manager::ObjectOutcomeEvent {
+            object_id: event_object_id,
+            outcome: Some(crate::sync_manager::ObjectOutcomeState::Errored { mutation_id, .. }),
+        } if *event_object_id == object_id && *mutation_id == insert_mutation_id
+    )));
 
     let update_record = core
         .get_mutation_record(update_mutation_id)
@@ -417,6 +470,17 @@ fn runtime_core_rejected_insert_rolls_back_dependent_chain_and_acknowledges() {
             .is_none()
     );
     assert!(core.get_object_outcome(object_id).unwrap().is_none());
+    assert!(
+        core.take_object_outcome_events()
+            .iter()
+            .any(|event| matches!(
+                event,
+                crate::sync_manager::ObjectOutcomeEvent {
+                    object_id: event_object_id,
+                    outcome: None,
+                } if *event_object_id == object_id
+            ))
+    );
     assert!(execute_query(&mut core, Query::new("users")).is_empty());
 
     let object = core
@@ -510,6 +574,74 @@ fn runtime_core_rejected_update_restores_previous_row_state() {
     let results = execute_query(&mut core, Query::new("users"));
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1[1], Value::Text("Alice".into()));
+}
+
+#[test]
+fn runtime_core_retention_cap_prunes_oldest_rejections_without_ack_event() {
+    let mut core = create_test_runtime();
+
+    let (first_id, _) = core
+        .insert(
+            "users",
+            vec![Value::Uuid(ObjectId::new()), Value::Text("First".into())],
+            None,
+        )
+        .unwrap();
+    let first_mutation_id = match core.take_mutation_events().as_slice() {
+        [MutationEvent::Recorded { mutation_id }] => *mutation_id,
+        other => panic!("unexpected mutation events after first insert: {other:?}"),
+    };
+    let first_record = core
+        .get_mutation_record(first_mutation_id)
+        .unwrap()
+        .expect("first mutation should exist");
+    reject_mutation_at(&mut core, &first_record, "first rejection", 1);
+    core.take_mutation_events();
+
+    let (second_id, _) = core
+        .insert(
+            "users",
+            vec![Value::Uuid(ObjectId::new()), Value::Text("Second".into())],
+            None,
+        )
+        .unwrap();
+    let second_mutation_id = match core.take_mutation_events().as_slice() {
+        [MutationEvent::Recorded { mutation_id }] => *mutation_id,
+        other => panic!("unexpected mutation events after second insert: {other:?}"),
+    };
+    let second_record = core
+        .get_mutation_record(second_mutation_id)
+        .unwrap()
+        .expect("second mutation should exist");
+    reject_mutation_at(&mut core, &second_record, "second rejection", 2);
+    core.take_mutation_events();
+
+    core.enforce_rejected_mutation_retention_cap(1).unwrap();
+
+    assert!(
+        core.get_mutation_record(first_mutation_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        core.get_mutation_record(second_mutation_id)
+            .unwrap()
+            .is_some()
+    );
+    assert!(core.get_object_outcome(first_id).unwrap().is_none());
+    assert!(matches!(
+        core.get_object_outcome(second_id).unwrap(),
+        Some(crate::sync_manager::ObjectOutcomeState::Errored {
+            mutation_id,
+            ..
+        }) if mutation_id == second_mutation_id
+    ));
+    assert!(
+        core.take_mutation_events()
+            .iter()
+            .all(|event| !matches!(event, MutationEvent::Acknowledged { .. })),
+        "forced retention compaction should not emit acknowledgement events"
+    );
 }
 
 // =========================================================================
@@ -1033,19 +1165,12 @@ fn rc_insert_persisted_resolves_on_worker_ack() {
     assert!(!id.0.is_nil());
     assert_eq!(row_values, values);
 
-    assert!(
-        receiver.try_recv().is_err() || receiver.try_recv() == Ok(None),
-        "Receiver should not be resolved before ack"
-    );
+    expect_persisted_pending(&mut receiver, "receiver should not resolve before ack");
 
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
 
-    match receiver.try_recv() {
-        Ok(Some(())) => {}
-        Ok(None) => panic!("Receiver should be resolved after Worker ack"),
-        Err(_) => panic!("Receiver was cancelled"),
-    }
+    expect_persisted_ok(&mut receiver, "receiver should resolve after Worker ack");
 }
 
 #[test]
@@ -1088,20 +1213,18 @@ fn rc_insert_persisted_holds_until_correct_tier() {
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
 
-    assert_eq!(
-        receiver.try_recv(),
-        Ok(None),
-        "Worker ack should not satisfy EdgeServer request"
+    expect_persisted_pending(
+        &mut receiver,
+        "Worker ack should not satisfy EdgeServer request",
     );
 
     pump_b_to_c(&mut s);
     pump_c_to_b_to_a(&mut s);
 
-    match receiver.try_recv() {
-        Ok(Some(())) => {}
-        Ok(None) => panic!("Receiver should be resolved after EdgeServer ack"),
-        Err(_) => panic!("Receiver was cancelled"),
-    }
+    expect_persisted_ok(
+        &mut receiver,
+        "receiver should resolve after EdgeServer ack",
+    );
 }
 
 #[test]
@@ -1114,11 +1237,10 @@ fn rc_insert_persisted_higher_tier_satisfies_lower() {
 
     pump_3tier(&mut s);
 
-    match receiver.try_recv() {
-        Ok(Some(())) => {}
-        Ok(None) => panic!("EdgeServer ack should satisfy Worker request"),
-        Err(_) => panic!("Receiver was cancelled"),
-    }
+    expect_persisted_ok(
+        &mut receiver,
+        "EdgeServer ack should satisfy Worker request",
+    );
 }
 
 #[test]
@@ -1140,11 +1262,10 @@ fn rc_update_persisted_resolves_on_ack() {
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
 
-    match receiver.try_recv() {
-        Ok(Some(())) => {}
-        Ok(None) => panic!("Update receiver should be resolved after Worker ack"),
-        Err(_) => panic!("Receiver was cancelled"),
-    }
+    expect_persisted_ok(
+        &mut receiver,
+        "Update receiver should be resolved after Worker ack",
+    );
 
     let query = Query::new("users");
     let results = execute_query(&mut s.b, query);
@@ -1165,15 +1286,75 @@ fn rc_delete_persisted_resolves_on_ack() {
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
 
-    match receiver.try_recv() {
-        Ok(Some(())) => {}
-        Ok(None) => panic!("Delete receiver should be resolved after Worker ack"),
-        Err(_) => panic!("Receiver was cancelled"),
-    }
+    expect_persisted_ok(
+        &mut receiver,
+        "Delete receiver should be resolved after Worker ack",
+    );
 
     let query = Query::new("users");
     let results = execute_query(&mut s.b, query);
     assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn rc_insert_persisted_rejects_on_mutation_outcome() {
+    let mut s = create_3tier_rc();
+    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
+    let ((_id, _row_values), mut receiver) =
+        s.a.insert_persisted("users", values, None, DurabilityTier::Worker)
+            .unwrap();
+    let mutation_id = match s.a.take_mutation_events().as_slice() {
+        [MutationEvent::Recorded { mutation_id }] => *mutation_id,
+        other => panic!("unexpected mutation events: {other:?}"),
+    };
+    let record =
+        s.a.get_mutation_record(mutation_id)
+            .unwrap()
+            .expect("mutation record should exist");
+    let rejection = reject_mutation(&mut s.a, &record, "policy denied write");
+
+    let error = expect_persisted_err(&mut receiver, "insert durable receiver should reject");
+    assert_eq!(error.mutation_id, mutation_id);
+    assert_eq!(error.root_mutation_id, mutation_id);
+    assert_eq!(error.rejection, rejection);
+}
+
+#[test]
+fn rc_persisted_waiter_rejects_when_mutation_is_superseded() {
+    let mut s = create_3tier_rc();
+    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
+    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
+    let insert_mutation_id = match s.a.take_mutation_events().as_slice() {
+        [MutationEvent::Recorded { mutation_id }] => *mutation_id,
+        other => panic!("unexpected mutation events after insert: {other:?}"),
+    };
+
+    let mut receiver =
+        s.a.update_persisted(
+            id,
+            vec![("name".into(), Value::Text("Bob".into()))],
+            None,
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+    let update_mutation_id = match s.a.take_mutation_events().as_slice() {
+        [MutationEvent::Recorded { mutation_id }] => *mutation_id,
+        other => panic!("unexpected mutation events after update: {other:?}"),
+    };
+    let insert_record =
+        s.a.get_mutation_record(insert_mutation_id)
+            .unwrap()
+            .expect("insert mutation record should exist");
+    let rejection = reject_mutation(&mut s.a, &insert_record, "policy denied write");
+
+    let error = expect_persisted_err(
+        &mut receiver,
+        "superseded durable receiver should reject with root rejection",
+    );
+    assert_eq!(error.mutation_id, update_mutation_id);
+    assert_eq!(error.root_mutation_id, insert_mutation_id);
+    assert_eq!(error.rejection, rejection);
+    assert!(execute_query(&mut s.a, Query::new("users")).is_empty());
 }
 
 #[test]
@@ -1192,16 +1373,8 @@ fn rc_multiple_persisted_inserts_independent() {
 
     pump_3tier(&mut s);
 
-    match receiver1.try_recv() {
-        Ok(Some(())) => {}
-        Ok(None) => panic!("receiver1 should be resolved"),
-        Err(_) => panic!("receiver1 cancelled"),
-    }
-    match receiver2.try_recv() {
-        Ok(Some(())) => {}
-        Ok(None) => panic!("receiver2 should be resolved"),
-        Err(_) => panic!("receiver2 cancelled"),
-    }
+    expect_persisted_ok(&mut receiver1, "receiver1 should be resolved");
+    expect_persisted_ok(&mut receiver2, "receiver2 should be resolved");
 }
 
 #[test]

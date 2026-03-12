@@ -105,7 +105,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         values: Vec<Value>,
         session: Option<&Session>,
         tier: DurabilityTier,
-    ) -> Result<(InsertedRow, oneshot::Receiver<()>), RuntimeError> {
+    ) -> Result<(InsertedRow, PersistedMutationReceiver), RuntimeError> {
         let branch_name = self.schema_manager.branch_name();
         let result = self
             .schema_manager
@@ -114,29 +114,29 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let row_id = result.row_id;
         let row_commit_id = result.row_commit_id;
         let row_values = result.row_values;
-        self.record_local_mutation(
-            row_id,
-            branch_name,
-            Some(table.to_string()),
-            MutationOperation::Insert,
-            vec![row_commit_id],
-            Vec::new(),
-        )?;
+        let mutation_id = self
+            .record_local_mutation(
+                row_id,
+                branch_name,
+                Some(table.to_string()),
+                MutationOperation::Insert,
+                vec![row_commit_id],
+                Vec::new(),
+            )?
+            .ok_or_else(|| RuntimeError::WriteError("mutation journal disabled".to_string()))?;
 
-        let (sender, receiver) = oneshot::channel();
-        if self
+        let receiver = if self
             .schema_manager
             .query_manager()
             .sync_manager()
             .has_local_durability_at_least(tier)
         {
-            let _ = sender.send(());
+            let (sender, receiver) = oneshot::channel();
+            let _ = sender.send(Ok(()));
+            receiver
         } else {
-            self.ack_watchers
-                .entry(row_commit_id)
-                .or_default()
-                .push((tier, sender));
-        }
+            self.register_persisted_mutation_waiter(mutation_id, tier)
+        };
 
         self.immediate_tick();
         Ok(((row_id, row_values), receiver))
@@ -150,7 +150,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         values: Vec<(String, Value)>,
         session: Option<&Session>,
         tier: DurabilityTier,
-    ) -> Result<oneshot::Receiver<()>, RuntimeError> {
+    ) -> Result<PersistedMutationReceiver, RuntimeError> {
         let current_values = self.merge_row_update_values(object_id, values)?;
         let (table, branch_name, previous_commit_ids) =
             self.capture_existing_mutation_context(object_id)?;
@@ -160,29 +160,29 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .query_manager_mut()
             .update_with_session(&mut self.storage, object_id, &current_values, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
-        self.record_local_mutation(
-            object_id,
-            branch_name,
-            Some(table),
-            MutationOperation::Update,
-            vec![commit_id],
-            previous_commit_ids,
-        )?;
+        let mutation_id = self
+            .record_local_mutation(
+                object_id,
+                branch_name,
+                Some(table),
+                MutationOperation::Update,
+                vec![commit_id],
+                previous_commit_ids,
+            )?
+            .ok_or_else(|| RuntimeError::WriteError("mutation journal disabled".to_string()))?;
 
-        let (sender, receiver) = oneshot::channel();
-        if self
+        let receiver = if self
             .schema_manager
             .query_manager()
             .sync_manager()
             .has_local_durability_at_least(tier)
         {
-            let _ = sender.send(());
+            let (sender, receiver) = oneshot::channel();
+            let _ = sender.send(Ok(()));
+            receiver
         } else {
-            self.ack_watchers
-                .entry(commit_id)
-                .or_default()
-                .push((tier, sender));
-        }
+            self.register_persisted_mutation_waiter(mutation_id, tier)
+        };
 
         self.immediate_tick();
         Ok(receiver)
@@ -249,7 +249,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         object_id: ObjectId,
         session: Option<&Session>,
         tier: DurabilityTier,
-    ) -> Result<oneshot::Receiver<()>, RuntimeError> {
+    ) -> Result<PersistedMutationReceiver, RuntimeError> {
         let (table, branch_name, previous_commit_ids) =
             self.capture_existing_mutation_context(object_id)?;
         let handle = self
@@ -257,29 +257,29 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .query_manager_mut()
             .delete_with_session(&mut self.storage, object_id, session)
             .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
-        self.record_local_mutation(
-            object_id,
-            branch_name,
-            Some(table),
-            MutationOperation::Delete,
-            vec![handle.delete_commit_id],
-            previous_commit_ids,
-        )?;
+        let mutation_id = self
+            .record_local_mutation(
+                object_id,
+                branch_name,
+                Some(table),
+                MutationOperation::Delete,
+                vec![handle.delete_commit_id],
+                previous_commit_ids,
+            )?
+            .ok_or_else(|| RuntimeError::WriteError("mutation journal disabled".to_string()))?;
 
-        let (sender, receiver) = oneshot::channel();
-        if self
+        let receiver = if self
             .schema_manager
             .query_manager()
             .sync_manager()
             .has_local_durability_at_least(tier)
         {
-            let _ = sender.send(());
+            let (sender, receiver) = oneshot::channel();
+            let _ = sender.send(Ok(()));
+            receiver
         } else {
-            self.ack_watchers
-                .entry(handle.delete_commit_id)
-                .or_default()
-                .push((tier, sender));
-        }
+            self.register_persisted_mutation_waiter(mutation_id, tier)
+        };
 
         self.immediate_tick();
         Ok(receiver)

@@ -32,24 +32,14 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             if let Err(error) = self.advance_mutation_ack(commit_id, acked_tier) {
                 tracing::warn!(?commit_id, ?acked_tier, error = %error, "failed to advance mutation ack");
             }
-            if let Some(watchers) = self.ack_watchers.remove(&commit_id) {
-                let mut remaining = Vec::new();
-                for (requested_tier, sender) in watchers {
-                    if acked_tier >= requested_tier {
-                        tracing::debug!(
-                            ?commit_id,
-                            ?acked_tier,
-                            ?requested_tier,
-                            "ack watcher resolved"
-                        );
-                        let _ = sender.send(());
-                    } else {
-                        remaining.push((requested_tier, sender));
-                    }
-                }
-                if !remaining.is_empty() {
-                    self.ack_watchers.insert(commit_id, remaining);
-                }
+            if let Ok(Some(record)) = self.load_mutation_record_for_commit(commit_id) {
+                tracing::debug!(
+                    ?commit_id,
+                    mutation_id = %record.id,
+                    ?acked_tier,
+                    "ack advanced mutation watcher state"
+                );
+                self.resolve_persisted_waiters(record.id, record.highest_acked_tier);
             }
         }
 

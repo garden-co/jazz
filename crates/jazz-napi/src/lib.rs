@@ -689,7 +689,10 @@ impl NapiRuntime {
             ((object_id, row_values), receiver)
         };
 
-        let _ = receiver.await;
+        receiver
+            .await
+            .map_err(|_| napi::Error::from_reason("Insert durable waiter cancelled"))?
+            .map_err(|err| napi::Error::from_reason(err.to_string()))?;
         Ok(serde_json::json!({
             "id": object_id.uuid().to_string(),
             "values": row_values,
@@ -722,7 +725,10 @@ impl NapiRuntime {
                 .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?
         };
 
-        let _ = receiver.await;
+        receiver
+            .await
+            .map_err(|_| napi::Error::from_reason("Update durable waiter cancelled"))?
+            .map_err(|err| napi::Error::from_reason(err.to_string()))?;
         Ok(())
     }
 
@@ -743,7 +749,10 @@ impl NapiRuntime {
                 .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?
         };
 
-        let _ = receiver.await;
+        receiver
+            .await
+            .map_err(|_| napi::Error::from_reason("Delete durable waiter cancelled"))?
+            .map_err(|err| napi::Error::from_reason(err.to_string()))?;
         Ok(())
     }
 

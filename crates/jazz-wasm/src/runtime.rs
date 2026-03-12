@@ -757,7 +757,10 @@ impl WasmRuntime {
             values: row_values,
         };
         let promise = wasm_bindgen_futures::future_to_promise(async move {
-            let _ = receiver.await;
+            receiver
+                .await
+                .map_err(|_| JsValue::from_str("Insert durable waiter cancelled"))?
+                .map_err(|err| JsValue::from_str(&err.to_string()))?;
             let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
             row.serialize(&serializer)
                 .map_err(|e| JsValue::from_str(&format!("Serialization failed: {:?}", e)))
@@ -790,7 +793,10 @@ impl WasmRuntime {
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {
-            let _ = receiver.await;
+            receiver
+                .await
+                .map_err(|_| JsValue::from_str("Update durable waiter cancelled"))?
+                .map_err(|err| JsValue::from_str(&err.to_string()))?;
             Ok(JsValue::undefined())
         });
 
@@ -813,7 +819,10 @@ impl WasmRuntime {
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {
-            let _ = receiver.await;
+            receiver
+                .await
+                .map_err(|_| JsValue::from_str("Delete durable waiter cancelled"))?
+                .map_err(|err| JsValue::from_str(&err.to_string()))?;
             Ok(JsValue::undefined())
         });
 

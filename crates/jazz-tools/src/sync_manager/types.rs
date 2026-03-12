@@ -296,6 +296,12 @@ pub enum ObjectOutcomeState {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectOutcomeEvent {
+    pub object_id: ObjectId,
+    pub outcome: Option<ObjectOutcomeState>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MutationOutcomeFilter {

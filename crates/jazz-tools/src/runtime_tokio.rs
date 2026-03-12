@@ -28,7 +28,7 @@ use crate::schema_manager::{QuerySchemaContext, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{
     ClientId, InboxEntry, MutationEvent, MutationId, MutationOutcome, MutationRecord,
-    ObjectOutcomeState, OutboxEntry, QueryPropagation, ServerId,
+    ObjectOutcomeEvent, ObjectOutcomeState, OutboxEntry, QueryPropagation, ServerId,
 };
 
 // ============================================================================
@@ -373,6 +373,12 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn take_mutation_events(&self) -> Result<Vec<MutationEvent>, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.take_mutation_events())
+    }
+
+    /// Take derived object-outcome change events since the last call.
+    pub fn take_object_outcome_events(&self) -> Result<Vec<ObjectOutcomeEvent>, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.take_object_outcome_events())
     }
 
     /// Enable or disable local mutation journal ownership for this runtime.

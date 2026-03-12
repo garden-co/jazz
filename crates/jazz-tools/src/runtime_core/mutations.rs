@@ -6,6 +6,8 @@ use crate::sync_manager::{
     MutationOperation, MutationOutcomeState, MutationRejection, current_timestamp_micros,
 };
 
+pub(crate) const MAX_RETAINED_UNACKNOWLEDGED_REJECTIONS: usize = 10_000;
+
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     pub(crate) fn record_local_mutation(
         &mut self,
@@ -20,6 +22,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             return Ok(None);
         }
 
+        let previous_object_outcome = self.get_object_outcome(object_id)?;
         let mutation_id = MutationId::new();
         let record = MutationRecord {
             id: mutation_id,
@@ -43,6 +46,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         }
         self.mutation_events
             .push(MutationEvent::Recorded { mutation_id });
+        self.enqueue_object_outcome_event_if_changed(object_id, previous_object_outcome)?;
 
         Ok(Some(mutation_id))
     }
@@ -78,6 +82,19 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         Ok(())
     }
 
+    pub(crate) fn register_persisted_mutation_waiter(
+        &mut self,
+        mutation_id: MutationId,
+        tier: DurabilityTier,
+    ) -> PersistedMutationReceiver {
+        let (sender, receiver) = oneshot::channel();
+        self.ack_watchers
+            .entry(mutation_id)
+            .or_default()
+            .push(PersistedMutationWatcher { tier, sender });
+        receiver
+    }
+
     pub(crate) fn handle_received_mutation_outcome(
         &mut self,
         outcome: MutationOutcome,
@@ -108,6 +125,8 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             }
         }
 
+        self.enforce_rejected_mutation_retention_cap(MAX_RETAINED_UNACKNOWLEDGED_REJECTIONS)?;
+
         Ok(())
     }
 
@@ -129,15 +148,15 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
         match &record.outcome {
             MutationOutcomeState::Pending => Ok(()),
-            MutationOutcomeState::Accepted => self.delete_mutation_record(record),
-            MutationOutcomeState::Rejected(_) => self.acknowledge_rejection_group(record.id),
+            MutationOutcomeState::Accepted => self.delete_mutation_record(record, true),
+            MutationOutcomeState::Rejected(_) => self.prune_rejection_group(record.id, true),
             MutationOutcomeState::SupersededByRejection { root_mutation_id } => {
-                self.acknowledge_rejection_group(*root_mutation_id)
+                self.prune_rejection_group(*root_mutation_id, true)
             }
         }
     }
 
-    fn load_mutation_record_for_commit(
+    pub(crate) fn load_mutation_record_for_commit(
         &mut self,
         commit_id: CommitId,
     ) -> Result<Option<MutationRecord>, RuntimeError> {
@@ -193,12 +212,17 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             return Ok(());
         }
 
+        let previous_object_outcome = self.get_object_outcome(record.object_id)?;
+        let object_id = record.object_id;
         record.outcome = MutationOutcomeState::Accepted;
+        let highest_acked_tier = record.highest_acked_tier;
         self.storage
             .put_mutation_record(record)
             .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?;
         self.mutation_events
             .push(MutationEvent::Accepted { mutation_id });
+        self.resolve_persisted_waiters(mutation_id, highest_acked_tier);
+        self.enqueue_object_outcome_event_if_changed(object_id, previous_object_outcome)?;
         Ok(())
     }
 
@@ -214,6 +238,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         else {
             return Ok(());
         };
+        let previous_object_outcome = self.get_object_outcome(root_record.object_id)?;
 
         let deactivated_commit_ids = {
             let root_commit_ids: HashSet<_> = root_record.commit_ids.iter().copied().collect();
@@ -255,6 +280,14 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                     mutation_id: root_mutation_id,
                     rejection: rejection.clone(),
                 });
+                self.reject_persisted_waiters(
+                    root_mutation_id,
+                    PersistedMutationError {
+                        mutation_id: root_mutation_id,
+                        root_mutation_id,
+                        rejection: rejection.clone(),
+                    },
+                );
             } else {
                 if matches!(
                     record.outcome,
@@ -274,15 +307,29 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                         mutation_id,
                         root_mutation_id,
                     });
+                self.reject_persisted_waiters(
+                    mutation_id,
+                    PersistedMutationError {
+                        mutation_id,
+                        root_mutation_id,
+                        rejection: rejection.clone(),
+                    },
+                );
             }
         }
+
+        self.enqueue_object_outcome_event_if_changed(
+            root_record.object_id,
+            previous_object_outcome,
+        )?;
 
         Ok(())
     }
 
-    fn acknowledge_rejection_group(
+    fn prune_rejection_group(
         &mut self,
         root_mutation_id: MutationId,
+        emit_ack_events: bool,
     ) -> Result<(), RuntimeError> {
         let Some(root_record) = self
             .storage
@@ -325,22 +372,107 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?;
 
         for record in records_to_ack {
-            self.delete_mutation_record(record)?;
+            self.delete_mutation_record(record, emit_ack_events)?;
         }
 
         Ok(())
     }
 
-    fn delete_mutation_record(&mut self, record: MutationRecord) -> Result<(), RuntimeError> {
+    fn delete_mutation_record(
+        &mut self,
+        record: MutationRecord,
+        emit_ack_event: bool,
+    ) -> Result<(), RuntimeError> {
+        let previous_object_outcome = self.get_object_outcome(record.object_id)?;
+        let object_id = record.object_id;
         self.storage
             .delete_mutation_record(record.id)
             .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?;
+        self.ack_watchers.remove(&record.id);
         for commit_id in record.commit_ids {
             self.commit_to_mutation.remove(&commit_id);
         }
-        self.mutation_events.push(MutationEvent::Acknowledged {
-            mutation_id: record.id,
+        if emit_ack_event {
+            self.mutation_events.push(MutationEvent::Acknowledged {
+                mutation_id: record.id,
+            });
+        }
+        self.enqueue_object_outcome_event_if_changed(object_id, previous_object_outcome)?;
+        Ok(())
+    }
+
+    pub(crate) fn resolve_persisted_waiters(
+        &mut self,
+        mutation_id: MutationId,
+        highest_acked_tier: Option<DurabilityTier>,
+    ) {
+        let Some(highest_acked_tier) = highest_acked_tier else {
+            return;
+        };
+        let Some(watchers) = self.ack_watchers.remove(&mutation_id) else {
+            return;
+        };
+
+        let mut remaining = Vec::new();
+        for watcher in watchers {
+            if highest_acked_tier >= watcher.tier {
+                let _ = watcher.sender.send(Ok(()));
+            } else {
+                remaining.push(watcher);
+            }
+        }
+
+        if !remaining.is_empty() {
+            self.ack_watchers.insert(mutation_id, remaining);
+        }
+    }
+
+    fn reject_persisted_waiters(&mut self, mutation_id: MutationId, error: PersistedMutationError) {
+        if let Some(watchers) = self.ack_watchers.remove(&mutation_id) {
+            for watcher in watchers {
+                let _ = watcher.sender.send(Err(error.clone()));
+            }
+        }
+    }
+
+    pub(crate) fn enforce_rejected_mutation_retention_cap(
+        &mut self,
+        limit: usize,
+    ) -> Result<(), RuntimeError> {
+        let mut rejected_roots = self
+            .storage
+            .list_mutation_records_by_outcome(MutationOutcomeFilter::Rejected)
+            .map_err(|err| RuntimeError::WriteError(format!("{:?}", err)))?;
+
+        if rejected_roots.len() <= limit {
+            return Ok(());
+        }
+
+        rejected_roots.sort_by_key(|record| match &record.outcome {
+            MutationOutcomeState::Rejected(rejection) => rejection.rejected_at_micros,
+            _ => u64::MAX,
         });
+
+        let overflow = rejected_roots.len() - limit;
+        for record in rejected_roots.into_iter().take(overflow) {
+            self.prune_rejection_group(record.id, false)?;
+        }
+
+        Ok(())
+    }
+
+    fn enqueue_object_outcome_event_if_changed(
+        &mut self,
+        object_id: ObjectId,
+        previous: Option<ObjectOutcomeState>,
+    ) -> Result<(), RuntimeError> {
+        let current = self.get_object_outcome(object_id)?;
+        if current != previous {
+            self.object_outcome_events.push(ObjectOutcomeEvent {
+                object_id,
+                outcome: current,
+            });
+        }
         Ok(())
     }
 }
