@@ -60,6 +60,16 @@ const TEST_SCHEMA: WasmSchema = {
   },
 };
 
+const TIMESTAMP_SCHEMA: WasmSchema = {
+  projects: {
+    columns: [
+      { name: "name", column_type: { type: "Text" }, nullable: false },
+      { name: "created_at", column_type: { type: "Timestamp" }, nullable: false },
+      { name: "updated_at", column_type: { type: "Timestamp" }, nullable: false },
+    ],
+  },
+};
+
 const TODO_SERVER_WASM_SCHEMA: WasmSchema = {
   projects: {
     columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
@@ -1268,6 +1278,53 @@ describe("NAPI integration", () => {
       }
       if (reopenedContext) {
         await reopenedContext.shutdown();
+      }
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("accepts modern epoch-millisecond timestamps from the TS value converter on backend durable writes", async () => {
+    const dataRoot = await createTempDir("jazz-napi-timestamp-");
+    const dataPath = join(dataRoot, "runtime.skv");
+    const timestamp = 1773285322816;
+    let context: {
+      client(): JazzClient;
+      shutdown(): Promise<void>;
+    } | null = null;
+
+    try {
+      const { createJazzContext } = await import("../backend/create-jazz-context.js");
+      const { toValueArray } = await import("./value-converter.js");
+
+      context = createJazzContext({
+        appId: randomUUID(),
+        app: { wasmSchema: TIMESTAMP_SCHEMA },
+        driver: { type: "persistent", dataPath },
+      });
+
+      const values = toValueArray(
+        {
+          name: "timestamp-probe",
+          created_at: new Date(timestamp),
+          updated_at: new Date(timestamp),
+        },
+        TIMESTAMP_SCHEMA,
+        "projects",
+      );
+
+      await expect(
+        context.client().createDurable("projects", values, { tier: "worker" }),
+      ).resolves.toEqual({
+        id: expect.any(String),
+        values: [
+          { type: "Text", value: "timestamp-probe" },
+          { type: "Timestamp", value: timestamp },
+          { type: "Timestamp", value: timestamp },
+        ],
+      });
+    } finally {
+      if (context) {
+        await context.shutdown();
       }
       await rm(dataRoot, { recursive: true, force: true });
     }
