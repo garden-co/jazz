@@ -1321,3 +1321,158 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
             .join(", ")
     );
 }
+
+// =========================================================================
+// Foreign Key — No Write-Time Validation
+// =========================================================================
+//
+// FK write-time existence checks are intentionally removed: in a local-first
+// system with query-scoped sync, the referenced row may not be loaded yet,
+// causing false violations. True referential integrity will be enforced by
+// global transactions (specs/todo/b_launch/globally_consistent_transactions.md).
+//
+// These tests document that FK-referencing writes succeed even when the
+// target row is absent from the local index. They double as scaffolding for
+// when global transactions re-introduce server-side FK checks.
+
+/// Schema that mirrors the stress-test app: projects + todos with FK.
+fn fk_stress_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("projects")
+                .column("name", ColumnType::Text)
+                .column("owner_id", ColumnType::Text),
+        )
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("done", ColumnType::Boolean)
+                .nullable_column("description", ColumnType::Text)
+                .column("owner_id", ColumnType::Text)
+                .nullable_fk_column("project", "projects"),
+        )
+        .build()
+}
+
+fn create_fk_runtime() -> TestCore {
+    let schema = fk_stress_schema();
+    let app_id = AppId::from_name("fk-test");
+    let sync_manager = SyncManager::new();
+    let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+    let mut core = RuntimeCore::new(
+        schema_manager,
+        MemoryStorage::new(),
+        NoopScheduler,
+        VecSyncSender::new(),
+    );
+    core.immediate_tick();
+    core
+}
+
+/// After query-scoped sync, a todo's `project` FK can reference a project
+/// that was never loaded into MemoryStorage. A partial update (toggling
+/// `done`) must succeed — no FK re-check.
+///
+/// ```text
+///   MemoryStorage (after query-scoped sync)
+///   ┌────────────────────────────────────────┐
+///   │ projects._id index:  []     ← empty!   │
+///   │ todos._id index:     [todo_1]           │
+///   │                                         │
+///   │ todo_1.project = project_42  → not in   │
+///   │                               index     │
+///   └────────────────────────────────────────┘
+///
+///   User toggles todo_1.done → partial update → OK (no FK check)
+/// ```
+#[test]
+fn rc_partial_update_with_unloaded_fk_reference() {
+    let mut core = create_fk_runtime();
+
+    let (project_id, _) = core
+        .insert(
+            "projects",
+            vec![Value::Text("Acme".into()), Value::Text("alice".into())],
+            None,
+        )
+        .unwrap();
+
+    let (todo_id, _) = core
+        .insert(
+            "todos",
+            vec![
+                Value::Text("Buy milk".into()),
+                Value::Boolean(true),        // done
+                Value::Null,                 // description (nullable)
+                Value::Text("alice".into()), // owner_id
+                Value::Uuid(project_id),     // project FK
+            ],
+            None,
+        )
+        .unwrap();
+
+    core.immediate_tick();
+
+    // Simulate query-scoped sync: remove the project from the _id index.
+    let branch = core.schema_manager().branch_name();
+    core.storage
+        .index_remove(
+            "projects",
+            "_id",
+            branch.as_str(),
+            &Value::Uuid(project_id),
+            project_id,
+        )
+        .unwrap();
+
+    // Partial update: only change `done`.
+    // No FK validation → succeeds even though project is not in the index.
+    core.update(
+        todo_id,
+        vec![("done".to_string(), Value::Boolean(false))],
+        None,
+    )
+    .expect("partial update must succeed even when referenced project is not loaded");
+}
+
+/// Changing a FK column to a non-existent target is allowed at the local
+/// write level (no FK existence check). Global transactions will enforce
+/// this server-side in the future.
+#[test]
+fn rc_partial_update_changing_fk_to_missing_target_succeeds() {
+    let mut core = create_fk_runtime();
+
+    let (project_id, _) = core
+        .insert(
+            "projects",
+            vec![Value::Text("Acme".into()), Value::Text("alice".into())],
+            None,
+        )
+        .unwrap();
+
+    let (todo_id, _) = core
+        .insert(
+            "todos",
+            vec![
+                Value::Text("Buy milk".into()),
+                Value::Boolean(true),
+                Value::Null,
+                Value::Text("alice".into()),
+                Value::Uuid(project_id),
+            ],
+            None,
+        )
+        .unwrap();
+
+    core.immediate_tick();
+
+    // Change the FK column to a non-existent project.
+    // Without global transactions this is accepted locally.
+    let bogus_project = ObjectId::new();
+    core.update(
+        todo_id,
+        vec![("project".to_string(), Value::Uuid(bogus_project))],
+        None,
+    )
+    .expect("changing FK to non-existent target must succeed without local FK checks");
+}

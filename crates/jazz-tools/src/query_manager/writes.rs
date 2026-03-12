@@ -53,13 +53,6 @@ impl QueryManager {
             });
         }
 
-        self.validate_foreign_keys_for_values(
-            storage,
-            &table_name,
-            &descriptor,
-            values,
-            &self.current_branch(),
-        )?;
         self.validate_json_for_values(&descriptor, values)?;
 
         // Encode to binary
@@ -168,7 +161,6 @@ impl QueryManager {
             });
         }
 
-        self.validate_foreign_keys_for_values(storage, &table_name, &descriptor, values, branch)?;
         self.validate_json_for_values(&descriptor, values)?;
 
         // Encode to binary
@@ -240,68 +232,6 @@ impl QueryManager {
             row_commit_id,
             row_values: values.to_vec(),
         })
-    }
-
-    fn validate_foreign_keys_for_values(
-        &self,
-        storage: &dyn Storage,
-        table_name: &TableName,
-        descriptor: &RowDescriptor,
-        values: &[Value],
-        branch: &str,
-    ) -> Result<(), QueryError> {
-        for (column, value) in descriptor.columns.iter().zip(values.iter()) {
-            let Some(referenced_table) = column.references else {
-                continue;
-            };
-
-            match (&column.column_type, value) {
-                (ColumnType::Uuid, Value::Uuid(target_id)) => {
-                    if self.row_is_indexed_on_branch(
-                        storage,
-                        referenced_table.as_str(),
-                        branch,
-                        *target_id,
-                    ) {
-                        continue;
-                    }
-                    return Err(QueryError::UuidForeignKeyViolation {
-                        table: *table_name,
-                        column: column.name.as_str().to_string(),
-                        referenced_table,
-                        missing_id: *target_id,
-                    });
-                }
-                (
-                    ColumnType::Array {
-                        element: element_type,
-                    },
-                    Value::Array(elements),
-                ) if matches!(element_type.as_ref(), ColumnType::Uuid) => {
-                    for element in elements {
-                        let Value::Uuid(target_id) = element else {
-                            continue;
-                        };
-                        if self.row_is_indexed_on_branch(
-                            storage,
-                            referenced_table.as_str(),
-                            branch,
-                            *target_id,
-                        ) {
-                            continue;
-                        }
-                        return Err(QueryError::UuidArrayForeignKeyViolation {
-                            table: *table_name,
-                            column: column.name.as_str().to_string(),
-                            referenced_table,
-                            missing_id: *target_id,
-                        });
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(())
     }
 
     fn validate_json_for_values(
@@ -386,18 +316,14 @@ impl QueryManager {
         }
     }
 
-    pub(super) fn validate_foreign_keys_for_content(
+    pub(super) fn validate_json_for_content(
         &self,
-        storage: &dyn Storage,
-        table_name: &TableName,
         descriptor: &RowDescriptor,
         content: &[u8],
-        branch: &str,
     ) -> Result<(), QueryError> {
         let values = decode_row(descriptor, content)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
-        self.validate_json_for_values(descriptor, &values)?;
-        self.validate_foreign_keys_for_values(storage, table_name, descriptor, &values, branch)
+        self.validate_json_for_values(descriptor, &values)
     }
 
     /// Evaluate a policy expression against encoded row content using full policy context.
@@ -849,13 +775,6 @@ impl QueryManager {
             });
         }
 
-        self.validate_foreign_keys_for_values(
-            storage,
-            &table_name,
-            &descriptor,
-            values,
-            &self.current_branch(),
-        )?;
         self.validate_json_for_values(&descriptor, values)?;
 
         // Encode new data (used by WITH CHECK and commit write).
@@ -1223,13 +1142,6 @@ impl QueryManager {
             });
         }
 
-        self.validate_foreign_keys_for_values(
-            storage,
-            &table_name,
-            &descriptor,
-            values,
-            &self.current_branch(),
-        )?;
         self.validate_json_for_values(&descriptor, values)?;
 
         // Encode new row data
