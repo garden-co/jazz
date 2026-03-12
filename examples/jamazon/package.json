@@ -1,0 +1,49 @@
+{
+  "name": "jamazon",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#/*": "./src/*"
+  },
+  "scripts": {
+    "dev": "node ../../packages/jazz-tools/dist/cli.js build && vite dev --port 3000",
+    "dev2": "node ../../packages/jazz-tools/dist/cli.js build && pnpx tsx scripts/dev.ts",
+    "build": "node ../../packages/jazz-tools/dist/cli.js build && vite build",
+    "preview": "vite preview",
+    "seed": "node ../../packages/jazz-tools/dist/cli.js build && tsx scripts/seed-products.ts",
+    "test": "vitest run",
+    "server:start": "rm -rf ./data && pnpm jazz-tools server 00000000-0000-0000-0000-000000000003 --admin-secret jamazon-admin --allow-anonymous"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.2.1",
+    "@tanstack/react-devtools": "^0.9.10",
+    "@tanstack/react-router": "^1.166.3",
+    "@tanstack/react-router-devtools": "^1.166.3",
+    "@tanstack/react-router-ssr-query": "^1.166.3",
+    "@tanstack/react-start": "^1.166.3",
+    "@tanstack/router-plugin": "^1.166.3",
+    "jazz-napi": "workspace:jazz-napi",
+    "jazz-tools": "workspace:*",
+    "lucide-react": "^0.577.0",
+    "nitro": "npm:nitro-nightly@latest",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "tailwindcss": "^4.2.1"
+  },
+  "devDependencies": {
+    "@tanstack/devtools-vite": "^0.5.3",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^25.3.5",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "jsdom": "^28.1.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "vite-plugin-wasm": "^3.5.0",
+    "vite-tsconfig-paths": "^6.1.1",
+    "vitest": "^4.0.18"
+  }
+}

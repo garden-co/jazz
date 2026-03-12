@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+body {
+  @apply m-0 bg-neutral-950 text-amber-50;
+  font-family: "Avenir Next", "Trebuchet MS", "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New",
+    monospace;
+}
