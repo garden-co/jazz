@@ -237,6 +237,7 @@ export const startFreshTestServer: BrowserCommand<[label: string]> = async (_ctx
     appId: FRESH_APP_ID,
     port,
     adminSecret: FRESH_ADMIN_SECRET,
+    allowAnonymous: true,
     enableLogs: false,
   });
 

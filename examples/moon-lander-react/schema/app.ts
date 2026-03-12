@@ -8,6 +8,13 @@ export type JsonValue =
   | { [key: string]: JsonValue }
   | JsonValue[];
 
+export type PermissionIntrospectionColumn = "$canRead" | "$canEdit" | "$canDelete";
+export interface PermissionIntrospectionColumns {
+  $canRead: boolean | null;
+  $canEdit: boolean | null;
+  $canDelete: boolean | null;
+}
+
 export interface Player {
   id: string;
   playerId: string;
@@ -103,6 +110,9 @@ export interface PlayerWhereInput {
     | number
     | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
   thrusting?: boolean;
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
 export interface FuelDepositWhereInput {
@@ -116,6 +126,9 @@ export interface FuelDepositWhereInput {
     | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
   collected?: boolean;
   collectedBy?: string | { eq?: string; ne?: string; contains?: string };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
 export interface ChatMessageWhereInput {
@@ -125,7 +138,40 @@ export interface ChatMessageWhereInput {
   createdAt?:
     | number
     | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
+
+type AnyPlayerQueryBuilder<T = any> = { readonly _table: "players" } & QueryBuilder<T>;
+type AnyFuelDepositQueryBuilder<T = any> = { readonly _table: "fuel_deposits" } & QueryBuilder<T>;
+type AnyChatMessageQueryBuilder<T = any> = { readonly _table: "chat_messages" } & QueryBuilder<T>;
+
+export type PlayerSelectableColumn = keyof Player | PermissionIntrospectionColumn | "*";
+export type PlayerOrderableColumn = keyof Player | PermissionIntrospectionColumn;
+
+export type PlayerSelected<S extends PlayerSelectableColumn = keyof Player> = "*" extends S
+  ? Player
+  : Pick<Player, Extract<S | "id", keyof Player>> &
+      Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type FuelDepositSelectableColumn = keyof FuelDeposit | PermissionIntrospectionColumn | "*";
+export type FuelDepositOrderableColumn = keyof FuelDeposit | PermissionIntrospectionColumn;
+
+export type FuelDepositSelected<S extends FuelDepositSelectableColumn = keyof FuelDeposit> =
+  "*" extends S
+    ? FuelDeposit
+    : Pick<FuelDeposit, Extract<S | "id", keyof FuelDeposit>> &
+        Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type ChatMessageSelectableColumn = keyof ChatMessage | PermissionIntrospectionColumn | "*";
+export type ChatMessageOrderableColumn = keyof ChatMessage | PermissionIntrospectionColumn;
+
+export type ChatMessageSelected<S extends ChatMessageSelectableColumn = keyof ChatMessage> =
+  "*" extends S
+    ? ChatMessage
+    : Pick<ChatMessage, Extract<S | "id", keyof ChatMessage>> &
+        Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export const wasmSchema: WasmSchema = {
   players: {
@@ -229,31 +275,6 @@ export const wasmSchema: WasmSchema = {
         nullable: false,
       },
     ],
-    policies: {
-      select: {
-        using: {
-          type: "True",
-        },
-      },
-      insert: {
-        with_check: {
-          type: "True",
-        },
-      },
-      update: {
-        using: {
-          type: "True",
-        },
-        with_check: {
-          type: "True",
-        },
-      },
-      delete: {
-        using: {
-          type: "True",
-        },
-      },
-    },
   },
   fuel_deposits: {
     columns: [
@@ -293,31 +314,6 @@ export const wasmSchema: WasmSchema = {
         nullable: false,
       },
     ],
-    policies: {
-      select: {
-        using: {
-          type: "True",
-        },
-      },
-      insert: {
-        with_check: {
-          type: "True",
-        },
-      },
-      update: {
-        using: {
-          type: "True",
-        },
-        with_check: {
-          type: "True",
-        },
-      },
-      delete: {
-        using: {
-          type: "True",
-        },
-      },
-    },
   },
   chat_messages: {
     columns: [
@@ -343,32 +339,20 @@ export const wasmSchema: WasmSchema = {
         nullable: false,
       },
     ],
-    policies: {
-      select: {
-        using: {
-          type: "True",
-        },
-      },
-      insert: {
-        with_check: {
-          type: "True",
-        },
-      },
-      update: {},
-      delete: {},
-    },
   },
 };
 
 export class PlayerQueryBuilder<
   I extends Record<string, never> = {},
-> implements QueryBuilder<Player> {
+  S extends PlayerSelectableColumn = keyof Player,
+> implements QueryBuilder<PlayerSelected<S>> {
   readonly _table = "players";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: Player;
+  declare readonly _rowType: PlayerSelected<S>;
   declare readonly _initType: PlayerInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<Record<string, never>> = {};
+  private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
@@ -381,7 +365,7 @@ export class PlayerQueryBuilder<
     step_hops: string[];
   };
 
-  where(conditions: PlayerWhereInput): PlayerQueryBuilder<I> {
+  where(conditions: PlayerWhereInput): PlayerQueryBuilder<I, S> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -398,19 +382,30 @@ export class PlayerQueryBuilder<
     return clone;
   }
 
-  orderBy(column: keyof Player, direction: "asc" | "desc" = "asc"): PlayerQueryBuilder<I> {
+  select<NewS extends PlayerSelectableColumn>(
+    ...columns: [NewS, ...NewS[]]
+  ): PlayerQueryBuilder<I, NewS> {
+    const clone = this._clone<I, NewS>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  orderBy(
+    column: PlayerOrderableColumn,
+    direction: "asc" | "desc" = "asc",
+  ): PlayerQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): PlayerQueryBuilder<I> {
+  limit(n: number): PlayerQueryBuilder<I, S> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): PlayerQueryBuilder<I> {
+  offset(n: number): PlayerQueryBuilder<I, S> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
@@ -420,7 +415,7 @@ export class PlayerQueryBuilder<
     start: PlayerWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): PlayerQueryBuilder<I> {
+  }): PlayerQueryBuilder<I, S> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -502,6 +497,7 @@ export class PlayerQueryBuilder<
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
       offset: this._offsetVal,
@@ -510,10 +506,18 @@ export class PlayerQueryBuilder<
     });
   }
 
-  private _clone<CloneI extends Record<string, never> = I>(): PlayerQueryBuilder<CloneI> {
-    const clone = new PlayerQueryBuilder<CloneI>();
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<
+    CloneI extends Record<string, never> = I,
+    CloneS extends PlayerSelectableColumn = S,
+  >(): PlayerQueryBuilder<CloneI, CloneS> {
+    const clone = new PlayerQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
@@ -531,13 +535,15 @@ export class PlayerQueryBuilder<
 
 export class FuelDepositQueryBuilder<
   I extends Record<string, never> = {},
-> implements QueryBuilder<FuelDeposit> {
+  S extends FuelDepositSelectableColumn = keyof FuelDeposit,
+> implements QueryBuilder<FuelDepositSelected<S>> {
   readonly _table = "fuel_deposits";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: FuelDeposit;
+  declare readonly _rowType: FuelDepositSelected<S>;
   declare readonly _initType: FuelDepositInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<Record<string, never>> = {};
+  private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
@@ -550,7 +556,7 @@ export class FuelDepositQueryBuilder<
     step_hops: string[];
   };
 
-  where(conditions: FuelDepositWhereInput): FuelDepositQueryBuilder<I> {
+  where(conditions: FuelDepositWhereInput): FuelDepositQueryBuilder<I, S> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -567,22 +573,30 @@ export class FuelDepositQueryBuilder<
     return clone;
   }
 
+  select<NewS extends FuelDepositSelectableColumn>(
+    ...columns: [NewS, ...NewS[]]
+  ): FuelDepositQueryBuilder<I, NewS> {
+    const clone = this._clone<I, NewS>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
   orderBy(
-    column: keyof FuelDeposit,
+    column: FuelDepositOrderableColumn,
     direction: "asc" | "desc" = "asc",
-  ): FuelDepositQueryBuilder<I> {
+  ): FuelDepositQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): FuelDepositQueryBuilder<I> {
+  limit(n: number): FuelDepositQueryBuilder<I, S> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): FuelDepositQueryBuilder<I> {
+  offset(n: number): FuelDepositQueryBuilder<I, S> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
@@ -592,7 +606,7 @@ export class FuelDepositQueryBuilder<
     start: FuelDepositWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): FuelDepositQueryBuilder<I> {
+  }): FuelDepositQueryBuilder<I, S> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -674,6 +688,7 @@ export class FuelDepositQueryBuilder<
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
       offset: this._offsetVal,
@@ -682,10 +697,18 @@ export class FuelDepositQueryBuilder<
     });
   }
 
-  private _clone<CloneI extends Record<string, never> = I>(): FuelDepositQueryBuilder<CloneI> {
-    const clone = new FuelDepositQueryBuilder<CloneI>();
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<
+    CloneI extends Record<string, never> = I,
+    CloneS extends FuelDepositSelectableColumn = S,
+  >(): FuelDepositQueryBuilder<CloneI, CloneS> {
+    const clone = new FuelDepositQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
@@ -703,13 +726,15 @@ export class FuelDepositQueryBuilder<
 
 export class ChatMessageQueryBuilder<
   I extends Record<string, never> = {},
-> implements QueryBuilder<ChatMessage> {
+  S extends ChatMessageSelectableColumn = keyof ChatMessage,
+> implements QueryBuilder<ChatMessageSelected<S>> {
   readonly _table = "chat_messages";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: ChatMessage;
+  declare readonly _rowType: ChatMessageSelected<S>;
   declare readonly _initType: ChatMessageInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<Record<string, never>> = {};
+  private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
@@ -722,7 +747,7 @@ export class ChatMessageQueryBuilder<
     step_hops: string[];
   };
 
-  where(conditions: ChatMessageWhereInput): ChatMessageQueryBuilder<I> {
+  where(conditions: ChatMessageWhereInput): ChatMessageQueryBuilder<I, S> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -739,22 +764,30 @@ export class ChatMessageQueryBuilder<
     return clone;
   }
 
+  select<NewS extends ChatMessageSelectableColumn>(
+    ...columns: [NewS, ...NewS[]]
+  ): ChatMessageQueryBuilder<I, NewS> {
+    const clone = this._clone<I, NewS>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
   orderBy(
-    column: keyof ChatMessage,
+    column: ChatMessageOrderableColumn,
     direction: "asc" | "desc" = "asc",
-  ): ChatMessageQueryBuilder<I> {
+  ): ChatMessageQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): ChatMessageQueryBuilder<I> {
+  limit(n: number): ChatMessageQueryBuilder<I, S> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): ChatMessageQueryBuilder<I> {
+  offset(n: number): ChatMessageQueryBuilder<I, S> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
@@ -764,7 +797,7 @@ export class ChatMessageQueryBuilder<
     start: ChatMessageWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): ChatMessageQueryBuilder<I> {
+  }): ChatMessageQueryBuilder<I, S> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -846,6 +879,7 @@ export class ChatMessageQueryBuilder<
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
       offset: this._offsetVal,
@@ -854,10 +888,18 @@ export class ChatMessageQueryBuilder<
     });
   }
 
-  private _clone<CloneI extends Record<string, never> = I>(): ChatMessageQueryBuilder<CloneI> {
-    const clone = new ChatMessageQueryBuilder<CloneI>();
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<
+    CloneI extends Record<string, never> = I,
+    CloneS extends ChatMessageSelectableColumn = S,
+  >(): ChatMessageQueryBuilder<CloneI, CloneS> {
+    const clone = new ChatMessageQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;

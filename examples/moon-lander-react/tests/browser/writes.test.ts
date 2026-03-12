@@ -151,14 +151,14 @@ function mockDb() {
 
   return {
     db: {
-      insert: vi.fn(
+      insertDurable: vi.fn(
         async (table: unknown, data: Record<string, unknown>, options?: { tier?: string }) => {
           const id = `new-${inserts.length}`;
           inserts.push({ table, data, tier: options?.tier ?? "edge" });
-          return id;
+          return { id, ...data };
         },
       ),
-      update: vi.fn(
+      updateDurable: vi.fn(
         async (
           table: unknown,
           id: string,

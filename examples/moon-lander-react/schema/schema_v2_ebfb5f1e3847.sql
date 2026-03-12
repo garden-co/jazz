@@ -1,3 +1,17 @@
+CREATE TABLE chat_messages (
+    playerId TEXT NOT NULL,
+    message TEXT NOT NULL,
+    createdAt INTEGER NOT NULL
+);
+
+CREATE TABLE fuel_deposits (
+    fuelType TEXT NOT NULL,
+    positionX INTEGER NOT NULL,
+    createdAt INTEGER NOT NULL,
+    collected BOOLEAN NOT NULL,
+    collectedBy TEXT NOT NULL
+);
+
 CREATE TABLE players (
     playerId TEXT NOT NULL,
     name TEXT NOT NULL,
@@ -13,18 +27,4 @@ CREATE TABLE players (
     landerFuelLevel INTEGER NOT NULL,
     landerSpawnX INTEGER NOT NULL,
     thrusting BOOLEAN NOT NULL
-);
-
-CREATE TABLE fuel_deposits (
-    fuelType TEXT NOT NULL,
-    positionX INTEGER NOT NULL,
-    createdAt INTEGER NOT NULL,
-    collected BOOLEAN NOT NULL,
-    collectedBy TEXT NOT NULL
-);
-
-CREATE TABLE chat_messages (
-    playerId TEXT NOT NULL,
-    message TEXT NOT NULL,
-    createdAt INTEGER NOT NULL
 );
