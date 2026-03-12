@@ -196,6 +196,38 @@ function getArrayU8FromWasm0(ptr, len) {
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
 }
 /**
+ * WASM-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305.
+ * Provides authenticated decryption with perfect forward secrecy.
+ * - `sealed_message`: The sealed bytes to decrypt
+ * - `recipient_secret`: Base58-encoded recipient's private key with "sealerSecret_z" prefix
+ * - `sender_id`: Base58-encoded sender's public key with "sealer_z" prefix
+ * - `nonce_material`: Raw bytes used to generate the nonce (must match sealing)
+ * Returns unsealed bytes or throws JsError if unsealing fails.
+ * @param {Uint8Array} sealed_message
+ * @param {string} recipient_secret
+ * @param {string} sender_id
+ * @param {Uint8Array} nonce_material
+ * @returns {Uint8Array}
+ */
+export function unseal(sealed_message, recipient_secret, sender_id, nonce_material) {
+    const ptr0 = passArray8ToWasm0(sealed_message, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(recipient_secret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passStringToWasm0(sender_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ptr3 = passArray8ToWasm0(nonce_material, wasm.__wbindgen_malloc);
+    const len3 = WASM_VECTOR_LEN;
+    const ret = wasm.unseal(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v5 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v5;
+}
+
+/**
  * WASM-exposed function for sealing a message for a group (anonymous box pattern).
  * Uses an ephemeral key pair, so no sender authentication is provided.
  * - `message`: Raw bytes to seal
@@ -247,38 +279,6 @@ export function seal(message, sender_secret, recipient_id, nonce_material) {
     const ptr3 = passArray8ToWasm0(nonce_material, wasm.__wbindgen_malloc);
     const len3 = WASM_VECTOR_LEN;
     const ret = wasm.seal(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
-    if (ret[3]) {
-        throw takeFromExternrefTable0(ret[2]);
-    }
-    var v5 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v5;
-}
-
-/**
- * WASM-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305.
- * Provides authenticated decryption with perfect forward secrecy.
- * - `sealed_message`: The sealed bytes to decrypt
- * - `recipient_secret`: Base58-encoded recipient's private key with "sealerSecret_z" prefix
- * - `sender_id`: Base58-encoded sender's public key with "sealer_z" prefix
- * - `nonce_material`: Raw bytes used to generate the nonce (must match sealing)
- * Returns unsealed bytes or throws JsError if unsealing fails.
- * @param {Uint8Array} sealed_message
- * @param {string} recipient_secret
- * @param {string} sender_id
- * @param {Uint8Array} nonce_material
- * @returns {Uint8Array}
- */
-export function unseal(sealed_message, recipient_secret, sender_id, nonce_material) {
-    const ptr0 = passArray8ToWasm0(sealed_message, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(recipient_secret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passStringToWasm0(sender_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len2 = WASM_VECTOR_LEN;
-    const ptr3 = passArray8ToWasm0(nonce_material, wasm.__wbindgen_malloc);
-    const len3 = WASM_VECTOR_LEN;
-    const ret = wasm.unseal(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }
@@ -370,6 +370,108 @@ export function decrypt(ciphertext, key_secret, nonce_material) {
 }
 
 /**
+ * WASM-exposed function to sign a message using Ed25519.
+ * - `message`: Raw bytes to sign
+ * - `secret`: Raw Ed25519 signing key bytes
+ * Returns base58-encoded signature with "signature_z" prefix or throws JsError if signing fails.
+ * @param {Uint8Array} message
+ * @param {Uint8Array} secret
+ * @returns {string}
+ */
+export function sign(message, secret) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passArray8ToWasm0(message, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(secret, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.sign(ptr0, len0, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * WASM-exposed function to derive a signer ID from a signing key.
+ * - `secret`: Raw Ed25519 signing key bytes
+ * Returns base58-encoded verifying key with "signer_z" prefix or throws JsError if derivation fails.
+ * @param {Uint8Array} secret
+ * @returns {string}
+ */
+export function getSignerId(secret) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passArray8ToWasm0(secret, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.getSignerId(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * WASM-exposed function to verify an Ed25519 signature.
+ * - `signature`: Raw signature bytes
+ * - `message`: Raw bytes that were signed
+ * - `id`: Raw Ed25519 verifying key bytes
+ * Returns true if signature is valid, false otherwise, or throws JsError if verification fails.
+ * @param {Uint8Array} signature
+ * @param {Uint8Array} message
+ * @param {Uint8Array} id
+ * @returns {boolean}
+ */
+export function verify(signature, message, id) {
+    const ptr0 = passArray8ToWasm0(signature, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(message, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(id, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.verify(ptr0, len0, ptr1, len1, ptr2, len2);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0] !== 0;
+}
+
+/**
+ * Hash data once using BLAKE3.
+ * - `data`: Raw bytes to hash
+ * Returns 32 bytes of hash output.
+ * This is the simplest way to compute a BLAKE3 hash of a single piece of data.
+ * @param {Uint8Array} data
+ * @returns {Uint8Array}
+ */
+export function blake3HashOnce(data) {
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.blake3HashOnce(ptr0, len0);
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
  * Generate a 24-byte nonce from input material using BLAKE3.
  * - `nonce_material`: Raw bytes to derive the nonce from
  * Returns 24 bytes suitable for use as a nonce in cryptographic operations.
@@ -427,23 +529,6 @@ export function blake3HashOnceWithContext(data, context) {
     var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v3;
-}
-
-/**
- * Hash data once using BLAKE3.
- * - `data`: Raw bytes to hash
- * Returns 32 bytes of hash output.
- * This is the simplest way to compute a BLAKE3 hash of a single piece of data.
- * @param {Uint8Array} data
- * @returns {Uint8Array}
- */
-export function blake3HashOnce(data) {
-    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.blake3HashOnce(ptr0, len0);
-    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v2;
 }
 
 /**
@@ -586,221 +671,6 @@ export function encryptXsalsa20(key, nonce_material, plaintext) {
 }
 
 /**
- * WASM-exposed function to sign a message using Ed25519.
- * - `message`: Raw bytes to sign
- * - `secret`: Raw Ed25519 signing key bytes
- * Returns base58-encoded signature with "signature_z" prefix or throws JsError if signing fails.
- * @param {Uint8Array} message
- * @param {Uint8Array} secret
- * @returns {string}
- */
-export function sign(message, secret) {
-    let deferred4_0;
-    let deferred4_1;
-    try {
-        const ptr0 = passArray8ToWasm0(message, wasm.__wbindgen_malloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passArray8ToWasm0(secret, wasm.__wbindgen_malloc);
-        const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.sign(ptr0, len0, ptr1, len1);
-        var ptr3 = ret[0];
-        var len3 = ret[1];
-        if (ret[3]) {
-            ptr3 = 0; len3 = 0;
-            throw takeFromExternrefTable0(ret[2]);
-        }
-        deferred4_0 = ptr3;
-        deferred4_1 = len3;
-        return getStringFromWasm0(ptr3, len3);
-    } finally {
-        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
-    }
-}
-
-/**
- * WASM-exposed function to verify an Ed25519 signature.
- * - `signature`: Raw signature bytes
- * - `message`: Raw bytes that were signed
- * - `id`: Raw Ed25519 verifying key bytes
- * Returns true if signature is valid, false otherwise, or throws JsError if verification fails.
- * @param {Uint8Array} signature
- * @param {Uint8Array} message
- * @param {Uint8Array} id
- * @returns {boolean}
- */
-export function verify(signature, message, id) {
-    const ptr0 = passArray8ToWasm0(signature, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passArray8ToWasm0(message, wasm.__wbindgen_malloc);
-    const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passArray8ToWasm0(id, wasm.__wbindgen_malloc);
-    const len2 = WASM_VECTOR_LEN;
-    const ret = wasm.verify(ptr0, len0, ptr1, len1, ptr2, len2);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return ret[0] !== 0;
-}
-
-/**
- * WASM-exposed function to derive a signer ID from a signing key.
- * - `secret`: Raw Ed25519 signing key bytes
- * Returns base58-encoded verifying key with "signer_z" prefix or throws JsError if derivation fails.
- * @param {Uint8Array} secret
- * @returns {string}
- */
-export function getSignerId(secret) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const ptr0 = passArray8ToWasm0(secret, wasm.__wbindgen_malloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.getSignerId(ptr0, len0);
-        var ptr2 = ret[0];
-        var len2 = ret[1];
-        if (ret[3]) {
-            ptr2 = 0; len2 = 0;
-            throw takeFromExternrefTable0(ret[2]);
-        }
-        deferred3_0 = ptr2;
-        deferred3_1 = len2;
-        return getStringFromWasm0(ptr2, len2);
-    } finally {
-        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
-    }
-}
-
-/**
- * WASM-exposed function to validate and copy Ed25519 signature bytes.
- * - `bytes`: 64 bytes of signature material to validate
- * Returns the same 64 bytes if valid or throws JsError if invalid.
- * @param {Uint8Array} bytes
- * @returns {Uint8Array}
- */
-export function ed25519SignatureFromBytes(bytes) {
-    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.ed25519SignatureFromBytes(ptr0, len0);
-    if (ret[3]) {
-        throw takeFromExternrefTable0(ret[2]);
-    }
-    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v2;
-}
-
-/**
- * WASM-exposed function to validate and copy Ed25519 verifying key bytes.
- * - `bytes`: 32 bytes of verifying key material to validate
- * Returns the same 32 bytes if valid or throws JsError if invalid.
- * @param {Uint8Array} bytes
- * @returns {Uint8Array}
- */
-export function ed25519VerifyingKeyFromBytes(bytes) {
-    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.ed25519VerifyingKeyFromBytes(ptr0, len0);
-    if (ret[3]) {
-        throw takeFromExternrefTable0(ret[2]);
-    }
-    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v2;
-}
-
-/**
- * WASM-exposed function to derive the public key from an Ed25519 signing key.
- * - `signing_key`: 32 bytes of signing key material
- * Returns 32 bytes of public key material or throws JsError if key is invalid.
- * @param {Uint8Array} signing_key
- * @returns {Uint8Array}
- */
-export function ed25519SigningKeyToPublic(signing_key) {
-    const ptr0 = passArray8ToWasm0(signing_key, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.ed25519SigningKeyToPublic(ptr0, len0);
-    if (ret[3]) {
-        throw takeFromExternrefTable0(ret[2]);
-    }
-    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v2;
-}
-
-/**
- * WASM-exposed function to derive an Ed25519 verifying key from a signing key.
- * - `signing_key`: 32 bytes of signing key material
- * Returns 32 bytes of verifying key material or throws JsError if key is invalid.
- * @param {Uint8Array} signing_key
- * @returns {Uint8Array}
- */
-export function ed25519VerifyingKey(signing_key) {
-    const ptr0 = passArray8ToWasm0(signing_key, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.ed25519VerifyingKey(ptr0, len0);
-    if (ret[3]) {
-        throw takeFromExternrefTable0(ret[2]);
-    }
-    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v2;
-}
-
-/**
- * Generate a new Ed25519 signing key using secure random number generation.
- * Returns 32 bytes of raw key material suitable for use with other Ed25519 functions.
- * @returns {Uint8Array}
- */
-export function newEd25519SigningKey() {
-    const ret = wasm.newEd25519SigningKey();
-    var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v1;
-}
-
-/**
- * WASM-exposed function to sign a message using Ed25519.
- * - `signing_key`: 32 bytes of signing key material
- * - `message`: Raw bytes to sign
- * Returns 64 bytes of signature material or throws JsError if signing fails.
- * @param {Uint8Array} signing_key
- * @param {Uint8Array} message
- * @returns {Uint8Array}
- */
-export function ed25519Sign(signing_key, message) {
-    const ptr0 = passArray8ToWasm0(signing_key, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passArray8ToWasm0(message, wasm.__wbindgen_malloc);
-    const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.ed25519Sign(ptr0, len0, ptr1, len1);
-    if (ret[3]) {
-        throw takeFromExternrefTable0(ret[2]);
-    }
-    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v3;
-}
-
-/**
- * WASM-exposed function to validate and copy Ed25519 signing key bytes.
- * - `bytes`: 32 bytes of signing key material to validate
- * Returns the same 32 bytes if valid or throws JsError if invalid.
- * @param {Uint8Array} bytes
- * @returns {Uint8Array}
- */
-export function ed25519SigningKeyFromBytes(bytes) {
-    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.ed25519SigningKeyFromBytes(ptr0, len0);
-    if (ret[3]) {
-        throw takeFromExternrefTable0(ret[2]);
-    }
-    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v2;
-}
-
-/**
  * WASM-exposed function to verify an Ed25519 signature.
  * - `verifying_key`: 32 bytes of verifying key material
  * - `message`: Raw bytes that were signed
@@ -846,6 +716,136 @@ export function ed25519SigningKeySign(signing_key, message) {
     var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v3;
+}
+
+/**
+ * WASM-exposed function to validate and copy Ed25519 signing key bytes.
+ * - `bytes`: 32 bytes of signing key material to validate
+ * Returns the same 32 bytes if valid or throws JsError if invalid.
+ * @param {Uint8Array} bytes
+ * @returns {Uint8Array}
+ */
+export function ed25519SigningKeyFromBytes(bytes) {
+    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.ed25519SigningKeyFromBytes(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * WASM-exposed function to sign a message using Ed25519.
+ * - `signing_key`: 32 bytes of signing key material
+ * - `message`: Raw bytes to sign
+ * Returns 64 bytes of signature material or throws JsError if signing fails.
+ * @param {Uint8Array} signing_key
+ * @param {Uint8Array} message
+ * @returns {Uint8Array}
+ */
+export function ed25519Sign(signing_key, message) {
+    const ptr0 = passArray8ToWasm0(signing_key, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(message, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.ed25519Sign(ptr0, len0, ptr1, len1);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v3;
+}
+
+/**
+ * WASM-exposed function to validate and copy Ed25519 signature bytes.
+ * - `bytes`: 64 bytes of signature material to validate
+ * Returns the same 64 bytes if valid or throws JsError if invalid.
+ * @param {Uint8Array} bytes
+ * @returns {Uint8Array}
+ */
+export function ed25519SignatureFromBytes(bytes) {
+    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.ed25519SignatureFromBytes(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * WASM-exposed function to validate and copy Ed25519 verifying key bytes.
+ * - `bytes`: 32 bytes of verifying key material to validate
+ * Returns the same 32 bytes if valid or throws JsError if invalid.
+ * @param {Uint8Array} bytes
+ * @returns {Uint8Array}
+ */
+export function ed25519VerifyingKeyFromBytes(bytes) {
+    const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.ed25519VerifyingKeyFromBytes(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * Generate a new Ed25519 signing key using secure random number generation.
+ * Returns 32 bytes of raw key material suitable for use with other Ed25519 functions.
+ * @returns {Uint8Array}
+ */
+export function newEd25519SigningKey() {
+    const ret = wasm.newEd25519SigningKey();
+    var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v1;
+}
+
+/**
+ * WASM-exposed function to derive the public key from an Ed25519 signing key.
+ * - `signing_key`: 32 bytes of signing key material
+ * Returns 32 bytes of public key material or throws JsError if key is invalid.
+ * @param {Uint8Array} signing_key
+ * @returns {Uint8Array}
+ */
+export function ed25519SigningKeyToPublic(signing_key) {
+    const ptr0 = passArray8ToWasm0(signing_key, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.ed25519SigningKeyToPublic(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * WASM-exposed function to derive an Ed25519 verifying key from a signing key.
+ * - `signing_key`: 32 bytes of signing key material
+ * Returns 32 bytes of verifying key material or throws JsError if key is invalid.
+ * @param {Uint8Array} signing_key
+ * @returns {Uint8Array}
+ */
+export function ed25519VerifyingKey(signing_key) {
+    const ptr0 = passArray8ToWasm0(signing_key, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.ed25519VerifyingKey(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
 }
 
 const Blake3HasherFinalization = (typeof FinalizationRegistry === 'undefined')

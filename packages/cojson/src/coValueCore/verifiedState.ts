@@ -93,6 +93,7 @@ export class VerifiedState {
   // Cache for known state to avoid repeated FFI calls between mutations
   private cachedKnownState: CoValueKnownState | undefined;
   private cachedKnownStateWithStreaming: CoValueKnownState | undefined;
+  private cachedIsStreaming: boolean | undefined;
 
   constructor(
     id: RawCoID,
@@ -129,6 +130,7 @@ export class VerifiedState {
   private invalidateKnownStateCache() {
     this.cachedKnownState = undefined;
     this.cachedKnownStateWithStreaming = undefined;
+    this.cachedIsStreaming = undefined;
   }
 
   /**
@@ -397,6 +399,7 @@ export class VerifiedState {
     }
     this.impl.setStreamingKnownState(JSON.stringify(streamingKnownState));
     this.cachedKnownStateWithStreaming = undefined;
+    this.cachedIsStreaming = undefined;
   }
 
   getSession(sessionID: SessionID): SessionLog | undefined {
@@ -598,6 +601,7 @@ export class VerifiedState {
   knownStateWithStreaming(): CoValueKnownState {
     if (!this.cachedKnownStateWithStreaming) {
       const result = this.impl.getKnownStateWithStreaming();
+      this.cachedIsStreaming = Boolean(result);
       if (!result || result === undefined) {
         this.cachedKnownStateWithStreaming = this.knownState();
       } else {
@@ -608,7 +612,11 @@ export class VerifiedState {
   }
 
   isStreaming(): boolean {
-    return Boolean(this.impl.getKnownStateWithStreaming());
+    if (this.cachedIsStreaming === undefined) {
+      this.knownStateWithStreaming();
+    }
+
+    return this.cachedIsStreaming ?? false;
   }
 
   decryptTransaction(
