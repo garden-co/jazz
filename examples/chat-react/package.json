@@ -7,7 +7,9 @@
     "dev": "npx tsx scripts/dev.ts",
     "build": "node ../../packages/jazz-tools/dist/cli.js build && vite build",
     "preview": "vite preview",
-    "test": "vitest run --config vitest.config.browser.ts"
+    "test": "vitest run --config vitest.config.browser.ts",
+    "walkthrough": "npx @marp-team/marp-cli --html --theme walkthrough/theme-jazz.css walkthrough/jazz-chat.md --preview",
+    "walkthrough:shots": "playwright test --config playwright.screenshots.config.ts"
   },
   "dependencies": {
     "@multiavatar/multiavatar": "^1.0.7",
@@ -41,6 +43,7 @@
     "tailwindcss": "^4.1.18"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@types/dompurify": "^3.2.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
