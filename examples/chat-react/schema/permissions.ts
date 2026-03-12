@@ -9,11 +9,12 @@ export default definePermissions(app, ({ policy, session, anyOf, allowedTo }) =>
 
   // Chats: readable if public, by chat members, or by anyone presenting a
   // valid join code (pre-authorises reading before the chatMember is inserted).
+  // Once inserted, no need to keep the join code claim
   policy.chats.allowRead.where((chat) =>
     anyOf([
       { isPublic: true },
       policy.chatMembers.exists.where({ chat: chat.id, userId: session.user_id }),
-      policy.chatMembers.exists.where({ chat: chat.id, joinCode: session["claims.join_code"] }),
+      { joinCode: session["claims.join_code"] },
     ]),
   );
   policy.chats.allowInsert.where({ createdBy: session.user_id });

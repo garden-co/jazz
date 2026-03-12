@@ -42,6 +42,7 @@ export const ChatList = () => {
     const chat = db.insert(app.chats, {
       isPublic: false,
       createdBy: userId,
+      joinCode: shareCode,
     });
     db.insert(app.chatMembers, {
       chat: chat.id,

@@ -1,12 +1,13 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
 import type { WasmSchema, QueryBuilder } from "jazz-tools";
-export type JsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | { [key: string]: JsonValue }
-  | JsonValue[];
+export type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];
+
+export type PermissionIntrospectionColumn = "$canRead" | "$canEdit" | "$canDelete";
+export interface PermissionIntrospectionColumns {
+  $canRead: boolean | null;
+  $canEdit: boolean | null;
+  $canDelete: boolean | null;
+}
 
 export interface Profile {
   id: string;
@@ -19,6 +20,7 @@ export interface Chat {
   id: string;
   isPublic: boolean;
   createdBy: string;
+  joinCode?: string;
 }
 
 export interface ChatMember {
@@ -79,6 +81,7 @@ export interface ProfileInit {
 export interface ChatInit {
   isPublic: boolean;
   createdBy: string;
+  joinCode?: string;
 }
 
 export interface ChatMemberInit {
@@ -129,12 +132,19 @@ export interface ProfileWhereInput {
   userId?: string | { eq?: string; ne?: string; contains?: string };
   name?: string | { eq?: string; ne?: string; contains?: string };
   avatar?: string | { eq?: string; ne?: string; contains?: string };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
 export interface ChatWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   isPublic?: boolean;
   createdBy?: string | { eq?: string; ne?: string; contains?: string };
+  joinCode?: string | { eq?: string; ne?: string; contains?: string };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
 export interface ChatMemberWhereInput {
@@ -142,6 +152,9 @@ export interface ChatMemberWhereInput {
   chat?: string | { eq?: string; ne?: string };
   userId?: string | { eq?: string; ne?: string; contains?: string };
   joinCode?: string | { eq?: string; ne?: string; contains?: string };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
 export interface MessageWhereInput {
@@ -150,16 +163,10 @@ export interface MessageWhereInput {
   text?: string | { eq?: string; ne?: string; contains?: string };
   sender?: string | { eq?: string; ne?: string };
   senderId?: string | { eq?: string; ne?: string; contains?: string };
-  createdAt?:
-    | Date
-    | number
-    | {
-        eq?: Date | number;
-        gt?: Date | number;
-        gte?: Date | number;
-        lt?: Date | number;
-        lte?: Date | number;
-      };
+  createdAt?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
 export interface ReactionWhereInput {
@@ -167,21 +174,18 @@ export interface ReactionWhereInput {
   message?: string | { eq?: string; ne?: string };
   userId?: string | { eq?: string; ne?: string; contains?: string };
   emoji?: string | { eq?: string; ne?: string; contains?: string };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
 export interface CanvasWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   chat?: string | { eq?: string; ne?: string };
-  createdAt?:
-    | Date
-    | number
-    | {
-        eq?: Date | number;
-        gt?: Date | number;
-        gte?: Date | number;
-        lt?: Date | number;
-        lte?: Date | number;
-      };
+  createdAt?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
 export interface StrokeWhereInput {
@@ -189,20 +193,12 @@ export interface StrokeWhereInput {
   canvas?: string | { eq?: string; ne?: string };
   ownerId?: string | { eq?: string; ne?: string; contains?: string };
   color?: string | { eq?: string; ne?: string; contains?: string };
-  width?:
-    | number
-    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  width?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
   pointsJson?: string | { eq?: string; ne?: string; contains?: string };
-  createdAt?:
-    | Date
-    | number
-    | {
-        eq?: Date | number;
-        gt?: Date | number;
-        gte?: Date | number;
-        lt?: Date | number;
-        lte?: Date | number;
-      };
+  createdAt?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
 export interface AttachmentWhereInput {
@@ -212,48 +208,238 @@ export interface AttachmentWhereInput {
   name?: string | { eq?: string; ne?: string; contains?: string };
   data?: string | { eq?: string; ne?: string; contains?: string };
   mimeType?: string | { eq?: string; ne?: string; contains?: string };
-  size?:
-    | number
-    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  size?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
+type AnyProfileQueryBuilder<T = any> = { readonly _table: "profiles" } & QueryBuilder<T>;
+type AnyChatQueryBuilder<T = any> = { readonly _table: "chats" } & QueryBuilder<T>;
+type AnyChatMemberQueryBuilder<T = any> = { readonly _table: "chatMembers" } & QueryBuilder<T>;
+type AnyMessageQueryBuilder<T = any> = { readonly _table: "messages" } & QueryBuilder<T>;
+type AnyReactionQueryBuilder<T = any> = { readonly _table: "reactions" } & QueryBuilder<T>;
+type AnyCanvasQueryBuilder<T = any> = { readonly _table: "canvases" } & QueryBuilder<T>;
+type AnyStrokeQueryBuilder<T = any> = { readonly _table: "strokes" } & QueryBuilder<T>;
+type AnyAttachmentQueryBuilder<T = any> = { readonly _table: "attachments" } & QueryBuilder<T>;
+
 export interface ProfileInclude {
-  messagesViaSender?: true | MessageInclude | MessageQueryBuilder;
+  messagesViaSender?: true | MessageInclude | AnyMessageQueryBuilder<any>;
 }
 
 export interface ChatInclude {
-  chatMembersViaChat?: true | ChatMemberInclude | ChatMemberQueryBuilder;
-  messagesViaChat?: true | MessageInclude | MessageQueryBuilder;
-  canvasesViaChat?: true | CanvasInclude | CanvasQueryBuilder;
+  chatMembersViaChat?: true | ChatMemberInclude | AnyChatMemberQueryBuilder<any>;
+  messagesViaChat?: true | MessageInclude | AnyMessageQueryBuilder<any>;
+  canvasesViaChat?: true | CanvasInclude | AnyCanvasQueryBuilder<any>;
 }
 
 export interface ChatMemberInclude {
-  chat?: true | ChatInclude | ChatQueryBuilder;
+  chat?: true | ChatInclude | AnyChatQueryBuilder<any>;
 }
 
 export interface MessageInclude {
-  chat?: true | ChatInclude | ChatQueryBuilder;
-  sender?: true | ProfileInclude | ProfileQueryBuilder;
-  reactionsViaMessage?: true | ReactionInclude | ReactionQueryBuilder;
-  attachmentsViaMessage?: true | AttachmentInclude | AttachmentQueryBuilder;
+  chat?: true | ChatInclude | AnyChatQueryBuilder<any>;
+  sender?: true | ProfileInclude | AnyProfileQueryBuilder<any>;
+  reactionsViaMessage?: true | ReactionInclude | AnyReactionQueryBuilder<any>;
+  attachmentsViaMessage?: true | AttachmentInclude | AnyAttachmentQueryBuilder<any>;
 }
 
 export interface ReactionInclude {
-  message?: true | MessageInclude | MessageQueryBuilder;
+  message?: true | MessageInclude | AnyMessageQueryBuilder<any>;
 }
 
 export interface CanvasInclude {
-  chat?: true | ChatInclude | ChatQueryBuilder;
-  strokesViaCanvas?: true | StrokeInclude | StrokeQueryBuilder;
+  chat?: true | ChatInclude | AnyChatQueryBuilder<any>;
+  strokesViaCanvas?: true | StrokeInclude | AnyStrokeQueryBuilder<any>;
 }
 
 export interface StrokeInclude {
-  canvas?: true | CanvasInclude | CanvasQueryBuilder;
+  canvas?: true | CanvasInclude | AnyCanvasQueryBuilder<any>;
 }
 
 export interface AttachmentInclude {
-  message?: true | MessageInclude | MessageQueryBuilder;
+  message?: true | MessageInclude | AnyMessageQueryBuilder<any>;
 }
+
+export type ProfileIncludedRelations<I extends ProfileInclude = {}> = {
+  [K in keyof I]-?:
+    K extends "messagesViaSender"
+      ? NonNullable<I["messagesViaSender"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Message[]
+          : RelationInclude extends AnyMessageQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends MessageInclude
+              ? MessageWithIncludes<RelationInclude>[]
+              : never
+        : never
+    : never;
+};
+
+export type ChatIncludedRelations<I extends ChatInclude = {}> = {
+  [K in keyof I]-?:
+    K extends "chatMembersViaChat"
+      ? NonNullable<I["chatMembersViaChat"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? ChatMember[]
+          : RelationInclude extends AnyChatMemberQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends ChatMemberInclude
+              ? ChatMemberWithIncludes<RelationInclude>[]
+              : never
+        : never
+    : K extends "messagesViaChat"
+      ? NonNullable<I["messagesViaChat"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Message[]
+          : RelationInclude extends AnyMessageQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends MessageInclude
+              ? MessageWithIncludes<RelationInclude>[]
+              : never
+        : never
+    : K extends "canvasesViaChat"
+      ? NonNullable<I["canvasesViaChat"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Canvas[]
+          : RelationInclude extends AnyCanvasQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends CanvasInclude
+              ? CanvasWithIncludes<RelationInclude>[]
+              : never
+        : never
+    : never;
+};
+
+export type ChatMemberIncludedRelations<I extends ChatMemberInclude = {}> = {
+  [K in keyof I]-?:
+    K extends "chat"
+      ? NonNullable<I["chat"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Chat
+          : RelationInclude extends AnyChatQueryBuilder<infer QueryRow>
+            ? QueryRow
+            : RelationInclude extends ChatInclude
+              ? ChatWithIncludes<RelationInclude>
+              : never
+        : never
+    : never;
+};
+
+export type MessageIncludedRelations<I extends MessageInclude = {}> = {
+  [K in keyof I]-?:
+    K extends "chat"
+      ? NonNullable<I["chat"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Chat
+          : RelationInclude extends AnyChatQueryBuilder<infer QueryRow>
+            ? QueryRow
+            : RelationInclude extends ChatInclude
+              ? ChatWithIncludes<RelationInclude>
+              : never
+        : never
+    : K extends "sender"
+      ? NonNullable<I["sender"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Profile
+          : RelationInclude extends AnyProfileQueryBuilder<infer QueryRow>
+            ? QueryRow
+            : RelationInclude extends ProfileInclude
+              ? ProfileWithIncludes<RelationInclude>
+              : never
+        : never
+    : K extends "reactionsViaMessage"
+      ? NonNullable<I["reactionsViaMessage"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Reaction[]
+          : RelationInclude extends AnyReactionQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends ReactionInclude
+              ? ReactionWithIncludes<RelationInclude>[]
+              : never
+        : never
+    : K extends "attachmentsViaMessage"
+      ? NonNullable<I["attachmentsViaMessage"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Attachment[]
+          : RelationInclude extends AnyAttachmentQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends AttachmentInclude
+              ? AttachmentWithIncludes<RelationInclude>[]
+              : never
+        : never
+    : never;
+};
+
+export type ReactionIncludedRelations<I extends ReactionInclude = {}> = {
+  [K in keyof I]-?:
+    K extends "message"
+      ? NonNullable<I["message"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Message
+          : RelationInclude extends AnyMessageQueryBuilder<infer QueryRow>
+            ? QueryRow
+            : RelationInclude extends MessageInclude
+              ? MessageWithIncludes<RelationInclude>
+              : never
+        : never
+    : never;
+};
+
+export type CanvasIncludedRelations<I extends CanvasInclude = {}> = {
+  [K in keyof I]-?:
+    K extends "chat"
+      ? NonNullable<I["chat"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Chat
+          : RelationInclude extends AnyChatQueryBuilder<infer QueryRow>
+            ? QueryRow
+            : RelationInclude extends ChatInclude
+              ? ChatWithIncludes<RelationInclude>
+              : never
+        : never
+    : K extends "strokesViaCanvas"
+      ? NonNullable<I["strokesViaCanvas"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Stroke[]
+          : RelationInclude extends AnyStrokeQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends StrokeInclude
+              ? StrokeWithIncludes<RelationInclude>[]
+              : never
+        : never
+    : never;
+};
+
+export type StrokeIncludedRelations<I extends StrokeInclude = {}> = {
+  [K in keyof I]-?:
+    K extends "canvas"
+      ? NonNullable<I["canvas"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Canvas
+          : RelationInclude extends AnyCanvasQueryBuilder<infer QueryRow>
+            ? QueryRow
+            : RelationInclude extends CanvasInclude
+              ? CanvasWithIncludes<RelationInclude>
+              : never
+        : never
+    : never;
+};
+
+export type AttachmentIncludedRelations<I extends AttachmentInclude = {}> = {
+  [K in keyof I]-?:
+    K extends "message"
+      ? NonNullable<I["message"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Message
+          : RelationInclude extends AnyMessageQueryBuilder<infer QueryRow>
+            ? QueryRow
+            : RelationInclude extends MessageInclude
+              ? MessageWithIncludes<RelationInclude>
+              : never
+        : never
+    : never;
+};
 
 export interface ProfileRelations {
   messagesViaSender: Message[];
@@ -293,911 +479,753 @@ export interface AttachmentRelations {
   message: Message;
 }
 
-export type ProfileWithIncludes<I extends ProfileInclude = {}> = Profile & {
-  messagesViaSender?: NonNullable<I["messagesViaSender"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Message[]
-      : RelationInclude extends MessageQueryBuilder<
-            infer QueryInclude extends MessageInclude,
-            infer QuerySelect extends keyof Message | "*"
-          >
-        ? MessageSelectedWithIncludes<QueryInclude, QuerySelect>[]
-        : RelationInclude extends MessageInclude
-          ? MessageWithIncludes<RelationInclude>[]
-          : never
-    : never;
-};
+export type ProfileWithIncludes<I extends ProfileInclude = {}> = Omit<Profile, Extract<keyof I, keyof Profile>> & ProfileIncludedRelations<I>;
 
-export type ChatWithIncludes<I extends ChatInclude = {}> = Chat & {
-  chatMembersViaChat?: NonNullable<I["chatMembersViaChat"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? ChatMember[]
-      : RelationInclude extends ChatMemberQueryBuilder<
-            infer QueryInclude extends ChatMemberInclude,
-            infer QuerySelect extends keyof ChatMember | "*"
-          >
-        ? ChatMemberSelectedWithIncludes<QueryInclude, QuerySelect>[]
-        : RelationInclude extends ChatMemberInclude
-          ? ChatMemberWithIncludes<RelationInclude>[]
-          : never
-    : never;
-  messagesViaChat?: NonNullable<I["messagesViaChat"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Message[]
-      : RelationInclude extends MessageQueryBuilder<
-            infer QueryInclude extends MessageInclude,
-            infer QuerySelect extends keyof Message | "*"
-          >
-        ? MessageSelectedWithIncludes<QueryInclude, QuerySelect>[]
-        : RelationInclude extends MessageInclude
-          ? MessageWithIncludes<RelationInclude>[]
-          : never
-    : never;
-  canvasesViaChat?: NonNullable<I["canvasesViaChat"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Canvas[]
-      : RelationInclude extends CanvasQueryBuilder<
-            infer QueryInclude extends CanvasInclude,
-            infer QuerySelect extends keyof Canvas | "*"
-          >
-        ? CanvasSelectedWithIncludes<QueryInclude, QuerySelect>[]
-        : RelationInclude extends CanvasInclude
-          ? CanvasWithIncludes<RelationInclude>[]
-          : never
-    : never;
-};
+export type ChatWithIncludes<I extends ChatInclude = {}> = Omit<Chat, Extract<keyof I, keyof Chat>> & ChatIncludedRelations<I>;
 
-export type ChatMemberWithIncludes<I extends ChatMemberInclude = {}> = ChatMember & {
-  chat?: NonNullable<I["chat"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Chat
-      : RelationInclude extends ChatQueryBuilder<
-            infer QueryInclude extends ChatInclude,
-            infer QuerySelect extends keyof Chat | "*"
-          >
-        ? ChatSelectedWithIncludes<QueryInclude, QuerySelect>
-        : RelationInclude extends ChatInclude
-          ? ChatWithIncludes<RelationInclude>
-          : never
-    : never;
-};
+export type ChatMemberWithIncludes<I extends ChatMemberInclude = {}> = Omit<ChatMember, Extract<keyof I, keyof ChatMember>> & ChatMemberIncludedRelations<I>;
 
-export type MessageWithIncludes<I extends MessageInclude = {}> = Message & {
-  chat?: NonNullable<I["chat"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Chat
-      : RelationInclude extends ChatQueryBuilder<
-            infer QueryInclude extends ChatInclude,
-            infer QuerySelect extends keyof Chat | "*"
-          >
-        ? ChatSelectedWithIncludes<QueryInclude, QuerySelect>
-        : RelationInclude extends ChatInclude
-          ? ChatWithIncludes<RelationInclude>
-          : never
-    : never;
-  sender?: NonNullable<I["sender"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Profile
-      : RelationInclude extends ProfileQueryBuilder<
-            infer QueryInclude extends ProfileInclude,
-            infer QuerySelect extends keyof Profile | "*"
-          >
-        ? ProfileSelectedWithIncludes<QueryInclude, QuerySelect>
-        : RelationInclude extends ProfileInclude
-          ? ProfileWithIncludes<RelationInclude>
-          : never
-    : never;
-  reactionsViaMessage?: NonNullable<I["reactionsViaMessage"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Reaction[]
-      : RelationInclude extends ReactionQueryBuilder<
-            infer QueryInclude extends ReactionInclude,
-            infer QuerySelect extends keyof Reaction | "*"
-          >
-        ? ReactionSelectedWithIncludes<QueryInclude, QuerySelect>[]
-        : RelationInclude extends ReactionInclude
-          ? ReactionWithIncludes<RelationInclude>[]
-          : never
-    : never;
-  attachmentsViaMessage?: NonNullable<I["attachmentsViaMessage"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Attachment[]
-      : RelationInclude extends AttachmentQueryBuilder<
-            infer QueryInclude extends AttachmentInclude,
-            infer QuerySelect extends keyof Attachment | "*"
-          >
-        ? AttachmentSelectedWithIncludes<QueryInclude, QuerySelect>[]
-        : RelationInclude extends AttachmentInclude
-          ? AttachmentWithIncludes<RelationInclude>[]
-          : never
-    : never;
-};
+export type MessageWithIncludes<I extends MessageInclude = {}> = Omit<Message, Extract<keyof I, keyof Message>> & MessageIncludedRelations<I>;
 
-export type ReactionWithIncludes<I extends ReactionInclude = {}> = Reaction & {
-  message?: NonNullable<I["message"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Message
-      : RelationInclude extends MessageQueryBuilder<
-            infer QueryInclude extends MessageInclude,
-            infer QuerySelect extends keyof Message | "*"
-          >
-        ? MessageSelectedWithIncludes<QueryInclude, QuerySelect>
-        : RelationInclude extends MessageInclude
-          ? MessageWithIncludes<RelationInclude>
-          : never
-    : never;
-};
+export type ReactionWithIncludes<I extends ReactionInclude = {}> = Omit<Reaction, Extract<keyof I, keyof Reaction>> & ReactionIncludedRelations<I>;
 
-export type CanvasWithIncludes<I extends CanvasInclude = {}> = Canvas & {
-  chat?: NonNullable<I["chat"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Chat
-      : RelationInclude extends ChatQueryBuilder<
-            infer QueryInclude extends ChatInclude,
-            infer QuerySelect extends keyof Chat | "*"
-          >
-        ? ChatSelectedWithIncludes<QueryInclude, QuerySelect>
-        : RelationInclude extends ChatInclude
-          ? ChatWithIncludes<RelationInclude>
-          : never
-    : never;
-  strokesViaCanvas?: NonNullable<I["strokesViaCanvas"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Stroke[]
-      : RelationInclude extends StrokeQueryBuilder<
-            infer QueryInclude extends StrokeInclude,
-            infer QuerySelect extends keyof Stroke | "*"
-          >
-        ? StrokeSelectedWithIncludes<QueryInclude, QuerySelect>[]
-        : RelationInclude extends StrokeInclude
-          ? StrokeWithIncludes<RelationInclude>[]
-          : never
-    : never;
-};
+export type CanvasWithIncludes<I extends CanvasInclude = {}> = Omit<Canvas, Extract<keyof I, keyof Canvas>> & CanvasIncludedRelations<I>;
 
-export type StrokeWithIncludes<I extends StrokeInclude = {}> = Stroke & {
-  canvas?: NonNullable<I["canvas"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Canvas
-      : RelationInclude extends CanvasQueryBuilder<
-            infer QueryInclude extends CanvasInclude,
-            infer QuerySelect extends keyof Canvas | "*"
-          >
-        ? CanvasSelectedWithIncludes<QueryInclude, QuerySelect>
-        : RelationInclude extends CanvasInclude
-          ? CanvasWithIncludes<RelationInclude>
-          : never
-    : never;
-};
+export type StrokeWithIncludes<I extends StrokeInclude = {}> = Omit<Stroke, Extract<keyof I, keyof Stroke>> & StrokeIncludedRelations<I>;
 
-export type AttachmentWithIncludes<I extends AttachmentInclude = {}> = Attachment & {
-  message?: NonNullable<I["message"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Message
-      : RelationInclude extends MessageQueryBuilder<
-            infer QueryInclude extends MessageInclude,
-            infer QuerySelect extends keyof Message | "*"
-          >
-        ? MessageSelectedWithIncludes<QueryInclude, QuerySelect>
-        : RelationInclude extends MessageInclude
-          ? MessageWithIncludes<RelationInclude>
-          : never
-    : never;
-};
+export type AttachmentWithIncludes<I extends AttachmentInclude = {}> = Omit<Attachment, Extract<keyof I, keyof Attachment>> & AttachmentIncludedRelations<I>;
 
-export type ProfileSelected<S extends keyof Profile | "*" = keyof Profile> = "*" extends S
-  ? Profile
-  : Pick<Profile, Extract<S | "id", keyof Profile>>;
+export type ProfileSelectableColumn = keyof Profile | PermissionIntrospectionColumn | "*";
+export type ProfileOrderableColumn = keyof Profile | PermissionIntrospectionColumn;
 
-export type ProfileSelectedWithIncludes<
-  I extends ProfileInclude = {},
-  S extends keyof Profile | "*" = keyof Profile,
-> = ProfileSelected<S> & Omit<ProfileWithIncludes<I>, keyof Profile>;
+export type ProfileSelected<S extends ProfileSelectableColumn = keyof Profile> = "*" extends S ? Profile : Pick<Profile, Extract<S | "id", keyof Profile>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type ChatSelected<S extends keyof Chat | "*" = keyof Chat> = "*" extends S
-  ? Chat
-  : Pick<Chat, Extract<S | "id", keyof Chat>>;
+export type ProfileSelectedWithIncludes<I extends ProfileInclude = {}, S extends ProfileSelectableColumn = keyof Profile> = Omit<ProfileSelected<S>, Extract<keyof I, keyof ProfileSelected<S>>> & ProfileIncludedRelations<I>;
 
-export type ChatSelectedWithIncludes<
-  I extends ChatInclude = {},
-  S extends keyof Chat | "*" = keyof Chat,
-> = ChatSelected<S> & Omit<ChatWithIncludes<I>, keyof Chat>;
+export type ChatSelectableColumn = keyof Chat | PermissionIntrospectionColumn | "*";
+export type ChatOrderableColumn = keyof Chat | PermissionIntrospectionColumn;
 
-export type ChatMemberSelected<S extends keyof ChatMember | "*" = keyof ChatMember> = "*" extends S
-  ? ChatMember
-  : Pick<ChatMember, Extract<S | "id", keyof ChatMember>>;
+export type ChatSelected<S extends ChatSelectableColumn = keyof Chat> = "*" extends S ? Chat : Pick<Chat, Extract<S | "id", keyof Chat>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type ChatMemberSelectedWithIncludes<
-  I extends ChatMemberInclude = {},
-  S extends keyof ChatMember | "*" = keyof ChatMember,
-> = ChatMemberSelected<S> & Omit<ChatMemberWithIncludes<I>, keyof ChatMember>;
+export type ChatSelectedWithIncludes<I extends ChatInclude = {}, S extends ChatSelectableColumn = keyof Chat> = Omit<ChatSelected<S>, Extract<keyof I, keyof ChatSelected<S>>> & ChatIncludedRelations<I>;
 
-export type MessageSelected<S extends keyof Message | "*" = keyof Message> = "*" extends S
-  ? Message
-  : Pick<Message, Extract<S | "id", keyof Message>>;
+export type ChatMemberSelectableColumn = keyof ChatMember | PermissionIntrospectionColumn | "*";
+export type ChatMemberOrderableColumn = keyof ChatMember | PermissionIntrospectionColumn;
 
-export type MessageSelectedWithIncludes<
-  I extends MessageInclude = {},
-  S extends keyof Message | "*" = keyof Message,
-> = MessageSelected<S> & Omit<MessageWithIncludes<I>, keyof Message>;
+export type ChatMemberSelected<S extends ChatMemberSelectableColumn = keyof ChatMember> = "*" extends S ? ChatMember : Pick<ChatMember, Extract<S | "id", keyof ChatMember>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type ReactionSelected<S extends keyof Reaction | "*" = keyof Reaction> = "*" extends S
-  ? Reaction
-  : Pick<Reaction, Extract<S | "id", keyof Reaction>>;
+export type ChatMemberSelectedWithIncludes<I extends ChatMemberInclude = {}, S extends ChatMemberSelectableColumn = keyof ChatMember> = Omit<ChatMemberSelected<S>, Extract<keyof I, keyof ChatMemberSelected<S>>> & ChatMemberIncludedRelations<I>;
 
-export type ReactionSelectedWithIncludes<
-  I extends ReactionInclude = {},
-  S extends keyof Reaction | "*" = keyof Reaction,
-> = ReactionSelected<S> & Omit<ReactionWithIncludes<I>, keyof Reaction>;
+export type MessageSelectableColumn = keyof Message | PermissionIntrospectionColumn | "*";
+export type MessageOrderableColumn = keyof Message | PermissionIntrospectionColumn;
 
-export type CanvasSelected<S extends keyof Canvas | "*" = keyof Canvas> = "*" extends S
-  ? Canvas
-  : Pick<Canvas, Extract<S | "id", keyof Canvas>>;
+export type MessageSelected<S extends MessageSelectableColumn = keyof Message> = "*" extends S ? Message : Pick<Message, Extract<S | "id", keyof Message>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type CanvasSelectedWithIncludes<
-  I extends CanvasInclude = {},
-  S extends keyof Canvas | "*" = keyof Canvas,
-> = CanvasSelected<S> & Omit<CanvasWithIncludes<I>, keyof Canvas>;
+export type MessageSelectedWithIncludes<I extends MessageInclude = {}, S extends MessageSelectableColumn = keyof Message> = Omit<MessageSelected<S>, Extract<keyof I, keyof MessageSelected<S>>> & MessageIncludedRelations<I>;
 
-export type StrokeSelected<S extends keyof Stroke | "*" = keyof Stroke> = "*" extends S
-  ? Stroke
-  : Pick<Stroke, Extract<S | "id", keyof Stroke>>;
+export type ReactionSelectableColumn = keyof Reaction | PermissionIntrospectionColumn | "*";
+export type ReactionOrderableColumn = keyof Reaction | PermissionIntrospectionColumn;
 
-export type StrokeSelectedWithIncludes<
-  I extends StrokeInclude = {},
-  S extends keyof Stroke | "*" = keyof Stroke,
-> = StrokeSelected<S> & Omit<StrokeWithIncludes<I>, keyof Stroke>;
+export type ReactionSelected<S extends ReactionSelectableColumn = keyof Reaction> = "*" extends S ? Reaction : Pick<Reaction, Extract<S | "id", keyof Reaction>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type AttachmentSelected<S extends keyof Attachment | "*" = keyof Attachment> = "*" extends S
-  ? Attachment
-  : Pick<Attachment, Extract<S | "id", keyof Attachment>>;
+export type ReactionSelectedWithIncludes<I extends ReactionInclude = {}, S extends ReactionSelectableColumn = keyof Reaction> = Omit<ReactionSelected<S>, Extract<keyof I, keyof ReactionSelected<S>>> & ReactionIncludedRelations<I>;
 
-export type AttachmentSelectedWithIncludes<
-  I extends AttachmentInclude = {},
-  S extends keyof Attachment | "*" = keyof Attachment,
-> = AttachmentSelected<S> & Omit<AttachmentWithIncludes<I>, keyof Attachment>;
+export type CanvasSelectableColumn = keyof Canvas | PermissionIntrospectionColumn | "*";
+export type CanvasOrderableColumn = keyof Canvas | PermissionIntrospectionColumn;
+
+export type CanvasSelected<S extends CanvasSelectableColumn = keyof Canvas> = "*" extends S ? Canvas : Pick<Canvas, Extract<S | "id", keyof Canvas>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type CanvasSelectedWithIncludes<I extends CanvasInclude = {}, S extends CanvasSelectableColumn = keyof Canvas> = Omit<CanvasSelected<S>, Extract<keyof I, keyof CanvasSelected<S>>> & CanvasIncludedRelations<I>;
+
+export type StrokeSelectableColumn = keyof Stroke | PermissionIntrospectionColumn | "*";
+export type StrokeOrderableColumn = keyof Stroke | PermissionIntrospectionColumn;
+
+export type StrokeSelected<S extends StrokeSelectableColumn = keyof Stroke> = "*" extends S ? Stroke : Pick<Stroke, Extract<S | "id", keyof Stroke>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type StrokeSelectedWithIncludes<I extends StrokeInclude = {}, S extends StrokeSelectableColumn = keyof Stroke> = Omit<StrokeSelected<S>, Extract<keyof I, keyof StrokeSelected<S>>> & StrokeIncludedRelations<I>;
+
+export type AttachmentSelectableColumn = keyof Attachment | PermissionIntrospectionColumn | "*";
+export type AttachmentOrderableColumn = keyof Attachment | PermissionIntrospectionColumn;
+
+export type AttachmentSelected<S extends AttachmentSelectableColumn = keyof Attachment> = "*" extends S ? Attachment : Pick<Attachment, Extract<S | "id", keyof Attachment>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type AttachmentSelectedWithIncludes<I extends AttachmentInclude = {}, S extends AttachmentSelectableColumn = keyof Attachment> = Omit<AttachmentSelected<S>, Extract<keyof I, keyof AttachmentSelected<S>>> & AttachmentIncludedRelations<I>;
 
 export const wasmSchema: WasmSchema = {
-  profiles: {
-    columns: [
+  "profiles": {
+    "columns": [
       {
-        name: "userId",
-        column_type: {
-          type: "Text",
+        "name": "userId",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "name",
-        column_type: {
-          type: "Text",
+        "name": "name",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "avatar",
-        column_type: {
-          type: "Text",
+        "name": "avatar",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: true,
-      },
+        "nullable": true
+      }
     ],
-    policies: {
-      select: {
-        using: {
-          type: "True",
-        },
+    "policies": {
+      "select": {
+        "using": {
+          "type": "True"
+        }
       },
-      insert: {
-        with_check: {
-          type: "Cmp",
-          column: "userId",
-          op: "Eq",
-          value: {
-            type: "SessionRef",
-            path: ["user_id"],
-          },
-        },
+      "insert": {
+        "with_check": {
+          "type": "Cmp",
+          "column": "userId",
+          "op": "Eq",
+          "value": {
+            "type": "SessionRef",
+            "path": [
+              "user_id"
+            ]
+          }
+        }
       },
-      update: {
-        using: {
-          type: "Cmp",
-          column: "userId",
-          op: "Eq",
-          value: {
-            type: "SessionRef",
-            path: ["user_id"],
-          },
+      "update": {
+        "using": {
+          "type": "Cmp",
+          "column": "userId",
+          "op": "Eq",
+          "value": {
+            "type": "SessionRef",
+            "path": [
+              "user_id"
+            ]
+          }
         },
-        with_check: {
-          type: "Cmp",
-          column: "userId",
-          op: "Eq",
-          value: {
-            type: "SessionRef",
-            path: ["user_id"],
-          },
-        },
+        "with_check": {
+          "type": "Cmp",
+          "column": "userId",
+          "op": "Eq",
+          "value": {
+            "type": "SessionRef",
+            "path": [
+              "user_id"
+            ]
+          }
+        }
       },
-      delete: {},
-    },
+      "delete": {}
+    }
   },
-  chats: {
-    columns: [
+  "chats": {
+    "columns": [
       {
-        name: "isPublic",
-        column_type: {
-          type: "Boolean",
+        "name": "isPublic",
+        "column_type": {
+          "type": "Boolean"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "createdBy",
-        column_type: {
-          type: "Text",
+        "name": "createdBy",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
+      {
+        "name": "joinCode",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      }
     ],
-    policies: {
-      select: {
-        using: {
-          type: "Or",
-          exprs: [
+    "policies": {
+      "select": {
+        "using": {
+          "type": "Or",
+          "exprs": [
             {
-              type: "Cmp",
-              column: "isPublic",
-              op: "Eq",
-              value: {
-                type: "Literal",
-                value: {
-                  type: "Boolean",
-                  value: true,
-                },
-              },
+              "type": "Cmp",
+              "column": "isPublic",
+              "op": "Eq",
+              "value": {
+                "type": "Literal",
+                "value": {
+                  "type": "Boolean",
+                  "value": true
+                }
+              }
             },
             {
-              type: "Exists",
-              table: "chatMembers",
-              condition: {
-                type: "And",
-                exprs: [
+              "type": "Exists",
+              "table": "chatMembers",
+              "condition": {
+                "type": "And",
+                "exprs": [
                   {
-                    type: "Cmp",
-                    column: "chat",
-                    op: "Eq",
-                    value: {
-                      type: "SessionRef",
-                      path: ["__jazz_outer_row", "id"],
-                    },
+                    "type": "Cmp",
+                    "column": "chat",
+                    "op": "Eq",
+                    "value": {
+                      "type": "SessionRef",
+                      "path": [
+                        "__jazz_outer_row",
+                        "id"
+                      ]
+                    }
                   },
                   {
-                    type: "Cmp",
-                    column: "userId",
-                    op: "Eq",
-                    value: {
-                      type: "SessionRef",
-                      path: ["user_id"],
-                    },
-                  },
-                ],
-              },
+                    "type": "Cmp",
+                    "column": "userId",
+                    "op": "Eq",
+                    "value": {
+                      "type": "SessionRef",
+                      "path": [
+                        "user_id"
+                      ]
+                    }
+                  }
+                ]
+              }
             },
             {
-              type: "Exists",
-              table: "chatMembers",
-              condition: {
-                type: "And",
-                exprs: [
-                  {
-                    type: "Cmp",
-                    column: "chat",
-                    op: "Eq",
-                    value: {
-                      type: "SessionRef",
-                      path: ["__jazz_outer_row", "id"],
-                    },
-                  },
-                  {
-                    type: "Cmp",
-                    column: "joinCode",
-                    op: "Eq",
-                    value: {
-                      type: "SessionRef",
-                      path: ["claims", "join_code"],
-                    },
-                  },
-                ],
-              },
-            },
-          ],
-        },
+              "type": "Cmp",
+              "column": "joinCode",
+              "op": "Eq",
+              "value": {
+                "type": "SessionRef",
+                "path": [
+                  "claims",
+                  "join_code"
+                ]
+              }
+            }
+          ]
+        }
       },
-      insert: {
-        with_check: {
-          type: "Cmp",
-          column: "createdBy",
-          op: "Eq",
-          value: {
-            type: "SessionRef",
-            path: ["user_id"],
-          },
-        },
+      "insert": {
+        "with_check": {
+          "type": "Cmp",
+          "column": "createdBy",
+          "op": "Eq",
+          "value": {
+            "type": "SessionRef",
+            "path": [
+              "user_id"
+            ]
+          }
+        }
       },
-      update: {},
-      delete: {},
-    },
+      "update": {},
+      "delete": {}
+    }
   },
-  chatMembers: {
-    columns: [
+  "chatMembers": {
+    "columns": [
       {
-        name: "chat",
-        column_type: {
-          type: "Uuid",
+        "name": "chat",
+        "column_type": {
+          "type": "Uuid"
         },
-        nullable: false,
-        references: "chats",
+        "nullable": false,
+        "references": "chats"
       },
       {
-        name: "userId",
-        column_type: {
-          type: "Text",
+        "name": "userId",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "joinCode",
-        column_type: {
-          type: "Text",
+        "name": "joinCode",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: true,
-      },
+        "nullable": true
+      }
     ],
-    policies: {
-      select: {
-        using: {
-          type: "Cmp",
-          column: "userId",
-          op: "Eq",
-          value: {
-            type: "SessionRef",
-            path: ["user_id"],
-          },
-        },
+    "policies": {
+      "select": {
+        "using": {
+          "type": "Cmp",
+          "column": "userId",
+          "op": "Eq",
+          "value": {
+            "type": "SessionRef",
+            "path": [
+              "user_id"
+            ]
+          }
+        }
       },
-      insert: {
-        with_check: {
-          type: "Cmp",
-          column: "userId",
-          op: "Eq",
-          value: {
-            type: "SessionRef",
-            path: ["user_id"],
-          },
-        },
+      "insert": {
+        "with_check": {
+          "type": "Cmp",
+          "column": "userId",
+          "op": "Eq",
+          "value": {
+            "type": "SessionRef",
+            "path": [
+              "user_id"
+            ]
+          }
+        }
       },
-      update: {},
-      delete: {},
-    },
+      "update": {},
+      "delete": {}
+    }
   },
-  messages: {
-    columns: [
+  "messages": {
+    "columns": [
       {
-        name: "chat",
-        column_type: {
-          type: "Uuid",
+        "name": "chat",
+        "column_type": {
+          "type": "Uuid"
         },
-        nullable: false,
-        references: "chats",
+        "nullable": false,
+        "references": "chats"
       },
       {
-        name: "text",
-        column_type: {
-          type: "Text",
+        "name": "text",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "sender",
-        column_type: {
-          type: "Uuid",
+        "name": "sender",
+        "column_type": {
+          "type": "Uuid"
         },
-        nullable: false,
-        references: "profiles",
+        "nullable": false,
+        "references": "profiles"
       },
       {
-        name: "senderId",
-        column_type: {
-          type: "Text",
+        "name": "senderId",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "createdAt",
-        column_type: {
-          type: "Timestamp",
+        "name": "createdAt",
+        "column_type": {
+          "type": "Timestamp"
         },
-        nullable: false,
-      },
+        "nullable": false
+      }
     ],
-    policies: {
-      select: {
-        using: {
-          type: "Or",
-          exprs: [
+    "policies": {
+      "select": {
+        "using": {
+          "type": "Or",
+          "exprs": [
             {
-              type: "Inherits",
-              operation: "Select",
-              via_column: "chat",
+              "type": "Inherits",
+              "operation": "Select",
+              "via_column": "chat"
             },
             {
-              type: "Exists",
-              table: "chatMembers",
-              condition: {
-                type: "And",
-                exprs: [
+              "type": "Exists",
+              "table": "chatMembers",
+              "condition": {
+                "type": "And",
+                "exprs": [
                   {
-                    type: "Cmp",
-                    column: "chat",
-                    op: "Eq",
-                    value: {
-                      type: "SessionRef",
-                      path: ["__jazz_outer_row", "chat"],
-                    },
+                    "type": "Cmp",
+                    "column": "chat",
+                    "op": "Eq",
+                    "value": {
+                      "type": "SessionRef",
+                      "path": [
+                        "__jazz_outer_row",
+                        "chat"
+                      ]
+                    }
                   },
                   {
-                    type: "Cmp",
-                    column: "userId",
-                    op: "Eq",
-                    value: {
-                      type: "SessionRef",
-                      path: ["user_id"],
-                    },
-                  },
-                ],
-              },
-            },
-          ],
-        },
+                    "type": "Cmp",
+                    "column": "userId",
+                    "op": "Eq",
+                    "value": {
+                      "type": "SessionRef",
+                      "path": [
+                        "user_id"
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
       },
-      insert: {
-        with_check: {
-          type: "Exists",
-          table: "chatMembers",
-          condition: {
-            type: "And",
-            exprs: [
+      "insert": {
+        "with_check": {
+          "type": "Exists",
+          "table": "chatMembers",
+          "condition": {
+            "type": "And",
+            "exprs": [
               {
-                type: "Cmp",
-                column: "chat",
-                op: "Eq",
-                value: {
-                  type: "SessionRef",
-                  path: ["__jazz_outer_row", "chat"],
-                },
-              },
-              {
-                type: "Cmp",
-                column: "userId",
-                op: "Eq",
-                value: {
-                  type: "SessionRef",
-                  path: ["user_id"],
-                },
-              },
-            ],
-          },
-        },
-      },
-      update: {},
-      delete: {
-        using: {
-          type: "Cmp",
-          column: "senderId",
-          op: "Eq",
-          value: {
-            type: "SessionRef",
-            path: ["user_id"],
-          },
-        },
-      },
-    },
-  },
-  reactions: {
-    columns: [
-      {
-        name: "message",
-        column_type: {
-          type: "Uuid",
-        },
-        nullable: false,
-        references: "messages",
-      },
-      {
-        name: "userId",
-        column_type: {
-          type: "Text",
-        },
-        nullable: false,
-      },
-      {
-        name: "emoji",
-        column_type: {
-          type: "Text",
-        },
-        nullable: false,
-      },
-    ],
-    policies: {
-      select: {
-        using: {
-          type: "Inherits",
-          operation: "Select",
-          via_column: "message",
-        },
-      },
-      insert: {
-        with_check: {
-          type: "Cmp",
-          column: "userId",
-          op: "Eq",
-          value: {
-            type: "SessionRef",
-            path: ["user_id"],
-          },
-        },
-      },
-      update: {},
-      delete: {
-        using: {
-          type: "Cmp",
-          column: "userId",
-          op: "Eq",
-          value: {
-            type: "SessionRef",
-            path: ["user_id"],
-          },
-        },
-      },
-    },
-  },
-  canvases: {
-    columns: [
-      {
-        name: "chat",
-        column_type: {
-          type: "Uuid",
-        },
-        nullable: false,
-        references: "chats",
-      },
-      {
-        name: "createdAt",
-        column_type: {
-          type: "Timestamp",
-        },
-        nullable: false,
-      },
-    ],
-    policies: {
-      select: {
-        using: {
-          type: "Or",
-          exprs: [
-            {
-              type: "Inherits",
-              operation: "Select",
-              via_column: "chat",
-            },
-            {
-              type: "Exists",
-              table: "chatMembers",
-              condition: {
-                type: "And",
-                exprs: [
-                  {
-                    type: "Cmp",
-                    column: "chat",
-                    op: "Eq",
-                    value: {
-                      type: "SessionRef",
-                      path: ["__jazz_outer_row", "chat"],
-                    },
-                  },
-                  {
-                    type: "Cmp",
-                    column: "userId",
-                    op: "Eq",
-                    value: {
-                      type: "SessionRef",
-                      path: ["user_id"],
-                    },
-                  },
-                ],
-              },
-            },
-          ],
-        },
-      },
-      insert: {
-        with_check: {
-          type: "Exists",
-          table: "chatMembers",
-          condition: {
-            type: "And",
-            exprs: [
-              {
-                type: "Cmp",
-                column: "chat",
-                op: "Eq",
-                value: {
-                  type: "SessionRef",
-                  path: ["__jazz_outer_row", "chat"],
-                },
+                "type": "Cmp",
+                "column": "chat",
+                "op": "Eq",
+                "value": {
+                  "type": "SessionRef",
+                  "path": [
+                    "__jazz_outer_row",
+                    "chat"
+                  ]
+                }
               },
               {
-                type: "Cmp",
-                column: "userId",
-                op: "Eq",
-                value: {
-                  type: "SessionRef",
-                  path: ["user_id"],
-                },
+                "type": "Cmp",
+                "column": "userId",
+                "op": "Eq",
+                "value": {
+                  "type": "SessionRef",
+                  "path": [
+                    "user_id"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "update": {},
+      "delete": {
+        "using": {
+          "type": "Cmp",
+          "column": "senderId",
+          "op": "Eq",
+          "value": {
+            "type": "SessionRef",
+            "path": [
+              "user_id"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "reactions": {
+    "columns": [
+      {
+        "name": "message",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "messages"
+      },
+      {
+        "name": "userId",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      },
+      {
+        "name": "emoji",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": false
+      }
+    ],
+    "policies": {
+      "select": {
+        "using": {
+          "type": "Inherits",
+          "operation": "Select",
+          "via_column": "message"
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "Cmp",
+          "column": "userId",
+          "op": "Eq",
+          "value": {
+            "type": "SessionRef",
+            "path": [
+              "user_id"
+            ]
+          }
+        }
+      },
+      "update": {},
+      "delete": {
+        "using": {
+          "type": "Cmp",
+          "column": "userId",
+          "op": "Eq",
+          "value": {
+            "type": "SessionRef",
+            "path": [
+              "user_id"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "canvases": {
+    "columns": [
+      {
+        "name": "chat",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": false,
+        "references": "chats"
+      },
+      {
+        "name": "createdAt",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": false
+      }
+    ],
+    "policies": {
+      "select": {
+        "using": {
+          "type": "Or",
+          "exprs": [
+            {
+              "type": "Inherits",
+              "operation": "Select",
+              "via_column": "chat"
+            },
+            {
+              "type": "Exists",
+              "table": "chatMembers",
+              "condition": {
+                "type": "And",
+                "exprs": [
+                  {
+                    "type": "Cmp",
+                    "column": "chat",
+                    "op": "Eq",
+                    "value": {
+                      "type": "SessionRef",
+                      "path": [
+                        "__jazz_outer_row",
+                        "chat"
+                      ]
+                    }
+                  },
+                  {
+                    "type": "Cmp",
+                    "column": "userId",
+                    "op": "Eq",
+                    "value": {
+                      "type": "SessionRef",
+                      "path": [
+                        "user_id"
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "insert": {
+        "with_check": {
+          "type": "Exists",
+          "table": "chatMembers",
+          "condition": {
+            "type": "And",
+            "exprs": [
+              {
+                "type": "Cmp",
+                "column": "chat",
+                "op": "Eq",
+                "value": {
+                  "type": "SessionRef",
+                  "path": [
+                    "__jazz_outer_row",
+                    "chat"
+                  ]
+                }
               },
-            ],
-          },
-        },
+              {
+                "type": "Cmp",
+                "column": "userId",
+                "op": "Eq",
+                "value": {
+                  "type": "SessionRef",
+                  "path": [
+                    "user_id"
+                  ]
+                }
+              }
+            ]
+          }
+        }
       },
-      update: {},
-      delete: {},
-    },
+      "update": {},
+      "delete": {}
+    }
   },
-  strokes: {
-    columns: [
+  "strokes": {
+    "columns": [
       {
-        name: "canvas",
-        column_type: {
-          type: "Uuid",
+        "name": "canvas",
+        "column_type": {
+          "type": "Uuid"
         },
-        nullable: false,
-        references: "canvases",
+        "nullable": false,
+        "references": "canvases"
       },
       {
-        name: "ownerId",
-        column_type: {
-          type: "Text",
+        "name": "ownerId",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "color",
-        column_type: {
-          type: "Text",
+        "name": "color",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "width",
-        column_type: {
-          type: "Integer",
+        "name": "width",
+        "column_type": {
+          "type": "Integer"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "pointsJson",
-        column_type: {
-          type: "Text",
+        "name": "pointsJson",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "createdAt",
-        column_type: {
-          type: "Timestamp",
+        "name": "createdAt",
+        "column_type": {
+          "type": "Timestamp"
         },
-        nullable: false,
-      },
+        "nullable": false
+      }
     ],
-    policies: {
-      select: {
-        using: {
-          type: "Inherits",
-          operation: "Select",
-          via_column: "canvas",
-        },
+    "policies": {
+      "select": {
+        "using": {
+          "type": "Inherits",
+          "operation": "Select",
+          "via_column": "canvas"
+        }
       },
-      insert: {
-        with_check: {
-          type: "Inherits",
-          operation: "Select",
-          via_column: "canvas",
-        },
+      "insert": {
+        "with_check": {
+          "type": "Inherits",
+          "operation": "Select",
+          "via_column": "canvas"
+        }
       },
-      update: {},
-      delete: {
-        using: {
-          type: "Cmp",
-          column: "ownerId",
-          op: "Eq",
-          value: {
-            type: "SessionRef",
-            path: ["user_id"],
-          },
-        },
-      },
-    },
+      "update": {},
+      "delete": {
+        "using": {
+          "type": "Cmp",
+          "column": "ownerId",
+          "op": "Eq",
+          "value": {
+            "type": "SessionRef",
+            "path": [
+              "user_id"
+            ]
+          }
+        }
+      }
+    }
   },
-  attachments: {
-    columns: [
+  "attachments": {
+    "columns": [
       {
-        name: "message",
-        column_type: {
-          type: "Uuid",
+        "name": "message",
+        "column_type": {
+          "type": "Uuid"
         },
-        nullable: false,
-        references: "messages",
+        "nullable": false,
+        "references": "messages"
       },
       {
-        name: "type",
-        column_type: {
-          type: "Text",
+        "name": "type",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "name",
-        column_type: {
-          type: "Text",
+        "name": "name",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "data",
-        column_type: {
-          type: "Text",
+        "name": "data",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "mimeType",
-        column_type: {
-          type: "Text",
+        "name": "mimeType",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "size",
-        column_type: {
-          type: "Integer",
+        "name": "size",
+        "column_type": {
+          "type": "Integer"
         },
-        nullable: false,
-      },
+        "nullable": false
+      }
     ],
-    policies: {
-      select: {
-        using: {
-          type: "Inherits",
-          operation: "Select",
-          via_column: "message",
-        },
+    "policies": {
+      "select": {
+        "using": {
+          "type": "Inherits",
+          "operation": "Select",
+          "via_column": "message"
+        }
       },
-      insert: {
-        with_check: {
-          type: "Inherits",
-          operation: "Select",
-          via_column: "message",
-        },
+      "insert": {
+        "with_check": {
+          "type": "Inherits",
+          "operation": "Select",
+          "via_column": "message"
+        }
       },
-      update: {},
-      delete: {},
-    },
-  },
+      "update": {},
+      "delete": {}
+    }
+  }
 };
 
-export class ProfileQueryBuilder<
-  I extends ProfileInclude = {},
-  S extends keyof Profile | "*" = keyof Profile,
-> implements QueryBuilder<ProfileSelectedWithIncludes<I, S>> {
+export class ProfileQueryBuilder<I extends ProfileInclude = {}, S extends ProfileSelectableColumn = keyof Profile> implements QueryBuilder<ProfileSelectedWithIncludes<I, S>> {
   readonly _table = "profiles";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: ProfileSelectedWithIncludes<I, S>;
@@ -1234,9 +1262,7 @@ export class ProfileQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Profile | "*">(
-    ...columns: [NewS, ...NewS[]]
-  ): ProfileQueryBuilder<I, NewS> {
+  select<NewS extends ProfileSelectableColumn>(...columns: [NewS, ...NewS[]]): ProfileQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -1248,7 +1274,7 @@ export class ProfileQueryBuilder<
     return clone;
   }
 
-  orderBy(column: keyof Profile, direction: "asc" | "desc" = "asc"): ProfileQueryBuilder<I, S> {
+  orderBy(column: ProfileOrderableColumn, direction: "asc" | "desc" = "asc"): ProfileQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -1297,15 +1323,13 @@ export class ProfileQueryBuilder<
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (
-      !stepOutput ||
-      typeof stepOutput !== "object" ||
-      typeof (stepOutput as { _build?: unknown })._build !== "function"
-    ) {
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(stepOutput._build()) as {
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -1329,9 +1353,7 @@ export class ProfileQueryBuilder<
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error(
-        "gather(...) step must include exactly one where condition bound to current.",
-      );
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
     }
 
     const currentCondition = currentConditions[0];
@@ -1371,10 +1393,7 @@ export class ProfileQueryBuilder<
     return JSON.parse(this._build());
   }
 
-  private _clone<
-    CloneI extends ProfileInclude = I,
-    CloneS extends keyof Profile | "*" = S,
-  >(): ProfileQueryBuilder<CloneI, CloneS> {
+  private _clone<CloneI extends ProfileInclude = I, CloneS extends ProfileSelectableColumn = S>(): ProfileQueryBuilder<CloneI, CloneS> {
     const clone = new ProfileQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
@@ -1394,10 +1413,7 @@ export class ProfileQueryBuilder<
   }
 }
 
-export class ChatQueryBuilder<
-  I extends ChatInclude = {},
-  S extends keyof Chat | "*" = keyof Chat,
-> implements QueryBuilder<ChatSelectedWithIncludes<I, S>> {
+export class ChatQueryBuilder<I extends ChatInclude = {}, S extends ChatSelectableColumn = keyof Chat> implements QueryBuilder<ChatSelectedWithIncludes<I, S>> {
   readonly _table = "chats";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: ChatSelectedWithIncludes<I, S>;
@@ -1434,7 +1450,7 @@ export class ChatQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Chat | "*">(...columns: [NewS, ...NewS[]]): ChatQueryBuilder<I, NewS> {
+  select<NewS extends ChatSelectableColumn>(...columns: [NewS, ...NewS[]]): ChatQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -1446,7 +1462,7 @@ export class ChatQueryBuilder<
     return clone;
   }
 
-  orderBy(column: keyof Chat, direction: "asc" | "desc" = "asc"): ChatQueryBuilder<I, S> {
+  orderBy(column: ChatOrderableColumn, direction: "asc" | "desc" = "asc"): ChatQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -1464,9 +1480,7 @@ export class ChatQueryBuilder<
     return clone;
   }
 
-  hopTo(
-    relation: "chatMembersViaChat" | "messagesViaChat" | "canvasesViaChat",
-  ): ChatQueryBuilder<I, S> {
+  hopTo(relation: "chatMembersViaChat" | "messagesViaChat" | "canvasesViaChat"): ChatQueryBuilder<I, S> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -1497,15 +1511,13 @@ export class ChatQueryBuilder<
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (
-      !stepOutput ||
-      typeof stepOutput !== "object" ||
-      typeof (stepOutput as { _build?: unknown })._build !== "function"
-    ) {
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(stepOutput._build()) as {
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -1529,9 +1541,7 @@ export class ChatQueryBuilder<
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error(
-        "gather(...) step must include exactly one where condition bound to current.",
-      );
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
     }
 
     const currentCondition = currentConditions[0];
@@ -1571,10 +1581,7 @@ export class ChatQueryBuilder<
     return JSON.parse(this._build());
   }
 
-  private _clone<
-    CloneI extends ChatInclude = I,
-    CloneS extends keyof Chat | "*" = S,
-  >(): ChatQueryBuilder<CloneI, CloneS> {
+  private _clone<CloneI extends ChatInclude = I, CloneS extends ChatSelectableColumn = S>(): ChatQueryBuilder<CloneI, CloneS> {
     const clone = new ChatQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
@@ -1594,10 +1601,7 @@ export class ChatQueryBuilder<
   }
 }
 
-export class ChatMemberQueryBuilder<
-  I extends ChatMemberInclude = {},
-  S extends keyof ChatMember | "*" = keyof ChatMember,
-> implements QueryBuilder<ChatMemberSelectedWithIncludes<I, S>> {
+export class ChatMemberQueryBuilder<I extends ChatMemberInclude = {}, S extends ChatMemberSelectableColumn = keyof ChatMember> implements QueryBuilder<ChatMemberSelectedWithIncludes<I, S>> {
   readonly _table = "chatMembers";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: ChatMemberSelectedWithIncludes<I, S>;
@@ -1634,9 +1638,7 @@ export class ChatMemberQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof ChatMember | "*">(
-    ...columns: [NewS, ...NewS[]]
-  ): ChatMemberQueryBuilder<I, NewS> {
+  select<NewS extends ChatMemberSelectableColumn>(...columns: [NewS, ...NewS[]]): ChatMemberQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -1648,10 +1650,7 @@ export class ChatMemberQueryBuilder<
     return clone;
   }
 
-  orderBy(
-    column: keyof ChatMember,
-    direction: "asc" | "desc" = "asc",
-  ): ChatMemberQueryBuilder<I, S> {
+  orderBy(column: ChatMemberOrderableColumn, direction: "asc" | "desc" = "asc"): ChatMemberQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -1700,15 +1699,13 @@ export class ChatMemberQueryBuilder<
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (
-      !stepOutput ||
-      typeof stepOutput !== "object" ||
-      typeof (stepOutput as { _build?: unknown })._build !== "function"
-    ) {
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(stepOutput._build()) as {
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -1732,9 +1729,7 @@ export class ChatMemberQueryBuilder<
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error(
-        "gather(...) step must include exactly one where condition bound to current.",
-      );
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
     }
 
     const currentCondition = currentConditions[0];
@@ -1774,10 +1769,7 @@ export class ChatMemberQueryBuilder<
     return JSON.parse(this._build());
   }
 
-  private _clone<
-    CloneI extends ChatMemberInclude = I,
-    CloneS extends keyof ChatMember | "*" = S,
-  >(): ChatMemberQueryBuilder<CloneI, CloneS> {
+  private _clone<CloneI extends ChatMemberInclude = I, CloneS extends ChatMemberSelectableColumn = S>(): ChatMemberQueryBuilder<CloneI, CloneS> {
     const clone = new ChatMemberQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
@@ -1797,10 +1789,7 @@ export class ChatMemberQueryBuilder<
   }
 }
 
-export class MessageQueryBuilder<
-  I extends MessageInclude = {},
-  S extends keyof Message | "*" = keyof Message,
-> implements QueryBuilder<MessageSelectedWithIncludes<I, S>> {
+export class MessageQueryBuilder<I extends MessageInclude = {}, S extends MessageSelectableColumn = keyof Message> implements QueryBuilder<MessageSelectedWithIncludes<I, S>> {
   readonly _table = "messages";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: MessageSelectedWithIncludes<I, S>;
@@ -1837,9 +1826,7 @@ export class MessageQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Message | "*">(
-    ...columns: [NewS, ...NewS[]]
-  ): MessageQueryBuilder<I, NewS> {
+  select<NewS extends MessageSelectableColumn>(...columns: [NewS, ...NewS[]]): MessageQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -1851,7 +1838,7 @@ export class MessageQueryBuilder<
     return clone;
   }
 
-  orderBy(column: keyof Message, direction: "asc" | "desc" = "asc"): MessageQueryBuilder<I, S> {
+  orderBy(column: MessageOrderableColumn, direction: "asc" | "desc" = "asc"): MessageQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -1869,9 +1856,7 @@ export class MessageQueryBuilder<
     return clone;
   }
 
-  hopTo(
-    relation: "chat" | "sender" | "reactionsViaMessage" | "attachmentsViaMessage",
-  ): MessageQueryBuilder<I, S> {
+  hopTo(relation: "chat" | "sender" | "reactionsViaMessage" | "attachmentsViaMessage"): MessageQueryBuilder<I, S> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -1902,15 +1887,13 @@ export class MessageQueryBuilder<
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (
-      !stepOutput ||
-      typeof stepOutput !== "object" ||
-      typeof (stepOutput as { _build?: unknown })._build !== "function"
-    ) {
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(stepOutput._build()) as {
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -1934,9 +1917,7 @@ export class MessageQueryBuilder<
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error(
-        "gather(...) step must include exactly one where condition bound to current.",
-      );
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
     }
 
     const currentCondition = currentConditions[0];
@@ -1976,10 +1957,7 @@ export class MessageQueryBuilder<
     return JSON.parse(this._build());
   }
 
-  private _clone<
-    CloneI extends MessageInclude = I,
-    CloneS extends keyof Message | "*" = S,
-  >(): MessageQueryBuilder<CloneI, CloneS> {
+  private _clone<CloneI extends MessageInclude = I, CloneS extends MessageSelectableColumn = S>(): MessageQueryBuilder<CloneI, CloneS> {
     const clone = new MessageQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
@@ -1999,10 +1977,7 @@ export class MessageQueryBuilder<
   }
 }
 
-export class ReactionQueryBuilder<
-  I extends ReactionInclude = {},
-  S extends keyof Reaction | "*" = keyof Reaction,
-> implements QueryBuilder<ReactionSelectedWithIncludes<I, S>> {
+export class ReactionQueryBuilder<I extends ReactionInclude = {}, S extends ReactionSelectableColumn = keyof Reaction> implements QueryBuilder<ReactionSelectedWithIncludes<I, S>> {
   readonly _table = "reactions";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: ReactionSelectedWithIncludes<I, S>;
@@ -2039,9 +2014,7 @@ export class ReactionQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Reaction | "*">(
-    ...columns: [NewS, ...NewS[]]
-  ): ReactionQueryBuilder<I, NewS> {
+  select<NewS extends ReactionSelectableColumn>(...columns: [NewS, ...NewS[]]): ReactionQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -2053,7 +2026,7 @@ export class ReactionQueryBuilder<
     return clone;
   }
 
-  orderBy(column: keyof Reaction, direction: "asc" | "desc" = "asc"): ReactionQueryBuilder<I, S> {
+  orderBy(column: ReactionOrderableColumn, direction: "asc" | "desc" = "asc"): ReactionQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -2102,15 +2075,13 @@ export class ReactionQueryBuilder<
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (
-      !stepOutput ||
-      typeof stepOutput !== "object" ||
-      typeof (stepOutput as { _build?: unknown })._build !== "function"
-    ) {
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(stepOutput._build()) as {
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -2134,9 +2105,7 @@ export class ReactionQueryBuilder<
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error(
-        "gather(...) step must include exactly one where condition bound to current.",
-      );
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
     }
 
     const currentCondition = currentConditions[0];
@@ -2176,10 +2145,7 @@ export class ReactionQueryBuilder<
     return JSON.parse(this._build());
   }
 
-  private _clone<
-    CloneI extends ReactionInclude = I,
-    CloneS extends keyof Reaction | "*" = S,
-  >(): ReactionQueryBuilder<CloneI, CloneS> {
+  private _clone<CloneI extends ReactionInclude = I, CloneS extends ReactionSelectableColumn = S>(): ReactionQueryBuilder<CloneI, CloneS> {
     const clone = new ReactionQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
@@ -2199,10 +2165,7 @@ export class ReactionQueryBuilder<
   }
 }
 
-export class CanvasQueryBuilder<
-  I extends CanvasInclude = {},
-  S extends keyof Canvas | "*" = keyof Canvas,
-> implements QueryBuilder<CanvasSelectedWithIncludes<I, S>> {
+export class CanvasQueryBuilder<I extends CanvasInclude = {}, S extends CanvasSelectableColumn = keyof Canvas> implements QueryBuilder<CanvasSelectedWithIncludes<I, S>> {
   readonly _table = "canvases";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: CanvasSelectedWithIncludes<I, S>;
@@ -2239,9 +2202,7 @@ export class CanvasQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Canvas | "*">(
-    ...columns: [NewS, ...NewS[]]
-  ): CanvasQueryBuilder<I, NewS> {
+  select<NewS extends CanvasSelectableColumn>(...columns: [NewS, ...NewS[]]): CanvasQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -2253,7 +2214,7 @@ export class CanvasQueryBuilder<
     return clone;
   }
 
-  orderBy(column: keyof Canvas, direction: "asc" | "desc" = "asc"): CanvasQueryBuilder<I, S> {
+  orderBy(column: CanvasOrderableColumn, direction: "asc" | "desc" = "asc"): CanvasQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -2302,15 +2263,13 @@ export class CanvasQueryBuilder<
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (
-      !stepOutput ||
-      typeof stepOutput !== "object" ||
-      typeof (stepOutput as { _build?: unknown })._build !== "function"
-    ) {
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(stepOutput._build()) as {
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -2334,9 +2293,7 @@ export class CanvasQueryBuilder<
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error(
-        "gather(...) step must include exactly one where condition bound to current.",
-      );
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
     }
 
     const currentCondition = currentConditions[0];
@@ -2376,10 +2333,7 @@ export class CanvasQueryBuilder<
     return JSON.parse(this._build());
   }
 
-  private _clone<
-    CloneI extends CanvasInclude = I,
-    CloneS extends keyof Canvas | "*" = S,
-  >(): CanvasQueryBuilder<CloneI, CloneS> {
+  private _clone<CloneI extends CanvasInclude = I, CloneS extends CanvasSelectableColumn = S>(): CanvasQueryBuilder<CloneI, CloneS> {
     const clone = new CanvasQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
@@ -2399,10 +2353,7 @@ export class CanvasQueryBuilder<
   }
 }
 
-export class StrokeQueryBuilder<
-  I extends StrokeInclude = {},
-  S extends keyof Stroke | "*" = keyof Stroke,
-> implements QueryBuilder<StrokeSelectedWithIncludes<I, S>> {
+export class StrokeQueryBuilder<I extends StrokeInclude = {}, S extends StrokeSelectableColumn = keyof Stroke> implements QueryBuilder<StrokeSelectedWithIncludes<I, S>> {
   readonly _table = "strokes";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: StrokeSelectedWithIncludes<I, S>;
@@ -2439,9 +2390,7 @@ export class StrokeQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Stroke | "*">(
-    ...columns: [NewS, ...NewS[]]
-  ): StrokeQueryBuilder<I, NewS> {
+  select<NewS extends StrokeSelectableColumn>(...columns: [NewS, ...NewS[]]): StrokeQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -2453,7 +2402,7 @@ export class StrokeQueryBuilder<
     return clone;
   }
 
-  orderBy(column: keyof Stroke, direction: "asc" | "desc" = "asc"): StrokeQueryBuilder<I, S> {
+  orderBy(column: StrokeOrderableColumn, direction: "asc" | "desc" = "asc"): StrokeQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -2502,15 +2451,13 @@ export class StrokeQueryBuilder<
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (
-      !stepOutput ||
-      typeof stepOutput !== "object" ||
-      typeof (stepOutput as { _build?: unknown })._build !== "function"
-    ) {
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(stepOutput._build()) as {
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -2534,9 +2481,7 @@ export class StrokeQueryBuilder<
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error(
-        "gather(...) step must include exactly one where condition bound to current.",
-      );
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
     }
 
     const currentCondition = currentConditions[0];
@@ -2576,10 +2521,7 @@ export class StrokeQueryBuilder<
     return JSON.parse(this._build());
   }
 
-  private _clone<
-    CloneI extends StrokeInclude = I,
-    CloneS extends keyof Stroke | "*" = S,
-  >(): StrokeQueryBuilder<CloneI, CloneS> {
+  private _clone<CloneI extends StrokeInclude = I, CloneS extends StrokeSelectableColumn = S>(): StrokeQueryBuilder<CloneI, CloneS> {
     const clone = new StrokeQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
@@ -2599,10 +2541,7 @@ export class StrokeQueryBuilder<
   }
 }
 
-export class AttachmentQueryBuilder<
-  I extends AttachmentInclude = {},
-  S extends keyof Attachment | "*" = keyof Attachment,
-> implements QueryBuilder<AttachmentSelectedWithIncludes<I, S>> {
+export class AttachmentQueryBuilder<I extends AttachmentInclude = {}, S extends AttachmentSelectableColumn = keyof Attachment> implements QueryBuilder<AttachmentSelectedWithIncludes<I, S>> {
   readonly _table = "attachments";
   readonly _schema: WasmSchema = wasmSchema;
   declare readonly _rowType: AttachmentSelectedWithIncludes<I, S>;
@@ -2639,9 +2578,7 @@ export class AttachmentQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Attachment | "*">(
-    ...columns: [NewS, ...NewS[]]
-  ): AttachmentQueryBuilder<I, NewS> {
+  select<NewS extends AttachmentSelectableColumn>(...columns: [NewS, ...NewS[]]): AttachmentQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -2653,10 +2590,7 @@ export class AttachmentQueryBuilder<
     return clone;
   }
 
-  orderBy(
-    column: keyof Attachment,
-    direction: "asc" | "desc" = "asc",
-  ): AttachmentQueryBuilder<I, S> {
+  orderBy(column: AttachmentOrderableColumn, direction: "asc" | "desc" = "asc"): AttachmentQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -2705,15 +2639,13 @@ export class AttachmentQueryBuilder<
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (
-      !stepOutput ||
-      typeof stepOutput !== "object" ||
-      typeof (stepOutput as { _build?: unknown })._build !== "function"
-    ) {
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(stepOutput._build()) as {
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -2737,9 +2669,7 @@ export class AttachmentQueryBuilder<
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error(
-        "gather(...) step must include exactly one where condition bound to current.",
-      );
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
     }
 
     const currentCondition = currentConditions[0];
@@ -2779,10 +2709,7 @@ export class AttachmentQueryBuilder<
     return JSON.parse(this._build());
   }
 
-  private _clone<
-    CloneI extends AttachmentInclude = I,
-    CloneS extends keyof Attachment | "*" = S,
-  >(): AttachmentQueryBuilder<CloneI, CloneS> {
+  private _clone<CloneI extends AttachmentInclude = I, CloneS extends AttachmentSelectableColumn = S>(): AttachmentQueryBuilder<CloneI, CloneS> {
     const clone = new AttachmentQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
