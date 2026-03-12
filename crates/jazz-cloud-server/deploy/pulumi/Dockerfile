@@ -5,7 +5,6 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY examples ./examples
-COPY patched-crates ./patched-crates
 
 RUN cargo build --release -p jazz-cloud-server
 
