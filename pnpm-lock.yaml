@@ -23,11 +23,6 @@ overrides:
   react: 19.2.4
   react-dom: 19.2.4
 
-patchedDependencies:
-  uniffi-bindgen-react-native@0.29.3-1:
-    hash: 651a1477b2643feac62679f63fd8996d65d416d6b2f5ee7f84fea45a8561bacb
-    path: patches/uniffi-bindgen-react-native@0.29.3-1.patch
-
 importers:
 
   .:
@@ -80,8 +75,8 @@ importers:
   crates/jazz-rn:
     dependencies:
       uniffi-bindgen-react-native:
-        specifier: 0.29.3-1
-        version: 0.29.3-1(patch_hash=651a1477b2643feac62679f63fd8996d65d416d6b2f5ee7f84fea45a8561bacb)
+        specifier: 0.30.0-1
+        version: 0.30.0-1
     devDependencies:
       '@commitlint/config-conventional':
         specifier: ^19.8.1
@@ -9482,8 +9477,8 @@ packages:
     resolution: {integrity: sha512-+QBBXBCvifc56fsbuxZQ6Sic3wqqc3WWaqxs58gvJrcOuN83HGTCwz3oS5phzU9LthRNE9VrJCFCLUgHeeFnfA==}
     engines: {node: '>=18'}
 
-  uniffi-bindgen-react-native@0.29.3-1:
-    resolution: {integrity: sha512-o6gXZsAh55yuvhwF2WSFdIHV4phyfWcCmg4DuyfJWJ7CvUz1UcIz2S4u9SmXAz1jsuqvu6Xc9hexrRBB0a5osg==}
+  uniffi-bindgen-react-native@0.30.0-1:
+    resolution: {integrity: sha512-rffyNPTQ2qFx7deaLXYVBhXcy4pDrjtEc28Pc1Rwt532IGEQquT7eNvvLKIgX6G5xODi6Yfni1zFs5u+O2QL1A==}
     hasBin: true
 
   unified@11.0.5:
@@ -20591,7 +20586,7 @@ snapshots:
 
   unicorn-magic@0.3.0: {}
 
-  uniffi-bindgen-react-native@0.29.3-1(patch_hash=651a1477b2643feac62679f63fd8996d65d416d6b2f5ee7f84fea45a8561bacb): {}
+  uniffi-bindgen-react-native@0.30.0-1: {}
 
   unified@11.0.5:
     dependencies:
