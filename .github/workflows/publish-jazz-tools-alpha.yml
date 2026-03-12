@@ -711,6 +711,7 @@ jobs:
         run: |
           mkdir -p dist/rn-ios
           cp -R crates/jazz-rn/JazzRnFramework.xcframework dist/rn-ios/
+          cp -R crates/jazz-rn/cpp/generated dist/rn-ios/cpp-generated
 
       - uses: actions/upload-artifact@v4
         with:
@@ -934,8 +935,11 @@ jobs:
         run: |
           rm -rf crates/jazz-rn/JazzRnFramework.xcframework
           rm -rf crates/jazz-rn/android/src/main/jniLibs
+          rm -rf crates/jazz-rn/cpp/generated
           mkdir -p crates/jazz-rn/android/src/main
+          mkdir -p crates/jazz-rn/cpp
           cp -R dist/rn-ios/JazzRnFramework.xcframework crates/jazz-rn/
+          cp -R dist/rn-ios/cpp-generated crates/jazz-rn/cpp/generated
           cp -R dist/rn-android/jniLibs crates/jazz-rn/android/src/main/
 
       - name: Show release mode
@@ -1117,6 +1121,16 @@ jobs:
           }
           grep -q '^package/JazzRnFramework.xcframework/Info.plist$' "${LISTING}" || {
             echo "Missing JazzRnFramework.xcframework/Info.plist in packed jazz-rn tarball."
+            exit 1
+          }
+
+          # Ensure generated C++ bindings are present (required by the podspec at compile time).
+          grep -q '^package/cpp/generated/jazz_rn\.hpp$' "${LISTING}" || {
+            echo "Missing cpp/generated/jazz_rn.hpp in packed jazz-rn tarball."
+            exit 1
+          }
+          grep -q '^package/cpp/generated/jazz_rn\.cpp$' "${LISTING}" || {
+            echo "Missing cpp/generated/jazz_rn.cpp in packed jazz-rn tarball."
             exit 1
           }
 
