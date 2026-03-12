@@ -6,6 +6,13 @@
 const { readFileSync } = require('node:fs')
 let nativeBinding = null;
 const loadErrors = [];
+const NATIVE_BINDING_PACKAGE_SCOPE = "@garden-co";
+const resolveNativeBindingPackage = (name) =>
+  `${NATIVE_BINDING_PACKAGE_SCOPE}/${name}`;
+const requireNativeBindingPackage = (name) =>
+  require(resolveNativeBindingPackage(name));
+const getNativeBindingPackageVersion = (name) =>
+  require(`${resolveNativeBindingPackage(name)}/package.json`).version;
 
 const isMusl = () => {
   let musl = false;
@@ -77,8 +84,8 @@ function requireNative() {
         loadErrors.push(e);
       }
       try {
-        const binding = require("jazz-napi-android-arm64");
-        const bindingPackageVersion = require("jazz-napi-android-arm64/package.json").version;
+        const binding = requireNativeBindingPackage("jazz-napi-android-arm64");
+        const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-android-arm64");
         if (
           bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -99,8 +106,8 @@ function requireNative() {
         loadErrors.push(e);
       }
       try {
-        const binding = require("jazz-napi-android-arm-eabi");
-        const bindingPackageVersion = require("jazz-napi-android-arm-eabi/package.json").version;
+        const binding = requireNativeBindingPackage("jazz-napi-android-arm-eabi");
+        const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-android-arm-eabi");
         if (
           bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -129,8 +136,8 @@ function requireNative() {
           loadErrors.push(e);
         }
         try {
-          const binding = require("jazz-napi-win32-x64-gnu");
-          const bindingPackageVersion = require("jazz-napi-win32-x64-gnu/package.json").version;
+          const binding = requireNativeBindingPackage("jazz-napi-win32-x64-gnu");
+          const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-win32-x64-gnu");
           if (
             bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -151,8 +158,8 @@ function requireNative() {
           loadErrors.push(e);
         }
         try {
-          const binding = require("jazz-napi-win32-x64-msvc");
-          const bindingPackageVersion = require("jazz-napi-win32-x64-msvc/package.json").version;
+          const binding = requireNativeBindingPackage("jazz-napi-win32-x64-msvc");
+          const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-win32-x64-msvc");
           if (
             bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -174,8 +181,8 @@ function requireNative() {
         loadErrors.push(e);
       }
       try {
-        const binding = require("jazz-napi-win32-ia32-msvc");
-        const bindingPackageVersion = require("jazz-napi-win32-ia32-msvc/package.json").version;
+        const binding = requireNativeBindingPackage("jazz-napi-win32-ia32-msvc");
+        const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-win32-ia32-msvc");
         if (
           bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -196,8 +203,8 @@ function requireNative() {
         loadErrors.push(e);
       }
       try {
-        const binding = require("jazz-napi-win32-arm64-msvc");
-        const bindingPackageVersion = require("jazz-napi-win32-arm64-msvc/package.json").version;
+        const binding = requireNativeBindingPackage("jazz-napi-win32-arm64-msvc");
+        const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-win32-arm64-msvc");
         if (
           bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -221,8 +228,8 @@ function requireNative() {
       loadErrors.push(e);
     }
     try {
-      const binding = require("jazz-napi-darwin-universal");
-      const bindingPackageVersion = require("jazz-napi-darwin-universal/package.json").version;
+      const binding = requireNativeBindingPackage("jazz-napi-darwin-universal");
+      const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-darwin-universal");
       if (
         bindingPackageVersion !== "2.0.0-alpha.14" &&
         process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -243,8 +250,8 @@ function requireNative() {
         loadErrors.push(e);
       }
       try {
-        const binding = require("jazz-napi-darwin-x64");
-        const bindingPackageVersion = require("jazz-napi-darwin-x64/package.json").version;
+        const binding = requireNativeBindingPackage("jazz-napi-darwin-x64");
+        const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-darwin-x64");
         if (
           bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -265,8 +272,8 @@ function requireNative() {
         loadErrors.push(e);
       }
       try {
-        const binding = require("jazz-napi-darwin-arm64");
-        const bindingPackageVersion = require("jazz-napi-darwin-arm64/package.json").version;
+        const binding = requireNativeBindingPackage("jazz-napi-darwin-arm64");
+        const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-darwin-arm64");
         if (
           bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -291,8 +298,8 @@ function requireNative() {
         loadErrors.push(e);
       }
       try {
-        const binding = require("jazz-napi-freebsd-x64");
-        const bindingPackageVersion = require("jazz-napi-freebsd-x64/package.json").version;
+        const binding = requireNativeBindingPackage("jazz-napi-freebsd-x64");
+        const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-freebsd-x64");
         if (
           bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -313,8 +320,8 @@ function requireNative() {
         loadErrors.push(e);
       }
       try {
-        const binding = require("jazz-napi-freebsd-arm64");
-        const bindingPackageVersion = require("jazz-napi-freebsd-arm64/package.json").version;
+        const binding = requireNativeBindingPackage("jazz-napi-freebsd-arm64");
+        const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-freebsd-arm64");
         if (
           bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -340,8 +347,8 @@ function requireNative() {
           loadErrors.push(e);
         }
         try {
-          const binding = require("jazz-napi-linux-x64-musl");
-          const bindingPackageVersion = require("jazz-napi-linux-x64-musl/package.json").version;
+          const binding = requireNativeBindingPackage("jazz-napi-linux-x64-musl");
+          const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-linux-x64-musl");
           if (
             bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -362,8 +369,8 @@ function requireNative() {
           loadErrors.push(e);
         }
         try {
-          const binding = require("jazz-napi-linux-x64-gnu");
-          const bindingPackageVersion = require("jazz-napi-linux-x64-gnu/package.json").version;
+          const binding = requireNativeBindingPackage("jazz-napi-linux-x64-gnu");
+          const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-linux-x64-gnu");
           if (
             bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -386,8 +393,8 @@ function requireNative() {
           loadErrors.push(e);
         }
         try {
-          const binding = require("jazz-napi-linux-arm64-musl");
-          const bindingPackageVersion = require("jazz-napi-linux-arm64-musl/package.json").version;
+          const binding = requireNativeBindingPackage("jazz-napi-linux-arm64-musl");
+          const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-linux-arm64-musl");
           if (
             bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -408,8 +415,8 @@ function requireNative() {
           loadErrors.push(e);
         }
         try {
-          const binding = require("jazz-napi-linux-arm64-gnu");
-          const bindingPackageVersion = require("jazz-napi-linux-arm64-gnu/package.json").version;
+          const binding = requireNativeBindingPackage("jazz-napi-linux-arm64-gnu");
+          const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-linux-arm64-gnu");
           if (
             bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -432,9 +439,10 @@ function requireNative() {
           loadErrors.push(e);
         }
         try {
-          const binding = require("jazz-napi-linux-arm-musleabihf");
-          const bindingPackageVersion =
-            require("jazz-napi-linux-arm-musleabihf/package.json").version;
+          const binding = requireNativeBindingPackage("jazz-napi-linux-arm-musleabihf");
+          const bindingPackageVersion = getNativeBindingPackageVersion(
+            "jazz-napi-linux-arm-musleabihf",
+          );
           if (
             bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -455,9 +463,10 @@ function requireNative() {
           loadErrors.push(e);
         }
         try {
-          const binding = require("jazz-napi-linux-arm-gnueabihf");
-          const bindingPackageVersion =
-            require("jazz-napi-linux-arm-gnueabihf/package.json").version;
+          const binding = requireNativeBindingPackage("jazz-napi-linux-arm-gnueabihf");
+          const bindingPackageVersion = getNativeBindingPackageVersion(
+            "jazz-napi-linux-arm-gnueabihf",
+          );
           if (
             bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -480,9 +489,10 @@ function requireNative() {
           loadErrors.push(e);
         }
         try {
-          const binding = require("jazz-napi-linux-loong64-musl");
-          const bindingPackageVersion =
-            require("jazz-napi-linux-loong64-musl/package.json").version;
+          const binding = requireNativeBindingPackage("jazz-napi-linux-loong64-musl");
+          const bindingPackageVersion = getNativeBindingPackageVersion(
+            "jazz-napi-linux-loong64-musl",
+          );
           if (
             bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -503,8 +513,8 @@ function requireNative() {
           loadErrors.push(e);
         }
         try {
-          const binding = require("jazz-napi-linux-loong64-gnu");
-          const bindingPackageVersion = require("jazz-napi-linux-loong64-gnu/package.json").version;
+          const binding = requireNativeBindingPackage("jazz-napi-linux-loong64-gnu");
+          const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-linux-loong64-gnu");
           if (
             bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -527,9 +537,10 @@ function requireNative() {
           loadErrors.push(e);
         }
         try {
-          const binding = require("jazz-napi-linux-riscv64-musl");
-          const bindingPackageVersion =
-            require("jazz-napi-linux-riscv64-musl/package.json").version;
+          const binding = requireNativeBindingPackage("jazz-napi-linux-riscv64-musl");
+          const bindingPackageVersion = getNativeBindingPackageVersion(
+            "jazz-napi-linux-riscv64-musl",
+          );
           if (
             bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -550,8 +561,8 @@ function requireNative() {
           loadErrors.push(e);
         }
         try {
-          const binding = require("jazz-napi-linux-riscv64-gnu");
-          const bindingPackageVersion = require("jazz-napi-linux-riscv64-gnu/package.json").version;
+          const binding = requireNativeBindingPackage("jazz-napi-linux-riscv64-gnu");
+          const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-linux-riscv64-gnu");
           if (
             bindingPackageVersion !== "2.0.0-alpha.14" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -573,8 +584,8 @@ function requireNative() {
         loadErrors.push(e);
       }
       try {
-        const binding = require("jazz-napi-linux-ppc64-gnu");
-        const bindingPackageVersion = require("jazz-napi-linux-ppc64-gnu/package.json").version;
+        const binding = requireNativeBindingPackage("jazz-napi-linux-ppc64-gnu");
+        const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-linux-ppc64-gnu");
         if (
           bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -595,8 +606,8 @@ function requireNative() {
         loadErrors.push(e);
       }
       try {
-        const binding = require("jazz-napi-linux-s390x-gnu");
-        const bindingPackageVersion = require("jazz-napi-linux-s390x-gnu/package.json").version;
+        const binding = requireNativeBindingPackage("jazz-napi-linux-s390x-gnu");
+        const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-linux-s390x-gnu");
         if (
           bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -621,8 +632,8 @@ function requireNative() {
         loadErrors.push(e);
       }
       try {
-        const binding = require("jazz-napi-openharmony-arm64");
-        const bindingPackageVersion = require("jazz-napi-openharmony-arm64/package.json").version;
+        const binding = requireNativeBindingPackage("jazz-napi-openharmony-arm64");
+        const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-openharmony-arm64");
         if (
           bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -643,8 +654,8 @@ function requireNative() {
         loadErrors.push(e);
       }
       try {
-        const binding = require("jazz-napi-openharmony-x64");
-        const bindingPackageVersion = require("jazz-napi-openharmony-x64/package.json").version;
+        const binding = requireNativeBindingPackage("jazz-napi-openharmony-x64");
+        const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-openharmony-x64");
         if (
           bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -665,8 +676,8 @@ function requireNative() {
         loadErrors.push(e);
       }
       try {
-        const binding = require("jazz-napi-openharmony-arm");
-        const bindingPackageVersion = require("jazz-napi-openharmony-arm/package.json").version;
+        const binding = requireNativeBindingPackage("jazz-napi-openharmony-arm");
+        const bindingPackageVersion = getNativeBindingPackageVersion("jazz-napi-openharmony-arm");
         if (
           bindingPackageVersion !== "2.0.0-alpha.14" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -705,7 +716,7 @@ if (!nativeBinding || process.env.NAPI_RS_FORCE_WASI) {
   }
   if (!nativeBinding || process.env.NAPI_RS_FORCE_WASI) {
     try {
-      wasiBinding = require("jazz-napi-wasm32-wasi");
+      wasiBinding = requireNativeBindingPackage("jazz-napi-wasm32-wasi");
       nativeBinding = wasiBinding;
     } catch (err) {
       if (process.env.NAPI_RS_FORCE_WASI) {
