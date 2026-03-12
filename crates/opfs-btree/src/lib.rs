@@ -1,3 +1,4 @@
+mod crc32;
 mod db;
 mod error;
 mod file;

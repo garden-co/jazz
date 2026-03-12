@@ -1,4 +1,4 @@
-use crate::BTreeError;
+use crate::{BTreeError, crc32};
 
 const MAGIC: [u8; 8] = *b"OPFSBT01";
 const FORMAT_VERSION: u32 = 1;
@@ -89,7 +89,7 @@ impl Superblock {
         page[OFFSET_TOTAL_PAGES..OFFSET_TOTAL_PAGES + 8]
             .copy_from_slice(&self.total_pages.to_le_bytes());
 
-        let checksum = crc32fast::hash(&page[..OFFSET_CHECKSUM]);
+        let checksum = crc32::hash(&page[..OFFSET_CHECKSUM]);
         page[OFFSET_CHECKSUM..OFFSET_CHECKSUM + 4].copy_from_slice(&checksum.to_le_bytes());
         Ok(())
     }
@@ -138,7 +138,7 @@ impl Superblock {
                 .try_into()
                 .expect("superblock checksum slice"),
         );
-        let actual_checksum = crc32fast::hash(&page[..OFFSET_CHECKSUM]);
+        let actual_checksum = crc32::hash(&page[..OFFSET_CHECKSUM]);
         if expected_checksum != actual_checksum {
             return Err(BTreeError::Corrupt(format!(
                 "superblock checksum mismatch: expected {}, got {}",

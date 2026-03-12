@@ -1,4 +1,4 @@
-use crate::BTreeError;
+use crate::{BTreeError, crc32};
 
 pub(crate) type PageId = u64;
 
@@ -1339,10 +1339,8 @@ fn page_payload_capacity(page_size: usize) -> Result<usize, BTreeError> {
 }
 
 fn page_checksum(raw: &[u8]) -> u32 {
-    let mut hasher = crc32fast::Hasher::new();
-    hasher.update(&raw[..20]);
-    hasher.update(&raw[24..]);
-    hasher.finalize()
+    let crc = crc32::update(0, &raw[..20]);
+    crc32::update(crc, &raw[24..])
 }
 
 #[inline]
