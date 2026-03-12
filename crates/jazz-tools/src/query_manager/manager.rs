@@ -49,20 +49,6 @@ pub enum QueryError {
         table: TableName,
         operation: Operation,
     },
-    /// UUID reference points at a missing row.
-    UuidForeignKeyViolation {
-        table: TableName,
-        column: String,
-        referenced_table: TableName,
-        missing_id: ObjectId,
-    },
-    /// UUID[] reference points at a missing row.
-    UuidArrayForeignKeyViolation {
-        table: TableName,
-        column: String,
-        referenced_table: TableName,
-        missing_id: ObjectId,
-    },
     /// Unknown schema hash - client should sync schema first.
     UnknownSchema(SchemaHash),
 }
@@ -87,26 +73,6 @@ impl std::fmt::Display for QueryError {
             QueryError::PolicyDenied { table, operation } => {
                 write!(f, "policy denied {} on table {}", operation, table)
             }
-            QueryError::UuidForeignKeyViolation {
-                table,
-                column,
-                referenced_table,
-                missing_id,
-            } => write!(
-                f,
-                "uuid foreign key violation on {}.{}: missing referenced row {} in table {}",
-                table, column, missing_id, referenced_table
-            ),
-            QueryError::UuidArrayForeignKeyViolation {
-                table,
-                column,
-                referenced_table,
-                missing_id,
-            } => write!(
-                f,
-                "uuid[] foreign key violation on {}.{}: missing referenced row {} in table {}",
-                table, column, missing_id, referenced_table
-            ),
             QueryError::UnknownSchema(hash) => {
                 write!(
                     f,
