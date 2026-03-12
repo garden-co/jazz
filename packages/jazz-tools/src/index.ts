@@ -12,8 +12,9 @@ export {
 export { schemaToSql, lensToSql } from "./sql-gen.js";
 export type {
   Schema,
-  Table,
+  Table as SchemaAstTable,
   Column,
+  JsonSqlType,
   PolicyExpr,
   PolicyOperation,
   PolicyCmpOp,
@@ -32,6 +33,24 @@ export type {
   JsonSchema,
   JsonSchemaToTs,
 } from "./schema.js";
+export type {
+  TypedColumnBuilder,
+  AnyTypedColumnBuilder,
+  ColumnAlias,
+  ColumnBuilderSqlType,
+  ColumnBuilderOptional,
+  ColumnBuilderReferences,
+  StringColumn,
+  BooleanColumn,
+  IntColumn,
+  TimestampColumn,
+  FloatColumn,
+  BytesColumn,
+  JsonColumn,
+  EnumColumn,
+  RefColumn,
+  ArrayColumn,
+} from "./dsl.js";
 export type {
   RelColumnRef,
   RelRowIdRef,
@@ -52,6 +71,42 @@ export type {
 
 // Codegen
 export { generateClient, schemaToWasm, generateTypes } from "./codegen/index.js";
+export {
+  defineSchema,
+  defineApp,
+  TypedTableQueryBuilder,
+  permissionIntrospectionColumns,
+} from "./typed-app.js";
+export type {
+  TableDefinition,
+  SchemaDefinition,
+  Simplify,
+  CompactSchema,
+  DefinedSchema,
+  TableRow,
+  TableInit,
+  TableWhereInput,
+  TableSelectableColumn,
+  TableOrderableColumn,
+  TableSelected,
+  TableInclude,
+  TableSelectedWithIncludes,
+  TableRelation,
+  TableRelationMap,
+  TableMeta,
+  SchemaRelations,
+  SchemaTable,
+  AnyTableMeta,
+  Table,
+  Query,
+  TableHandle,
+  QueryHandle,
+  TypedApp,
+  RowOf,
+  InsertOf,
+  TableMetaOf,
+  WhereOf,
+} from "./typed-app.js";
 
 // Storage drivers
 export * from "./drivers/index.js";

@@ -91,6 +91,99 @@ interface ColumnBuilder {
   _references: string | undefined;
 }
 
+export type TypedColumnBuilder<
+  Sql extends SqlType = SqlType,
+  Optional extends boolean = boolean,
+  Ref extends string | undefined = string | undefined,
+> = Omit<ColumnBuilder, "optional"> & {
+  readonly __jazzSqlType: Sql;
+  readonly __jazzOptional: Optional;
+  readonly __jazzReferences: Ref;
+  optional(): ColumnAlias<Sql, true, Ref>;
+};
+
+export type AnyTypedColumnBuilder = TypedColumnBuilder<SqlType, boolean, string | undefined>;
+export type ColumnBuilderSqlType<TBuilder extends AnyTypedColumnBuilder> =
+  TBuilder["__jazzSqlType"];
+export type ColumnBuilderOptional<TBuilder extends AnyTypedColumnBuilder> =
+  TBuilder["__jazzOptional"];
+export type ColumnBuilderReferences<TBuilder extends AnyTypedColumnBuilder> =
+  TBuilder["__jazzReferences"];
+
+export type StringColumn<Optional extends boolean = false> = TypedColumnBuilder<"TEXT", Optional>;
+export type BooleanColumn<Optional extends boolean = false> = TypedColumnBuilder<
+  "BOOLEAN",
+  Optional
+>;
+export type IntColumn<Optional extends boolean = false> = TypedColumnBuilder<"INTEGER", Optional>;
+export type TimestampColumn<Optional extends boolean = false> = TypedColumnBuilder<
+  "TIMESTAMP",
+  Optional
+>;
+export type FloatColumn<Optional extends boolean = false> = TypedColumnBuilder<"REAL", Optional>;
+export type BytesColumn<Optional extends boolean = false> = TypedColumnBuilder<"BYTEA", Optional>;
+export type JsonColumn<Output = JsonValue, Optional extends boolean = false> = TypedColumnBuilder<
+  JsonSqlType<Output>,
+  Optional
+>;
+export type EnumColumn<
+  Variants extends readonly string[] = readonly string[],
+  Optional extends boolean = false,
+> = TypedColumnBuilder<
+  {
+    kind: "ENUM";
+    variants: [...Variants];
+  },
+  Optional
+>;
+export type RefColumn<
+  TargetTable extends string,
+  Optional extends boolean = false,
+> = TypedColumnBuilder<"UUID", Optional, TargetTable>;
+export type ArrayColumn<
+  ElementSql extends SqlType = SqlType,
+  Optional extends boolean = false,
+  Ref extends string | undefined = string | undefined,
+> = TypedColumnBuilder<
+  {
+    kind: "ARRAY";
+    element: ElementSql;
+  },
+  Optional,
+  Ref
+>;
+export type ColumnAlias<
+  Sql extends SqlType = SqlType,
+  Optional extends boolean = boolean,
+  Ref extends string | undefined = string | undefined,
+> = Ref extends string
+  ? RefColumn<Ref, Optional>
+  : Sql extends "TEXT"
+    ? StringColumn<Optional>
+    : Sql extends "BOOLEAN"
+      ? BooleanColumn<Optional>
+      : Sql extends "INTEGER"
+        ? IntColumn<Optional>
+        : Sql extends "TIMESTAMP"
+          ? TimestampColumn<Optional>
+          : Sql extends "REAL"
+            ? FloatColumn<Optional>
+            : Sql extends "BYTEA"
+              ? BytesColumn<Optional>
+              : Sql extends JsonSqlType<infer Output>
+                ? JsonColumn<Output, Optional>
+                : Sql extends {
+                      kind: "ENUM";
+                      variants: infer Variants extends readonly string[];
+                    }
+                  ? EnumColumn<Variants, Optional>
+                  : Sql extends {
+                        kind: "ARRAY";
+                        element: infer ElementSql extends SqlType;
+                      }
+                    ? ArrayColumn<ElementSql, Optional, Ref>
+                    : TypedColumnBuilder<Sql, Optional, Ref>;
+
 class ScalarBuilder implements ColumnBuilder {
   private _nullable = false;
 
@@ -363,16 +456,29 @@ class DropBuilder {
 
 export const col = {
   // Schema context
-  string: () => new ScalarBuilder("TEXT"),
-  boolean: () => new ScalarBuilder("BOOLEAN"),
-  int: () => new ScalarBuilder("INTEGER"),
-  timestamp: () => new ScalarBuilder("TIMESTAMP"),
-  float: () => new ScalarBuilder("REAL"),
-  bytes: () => new ScalarBuilder("BYTEA"),
-  json: jsonColumn,
-  enum: (...variants: string[]) => new EnumBuilder(...variants),
-  ref: (targetTable: string) => new RefBuilder(targetTable),
-  array: (element: ColumnBuilder) => new ArrayBuilder(element),
+  string: () => new ScalarBuilder("TEXT") as unknown as StringColumn,
+  boolean: () => new ScalarBuilder("BOOLEAN") as unknown as BooleanColumn,
+  int: () => new ScalarBuilder("INTEGER") as unknown as IntColumn,
+  timestamp: () => new ScalarBuilder("TIMESTAMP") as unknown as TimestampColumn,
+  float: () => new ScalarBuilder("REAL") as unknown as FloatColumn,
+  bytes: () => new ScalarBuilder("BYTEA") as unknown as BytesColumn,
+  json: jsonColumn as unknown as {
+    (): JsonColumn;
+    <Schema extends StandardJSONSchemaV1<unknown, unknown>>(
+      schema: Schema,
+    ): JsonColumn<StandardJSONSchemaV1.InferOutput<Schema>>;
+    (schema: JsonSchema): JsonColumn;
+  },
+  enum: <const Variants extends readonly [string, ...string[]]>(...variants: Variants) =>
+    new EnumBuilder(...variants) as unknown as EnumColumn<Variants>,
+  ref: <const TargetTable extends string>(targetTable: TargetTable) =>
+    new RefBuilder(targetTable) as unknown as RefColumn<TargetTable>,
+  array: <Builder extends AnyTypedColumnBuilder>(element: Builder) =>
+    new ArrayBuilder(element) as unknown as ArrayColumn<
+      ColumnBuilderSqlType<Builder>,
+      false,
+      ColumnBuilderReferences<Builder>
+    >,
 
   // Migration context
   add: () => new AddBuilder(),
