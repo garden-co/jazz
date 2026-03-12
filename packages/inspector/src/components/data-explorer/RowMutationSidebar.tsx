@@ -259,9 +259,6 @@ export function RowMutationSidebar({
                 {readOnlyReason === "binary" ? (
                   <p className={styles.hint}>Read-only: binary field</p>
                 ) : null}
-                {readOnlyReason === "foreign-key" ? (
-                  <p className={styles.hint}>Read-only: foreign key field</p>
-                ) : null}
                 {fieldError ? <p className={styles.error}>{fieldError}</p> : null}
               </div>
             );

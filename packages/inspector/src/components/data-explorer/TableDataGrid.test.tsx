@@ -155,11 +155,11 @@ describe("TableDataGrid", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0] as Element);
 
     expect(screen.getByRole("heading", { name: "Edit row" })).not.toBeNull();
-    expect(screen.getByText("Read-only: foreign key field")).not.toBeNull();
     expect(screen.getByText("Read-only: binary field")).not.toBeNull();
 
     fireEvent.change(screen.getByLabelText("title"), { target: { value: "zeta updated" } });
     fireEvent.change(screen.getByLabelText("done"), { target: { value: "true" } });
+    fireEvent.change(screen.getByLabelText("owner_id"), { target: { value: "owner-c" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     expect(mockUpdateDurable).toHaveBeenCalledWith(
@@ -168,6 +168,7 @@ describe("TableDataGrid", () => {
       expect.objectContaining({
         title: "zeta updated",
         done: true,
+        owner_id: "owner-c",
       }),
       { tier: "worker" },
     );
