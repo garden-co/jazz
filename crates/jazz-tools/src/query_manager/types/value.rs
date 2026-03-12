@@ -1,3 +1,4 @@
+use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::object::ObjectId;
@@ -43,7 +44,7 @@ enum ValueHuman {
     Double(f64),
     Boolean(bool),
     Text(String),
-    Timestamp(u64),
+    Timestamp(#[serde(deserialize_with = "deserialize_timestamp_value")] u64),
     Uuid(ObjectId),
     Bytea(Vec<u8>),
     Array(Vec<ValueHuman>),
@@ -72,6 +73,55 @@ enum ValueBinary {
     Array(Vec<ValueBinary>),
     Row(Vec<ValueBinary>),
     Null,
+}
+
+fn deserialize_timestamp_value<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // JS numbers crossing the NAPI JSON boundary can surface as integral f64s.
+    struct TimestampValueVisitor;
+
+    impl Visitor<'_> for TimestampValueVisitor {
+        type Value = u64;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a non-negative integer timestamp")
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+            Ok(value)
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            u64::try_from(value).map_err(|_| E::custom("timestamp must be non-negative"))
+        }
+
+        fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if !value.is_finite() {
+                return Err(E::custom("timestamp must be finite"));
+            }
+            if value < 0.0 {
+                return Err(E::custom("timestamp must be non-negative"));
+            }
+            if value.fract() != 0.0 {
+                return Err(E::custom("timestamp must be an integer"));
+            }
+            if value > u64::MAX as f64 {
+                return Err(E::custom("timestamp is out of range"));
+            }
+
+            Ok(value as u64)
+        }
+    }
+
+    deserializer.deserialize_any(TimestampValueVisitor)
 }
 
 impl From<&Value> for ValueHuman {
