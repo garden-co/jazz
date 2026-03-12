@@ -1,5 +1,17 @@
 # jazz-tools
 
+## 2.0.0-alpha.17
+
+### Patch Changes
+
+- 9002dde: Fix `jazz build` not regenerating `app.ts` on subsequent builds.
+
+  The bin entry point was treating the TypeScript schema build as a one-time bootstrap step, skipping it whenever `current.sql` already existed. Removed the guard so `app.ts` and `current.sql` are always regenerated when `current.ts` is present.
+
+- 6672f98: Remove local write-time foreign-key existence checks so inserts and updates no longer fail just because a referenced row has not been synced into the active query set yet.
+- bb10f1c: Add a shared `jazz-tools/expo/polyfills` entrypoint for Expo apps and ensure published `jazz-rn` packages include the generated C++ bindings required for native builds.
+  - jazz-wasm@2.0.0-alpha.17
+
 ## 2.0.0-alpha.16
 
 ### Patch Changes
