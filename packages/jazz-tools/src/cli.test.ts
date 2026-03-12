@@ -1,9 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { build } from "./cli.js";
 
 const dslPath = fileURLToPath(new URL("./dsl.ts", import.meta.url));
@@ -29,6 +29,17 @@ async function createWorkspace(): Promise<{ root: string; schemaDir: string; jaz
   await chmod(jazzBin, 0o755);
 
   return { root, schemaDir, jazzBin };
+}
+
+async function createFakeRustBin(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "jazz-tools-cli-rust-bin-"));
+  tempRoots.push(root);
+
+  const rustBin = join(root, "fake-jazz-tools");
+  await writeFile(rustBin, "#!/bin/sh\nexit 0\n");
+  await chmod(rustBin, 0o755);
+
+  return rustBin;
 }
 
 function currentSchemaWithoutInlinePermissions(): string {
@@ -332,37 +343,36 @@ describe("cli build permissions generation", () => {
 // Integration test: exercises the bin/jazz-tools.js entry point, which applies extra
 // logic on top of build() to decide whether to invoke the TS CLI at all.
 const binPath = fileURLToPath(new URL("../bin/jazz-tools.js", import.meta.url));
-const fakeRustBinPath = fileURLToPath(new URL("../../../target/debug/jazz-tools", import.meta.url));
+
+function runBinBuild(schemaDir: string, rustBin: string): void {
+  const result = spawnSync(
+    process.execPath,
+    [binPath, "build", "--schema-dir", schemaDir, "--rust-bin", rustBin],
+    {
+      stdio: "inherit",
+    },
+  );
+
+  expect(result.status).toBe(0);
+}
 
 describe("bin integration", () => {
-  beforeAll(async () => {
-    await mkdir(dirname(fakeRustBinPath), { recursive: true });
-    await writeFile(fakeRustBinPath, "#!/bin/sh\nexit 0\n");
-    await chmod(fakeRustBinPath, 0o755);
-  });
-
-  afterAll(async () => {
-    await rm(fakeRustBinPath, { force: true });
-  });
-
   it("generates current.sql on first build (no current.sql)", async () => {
     const { schemaDir } = await createWorkspace();
+    const rustBin = await createFakeRustBin();
     await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
 
-    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
-      stdio: "inherit",
-    });
+    runBinBuild(schemaDir, rustBin);
 
     await readFile(join(schemaDir, "current.sql"), "utf8");
   });
 
   it("generates app.ts on first build (no current.sql)", async () => {
     const { schemaDir } = await createWorkspace();
+    const rustBin = await createFakeRustBin();
     await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
 
-    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
-      stdio: "inherit",
-    });
+    runBinBuild(schemaDir, rustBin);
 
     await readFile(join(schemaDir, "app.ts"), "utf8");
   });
@@ -371,12 +381,11 @@ describe("bin integration", () => {
     // Regression: bin skips the TS CLI step when current.sql is present,
     // so neither file is updated on subsequent builds.
     const { schemaDir } = await createWorkspace();
+    const rustBin = await createFakeRustBin();
     await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
     await writeFile(join(schemaDir, "current.sql"), "-- stale");
 
-    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
-      stdio: "inherit",
-    });
+    runBinBuild(schemaDir, rustBin);
 
     const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
     expect(sql).toContain("CREATE TABLE");
@@ -387,15 +396,12 @@ describe("bin integration", () => {
 
   it("updates current.sql when current.ts changes after initial build", async () => {
     const { schemaDir } = await createWorkspace();
+    const rustBin = await createFakeRustBin();
     await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
-    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
-      stdio: "inherit",
-    });
+    runBinBuild(schemaDir, rustBin);
 
     await writeFile(join(schemaDir, "current.ts"), currentSchemaWithComments());
-    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
-      stdio: "inherit",
-    });
+    runBinBuild(schemaDir, rustBin);
 
     const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
     expect(sql).toContain("CREATE TABLE comments");
@@ -403,15 +409,12 @@ describe("bin integration", () => {
 
   it("updates app.ts when current.ts changes after initial build", async () => {
     const { schemaDir } = await createWorkspace();
+    const rustBin = await createFakeRustBin();
     await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
-    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
-      stdio: "inherit",
-    });
+    runBinBuild(schemaDir, rustBin);
 
     await writeFile(join(schemaDir, "current.ts"), currentSchemaWithComments());
-    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
-      stdio: "inherit",
-    });
+    runBinBuild(schemaDir, rustBin);
 
     const appTs = await readFile(join(schemaDir, "app.ts"), "utf8");
     expect(appTs).toContain("comments");
@@ -419,18 +422,15 @@ describe("bin integration", () => {
 
   it("generates migration SQL from stub on rebuild when current.sql already exists", async () => {
     const { schemaDir } = await createWorkspace();
+    const rustBin = await createFakeRustBin();
     await writeFile(join(schemaDir, "current.ts"), binSchemaWithMessagesAndCanvases());
-    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
-      stdio: "inherit",
-    });
+    runBinBuild(schemaDir, rustBin);
 
     await writeFile(
       join(schemaDir, "migration_v1_v2_aaaaaaaaaaaa_bbbbbbbbbbbb.ts"),
       binMigrationDropIsPublicFromBothTables(),
     );
-    spawnSync(process.execPath, [binPath, "build", "--schema-dir", schemaDir], {
-      stdio: "inherit",
-    });
+    runBinBuild(schemaDir, rustBin);
 
     await readFile(join(schemaDir, "migration_v1_v2_fwd_aaaaaaaaaaaa_bbbbbbbbbbbb.sql"), "utf8");
     await readFile(join(schemaDir, "migration_v1_v2_bwd_aaaaaaaaaaaa_bbbbbbbbbbbb.sql"), "utf8");
