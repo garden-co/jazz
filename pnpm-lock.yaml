@@ -230,6 +230,9 @@ importers:
         specifier: 0.81.5
         version: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4)
     devDependencies:
+      '@babel/plugin-transform-flow-strip-types':
+        specifier: ^7.27.1
+        version: 7.27.1(@babel/core@7.29.0)
       '@types/react':
         specifier: ^19.0.0
         version: 19.2.14
@@ -401,6 +404,9 @@ importers:
         specifier: 0.81.5
         version: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4)
     devDependencies:
+      '@babel/plugin-transform-flow-strip-types':
+        specifier: ^7.27.1
+        version: 7.27.1(@babel/core@7.29.0)
       '@types/react':
         specifier: ^19.0.0
         version: 19.2.14
