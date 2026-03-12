@@ -92,6 +92,22 @@ fn value_column_type() {
     assert_eq!(Value::Null.column_type(), None);
 }
 
+#[test]
+fn value_deserializes_timestamp_from_integral_float() {
+    let value: Value = serde_json::from_str(r#"{"type":"Timestamp","value":1773285322816.0}"#)
+        .expect("deserialize timestamp");
+
+    assert_eq!(value, Value::Timestamp(1773285322816));
+}
+
+#[test]
+fn value_rejects_fractional_float_timestamp() {
+    let error = serde_json::from_str::<Value>(r#"{"type":"Timestamp","value":1.5}"#)
+        .expect_err("fractional timestamp should be rejected");
+
+    assert!(error.to_string().contains("timestamp must be an integer"));
+}
+
 // ========================================================================
 // Tuple Model Tests
 // ========================================================================
