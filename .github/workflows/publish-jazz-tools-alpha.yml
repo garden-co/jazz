@@ -1062,6 +1062,7 @@ jobs:
           tar -tf "${TARBALL}" | grep -q "package/index.js"
           tar -tf "${TARBALL}" | grep -q "package/index.d.ts"
           tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);const optional=p.optionalDependencies||{};for(const [name,version] of Object.entries(optional)){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`optionalDependencies.${name} uses workspace protocol (${version}) in packed manifest`);}}for(const name of ["@garden-co/jazz-napi-linux-x64-gnu","@garden-co/jazz-napi-win32-x64-msvc","@garden-co/jazz-napi-darwin-x64","@garden-co/jazz-napi-darwin-arm64"]){if(!optional[name]){throw new Error(`missing optional dependency ${name} in packed manifest`);}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
+          tar -xOf "${TARBALL}" package/index.js | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const unscoped=[...s.matchAll(/require\("((?!\.\/)jazz-napi-[^"]+)"/g)].map((m)=>m[1]);if(unscoped.length){throw new Error(`packed index.js still references unscoped native packages: ${[...new Set(unscoped)].join(", ")}`);}if(!s.includes("@garden-co")){throw new Error("packed index.js is missing the @garden-co package scope");}console.log("Packed loader uses scoped native package names");});'
 
       - name: Verify packed jazz-tools manifest
         run: |
