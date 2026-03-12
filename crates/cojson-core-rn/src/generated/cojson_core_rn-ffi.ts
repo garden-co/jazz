@@ -138,6 +138,10 @@ interface NativeModuleInterface {
     ptr: bigint,
     uniffi_out_err: UniffiRustCallStatus
   ): number;
+  ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_is_streaming(
+    ptr: bigint,
+    uniffi_out_err: UniffiRustCallStatus
+  ): number;
   ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_make_new_private_transaction(
     ptr: bigint,
     sessionId: Uint8Array,
@@ -364,6 +368,7 @@ interface NativeModuleInterface {
   ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_transaction(): number;
   ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_get_transaction_count(): number;
   ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_is_deleted(): number;
+  ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_is_streaming(): number;
   ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_make_new_private_transaction(): number;
   ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_make_new_trusting_transaction(): number;
   ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_mark_as_deleted(): number;

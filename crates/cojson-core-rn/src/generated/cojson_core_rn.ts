@@ -1933,10 +1933,6 @@ export interface SessionMapInterface {
    */
   getKnownStateWithStreaming() /*throws*/ : KnownState | undefined;
   /**
-   * Check whether the CoValue still has pending streaming content.
-   */
-  isStreaming() /*throws*/ : boolean;
-  /**
    * Get last signature for a session (returns None if session not found)
    */
   getLastSignature(sessionId: string) /*throws*/ : string | undefined;
@@ -1979,6 +1975,10 @@ export interface SessionMapInterface {
    * Check if this CoValue is deleted
    */
   isDeleted() /*throws*/ : boolean;
+  /**
+   * Check whether the CoValue still has pending streaming content.
+   */
+  isStreaming() /*throws*/ : boolean;
   /**
    * Create new private transaction (for local writes)
    * Returns JSON: { signature: string, transaction: Transaction }
@@ -2198,26 +2198,6 @@ export class SessionMap
   }
 
   /**
-   * Check whether the CoValue still has pending streaming content.
-   */
-  public isStreaming(): boolean /*throws*/ {
-    return FfiConverterBool.lift(
-      uniffiCaller.rustCallWithError(
-        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
-          FfiConverterTypeSessionMapError
-        ),
-        /*caller:*/ (callStatus) => {
-          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_is_streaming(
-            uniffiTypeSessionMapObjectFactory.clonePointer(this),
-            callStatus
-          );
-        },
-        /*liftString:*/ FfiConverterString.lift
-      )
-    );
-  }
-
-  /**
    * Get last signature for a session (returns None if session not found)
    */
   public getLastSignature(sessionId: string): string | undefined /*throws*/ {
@@ -2388,6 +2368,26 @@ export class SessionMap
         ),
         /*caller:*/ (callStatus) => {
           return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_is_deleted(
+            uniffiTypeSessionMapObjectFactory.clonePointer(this),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  /**
+   * Check whether the CoValue still has pending streaming content.
+   */
+  public isStreaming(): boolean /*throws*/ {
+    return FfiConverterBool.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeSessionMapError.lift.bind(
+          FfiConverterTypeSessionMapError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_cojson_core_rn_fn_method_sessionmap_is_streaming(
             uniffiTypeSessionMapObjectFactory.clonePointer(this),
             callStatus
           );
@@ -3012,6 +3012,14 @@ function uniffiEnsureInitialized() {
   ) {
     throw new UniffiInternalError.ApiChecksumMismatch(
       'uniffi_cojson_core_rn_checksum_method_sessionmap_is_deleted'
+    );
+  }
+  if (
+    nativeModule().ubrn_uniffi_cojson_core_rn_checksum_method_sessionmap_is_streaming() !==
+    46931
+  ) {
+    throw new UniffiInternalError.ApiChecksumMismatch(
+      'uniffi_cojson_core_rn_checksum_method_sessionmap_is_streaming'
     );
   }
   if (
