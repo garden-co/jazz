@@ -51,15 +51,19 @@
 }
 
 .gridFrame {
+  display: block;
+  flex: 1 1 auto;
   min-height: 0;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
   border: 1px solid #2f3a4b;
   border-radius: 8px;
 }
 
 .contentArea {
+  display: flex;
+  flex-direction: column;
   min-height: 0;
-  display: block;
   border: 1px solid #2f3a4b;
   border-radius: 8px;
   overflow: hidden;
@@ -98,7 +102,8 @@
 .table thead th {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 3;
+  background: #1b2433;
 }
 
 .headerCell {
@@ -136,7 +141,7 @@
   composes: headerCell;
   position: sticky;
   right: 0;
-  z-index: 2;
+  z-index: 4;
   min-width: 106px;
 }
 

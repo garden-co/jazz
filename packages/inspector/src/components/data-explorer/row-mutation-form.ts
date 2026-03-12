@@ -2,7 +2,7 @@ import type { ColumnDescriptor, ColumnType } from "jazz-tools";
 
 export type MutationFormMode = "edit" | "insert";
 
-export type MutationFieldReadOnlyReason = "binary" | "foreign-key" | null;
+export type MutationFieldReadOnlyReason = "binary" | null;
 
 export interface MutationFormField {
   column: ColumnDescriptor;
@@ -23,7 +23,6 @@ function isBinaryColumnType(columnType: ColumnType): boolean {
 }
 
 export function getFieldReadOnlyReason(column: ColumnDescriptor): MutationFieldReadOnlyReason {
-  if (column.references) return "foreign-key";
   if (isBinaryColumnType(column.column_type)) return "binary";
   return null;
 }
