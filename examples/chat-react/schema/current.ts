@@ -9,6 +9,7 @@ table("profiles", {
 table("chats", {
   isPublic: col.boolean(),
   createdBy: col.string(),
+  joinCode: col.string().optional(),
 });
 
 table("chatMembers", {
