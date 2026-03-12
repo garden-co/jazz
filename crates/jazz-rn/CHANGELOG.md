@@ -1,5 +1,11 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.17
+
+### Patch Changes
+
+- bb10f1c: Add a shared `jazz-tools/expo/polyfills` entrypoint for Expo apps and ensure published `jazz-rn` packages include the generated C++ bindings required for native builds.
+
 ## 2.0.0-alpha.16
 
 ## 2.0.0-alpha.15
