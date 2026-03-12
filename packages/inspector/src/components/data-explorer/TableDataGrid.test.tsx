@@ -101,7 +101,7 @@ describe("TableDataGrid", () => {
     const firstQuery = mockUseAll.mock.calls[0]?.[0] as { _build: () => string };
     expect(JSON.parse(firstQuery._build())).toMatchObject({
       orderBy: [["id", "asc"]],
-      limit: 10,
+      limit: 11,
       offset: 0,
     });
 
@@ -111,7 +111,7 @@ describe("TableDataGrid", () => {
     const sortedQuery = mockUseAll.mock.calls.at(-1)?.[0] as { _build: () => string };
     expect(JSON.parse(sortedQuery._build())).toMatchObject({
       orderBy: [["title", "asc"]],
-      limit: 10,
+      limit: 11,
       offset: 0,
     });
   });
@@ -141,7 +141,7 @@ describe("TableDataGrid", () => {
     expect(JSON.parse(filteredQuery._build())).toMatchObject({
       conditions: [{ column: "title", op: "contains", value: "alpha" }],
       orderBy: [["id", "asc"]],
-      limit: 10,
+      limit: 11,
       offset: 0,
     });
   });
