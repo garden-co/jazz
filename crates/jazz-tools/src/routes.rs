@@ -12,7 +12,8 @@ use axum::{
 };
 use bytes::Bytes;
 use jazz_tools::jazz_transport::{
-    ConnectionId, ErrorResponse, ServerEvent, SuccessResponse, SyncPayloadRequest,
+    ConnectionId, ErrorResponse, ServerEvent, SyncBatchRequest, SyncBatchResponse,
+    SyncPayloadResult,
 };
 use jazz_tools::sync_manager::ClientId;
 use serde::{Deserialize, Serialize};
@@ -259,29 +260,22 @@ async fn events_handler(
         .unwrap())
 }
 
-/// Push a sync payload to the server's inbox.
+/// Push an ordered batch of sync payloads to the server's inbox.
 ///
-/// Admin clients (with valid admin secret) can write catalogue objects.
-/// Session is extracted from headers and bound to the client_id.
+/// Auth is checked once per request. Payloads are applied sequentially and
+/// a per-payload result is returned for each entry in the batch.
 async fn sync_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-    Json(request): Json<SyncPayloadRequest>,
+    Json(request): Json<SyncBatchRequest>,
 ) -> impl IntoResponse {
     use jazz_tools::sync_manager::{InboxEntry, Source};
 
-    let payload_size = serde_json::to_vec(&request.payload)
-        .map(|v| v.len())
-        .unwrap_or(0);
-    {
-        let _span = tracing::debug_span!(
-            "sync_handler",
-            client_id = %request.client_id,
-            payload_size,
-        )
-        .entered();
-        tracing::info!(client_id = %request.client_id, payload = request.payload.variant_name(), "sync request");
-    }
+    tracing::debug!(
+        client_id = %request.client_id,
+        payload_count = request.payloads.len(),
+        "sync batch request",
+    );
 
     // Check admin secret — if present and valid, promote client to Admin role
     let is_admin = {
@@ -382,19 +376,26 @@ async fn sync_handler(
         }
     }
 
-    let entry = InboxEntry {
-        source: Source::Client(request.client_id),
-        payload: request.payload,
-    };
-
-    match state.runtime.push_sync_inbox(entry) {
-        Ok(()) => Json(SuccessResponse::default()).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(e.to_string())),
-        )
-            .into_response(),
+    // Apply each payload in order, collecting per-payload results.
+    let mut results = Vec::with_capacity(request.payloads.len());
+    for payload in request.payloads {
+        let entry = InboxEntry {
+            source: Source::Client(request.client_id),
+            payload,
+        };
+        match state.runtime.push_sync_inbox(entry) {
+            Ok(()) => results.push(SyncPayloadResult {
+                ok: true,
+                error: None,
+            }),
+            Err(e) => results.push(SyncPayloadResult {
+                ok: false,
+                error: Some(e.to_string()),
+            }),
+        }
     }
+
+    Json(SyncBatchResponse { results }).into_response()
 }
 
 /// Return the catalogue schema for the given hash.
@@ -809,7 +810,7 @@ mod tests {
     use serde_json::Value;
     use tempfile::TempDir;
     use tokio::sync::{RwLock, broadcast};
-    use tower::util::ServiceExt;
+    use tower::ServiceExt;
 
     use crate::commands::server::{ExternalIdentityStore, ServerState};
     use crate::middleware::AuthConfig;
@@ -823,6 +824,47 @@ mod tests {
             jwks_url: None,
             jwks_set: None,
         }
+    }
+
+    /// Spin up the full router backed by an in-process runtime.
+    /// `backend_secret` is wired into `AuthConfig` so tests can authenticate
+    /// via the `X-Jazz-Backend-Secret` header without needing JWT setup.
+    fn make_sync_test_app(backend_secret: &str) -> (axum::Router, TempDir) {
+        let data_dir = TempDir::new().expect("temp dir");
+        let db_path = data_dir.path().join("groove.fjall");
+        let storage = FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
+
+        let sync_manager = SyncManager::new()
+            .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
+        let schema_manager =
+            SchemaManager::new_server(sync_manager, AppId::from_name("test-app"), "prod");
+        let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
+
+        let auth_config = AuthConfig {
+            backend_secret: Some(backend_secret.to_string()),
+            admin_secret: None,
+            allow_anonymous: true,
+            allow_demo: true,
+            jwks_url: None,
+            jwks_set: None,
+        };
+
+        let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(16);
+
+        let state = Arc::new(ServerState {
+            runtime,
+            app_id: AppId::from_name("test-app"),
+            connections: RwLock::new(HashMap::new()),
+            next_connection_id: std::sync::atomic::AtomicU64::new(1),
+            sync_broadcast: sync_tx,
+            auth_config,
+            external_identity_store: Arc::new(
+                ExternalIdentityStore::new(data_dir.path().to_str().unwrap()).unwrap(),
+            ),
+            external_identities: RwLock::new(HashMap::new()),
+        });
+
+        (create_router(state), data_dir)
     }
 
     fn make_state_with_schema(
@@ -871,6 +913,146 @@ mod tests {
                 get(admin_subscription_introspection_handler),
             )
             .with_state(state)
+    }
+
+    /// A minimal valid `SyncPayload::ObjectUpdated` as a `serde_json::Value`,
+    /// suitable for embedding in batch request bodies.
+    fn object_updated_payload(object_id: &str) -> Value {
+        serde_json::json!({
+            "ObjectUpdated": {
+                "object_id": object_id,
+                "metadata": null,
+                "branch_name": "main",
+                "commits": []
+            }
+        })
+    }
+
+    // -------------------------------------------------------------------------
+    // Batch sync handler tests
+    //
+    // These are RED: the /sync endpoint currently expects
+    // {"payload":…,"client_id":…} (singular). Sending the new always-array
+    // {"payloads":[…],"client_id":…} body currently returns 422. These tests
+    // will go green once SyncPayloadRequest is replaced with SyncBatchRequest
+    // and sync_handler returns {"results":[…]}.
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn sync_batch_accepts_two_payloads_and_returns_ok_results() {
+        // alice fires two position updates in the same tick — they should land
+        // in a single POST and both be acknowledged
+        //
+        //  alice (client)          server
+        //    ──[p1, p2]──────────► /sync
+        //                          apply p1 → ok
+        //                          apply p2 → ok
+        //    ◄────────────────── {results:[ok,ok]}
+
+        let (app, _dir) = make_sync_test_app("test-backend-secret");
+        let client_id = ClientId::new();
+
+        let body = serde_json::json!({
+            "payloads": [
+                object_updated_payload("00000000-0000-0000-0000-000000000001"),
+                object_updated_payload("00000000-0000-0000-0000-000000000002"),
+            ],
+            "client_id": client_id,
+        });
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/sync")
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Backend-Secret", "test-backend-secret")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+
+        let results = json["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["ok"], true);
+        assert_eq!(results[1]["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn sync_batch_requires_auth() {
+        // No auth headers → 401 before any payloads are applied
+        let (app, _dir) = make_sync_test_app("test-backend-secret");
+
+        let body = serde_json::json!({
+            "payloads": [object_updated_payload("00000000-0000-0000-0000-000000000001")],
+            "client_id": ClientId::new(),
+        });
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/sync")
+                    .header("Content-Type", "application/json")
+                    // deliberately no X-Jazz-Backend-Secret
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn sync_batch_returns_one_result_per_payload() {
+        // bob sends 60 position updates in one tick — server must return
+        // exactly 60 results, one per payload, in order
+        let (app, _dir) = make_sync_test_app("test-backend-secret");
+        let client_id = ClientId::new();
+
+        let payloads: Vec<Value> = (0..60)
+            .map(|i| object_updated_payload(&format!("00000000-0000-0000-0000-{:012}", i)))
+            .collect();
+
+        let body = serde_json::json!({
+            "payloads": payloads,
+            "client_id": client_id,
+        });
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/sync")
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Backend-Secret", "test-backend-secret")
+                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+
+        let results = json["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 60);
+        for result in results {
+            assert_eq!(result["ok"], true);
+        }
     }
 
     #[tokio::test]

@@ -20,7 +20,8 @@ use base64::Engine;
 use bytes::Bytes;
 use hmac::{Hmac, Mac};
 use jazz_tools::jazz_transport::{
-    ConnectionId, ErrorResponse, ServerEvent, SuccessResponse, SyncPayloadRequest,
+    ConnectionId, ErrorResponse, ServerEvent, SyncBatchRequest, SyncBatchResponse,
+    SyncPayloadResult,
 };
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::QueryBuilder;
@@ -3228,7 +3229,7 @@ async fn sync_handler(
     State(state): State<Arc<ServerState>>,
     AxumPath(path): AxumPath<AppPath>,
     headers: HeaderMap,
-    Json(request): Json<SyncPayloadRequest>,
+    Json(request): Json<SyncBatchRequest>,
 ) -> impl IntoResponse {
     let app_id = match parse_app_id(&path.app_id) {
         Ok(id) => id,
@@ -3274,19 +3275,10 @@ async fn sync_handler(
     };
     let has_session_header = headers.get("X-Jazz-Session").is_some();
 
-    let dispatch_result = if is_admin {
-        state
-            .workers
-            .sync_as_admin(app_id, request.client_id, request.payload)
-            .await
-    } else if is_backend && !has_session_header {
-        state
-            .workers
-            .sync_as_backend(app_id, request.client_id, request.payload)
-            .await
-    } else {
-        let session = match extract_session(&headers, app_id, &cfg, &state).await {
-            Ok(Some(session)) => session,
+    // Resolve session once for the whole batch (only needed for non-admin/non-backend).
+    let session = if !(is_admin || is_backend && !has_session_header) {
+        match extract_session(&headers, app_id, &cfg, &state).await {
+            Ok(Some(session)) => Some(session),
             Ok(None) => {
                 return (
                     StatusCode::UNAUTHORIZED,
@@ -3299,21 +3291,52 @@ async fn sync_handler(
             Err((status, msg)) => {
                 return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
             }
-        };
-
-        state
-            .workers
-            .sync_as_session(app_id, request.client_id, session, request.payload)
-            .await
+        }
+    } else {
+        None
     };
 
-    match dispatch_result {
-        Ok(()) => Json(SuccessResponse::default()).into_response(),
-        Err(err) => {
-            let (status, message) = worker_dispatch_status_and_message(err);
-            (status, Json(ErrorResponse::internal(message))).into_response()
+    // Apply each payload in order, collecting per-payload results.
+    let mut results = Vec::with_capacity(request.payloads.len());
+    for payload in request.payloads {
+        let dispatch_result = if is_admin {
+            state
+                .workers
+                .sync_as_admin(app_id, request.client_id, payload)
+                .await
+        } else if is_backend && !has_session_header {
+            state
+                .workers
+                .sync_as_backend(app_id, request.client_id, payload)
+                .await
+        } else {
+            state
+                .workers
+                .sync_as_session(
+                    app_id,
+                    request.client_id,
+                    session.clone().expect("session resolved above"),
+                    payload,
+                )
+                .await
+        };
+
+        match dispatch_result {
+            Ok(()) => results.push(SyncPayloadResult {
+                ok: true,
+                error: None,
+            }),
+            Err(err) => {
+                let (_status, message) = worker_dispatch_status_and_message(err);
+                results.push(SyncPayloadResult {
+                    ok: false,
+                    error: Some(message),
+                });
+            }
         }
     }
+
+    Json(SyncBatchResponse { results }).into_response()
 }
 
 async fn schema_catalogue_handler(

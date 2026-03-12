@@ -26,7 +26,7 @@ type Todo = {
 
 type SyncRequestBody = {
   client_id: string;
-  payload: unknown;
+  payloads: unknown[];
 };
 
 type ObjectMutationRequest = {
@@ -459,10 +459,9 @@ function hasPayloadKind(payloadJson: string, payloadKind: string): boolean {
 }
 
 function isQuerySubscriptionRequest(request: { body: SyncRequestBody }): boolean {
-  return (
-    typeof request.body.payload === "object" &&
-    request.body.payload !== null &&
-    "QuerySubscription" in (request.body.payload as Record<string, unknown>)
+  return request.body.payloads.some(
+    (p) =>
+      typeof p === "object" && p !== null && "QuerySubscription" in (p as Record<string, unknown>),
   );
 }
 
@@ -648,7 +647,14 @@ describe("NAPI integration", () => {
       expect(request.headers["x-jazz-local-mode"]).toBeUndefined();
       expect(request.headers["x-jazz-local-token"]).toBeUndefined();
       expect(request.body.client_id).toBe("server-client-1");
-      expect(request.body.payload).toHaveProperty("QuerySubscription");
+      expect(
+        request.body.payloads.find(
+          (p) =>
+            typeof p === "object" &&
+            p !== null &&
+            "QuerySubscription" in (p as Record<string, unknown>),
+        ),
+      ).toBeDefined();
     } finally {
       if (context) {
         await context.shutdown();
