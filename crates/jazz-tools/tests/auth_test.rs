@@ -91,18 +91,18 @@ fn encode_session(session: &Session) -> String {
     base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
 }
 
-/// Create a valid sync request body (SyncPayloadRequest).
+/// Create a valid sync batch request body (SyncBatchRequest).
 fn sync_body() -> String {
     json!({
         "client_id": "01234567-89ab-cdef-0123-456789abcdef",
-        "payload": {
+        "payloads": [{
             "ObjectUpdated": {
                 "object_id": "01234567-89ab-cdef-0123-456789abcdef",
                 "metadata": null,
                 "branch_name": "main",
                 "commits": []
             }
-        }
+        }]
     })
     .to_string()
 }

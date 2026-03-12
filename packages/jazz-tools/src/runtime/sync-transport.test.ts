@@ -10,6 +10,7 @@ import {
   normalizePathPrefix,
   readBinaryFrames,
   sendSyncPayload,
+  sendSyncPayloadBatch,
   SyncStreamController,
   type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
@@ -546,9 +547,9 @@ describe("sync-transport", () => {
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 
       const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body as string) as {
-        payload: unknown;
+        payloads: unknown[];
       };
-      expect(requestBody.payload).toEqual(JSON.parse(payloadJson));
+      expect(requestBody.payloads).toEqual([JSON.parse(payloadJson)]);
       expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/sync");
       expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
         "X-Jazz-Backend-Secret": "backend-secret",
@@ -568,5 +569,104 @@ describe("sync-transport", () => {
     router("server", "upstream-1", JSON.stringify({ Ping: {} }), false);
 
     await vi.waitFor(() => expect(onServerPayloadError).toHaveBeenCalledWith(error));
+  });
+
+  // ---------------------------------------------------------------------------
+  // sendSyncPayloadBatch
+  //
+  // RED: sendSyncPayloadBatch does not exist yet — these tests will fail at
+  // import time until it is exported from sync-transport.ts.
+  // ---------------------------------------------------------------------------
+
+  describe("sendSyncPayloadBatch", () => {
+    const playerPayload = (id: string) =>
+      JSON.stringify({
+        ObjectUpdated: { object_id: id, branch_name: "main", commits: [] },
+      });
+
+    it("sends all payloads in a single POST using the always-array wire format", async () => {
+      // alice updates her position 3 times in one tick — should be 1 fetch call,
+      // not 3
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+      (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      const payloads = [playerPayload("id-1"), playerPayload("id-2"), playerPayload("id-3")];
+
+      await sendSyncPayloadBatch("http://localhost:3000", payloads, {
+        jwtToken: "alice-token",
+        clientId: "client-alice",
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+      expect(body.payloads).toHaveLength(3);
+      expect(body.client_id).toBe("client-alice");
+      // Each element is the parsed payload, not the raw JSON string
+      expect(body.payloads[0]).toEqual(JSON.parse(payloads[0]));
+      expect(body.payloads[1]).toEqual(JSON.parse(payloads[1]));
+      expect(body.payloads[2]).toEqual(JSON.parse(payloads[2]));
+    });
+
+    it("preserves payload order in the POST body", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+      (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      // bob's collected flag goes false→true→false in one tick; order must be preserved
+      const p1 = JSON.stringify({
+        ObjectUpdated: { object_id: "p1", branch_name: "main", commits: [] },
+      });
+      const p2 = JSON.stringify({
+        ObjectUpdated: { object_id: "p2", branch_name: "main", commits: [] },
+      });
+      const p3 = JSON.stringify({
+        ObjectUpdated: { object_id: "p3", branch_name: "main", commits: [] },
+      });
+
+      await sendSyncPayloadBatch("http://localhost:3000", [p1, p2, p3], {
+        jwtToken: "bob-token",
+      });
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+      expect(body.payloads[0].ObjectUpdated.object_id).toBe("p1");
+      expect(body.payloads[1].ObjectUpdated.object_id).toBe("p2");
+      expect(body.payloads[2].ObjectUpdated.object_id).toBe("p3");
+    });
+
+    it("applies JWT auth header", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+      (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      await sendSyncPayloadBatch("http://localhost:3000", [playerPayload("id-1")], {
+        jwtToken: "alice-jwt",
+      });
+
+      expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+        Authorization: "Bearer alice-jwt",
+      });
+    });
+
+    it("posts to path-prefixed route when provided", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+      (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      await sendSyncPayloadBatch("http://localhost:3000", [playerPayload("id-1")], {
+        jwtToken: "token",
+        pathPrefix: "apps/app-42",
+      });
+
+      expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/apps/app-42/sync");
+    });
+
+    it("throws on non-2xx response", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue({ ok: false, status: 503, statusText: "Service Unavailable" });
+      (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        sendSyncPayloadBatch("http://localhost:3000", [playerPayload("id-1")], {}),
+      ).rejects.toThrow("503");
+    });
   });
 });
