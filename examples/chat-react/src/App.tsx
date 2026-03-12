@@ -1,7 +1,6 @@
 import { createJazzClient, getActiveSyntheticAuth, JazzProvider } from "jazz-tools/react";
-import { Suspense, useMemo } from "react";
+import { Suspense, useEffect, useState } from "react";
 
-// DbConfig isn't re-exported from jazz-tools/react; grab it from the runtime.
 type DbConfig = Parameters<typeof createJazzClient>[0];
 
 import { Loader2Icon } from "lucide-react";
@@ -35,17 +34,45 @@ function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
 
 export function App({ config }: { config?: Partial<DbConfig> } = {}) {
   const resolvedConfig = defaultConfig(config);
-  const client = useMemo(
-    () => createJazzClient(resolvedConfig),
-    [resolvedConfig, resolvedConfig.appId, resolvedConfig.dbName, resolvedConfig.serverUrl],
-  );
+  const configKey = JSON.stringify(resolvedConfig);
+  const [client, setClient] = useState<Awaited<ReturnType<typeof createJazzClient>> | null>(null);
+  const [error, setError] = useState<unknown>(null);
+
+  useEffect(() => {
+    let active = true;
+    const client = createJazzClient(resolvedConfig);
+
+    client.then(
+      (resolved) => {
+        if (!active) {
+          resolved.shutdown();
+          return;
+        }
+        setClient(resolved);
+      },
+      (reason) => {
+        if (!active) return;
+        setError(reason);
+      },
+    );
+
+    return () => {
+      active = false;
+      client.then((resolved) => resolved.shutdown()).catch(() => {});
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configKey]);
+
+  if (error) throw error;
+
+  if (!client) {
+    return <p id="joining-chat">Loading...</p>;
+  }
 
   return (
-    <Suspense fallback={<p id="joining-chat">Loading...</p>}>
-      <JazzProvider client={client}>
-        <AppContent />
-      </JazzProvider>
-    </Suspense>
+    <JazzProvider client={client}>
+      <AppContent />
+    </JazzProvider>
   );
 }
 
