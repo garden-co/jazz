@@ -75,16 +75,16 @@ When the recursive references involve more complex types, it is sometimes requir
 ```
 </CodeGroup>
 
-### Partial
+### `.partial()`
 
-For convenience Jazz provies a dedicated API for making all the properties of a CoMap optional:
+For convenience Jazz provides a dedicated API for making all the properties of a CoMap optional:
 
 <CodeGroup>
 ```ts partial.ts
 ```
 </CodeGroup>
 
-### Pick
+### `.pick()`
 
 You can also pick specific fields from a CoMap:
 
@@ -92,6 +92,37 @@ You can also pick specific fields from a CoMap:
 ```ts pick.ts
 ```
 </CodeGroup>
+
+### `.omit()`
+
+To omit specific fields:
+
+<CodeGroup>
+```ts omit.ts
+```
+</CodeGroup>
+
+### `.extend()`
+
+You can extend an existing CoMap by adding fields or overriding existing ones:
+
+<CodeGroup>
+```ts extend.ts
+```
+</CodeGroup>
+
+`.extend()` preserves all of the CoMap's defined configurations, such as those defined using `withMigration()`, `withPermissions()`, and `resolved()`.
+
+### `.safeExtend()`
+
+Use `.safeExtend()` when you want to extend a CoMap while type-checking ensures that new fields cannot override existing fields with incompatible types:
+
+<CodeGroup>
+```ts safe-extend.ts
+```
+</CodeGroup>
+
+Like `.extend()`, `.safeExtend()` preserves all of the CoMap's defined configurations.
 
 ### Working with Record CoMaps
 
