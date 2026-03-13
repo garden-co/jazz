@@ -159,6 +159,7 @@ impl SyncManager {
         match &payload {
             SyncPayload::ObjectUpdated {
                 object_id,
+                metadata,
                 branch_name,
                 commits,
                 ..
@@ -207,7 +208,11 @@ impl SyncManager {
                             return;
                         }
                         // Row data — queue for ReBAC permission check
-                        let (metadata, old_content) = self
+                        let payload_metadata = metadata
+                            .as_ref()
+                            .map(|meta| meta.metadata.clone())
+                            .unwrap_or_default();
+                        let (stored_metadata, old_content) = self
                             .object_manager
                             .get(object_id)
                             .map(|obj| {
@@ -225,6 +230,13 @@ impl SyncManager {
                                 (obj.metadata.clone(), old)
                             })
                             .unwrap_or_default();
+                        // For brand-new rows, metadata may only be present in the inbound payload
+                        // because the object has not been applied to ObjectManager yet.
+                        let metadata = if old_content.is_none() && stored_metadata.is_empty() {
+                            payload_metadata
+                        } else {
+                            stored_metadata
+                        };
                         let new_content = commits.last().map(|c| c.content.clone());
                         let operation = if old_content.is_some() {
                             Operation::Update
