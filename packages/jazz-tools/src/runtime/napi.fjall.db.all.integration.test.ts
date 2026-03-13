@@ -29,7 +29,7 @@ describe("db.all NAPI Fjall integration", () => {
     expect(rows.find((row) => row.id === second.id)).toBeDefined();
     expect(readRowDone(rows.find((row) => row.id === first.id)!)).toBe(false);
     expect(readRowDone(rows.find((row) => row.id === second.id)!)).toBe(true);
-  }, 20_000);
+  });
 
   it("applies durable update and delete operations against Fjall storage", async () => {
     const store = await env.createPersistentStore("update-delete");
@@ -64,7 +64,7 @@ describe("db.all NAPI Fjall integration", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]?.id).toBe(survivor.id);
-  }, 20_000);
+  });
 
   it("reopens a Fjall store with the latest durable state", async () => {
     const store = await env.createPersistentStore("reopen-state");
@@ -127,5 +127,5 @@ describe("db.all NAPI Fjall integration", () => {
     );
 
     expect(finalRows.map(readRowTitle).sort()).toEqual(["after-reopen", "persist-me-updated"]);
-  }, 25_000);
+  });
 });
