@@ -328,7 +328,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.subscribe(query, callback, session)
-            .map_err(|e| RuntimeError::QueryError(format!("{:?}", e)))
+            .map_err(|e| RuntimeError::QueryError(e.to_string()))
     }
 
     /// Unsubscribe from a query.
@@ -483,7 +483,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         let result = core
             .subscribe_with_schema_context(query, schema_context, session)
-            .map_err(|e| RuntimeError::QueryError(format!("{:?}", e)))?;
+            .map_err(|e| RuntimeError::QueryError(e.to_string()))?;
         Ok(result)
     }
 }

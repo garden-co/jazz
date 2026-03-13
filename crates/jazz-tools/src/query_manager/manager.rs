@@ -37,6 +37,13 @@ pub enum QueryError {
     EncodingError(String),
     ObjectNotFound(ObjectId),
     QueryCompilationError(String),
+    IndexValueTooLarge {
+        table: TableName,
+        column: String,
+        branch: String,
+        key_bytes: usize,
+        max_key_bytes: usize,
+    },
     IndexError(String),
     /// Cannot undelete or truncate a row that is not soft-deleted.
     RowNotDeleted(ObjectId),
@@ -66,6 +73,16 @@ impl std::fmt::Display for QueryError {
             QueryError::EncodingError(msg) => write!(f, "encoding error: {msg}"),
             QueryError::ObjectNotFound(id) => write!(f, "object not found: {:?}", id),
             QueryError::QueryCompilationError(msg) => write!(f, "query compilation error: {msg}"),
+            QueryError::IndexValueTooLarge {
+                table,
+                column,
+                branch,
+                key_bytes,
+                max_key_bytes,
+            } => write!(
+                f,
+                "indexed value too large for {table}.{column} on branch {branch}: index key would be {key_bytes} bytes (max {max_key_bytes})"
+            ),
             QueryError::IndexError(msg) => write!(f, "index error: {msg}"),
             QueryError::RowNotDeleted(id) => write!(f, "row not deleted: {:?}", id),
             QueryError::RowAlreadyDeleted(id) => write!(f, "row already deleted: {:?}", id),
@@ -1137,13 +1154,21 @@ impl QueryManager {
                     &Value::Uuid(update.object_id),
                     update.object_id,
                 );
-                let _ = storage.index_insert(
+                if let Err(error) = storage.index_insert(
                     &table,
                     "_id_deleted",
                     branch,
                     &Value::Uuid(update.object_id),
                     update.object_id,
-                );
+                ) {
+                    tracing::error!(
+                        table,
+                        branch,
+                        object_id = %update.object_id,
+                        %error,
+                        "failed to insert synced _id_deleted index entry"
+                    );
+                }
             }
             self.mark_subscriptions_dirty(&table);
             self.mark_row_deleted_in_subscriptions(&table, update.object_id);
@@ -1162,14 +1187,22 @@ impl QueryManager {
 
         if was_soft_deleted {
             // This is an undelete - remove from _id_deleted, add to _id and column indices
-            let _ = Self::update_indices_for_undelete_on_branch(
+            if let Err(error) = Self::update_indices_for_undelete_on_branch(
                 storage,
                 &table,
                 branch,
                 update.object_id,
                 &new_data,
                 &descriptor,
-            );
+            ) {
+                tracing::error!(
+                    table,
+                    branch,
+                    object_id = %update.object_id,
+                    %error,
+                    "failed to update indices for synced undelete"
+                );
+            }
             self.mark_subscriptions_dirty(&table);
             return;
         }
@@ -1177,18 +1210,26 @@ impl QueryManager {
         // Normal update handling
         if update.is_new_object || update.previous_commit_ids.is_empty() {
             // First commit on branch (new object or synced first commit) - insert into all indices
-            let _ = Self::update_indices_for_insert_on_branch(
+            if let Err(error) = Self::update_indices_for_insert_on_branch(
                 storage,
                 &table,
                 branch,
                 update.object_id,
                 &new_data,
                 &descriptor,
-            );
+            ) {
+                tracing::error!(
+                    table,
+                    branch,
+                    object_id = %update.object_id,
+                    %error,
+                    "failed to update indices for synced insert"
+                );
+            }
         } else if let Some(old_data) = update.old_content {
             // Synced update - compute index delta using old_content
             // TODO: Future merge strategies - currently last-writer-wins by timestamp
-            let _ = Self::update_indices_for_update_on_branch(
+            if let Err(error) = Self::update_indices_for_update_on_branch(
                 storage,
                 &table,
                 branch,
@@ -1196,7 +1237,15 @@ impl QueryManager {
                 &old_data,
                 &new_data,
                 &descriptor,
-            );
+            ) {
+                tracing::error!(
+                    table,
+                    branch,
+                    object_id = %update.object_id,
+                    %error,
+                    "failed to update indices for synced update"
+                );
+            }
         } else {
             panic!(
                 "missing old_content for historical sync update: object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",

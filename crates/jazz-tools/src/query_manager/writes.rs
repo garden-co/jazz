@@ -54,6 +54,12 @@ impl QueryManager {
         }
 
         self.validate_json_for_values(&descriptor, values)?;
+        Self::validate_write_index_values_on_branch(
+            table,
+            self.current_branch().as_str(),
+            values,
+            &descriptor,
+        )?;
 
         // Encode to binary
         let data = encode_row(&descriptor, values)
@@ -162,6 +168,7 @@ impl QueryManager {
         }
 
         self.validate_json_for_values(&descriptor, values)?;
+        Self::validate_write_index_values_on_branch(table, branch, values, &descriptor)?;
 
         // Encode to binary
         let data = encode_row(&descriptor, values)
@@ -776,6 +783,12 @@ impl QueryManager {
         }
 
         self.validate_json_for_values(&descriptor, values)?;
+        Self::validate_write_index_values_on_branch(
+            &table,
+            self.current_branch().as_str(),
+            values,
+            &descriptor,
+        )?;
 
         // Encode new data (used by WITH CHECK and commit write).
         let new_data = encode_row(&descriptor, values)
@@ -1049,7 +1062,6 @@ impl QueryManager {
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
         let descriptor = table_schema.columns.clone();
-
         // Get parent commit on this branch
         let tips = self
             .sync_manager
@@ -1143,6 +1155,12 @@ impl QueryManager {
         }
 
         self.validate_json_for_values(&descriptor, values)?;
+        Self::validate_write_index_values_on_branch(
+            &table,
+            self.current_branch().as_str(),
+            values,
+            &descriptor,
+        )?;
 
         // Encode new row data
         let new_data = encode_row(&descriptor, values)
@@ -1225,7 +1243,6 @@ impl QueryManager {
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
         let descriptor = table_schema.columns.clone();
-
         // Get parent commit
         let tips = self
             .sync_manager
