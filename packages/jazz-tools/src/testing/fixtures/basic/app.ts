@@ -49,8 +49,8 @@ export const wasmSchema: WasmSchema = {
 export class TodoQueryBuilder<I extends Record<string, never> = {}> implements QueryBuilder<Todo> {
   readonly _table = "todos";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: Todo;
-  declare readonly _initType: TodoInit;
+  readonly _rowType: Todo = undefined as unknown as Todo;
+  readonly _initType: TodoInit = undefined as unknown as TodoInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<Record<string, never>> = {};
   private _orderBys: Array<[string, "asc" | "desc"]> = [];

@@ -229,8 +229,8 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}> implements Query
 > {
   readonly _table = "projects";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: ProjectWithIncludes<I>;
-  declare readonly _initType: ProjectInit;
+  readonly _rowType: ProjectWithIncludes<I> = undefined as unknown as ProjectWithIncludes<I>;
+  readonly _initType: ProjectInit = undefined as unknown as ProjectInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ProjectInclude> = {};
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
@@ -410,8 +410,8 @@ export class TodoQueryBuilder<I extends TodoInclude = {}> implements QueryBuilde
 > {
   readonly _table = "todos";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: TodoWithIncludes<I>;
-  declare readonly _initType: TodoInit;
+  readonly _rowType: TodoWithIncludes<I> = undefined as unknown as TodoWithIncludes<I>;
+  readonly _initType: TodoInit = undefined as unknown as TodoInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<TodoInclude> = {};
   private _orderBys: Array<[string, "asc" | "desc"]> = [];

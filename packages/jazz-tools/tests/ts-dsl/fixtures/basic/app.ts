@@ -336,8 +336,9 @@ export class UserQueryBuilder<
 > implements QueryBuilder<UserSelectedWithIncludes<I, S>> {
   readonly _table = "users";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: UserSelectedWithIncludes<I, S>;
-  declare readonly _initType: UserInit;
+  readonly _rowType: UserSelectedWithIncludes<I, S> =
+    undefined as unknown as UserSelectedWithIncludes<I, S>;
+  readonly _initType: UserInit = undefined as unknown as UserInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<UserInclude> = {};
   private _selectColumns?: string[];
@@ -536,8 +537,9 @@ export class ProjectQueryBuilder<
 > implements QueryBuilder<ProjectSelectedWithIncludes<I, S>> {
   readonly _table = "projects";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: ProjectSelectedWithIncludes<I, S>;
-  declare readonly _initType: ProjectInit;
+  readonly _rowType: ProjectSelectedWithIncludes<I, S> =
+    undefined as unknown as ProjectSelectedWithIncludes<I, S>;
+  readonly _initType: ProjectInit = undefined as unknown as ProjectInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ProjectInclude> = {};
   private _selectColumns?: string[];
@@ -739,8 +741,9 @@ export class TodoQueryBuilder<
 > implements QueryBuilder<TodoSelectedWithIncludes<I, S>> {
   readonly _table = "todos";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: TodoSelectedWithIncludes<I, S>;
-  declare readonly _initType: TodoInit;
+  readonly _rowType: TodoSelectedWithIncludes<I, S> =
+    undefined as unknown as TodoSelectedWithIncludes<I, S>;
+  readonly _initType: TodoInit = undefined as unknown as TodoInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<TodoInclude> = {};
   private _selectColumns?: string[];

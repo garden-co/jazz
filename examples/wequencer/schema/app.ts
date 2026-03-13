@@ -387,8 +387,8 @@ export const wasmSchema: WasmSchema = {
 export class InstrumentQueryBuilder<I extends InstrumentInclude = {}, S extends InstrumentSelectableColumn = keyof Instrument> implements QueryBuilder<InstrumentSelectedWithIncludes<I, S>> {
   readonly _table = "instruments";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: InstrumentSelectedWithIncludes<I, S>;
-  declare readonly _initType: InstrumentInit;
+  readonly _rowType: InstrumentSelectedWithIncludes<I, S> = undefined as unknown as InstrumentSelectedWithIncludes<I, S>;
+  readonly _initType: InstrumentInit = undefined as unknown as InstrumentInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<InstrumentInclude> = {};
   private _selectColumns?: string[];
@@ -575,8 +575,8 @@ export class InstrumentQueryBuilder<I extends InstrumentInclude = {}, S extends 
 export class JamQueryBuilder<I extends JamInclude = {}, S extends JamSelectableColumn = keyof Jam> implements QueryBuilder<JamSelectedWithIncludes<I, S>> {
   readonly _table = "jams";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: JamSelectedWithIncludes<I, S>;
-  declare readonly _initType: JamInit;
+  readonly _rowType: JamSelectedWithIncludes<I, S> = undefined as unknown as JamSelectedWithIncludes<I, S>;
+  readonly _initType: JamInit = undefined as unknown as JamInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<JamInclude> = {};
   private _selectColumns?: string[];
@@ -763,8 +763,8 @@ export class JamQueryBuilder<I extends JamInclude = {}, S extends JamSelectableC
 export class BeatQueryBuilder<I extends BeatInclude = {}, S extends BeatSelectableColumn = keyof Beat> implements QueryBuilder<BeatSelectedWithIncludes<I, S>> {
   readonly _table = "beats";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: BeatSelectedWithIncludes<I, S>;
-  declare readonly _initType: BeatInit;
+  readonly _rowType: BeatSelectedWithIncludes<I, S> = undefined as unknown as BeatSelectedWithIncludes<I, S>;
+  readonly _initType: BeatInit = undefined as unknown as BeatInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<BeatInclude> = {};
   private _selectColumns?: string[];
@@ -951,8 +951,8 @@ export class BeatQueryBuilder<I extends BeatInclude = {}, S extends BeatSelectab
 export class ParticipantQueryBuilder<I extends ParticipantInclude = {}, S extends ParticipantSelectableColumn = keyof Participant> implements QueryBuilder<ParticipantSelectedWithIncludes<I, S>> {
   readonly _table = "participants";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: ParticipantSelectedWithIncludes<I, S>;
-  declare readonly _initType: ParticipantInit;
+  readonly _rowType: ParticipantSelectedWithIncludes<I, S> = undefined as unknown as ParticipantSelectedWithIncludes<I, S>;
+  readonly _initType: ParticipantInit = undefined as unknown as ParticipantInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ParticipantInclude> = {};
   private _selectColumns?: string[];

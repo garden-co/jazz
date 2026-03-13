@@ -1037,8 +1037,12 @@ describe("generateQueryBuilderClasses", () => {
     expect(output).toContain(
       "export class TodoQueryBuilder<I extends Record<string, never> = {}, S extends TodoSelectableColumn = keyof Todo> implements QueryBuilder<TodoSelected<S>> {",
     );
-    expect(output).toContain("declare readonly _rowType: TodoSelected<S>;");
-    expect(output).toContain("declare readonly _initType: TodoInit;");
+    expect(output).toContain(
+      "readonly _rowType: TodoSelected<S> = undefined as unknown as TodoSelected<S>;",
+    );
+    expect(output).toContain("readonly _initType: TodoInit = undefined as unknown as TodoInit;");
+    expect(output).not.toContain("declare readonly _rowType");
+    expect(output).not.toContain("declare readonly _initType");
     expect(output).toContain("where(conditions: TodoWhereInput)");
     expect(output).toContain(
       "select<NewS extends TodoSelectableColumn>(...columns: [NewS, ...NewS[]]): TodoQueryBuilder<I, NewS>",
@@ -1060,7 +1064,9 @@ describe("generateQueryBuilderClasses", () => {
     expect(output).toContain(
       "export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo> implements QueryBuilder<TodoSelectedWithIncludes<I, S>> {",
     );
-    expect(output).toContain("declare readonly _rowType: TodoSelectedWithIncludes<I, S>;");
+    expect(output).toContain(
+      "readonly _rowType: TodoSelectedWithIncludes<I, S> = undefined as unknown as TodoSelectedWithIncludes<I, S>;",
+    );
   });
 
   it("generates include method for tables with relations", () => {
