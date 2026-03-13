@@ -19,15 +19,14 @@
   },
   "scripts": {
     "build": "node scripts/build.js",
-    "build:debug": "node scripts/build.js --debug",
-    "check:loader-scope": "node scripts/ensure-scoped-loader.js --check",
-    "fix:loader-scope": "node scripts/ensure-scoped-loader.js"
+    "build:debug": "node scripts/build.js --debug"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3"
   },
   "napi": {
     "binaryName": "jazz-napi",
+    "packageName": "@garden-co/jazz-napi",
     "targets": [
       "x86_64-unknown-linux-gnu",
       "x86_64-pc-windows-msvc",
