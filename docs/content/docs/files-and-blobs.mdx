@@ -1,0 +1,98 @@
+---
+title: Files & Blobs
+description: Chunked browser Blob and stream storage using conventional files and file_parts tables.
+---
+
+import { Callout } from "fumadocs-ui/components/callout";
+
+This page explains how to store images and other binary blobs in Jazz using browser `Blob`,
+`File`, and `ReadableStream` values. These files benefit from the same sync, local-first storage,
+and permission model as the rest of your structured data.
+
+Use plain `col.bytes()` when the binary value is small, naturally belongs on the row itself, and
+should always load together with the rest of that row.
+
+## Add the Conventional Tables
+
+`db.createFileFromBlob`, `db.createFileFromStream`, `db.loadFileAsBlob`, and
+`db.loadFileAsStream` currently expect these exact table and column names on `app`:
+
+<include cwd lang="ts" title="schema/current.ts">
+  ../examples/docs/todo-client-localfirst-ts/schema/current.ts#schema-files-and-blobs-ts
+</include>
+
+`file_parts.data` stores the raw chunk bytes. `files.parts` keeps the ordered chunk ids, and
+`files.partSizes` stores each chunk's byte length in the same order.
+
+In the example above, `uploads.file` is your app-owned reference to a stored file. `files.name`
+is optional metadata; `createFileFromBlob(...)` fills it from `File.name` when available.
+
+## Add Permissions
+
+<include cwd lang="ts" title="schema/files-and-blobs-permissions.ts">
+  ../examples/docs/todo-client-localfirst-ts/schema/files-and-blobs-permissions.ts#files-permissions-ts
+</include>
+
+`uploads` owns access. `files` inherit read and delete access from `uploads.file`, and
+`file_parts` inherit from `files.parts`.
+
+<Callout title="Insert permissions are direct for now">
+  `createFileFromBlob(...)` and `createFileFromStream(...)` create `file_parts` and `files` before
+  your parent row exists, so insert inheritance does not naturally apply yet. In this MVP, grant
+  direct insert access to the clients that may upload, or perform uploads in a trusted backend
+  context.
+</Callout>
+
+Files are write-once in this MVP, so `files` and `file_parts` normally do not need update
+policies.
+
+## Create from a Blob
+
+<include cwd lang="ts" title="src/files-and-blobs-snippets.ts">
+  ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-create-from-blob-ts
+</include>
+
+The helper chunks the blob, creates the `file_parts` rows first, then creates the `files` row,
+and returns that file row so you can store its id on your own table.
+
+## Create from a ReadableStream
+
+<include cwd lang="ts" title="src/files-and-blobs-snippets.ts">
+  ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-create-from-stream-ts
+</include>
+
+## Load as a Blob
+
+<include cwd lang="ts" title="src/files-and-blobs-snippets.ts">
+  ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-load-blob-ts
+</include>
+
+## Load as a ReadableStream
+
+<include cwd lang="ts" title="src/files-and-blobs-snippets.ts">
+  ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-load-stream-ts
+</include>
+
+`loadFileAsBlob(...)` and `loadFileAsStream(...)` first fetch the `files` row without includes,
+then query each referenced `file_parts` row one at a time. That keeps loading naive and
+sequential instead of eager-loading every chunk into one query.
+
+## Durability and Incomplete Local Data
+
+The file helpers forward normal Jazz durability options:
+
+- Pass `tier` to `createFileFromBlob(...)` or `createFileFromStream(...)`.
+- Pass query options like `{ tier: "edge" }` to `loadFileAsBlob(...)` or `loadFileAsStream(...)`.
+
+If the requested tier does not have the full file yet, `loadFileAsBlob(...)` fails the whole
+read and `loadFileAsStream(...)` errors when it reaches the missing part. Use `edge` or `global`
+when you need the read to wait for a more complete remote snapshot than local OPFS currently has.
+
+## No Automatic Cascade Yet
+
+Until file cascade delete lands, delete the chunk rows and the `files` row before deleting your
+parent app row so the inherited delete policies still match:
+
+<include cwd lang="ts" title="src/files-and-blobs-snippets.ts">
+  ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-delete-ts
+</include>

@@ -13,6 +13,10 @@ That keeps UI latency low because local state updates do not wait for any networ
 `insertDurable`, `updateDurable`, and `deleteDurable` return promises that
 resolve when the requested durability tier is reached.
 
+For browser `Blob`, `File`, or `ReadableStream` uploads, use `db.createFileFromBlob(...)`
+or `db.createFileFromStream(...)` and then store the returned file id on your own row. See
+[Files & Blobs](/docs/files-and-blobs).
+
 ## Mutating from Framework Context
 
 Use the framework context binding to access the shared `Db` instance and execute mutations.
