@@ -1,5 +1,14 @@
 # cojson
 
+## 0.20.14
+
+### Patch Changes
+
+- 4bbfce2: Avoid recursive WASM aliasing errors when checking streaming state, including the `newContentSince()` path.
+  - cojson-core-wasm@0.20.14
+  - cojson-core-rn@0.20.14
+  - cojson-core-napi@0.20.14
+
 ## 0.20.13
 
 ### Patch Changes
