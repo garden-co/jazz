@@ -1064,7 +1064,7 @@ describe("generateQueryBuilderClasses", () => {
     expect(output).toContain(
       "export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false> implements QueryBuilder<TodoSelectedWithIncludes<I, S, R>> {",
     );
-    expect(output).toContain("declare readonly _rowType: TodoSelectedWithIncludes<I, S, R>;");
+    expect(output).toContain("readonly _rowType!: TodoSelectedWithIncludes<I, S, R>;");
   });
 
   it("generates include method for tables with relations", () => {
