@@ -1,16 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import {
   attachDevTools,
-  createJazzClient,
   getActiveSyntheticAuth,
   JazzProvider,
   useAll,
   useDb,
+  useJazzClient,
   useSession,
 } from "jazz-tools/react";
+import type { DbConfig } from "jazz-tools";
 import { app, UploadWithIncludes, type File as JazzFile } from "../schema/app.js";
-
-type JazzProviderClientConfig = NonNullable<Parameters<typeof createJazzClient>[0]>;
 
 const BYTEA_MAX_BYTES = 1_048_576;
 const PART_SIZE_BYTES = 256 * 1024;
@@ -75,9 +74,7 @@ function readEnvAppId(): string | undefined {
     ?.JAZZ_APP_ID;
 }
 
-function defaultConfig(
-  overrides: Partial<JazzProviderClientConfig> = {},
-): JazzProviderClientConfig {
+function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
   const appId = overrides.appId ?? readEnvAppId() ?? "14fef0b4-4f6f-41f9-8884-8e6a8e52bb49";
   const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
@@ -89,6 +86,30 @@ function defaultConfig(
     localAuthToken: active.localAuthToken,
     ...overrides,
   };
+}
+
+const devToolsAttachedClients = new WeakSet<object>();
+
+function DevToolsRegistration() {
+  const client = useJazzClient();
+
+  useEffect(() => {
+    if (devToolsAttachedClients.has(client as object)) {
+      return;
+    }
+
+    void attachDevTools(client, app.wasmSchema);
+    devToolsAttachedClients.add(client as object);
+
+    if (location.origin.includes("localhost")) {
+      Object.defineProperty(window, "jazzClient", {
+        value: client,
+        writable: true,
+      });
+    }
+  }, [client]);
+
+  return null;
 }
 
 function FileUploadScreen() {
@@ -284,57 +305,16 @@ function FileUploadScreen() {
 }
 
 type AppProps = {
-  config?: Partial<JazzProviderClientConfig>;
+  config?: Partial<DbConfig>;
   fallback?: React.ReactNode;
 };
 
 export function App({ config, fallback }: AppProps = {}) {
   const resolvedConfig = defaultConfig(config);
-  const configKey = JSON.stringify(resolvedConfig);
-  const [client, setClient] = useState<Awaited<ReturnType<typeof createJazzClient>> | null>(null);
-  const [error, setError] = useState<unknown>(null);
-
-  useEffect(() => {
-    let active = true;
-    const pendingClient = createJazzClient(resolvedConfig);
-
-    void pendingClient.then(
-      (resolved) => {
-        if (!active) {
-          void resolved.shutdown();
-          return;
-        }
-        setClient(resolved);
-        attachDevTools(resolved, app.wasmSchema);
-        if (location.origin.includes("localhost")) {
-          Object.defineProperty(window, "jazzClient", {
-            value: resolved,
-            writable: true,
-          });
-        }
-      },
-      (reason) => {
-        if (!active) return;
-        setError(reason);
-      },
-    );
-
-    return () => {
-      active = false;
-      void pendingClient.then((resolved) => resolved.shutdown()).catch(() => {});
-    };
-  }, [configKey]);
-
-  if (error) {
-    throw error;
-  }
-
-  if (!client) {
-    return <>{fallback ?? <p>Loading...</p>}</>;
-  }
 
   return (
-    <JazzProvider client={client}>
+    <JazzProvider config={resolvedConfig} fallback={fallback ?? <p>Loading...</p>}>
+      <DevToolsRegistration />
       <FileUploadScreen />
     </JazzProvider>
   );
