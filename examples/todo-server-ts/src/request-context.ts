@@ -24,14 +24,14 @@ export function sessionFromRequest(req: Request): Session {
 }
 
 export async function listTodosForRequester(req: Request, context: JazzContext) {
-  const userClient = context.forSession(sessionFromRequest(req), schemaApp);
-  const rows = await userClient.query(schemaApp.todos);
+  const userDb = context.forSession(sessionFromRequest(req), schemaApp);
+  const rows = await userDb.all(schemaApp.todos);
   return rows;
 }
 
 export async function listTodosWithSimplePolicy(req: Request, context: JazzContext) {
-  const userClient = context.forSession(sessionFromRequest(req), schemaApp);
-  return userClient.query(schemaApp.todos);
+  const userDb = context.forSession(sessionFromRequest(req), schemaApp);
+  return userDb.all(schemaApp.todos);
 }
 
 export async function listTodosWithInheritedPolicy(
@@ -39,6 +39,6 @@ export async function listTodosWithInheritedPolicy(
   context: JazzContext,
   folderId: string,
 ) {
-  const userClient = context.forSession(sessionFromRequest(req), schemaApp);
-  return userClient.query(schemaApp.todos.where({ project: folderId }));
+  const userDb = context.forSession(sessionFromRequest(req), schemaApp);
+  return userDb.all(schemaApp.todos.where({ project: folderId }));
 }

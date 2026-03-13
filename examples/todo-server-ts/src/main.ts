@@ -10,7 +10,7 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { createJazzContext, type JazzClient, type Value } from "jazz-tools/backend";
+import { createJazzContext, type Db } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema/app.js";
 
 // ============================================================================
@@ -38,7 +38,7 @@ interface UpdateTodoRequest {
 
 export interface TodoServer {
   app: Application;
-  client: JazzClient;
+  db: Db;
   shutdown: () => Promise<void>;
   flush: () => void;
 }
@@ -57,7 +57,7 @@ export interface RunningServer extends TodoServer {
  * Create a todo server.
  *
  * @param dataPath Optional path to local Fjall database file. If omitted, uses a temp directory.
- * @returns TodoServer with app, client, and shutdown function
+ * @returns TodoServer with app, db, and shutdown function
  */
 export async function createServer(dataPath?: string): Promise<TodoServer> {
   const dbPath = dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
@@ -70,59 +70,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     env: "dev",
     userBranch: "main",
   });
-  const client = context.client();
-  const declaredTodoColumns = schemaApp.wasmSchema.todos.columns;
-  const todoColumnIndexes = new Map(
-    declaredTodoColumns.map((column, index) => [column.name, index] as const),
-  );
-
-  function getTodoValue(values: Value[], columnName: string): Value | undefined {
-    const index = todoColumnIndexes.get(columnName);
-    return index === undefined ? undefined : values[index];
-  }
-
-  function buildTodoValues(body: CreateTodoRequest): Value[] {
-    const ownerId = body.owner_id ?? "anonymous";
-
-    return declaredTodoColumns.map((column) => {
-      switch (column.name) {
-        case "description":
-          return body.description
-            ? ({ type: "Text", value: body.description } as const)
-            : ({ type: "Null" } as const);
-        case "done":
-          return { type: "Boolean", value: false } as const;
-        case "owner_id":
-          return { type: "Text", value: ownerId } as const;
-        case "parent":
-        case "project":
-          return { type: "Null" } as const;
-        case "title":
-          return { type: "Text", value: body.title } as const;
-        default:
-          throw new Error(`Unsupported todo column: ${column.name}`);
-      }
-    });
-  }
-
-  function rowToTodo(id: string, values: Value[]): Todo | null {
-    if (values.length < 2) return null;
-
-    const titleVal = getTodoValue(values, "title");
-    const doneVal = getTodoValue(values, "done");
-    const descVal = getTodoValue(values, "description");
-
-    if (titleVal?.type !== "Text" || doneVal?.type !== "Boolean") {
-      return null;
-    }
-
-    return {
-      id,
-      title: titleVal.value,
-      done: doneVal.value,
-      description: descVal?.type === "Text" && descVal.value ? descVal.value : undefined,
-    };
-  }
+  const db = context.db();
 
   // Create Express app
   const app = express();
@@ -133,10 +81,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
 
   // Helper to broadcast current todos to all SSE connections
   async function broadcastTodos() {
-    const rows = await client.query(schemaApp.todos);
-    const todos = rows
-      .map((row) => rowToTodo(row.id, row.values))
-      .filter((t): t is Todo => t !== null);
+    const todos = await db.all(schemaApp.todos);
     const data = `data: ${JSON.stringify(todos)}\n\n`;
 
     for (const res of sseConnections) {
@@ -156,11 +101,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
   // List all todos
   app.get("/todos", async (_req: Request, res: Response, next: NextFunction) => {
     try {
-      const rows = await client.query(schemaApp.todos);
-      const todos = rows
-        .map((row) => rowToTodo(row.id, row.values))
-        .filter((t): t is Todo => t !== null);
-
+      const todos = await db.all(schemaApp.todos);
       res.json(todos);
     } catch (e) {
       next(e);
@@ -177,15 +118,12 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         return;
       }
 
-      const values = buildTodoValues(body);
-
-      const row = await client.create("todos", values);
-      const todo = rowToTodo(row.id, row.values);
-
-      if (!todo) {
-        res.status(500).json({ error: "Failed to create todo" });
-        return;
-      }
+      const todo = db.insert(schemaApp.todos, {
+        title: body.title,
+        done: false,
+        description: body.description?.trim(),
+        owner_id: body.owner_id ?? "anonymous",
+      });
 
       res.status(201).json(todo);
 
@@ -199,13 +137,11 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
   // List todos as a specific session user (for policy verification/testing)
   app.get("/todos/as/:userId", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const rows = await client.queryInternal(schemaApp.todos, {
+      const userDb = context.forSession({
         user_id: req.params.userId,
         claims: {},
       });
-      const todos = rows
-        .map((row) => rowToTodo(row.id, row.values))
-        .filter((t): t is Todo => t !== null);
+      const todos = await userDb.all(schemaApp.todos);
       res.json(todos);
     } catch (e) {
       next(e);
@@ -224,10 +160,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     sseConnections.add(res);
 
     // Send initial state
-    const rows = await client.query(schemaApp.todos);
-    const todos = rows
-      .map((row) => rowToTodo(row.id, row.values))
-      .filter((t): t is Todo => t !== null);
+    const todos = await db.all(schemaApp.todos);
     res.write(`data: ${JSON.stringify(todos)}\n\n`);
 
     // Clean up on disconnect
@@ -241,17 +174,9 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     try {
       const { id } = req.params;
 
-      const rows = await client.query(schemaApp.todos.where({ id }));
-      const row = rows.find((r) => r.id === id);
-
-      if (!row) {
-        res.status(404).json({ error: "Todo not found" });
-        return;
-      }
-
-      const todo = rowToTodo(row.id, row.values);
+      const todo = await db.one(schemaApp.todos.where({ id }));
       if (!todo) {
-        res.status(500).json({ error: "Failed to parse todo" });
+        res.status(404).json({ error: "Todo not found" });
         return;
       }
 
@@ -267,45 +192,31 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
       const { id } = req.params;
       const body = req.body as UpdateTodoRequest;
 
-      const updates: Record<string, Value> = {};
+      const updates = {
+        title: body.title,
+        done: body.done,
+        description: body.description === undefined ? undefined : body.description.trim(),
+      };
 
-      if (body.title !== undefined) {
-        updates.title = { type: "Text", value: body.title };
-      }
-      if (body.done !== undefined) {
-        updates.done = { type: "Boolean", value: body.done };
-      }
-      if (body.description !== undefined) {
-        updates.description = { type: "Text", value: body.description };
-      }
-
-      if (Object.keys(updates).length === 0) {
+      if (Object.values(updates).every((value) => value === undefined)) {
         // No updates, just return the current todo
-        const rows = await client.query(schemaApp.todos.where({ id }));
-        const row = rows.find((r) => r.id === id);
-
-        if (!row) {
+        const todo = await db.one(schemaApp.todos.where({ id }));
+        if (!todo) {
           res.status(404).json({ error: "Todo not found" });
           return;
         }
-
-        const todo = rowToTodo(row.id, row.values);
         res.json(todo);
         return;
       }
 
-      await client.updateDurable(id, updates);
+      await db.updateDurable(schemaApp.todos, id, updates);
 
       // Fetch updated todo
-      const rows = await client.query(schemaApp.todos.where({ id }));
-      const row = rows.find((r) => r.id === id);
-
-      if (!row) {
+      const todo = await db.one(schemaApp.todos.where({ id }));
+      if (!todo) {
         res.status(404).json({ error: "Todo not found after update" });
         return;
       }
-
-      const todo = rowToTodo(row.id, row.values);
       res.json(todo);
 
       // Notify SSE connections
@@ -320,7 +231,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     try {
       const { id } = req.params;
 
-      await client.deleteDurable(id);
+      await db.deleteDurable(schemaApp.todos, id);
       res.status(204).send();
 
       // Notify SSE connections
@@ -343,7 +254,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
 
   return {
     app,
-    client,
+    db,
     shutdown: async () => {
       await context.shutdown();
     },
