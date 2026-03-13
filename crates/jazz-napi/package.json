@@ -19,7 +19,9 @@
   },
   "scripts": {
     "build": "node scripts/build.js",
-    "build:debug": "napi build --platform"
+    "build:debug": "node scripts/build.js --debug",
+    "check:loader-scope": "node scripts/ensure-scoped-loader.js --check",
+    "fix:loader-scope": "node scripts/ensure-scoped-loader.js"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3"
