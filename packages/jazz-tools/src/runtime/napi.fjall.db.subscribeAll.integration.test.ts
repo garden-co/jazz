@@ -27,23 +27,20 @@ describe("db.subscribeAll NAPI Fjall integration", () => {
     try {
       await client.createDurable("todos", todoValues("watch-me", false), { tier: "worker" });
 
-      await vi.waitFor(
-        () => {
-          expect(
-            deltas.some((delta) =>
-              delta.some(
-                (change) =>
-                  change.kind === 0 && change.row && readRowTitle(change.row) === "watch-me",
-              ),
+      await vi.waitFor(() => {
+        expect(
+          deltas.some((delta) =>
+            delta.some(
+              (change) =>
+                change.kind === 0 && change.row && readRowTitle(change.row) === "watch-me",
             ),
-          ).toBe(true);
-        },
-        { timeout: 10_000 },
-      );
+          ),
+        ).toBe(true);
+      });
     } finally {
       client.unsubscribe(subscriptionId);
     }
-  }, 20_000);
+  });
 
   it("supports condition filters for Fjall-backed subscriptions", async () => {
     const store = await env.createPersistentStore("subscription-filter");
@@ -62,19 +59,15 @@ describe("db.subscribeAll NAPI Fjall integration", () => {
       await client.createDurable("todos", todoValues("visible", false), { tier: "worker" });
       await client.createDurable("todos", todoValues("hidden", true), { tier: "worker" });
 
-      await vi.waitFor(
-        () => {
-          expect(
-            deltas.some((delta) =>
-              delta.some(
-                (change) =>
-                  change.kind === 0 && change.row && readRowTitle(change.row) === "visible",
-              ),
+      await vi.waitFor(() => {
+        expect(
+          deltas.some((delta) =>
+            delta.some(
+              (change) => change.kind === 0 && change.row && readRowTitle(change.row) === "visible",
             ),
-          ).toBe(true);
-        },
-        { timeout: 10_000 },
-      );
+          ),
+        ).toBe(true);
+      });
 
       expect(
         deltas.some((delta) =>
@@ -98,5 +91,5 @@ describe("db.subscribeAll NAPI Fjall integration", () => {
     } finally {
       client.unsubscribe(subscriptionId);
     }
-  }, 20_000);
+  });
 });
