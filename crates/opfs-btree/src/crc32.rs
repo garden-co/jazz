@@ -1,7 +1,10 @@
 const IEEE_POLYNOMIAL: u32 = 0xEDB8_8320;
 
+// 16 tables × 256 entries × 4 bytes = 16 KB — fits comfortably in L1 data cache
+// (32 KB typical) with room for page data, unlike slicing-by-32's 32 KB footprint
+// that thrashes L1 on WASM engines.
 #[cfg(any(target_arch = "wasm32", test))]
-const FAST_TABLE_COUNT: usize = 32;
+const FAST_TABLE_COUNT: usize = 16;
 
 // `static` avoids large table copies in debug builds when indexing.
 #[cfg(any(target_arch = "wasm32", test))]
@@ -51,56 +54,40 @@ const fn build_crc32_tables() -> [[u32; 256]; FAST_TABLE_COUNT] {
 
 #[inline]
 #[cfg(any(target_arch = "wasm32", test))]
-fn update_chunk_32(crc: u32, bytes: &[u8]) -> u32 {
+fn update_chunk(crc: u32, bytes: &[u8]) -> u32 {
     debug_assert!(bytes.len() >= FAST_TABLE_COUNT);
 
-    CRC32_TABLES[0x00][bytes[0x1f] as usize]
-        ^ CRC32_TABLES[0x01][bytes[0x1e] as usize]
-        ^ CRC32_TABLES[0x02][bytes[0x1d] as usize]
-        ^ CRC32_TABLES[0x03][bytes[0x1c] as usize]
-        ^ CRC32_TABLES[0x04][bytes[0x1b] as usize]
-        ^ CRC32_TABLES[0x05][bytes[0x1a] as usize]
-        ^ CRC32_TABLES[0x06][bytes[0x19] as usize]
-        ^ CRC32_TABLES[0x07][bytes[0x18] as usize]
-        ^ CRC32_TABLES[0x08][bytes[0x17] as usize]
-        ^ CRC32_TABLES[0x09][bytes[0x16] as usize]
-        ^ CRC32_TABLES[0x0a][bytes[0x15] as usize]
-        ^ CRC32_TABLES[0x0b][bytes[0x14] as usize]
-        ^ CRC32_TABLES[0x0c][bytes[0x13] as usize]
-        ^ CRC32_TABLES[0x0d][bytes[0x12] as usize]
-        ^ CRC32_TABLES[0x0e][bytes[0x11] as usize]
-        ^ CRC32_TABLES[0x0f][bytes[0x10] as usize]
-        ^ CRC32_TABLES[0x10][bytes[0x0f] as usize]
-        ^ CRC32_TABLES[0x11][bytes[0x0e] as usize]
-        ^ CRC32_TABLES[0x12][bytes[0x0d] as usize]
-        ^ CRC32_TABLES[0x13][bytes[0x0c] as usize]
-        ^ CRC32_TABLES[0x14][bytes[0x0b] as usize]
-        ^ CRC32_TABLES[0x15][bytes[0x0a] as usize]
-        ^ CRC32_TABLES[0x16][bytes[0x09] as usize]
-        ^ CRC32_TABLES[0x17][bytes[0x08] as usize]
-        ^ CRC32_TABLES[0x18][bytes[0x07] as usize]
-        ^ CRC32_TABLES[0x19][bytes[0x06] as usize]
-        ^ CRC32_TABLES[0x1a][bytes[0x05] as usize]
-        ^ CRC32_TABLES[0x1b][bytes[0x04] as usize]
-        ^ CRC32_TABLES[0x1c][bytes[0x03] as usize ^ ((crc >> 0x18) & 0xFF) as usize]
-        ^ CRC32_TABLES[0x1d][bytes[0x02] as usize ^ ((crc >> 0x10) & 0xFF) as usize]
-        ^ CRC32_TABLES[0x1e][bytes[0x01] as usize ^ ((crc >> 0x08) & 0xFF) as usize]
-        ^ CRC32_TABLES[0x1f][bytes[0x00] as usize ^ (crc & 0xFF) as usize]
+    CRC32_TABLES[0x00][bytes[0x0f] as usize]
+        ^ CRC32_TABLES[0x01][bytes[0x0e] as usize]
+        ^ CRC32_TABLES[0x02][bytes[0x0d] as usize]
+        ^ CRC32_TABLES[0x03][bytes[0x0c] as usize]
+        ^ CRC32_TABLES[0x04][bytes[0x0b] as usize]
+        ^ CRC32_TABLES[0x05][bytes[0x0a] as usize]
+        ^ CRC32_TABLES[0x06][bytes[0x09] as usize]
+        ^ CRC32_TABLES[0x07][bytes[0x08] as usize]
+        ^ CRC32_TABLES[0x08][bytes[0x07] as usize]
+        ^ CRC32_TABLES[0x09][bytes[0x06] as usize]
+        ^ CRC32_TABLES[0x0a][bytes[0x05] as usize]
+        ^ CRC32_TABLES[0x0b][bytes[0x04] as usize]
+        ^ CRC32_TABLES[0x0c][bytes[0x03] as usize ^ ((crc >> 0x18) & 0xFF) as usize]
+        ^ CRC32_TABLES[0x0d][bytes[0x02] as usize ^ ((crc >> 0x10) & 0xFF) as usize]
+        ^ CRC32_TABLES[0x0e][bytes[0x01] as usize ^ ((crc >> 0x08) & 0xFF) as usize]
+        ^ CRC32_TABLES[0x0f][bytes[0x00] as usize ^ (crc & 0xFF) as usize]
 }
 
 #[inline]
 #[cfg(any(target_arch = "wasm32", test))]
-fn update_state_fast_32(mut crc: u32, mut bytes: &[u8]) -> u32 {
-    while bytes.len() >= 128 {
-        crc = update_chunk_32(crc, &bytes[..32]);
-        crc = update_chunk_32(crc, &bytes[32..64]);
-        crc = update_chunk_32(crc, &bytes[64..96]);
-        crc = update_chunk_32(crc, &bytes[96..128]);
-        bytes = &bytes[128..];
+fn update_state_fast(mut crc: u32, mut bytes: &[u8]) -> u32 {
+    while bytes.len() >= 64 {
+        crc = update_chunk(crc, &bytes[..16]);
+        crc = update_chunk(crc, &bytes[16..32]);
+        crc = update_chunk(crc, &bytes[32..48]);
+        crc = update_chunk(crc, &bytes[48..64]);
+        bytes = &bytes[64..];
     }
 
     while bytes.len() >= FAST_TABLE_COUNT {
-        crc = update_chunk_32(crc, &bytes[..FAST_TABLE_COUNT]);
+        crc = update_chunk(crc, &bytes[..FAST_TABLE_COUNT]);
         bytes = &bytes[FAST_TABLE_COUNT..];
     }
 
@@ -123,7 +110,7 @@ fn update_state_slow(mut crc: u32, bytes: &[u8]) -> u32 {
 #[inline]
 #[cfg(target_arch = "wasm32")]
 fn update_state(crc: u32, bytes: &[u8]) -> u32 {
-    update_state_fast_32(crc, bytes)
+    update_state_fast(crc, bytes)
 }
 
 #[inline]
@@ -144,7 +131,7 @@ pub(crate) fn update(crc: u32, bytes: &[u8]) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{hash, update, update_state_fast_32, update_state_slow};
+    use super::{hash, update, update_state_fast, update_state_slow};
 
     fn finalize_state(state: u32) -> u32 {
         !state
@@ -170,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn fast_32_matches_slow_for_varied_lengths_and_seeds() {
+    fn fast_matches_slow_for_varied_lengths_and_seeds() {
         let mut bytes = [0u8; 257];
         for (idx, byte) in bytes.iter_mut().enumerate() {
             *byte = (idx as u8).wrapping_mul(17).wrapping_add(31);
@@ -179,14 +166,14 @@ mod tests {
         for seed in [0, 1, 0x1234_5678, 0xFFFF_FFFF] {
             for len in 0..=bytes.len() {
                 let slow = finalize_state(update_state_slow(!seed, &bytes[..len]));
-                let fast = finalize_state(update_state_fast_32(!seed, &bytes[..len]));
+                let fast = finalize_state(update_state_fast(!seed, &bytes[..len]));
                 assert_eq!(fast, slow, "seed={seed:#010x} len={len}");
             }
         }
     }
 
     #[test]
-    fn fast_32_matches_slow_across_incremental_chunks() {
+    fn fast_matches_slow_across_incremental_chunks() {
         let mut bytes = [0u8; 513];
         for (idx, byte) in bytes.iter_mut().enumerate() {
             *byte = (idx as u8).wrapping_mul(29).wrapping_add(7);
@@ -197,8 +184,8 @@ mod tests {
                 update_state_slow(!0, &bytes[..split]),
                 &bytes[split..],
             ));
-            let fast = finalize_state(update_state_fast_32(
-                update_state_fast_32(!0, &bytes[..split]),
+            let fast = finalize_state(update_state_fast(
+                update_state_fast(!0, &bytes[..split]),
                 &bytes[split..],
             ));
             assert_eq!(fast, slow, "split={split}");
