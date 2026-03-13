@@ -1,9 +1,9 @@
 import { createDb, type DbConfig, type Db } from "jazz-tools";
-import { readAndWriteOwnedTodos } from "./auth-session-snippets.js";
+import { authSessionExamples } from "./auth-session-snippets.js";
 import { app, Todo } from "../schema/app.js";
 
 // Keep docs-only auth snippets in the compiled example app.
-void readAndWriteOwnedTodos;
+void authSessionExamples;
 
 function readEnvAppId(): string | undefined {
   return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env

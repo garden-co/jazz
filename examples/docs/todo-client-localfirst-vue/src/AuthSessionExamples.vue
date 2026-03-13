@@ -1,26 +1,35 @@
-<!-- #region auth-session-vue -->
 <script setup lang="ts">
-import { useDb, useSession } from "jazz-tools/vue";
+import { useAll, useDb, useSession } from "jazz-tools/vue";
 import { app } from "../schema/session-app.js";
 
 const db = useDb();
+
+// #region auth-session-vue-hook
 const session = useSession();
+// #endregion auth-session-vue-hook
 
-async function loadOwnedTodos() {
-  if (!session) return [];
-  return db.all(app.todos.where({ owner_id: session.user_id }));
-}
+// #region auth-session-vue-user-id
+const sessionUserId = session?.user_id ?? null;
+// #endregion auth-session-vue-user-id
 
+// #region auth-session-vue-query
+const ownedTodos = useAll(app.todos.where({ owner_id: sessionUserId ?? "__no-session__" }));
+// #endregion auth-session-vue-query
+
+// #region auth-session-vue-insert
 function addOwnedTodo(title: string) {
-  if (!session) return;
+  if (!sessionUserId) return;
 
   db.insert(app.todos, {
     title,
     done: false,
-    owner_id: session.user_id,
+    owner_id: sessionUserId,
   });
 }
+// #endregion auth-session-vue-insert
+
+void ownedTodos;
+void addOwnedTodo;
 </script>
 
 <template></template>
-<!-- #endregion auth-session-vue -->

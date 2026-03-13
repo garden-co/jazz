@@ -130,30 +130,104 @@ After linking, external JWT sessions resolve to the same principal.
 ## Use the Current Session in Client Code
 
 When you want to attach rows to the current user, or fetch only the rows relevant to that
-user, read the resolved session in your client and use `session.user_id`.
+user, read the resolved session in your client and derive a user id from it.
+
+### 1. Get the Session and User ID
 
 <Tabs items={["React", "Vue", "Svelte", "TypeScript"]}>
   <Tab value="React">
     <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react
+      ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-hook
+    </include>
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-user-id
     </include>
 
   </Tab>
   <Tab value="Vue">
     <include cwd lang="vue">
-      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue
+      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-hook
+    </include>
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-user-id
     </include>
 
   </Tab>
   <Tab value="Svelte">
     <include cwd lang="svelte">
-      ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-hook
+    </include>
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-user-id
     </include>
 
   </Tab>
   <Tab value="TypeScript">
     <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts
+      ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-hook
+    </include>
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-user-id
+    </include>
+
+  </Tab>
+</Tabs>
+
+### 2. Read Rows Relevant to the Current User
+
+Use your framework's normal reactive read primitive with the same user-scoped filter.
+
+<Tabs items={["React", "Vue", "Svelte", "TypeScript"]}>
+  <Tab value="React">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-query
+    </include>
+
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-query
+    </include>
+
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-query
+    </include>
+
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-query
+    </include>
+
+  </Tab>
+</Tabs>
+
+### 3. Insert a User-Owned Row
+
+<Tabs items={["React", "Vue", "Svelte", "TypeScript"]}>
+  <Tab value="React">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-insert
+    </include>
+
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-insert
+    </include>
+
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-insert
+    </include>
+
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-insert
     </include>
 
   </Tab>
@@ -162,9 +236,6 @@ user, read the resolved session in your client and use `session.user_id`.
 Use whatever column matches your schema, such as `owner_id`, `author_id`, `assignee_id`, or
 `user_id`. The same pattern works whether a row is strictly owned by one user or simply scoped
 to a user.
-
-For live UI queries, use the same `where({ ...: session.user_id })` filter with your framework's
-normal query helper.
 
 These client-side filters are useful for UX, but they do not make data private on their own.
 Use [Permissions](/docs/permissions) to define row-level policies that actually enforce which
