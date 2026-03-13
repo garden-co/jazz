@@ -1,3 +1,4 @@
+mod checksum;
 mod db;
 mod error;
 mod file;
