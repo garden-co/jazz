@@ -187,6 +187,11 @@ reading it with `useAllSuspense(query)`.
 - **Behavior:** `include(...)` loads related rows and returns nested objects in one query result.
 - **Parameters (TypeScript):** `include({ relationName: true | nestedInclude | queryBuilder })`.
 - **Nested includes:** pass nested objects to load multi-hop relations.
+- **Missing forward references:** included forward relations may be `undefined` at runtime, even when the FK column is non-nullable. Jazz cannot guarantee referential integrity at read time: a referenced row may be deleted, not synced locally yet, or hidden by permissions.
+- **Required forward includes (TypeScript):** call `requireIncludes()` after `include(...)` to drop rows whose included references cannot be resolved.
+- **Nullable scalar FKs:** `requireIncludes()` does not drop a row just because a nullable FK is `null`; in that case the included relation remains `undefined`.
+- **Reverse relations:** `requireIncludes()` does not force reverse includes to be non-empty and does not filter on them.
+- **Forward array refs:** without `requireIncludes()`, missing referenced members are skipped from the included array. With `requireIncludes()`, the row is dropped if any referenced member is unavailable.
 
 For chunked files stored in the conventional `files` / `file_parts` tables, prefer
 `db.loadFileAsBlob(...)` or `db.loadFileAsStream(...)` over eager `include(...)` loading of
