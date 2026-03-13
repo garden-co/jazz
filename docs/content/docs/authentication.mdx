@@ -127,6 +127,135 @@ Use `JazzClient.linkExternalIdentity(...)` directly:
 
 After linking, external JWT sessions resolve to the same principal.
 
+## Use the Current Session in Client Code
+
+When you want to attach rows to the current user, or fetch only the rows relevant to that
+user, read the resolved session in your client and use `session.user_id`.
+
+<Tabs items={["React", "Vue", "Svelte", "TypeScript"]}>
+  <Tab value="React">
+    ````tsx
+    import { useDb, useSession } from "jazz-tools/react";
+    import { app } from "../schema/app.js";
+
+    function TodoActions() {
+      const db = useDb();
+      const session = useSession();
+
+      function addTodo(title: string) {
+        if (!session) return;
+
+        db.insert(app.todos, {
+          title,
+          done: false,
+          owner_id: session.user_id,
+        });
+      }
+
+      async function loadMyTodos() {
+        if (!session) return [];
+        return db.all(app.todos.where({ owner_id: session.user_id }));
+      }
+
+      return null;
+    }
+    ````
+
+  </Tab>
+  <Tab value="Vue">
+    ````vue
+    <script setup lang="ts">
+    import { useDb, useSession } from "jazz-tools/vue";
+    import { app } from "../schema/app.js";
+
+    const db = useDb();
+    const session = useSession();
+
+    function addTodo(title: string) {
+      if (!session) return;
+
+      db.insert(app.todos, {
+        title,
+        done: false,
+        owner_id: session.user_id,
+      });
+    }
+
+    async function loadMyTodos() {
+      if (!session) return [];
+      return db.all(app.todos.where({ owner_id: session.user_id }));
+    }
+    </script>
+    ````
+
+  </Tab>
+  <Tab value="Svelte">
+    ````svelte
+    <script lang="ts">
+      import { getDb, getSession } from "jazz-tools/svelte";
+      import { app } from "../schema/app.js";
+
+      const db = getDb();
+      const session = getSession();
+
+      function addTodo(title: string) {
+        if (!session) return;
+
+        db.insert(app.todos, {
+          title,
+          done: false,
+          owner_id: session.user_id,
+        });
+      }
+
+      async function loadMyTodos() {
+        if (!session) return [];
+        return db.all(app.todos.where({ owner_id: session.user_id }));
+      }
+    </script>
+    ````
+
+  </Tab>
+  <Tab value="TypeScript">
+    ````ts
+    import { createDb, resolveClientSession } from "jazz-tools";
+    import { app } from "../schema/app.js";
+
+    const config = {
+      appId: "my-app",
+      serverUrl: "http://127.0.0.1:4200",
+    };
+
+    const db = await createDb(config);
+    const session = await resolveClientSession(config);
+
+    if (session) {
+      db.insert(app.todos, {
+        title: "Write docs",
+        done: false,
+        owner_id: session.user_id,
+      });
+
+      const myTodos = await db.all(
+        app.todos.where({ owner_id: session.user_id }),
+      );
+    }
+    ````
+
+  </Tab>
+</Tabs>
+
+Use whatever column matches your schema, such as `owner_id`, `author_id`, `assignee_id`, or
+`user_id`. The same pattern works whether a row is strictly owned by one user or simply scoped
+to a user.
+
+For live UI queries, use the same `where({ ...: session.user_id })` filter with your framework's
+normal query helper.
+
+These client-side filters are useful for UX, but they do not make data private on their own.
+Use [Permissions](/docs/permissions) to define row-level policies that actually enforce which
+sessions can read or mutate a row.
+
 ## Session Resolution Order
 
 For `jazz-tools server`:
