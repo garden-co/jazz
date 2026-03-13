@@ -1,5 +1,13 @@
 # jazz-napi
 
+## 2.0.0-alpha.18
+
+### Patch Changes
+
+- 33bc53f: Fail indexed writes cleanly when an indexed value would exceed the storage key limit instead of panicking in native storage.
+
+  Oversized indexed inserts and updates now return a normal mutation error to JS callers, and local updates can recover rows that were previously left in a partial index state by older panic-driven failures.
+
 ## 2.0.0-alpha.17
 
 ### Patch Changes
