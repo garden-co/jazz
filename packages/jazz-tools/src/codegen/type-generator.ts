@@ -166,9 +166,12 @@ function maybeUndefined(type: string, nullable: boolean): string {
 }
 
 function relationResultType(baseType: string, rel: Relation): string {
-  return rel.isArray
-    ? maybeUndefined(`${baseType}[]`, rel.nullable)
-    : maybeUndefined(baseType, rel.nullable);
+  if (rel.isArray) {
+    return maybeUndefined(`${baseType}[]`, rel.nullable);
+  }
+
+  const relationMayBeMissing = rel.type === "forward";
+  return maybeUndefined(baseType, rel.nullable || relationMayBeMissing);
 }
 
 /**
@@ -221,7 +224,7 @@ function generateRelationsTypes(relations: Map<string, Relation[]>): string[] {
     lines.push(`export interface ${interfaceName} {`);
     for (const rel of rels) {
       const targetInterface = tableNameToInterface(rel.toTable);
-      const type = rel.isArray ? `${targetInterface}[]` : targetInterface;
+      const type = relationResultType(targetInterface, rel);
       lines.push(`  ${rel.name}: ${type};`);
     }
     lines.push(`}`);
