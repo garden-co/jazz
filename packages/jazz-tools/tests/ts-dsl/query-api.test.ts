@@ -142,7 +142,7 @@ describe("TS Query API", () => {
     expect(result.project).toBeUndefined();
   });
 
-  it("include returns 'undefined' for missing array referenced entities", async () => {
+  it("include skips missing referenced entities in forward array relations", async () => {
     const db = track(
       await createDb({
         appId: "test-app",
@@ -162,10 +162,10 @@ describe("TS Query API", () => {
       app.todos.where({ id: { eq: todo.id } }).include({ assignees: app.users.select("id") }),
     );
     assert(result, "Result is not defined");
-    expect(result.assignees).toEqual([undefined, { id: assignee2.id }]);
+    expect(result.assignees).toEqual([{ id: assignee2.id }]);
   });
 
-  it("include does not return missing FKs for reverse relations", async () => {
+  it("include skips missing referenced entities in reverse relations", async () => {
     const db = track(
       await createDb({
         appId: "test-app",
