@@ -59,6 +59,7 @@ jobs:
 
       - run: pnpm format:check
       - run: pnpm lint
+      - run: pnpm --filter jazz-napi check:loader-scope
       - run: pnpm build
       - name: Show sccache stats (after pnpm build)
         run: sccache --show-stats || true
