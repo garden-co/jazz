@@ -5,9 +5,9 @@ description: Chunked browser Blob and stream storage using conventional files an
 
 import { Callout } from "fumadocs-ui/components/callout";
 
-Use this pattern for browser `Blob`, `File`, and `ReadableStream` values that are too large or
-awkward to keep inline on a single row. Jazz now provides high-level `Db` helpers that chunk
-uploads on write and stream file parts back sequentially on read.
+This page explains how to store images and other binary blobs in Jazz using browser `Blob`,
+`File`, and `ReadableStream` values. These files benefit from the same sync, local-first storage,
+and permission model as the rest of your structured data.
 
 Use plain `col.bytes()` when the binary value is small, naturally belongs on the row itself, and
 should always load together with the rest of that row.

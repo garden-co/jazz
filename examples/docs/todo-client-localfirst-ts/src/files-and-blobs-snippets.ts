@@ -5,10 +5,9 @@ const EXAMPLE_OWNER_ID = "local:example-owner";
 
 // #region files-create-from-blob-ts
 export async function createUploadFromBlob(db: Db, blob: Blob) {
-  const namedBlob = blob as Blob & { name?: unknown };
   const file = await db.createFileFromBlob(app, blob, {
     tier: "edge",
-    name: typeof namedBlob.name === "string" ? namedBlob.name : "upload.bin",
+    name: blob instanceof File ? blob.name : "upload.bin",
     mimeType: blob.type || "application/octet-stream",
   });
 
@@ -51,7 +50,8 @@ export async function loadUploadBlob(db: Db, uploadId: string) {
     return null;
   }
 
-  return db.loadFileAsBlob(app, upload.file, { tier: "edge" });
+  const blob = await db.loadFileAsBlob(app, upload.file, { tier: "edge" });
+  return blob;
 }
 // #endregion files-load-blob-ts
 
@@ -62,7 +62,8 @@ export async function loadUploadStream(db: Db, uploadId: string) {
     return null;
   }
 
-  return db.loadFileAsStream(app, upload.file, { tier: "edge" });
+  const stream = await db.loadFileAsStream(app, upload.file, { tier: "edge" });
+  return stream;
 }
 // #endregion files-load-stream-ts
 
