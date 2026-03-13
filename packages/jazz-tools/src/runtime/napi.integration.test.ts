@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { WasmSchema } from "../drivers/types.js";
+import type { Row } from "./client.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { pushSchemaCatalogue, startLocalJazzServer } from "../testing/local-jazz-server.js";
