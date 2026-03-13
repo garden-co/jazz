@@ -48,9 +48,9 @@ export type TypeOfZodSchema<S extends z.core.$ZodType> =
                     infer Key,
                     infer Value extends z.core.$ZodType
                   >
-                ? {
-                    [key in z.output<Key>]: TypeOfZodSchema<Value>;
-                  }
+                ? Key extends z.core.$partial
+                  ? Partial<Record<z.output<Key>, TypeOfZodSchema<Value>>>
+                  : Record<z.output<Key>, TypeOfZodSchema<Value>>
                 : S extends z.core.$ZodArray<infer Item extends z.core.$ZodType>
                   ? TypeOfZodSchema<Item>[]
                   : S extends z.core.$ZodTuple<
