@@ -21,7 +21,7 @@ table("file_parts", {
 });
 
 table("files", {
-  name: col.string(),
+  name: col.string().optional(),
   mimeType: col.string(),
   parts: col.array(col.ref("file_parts")),
   partSizes: col.array(col.int()),

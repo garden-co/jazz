@@ -9,7 +9,7 @@ import type { QueryBuilder, QueryOptions, TableProxy } from "./db.js";
 
 interface StoredFile {
   id: string;
-  name: string;
+  name?: string;
   mimeType: string;
   parts: string[];
   partSizes: number[];
@@ -188,17 +188,31 @@ describe("createFileStorage", () => {
     const db = new FakeDb();
     const storage = createConventionalFileStorage(db, app);
     const file = await storage.fromBlob(
-      new Blob([Uint8Array.from([9, 8, 7])], { type: "image/png" }),
+      new File([Uint8Array.from([9, 8, 7])], "image.png", {
+        type: "image/png",
+      }),
       {
-        name: "image.png",
         tier: "edge",
         chunkSizeBytes: 8,
       },
     );
 
     expect(file.mimeType).toBe("image/png");
+    expect(file.name).toBe("image.png");
     expect(db.inserts.every((insert) => insert.durable)).toBe(true);
     expect(db.inserts.map((insert) => insert.tier)).toEqual(["edge", "edge"]);
+  });
+
+  it("omits the optional file name for unnamed blobs", async () => {
+    const db = new FakeDb();
+    const storage = createConventionalFileStorage(db, app);
+
+    const file = await storage.fromBlob(new Blob([Uint8Array.from([1, 2, 3])]), {
+      chunkSizeBytes: 8,
+    });
+
+    expect(file.name).toBeUndefined();
+    expect(db.inserts[1]?.data.name).toBeUndefined();
   });
 
   it("loads file metadata first and then fetches file parts sequentially", async () => {

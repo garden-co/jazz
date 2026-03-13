@@ -31,7 +31,7 @@ export interface FilePart {
 
 export interface File {
   id: string;
-  name: string;
+  name?: string;
   mimeType: string;
   parts: string[];
   partSizes: number[];
@@ -62,7 +62,7 @@ export interface FilePartInit {
 }
 
 export interface FileInit {
-  name: string;
+  name?: string;
   mimeType: string;
   parts: string[];
   partSizes: number[];
@@ -429,7 +429,7 @@ export const wasmSchema: WasmSchema = {
         "column_type": {
           "type": "Text"
         },
-        "nullable": false
+        "nullable": true
       },
       {
         "name": "mimeType",

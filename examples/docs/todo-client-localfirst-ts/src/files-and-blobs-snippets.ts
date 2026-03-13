@@ -4,12 +4,8 @@ import { app } from "../schema/app.js";
 const EXAMPLE_OWNER_ID = "local:example-owner";
 
 // #region files-create-from-blob-ts
-export async function createUploadFromBlob(db: Db, blob: Blob) {
-  const file = await db.createFileFromBlob(app, blob, {
-    tier: "edge",
-    name: blob instanceof File ? blob.name : "upload.bin",
-    mimeType: blob.type || "application/octet-stream",
-  });
+export async function createUploadFromBlob(db: Db, blob: Blob | File) {
+  const file = await db.createFileFromBlob(app, blob, { tier: "edge" });
 
   return db.insertDurable(
     app.uploads,

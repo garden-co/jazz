@@ -24,7 +24,8 @@ should always load together with the rest of that row.
 `file_parts.data` stores the raw chunk bytes. `files.parts` keeps the ordered chunk ids, and
 `files.partSizes` stores each chunk's byte length in the same order.
 
-In the example above, `uploads.file` is your app-owned reference to a stored file.
+In the example above, `uploads.file` is your app-owned reference to a stored file. `files.name`
+is optional metadata; `createFileFromBlob(...)` fills it from `File.name` when available.
 
 ## Add Permissions
 
