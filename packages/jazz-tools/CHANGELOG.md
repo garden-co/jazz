@@ -1,5 +1,17 @@
 # jazz-tools
 
+## 0.20.13
+
+### Patch Changes
+
+- 307b11d: fix(better-auth): import createAuthMiddleware from better-auth/api for compatibility with better-auth 1.5.3
+- 1acba7b: Add MCP docs server exposing Jazz documentation as searchable tools for AI assistants, accessible via `jazz-run mcp`.
+- 53c2cc2: Updated `jazz-tools/tiptap` to align `JazzSyncExtension` with the Tiptap 3 plugin interface and allow `coRichText` to be initialized later before syncing starts.
+- Updated dependencies [9877c61]
+  - cojson@0.20.13
+  - cojson-storage-indexeddb@0.20.13
+  - cojson-transport-ws@0.20.13
+
 ## 0.20.12
 
 ### Patch Changes
