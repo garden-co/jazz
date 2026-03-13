@@ -13,7 +13,6 @@ import {
   Simplify,
   SubscribeCallback,
   SubscribeListenerOptions,
-  coMapDefiner,
   coOptionalDefiner,
   hydrateCoreCoValueSchema,
   isAnyCoValueSchema,
@@ -394,14 +393,7 @@ export class CoMapSchema<
     return hydrateCoreCoValueSchema(schemaWithCatchAll);
   }
 
-  withMigration(
-    migration: (
-      value: Resolved<
-        Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
-        true
-      >,
-    ) => undefined,
-  ): this {
+  withMigration(migration: CoMapMigration<Shape>): this {
     // @ts-expect-error avoid exposing 'migrate' at the type level
     this.coValueClass.prototype.migrate = migration;
     return this;
@@ -417,6 +409,7 @@ export class CoMapSchema<
 
   /**
    * Creates a new CoMap schema by picking the specified keys from the original schema.
+   * The new CoMap will **not** inherit any configurations (migration, catchall, permissions, default resolve query)
    *
    * @param keys - The keys to pick from the original schema.
    * @returns A new CoMap schema with the picked keys.
@@ -433,12 +426,51 @@ export class CoMapSchema<
       }
     }
 
-    // @ts-expect-error the picked shape contains all required keys
-    return coMapDefiner(pickedShape);
+    return this.copy(
+      {
+        shape: pickedShape as Pick<Shape, Keys>,
+        permissions: DEFAULT_SCHEMA_PERMISSIONS,
+        resolveQuery: true,
+      },
+      {
+        shouldCopyCatchAll: false,
+        shouldCopyMigration: false,
+      },
+    );
+  }
+
+  /**
+   * Creates a new CoMap schema by omitting the specified keys from the original schema.
+   * The new CoMap will **not** inherit any configurations (migration, catchall, permissions, default resolve query)
+   *
+   * @param keys - The keys to omit from the original schema.
+   * @returns A new CoMap schema with the omitted keys.
+   */
+  omit<Keys extends keyof Shape>(
+    keys: { [key in Keys]: true },
+  ): CoMapSchema<Simplify<Omit<Shape, Keys>>, unknown, Owner> {
+    const newShape: Record<string, AnyZodOrCoValueSchema> = { ...this.shape };
+
+    for (const key in keys) {
+      delete newShape[key];
+    }
+
+    return this.copy(
+      {
+        shape: newShape as Omit<Shape, Keys>,
+        permissions: DEFAULT_SCHEMA_PERMISSIONS,
+        resolveQuery: true,
+      },
+      {
+        shouldCopyCatchAll: false,
+        shouldCopyMigration: false,
+      },
+    );
   }
 
   /**
    * Creates a new CoMap schema by making all fields optional.
+   * The new CoMap will **not** inherit any configurations (migration, permissions, default resolve query) except catchall
    *
    * @returns A new CoMap schema with all fields optional.
    */
@@ -462,15 +494,64 @@ export class CoMapSchema<
       }
     }
 
-    const partialCoMapSchema = coMapDefiner(partialShape);
-    if (this.catchAll) {
-      // @ts-expect-error the partial shape contains all required keys
-      return partialCoMapSchema.catchall(
-        this.catchAll as unknown as AnyZodOrCoValueSchema,
-      );
-    }
-    // @ts-expect-error the partial shape contains all required keys
-    return partialCoMapSchema;
+    return this.copy(
+      {
+        shape: partialShape as PartialShape<Shape, Keys>,
+        permissions: DEFAULT_SCHEMA_PERMISSIONS,
+        resolveQuery: true,
+      },
+      {
+        shouldCopyMigration: false,
+      },
+    );
+  }
+
+  /**
+   * Creates a new CoMap schema by extending the current schema with additional fields.
+   * The new CoMap **will** inherit all configurations (migration, catchall, permissions, default resolve query)
+   *
+   * @param shape - The shape object with additional fields to add to the schema.
+   * @returns A new CoMap schema with the additional fields.
+   */
+  extend<ExtendShape extends z.core.$ZodLooseShape>(
+    shape: ExtendShape,
+  ): CoMapSchema<
+    z.core.util.Extend<Shape, ExtendShape>,
+    CatchAll,
+    Owner,
+    DefaultResolveQuery
+  > {
+    return this.copy({
+      shape: {
+        ...this.shape,
+        ...shape,
+      } as z.core.util.Extend<Shape, ExtendShape>,
+    });
+  }
+
+  /**
+   * Creates a new CoMap schema by extending the current schema with additional fields,
+   * while also making sure that no existing fields are accidentally overridden.
+   * The new CoMap **will** inherit all configurations (migration, catchall, permissions, default resolve query)
+   *
+   * @param shape - The shape object with additional fields to add to the schema.
+   * @returns A new CoMap schema with the additional fields.
+   */
+  safeExtend<ExtendShape extends z.core.$ZodLooseShape>(
+    shape: SafeExtendShape<Shape, ExtendShape> &
+      Partial<Record<keyof Shape, AnyZodOrCoValueSchema>>,
+  ): CoMapSchema<
+    z.core.util.Extend<Shape, ExtendShape>,
+    CatchAll,
+    Owner,
+    DefaultResolveQuery
+  > {
+    return this.copy({
+      shape: {
+        ...this.shape,
+        ...shape,
+      } as z.core.util.Extend<Shape, ExtendShape>,
+    });
   }
 
   /**
@@ -502,22 +583,45 @@ export class CoMapSchema<
   /**
    * Creates a copy of this schema, preserving all previous configuration
    */
-  private copy<ResolveQuery extends CoreResolveQuery = DefaultResolveQuery>({
-    permissions,
-    resolveQuery,
-  }: {
-    permissions?: SchemaPermissions;
-    resolveQuery?: ResolveQuery;
-  }): CoMapSchema<Shape, CatchAll, Owner, ResolveQuery> {
-    const coreSchema = createCoreCoMapSchema(this.shape, this.catchAll);
-    // @ts-expect-error
-    const copy: CoMapSchema<Shape, CatchAll, Owner, ResolveQuery> =
-      hydrateCoreCoValueSchema(coreSchema);
-    // @ts-expect-error avoid exposing 'migrate' at the type level
-    copy.coValueClass.prototype.migrate = this.coValueClass.prototype.migrate;
-    // @ts-expect-error TS cannot infer that the resolveQuery type is valid
-    copy.resolveQuery = resolveQuery ?? this.resolveQuery;
+  private copy<
+    ShapeOverride extends z.core.$ZodLooseShape = Shape,
+    ResolveQuery extends CoreResolveQuery = DefaultResolveQuery,
+  >(
+    {
+      shape,
+      permissions,
+      resolveQuery,
+    }: {
+      shape?: ShapeOverride;
+      permissions?: SchemaPermissions;
+      resolveQuery?: ResolveQuery;
+    },
+    options: {
+      shouldCopyCatchAll?: boolean;
+      shouldCopyMigration?: boolean;
+    } = {},
+  ): CoMapSchema<ShapeOverride, CatchAll, Owner, ResolveQuery> {
+    const { shouldCopyCatchAll = true, shouldCopyMigration = true } = options;
+
+    const coreSchema = createCoreCoMapSchema(
+      shape ?? this.shape,
+      shouldCopyCatchAll ? this.catchAll : (undefined as unknown),
+    );
+
+    const copy = hydrateCoreCoValueSchema(coreSchema) as CoMapSchema<
+      ShapeOverride,
+      CatchAll,
+      Owner,
+      ResolveQuery
+    >;
+
+    if (shouldCopyMigration) {
+      // @ts-expect-error avoid exposing 'migrate' at the type level
+      copy.coValueClass.prototype.migrate = this.coValueClass.prototype.migrate;
+    }
+
     copy.#permissions = permissions ?? this.#permissions;
+    copy.resolveQuery = (resolveQuery ?? this.resolveQuery) as ResolveQuery;
     return copy;
   }
 }
@@ -611,6 +715,13 @@ export interface CoreCoMapSchema<
   getDefinition: () => CoMapSchemaDefinition;
 }
 
+type CoMapMigration<Shape extends z.core.$ZodLooseShape> = (
+  value: Resolved<
+    Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
+    true
+  >,
+) => undefined;
+
 export type CoMapInstanceShape<
   Shape extends z.core.$ZodLooseShape,
   CatchAll extends AnyZodOrCoValueSchema | unknown = unknown,
@@ -642,3 +753,29 @@ export type PartialShape<
         : never
     : Shape[key];
 }>;
+
+export type SafeExtendShape<
+  Base extends z.core.$ZodLooseShape,
+  Ext extends z.core.$ZodLooseShape,
+> = {
+  [K in keyof Ext]: K extends keyof Base
+    ? Base[K] extends z.core.SomeType
+      ? Ext[K] extends z.core.SomeType
+        ? InstanceOrPrimitiveOfSchema<
+            Ext[K]
+          > extends InstanceOrPrimitiveOfSchema<Base[K]>
+          ? z.core.input<Ext[K]> extends z.core.input<Base[K]>
+            ? Ext[K]
+            : never
+          : never
+        : never
+      : Ext[K] extends z.core.SomeType
+        ? never
+        : // both are CoValue schemas
+          InstanceOrPrimitiveOfSchema<
+              Ext[K]
+            > extends InstanceOrPrimitiveOfSchema<Base[K]>
+          ? Ext[K]
+          : never
+    : Ext[K];
+};
