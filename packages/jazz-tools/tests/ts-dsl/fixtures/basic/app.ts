@@ -384,9 +384,7 @@ export class UserQueryBuilder<
 > implements QueryBuilder<UserSelectedWithIncludes<I, S, R>> {
   readonly _table = "users";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _initType: UserInit;
-  declare readonly _rowType: UserSelectedWithIncludes<I, S, R>;
-  readonly _rowType!: UserSelectedWithIncludes<I, S>;
+  readonly _rowType!: UserSelectedWithIncludes<I, S, R>;
   readonly _initType!: UserInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<UserInclude> = {};
@@ -600,7 +598,7 @@ export class ProjectQueryBuilder<
 > implements QueryBuilder<ProjectSelectedWithIncludes<I, S, R>> {
   readonly _table = "projects";
   readonly _schema: WasmSchema = wasmSchema;
-  readonly _rowType!: ProjectSelectedWithIncludes<I, S>;
+  readonly _rowType!: ProjectSelectedWithIncludes<I, S, R>;
   readonly _initType!: ProjectInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ProjectInclude> = {};
@@ -814,7 +812,7 @@ export class TodoQueryBuilder<
 > implements QueryBuilder<TodoSelectedWithIncludes<I, S, R>> {
   readonly _table = "todos";
   readonly _schema: WasmSchema = wasmSchema;
-  readonly _rowType!: TodoSelectedWithIncludes<I, S>;
+  readonly _rowType!: TodoSelectedWithIncludes<I, S, R>;
   readonly _initType!: TodoInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<TodoInclude> = {};
