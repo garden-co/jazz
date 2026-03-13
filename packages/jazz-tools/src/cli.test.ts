@@ -11,6 +11,9 @@ const permissionsDslPath = fileURLToPath(new URL("./permissions/index.ts", impor
 // Bin integration tests run in a subprocess that loads dist/cli.js, so current.ts must import
 // from the compiled dist to share the same dsl module instance (and thus _collectedSchema state).
 const distDslPath = fileURLToPath(new URL("../dist/dsl.js", import.meta.url));
+const distPermissionsDslPath = fileURLToPath(
+  new URL("../dist/permissions/index.js", import.meta.url),
+);
 
 const tempRoots: string[] = [];
 
@@ -167,6 +170,17 @@ migrate("messages", {
 migrate("canvases", {
   isPublic: col.drop().boolean({ backwardsDefault: false }),
 });
+`;
+}
+
+function binPermissionsSchema(appImportPath: string = "./app.js"): string {
+  return `
+import { definePermissions } from ${JSON.stringify(distPermissionsDslPath)};
+import { app } from ${JSON.stringify(appImportPath)};
+
+export default definePermissions(app, ({ policy, session }) => [
+  policy.todos.allowRead.where({ owner_id: session.user_id }),
+]);
 `;
 }
 
@@ -460,5 +474,19 @@ describe("bin integration", () => {
 
     await readFile(join(schemaDir, "migration_v1_v2_fwd_aaaaaaaaaaaa_bbbbbbbbbbbb.sql"), "utf8");
     await readFile(join(schemaDir, "migration_v1_v2_bwd_aaaaaaaaaaaa_bbbbbbbbbbbb.sql"), "utf8");
+  });
+
+  it("loads permissions.ts that imports ./app via bin entry point", async () => {
+    const { schemaDir } = await createWorkspace();
+    const rustBin = await createFakeRustBin();
+    await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), binPermissionsSchema("./app"));
+
+    runBinBuild(schemaDir, rustBin);
+
+    const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
+    expect(sql).toContain(
+      "CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);",
+    );
   });
 });
