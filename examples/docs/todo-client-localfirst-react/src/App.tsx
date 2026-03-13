@@ -1,7 +1,11 @@
 import * as React from "react";
 import { JazzProvider } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
+import { AuthSessionExamples } from "./AuthSessionExamples.js";
 import { TodoList } from "./TodoList.js";
+
+// Keep docs-only auth snippets in the compiled example app.
+void AuthSessionExamples;
 
 function readEnvAppId(): string | undefined {
   return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env

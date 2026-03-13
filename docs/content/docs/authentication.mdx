@@ -134,113 +134,27 @@ user, read the resolved session in your client and use `session.user_id`.
 
 <Tabs items={["React", "Vue", "Svelte", "TypeScript"]}>
   <Tab value="React">
-    ````tsx
-    import { useDb, useSession } from "jazz-tools/react";
-    import { app } from "../schema/app.js";
-
-    function TodoActions() {
-      const db = useDb();
-      const session = useSession();
-
-      function addTodo(title: string) {
-        if (!session) return;
-
-        db.insert(app.todos, {
-          title,
-          done: false,
-          owner_id: session.user_id,
-        });
-      }
-
-      async function loadMyTodos() {
-        if (!session) return [];
-        return db.all(app.todos.where({ owner_id: session.user_id }));
-      }
-
-      return null;
-    }
-    ````
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react
+    </include>
 
   </Tab>
   <Tab value="Vue">
-    ````vue
-    <script setup lang="ts">
-    import { useDb, useSession } from "jazz-tools/vue";
-    import { app } from "../schema/app.js";
-
-    const db = useDb();
-    const session = useSession();
-
-    function addTodo(title: string) {
-      if (!session) return;
-
-      db.insert(app.todos, {
-        title,
-        done: false,
-        owner_id: session.user_id,
-      });
-    }
-
-    async function loadMyTodos() {
-      if (!session) return [];
-      return db.all(app.todos.where({ owner_id: session.user_id }));
-    }
-    </script>
-    ````
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue
+    </include>
 
   </Tab>
   <Tab value="Svelte">
-    ````svelte
-    <script lang="ts">
-      import { getDb, getSession } from "jazz-tools/svelte";
-      import { app } from "../schema/app.js";
-
-      const db = getDb();
-      const session = getSession();
-
-      function addTodo(title: string) {
-        if (!session) return;
-
-        db.insert(app.todos, {
-          title,
-          done: false,
-          owner_id: session.user_id,
-        });
-      }
-
-      async function loadMyTodos() {
-        if (!session) return [];
-        return db.all(app.todos.where({ owner_id: session.user_id }));
-      }
-    </script>
-    ````
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte
+    </include>
 
   </Tab>
   <Tab value="TypeScript">
-    ````ts
-    import { createDb, resolveClientSession } from "jazz-tools";
-    import { app } from "../schema/app.js";
-
-    const config = {
-      appId: "my-app",
-      serverUrl: "http://127.0.0.1:4200",
-    };
-
-    const db = await createDb(config);
-    const session = await resolveClientSession(config);
-
-    if (session) {
-      db.insert(app.todos, {
-        title: "Write docs",
-        done: false,
-        owner_id: session.user_id,
-      });
-
-      const myTodos = await db.all(
-        app.todos.where({ owner_id: session.user_id }),
-      );
-    }
-    ````
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts
+    </include>
 
   </Tab>
 </Tabs>
