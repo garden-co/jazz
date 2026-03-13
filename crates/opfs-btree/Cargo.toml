@@ -17,7 +17,7 @@ rustc-hash = "2"
 thiserror = "2"
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
-xxhash-rust = { version = "0.8", features = ["xxh32"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 bf-tree = { version = "0.4.8", optional = true }

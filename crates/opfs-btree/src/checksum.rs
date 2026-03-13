@@ -1,13 +1,13 @@
-use xxhash_rust::xxh32;
+use xxhash_rust::xxh3;
 
 pub(crate) struct Hasher {
-    state: xxh32::Xxh32,
+    state: xxh3::Xxh3,
 }
 
 impl Hasher {
     pub(crate) fn new() -> Self {
         Self {
-            state: xxh32::Xxh32::new(0),
+            state: xxh3::Xxh3::new(),
         }
     }
 
@@ -16,13 +16,13 @@ impl Hasher {
     }
 
     pub(crate) fn finalize(self) -> u32 {
-        self.state.digest()
+        self.state.digest() as u32
     }
 }
 
 #[inline]
 pub(crate) fn hash(bytes: &[u8]) -> u32 {
-    xxh32::xxh32(bytes, 0)
+    xxh3::xxh3_64(bytes) as u32
 }
 
 #[cfg(test)]
@@ -30,14 +30,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn xxh32_standard_test_vectors() {
-        assert_eq!(hash(b""), 0x02CC_5D05);
-        assert_eq!(hash(b"123456789"), 0x937B_AD67);
-    }
-
-    #[test]
     fn streaming_matches_one_shot() {
-        let data = b"hello world, this is a test of streaming xxhash32";
+        let data = b"hello world, this is a test of streaming xxh3";
         let one_shot = hash(data);
 
         for split in 0..=data.len() {
