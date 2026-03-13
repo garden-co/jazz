@@ -1104,6 +1104,7 @@ impl QueryGraph {
             outer_tuple_descriptor,
             subgraph_template,
             outer_correlation,
+            spec.requirement,
             spec.column_name.clone(),
             schema.clone(),
         );

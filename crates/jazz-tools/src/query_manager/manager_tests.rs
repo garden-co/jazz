@@ -4892,6 +4892,33 @@ fn users_with_posts_descriptor() -> RowDescriptor {
     ])
 }
 
+fn groups_users_array_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Integer),
+            ColumnDescriptor::new("name", ColumnType::Text),
+        ])
+        .into(),
+    );
+    schema.insert(
+        TableName::new("groups"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new(
+                "member_ids",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Integer),
+                },
+            ),
+        ])
+        .into(),
+    );
+    schema
+}
+
 #[test]
 fn array_subquery_single_user_with_posts() {
     let sync_manager = SyncManager::new();
@@ -5102,6 +5129,128 @@ fn array_subquery_user_with_no_posts() {
     // Posts array should be empty
     let posts = values[2].as_array().expect("Should have posts array");
     assert_eq!(posts.len(), 0, "User with no posts should have empty array");
+}
+
+#[test]
+fn array_subquery_require_result_filters_and_readds_rows() {
+    let sync_manager = SyncManager::new();
+    let schema = users_posts_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .with_array("posts", |sub| {
+            sub.from("posts")
+                .correlate("author_id", "users.id")
+                .require_result()
+        })
+        .build();
+
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+
+    let initial_updates = qm.take_updates();
+    let initial_delta = initial_updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("Should have subscription update");
+    assert!(
+        initial_delta.added.is_empty(),
+        "user without posts should be filtered when include is required"
+    );
+
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Integer(100),
+            Value::Text("Hello world".into()),
+            Value::Integer(1),
+        ],
+    )
+    .unwrap();
+    qm.process(&mut storage);
+
+    let follow_up_updates = qm.take_updates();
+    let follow_up_delta = follow_up_updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("Should have subscription update after post insert");
+
+    assert_eq!(follow_up_delta.added.len(), 1);
+    let row = decode_row(
+        &users_with_posts_descriptor(),
+        &follow_up_delta.added[0].data,
+    )
+    .unwrap();
+    assert_eq!(row[0], Value::Integer(1));
+    assert_eq!(row[1], Value::Text("Alice".into()));
+    assert_eq!(row[2].as_array().expect("posts array").len(), 1);
+}
+
+#[test]
+fn array_subquery_require_full_cardinality_filters_incomplete_array_refs() {
+    let sync_manager = SyncManager::new();
+    let schema = groups_users_array_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "groups",
+        &[
+            Value::Integer(10),
+            Value::Text("Maintainers".into()),
+            Value::Array(vec![Value::Integer(1), Value::Integer(2)]),
+        ],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("groups")
+        .with_array("members", |sub| {
+            sub.from("users")
+                .correlate("user_id", "groups.member_ids")
+                .require_match_correlation_cardinality()
+        })
+        .build();
+
+    let initial_results = execute_query(&mut qm, &mut storage, query.clone()).unwrap();
+    assert!(
+        initial_results.is_empty(),
+        "group should be filtered when one referenced member is missing"
+    );
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(2), Value::Text("Bob".into())],
+    )
+    .unwrap();
+    let follow_up_results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(follow_up_results.len(), 1);
+    let row = &follow_up_results[0].1;
+    assert_eq!(row[0], Value::Integer(10));
+    assert_eq!(row[1], Value::Text("Maintainers".into()));
+    assert_eq!(
+        row[2],
+        Value::Array(vec![Value::Integer(1), Value::Integer(2)])
+    );
+    assert_eq!(row[3].as_array().expect("members array").len(), 2);
 }
 
 #[test]
