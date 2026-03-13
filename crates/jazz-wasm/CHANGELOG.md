@@ -1,5 +1,17 @@
 # jazz-wasm
 
+## 2.0.0-alpha.18
+
+### Patch Changes
+
+- 33bc53f: Fail indexed writes cleanly when an indexed value would exceed the storage key limit instead of panicking in native storage.
+
+  Oversized indexed inserts and updates now return a normal mutation error to JS callers, and local updates can recover rows that were previously left in a partial index state by older panic-driven failures.
+
+- 83f4f5d: Use xxHash-based checksums for `opfs-btree` pages and superblocks to reduce checksum overhead in persistent browser storage.
+
+  Existing OPFS stores created by older builds are not checksum-compatible with this change and will need to be recreated after upgrading.
+
 ## 2.0.0-alpha.17
 
 ## 2.0.0-alpha.16
