@@ -165,7 +165,7 @@ describe("TS Query API", () => {
         .requireIncludes(),
     );
 
-    expectTypeOf(result!.project).toEqualTypeOf<Project>();
+    expectTypeOf<NonNullable<typeof result>["project"]>().toEqualTypeOf<Project>();
     expect(result).toBeNull();
   });
 
