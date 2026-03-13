@@ -39,6 +39,7 @@ describe("TS Write API", () => {
       tags: ["tag1", "tag2"],
       project: project.id,
       owner: owner.id,
+      assignees: [],
     });
 
     expect(todo).toEqual({
@@ -48,6 +49,7 @@ describe("TS Write API", () => {
       tags: ["tag1", "tag2"],
       project: project.id,
       owner: owner.id,
+      assignees: [],
     });
   });
 
@@ -72,6 +74,7 @@ describe("TS Write API", () => {
         tags: ["tag1", "tag2"],
         project: project.id,
         owner: owner.id,
+        assignees: [],
       },
       { tier: "worker" },
     );
@@ -83,6 +86,7 @@ describe("TS Write API", () => {
       tags: ["tag1", "tag2"],
       project: project.id,
       owner: owner.id,
+      assignees: [],
     });
   });
 
@@ -95,6 +99,7 @@ describe("TS Write API", () => {
       tags: ["tag1", "tag2"],
       project: project.id,
       owner: owner.id,
+      assignees: [],
     });
 
     const result = db.update(app.todos, todo.id, { done: true });
@@ -113,6 +118,7 @@ describe("TS Write API", () => {
       tags: ["tag1", "tag2"],
       project: project.id,
       owner: owner.id,
+      assignees: [],
     });
 
     const pending = db.updateDurable(app.todos, todo.id, { done: true }, { tier: "worker" });
@@ -133,6 +139,7 @@ describe("TS Write API", () => {
       tags: ["tag1", "tag2"],
       project: project.id,
       owner: owner.id,
+      assignees: [],
     });
 
     const result = db.delete(app.todos, todo.id);
@@ -157,6 +164,7 @@ describe("TS Write API", () => {
         tags: ["tag1", "tag2"],
         project: project.id,
         owner: owner.id,
+        assignees: [],
       },
       { tier: "worker" },
     );
