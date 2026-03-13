@@ -45,11 +45,31 @@ export interface RequestLike {
  */
 export interface Runtime {
   insert(table: string, values: any): Row;
+  insertWithSession?(table: string, values: any, session_json?: string | null): Row;
   insertDurable(table: string, values: any, tier: string): Promise<Row>;
+  insertDurableWithSession?(
+    table: string,
+    values: any,
+    session_json: string | null | undefined,
+    tier: string,
+  ): Promise<Row>;
   update(object_id: string, values: any): void;
+  updateWithSession?(object_id: string, values: any, session_json?: string | null): void;
   updateDurable(object_id: string, values: any, tier: string): Promise<void>;
+  updateDurableWithSession?(
+    object_id: string,
+    values: any,
+    session_json: string | null | undefined,
+    tier: string,
+  ): Promise<void>;
   delete(object_id: string): void;
+  deleteWithSession?(object_id: string, session_json?: string | null): void;
   deleteDurable(object_id: string, tier: string): Promise<void>;
+  deleteDurableWithSession?(
+    object_id: string,
+    session_json: string | null | undefined,
+    tier: string,
+  ): Promise<void>;
   query(
     query_json: string,
     session_json?: string | null,
@@ -411,7 +431,7 @@ function decodeBase64Url(value: string): string {
   throw new Error("No base64 decoder available in this runtime");
 }
 
-function sessionFromRequest(request: RequestLike): Session {
+export function sessionFromRequest(request: RequestLike): Session {
   const authHeader = readHeader(request, "authorization");
   if (!authHeader?.startsWith("Bearer ")) {
     throw new Error("Missing or invalid Authorization header");
@@ -499,7 +519,6 @@ export class SessionClient {
       throw new Error("No server connection");
     }
 
-    // Convert updates object to array of tuples
     const updateArray = Object.entries(updates);
 
     const response = await this.client.sendRequest(
@@ -782,6 +801,28 @@ export class JazzClient {
     return options?.tier ?? this.defaultDurabilityTier;
   }
 
+  private encodeSession(session?: Session): string | undefined {
+    return session ? JSON.stringify(session) : undefined;
+  }
+
+  private requireSessionWriteMethod<
+    T extends keyof Pick<
+      Runtime,
+      | "insertWithSession"
+      | "insertDurableWithSession"
+      | "updateWithSession"
+      | "updateDurableWithSession"
+      | "deleteWithSession"
+      | "deleteDurableWithSession"
+    >,
+  >(method: T): NonNullable<Runtime[T]> {
+    const runtimeMethod = this.runtime[method];
+    if (!runtimeMethod) {
+      throw new Error(`${String(method)} is not supported by this runtime`);
+    }
+    return runtimeMethod.bind(this.runtime) as NonNullable<Runtime[T]>;
+  }
+
   private alignRowValuesToDeclaredSchema(
     table: string,
     values: Value[],
@@ -954,7 +995,21 @@ export class JazzClient {
    * Insert a new row into a table without waiting for durability.
    */
   create(table: string, values: Value[]): Row {
-    const row = this.runtime.insert(table, values);
+    return this.createInternal(table, values);
+  }
+
+  /**
+   * Insert a new row into a table with an optional session for policy checks.
+   * @internal
+   */
+  createInternal(table: string, values: Value[], session?: Session): Row {
+    const row = session
+      ? this.requireSessionWriteMethod("insertWithSession")(
+          table,
+          values,
+          this.encodeSession(session),
+        )
+      : this.runtime.insert(table, values);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
@@ -969,8 +1024,28 @@ export class JazzClient {
     values: Value[],
     options?: WriteDurabilityOptions,
   ): Promise<Row> {
+    return this.createDurableInternal(table, values, undefined, options);
+  }
+
+  /**
+   * Insert a new row into a table and wait for durability, optionally scoped to a session.
+   * @internal
+   */
+  async createDurableInternal(
+    table: string,
+    values: Value[],
+    session?: Session,
+    options?: WriteDurabilityOptions,
+  ): Promise<Row> {
     const tier = this.resolveWriteTier(options);
-    const row = await this.runtime.insertDurable(table, values, tier);
+    const row = session
+      ? await this.requireSessionWriteMethod("insertDurableWithSession")(
+          table,
+          values,
+          this.encodeSession(session),
+          tier,
+        )
+      : await this.runtime.insertDurable(table, values, tier);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
@@ -1015,6 +1090,22 @@ export class JazzClient {
    * Update a row by ID without waiting for durability.
    */
   update(objectId: string, updates: Record<string, Value>): void {
+    this.updateInternal(objectId, updates);
+  }
+
+  /**
+   * Update a row by ID without waiting for durability, optionally scoped to a session.
+   * @internal
+   */
+  updateInternal(objectId: string, updates: Record<string, Value>, session?: Session): void {
+    if (session) {
+      this.requireSessionWriteMethod("updateWithSession")(
+        objectId,
+        updates,
+        this.encodeSession(session),
+      );
+      return;
+    }
     this.runtime.update(objectId, updates);
   }
 
@@ -1026,7 +1117,29 @@ export class JazzClient {
     updates: Record<string, Value>,
     options?: WriteDurabilityOptions,
   ): Promise<void> {
+    await this.updateDurableInternal(objectId, updates, undefined, options);
+  }
+
+  /**
+   * Update a row by ID and wait for durability, optionally scoped to a session.
+   * @internal
+   */
+  async updateDurableInternal(
+    objectId: string,
+    updates: Record<string, Value>,
+    session?: Session,
+    options?: WriteDurabilityOptions,
+  ): Promise<void> {
     const tier = this.resolveWriteTier(options);
+    if (session) {
+      await this.requireSessionWriteMethod("updateDurableWithSession")(
+        objectId,
+        updates,
+        this.encodeSession(session),
+        tier,
+      );
+      return;
+    }
     await this.runtime.updateDurable(objectId, updates, tier);
   }
 
@@ -1034,6 +1147,18 @@ export class JazzClient {
    * Delete a row by ID without waiting for durability.
    */
   delete(objectId: string): void {
+    this.deleteInternal(objectId);
+  }
+
+  /**
+   * Delete a row by ID without waiting for durability, optionally scoped to a session.
+   * @internal
+   */
+  deleteInternal(objectId: string, session?: Session): void {
+    if (session) {
+      this.requireSessionWriteMethod("deleteWithSession")(objectId, this.encodeSession(session));
+      return;
+    }
     this.runtime.delete(objectId);
   }
 
@@ -1041,7 +1166,27 @@ export class JazzClient {
    * Delete a row by ID and wait for durability at the requested tier.
    */
   async deleteDurable(objectId: string, options?: WriteDurabilityOptions): Promise<void> {
+    await this.deleteDurableInternal(objectId, undefined, options);
+  }
+
+  /**
+   * Delete a row by ID and wait for durability, optionally scoped to a session.
+   * @internal
+   */
+  async deleteDurableInternal(
+    objectId: string,
+    session?: Session,
+    options?: WriteDurabilityOptions,
+  ): Promise<void> {
     const tier = this.resolveWriteTier(options);
+    if (session) {
+      await this.requireSessionWriteMethod("deleteDurableWithSession")(
+        objectId,
+        this.encodeSession(session),
+        tier,
+      );
+      return;
+    }
     await this.runtime.deleteDurable(objectId, tier);
   }
 
