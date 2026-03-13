@@ -32,6 +32,7 @@ export interface Todo {
   tags: string[];
   project: string;
   owner?: string;
+  assignees: string[];
 }
 
 export interface UserInit {
@@ -48,6 +49,7 @@ export interface TodoInit {
   tags: string[];
   project: string;
   owner?: string;
+  assignees: string[];
 }
 
 export interface UserWhereInput {
@@ -73,6 +75,7 @@ export interface TodoWhereInput {
   tags?: string[] | { eq?: string[]; contains?: string };
   project?: string | { eq?: string; ne?: string };
   owner?: string | { eq?: string; ne?: string; isNull?: boolean };
+  assignees?: string[] | { eq?: string[]; contains?: string };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -84,6 +87,7 @@ type AnyTodoQueryBuilder<T = any> = { readonly _table: "todos" } & QueryBuilder<
 
 export interface UserInclude {
   todosViaOwner?: true | TodoInclude | AnyTodoQueryBuilder<any>;
+  todosViaAssignees?: true | TodoInclude | AnyTodoQueryBuilder<any>;
 }
 
 export interface ProjectInclude {
@@ -93,6 +97,7 @@ export interface ProjectInclude {
 export interface TodoInclude {
   project?: true | ProjectInclude | AnyProjectQueryBuilder<any>;
   owner?: true | UserInclude | AnyUserQueryBuilder<any>;
+  assignees?: true | UserInclude | AnyUserQueryBuilder<any>;
 }
 
 export type UserIncludedRelations<I extends UserInclude = {}> = {
@@ -106,7 +111,17 @@ export type UserIncludedRelations<I extends UserInclude = {}> = {
             ? TodoWithIncludes<RelationInclude>[]
             : never
       : never
-    : never;
+    : K extends "todosViaAssignees"
+      ? NonNullable<I["todosViaAssignees"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Todo[]
+          : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends TodoInclude
+              ? TodoWithIncludes<RelationInclude>[]
+              : never
+        : never
+      : never;
 };
 
 export type ProjectIncludedRelations<I extends ProjectInclude = {}> = {
@@ -144,11 +159,22 @@ export type TodoIncludedRelations<I extends TodoInclude = {}> = {
               ? UserWithIncludes<RelationInclude> | undefined
               : never
         : never
-      : never;
+      : K extends "assignees"
+        ? NonNullable<I["assignees"]> extends infer RelationInclude
+          ? RelationInclude extends true
+            ? User[]
+            : RelationInclude extends AnyUserQueryBuilder<infer QueryRow>
+              ? QueryRow[]
+              : RelationInclude extends UserInclude
+                ? UserWithIncludes<RelationInclude>[]
+                : never
+          : never
+        : never;
 };
 
 export interface UserRelations {
   todosViaOwner: Todo[];
+  todosViaAssignees: Todo[];
 }
 
 export interface ProjectRelations {
@@ -158,6 +184,7 @@ export interface ProjectRelations {
 export interface TodoRelations {
   project: Project;
   owner: User;
+  assignees: User[];
 }
 
 export type UserWithIncludes<I extends UserInclude = {}> = Omit<
@@ -283,6 +310,17 @@ export const wasmSchema: WasmSchema = {
         nullable: true,
         references: "users",
       },
+      {
+        name: "assignees",
+        column_type: {
+          type: "Array",
+          element: {
+            type: "Uuid",
+          },
+        },
+        nullable: false,
+        references: "users",
+      },
     ],
     policies: {
       select: {
@@ -336,8 +374,8 @@ export class UserQueryBuilder<
 > implements QueryBuilder<UserSelectedWithIncludes<I, S>> {
   readonly _table = "users";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: UserSelectedWithIncludes<I, S>;
-  declare readonly _initType: UserInit;
+  readonly _rowType!: UserSelectedWithIncludes<I, S>;
+  readonly _initType!: UserInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<UserInclude> = {};
   private _selectColumns?: string[];
@@ -402,7 +440,7 @@ export class UserQueryBuilder<
     return clone;
   }
 
-  hopTo(relation: "todosViaOwner"): UserQueryBuilder<I, S> {
+  hopTo(relation: "todosViaOwner" | "todosViaAssignees"): UserQueryBuilder<I, S> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -536,8 +574,8 @@ export class ProjectQueryBuilder<
 > implements QueryBuilder<ProjectSelectedWithIncludes<I, S>> {
   readonly _table = "projects";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: ProjectSelectedWithIncludes<I, S>;
-  declare readonly _initType: ProjectInit;
+  readonly _rowType!: ProjectSelectedWithIncludes<I, S>;
+  readonly _initType!: ProjectInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ProjectInclude> = {};
   private _selectColumns?: string[];
@@ -739,8 +777,8 @@ export class TodoQueryBuilder<
 > implements QueryBuilder<TodoSelectedWithIncludes<I, S>> {
   readonly _table = "todos";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: TodoSelectedWithIncludes<I, S>;
-  declare readonly _initType: TodoInit;
+  readonly _rowType!: TodoSelectedWithIncludes<I, S>;
+  readonly _initType!: TodoInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<TodoInclude> = {};
   private _selectColumns?: string[];
@@ -805,7 +843,7 @@ export class TodoQueryBuilder<
     return clone;
   }
 
-  hopTo(relation: "project" | "owner"): TodoQueryBuilder<I, S> {
+  hopTo(relation: "project" | "owner" | "assignees"): TodoQueryBuilder<I, S> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;

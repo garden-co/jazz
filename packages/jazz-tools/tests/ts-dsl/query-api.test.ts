@@ -6,12 +6,23 @@ function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function insertOwner(db: Db, name = "Test User") {
+function insertUser(db: Db, name = "Test User") {
   return db.insert(app.users, { name });
 }
 
 function insertProject(db: Db, name = "Test Project") {
   return db.insert(app.projects, { name });
+}
+
+function insertTodo(db: Db, data: Partial<Todo>) {
+  return db.insert(app.todos, {
+    title: data.title ?? "Test Todo",
+    done: data.done ?? false,
+    tags: data.tags ?? [],
+    project: data.project ?? insertProject(db).id,
+    owner: data.owner ?? undefined,
+    assignees: data.assignees ?? [],
+  });
 }
 
 describe("TS Query API", () => {
@@ -61,10 +72,9 @@ describe("TS Query API", () => {
     );
 
     const { id: projectId } = insertProject(db);
-    const { id: ownerId } = insertOwner(db);
-    const { id: todoId } = db.insert(app.todos, {
+    const { id: ownerId } = insertUser(db);
+    const { id: todoId } = insertTodo(db, {
       title: "Hello world",
-      done: false,
       tags: ["general"],
       project: projectId,
       owner: ownerId,
@@ -90,11 +100,9 @@ describe("TS Query API", () => {
     );
 
     const { id: projectId } = insertProject(db, "Announcements");
-    const { id: ownerId } = insertOwner(db);
-    const { id: todoId } = db.insert(app.todos, {
+    const { id: ownerId } = insertUser(db);
+    const { id: todoId } = insertTodo(db, {
       title: "Write tests",
-      done: false,
-      tags: ["dev"],
       project: projectId,
       owner: ownerId,
     });
@@ -112,6 +120,76 @@ describe("TS Query API", () => {
     expect(todo.project.name).toBe("Announcements");
   });
 
+  it("include returns 'undefined' for missing scalar referenced entities", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("include-returns-entity") },
+      }),
+    );
+
+    const project = insertProject(db);
+    const todo = insertTodo(db, {
+      project: project.id,
+    });
+
+    await db.delete(app.projects, project.id);
+
+    const result = await db.one(
+      app.todos.where({ id: { eq: todo.id } }).include({ project: true }),
+    );
+    assert(result, "Result is not defined");
+    expect(result.project).toBeUndefined();
+  });
+
+  it("include skips missing referenced entities in forward array relations", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("include-returns-entity") },
+      }),
+    );
+
+    const assignee1 = insertUser(db);
+    const assignee2 = insertUser(db);
+    const todo = insertTodo(db, {
+      assignees: [assignee1.id, assignee2.id],
+    });
+
+    await db.delete(app.users, assignee1.id);
+
+    const result = await db.one(
+      app.todos.where({ id: { eq: todo.id } }).include({ assignees: app.users.select("id") }),
+    );
+    assert(result, "Result is not defined");
+    expect(result.assignees).toEqual([{ id: assignee2.id }]);
+  });
+
+  it("include skips missing referenced entities in reverse relations", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("include-returns-entity") },
+      }),
+    );
+
+    const owner = insertUser(db);
+    const { id: todoId } = insertTodo(db, {
+      owner: owner.id,
+    });
+    const { id: todoId2 } = insertTodo(db, {
+      owner: owner.id,
+    });
+
+    await db.delete(app.todos, todoId);
+
+    const result = await db.one(
+      app.users.where({ id: { eq: owner.id } }).include({ todosViaOwner: app.todos.select("id") }),
+    );
+    assert(result, "Result is not defined");
+    expect(result.todosViaOwner).toEqual([{ id: todoId2 }]);
+  });
+
   it("select narrows root columns while preserving id and includes", async () => {
     const db = track(
       await createDb({
@@ -121,13 +199,11 @@ describe("TS Query API", () => {
     );
 
     const { id: projectId } = insertProject(db, "Announcements");
-    const { id: ownerId } = insertOwner(db);
-    const { id: todoId } = db.insert(app.todos, {
+    const { id: todoId } = insertTodo(db, {
       title: "Write tests",
       done: false,
       tags: ["dev"],
       project: projectId,
-      owner: ownerId,
     });
 
     const result = await db.one(
@@ -162,11 +238,8 @@ describe("TS Query API", () => {
     );
 
     const { id: projectId } = insertProject(db, "Announcements");
-    const { id: ownerId } = insertOwner(db);
-    const { id: todoId } = db.insert(app.todos, {
-      title: "Write tests",
-      done: false,
-      tags: ["dev"],
+    const { id: ownerId } = insertUser(db);
+    const { id: todoId } = insertTodo(db, {
       project: projectId,
       owner: ownerId,
     });
@@ -193,12 +266,7 @@ describe("TS Query API", () => {
       }),
     );
 
-    const { id: projectId } = insertProject(db, "Announcements");
-    const { id: todoId } = db.insert(app.todos, {
-      title: "Write tests",
-      done: false,
-      tags: ["dev"],
-      project: projectId,
+    const { id: todoId } = insertTodo(db, {
       owner: undefined,
     });
 
@@ -218,13 +286,14 @@ describe("TS Query API", () => {
     );
 
     const { id: projectId } = insertProject(db);
-    const { id: ownerId } = insertOwner(db);
-    const { id: todoId } = db.insert(app.todos, {
+    const { id: ownerId } = insertUser(db);
+    const { id: todoId } = insertTodo(db, {
       title: "Write tests",
       done: false,
       tags: ["dev"],
       project: projectId,
       owner: ownerId,
+      assignees: [],
     });
 
     const result = await db.one(app.todos.select("*").where({ id: { eq: todoId } }));
@@ -238,6 +307,7 @@ describe("TS Query API", () => {
       tags: ["dev"],
       project: projectId,
       owner: ownerId,
+      assignees: [],
     });
   });
 
@@ -251,18 +321,20 @@ describe("TS Query API", () => {
       }),
     );
 
-    const { id: projectId } = await db.insert(app.projects, { name: "Announcements" });
-    const { id: editableId } = await db.insert(app.todos, {
+    const { id: projectId } = insertProject(db, "Announcements");
+    const { id: editableId } = insertTodo(db, {
       title: "Draft docs",
       done: false,
       tags: ["dev"],
       project: projectId,
+      assignees: [],
     });
-    const { id: lockedId } = await db.insert(app.todos, {
+    const { id: lockedId } = insertTodo(db, {
       title: "Shipped docs",
       done: true,
       tags: ["docs"],
       project: projectId,
+      assignees: [],
     });
 
     const projected = await db.all(
@@ -337,13 +409,14 @@ describe("TS Query API", () => {
     );
 
     const { id: projectId } = insertProject(db, "Announcements");
-    const { id: ownerId } = insertOwner(db);
-    const { id: todoId } = db.insert(app.todos, {
+    const { id: ownerId } = insertUser(db);
+    const { id: todoId } = insertTodo(db, {
       title: "Write tests",
       done: false,
       tags: ["dev"],
       project: projectId,
       owner: ownerId,
+      assignees: [],
     });
 
     const result = await db.one(
@@ -379,7 +452,7 @@ describe("TS Query API", () => {
     );
 
     const { id: projectId } = insertProject(db, "Announcements");
-    const { id: ownerId } = insertOwner(db);
+    const { id: ownerId } = insertUser(db);
 
     type SubscribedTodo = {
       id: string;
@@ -412,12 +485,13 @@ describe("TS Query API", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    const { id: todoId } = db.insert(app.todos, {
+    const { id: todoId } = insertTodo(db, {
       title: "Watch subscription",
       done: false,
       tags: ["dev"],
       project: projectId,
       owner: ownerId,
+      assignees: [],
     });
 
     const delta = await deltaPromise;
@@ -448,28 +522,17 @@ describe("TS Query API", () => {
           driver: { type: "persistent", dbName: uniqueDbName("query-by-array-column-equality") },
         }),
       );
-      const { id: projectId } = insertProject(db);
-      const { id: ownerId } = insertOwner(db);
-      const { id: id1 } = db.insert(app.todos, {
+      const { id: id1 } = insertTodo(db, {
         title: "Todo 1",
-        done: false,
         tags: ["tag1"],
-        project: projectId,
-        owner: ownerId,
       });
-      db.insert(app.todos, {
+      insertTodo(db, {
         title: "Todo 2",
-        done: false,
         tags: ["tag2"],
-        project: projectId,
-        owner: ownerId,
       });
-      db.insert(app.todos, {
+      insertTodo(db, {
         title: "Todo 3",
-        done: false,
         tags: ["tag1", "tag2"],
-        project: projectId,
-        owner: ownerId,
       });
 
       const todosWithTags = await db.all(app.todos.where({ tags: { eq: ["tag1"] } }));
@@ -484,28 +547,17 @@ describe("TS Query API", () => {
           driver: { type: "persistent", dbName: uniqueDbName("query-by-array-column-contains") },
         }),
       );
-      const { id: projectId } = insertProject(db);
-      const { id: ownerId } = insertOwner(db);
-      const { id: id1 } = db.insert(app.todos, {
+      const { id: id1 } = insertTodo(db, {
         title: "Todo 1",
-        done: false,
         tags: ["tag1"],
-        project: projectId,
-        owner: ownerId,
       });
-      db.insert(app.todos, {
+      insertTodo(db, {
         title: "Todo 2",
-        done: false,
         tags: ["tag2"],
-        project: projectId,
-        owner: ownerId,
       });
-      const { id: id3 } = db.insert(app.todos, {
+      const { id: id3 } = insertTodo(db, {
         title: "Todo 3",
-        done: false,
         tags: ["tag1", "tag2"],
-        project: projectId,
-        owner: ownerId,
       });
 
       const todosWithTags = await db.all(app.todos.where({ tags: { contains: "tag1" } }));
