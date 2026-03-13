@@ -142,11 +142,11 @@ export type TodoIncludedRelations<I extends TodoInclude = {}> = {
   [K in keyof I]-?: K extends "project"
     ? NonNullable<I["project"]> extends infer RelationInclude
       ? RelationInclude extends true
-        ? Project
+        ? Project | undefined
         : RelationInclude extends AnyProjectQueryBuilder<infer QueryRow>
-          ? QueryRow
+          ? QueryRow | undefined
           : RelationInclude extends ProjectInclude
-            ? ProjectWithIncludes<RelationInclude>
+            ? ProjectWithIncludes<RelationInclude> | undefined
             : never
       : never
     : K extends "owner"
@@ -182,8 +182,8 @@ export interface ProjectRelations {
 }
 
 export interface TodoRelations {
-  project: Project;
-  owner: User;
+  project: Project | undefined;
+  owner: User | undefined;
   assignees: User[];
 }
 

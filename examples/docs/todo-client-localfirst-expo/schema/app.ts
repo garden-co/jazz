@@ -1,12 +1,6 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
 import type { WasmSchema, QueryBuilder } from "jazz-tools";
-export type JsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | { [key: string]: JsonValue }
-  | JsonValue[];
+export type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];
 
 export type PermissionIntrospectionColumn = "$canRead" | "$canEdit" | "$canDelete";
 export interface PermissionIntrospectionColumns {
@@ -130,9 +124,9 @@ export interface ProjectRelations {
 }
 
 export interface TodoRelations {
-  parent: Todo;
+  parent: Todo | undefined;
   todosViaParent: Todo[];
-  project: Project;
+  project: Project | undefined;
 }
 
 export type ProjectWithIncludes<I extends ProjectInclude = {}> = Omit<
@@ -175,154 +169,164 @@ export type TodoSelectedWithIncludes<
 > = Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I>;
 
 export const wasmSchema: WasmSchema = {
-  projects: {
-    columns: [
+  "projects": {
+    "columns": [
       {
-        name: "name",
-        column_type: {
-          type: "Text",
+        "name": "name",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
-      },
-    ],
+        "nullable": false
+      }
+    ]
   },
-  todos: {
-    columns: [
+  "todos": {
+    "columns": [
       {
-        name: "title",
-        column_type: {
-          type: "Text",
+        "name": "title",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "done",
-        column_type: {
-          type: "Boolean",
+        "name": "done",
+        "column_type": {
+          "type": "Boolean"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "description",
-        column_type: {
-          type: "Text",
+        "name": "description",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: true,
+        "nullable": true
       },
       {
-        name: "owner_id",
-        column_type: {
-          type: "Text",
+        "name": "owner_id",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "parent",
-        column_type: {
-          type: "Uuid",
+        "name": "parent",
+        "column_type": {
+          "type": "Uuid"
         },
-        nullable: true,
-        references: "todos",
+        "nullable": true,
+        "references": "todos"
       },
       {
-        name: "project",
-        column_type: {
-          type: "Uuid",
+        "name": "project",
+        "column_type": {
+          "type": "Uuid"
         },
-        nullable: true,
-        references: "projects",
-      },
+        "nullable": true,
+        "references": "projects"
+      }
     ],
-    policies: {
-      select: {
-        using: {
-          type: "Cmp",
-          column: "owner_id",
-          op: "Eq",
-          value: {
-            type: "SessionRef",
-            path: ["user_id"],
-          },
-        },
+    "policies": {
+      "select": {
+        "using": {
+          "type": "Cmp",
+          "column": "owner_id",
+          "op": "Eq",
+          "value": {
+            "type": "SessionRef",
+            "path": [
+              "user_id"
+            ]
+          }
+        }
       },
-      insert: {
-        with_check: {
-          type: "Cmp",
-          column: "owner_id",
-          op: "Eq",
-          value: {
-            type: "SessionRef",
-            path: ["user_id"],
-          },
-        },
+      "insert": {
+        "with_check": {
+          "type": "Cmp",
+          "column": "owner_id",
+          "op": "Eq",
+          "value": {
+            "type": "SessionRef",
+            "path": [
+              "user_id"
+            ]
+          }
+        }
       },
-      update: {
-        using: {
-          type: "And",
-          exprs: [
+      "update": {
+        "using": {
+          "type": "And",
+          "exprs": [
             {
-              type: "Cmp",
-              column: "owner_id",
-              op: "Eq",
-              value: {
-                type: "SessionRef",
-                path: ["user_id"],
-              },
+              "type": "Cmp",
+              "column": "owner_id",
+              "op": "Eq",
+              "value": {
+                "type": "SessionRef",
+                "path": [
+                  "user_id"
+                ]
+              }
             },
             {
-              type: "Cmp",
-              column: "done",
-              op: "Eq",
-              value: {
-                type: "Literal",
-                value: {
-                  type: "Boolean",
-                  value: false,
-                },
-              },
-            },
-          ],
+              "type": "Cmp",
+              "column": "done",
+              "op": "Eq",
+              "value": {
+                "type": "Literal",
+                "value": {
+                  "type": "Boolean",
+                  "value": false
+                }
+              }
+            }
+          ]
         },
-        with_check: {
-          type: "Cmp",
-          column: "owner_id",
-          op: "Eq",
-          value: {
-            type: "SessionRef",
-            path: ["user_id"],
-          },
-        },
+        "with_check": {
+          "type": "Cmp",
+          "column": "owner_id",
+          "op": "Eq",
+          "value": {
+            "type": "SessionRef",
+            "path": [
+              "user_id"
+            ]
+          }
+        }
       },
-      delete: {
-        using: {
-          type: "And",
-          exprs: [
+      "delete": {
+        "using": {
+          "type": "And",
+          "exprs": [
             {
-              type: "Cmp",
-              column: "owner_id",
-              op: "Eq",
-              value: {
-                type: "SessionRef",
-                path: ["user_id"],
-              },
+              "type": "Cmp",
+              "column": "owner_id",
+              "op": "Eq",
+              "value": {
+                "type": "SessionRef",
+                "path": [
+                  "user_id"
+                ]
+              }
             },
             {
-              type: "Cmp",
-              column: "done",
-              op: "Eq",
-              value: {
-                type: "Literal",
-                value: {
-                  type: "Boolean",
-                  value: false,
-                },
-              },
-            },
-          ],
-        },
-      },
-    },
-  },
+              "type": "Cmp",
+              "column": "done",
+              "op": "Eq",
+              "value": {
+                "type": "Literal",
+                "value": {
+                  "type": "Boolean",
+                  "value": false
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
 };
 
 export class ProjectQueryBuilder<
@@ -431,15 +435,13 @@ export class ProjectQueryBuilder<
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (
-      !stepOutput ||
-      typeof stepOutput !== "object" ||
-      typeof (stepOutput as { _build?: unknown })._build !== "function"
-    ) {
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(stepOutput._build()) as {
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -463,9 +465,7 @@ export class ProjectQueryBuilder<
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error(
-        "gather(...) step must include exactly one where condition bound to current.",
-      );
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
     }
 
     const currentCondition = currentConditions[0];
@@ -631,15 +631,13 @@ export class TodoQueryBuilder<
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (
-      !stepOutput ||
-      typeof stepOutput !== "object" ||
-      typeof (stepOutput as { _build?: unknown })._build !== "function"
-    ) {
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(stepOutput._build()) as {
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -663,9 +661,7 @@ export class TodoQueryBuilder<
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error(
-        "gather(...) step must include exactly one where condition bound to current.",
-      );
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
     }
 
     const currentCondition = currentConditions[0];

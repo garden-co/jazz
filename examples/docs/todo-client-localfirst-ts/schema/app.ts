@@ -263,9 +263,9 @@ export interface ProjectRelations {
 }
 
 export interface TodoRelations {
-  parent: Todo;
+  parent: Todo | undefined;
   todosViaParent: Todo[];
-  project: Project;
+  project: Project | undefined;
 }
 
 export interface FilePartRelations {

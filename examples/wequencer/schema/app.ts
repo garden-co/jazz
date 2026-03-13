@@ -212,11 +212,11 @@ export type BeatIncludedRelations<I extends BeatInclude = {}> = {
     : K extends "instrument"
       ? NonNullable<I["instrument"]> extends infer RelationInclude
         ? RelationInclude extends true
-          ? Instrument
+          ? Instrument | undefined
           : RelationInclude extends AnyInstrumentQueryBuilder<infer QueryRow>
-            ? QueryRow
+            ? QueryRow | undefined
             : RelationInclude extends InstrumentInclude
-              ? InstrumentWithIncludes<RelationInclude>
+              ? InstrumentWithIncludes<RelationInclude> | undefined
               : never
         : never
       : never;
@@ -246,12 +246,12 @@ export interface JamRelations {
 }
 
 export interface BeatRelations {
-  jam: Jam;
-  instrument: Instrument;
+  jam: Jam | undefined;
+  instrument: Instrument | undefined;
 }
 
 export interface ParticipantRelations {
-  jam: Jam;
+  jam: Jam | undefined;
 }
 
 export type InstrumentWithIncludes<I extends InstrumentInclude = {}> = Omit<
