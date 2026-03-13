@@ -76,10 +76,10 @@ table("todos", {
 `;
 }
 
-function permissionsSchema(): string {
+function permissionsSchema(appImportPath: string = "./app.js"): string {
   return `
 import { definePermissions } from ${JSON.stringify(permissionsDslPath)};
-import { app } from "./app";
+import { app } from ${JSON.stringify(appImportPath)};
 
 export default definePermissions(app, ({ policy, session }) => [
   policy.todos.allowRead.where({ owner_id: session.user_id }),
@@ -108,7 +108,7 @@ export const nope = 42;
 function permissionsSchemaNamedExport(): string {
   return `
 import { definePermissions } from ${JSON.stringify(permissionsDslPath)};
-import { app } from "./app";
+import { app } from "./app.js";
 
 export const permissions = definePermissions(app, ({ policy, session }) => [
   policy.todos.allowRead.where({ owner_id: session.user_id }),
@@ -277,6 +277,32 @@ describe("cli build permissions generation", () => {
     expect(appTs).toContain('"type": "SessionRef"');
     expect(appTs).toContain('"column": "owner_id"');
     expect(permissionsTest).toContain("Permissions test starter.");
+  });
+
+  it("loads permissions.ts when it imports app from ./app.ts", async () => {
+    const { schemaDir, jazzBin } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    await writeFile(join(schemaDir, "permissions.ts"), permissionsSchema("./app.ts"));
+
+    await build({ schemaDir, jazzBin });
+
+    const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
+    expect(sql).toContain(
+      "CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);",
+    );
+  });
+
+  it("loads permissions.ts when it imports app from ./app", async () => {
+    const { schemaDir, jazzBin } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    await writeFile(join(schemaDir, "permissions.ts"), permissionsSchema("./app"));
+
+    await build({ schemaDir, jazzBin });
+
+    const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
+    expect(sql).toContain(
+      "CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);",
+    );
   });
 
   it("fails when current.ts uses inline table permissions", async () => {
