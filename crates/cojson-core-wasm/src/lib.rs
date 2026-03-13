@@ -3,6 +3,13 @@ use serde::Serialize;
 use thiserror::Error;
 use wasm_bindgen::prelude::*;
 
+// ============================================================================
+// Storage Module - Native Storage Backend
+// ============================================================================
+
+pub mod storage;
+pub use storage::NativeStorage;
+
 pub mod hash {
     pub mod blake3;
     pub use blake3::*;
