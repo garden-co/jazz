@@ -100,12 +100,7 @@ function buildIncludePlans(
   return plans;
 }
 
-function transformIncludedValue(
-  value: WasmValue,
-  plan: IncludePlan,
-  schema: WasmSchema,
-  sourceRow: Record<string, unknown>,
-): unknown {
+function transformIncludedValue(value: WasmValue, plan: IncludePlan, schema: WasmSchema): unknown {
   if (value.type !== "Array") {
     return unwrapValue(value);
   }
@@ -126,39 +121,6 @@ function transformIncludedValue(
       plan.projection,
     );
   });
-
-  if (plan.relation.type === "forward" && plan.relation.isArray) {
-    const foreignKeys = sourceRow[plan.relation.fromColumn];
-    if (!Array.isArray(foreignKeys)) {
-      return rows;
-    }
-
-    const rowsById = new Map<string, unknown[]>();
-    for (const row of rows) {
-      if (!row || typeof row !== "object" || !("id" in row)) {
-        continue;
-      }
-      const rowId = row.id;
-      if (typeof rowId !== "string") {
-        continue;
-      }
-      const bucket = rowsById.get(rowId);
-      if (bucket) {
-        bucket.push(row);
-      } else {
-        rowsById.set(rowId, [row]);
-      }
-    }
-
-    // Preserve order of references in the source array,
-    // and return undefined for missing references.
-    return foreignKeys.map((fk) => {
-      if (typeof fk !== "string") {
-        return undefined;
-      }
-      return rowsById.get(fk)?.shift();
-    });
-  }
 
   return plan.relation.isArray ? rows : rows[0];
 }
@@ -195,7 +157,7 @@ function transformRowValues(
     const value = values[baseColumns.length + i];
     if (value === undefined) continue;
     const plan = includePlans[i];
-    obj[plan.relation.name] = transformIncludedValue(value, plan, schema, obj);
+    obj[plan.relation.name] = transformIncludedValue(value, plan, schema);
   }
 
   return obj;
