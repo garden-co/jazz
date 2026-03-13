@@ -16,6 +16,7 @@ Shared benchmark definitions for the realistic, scenario-driven benchmark suite.
 - `scenarios/b4_server_fanout_updates.json`: update fanout delivery to many subscribers
 - `scenarios/b5_server_permission_recursive.json`: recursive-permission read/update mix
 - `scenarios/b6_server_hotspot_history.json`: deep-history hotspot updates + storage delta
+- `scenarios/r8_many_branches.json`: many linked branches on a single object
 
 ## Native Runner (Fjall)
 
@@ -55,6 +56,7 @@ It currently loads:
 - scenario `R5`: `benchmarks/realistic/scenarios/r5_permission_recursive.json` (recursive policy read/update with allow+deny mix)
 - scenario `R6`: `benchmarks/realistic/scenarios/r6_permission_write_heavy.json` (recursive policy write-heavy allow+deny mix)
 - scenario `R7A`: `benchmarks/realistic/scenarios/r7_hotspot_history.json` (deep updates on a small hot set)
+- scenario `R8`: `benchmarks/realistic/scenarios/r8_many_branches.json` (many linked branches on one object)
 
 Current topology coverage:
 
@@ -66,6 +68,7 @@ Current topology coverage:
 - recursive permission read/write: `realistic_phase1/permission_recursive`
 - recursive permission write-heavy: `realistic_phase1/permission_write_heavy`
 - hotspot deep-history updates: `realistic_phase1/hotspot_history`
+- branch-count scaling baseline: `realistic_phase1/many_branches_*`
 
 Run only the cold-load benchmark:
 
