@@ -13,7 +13,7 @@ export async function listTodosForRequester(req: Request, res: Response): Promis
   try {
     const rows = await context
       .forRequest(req, schemaApp)
-      .query(schemaApp.todos.where({ done: true }));
+      .all(schemaApp.todos.where({ done: true }));
     res.json(rows);
   } catch {
     sendQueryError(res);
@@ -26,7 +26,7 @@ export async function listTodosWithSimplePolicy(req: Request, res: Response): Pr
   try {
     const rows = await context
       .forRequest(req, schemaApp)
-      .query(schemaApp.todos.where({ done: false }));
+      .all(schemaApp.todos.where({ done: false }));
     res.json(rows);
   } catch {
     sendQueryError(res);
@@ -42,7 +42,7 @@ export async function listTodosWithInheritedPolicy(
   try {
     const rows = await context
       .forRequest(req, schemaApp)
-      .query(schemaApp.todos.where({ project: req.params.projectId }));
+      .all(schemaApp.todos.where({ project: req.params.projectId }));
     res.json(rows);
   } catch {
     sendQueryError(res);

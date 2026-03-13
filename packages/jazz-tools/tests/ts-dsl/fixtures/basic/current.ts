@@ -14,4 +14,5 @@ table("todos", {
   tags: col.array(col.string()),
   project: col.ref("projects"),
   owner: col.ref("users").optional(),
+  assignees: col.array(col.ref("users")),
 });

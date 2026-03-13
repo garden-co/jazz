@@ -1050,6 +1050,41 @@ describe("translateQuery", () => {
         },
       ]);
     });
+
+    it("omits implicit id from include builder projections", () => {
+      const builderJson = JSON.stringify({
+        table: "users",
+        conditions: [],
+        includes: {
+          todosViaOwner: {
+            table: "todos",
+            conditions: [],
+            includes: {},
+            select: ["id"],
+            orderBy: [],
+            hops: [],
+          },
+        },
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, schemaWithRelations);
+
+      expect(result.array_subqueries).toEqual([
+        {
+          column_name: "todosViaOwner",
+          table: "todos",
+          inner_column: "owner_id",
+          outer_column: "users.id",
+          filters: [],
+          joins: [],
+          select_columns: null,
+          order_by: [],
+          limit: null,
+          nested_arrays: [],
+        },
+      ]);
+    });
   });
 
   describe("self-referential relations", () => {
