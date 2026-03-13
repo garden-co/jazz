@@ -33,7 +33,7 @@ Deep dive: [Schemas](/docs/schemas).
 
 ## Create a server context
 
-Initialize a Jazz context once at process startup and lazily create a shared server client:
+Initialize a Jazz context once at process startup and lazily create a shared `Db`:
 
 <include cwd lang="ts" title="src/quickstart-snippets.ts">
   ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-context-ts
@@ -41,14 +41,15 @@ Initialize a Jazz context once at process startup and lazily create a shared ser
 
 - `appId` identifies the app namespace for storage and sync.
 - `app` is your generated schema DSL export (`app.wasmSchema` is loaded for runtime setup).
-- `serverUrl` + `backendSecret` enable request-scoped API operations via `context.forRequest(req)`.
+- `context.db()` gives you a high-level `Db` using the context's configured runtime/auth.
+- `serverUrl` + `backendSecret` enable backend-authenticated handles via `context.asBackend()` and `context.forRequest(req)`.
 - Runtime storage path controls where local server state persists.
 
 For more server context options, see [Setup](/docs/setup#backend-context-setup).
 
 ## Read data in API handlers
 
-Use `context.forRequest(req)` so each request is scoped to the requester session.
+Use `context.forRequest(req)` so each request gets a requester-scoped `Db`.
 
 ### One-shot reads
 
@@ -66,7 +67,7 @@ Deep dive: [Reading Data](/docs/reading-data).
 
 ## Write data behind API routes
 
-Mutations should also use `context.forRequest(req)` so policies evaluate against the requester context.
+Mutations should also use `context.forRequest(req)` so policies evaluate against the requester context while keeping the same high-level `Db` API.
 
 <include cwd lang="ts" title="src/quickstart-snippets.ts">
   ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-write-ts
