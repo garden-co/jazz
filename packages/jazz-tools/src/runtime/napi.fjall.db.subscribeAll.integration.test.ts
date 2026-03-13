@@ -73,8 +73,8 @@ describe("db.subscribeAll NAPI Fjall integration", () => {
         deltas.some((delta) =>
           delta.some(
             (change) =>
-              change.row !== undefined &&
-              change.row !== null &&
+              (change.kind === 0 || change.kind === 2) &&
+              change.row &&
               readRowTitle(change.row) === "hidden",
           ),
         ),
