@@ -1,6 +1,6 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, describe, it, expect, assert, expectTypeOf } from "vitest";
-import { app, Project, Todo, User, UserSelected } from "./fixtures/basic/app";
+import { app, Project, Todo, User } from "./fixtures/basic/app";
 
 function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -165,6 +165,7 @@ describe("TS Query API", () => {
         .requireIncludes(),
     );
 
+    expectTypeOf(result!.project).toEqualTypeOf<Project>();
     expect(result).toBeNull();
   });
 
@@ -189,6 +190,7 @@ describe("TS Query API", () => {
 
     assert(result, "Result is not defined");
     expect(result.id).toBe(todo.id);
+    expectTypeOf(result.owner).toEqualTypeOf<User | undefined>();
     expect(result.owner).toBeUndefined();
   });
 

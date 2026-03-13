@@ -807,28 +807,32 @@ describe("generateTypes with relations", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("export type TodoIncludedRelations<I extends TodoInclude = {}> = {");
     expect(output).toContain(
-      "export type TodoWithIncludes<I extends TodoInclude = {}> = Omit<Todo, Extract<keyof I, keyof Todo>> & TodoIncludedRelations<I>;",
+      "export type TodoIncludedRelations<I extends TodoInclude = {}, R extends boolean = false> = {",
     );
     expect(output).toContain(
-      "export type UserWithIncludes<I extends UserInclude = {}> = Omit<User, Extract<keyof I, keyof User>> & UserIncludedRelations<I>;",
+      "export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Omit<Todo, Extract<keyof I, keyof Todo>> & TodoIncludedRelations<I, R>;",
+    );
+    expect(output).toContain(
+      "export type UserWithIncludes<I extends UserInclude = {}, R extends boolean = false> = Omit<User, Extract<keyof I, keyof User>> & UserIncludedRelations<I, R>;",
     );
     expect(output).toContain("[K in keyof I]-?:");
     expect(output).toContain('K extends "owner"');
     expect(output).toContain('NonNullable<I["owner"]> extends infer RelationInclude');
     expect(output).toContain("? RelationInclude extends true");
-    expect(output).toContain("? User | undefined");
+    expect(output).toContain("? R extends true ? User : User | undefined");
     expect(output).toContain(": RelationInclude extends AnyUserQueryBuilder<infer QueryRow>");
-    expect(output).toContain("? QueryRow | undefined");
+    expect(output).toContain("? R extends true ? QueryRow : QueryRow | undefined");
     expect(output).toContain(": RelationInclude extends UserInclude");
-    expect(output).toContain("? UserWithIncludes<RelationInclude> | undefined");
+    expect(output).toContain(
+      "? R extends true ? UserWithIncludes<RelationInclude, false> : UserWithIncludes<RelationInclude, false> | undefined",
+    );
     expect(output).toContain('K extends "todosViaOwner"');
     expect(output).toContain("? Todo[]");
     expect(output).toContain(": RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>");
     expect(output).toContain("? QueryRow[]");
     expect(output).toContain(": RelationInclude extends TodoInclude");
-    expect(output).toContain("? TodoWithIncludes<RelationInclude>[]");
+    expect(output).toContain("? TodoWithIncludes<RelationInclude, false>[]");
     expect(output).not.toContain("WithIncludesFor<");
     expect(output).not.toContain("WithIncludesArray<");
   });
@@ -842,7 +846,7 @@ describe("generateTypes with relations", () => {
 
     expect(output).toContain("? User | undefined");
     expect(output).toContain("? QueryRow | undefined");
-    expect(output).toContain("? UserWithIncludes<RelationInclude> | undefined");
+    expect(output).toContain("? UserWithIncludes<RelationInclude, false> | undefined");
   });
 
   it("preserves undefined for nullable forward array includes", () => {
@@ -854,7 +858,7 @@ describe("generateTypes with relations", () => {
 
     expect(output).toContain("? User[] | undefined");
     expect(output).toContain("? QueryRow[] | undefined");
-    expect(output).toContain("? UserWithIncludes<RelationInclude>[] | undefined");
+    expect(output).toContain("? UserWithIncludes<RelationInclude, false>[] | undefined");
   });
 
   it("generates selection helper types", () => {
@@ -881,10 +885,10 @@ describe("generateTypes with relations", () => {
       '"*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>',
     );
     expect(output).toContain(
-      "export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo>",
+      "export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false>",
     );
     expect(output).toContain(
-      "Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I>",
+      "Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I, R>",
     );
   });
 
@@ -905,7 +909,7 @@ describe("generateTypes with relations", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain('K extends "resource_access_edgesViaResource"');
-    expect(output).toContain("? ResourceAccessEdgeWithIncludes<RelationInclude>[]");
+    expect(output).toContain("? ResourceAccessEdgeWithIncludes<RelationInclude, false>[]");
     expect(output).not.toContain(
       'resource_access_edgesViaResource?: I["resource_access_edgesViaResource"] extends true',
     );
@@ -1035,13 +1039,13 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain(
-      "export class TodoQueryBuilder<I extends Record<string, never> = {}, S extends TodoSelectableColumn = keyof Todo> implements QueryBuilder<TodoSelected<S>> {",
+      "export class TodoQueryBuilder<I extends Record<string, never> = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false> implements QueryBuilder<TodoSelected<S>> {",
     );
     expect(output).toContain("readonly _rowType!: TodoSelected<S>;");
     expect(output).toContain("readonly _initType!: TodoInit;");
     expect(output).toContain("where(conditions: TodoWhereInput)");
     expect(output).toContain(
-      "select<NewS extends TodoSelectableColumn>(...columns: [NewS, ...NewS[]]): TodoQueryBuilder<I, NewS>",
+      "select<NewS extends TodoSelectableColumn>(...columns: [NewS, ...NewS[]]): TodoQueryBuilder<I, NewS, R>",
     );
     expect(output).toContain("orderBy(column: TodoOrderableColumn");
     expect(output).toContain("limit(n: number)");
@@ -1058,9 +1062,9 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain(
-      "export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo> implements QueryBuilder<TodoSelectedWithIncludes<I, S>> {",
+      "export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false> implements QueryBuilder<TodoSelectedWithIncludes<I, S, R>> {",
     );
-    expect(output).toContain("readonly _rowType!: TodoSelectedWithIncludes<I, S>;");
+    expect(output).toContain("declare readonly _rowType: TodoSelectedWithIncludes<I, S, R>;");
   });
 
   it("generates include method for tables with relations", () => {
@@ -1071,8 +1075,9 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("include<NewI extends TodoInclude>(relations: NewI)");
-    expect(output).toContain("const clone = this._clone<I & NewI, S>();");
-    expect(output).toContain("requireIncludes(): TodoQueryBuilder<I, S> {");
+    expect(output).toContain("const clone = this._clone<I & NewI, S, R>();");
+    expect(output).toContain("requireIncludes(): TodoQueryBuilder<I, S, true> {");
+    expect(output).toContain("const clone = this._clone<I, S, true>();");
     expect(output).toContain("clone._requireIncludes = true;");
     expect(output).not.toContain("as unknown as TodoQueryBuilder<I & NewI>");
   });
@@ -1140,9 +1145,9 @@ describe("generateQueryBuilderClasses", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain(
-      "private _clone<CloneI extends Record<string, never> = I, CloneS extends TodoSelectableColumn = S>(): TodoQueryBuilder<CloneI, CloneS> {",
+      "private _clone<CloneI extends Record<string, never> = I, CloneS extends TodoSelectableColumn = S, CloneR extends boolean = R>(): TodoQueryBuilder<CloneI, CloneS, CloneR> {",
     );
-    expect(output).toContain("const clone = new TodoQueryBuilder<CloneI, CloneS>();");
+    expect(output).toContain("const clone = new TodoQueryBuilder<CloneI, CloneS, CloneR>();");
     expect(output).toContain("clone._conditions = [...this._conditions];");
     expect(output).toContain(
       "clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;",

@@ -165,13 +165,20 @@ function maybeUndefined(type: string, nullable: boolean): string {
   return nullable ? `${type} | undefined` : type;
 }
 
-function relationResultType(baseType: string, rel: Relation): string {
+function relationResultType(baseType: string, rel: Relation, requiredFlag?: string): string {
   if (rel.isArray) {
     return maybeUndefined(`${baseType}[]`, rel.nullable);
   }
 
-  const relationMayBeMissing = rel.type === "forward";
-  return maybeUndefined(baseType, rel.nullable || relationMayBeMissing);
+  if (rel.type !== "forward") {
+    return maybeUndefined(baseType, rel.nullable);
+  }
+
+  if (rel.nullable || !requiredFlag) {
+    return maybeUndefined(baseType, true);
+  }
+
+  return `${requiredFlag} extends true ? ${baseType} : ${baseType} | undefined`;
 }
 
 /**
@@ -244,7 +251,7 @@ function generateIncludedRelationsTypes(relations: Map<string, Relation[]>): str
     const includeInterface = baseInterface + "Include";
 
     lines.push(
-      `export type ${baseInterface}IncludedRelations<I extends ${includeInterface} = {}> = {`,
+      `export type ${baseInterface}IncludedRelations<I extends ${includeInterface} = {}, R extends boolean = false> = {`,
     );
     lines.push(`  [K in keyof I]-?:`);
 
@@ -252,9 +259,13 @@ function generateIncludedRelationsTypes(relations: Map<string, Relation[]>): str
       const targetInterface = tableNameToInterface(rel.toTable);
       const targetInclude = targetInterface + "Include";
       const targetWithIncludes = targetInterface + "WithIncludes";
-      const trueType = relationResultType(targetInterface, rel);
-      const queryBuilderSelectedType = relationResultType(`QueryRow`, rel);
-      const nestedIncludeType = relationResultType(`${targetWithIncludes}<RelationInclude>`, rel);
+      const trueType = relationResultType(targetInterface, rel, "R");
+      const queryBuilderSelectedType = relationResultType(`QueryRow`, rel, "R");
+      const nestedIncludeType = relationResultType(
+        `${targetWithIncludes}<RelationInclude, false>`,
+        rel,
+        "R",
+      );
       const prefix = index === 0 ? "    " : "    : ";
 
       lines.push(`${prefix}K extends "${rel.name}"`);
@@ -310,7 +321,7 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
     const includedRelationsType = baseInterface + "IncludedRelations";
 
     lines.push(
-      `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}> = Omit<${baseInterface}, Extract<keyof I, keyof ${baseInterface}>> & ${includedRelationsType}<I>;`,
+      `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}, R extends boolean = false> = Omit<${baseInterface}, Extract<keyof I, keyof ${baseInterface}>> & ${includedRelationsType}<I, R>;`,
     );
     lines.push(``);
   }
@@ -344,7 +355,7 @@ function generateSelectionTypes(schema: WasmSchema, relations: Map<string, Relat
 
     if (hasRelations) {
       lines.push(
-        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends ${selectableColumnType} = keyof ${baseInterface}> = Omit<${baseInterface}Selected<S>, Extract<keyof I, keyof ${baseInterface}Selected<S>>> & ${includedRelationsType}<I>;`,
+        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends ${selectableColumnType} = keyof ${baseInterface}, R extends boolean = false> = Omit<${baseInterface}Selected<S>, Extract<keyof I, keyof ${baseInterface}Selected<S>>> & ${includedRelationsType}<I, R>;`,
       );
       lines.push("");
     }
