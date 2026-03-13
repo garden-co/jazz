@@ -33,6 +33,7 @@ export {
   union,
   discriminatedUnion,
   record,
+  partialRecord,
   intersection,
   int,
   codec,

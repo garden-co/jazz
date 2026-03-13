@@ -92,4 +92,29 @@ describe("CoValue and Zod schema compatibility", () => {
       pets: z.tuple([Dog]),
     });
   });
+
+  test("z.record with enum requires all keys", () => {
+    const Person = co.map({
+      petCount: z.record(z.enum(["dog", "cat"]), z.number()),
+    });
+
+    Person.create({
+      // @ts-expect-error - missing cat
+      petCount: {
+        dog: 2,
+      },
+    });
+  });
+
+  test("z.partialRecord with enum does not require all keys", () => {
+    const Person = co.map({
+      petCount: z.partialRecord(z.enum(["dog", "cat"]), z.number()),
+    });
+
+    Person.create({
+      petCount: {
+        dog: 2,
+      },
+    });
+  });
 });
