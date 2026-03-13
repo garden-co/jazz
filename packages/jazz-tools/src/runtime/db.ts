@@ -29,6 +29,12 @@ import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
 import { toValueArray, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
+import {
+  createConventionalFileStorage,
+  type ConventionalFileApp,
+  type FileReadOptions,
+  type FileWriteOptions,
+} from "./file-storage.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
@@ -1158,6 +1164,55 @@ export class Db {
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
     const results = await this.all(query, options);
     return results[0] ?? null;
+  }
+
+  /**
+   * Create a conventional `files` row by chunking a browser Blob into `file_parts`.
+   *
+   * Expects `app.files` and `app.file_parts` to follow the built-in file-storage conventions.
+   */
+  async createFileFromBlob<FileRow extends { id: string }, FileInit, FilePartRow, FilePartInit>(
+    app: ConventionalFileApp<FileRow, FileInit, FilePartRow, FilePartInit>,
+    blob: Blob,
+    options?: FileWriteOptions,
+  ): Promise<FileRow> {
+    return createConventionalFileStorage(this, app).fromBlob(blob, options);
+  }
+
+  /**
+   * Create a conventional `files` row by chunking a browser ReadableStream into `file_parts`.
+   *
+   * Expects `app.files` and `app.file_parts` to follow the built-in file-storage conventions.
+   */
+  async createFileFromStream<FileRow extends { id: string }, FileInit, FilePartRow, FilePartInit>(
+    app: ConventionalFileApp<FileRow, FileInit, FilePartRow, FilePartInit>,
+    stream: ReadableStream<unknown>,
+    options?: FileWriteOptions,
+  ): Promise<FileRow> {
+    return createConventionalFileStorage(this, app).fromStream(stream, options);
+  }
+
+  /**
+   * Load a conventional file as a browser ReadableStream by querying the file row first
+   * and then reading each referenced `file_parts` row sequentially.
+   */
+  async loadFileAsStream<FileRow extends { id: string }, FileInit, FilePartRow, FilePartInit>(
+    app: ConventionalFileApp<FileRow, FileInit, FilePartRow, FilePartInit>,
+    fileOrId: string | FileRow,
+    options?: FileReadOptions,
+  ): Promise<ReadableStream<Uint8Array>> {
+    return createConventionalFileStorage(this, app).toStream(fileOrId, options);
+  }
+
+  /**
+   * Load a conventional file as a Blob using the same sequential part-query path as `loadFileAsStream`.
+   */
+  async loadFileAsBlob<FileRow extends { id: string }, FileInit, FilePartRow, FilePartInit>(
+    app: ConventionalFileApp<FileRow, FileInit, FilePartRow, FilePartInit>,
+    fileOrId: string | FileRow,
+    options?: FileReadOptions,
+  ): Promise<Blob> {
+    return createConventionalFileStorage(this, app).toBlob(fileOrId, options);
   }
 
   /**
