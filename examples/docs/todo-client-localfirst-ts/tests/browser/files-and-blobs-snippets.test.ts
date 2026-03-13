@@ -39,11 +39,7 @@ describe("files and blobs docs snippets", () => {
 
     await createUploadFromBlob(db as unknown as Db, file);
 
-    expect(db.createFileFromBlob).toHaveBeenCalledWith(app, file, {
-      tier: "edge",
-      name: "hello.txt",
-      mimeType: "text/plain",
-    });
+    expect(db.createFileFromBlob).toHaveBeenCalledWith(app, file, { tier: "edge" });
     expect(db.insertDurable).toHaveBeenCalledWith(
       app.uploads,
       {

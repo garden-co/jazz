@@ -100,7 +100,7 @@ export type ConventionalFileRow<TApp> =
 
 type LoadedFileRecord = {
   id: string;
-  name: string;
+  name?: string;
   mimeType: string;
   parts: string[];
   partSizes: number[];
@@ -248,15 +248,13 @@ export function createFileStorage<
 
   return {
     async fromBlob(blob: Blob, writeOptions: FileWriteOptions = {}): Promise<FileRow> {
-      const blobRecord = blob as Blob & { name?: unknown };
-      const name =
-        writeOptions.name ?? (typeof blobRecord.name === "string" ? blobRecord.name : "");
+      const name = writeOptions.name ?? getFileName(blob);
       const mimeType = writeOptions.mimeType ?? (blob.type || DEFAULT_MIME_TYPE);
 
       return this.fromStream(blob.stream(), {
         ...writeOptions,
-        name,
         mimeType,
+        ...(name !== undefined ? { name } : {}),
       });
     },
 
@@ -294,10 +292,10 @@ export function createFileStorage<
       return insertRow(
         options.files,
         {
-          [columns.name]: writeOptions.name ?? "",
           [columns.mimeType]: writeOptions.mimeType ?? DEFAULT_MIME_TYPE,
           [columns.parts]: filePartIds,
           [columns.partSizes]: partSizes,
+          ...(writeOptions.name !== undefined ? { [columns.name]: writeOptions.name } : {}),
         } as FileInit,
         writeOptions,
       );
@@ -435,7 +433,7 @@ export function createFileStorage<
 
     return {
       id,
-      name: typeof file[names.name] === "string" ? (file[names.name] as string) : "",
+      name: typeof file[names.name] === "string" ? (file[names.name] as string) : undefined,
       mimeType:
         typeof file[names.mimeType] === "string" && (file[names.mimeType] as string).length > 0
           ? (file[names.mimeType] as string)
@@ -495,6 +493,14 @@ export function createFileStorage<
     const copy = new Uint8Array(bytes.byteLength);
     copy.set(bytes);
     return copy.buffer;
+  }
+
+  function getFileName(blob: Blob): string | undefined {
+    if (typeof File !== "undefined" && blob instanceof File) {
+      return blob.name;
+    }
+
+    return undefined;
   }
 }
 
