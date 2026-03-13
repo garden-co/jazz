@@ -165,6 +165,7 @@ function generateQueryBuilderClass(
   lines.push(`  readonly _initType!: ${interfaceName}Init;`);
   lines.push(`  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];`);
   lines.push(`  private _includes: Partial<${includeConstraint}> = {};`);
+  lines.push(`  private _requireIncludes = false;`);
   lines.push(`  private _selectColumns?: string[];`);
   lines.push(`  private _orderBys: Array<[string, "asc" | "desc"]> = [];`);
   lines.push(`  private _limitVal?: number;`);
@@ -216,6 +217,13 @@ function generateQueryBuilderClass(
     );
     lines.push(`    const clone = this._clone<I & NewI, S>();`);
     lines.push(`    clone._includes = { ...this._includes, ...relations };`);
+    lines.push(`    return clone;`);
+    lines.push(`  }`);
+    lines.push(``);
+
+    lines.push(`  requireIncludes(): ${interfaceName}QueryBuilder<I, S> {`);
+    lines.push(`    const clone = this._clone();`);
+    lines.push(`    clone._requireIncludes = true;`);
     lines.push(`    return clone;`);
     lines.push(`  }`);
     lines.push(``);
@@ -348,6 +356,7 @@ function generateQueryBuilderClass(
   lines.push(`      table: this._table,`);
   lines.push(`      conditions: this._conditions,`);
   lines.push(`      includes: this._includes,`);
+  lines.push(`      __jazz_requireIncludes: this._requireIncludes || undefined,`);
   lines.push(`      select: this._selectColumns,`);
   lines.push(`      orderBy: this._orderBys,`);
   lines.push(`      limit: this._limitVal,`);
@@ -369,6 +378,7 @@ function generateQueryBuilderClass(
   lines.push(`    const clone = new ${interfaceName}QueryBuilder<CloneI, CloneS>();`);
   lines.push(`    clone._conditions = [...this._conditions];`);
   lines.push(`    clone._includes = { ...this._includes };`);
+  lines.push(`    clone._requireIncludes = this._requireIncludes;`);
   lines.push(
     `    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;`,
   );

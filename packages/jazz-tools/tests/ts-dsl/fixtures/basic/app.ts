@@ -378,6 +378,7 @@ export class UserQueryBuilder<
   readonly _initType!: UserInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<UserInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -419,6 +420,12 @@ export class UserQueryBuilder<
   include<NewI extends UserInclude>(relations: NewI): UserQueryBuilder<I & NewI, S> {
     const clone = this._clone<I & NewI, S>();
     clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): UserQueryBuilder<I, S> {
+    const clone = this._clone();
+    clone._requireIncludes = true;
     return clone;
   }
 
@@ -532,6 +539,7 @@ export class UserQueryBuilder<
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -552,6 +560,7 @@ export class UserQueryBuilder<
     const clone = new UserQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
@@ -578,6 +587,7 @@ export class ProjectQueryBuilder<
   readonly _initType!: ProjectInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ProjectInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -619,6 +629,12 @@ export class ProjectQueryBuilder<
   include<NewI extends ProjectInclude>(relations: NewI): ProjectQueryBuilder<I & NewI, S> {
     const clone = this._clone<I & NewI, S>();
     clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): ProjectQueryBuilder<I, S> {
+    const clone = this._clone();
+    clone._requireIncludes = true;
     return clone;
   }
 
@@ -735,6 +751,7 @@ export class ProjectQueryBuilder<
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -755,6 +772,7 @@ export class ProjectQueryBuilder<
     const clone = new ProjectQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
@@ -781,6 +799,7 @@ export class TodoQueryBuilder<
   readonly _initType!: TodoInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<TodoInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -822,6 +841,12 @@ export class TodoQueryBuilder<
   include<NewI extends TodoInclude>(relations: NewI): TodoQueryBuilder<I & NewI, S> {
     const clone = this._clone<I & NewI, S>();
     clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): TodoQueryBuilder<I, S> {
+    const clone = this._clone();
+    clone._requireIncludes = true;
     return clone;
   }
 
@@ -935,6 +960,7 @@ export class TodoQueryBuilder<
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -955,6 +981,7 @@ export class TodoQueryBuilder<
     const clone = new TodoQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
