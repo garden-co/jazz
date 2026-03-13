@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
@@ -590,6 +591,55 @@ async function createTempDir(prefix: string): Promise<string> {
 }
 
 describe("NAPI integration", () => {
+  it("surfaces oversized indexed persistent mutation errors to JS callers", async () => {
+    const { NapiRuntime } = await loadNapiModule();
+    const dataPath = await createTempDir("jazz-napi-large-index-");
+    const runtime = new NapiRuntime(
+      serializeRuntimeSchema(TEST_SCHEMA),
+      `napi-large-index-${randomUUID()}`,
+      "test",
+      "main",
+      dataPath,
+    ) as unknown as {
+      insert(table: string, values: unknown): Row;
+      update(objectId: string, updates: Record<string, unknown>): void;
+      query(queryJson: string): Promise<Row[]>;
+      close(): void;
+    };
+
+    const oversizedTitle = "x".repeat(40_000);
+    const queryJson = translateQuery(allTodosQuery._build(), TEST_SCHEMA);
+
+    try {
+      expect(() =>
+        runtime.insert("todos", [
+          { type: "Text", value: oversizedTitle },
+          { type: "Boolean", value: false },
+        ]),
+      ).toThrow(/indexed value too large/i);
+
+      const insertedRow = runtime.insert("todos", [
+        { type: "Text", value: "kept title" },
+        { type: "Boolean", value: false },
+      ]);
+
+      expect(() =>
+        runtime.update(insertedRow.id, {
+          title: { type: "Text", value: oversizedTitle },
+        }),
+      ).toThrow(/indexed value too large/i);
+
+      const rows = await runtime.query(queryJson);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: insertedRow.id });
+      expect(rows[0]?.values[0]).toEqual({ type: "Text", value: "kept title" });
+      expect(rows[0]?.values[1]).toEqual({ type: "Boolean", value: false });
+    } finally {
+      runtime.close();
+      await rm(dataPath, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it("emits the real nested onSyncMessageToSend callback shape from the compiled addon", async () => {
     const runtime = await createNapiRuntime(TEST_SCHEMA, {
       appId: `napi-contract-${randomUUID()}`,

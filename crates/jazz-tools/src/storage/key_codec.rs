@@ -4,7 +4,85 @@ use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
 
-use super::encode_value;
+use super::{StorageError, encode_value};
+
+const INDEX_KEY_MAX_BYTES: usize = u16::MAX as usize;
+const INDEX_ENTRY_UUID_HEX_BYTES: usize = 32;
+
+fn index_entry_key_bytes(
+    table: &str,
+    column: &str,
+    branch: &str,
+    encoded_value_len: usize,
+) -> usize {
+    "idx:".len()
+        + table.len()
+        + 1
+        + column.len()
+        + 1
+        + branch.len()
+        + 1
+        + (encoded_value_len * 2)
+        + 1
+        + INDEX_ENTRY_UUID_HEX_BYTES
+}
+
+fn index_value_prefix_bytes(
+    table: &str,
+    column: &str,
+    branch: &str,
+    encoded_value_len: usize,
+) -> usize {
+    "idx:".len()
+        + table.len()
+        + 1
+        + column.len()
+        + 1
+        + branch.len()
+        + 1
+        + (encoded_value_len * 2)
+        + 1
+}
+
+pub(super) fn validate_index_entry_size(
+    table: &str,
+    column: &str,
+    branch: &str,
+    value: &Value,
+) -> Result<(), StorageError> {
+    let encoded_value_len = encode_value(value).len();
+    let key_bytes = index_entry_key_bytes(table, column, branch, encoded_value_len);
+    if key_bytes > INDEX_KEY_MAX_BYTES {
+        return Err(StorageError::IndexKeyTooLarge {
+            table: table.to_string(),
+            column: column.to_string(),
+            branch: branch.to_string(),
+            key_bytes,
+            max_key_bytes: INDEX_KEY_MAX_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn encode_index_value_hex(
+    table: &str,
+    column: &str,
+    branch: &str,
+    value: &Value,
+) -> Result<String, StorageError> {
+    let encoded_value = encode_value(value);
+    let key_bytes = index_entry_key_bytes(table, column, branch, encoded_value.len());
+    if key_bytes > INDEX_KEY_MAX_BYTES {
+        return Err(StorageError::IndexKeyTooLarge {
+            table: table.to_string(),
+            column: column.to_string(),
+            branch: branch.to_string(),
+            key_bytes,
+            max_key_bytes: INDEX_KEY_MAX_BYTES,
+        });
+    }
+    Ok(hex::encode(encoded_value))
+}
 
 /// Format an ObjectId as compact hex (no dashes).
 pub(super) fn format_uuid(id: ObjectId) -> String {
@@ -54,25 +132,40 @@ pub(super) fn index_entry_key(
     branch: &str,
     value: &Value,
     row_id: ObjectId,
-) -> String {
-    format!(
+) -> Result<String, StorageError> {
+    Ok(format!(
         "idx:{}:{}:{}:{}:{}",
         table,
         column,
         branch,
-        hex::encode(encode_value(value)),
+        encode_index_value_hex(table, column, branch, value)?,
         format_uuid(row_id)
-    )
+    ))
 }
 
-pub(super) fn index_value_prefix(table: &str, column: &str, branch: &str, value: &Value) -> String {
-    format!(
+pub(super) fn index_value_prefix(
+    table: &str,
+    column: &str,
+    branch: &str,
+    value: &Value,
+) -> Result<String, StorageError> {
+    let encoded_value = encode_value(value);
+    if index_value_prefix_bytes(table, column, branch, encoded_value.len()) > INDEX_KEY_MAX_BYTES {
+        return Err(StorageError::IndexKeyTooLarge {
+            table: table.to_string(),
+            column: column.to_string(),
+            branch: branch.to_string(),
+            key_bytes: index_value_prefix_bytes(table, column, branch, encoded_value.len()),
+            max_key_bytes: INDEX_KEY_MAX_BYTES,
+        });
+    }
+    Ok(format!(
         "idx:{}:{}:{}:{}:",
         table,
         column,
         branch,
-        hex::encode(encode_value(value))
-    )
+        hex::encode(encoded_value)
+    ))
 }
 
 pub(super) fn index_prefix(table: &str, column: &str, branch: &str) -> String {

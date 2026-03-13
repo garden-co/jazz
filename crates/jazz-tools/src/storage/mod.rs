@@ -37,6 +37,43 @@ use crate::sync_manager::DurabilityTier;
 pub enum StorageError {
     NotFound,
     IoError(String),
+    IndexKeyTooLarge {
+        table: String,
+        column: String,
+        branch: String,
+        key_bytes: usize,
+        max_key_bytes: usize,
+    },
+}
+
+impl std::fmt::Display for StorageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StorageError::NotFound => write!(f, "not found"),
+            StorageError::IoError(message) => write!(f, "{message}"),
+            StorageError::IndexKeyTooLarge {
+                table,
+                column,
+                branch,
+                key_bytes,
+                max_key_bytes,
+            } => write!(
+                f,
+                "indexed value too large for {table}.{column} on branch {branch}: index key would be {key_bytes} bytes (max {max_key_bytes})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for StorageError {}
+
+pub(crate) fn validate_index_value_size(
+    table: &str,
+    column: &str,
+    branch: &str,
+    value: &Value,
+) -> Result<(), StorageError> {
+    key_codec::validate_index_entry_size(table, column, branch, value)
 }
 
 // ============================================================================
@@ -751,6 +788,7 @@ impl Storage for MemoryStorage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
+        validate_index_value_size(table, column, branch, value)?;
         let key = (table.to_string(), column.to_string(), branch.to_string());
         let index = self.indices.entry(key).or_default();
         let encoded = encode_value(value);
@@ -766,6 +804,12 @@ impl Storage for MemoryStorage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
+        if matches!(
+            validate_index_value_size(table, column, branch, value),
+            Err(StorageError::IndexKeyTooLarge { .. })
+        ) {
+            return Ok(());
+        }
         let key = (table.to_string(), column.to_string(), branch.to_string());
         if let Some(index) = self.indices.get_mut(&key) {
             let encoded = encode_value(value);
