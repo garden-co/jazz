@@ -424,7 +424,7 @@ impl NapiRuntime {
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let (object_id, row_values) = core
             .insert(&table, groove_values, None)
-            .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
+            .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))?;
         let row_values = align_row_values_to_declared_schema(
             &self.declared_schema,
             core.current_schema(),
@@ -457,7 +457,7 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         core.update(oid, updates, None)
-            .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?;
+            .map_err(|e| napi::Error::from_reason(format!("Update failed: {e}")))?;
 
         Ok(())
     }
@@ -679,7 +679,7 @@ impl NapiRuntime {
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             let ((object_id, row_values), receiver) = core
                 .insert_persisted(&table, groove_values, None, persistence_tier)
-                .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
+                .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,
                 core.current_schema(),
@@ -719,7 +719,7 @@ impl NapiRuntime {
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             core.update_persisted(oid, updates, None, persistence_tier)
-                .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?
+                .map_err(|e| napi::Error::from_reason(format!("Update failed: {e}")))?
         };
 
         let _ = receiver.await;

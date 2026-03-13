@@ -596,7 +596,7 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         let (object_id, row_values) = core
             .insert(table, groove_values, None)
-            .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?;
+            .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?;
 
         let row = SubscriptionRow {
             id: object_id.uuid().to_string(),
@@ -668,7 +668,7 @@ impl WasmRuntime {
 
         let mut core = self.core.borrow_mut();
         core.update(oid, updates, None)
-            .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?;
+            .map_err(|e| JsError::new(&format!("Update failed: {e}")))?;
 
         tracing::debug!(object_id, "updated");
         Ok(())
@@ -699,7 +699,7 @@ impl WasmRuntime {
 
         let mut core = self.core.borrow_mut();
         core.update(oid, updates, session.as_ref())
-            .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?;
+            .map_err(|e| JsError::new(&format!("Update failed: {e}")))?;
 
         tracing::debug!(object_id, "updated_with_session");
         Ok(())
@@ -743,7 +743,7 @@ impl WasmRuntime {
         let ((object_id, row_values), receiver) = {
             let mut core = self.core.borrow_mut();
             core.insert_persisted(table, groove_values, None, persistence_tier)
-                .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?
+                .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?
         };
 
         let row = SubscriptionRow {
@@ -780,7 +780,7 @@ impl WasmRuntime {
         let receiver = {
             let mut core = self.core.borrow_mut();
             core.update_persisted(oid, updates, None, persistence_tier)
-                .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?
+                .map_err(|e| JsError::new(&format!("Update failed: {e}")))?
         };
 
         let promise = wasm_bindgen_futures::future_to_promise(async move {

@@ -2,9 +2,6 @@
 //!
 //! Tests for CRUD operations, subscriptions, syncing, and deletions.
 
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-use std::panic::{AssertUnwindSafe, catch_unwind};
-
 use serde_json::json;
 use smallvec::smallvec;
 
@@ -713,19 +710,22 @@ fn fjall_oversized_text_insert_returns_index_error_instead_of_panicking() {
     let schema = large_index_schema();
     let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
 
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        qm.insert(
+    let err = qm
+        .insert(
             &mut storage,
             "todos",
             &[Value::Text(oversized_text()), Value::Boolean(false)],
         )
-    }));
-
-    let result = outcome
-        .expect("oversized indexed text insert should return QueryError instead of panicking");
-    let err = result.expect_err("oversized indexed text insert should fail cleanly");
+        .expect_err("oversized indexed text insert should fail cleanly");
     assert!(
-        matches!(err, QueryError::IndexError(_)),
+        matches!(
+            &err,
+            QueryError::IndexValueTooLarge {
+                table,
+                column,
+                ..
+            } if *table == TableName::new("todos") && column == "title"
+        ),
         "unexpected error: {err:?}"
     );
 
@@ -744,20 +744,22 @@ fn fjall_oversized_array_text_insert_returns_index_error_instead_of_panicking() 
     let schema = large_index_schema();
     let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
 
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        qm.insert(
+    let err = qm
+        .insert(
             &mut storage,
             "tag_lists",
             &[Value::Array(vec![Value::Text(oversized_text())])],
         )
-    }));
-
-    let result = outcome.expect(
-        "oversized indexed array(text) insert should return QueryError instead of panicking",
-    );
-    let err = result.expect_err("oversized indexed array(text) insert should fail cleanly");
+        .expect_err("oversized indexed array(text) insert should fail cleanly");
     assert!(
-        matches!(err, QueryError::IndexError(_)),
+        matches!(
+            &err,
+            QueryError::IndexValueTooLarge {
+                table,
+                column,
+                ..
+            } if *table == TableName::new("tag_lists") && column == "labels"
+        ),
         "unexpected error: {err:?}"
     );
 
@@ -784,19 +786,22 @@ fn fjall_oversized_text_update_returns_index_error_and_preserves_old_index() {
         )
         .expect("insert initial row");
 
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        qm.update(
+    let err = qm
+        .update(
             &mut storage,
             handle.row_id,
             &[Value::Text(oversized_text()), Value::Boolean(false)],
         )
-    }));
-
-    let result = outcome
-        .expect("oversized indexed text update should return QueryError instead of panicking");
-    let err = result.expect_err("oversized indexed text update should fail cleanly");
+        .expect_err("oversized indexed text update should fail cleanly");
     assert!(
-        matches!(err, QueryError::IndexError(_)),
+        matches!(
+            &err,
+            QueryError::IndexValueTooLarge {
+                table,
+                column,
+                ..
+            } if *table == TableName::new("todos") && column == "title"
+        ),
         "unexpected error: {err:?}"
     );
 
@@ -850,20 +855,22 @@ fn fjall_oversized_array_text_update_returns_index_error_and_preserves_old_index
         )
         .expect("insert initial row");
 
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        qm.update(
+    let err = qm
+        .update(
             &mut storage,
             handle.row_id,
             &[Value::Array(vec![Value::Text(oversized_text())])],
         )
-    }));
-
-    let result = outcome.expect(
-        "oversized indexed array(text) update should return QueryError instead of panicking",
-    );
-    let err = result.expect_err("oversized indexed array(text) update should fail cleanly");
+        .expect_err("oversized indexed array(text) update should fail cleanly");
     assert!(
-        matches!(err, QueryError::IndexError(_)),
+        matches!(
+            &err,
+            QueryError::IndexValueTooLarge {
+                table,
+                column,
+                ..
+            } if *table == TableName::new("tag_lists") && column == "labels"
+        ),
         "unexpected error: {err:?}"
     );
 
@@ -883,6 +890,80 @@ fn fjall_oversized_array_text_update_returns_index_error_and_preserves_old_index
         old_rows.len(),
         1,
         "failed update should keep the old array index entry queryable"
+    );
+}
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[test]
+fn fjall_update_can_heal_synced_row_with_oversized_index_value() {
+    use std::collections::HashMap;
+
+    use crate::commit::{Commit, StoredState};
+
+    let sync_manager = SyncManager::new();
+    let schema = large_index_schema();
+    let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
+    let branch = get_branch(&qm);
+    let row_id = ObjectId::new();
+    let oversized = oversized_text();
+
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "todos".to_string());
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_object(&mut storage, row_id, metadata);
+
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("done", ColumnType::Boolean),
+    ]);
+    let commit = Commit {
+        parents: smallvec![],
+        content: encode_row(
+            &descriptor,
+            &[Value::Text(oversized.clone()), Value::Boolean(false)],
+        )
+        .unwrap(),
+        timestamp: 1000,
+        author: row_id,
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut storage, row_id, &branch, commit)
+        .unwrap();
+    qm.process(&mut storage);
+
+    assert_eq!(
+        storage.index_lookup("todos", "title", &branch, &Value::Text(oversized.clone())),
+        Vec::<ObjectId>::new(),
+        "oversized synced value should not create a title index entry"
+    );
+
+    qm.update(
+        &mut storage,
+        row_id,
+        &[Value::Text("healed".into()), Value::Boolean(false)],
+    )
+    .expect("local update should heal a row left in partial index state");
+
+    let healed_query = qm
+        .query("todos")
+        .filter_eq("title", Value::Text("healed".into()))
+        .build();
+    let healed_rows =
+        execute_query(&mut qm, &mut storage, healed_query).expect("query healed indexed value");
+    assert_eq!(healed_rows.len(), 1);
+    assert_eq!(healed_rows[0].0, row_id);
+
+    let row = qm
+        .get_row(row_id)
+        .expect("row should still exist after healing");
+    assert_eq!(
+        row.1,
+        vec![Value::Text("healed".into()), Value::Boolean(false)]
     );
 }
 
