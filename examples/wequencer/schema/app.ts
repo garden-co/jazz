@@ -1,6 +1,12 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
 import type { WasmSchema, QueryBuilder } from "jazz-tools";
-export type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: JsonValue }
+  | JsonValue[];
 
 export type PermissionIntrospectionColumn = "$canRead" | "$canEdit" | "$canDelete";
 export interface PermissionIntrospectionColumns {
@@ -69,7 +75,9 @@ export interface InstrumentWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   name?: string | { eq?: string; ne?: string; contains?: string };
   sound?: Uint8Array | { eq?: Uint8Array; ne?: Uint8Array };
-  display_order?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  display_order?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -77,10 +85,30 @@ export interface InstrumentWhereInput {
 
 export interface JamWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
-  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
-  transport_start?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  created_at?:
+    | Date
+    | number
+    | {
+        eq?: Date | number;
+        gt?: Date | number;
+        gte?: Date | number;
+        lt?: Date | number;
+        lte?: Date | number;
+      };
+  transport_start?:
+    | Date
+    | number
+    | {
+        eq?: Date | number;
+        gt?: Date | number;
+        gte?: Date | number;
+        lt?: Date | number;
+        lte?: Date | number;
+      };
   bpm?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
-  beat_count?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  beat_count?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -90,7 +118,9 @@ export interface BeatWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   jam?: string | { eq?: string; ne?: string };
   instrument?: string | { eq?: string; ne?: string };
-  beat_index?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  beat_index?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
   placed_by?: string | { eq?: string; ne?: string; contains?: string };
   $canRead?: boolean;
   $canEdit?: boolean;
@@ -131,32 +161,30 @@ export interface ParticipantInclude {
 }
 
 export type InstrumentIncludedRelations<I extends InstrumentInclude = {}> = {
-  [K in keyof I]-?:
-    K extends "beatsViaInstrument"
-      ? NonNullable<I["beatsViaInstrument"]> extends infer RelationInclude
-        ? RelationInclude extends true
-          ? Beat[]
-          : RelationInclude extends AnyBeatQueryBuilder<infer QueryRow>
-            ? QueryRow[]
-            : RelationInclude extends BeatInclude
-              ? BeatWithIncludes<RelationInclude>[]
-              : never
-        : never
+  [K in keyof I]-?: K extends "beatsViaInstrument"
+    ? NonNullable<I["beatsViaInstrument"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? Beat[]
+        : RelationInclude extends AnyBeatQueryBuilder<infer QueryRow>
+          ? QueryRow[]
+          : RelationInclude extends BeatInclude
+            ? BeatWithIncludes<RelationInclude>[]
+            : never
+      : never
     : never;
 };
 
 export type JamIncludedRelations<I extends JamInclude = {}> = {
-  [K in keyof I]-?:
-    K extends "beatsViaJam"
-      ? NonNullable<I["beatsViaJam"]> extends infer RelationInclude
-        ? RelationInclude extends true
-          ? Beat[]
-          : RelationInclude extends AnyBeatQueryBuilder<infer QueryRow>
-            ? QueryRow[]
-            : RelationInclude extends BeatInclude
-              ? BeatWithIncludes<RelationInclude>[]
-              : never
-        : never
+  [K in keyof I]-?: K extends "beatsViaJam"
+    ? NonNullable<I["beatsViaJam"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? Beat[]
+        : RelationInclude extends AnyBeatQueryBuilder<infer QueryRow>
+          ? QueryRow[]
+          : RelationInclude extends BeatInclude
+            ? BeatWithIncludes<RelationInclude>[]
+            : never
+      : never
     : K extends "participantsViaJam"
       ? NonNullable<I["participantsViaJam"]> extends infer RelationInclude
         ? RelationInclude extends true
@@ -167,21 +195,20 @@ export type JamIncludedRelations<I extends JamInclude = {}> = {
               ? ParticipantWithIncludes<RelationInclude>[]
               : never
         : never
-    : never;
+      : never;
 };
 
 export type BeatIncludedRelations<I extends BeatInclude = {}> = {
-  [K in keyof I]-?:
-    K extends "jam"
-      ? NonNullable<I["jam"]> extends infer RelationInclude
-        ? RelationInclude extends true
-          ? Jam
-          : RelationInclude extends AnyJamQueryBuilder<infer QueryRow>
-            ? QueryRow
-            : RelationInclude extends JamInclude
-              ? JamWithIncludes<RelationInclude>
-              : never
-        : never
+  [K in keyof I]-?: K extends "jam"
+    ? NonNullable<I["jam"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? Jam
+        : RelationInclude extends AnyJamQueryBuilder<infer QueryRow>
+          ? QueryRow
+          : RelationInclude extends JamInclude
+            ? JamWithIncludes<RelationInclude>
+            : never
+      : never
     : K extends "instrument"
       ? NonNullable<I["instrument"]> extends infer RelationInclude
         ? RelationInclude extends true
@@ -192,21 +219,20 @@ export type BeatIncludedRelations<I extends BeatInclude = {}> = {
               ? InstrumentWithIncludes<RelationInclude>
               : never
         : never
-    : never;
+      : never;
 };
 
 export type ParticipantIncludedRelations<I extends ParticipantInclude = {}> = {
-  [K in keyof I]-?:
-    K extends "jam"
-      ? NonNullable<I["jam"]> extends infer RelationInclude
-        ? RelationInclude extends true
-          ? Jam
-          : RelationInclude extends AnyJamQueryBuilder<infer QueryRow>
-            ? QueryRow
-            : RelationInclude extends JamInclude
-              ? JamWithIncludes<RelationInclude>
-              : never
-        : never
+  [K in keyof I]-?: K extends "jam"
+    ? NonNullable<I["jam"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? Jam
+        : RelationInclude extends AnyJamQueryBuilder<infer QueryRow>
+          ? QueryRow
+          : RelationInclude extends JamInclude
+            ? JamWithIncludes<RelationInclude>
+            : never
+      : never
     : never;
 };
 
@@ -228,163 +254,207 @@ export interface ParticipantRelations {
   jam: Jam;
 }
 
-export type InstrumentWithIncludes<I extends InstrumentInclude = {}> = Omit<Instrument, Extract<keyof I, keyof Instrument>> & InstrumentIncludedRelations<I>;
+export type InstrumentWithIncludes<I extends InstrumentInclude = {}> = Omit<
+  Instrument,
+  Extract<keyof I, keyof Instrument>
+> &
+  InstrumentIncludedRelations<I>;
 
-export type JamWithIncludes<I extends JamInclude = {}> = Omit<Jam, Extract<keyof I, keyof Jam>> & JamIncludedRelations<I>;
+export type JamWithIncludes<I extends JamInclude = {}> = Omit<Jam, Extract<keyof I, keyof Jam>> &
+  JamIncludedRelations<I>;
 
-export type BeatWithIncludes<I extends BeatInclude = {}> = Omit<Beat, Extract<keyof I, keyof Beat>> & BeatIncludedRelations<I>;
+export type BeatWithIncludes<I extends BeatInclude = {}> = Omit<
+  Beat,
+  Extract<keyof I, keyof Beat>
+> &
+  BeatIncludedRelations<I>;
 
-export type ParticipantWithIncludes<I extends ParticipantInclude = {}> = Omit<Participant, Extract<keyof I, keyof Participant>> & ParticipantIncludedRelations<I>;
+export type ParticipantWithIncludes<I extends ParticipantInclude = {}> = Omit<
+  Participant,
+  Extract<keyof I, keyof Participant>
+> &
+  ParticipantIncludedRelations<I>;
 
 export type InstrumentSelectableColumn = keyof Instrument | PermissionIntrospectionColumn | "*";
 export type InstrumentOrderableColumn = keyof Instrument | PermissionIntrospectionColumn;
 
-export type InstrumentSelected<S extends InstrumentSelectableColumn = keyof Instrument> = "*" extends S ? Instrument : Pick<Instrument, Extract<S | "id", keyof Instrument>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type InstrumentSelected<S extends InstrumentSelectableColumn = keyof Instrument> =
+  "*" extends S
+    ? Instrument
+    : Pick<Instrument, Extract<S | "id", keyof Instrument>> &
+        Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type InstrumentSelectedWithIncludes<I extends InstrumentInclude = {}, S extends InstrumentSelectableColumn = keyof Instrument> = Omit<InstrumentSelected<S>, Extract<keyof I, keyof InstrumentSelected<S>>> & InstrumentIncludedRelations<I>;
+export type InstrumentSelectedWithIncludes<
+  I extends InstrumentInclude = {},
+  S extends InstrumentSelectableColumn = keyof Instrument,
+> = Omit<InstrumentSelected<S>, Extract<keyof I, keyof InstrumentSelected<S>>> &
+  InstrumentIncludedRelations<I>;
 
 export type JamSelectableColumn = keyof Jam | PermissionIntrospectionColumn | "*";
 export type JamOrderableColumn = keyof Jam | PermissionIntrospectionColumn;
 
-export type JamSelected<S extends JamSelectableColumn = keyof Jam> = "*" extends S ? Jam : Pick<Jam, Extract<S | "id", keyof Jam>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type JamSelected<S extends JamSelectableColumn = keyof Jam> = "*" extends S
+  ? Jam
+  : Pick<Jam, Extract<S | "id", keyof Jam>> &
+      Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type JamSelectedWithIncludes<I extends JamInclude = {}, S extends JamSelectableColumn = keyof Jam> = Omit<JamSelected<S>, Extract<keyof I, keyof JamSelected<S>>> & JamIncludedRelations<I>;
+export type JamSelectedWithIncludes<
+  I extends JamInclude = {},
+  S extends JamSelectableColumn = keyof Jam,
+> = Omit<JamSelected<S>, Extract<keyof I, keyof JamSelected<S>>> & JamIncludedRelations<I>;
 
 export type BeatSelectableColumn = keyof Beat | PermissionIntrospectionColumn | "*";
 export type BeatOrderableColumn = keyof Beat | PermissionIntrospectionColumn;
 
-export type BeatSelected<S extends BeatSelectableColumn = keyof Beat> = "*" extends S ? Beat : Pick<Beat, Extract<S | "id", keyof Beat>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type BeatSelected<S extends BeatSelectableColumn = keyof Beat> = "*" extends S
+  ? Beat
+  : Pick<Beat, Extract<S | "id", keyof Beat>> &
+      Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type BeatSelectedWithIncludes<I extends BeatInclude = {}, S extends BeatSelectableColumn = keyof Beat> = Omit<BeatSelected<S>, Extract<keyof I, keyof BeatSelected<S>>> & BeatIncludedRelations<I>;
+export type BeatSelectedWithIncludes<
+  I extends BeatInclude = {},
+  S extends BeatSelectableColumn = keyof Beat,
+> = Omit<BeatSelected<S>, Extract<keyof I, keyof BeatSelected<S>>> & BeatIncludedRelations<I>;
 
 export type ParticipantSelectableColumn = keyof Participant | PermissionIntrospectionColumn | "*";
 export type ParticipantOrderableColumn = keyof Participant | PermissionIntrospectionColumn;
 
-export type ParticipantSelected<S extends ParticipantSelectableColumn = keyof Participant> = "*" extends S ? Participant : Pick<Participant, Extract<S | "id", keyof Participant>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type ParticipantSelected<S extends ParticipantSelectableColumn = keyof Participant> =
+  "*" extends S
+    ? Participant
+    : Pick<Participant, Extract<S | "id", keyof Participant>> &
+        Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type ParticipantSelectedWithIncludes<I extends ParticipantInclude = {}, S extends ParticipantSelectableColumn = keyof Participant> = Omit<ParticipantSelected<S>, Extract<keyof I, keyof ParticipantSelected<S>>> & ParticipantIncludedRelations<I>;
+export type ParticipantSelectedWithIncludes<
+  I extends ParticipantInclude = {},
+  S extends ParticipantSelectableColumn = keyof Participant,
+> = Omit<ParticipantSelected<S>, Extract<keyof I, keyof ParticipantSelected<S>>> &
+  ParticipantIncludedRelations<I>;
 
 export const wasmSchema: WasmSchema = {
-  "instruments": {
-    "columns": [
+  instruments: {
+    columns: [
       {
-        "name": "name",
-        "column_type": {
-          "type": "Text"
+        name: "name",
+        column_type: {
+          type: "Text",
         },
-        "nullable": false
+        nullable: false,
       },
       {
-        "name": "sound",
-        "column_type": {
-          "type": "Bytea"
+        name: "sound",
+        column_type: {
+          type: "Bytea",
         },
-        "nullable": false
+        nullable: false,
       },
       {
-        "name": "display_order",
-        "column_type": {
-          "type": "Integer"
+        name: "display_order",
+        column_type: {
+          type: "Integer",
         },
-        "nullable": false
-      }
-    ]
+        nullable: false,
+      },
+    ],
   },
-  "jams": {
-    "columns": [
+  jams: {
+    columns: [
       {
-        "name": "created_at",
-        "column_type": {
-          "type": "Timestamp"
+        name: "created_at",
+        column_type: {
+          type: "Timestamp",
         },
-        "nullable": false
+        nullable: false,
       },
       {
-        "name": "transport_start",
-        "column_type": {
-          "type": "Timestamp"
+        name: "transport_start",
+        column_type: {
+          type: "Timestamp",
         },
-        "nullable": true
+        nullable: true,
       },
       {
-        "name": "bpm",
-        "column_type": {
-          "type": "Integer"
+        name: "bpm",
+        column_type: {
+          type: "Integer",
         },
-        "nullable": false
+        nullable: false,
       },
       {
-        "name": "beat_count",
-        "column_type": {
-          "type": "Integer"
+        name: "beat_count",
+        column_type: {
+          type: "Integer",
         },
-        "nullable": false
-      }
-    ]
+        nullable: false,
+      },
+    ],
   },
-  "beats": {
-    "columns": [
+  beats: {
+    columns: [
       {
-        "name": "jam",
-        "column_type": {
-          "type": "Uuid"
+        name: "jam",
+        column_type: {
+          type: "Uuid",
         },
-        "nullable": false,
-        "references": "jams"
+        nullable: false,
+        references: "jams",
       },
       {
-        "name": "instrument",
-        "column_type": {
-          "type": "Uuid"
+        name: "instrument",
+        column_type: {
+          type: "Uuid",
         },
-        "nullable": false,
-        "references": "instruments"
+        nullable: false,
+        references: "instruments",
       },
       {
-        "name": "beat_index",
-        "column_type": {
-          "type": "Integer"
+        name: "beat_index",
+        column_type: {
+          type: "Integer",
         },
-        "nullable": false
+        nullable: false,
       },
       {
-        "name": "placed_by",
-        "column_type": {
-          "type": "Text"
+        name: "placed_by",
+        column_type: {
+          type: "Text",
         },
-        "nullable": false
-      }
-    ]
+        nullable: false,
+      },
+    ],
   },
-  "participants": {
-    "columns": [
+  participants: {
+    columns: [
       {
-        "name": "jam",
-        "column_type": {
-          "type": "Uuid"
+        name: "jam",
+        column_type: {
+          type: "Uuid",
         },
-        "nullable": false,
-        "references": "jams"
+        nullable: false,
+        references: "jams",
       },
       {
-        "name": "user_id",
-        "column_type": {
-          "type": "Text"
+        name: "user_id",
+        column_type: {
+          type: "Text",
         },
-        "nullable": false
+        nullable: false,
       },
       {
-        "name": "display_name",
-        "column_type": {
-          "type": "Text"
+        name: "display_name",
+        column_type: {
+          type: "Text",
         },
-        "nullable": false
-      }
-    ]
-  }
+        nullable: false,
+      },
+    ],
+  },
 };
 
-export class InstrumentQueryBuilder<I extends InstrumentInclude = {}, S extends InstrumentSelectableColumn = keyof Instrument> implements QueryBuilder<InstrumentSelectedWithIncludes<I, S>> {
+export class InstrumentQueryBuilder<
+  I extends InstrumentInclude = {},
+  S extends InstrumentSelectableColumn = keyof Instrument,
+> implements QueryBuilder<InstrumentSelectedWithIncludes<I, S>> {
   readonly _table = "instruments";
   readonly _schema: WasmSchema = wasmSchema;
   readonly _rowType!: InstrumentSelectedWithIncludes<I, S>;
@@ -421,7 +491,9 @@ export class InstrumentQueryBuilder<I extends InstrumentInclude = {}, S extends 
     return clone;
   }
 
-  select<NewS extends InstrumentSelectableColumn>(...columns: [NewS, ...NewS[]]): InstrumentQueryBuilder<I, NewS> {
+  select<NewS extends InstrumentSelectableColumn>(
+    ...columns: [NewS, ...NewS[]]
+  ): InstrumentQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -433,7 +505,10 @@ export class InstrumentQueryBuilder<I extends InstrumentInclude = {}, S extends 
     return clone;
   }
 
-  orderBy(column: InstrumentOrderableColumn, direction: "asc" | "desc" = "asc"): InstrumentQueryBuilder<I, S> {
+  orderBy(
+    column: InstrumentOrderableColumn,
+    direction: "asc" | "desc" = "asc",
+  ): InstrumentQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -482,13 +557,15 @@ export class InstrumentQueryBuilder<I extends InstrumentInclude = {}, S extends 
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+    if (
+      !stepOutput ||
+      typeof stepOutput !== "object" ||
+      typeof (stepOutput as { _build?: unknown })._build !== "function"
+    ) {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(
-      stepOutput._build(),
-    ) as {
+    const stepBuilt = JSON.parse(stepOutput._build()) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -512,7 +589,9 @@ export class InstrumentQueryBuilder<I extends InstrumentInclude = {}, S extends 
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
     }
 
     const currentCondition = currentConditions[0];
@@ -552,7 +631,10 @@ export class InstrumentQueryBuilder<I extends InstrumentInclude = {}, S extends 
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends InstrumentInclude = I, CloneS extends InstrumentSelectableColumn = S>(): InstrumentQueryBuilder<CloneI, CloneS> {
+  private _clone<
+    CloneI extends InstrumentInclude = I,
+    CloneS extends InstrumentSelectableColumn = S,
+  >(): InstrumentQueryBuilder<CloneI, CloneS> {
     const clone = new InstrumentQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
@@ -572,7 +654,10 @@ export class InstrumentQueryBuilder<I extends InstrumentInclude = {}, S extends 
   }
 }
 
-export class JamQueryBuilder<I extends JamInclude = {}, S extends JamSelectableColumn = keyof Jam> implements QueryBuilder<JamSelectedWithIncludes<I, S>> {
+export class JamQueryBuilder<
+  I extends JamInclude = {},
+  S extends JamSelectableColumn = keyof Jam,
+> implements QueryBuilder<JamSelectedWithIncludes<I, S>> {
   readonly _table = "jams";
   readonly _schema: WasmSchema = wasmSchema;
   readonly _rowType!: JamSelectedWithIncludes<I, S>;
@@ -609,7 +694,9 @@ export class JamQueryBuilder<I extends JamInclude = {}, S extends JamSelectableC
     return clone;
   }
 
-  select<NewS extends JamSelectableColumn>(...columns: [NewS, ...NewS[]]): JamQueryBuilder<I, NewS> {
+  select<NewS extends JamSelectableColumn>(
+    ...columns: [NewS, ...NewS[]]
+  ): JamQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -670,13 +757,15 @@ export class JamQueryBuilder<I extends JamInclude = {}, S extends JamSelectableC
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+    if (
+      !stepOutput ||
+      typeof stepOutput !== "object" ||
+      typeof (stepOutput as { _build?: unknown })._build !== "function"
+    ) {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(
-      stepOutput._build(),
-    ) as {
+    const stepBuilt = JSON.parse(stepOutput._build()) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -700,7 +789,9 @@ export class JamQueryBuilder<I extends JamInclude = {}, S extends JamSelectableC
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
     }
 
     const currentCondition = currentConditions[0];
@@ -740,7 +831,10 @@ export class JamQueryBuilder<I extends JamInclude = {}, S extends JamSelectableC
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends JamInclude = I, CloneS extends JamSelectableColumn = S>(): JamQueryBuilder<CloneI, CloneS> {
+  private _clone<
+    CloneI extends JamInclude = I,
+    CloneS extends JamSelectableColumn = S,
+  >(): JamQueryBuilder<CloneI, CloneS> {
     const clone = new JamQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
@@ -760,7 +854,10 @@ export class JamQueryBuilder<I extends JamInclude = {}, S extends JamSelectableC
   }
 }
 
-export class BeatQueryBuilder<I extends BeatInclude = {}, S extends BeatSelectableColumn = keyof Beat> implements QueryBuilder<BeatSelectedWithIncludes<I, S>> {
+export class BeatQueryBuilder<
+  I extends BeatInclude = {},
+  S extends BeatSelectableColumn = keyof Beat,
+> implements QueryBuilder<BeatSelectedWithIncludes<I, S>> {
   readonly _table = "beats";
   readonly _schema: WasmSchema = wasmSchema;
   readonly _rowType!: BeatSelectedWithIncludes<I, S>;
@@ -797,7 +894,9 @@ export class BeatQueryBuilder<I extends BeatInclude = {}, S extends BeatSelectab
     return clone;
   }
 
-  select<NewS extends BeatSelectableColumn>(...columns: [NewS, ...NewS[]]): BeatQueryBuilder<I, NewS> {
+  select<NewS extends BeatSelectableColumn>(
+    ...columns: [NewS, ...NewS[]]
+  ): BeatQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -858,13 +957,15 @@ export class BeatQueryBuilder<I extends BeatInclude = {}, S extends BeatSelectab
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+    if (
+      !stepOutput ||
+      typeof stepOutput !== "object" ||
+      typeof (stepOutput as { _build?: unknown })._build !== "function"
+    ) {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(
-      stepOutput._build(),
-    ) as {
+    const stepBuilt = JSON.parse(stepOutput._build()) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -888,7 +989,9 @@ export class BeatQueryBuilder<I extends BeatInclude = {}, S extends BeatSelectab
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
     }
 
     const currentCondition = currentConditions[0];
@@ -928,7 +1031,10 @@ export class BeatQueryBuilder<I extends BeatInclude = {}, S extends BeatSelectab
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends BeatInclude = I, CloneS extends BeatSelectableColumn = S>(): BeatQueryBuilder<CloneI, CloneS> {
+  private _clone<
+    CloneI extends BeatInclude = I,
+    CloneS extends BeatSelectableColumn = S,
+  >(): BeatQueryBuilder<CloneI, CloneS> {
     const clone = new BeatQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
@@ -948,7 +1054,10 @@ export class BeatQueryBuilder<I extends BeatInclude = {}, S extends BeatSelectab
   }
 }
 
-export class ParticipantQueryBuilder<I extends ParticipantInclude = {}, S extends ParticipantSelectableColumn = keyof Participant> implements QueryBuilder<ParticipantSelectedWithIncludes<I, S>> {
+export class ParticipantQueryBuilder<
+  I extends ParticipantInclude = {},
+  S extends ParticipantSelectableColumn = keyof Participant,
+> implements QueryBuilder<ParticipantSelectedWithIncludes<I, S>> {
   readonly _table = "participants";
   readonly _schema: WasmSchema = wasmSchema;
   readonly _rowType!: ParticipantSelectedWithIncludes<I, S>;
@@ -985,7 +1094,9 @@ export class ParticipantQueryBuilder<I extends ParticipantInclude = {}, S extend
     return clone;
   }
 
-  select<NewS extends ParticipantSelectableColumn>(...columns: [NewS, ...NewS[]]): ParticipantQueryBuilder<I, NewS> {
+  select<NewS extends ParticipantSelectableColumn>(
+    ...columns: [NewS, ...NewS[]]
+  ): ParticipantQueryBuilder<I, NewS> {
     const clone = this._clone<I, NewS>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -997,7 +1108,10 @@ export class ParticipantQueryBuilder<I extends ParticipantInclude = {}, S extend
     return clone;
   }
 
-  orderBy(column: ParticipantOrderableColumn, direction: "asc" | "desc" = "asc"): ParticipantQueryBuilder<I, S> {
+  orderBy(
+    column: ParticipantOrderableColumn,
+    direction: "asc" | "desc" = "asc",
+  ): ParticipantQueryBuilder<I, S> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -1046,13 +1160,15 @@ export class ParticipantQueryBuilder<I extends ParticipantInclude = {}, S extend
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+    if (
+      !stepOutput ||
+      typeof stepOutput !== "object" ||
+      typeof (stepOutput as { _build?: unknown })._build !== "function"
+    ) {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(
-      stepOutput._build(),
-    ) as {
+    const stepBuilt = JSON.parse(stepOutput._build()) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -1076,7 +1192,9 @@ export class ParticipantQueryBuilder<I extends ParticipantInclude = {}, S extend
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
     }
 
     const currentCondition = currentConditions[0];
@@ -1116,7 +1234,10 @@ export class ParticipantQueryBuilder<I extends ParticipantInclude = {}, S extend
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends ParticipantInclude = I, CloneS extends ParticipantSelectableColumn = S>(): ParticipantQueryBuilder<CloneI, CloneS> {
+  private _clone<
+    CloneI extends ParticipantInclude = I,
+    CloneS extends ParticipantSelectableColumn = S,
+  >(): ParticipantQueryBuilder<CloneI, CloneS> {
     const clone = new ParticipantQueryBuilder<CloneI, CloneS>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
