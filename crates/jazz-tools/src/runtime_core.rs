@@ -132,7 +132,7 @@ impl std::error::Error for RuntimeError {}
 
 impl From<QueryError> for RuntimeError {
     fn from(e: QueryError) -> Self {
-        RuntimeError::QueryError(format!("{:?}", e))
+        RuntimeError::QueryError(e.to_string())
     }
 }
 

@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import { JazzClient, type Runtime } from "./client.js";
 import type { AppContext } from "./context.js";
 
-function makeClient() {
+function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const updateCalls: Array<[string, Record<string, unknown>]> = [];
   const updateDurableCalls: Array<[string, Record<string, unknown>, string]> = [];
   const deleteCalls: string[] = [];
   const deleteDurableCalls: Array<[string, string]> = [];
 
-  const runtime: Runtime = {
+  const runtimeBase: Runtime = {
     insert: () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
     insertDurable: async () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
     update: (objectId: string, updates: Record<string, unknown>) => {
@@ -36,6 +36,7 @@ function makeClient() {
     getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
   };
+  const runtime: Runtime = { ...runtimeBase, ...runtimeOverrides };
 
   const context: AppContext = {
     appId: "test-app",
@@ -62,6 +63,24 @@ function makeClient() {
 }
 
 describe("JazzClient mutation durability split", () => {
+  it("rethrows synchronous runtime mutation errors", () => {
+    const insertError = new Error("Insert failed: indexed value too large");
+    const updateError = new Error("Update failed: indexed value too large");
+    const { client } = makeClient({
+      insert: () => {
+        throw insertError;
+      },
+      update: () => {
+        throw updateError;
+      },
+    });
+
+    expect(() => client.create("todos", [])).toThrow(insertError);
+    expect(() =>
+      client.update("row-1", { done: { type: "Boolean" as const, value: true } }),
+    ).toThrow(updateError);
+  });
+
   it("routes update/delete through the synchronous runtime methods", () => {
     const { client, updateCalls, deleteCalls } = makeClient();
     const updates = { done: { type: "Boolean" as const, value: true } };
