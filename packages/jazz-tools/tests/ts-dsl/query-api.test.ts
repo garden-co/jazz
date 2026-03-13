@@ -1,6 +1,6 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, describe, it, expect, assert, expectTypeOf } from "vitest";
-import { app, Project, Todo, User } from "./fixtures/basic/app";
+import { app, Project, Todo, User, UserSelected } from "./fixtures/basic/app";
 
 function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -116,8 +116,8 @@ describe("TS Query API", () => {
     expect(todo.title).toBe("Write tests");
     expectTypeOf(todo.owner).toEqualTypeOf<string | undefined>();
     expect(todo.owner).toBe(ownerId);
-    expectTypeOf(todo.project).toEqualTypeOf<Project>();
-    expect(todo.project.name).toBe("Announcements");
+    expectTypeOf(todo.project).toEqualTypeOf<Project | undefined>();
+    expect(todo.project?.name).toBe("Announcements");
   });
 
   it("include returns 'undefined' for missing scalar referenced entities", async () => {
@@ -139,6 +139,7 @@ describe("TS Query API", () => {
       app.todos.where({ id: { eq: todo.id } }).include({ project: true }),
     );
     assert(result, "Result is not defined");
+    expectTypeOf(result.project).toEqualTypeOf<Project | undefined>();
     expect(result.project).toBeUndefined();
   });
 
@@ -162,6 +163,7 @@ describe("TS Query API", () => {
       app.todos.where({ id: { eq: todo.id } }).include({ assignees: app.users.select("id") }),
     );
     assert(result, "Result is not defined");
+    expectTypeOf(result.assignees).branded.toEqualTypeOf<{ id: string }[]>();
     expect(result.assignees).toEqual([{ id: assignee2.id }]);
   });
 
@@ -187,6 +189,7 @@ describe("TS Query API", () => {
       app.users.where({ id: { eq: owner.id } }).include({ todosViaOwner: app.todos.select("id") }),
     );
     assert(result, "Result is not defined");
+    expectTypeOf(result.todosViaOwner).branded.toEqualTypeOf<{ id: string }[]>();
     expect(result.todosViaOwner).toEqual([{ id: todoId2 }]);
   });
 
@@ -216,7 +219,7 @@ describe("TS Query API", () => {
     assert(result, "Result is not defined");
     expectTypeOf(result.id).toEqualTypeOf<string>();
     expectTypeOf(result.title).toEqualTypeOf<string>();
-    expectTypeOf(result.project).toEqualTypeOf<Project>();
+    expectTypeOf(result.project).toEqualTypeOf<Project | undefined>();
     expect(result).toEqual({
       id: todoId,
       title: "Write tests",
@@ -254,7 +257,8 @@ describe("TS Query API", () => {
     assert(result, "Result is not defined");
     expectTypeOf(result.owner).toEqualTypeOf<string | undefined>();
     expect(result.owner).toBe(ownerId);
-    expectTypeOf(result.project).toEqualTypeOf<Project>();
+    expectTypeOf(result.project).toEqualTypeOf<Project | undefined>();
+    assert(result.project, "Project include is not defined");
     expect(result.project.name).toBe("Announcements");
   });
 

@@ -786,7 +786,7 @@ describe("generateTypes with relations", () => {
     const output = generateTypes(wasm);
 
     expect(output).toContain("export interface TodoRelations {");
-    expect(output).toContain("owner: User;");
+    expect(output).toContain("owner: User | undefined;");
   });
 
   it("generates reverse relations as arrays", () => {
@@ -818,11 +818,11 @@ describe("generateTypes with relations", () => {
     expect(output).toContain('K extends "owner"');
     expect(output).toContain('NonNullable<I["owner"]> extends infer RelationInclude');
     expect(output).toContain("? RelationInclude extends true");
-    expect(output).toContain("? User");
+    expect(output).toContain("? User | undefined");
     expect(output).toContain(": RelationInclude extends AnyUserQueryBuilder<infer QueryRow>");
-    expect(output).toContain("? QueryRow");
+    expect(output).toContain("? QueryRow | undefined");
     expect(output).toContain(": RelationInclude extends UserInclude");
-    expect(output).toContain("? UserWithIncludes<RelationInclude>");
+    expect(output).toContain("? UserWithIncludes<RelationInclude> | undefined");
     expect(output).toContain('K extends "todosViaOwner"');
     expect(output).toContain("? Todo[]");
     expect(output).toContain(": RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>");
