@@ -608,6 +608,34 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
     }
 
+    /// Insert a row into a table as an explicit session principal.
+    #[wasm_bindgen(js_name = insertWithSession)]
+    pub fn insert_with_session(
+        &self,
+        table: &str,
+        values: JsValue,
+        session_json: Option<String>,
+    ) -> Result<JsValue, JsError> {
+        let _span = debug_span!("wasm::insertWithSession", tier = self.tier_label, table).entered();
+        let wasm_values: Vec<Value> = serde_wasm_bindgen::from_value(values)?;
+        let groove_values: Vec<Value> = wasm_values;
+        let session = parse_session_json(session_json)?;
+
+        let mut core = self.core.borrow_mut();
+        let (object_id, row_values) = core
+            .insert(table, groove_values, session.as_ref())
+            .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?;
+
+        let row = SubscriptionRow {
+            id: object_id.uuid().to_string(),
+            values: row_values,
+        };
+        tracing::debug!(object_id = %row.id, "inserted_with_session");
+        let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+        row.serialize(&serializer)
+            .map_err(|e| JsError::new(&format!("Serialization failed: {:?}", e)))
+    }
+
     /// Execute a query and return results as a Promise.
     ///
     /// Optional durability tier controls remote settlement behavior.
@@ -721,6 +749,28 @@ impl WasmRuntime {
         Ok(())
     }
 
+    /// Delete a row by ObjectId as an explicit session principal.
+    #[wasm_bindgen(js_name = deleteWithSession)]
+    pub fn delete_with_session(
+        &self,
+        object_id: &str,
+        session_json: Option<String>,
+    ) -> Result<(), JsError> {
+        let _span =
+            debug_span!("wasm::deleteWithSession", tier = self.tier_label, object_id).entered();
+        let uuid = uuid::Uuid::parse_str(object_id)
+            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let session = parse_session_json(session_json)?;
+
+        let mut core = self.core.borrow_mut();
+        core.delete(oid, session.as_ref())
+            .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?;
+
+        tracing::debug!(object_id, "deleted_with_session");
+        Ok(())
+    }
+
     // =========================================================================
     // Persisted CRUD Operations
     // =========================================================================
@@ -743,6 +793,41 @@ impl WasmRuntime {
         let ((object_id, row_values), receiver) = {
             let mut core = self.core.borrow_mut();
             core.insert_persisted(table, groove_values, None, persistence_tier)
+                .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?
+        };
+
+        let row = SubscriptionRow {
+            id: object_id.uuid().to_string(),
+            values: row_values,
+        };
+        let promise = wasm_bindgen_futures::future_to_promise(async move {
+            let _ = receiver.await;
+            let serializer = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
+            row.serialize(&serializer)
+                .map_err(|e| JsValue::from_str(&format!("Serialization failed: {:?}", e)))
+        });
+
+        Ok(promise)
+    }
+
+    /// Insert a row and return a Promise that resolves when the tier acks,
+    /// scoped to an explicit session principal.
+    #[wasm_bindgen(js_name = insertDurableWithSession)]
+    pub fn insert_durable_with_session(
+        &self,
+        table: &str,
+        values: JsValue,
+        session_json: Option<String>,
+        tier: &str,
+    ) -> Result<js_sys::Promise, JsError> {
+        let persistence_tier = parse_tier(tier)?;
+        let wasm_values: Vec<Value> = serde_wasm_bindgen::from_value(values)?;
+        let groove_values: Vec<Value> = wasm_values;
+        let session = parse_session_json(session_json)?;
+
+        let ((object_id, row_values), receiver) = {
+            let mut core = self.core.borrow_mut();
+            core.insert_persisted(table, groove_values, session.as_ref(), persistence_tier)
                 .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?
         };
 
@@ -791,6 +876,40 @@ impl WasmRuntime {
         Ok(promise)
     }
 
+    /// Update a row and return a Promise that resolves when the tier acks,
+    /// scoped to an explicit session principal.
+    #[wasm_bindgen(js_name = updateDurableWithSession)]
+    pub fn update_durable_with_session(
+        &self,
+        object_id: &str,
+        values: JsValue,
+        session_json: Option<String>,
+        tier: &str,
+    ) -> Result<js_sys::Promise, JsError> {
+        let persistence_tier = parse_tier(tier)?;
+
+        let uuid = uuid::Uuid::parse_str(object_id)
+            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let session = parse_session_json(session_json)?;
+
+        let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+        let updates: Vec<(String, Value)> = partial_values.into_iter().collect();
+
+        let receiver = {
+            let mut core = self.core.borrow_mut();
+            core.update_persisted(oid, updates, session.as_ref(), persistence_tier)
+                .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?
+        };
+
+        let promise = wasm_bindgen_futures::future_to_promise(async move {
+            let _ = receiver.await;
+            Ok(JsValue::undefined())
+        });
+
+        Ok(promise)
+    }
+
     /// Delete a row and return a Promise that resolves when the tier acks.
     #[wasm_bindgen(js_name = deleteDurable)]
     pub fn delete_durable(&self, object_id: &str, tier: &str) -> Result<js_sys::Promise, JsError> {
@@ -803,6 +922,36 @@ impl WasmRuntime {
         let receiver = {
             let mut core = self.core.borrow_mut();
             core.delete_persisted(oid, None, persistence_tier)
+                .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?
+        };
+
+        let promise = wasm_bindgen_futures::future_to_promise(async move {
+            let _ = receiver.await;
+            Ok(JsValue::undefined())
+        });
+
+        Ok(promise)
+    }
+
+    /// Delete a row and return a Promise that resolves when the tier acks,
+    /// scoped to an explicit session principal.
+    #[wasm_bindgen(js_name = deleteDurableWithSession)]
+    pub fn delete_durable_with_session(
+        &self,
+        object_id: &str,
+        session_json: Option<String>,
+        tier: &str,
+    ) -> Result<js_sys::Promise, JsError> {
+        let persistence_tier = parse_tier(tier)?;
+
+        let uuid = uuid::Uuid::parse_str(object_id)
+            .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let session = parse_session_json(session_json)?;
+
+        let receiver = {
+            let mut core = self.core.borrow_mut();
+            core.delete_persisted(oid, session.as_ref(), persistence_tier)
                 .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?
         };
 
