@@ -1072,6 +1072,8 @@ describe("generateQueryBuilderClasses", () => {
 
     expect(output).toContain("include<NewI extends TodoInclude>(relations: NewI)");
     expect(output).toContain("const clone = this._clone<I & NewI, S>();");
+    expect(output).toContain("requireIncludes(): TodoQueryBuilder<I, S> {");
+    expect(output).toContain("clone._requireIncludes = true;");
     expect(output).not.toContain("as unknown as TodoQueryBuilder<I & NewI>");
   });
 

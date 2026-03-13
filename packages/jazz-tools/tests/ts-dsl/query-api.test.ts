@@ -143,6 +143,55 @@ describe("TS Query API", () => {
     expect(result.project).toBeUndefined();
   });
 
+  it("requireIncludes filters out rows with missing scalar referenced entities", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("require-includes-scalar-missing") },
+      }),
+    );
+
+    const project = insertProject(db);
+    const todo = insertTodo(db, {
+      project: project.id,
+    });
+
+    await db.delete(app.projects, project.id);
+
+    const result = await db.one(
+      app.todos
+        .where({ id: { eq: todo.id } })
+        .include({ project: true })
+        .requireIncludes(),
+    );
+
+    expect(result).toBeNull();
+  });
+
+  it("requireIncludes does not filter out rows with null scalar references", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("require-includes-scalar-missing") },
+      }),
+    );
+
+    const todo = insertTodo(db, {
+      owner: undefined,
+    });
+
+    const result = await db.one(
+      app.todos
+        .where({ id: { eq: todo.id } })
+        .include({ owner: true })
+        .requireIncludes(),
+    );
+
+    assert(result, "Result is not defined");
+    expect(result.id).toBe(todo.id);
+    expect(result.owner).toBeUndefined();
+  });
+
   it("include skips missing referenced entities in forward array relations", async () => {
     const db = track(
       await createDb({
@@ -165,6 +214,32 @@ describe("TS Query API", () => {
     assert(result, "Result is not defined");
     expectTypeOf(result.assignees).branded.toEqualTypeOf<{ id: string }[]>();
     expect(result.assignees).toEqual([{ id: assignee2.id }]);
+  });
+
+  it("requireIncludes filters out rows with missing entities in forward array relations", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("require-includes-array-missing") },
+      }),
+    );
+
+    const assignee1 = insertUser(db);
+    const assignee2 = insertUser(db);
+    const todo = insertTodo(db, {
+      assignees: [assignee1.id, assignee2.id],
+    });
+
+    await db.delete(app.users, assignee1.id);
+
+    const result = await db.one(
+      app.todos
+        .where({ id: { eq: todo.id } })
+        .include({ assignees: app.users.select("id") })
+        .requireIncludes(),
+    );
+
+    expect(result).toBeNull();
   });
 
   it("include skips missing referenced entities in reverse relations", async () => {
@@ -190,6 +265,34 @@ describe("TS Query API", () => {
     );
     assert(result, "Result is not defined");
     expectTypeOf(result.todosViaOwner).branded.toEqualTypeOf<{ id: string }[]>();
+    expect(result.todosViaOwner).toEqual([{ id: todoId2 }]);
+  });
+
+  it("requireIncludes does not filter rows for reverse relations", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("require-includes-reverse") },
+      }),
+    );
+
+    const owner = insertUser(db);
+    const { id: todoId } = insertTodo(db, {
+      owner: owner.id,
+    });
+    const { id: todoId2 } = insertTodo(db, {
+      owner: owner.id,
+    });
+
+    await db.delete(app.todos, todoId);
+
+    const result = await db.one(
+      app.users
+        .where({ id: { eq: owner.id } })
+        .include({ todosViaOwner: app.todos.select("id") })
+        .requireIncludes(),
+    );
+    assert(result, "Result is not defined");
     expect(result.todosViaOwner).toEqual([{ id: todoId2 }]);
   });
 

@@ -175,6 +175,17 @@ function hiddenIncludeColumnName(relationName: string): string {
   return `__jazz_include_${relationName}`;
 }
 
+function includeRequirementForRelation(
+  relation: Relation,
+  requireIncludes: boolean,
+): "AtLeastOne" | "MatchCorrelationCardinality" | undefined {
+  if (!requireIncludes || relation.type !== "forward" || relation.nullable) {
+    return undefined;
+  }
+
+  return relation.isArray ? "MatchCorrelationCardinality" : "AtLeastOne";
+}
+
 function visibleSelectColumns(
   select: readonly string[],
   includeProjectionColumns: readonly string[] = [],
@@ -260,11 +271,12 @@ function toArraySubqueries(
   tableName: string,
   relations: Map<string, Relation[]>,
   schema: WasmSchema,
-  options?: { hideCurrentLevelColumnNames?: boolean },
+  options?: { hideCurrentLevelColumnNames?: boolean; requireIncludes?: boolean },
 ): object[] {
   const tableRels = relations.get(tableName) || [];
   const subqueries: object[] = [];
   const hideCurrentLevelColumnNames = options?.hideCurrentLevelColumnNames === true;
+  const requireCurrentLevelIncludes = options?.requireIncludes === true;
 
   for (const [relName, spec] of Object.entries(includes)) {
     const rel = tableRels.find((r) => r.name === relName);
@@ -286,6 +298,7 @@ function toArraySubqueries(
     ]);
     const nestedArrays = toArraySubqueries(spec.includes, rel.toTable, relations, schema, {
       hideCurrentLevelColumnNames: spec.select.length > 0,
+      requireIncludes: spec.requireIncludes,
     });
     const selectColumns = visibleSelectColumns(spec.select, includeProjectionColumns);
 
@@ -293,6 +306,7 @@ function toArraySubqueries(
     if (rel.type === "forward") {
       // Forward relation: todos.owner_id -> users.id
       // We join from the FK column to the target table's id
+      const requirement = includeRequirementForRelation(rel, requireCurrentLevelIncludes);
       subqueries.push({
         column_name: hideCurrentLevelColumnNames ? hiddenIncludeColumnName(relName) : relName,
         table: rel.toTable,
@@ -303,6 +317,7 @@ function toArraySubqueries(
         select_columns: selectColumns,
         order_by: orderBy,
         limit: spec.limit ?? null,
+        ...(requirement ? { requirement } : {}),
         nested_arrays: nestedArrays,
       });
     } else {
@@ -686,6 +701,7 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
     table: builder.table,
     array_subqueries: toArraySubqueries(builder.includes, builder.table, relations, schema, {
       hideCurrentLevelColumnNames: selectColumns.length > 0,
+      requireIncludes: builder.requireIncludes,
     }),
     relation_ir: relation,
     ...(projectedColumns ? { select_columns: projectedColumns } : {}),
