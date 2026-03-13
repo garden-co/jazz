@@ -4,7 +4,7 @@
 
 import { spawn } from "child_process";
 import { access, readdir, writeFile } from "fs/promises";
-import { join, basename, dirname } from "path";
+import { join, basename, dirname, resolve } from "path";
 import { pathToFileURL } from "url";
 import { register as registerCjs } from "tsx/cjs/api";
 import { register as registerEsm } from "tsx/esm/api";
@@ -44,7 +44,7 @@ let importCounter = 0;
 function requirePermissionsModule<T>(filePath: string): T {
   const loader = registerCjs({ namespace: `jazz-tools-cli-permissions-${++importCounter}` });
   try {
-    return loader.require(filePath, import.meta.url) as T;
+    return loader.require(resolve(filePath), import.meta.url) as T;
   } finally {
     loader.unregister();
   }
