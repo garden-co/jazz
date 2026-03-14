@@ -23,6 +23,7 @@
     "todo-client-localfirst-vue-docs": "0.1.0"
   },
   "changesets": [
+    "backend-high-level-only",
     "blue-pets-reflect",
     "bright-oranges-march",
     "calm-pumas-arrive",
@@ -31,6 +32,7 @@
     "codex-scoped-napi-loader",
     "cold-load-history",
     "durability-tier-overhaul-summary",
+    "eager-buttons-eat",
     "edge-server-settled-query",
     "exists-policy-expressions",
     "fair-forks-bake",
@@ -69,12 +71,14 @@
     "rust-frozen-sql-quoting",
     "server-context-api",
     "silent-flowers-live",
+    "stale-taxis-heal",
     "svelte-query-subscription-options",
     "svelte-support",
     "sync-insert-api",
     "sync-update-delete-api",
     "tall-bees-grow",
     "tidy-points-guess",
+    "tiny-files-sing",
     "vue-bindings-docs"
   ]
 }
