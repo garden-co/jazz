@@ -1,5 +1,11 @@
 # jazz-napi
 
+## 2.0.0-alpha.19
+
+### Patch Changes
+
+- 1cf799c: Configure `jazz-napi` to generate scoped `@garden-co/*` native package names at the source and publish the generated loader from release builds.
+
 ## 2.0.0-alpha.18
 
 ### Patch Changes
