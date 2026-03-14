@@ -1,5 +1,20 @@
 # jazz-tools
 
+## 2.0.0-alpha.19
+
+### Patch Changes
+
+- f2c10a1: Simplify `jazz-tools/backend` to expose only the high-level `Db` and `createJazzContext` APIs. `JazzContext` no longer exposes a low-level `client()` escape hatch, and the backend entrypoint no longer re-exports low-level runtime client and transport internals.
+- 4015614: Add `.requireIncludes()` option to query builders to avoid loading rows if any of their included references are missing
+- ecb2db8: Add high-level `Db` helpers for chunked browser file storage:
+  `createFileFromBlob(...)`, `createFileFromStream(...)`, `loadFileAsBlob(...)`,
+  and `loadFileAsStream(...)`.
+
+  Document the conventional `files` / `file_parts` schema, permission setup, and
+  blob/stream usage on the new Files & Blobs docs page.
+  - jazz-wasm@2.0.0-alpha.19
+  - jazz-rn@2.0.0-alpha.19
+
 ## 2.0.0-alpha.18
 
 ### Patch Changes
