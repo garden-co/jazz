@@ -31,9 +31,9 @@ export interface Todo {
   title: string;
   done: boolean;
   tags: string[];
-  project: string;
-  owner?: string;
-  assignees: string[];
+  projectId: string;
+  ownerId?: string;
+  assigneesIds: string[];
 }
 
 export interface UserInit {
@@ -49,9 +49,9 @@ export interface TodoInit {
   title: string;
   done: boolean;
   tags: string[];
-  project: string;
-  owner?: string;
-  assignees: string[];
+  projectId: string;
+  ownerId?: string;
+  assigneesIds: string[];
 }
 
 export interface UserWhereInput {
@@ -76,9 +76,9 @@ export interface TodoWhereInput {
   title?: string | { eq?: string; ne?: string; contains?: string };
   done?: boolean;
   tags?: string[] | { eq?: string[]; contains?: string };
-  project?: string | { eq?: string; ne?: string };
-  owner?: string | { eq?: string; ne?: string; isNull?: boolean };
-  assignees?: string[] | { eq?: string[]; contains?: string };
+  projectId?: string | { eq?: string; ne?: string };
+  ownerId?: string | { eq?: string; ne?: string; isNull?: boolean };
+  assigneesIds?: string[] | { eq?: string[]; contains?: string };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -342,7 +342,7 @@ export const wasmSchema: WasmSchema = {
         nullable: false,
       },
       {
-        name: "project",
+        name: "projectId",
         column_type: {
           type: "Uuid",
         },
@@ -350,7 +350,7 @@ export const wasmSchema: WasmSchema = {
         references: "projects",
       },
       {
-        name: "owner",
+        name: "ownerId",
         column_type: {
           type: "Uuid",
         },
@@ -358,7 +358,7 @@ export const wasmSchema: WasmSchema = {
         references: "users",
       },
       {
-        name: "assignees",
+        name: "assigneesIds",
         column_type: {
           type: "Array",
           element: {

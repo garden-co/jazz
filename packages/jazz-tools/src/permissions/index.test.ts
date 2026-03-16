@@ -613,13 +613,13 @@ describe("permissions DSL", () => {
           policy.exists(
             policy.people
               .where({ profileId: profile.id })
-              .hopTo("friendshipsViaPersonAId")
+              .hopTo("friendshipsViaPersonA")
               .where({ personBId: session.personId }),
           ),
           policy.exists(
             policy.people
               .where({ profileId: profile.id })
-              .hopTo("friendshipsViaPersonBId")
+              .hopTo("friendshipsViaPersonB")
               .where({ personAId: session.personId }),
           ),
         ]),
