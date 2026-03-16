@@ -18,6 +18,7 @@ export interface PermissionIntrospectionColumns {
 export interface User {
   id: string;
   name: string;
+  friends: string[];
 }
 
 export interface Project {
@@ -37,6 +38,7 @@ export interface Todo {
 
 export interface UserInit {
   name: string;
+  friends: string[];
 }
 
 export interface ProjectInit {
@@ -55,6 +57,7 @@ export interface TodoInit {
 export interface UserWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   name?: string | { eq?: string; ne?: string; contains?: string };
+  friends?: string[] | { eq?: string[]; contains?: string };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -86,6 +89,8 @@ type AnyProjectQueryBuilder<T = any> = { readonly _table: "projects" } & QueryBu
 type AnyTodoQueryBuilder<T = any> = { readonly _table: "todos" } & QueryBuilder<T>;
 
 export interface UserInclude {
+  friends?: true | UserInclude | AnyUserQueryBuilder<any>;
+  usersViaFriends?: true | UserInclude | AnyUserQueryBuilder<any>;
   todosViaOwner?: true | TodoInclude | AnyTodoQueryBuilder<any>;
   todosViaAssignees?: true | TodoInclude | AnyTodoQueryBuilder<any>;
 }
@@ -101,27 +106,47 @@ export interface TodoInclude {
 }
 
 export type UserIncludedRelations<I extends UserInclude = {}, R extends boolean = false> = {
-  [K in keyof I]-?: K extends "todosViaOwner"
-    ? NonNullable<I["todosViaOwner"]> extends infer RelationInclude
+  [K in keyof I]-?: K extends "friends"
+    ? NonNullable<I["friends"]> extends infer RelationInclude
       ? RelationInclude extends true
-        ? Todo[]
-        : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
+        ? User[]
+        : RelationInclude extends AnyUserQueryBuilder<infer QueryRow>
           ? QueryRow[]
-          : RelationInclude extends TodoInclude
-            ? TodoWithIncludes<RelationInclude, false>[]
+          : RelationInclude extends UserInclude
+            ? UserWithIncludes<RelationInclude, false>[]
             : never
       : never
-    : K extends "todosViaAssignees"
-      ? NonNullable<I["todosViaAssignees"]> extends infer RelationInclude
+    : K extends "usersViaFriends"
+      ? NonNullable<I["usersViaFriends"]> extends infer RelationInclude
         ? RelationInclude extends true
-          ? Todo[]
-          : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
+          ? User[]
+          : RelationInclude extends AnyUserQueryBuilder<infer QueryRow>
             ? QueryRow[]
-            : RelationInclude extends TodoInclude
-              ? TodoWithIncludes<RelationInclude, false>[]
+            : RelationInclude extends UserInclude
+              ? UserWithIncludes<RelationInclude, false>[]
               : never
         : never
-      : never;
+      : K extends "todosViaOwner"
+        ? NonNullable<I["todosViaOwner"]> extends infer RelationInclude
+          ? RelationInclude extends true
+            ? Todo[]
+            : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
+              ? QueryRow[]
+              : RelationInclude extends TodoInclude
+                ? TodoWithIncludes<RelationInclude, false>[]
+                : never
+          : never
+        : K extends "todosViaAssignees"
+          ? NonNullable<I["todosViaAssignees"]> extends infer RelationInclude
+            ? RelationInclude extends true
+              ? Todo[]
+              : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
+                ? QueryRow[]
+                : RelationInclude extends TodoInclude
+                  ? TodoWithIncludes<RelationInclude, false>[]
+                  : never
+            : never
+          : never;
 };
 
 export type ProjectIncludedRelations<I extends ProjectInclude = {}, R extends boolean = false> = {
@@ -179,6 +204,8 @@ export type TodoIncludedRelations<I extends TodoInclude = {}, R extends boolean 
 };
 
 export interface UserRelations {
+  friends: User[];
+  usersViaFriends: User[];
   todosViaOwner: Todo[];
   todosViaAssignees: Todo[];
 }
@@ -263,6 +290,17 @@ export const wasmSchema: WasmSchema = {
           type: "Text",
         },
         nullable: false,
+      },
+      {
+        name: "friends",
+        column_type: {
+          type: "Array",
+          element: {
+            type: "Uuid",
+          },
+        },
+        nullable: false,
+        references: "users",
       },
     ],
   },
@@ -460,7 +498,9 @@ export class UserQueryBuilder<
     return clone;
   }
 
-  hopTo(relation: "todosViaOwner" | "todosViaAssignees"): UserQueryBuilder<I, S, R> {
+  hopTo(
+    relation: "friends" | "usersViaFriends" | "todosViaOwner" | "todosViaAssignees",
+  ): UserQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
