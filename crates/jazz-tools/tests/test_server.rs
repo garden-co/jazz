@@ -110,10 +110,16 @@ impl TestServer {
         Self::start_inner(port, data_dir, jwks_server, vec![]).await
     }
 
-    /// Start a test server with programmable JWKS responses and a short cache TTL.
-    pub async fn start_with_jwks_responses_and_ttl(
+    /// Start a test server with programmable JWKS responses and custom cache timing.
+    pub async fn start_with_jwks_responses_and_ttl(responses: Vec<Value>, ttl_secs: u64) -> Self {
+        Self::start_with_jwks_responses_and_cache_config(responses, ttl_secs, 300).await
+    }
+
+    /// Start a test server with programmable JWKS responses, custom TTL, and max stale.
+    pub async fn start_with_jwks_responses_and_cache_config(
         responses: Vec<Value>,
         ttl_secs: u64,
+        max_stale_secs: u64,
     ) -> Self {
         let port = get_free_port();
         let data_dir = TempDir::new().expect("create temp dir");
@@ -122,7 +128,10 @@ impl TestServer {
             port,
             data_dir,
             jwks_server,
-            vec![("JAZZ_JWKS_CACHE_TTL_SECS", ttl_secs.to_string())],
+            vec![
+                ("JAZZ_JWKS_CACHE_TTL_SECS", ttl_secs.to_string()),
+                ("JAZZ_JWKS_MAX_STALE_SECS", max_stale_secs.to_string()),
+            ],
         )
         .await
     }

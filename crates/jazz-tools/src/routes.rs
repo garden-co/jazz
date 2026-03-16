@@ -23,7 +23,7 @@ use tower_http::trace::TraceLayer;
 use crate::commands::server::{ConnectionState, ServerState};
 use crate::middleware::auth::{
     derive_local_principal_id, extract_session, parse_local_auth_headers, validate_admin_secret,
-    validate_backend_secret, validate_jwt_identity,
+    validate_backend_secret,
 };
 use jazz_tools::query_manager::types::SchemaHash;
 use jazz_tools::schema_manager::AppId;
@@ -661,7 +661,7 @@ async fn link_external_handler(
     let jwt_result = if let Some(ref cache) = state.jwks_cache {
         crate::middleware::auth::validate_jwt_with_cache(token, cache).await
     } else {
-        validate_jwt_identity(token, &state.auth_config)
+        Err(crate::middleware::auth::JwtError::NoKeyConfigured)
     };
 
     let verified = match jwt_result {
@@ -834,7 +834,6 @@ mod tests {
             allow_anonymous: true,
             allow_demo: true,
             jwks_url: None,
-            jwks_set: None,
         }
     }
 
@@ -858,7 +857,6 @@ mod tests {
             allow_anonymous: true,
             allow_demo: true,
             jwks_url: None,
-            jwks_set: None,
         };
 
         let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(16);
@@ -1087,7 +1085,6 @@ mod tests {
             allow_anonymous: true,
             allow_demo: true,
             jwks_url: None,
-            jwks_set: None,
         };
 
         let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(16);

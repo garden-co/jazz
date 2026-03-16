@@ -17,7 +17,7 @@ use tokio::sync::{RwLock, broadcast};
 use tracing::info;
 
 use crate::middleware::AuthConfig;
-use crate::middleware::auth::{JwksCache, JWKS_CACHE_TTL};
+use crate::middleware::auth::{JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache};
 use crate::routes;
 
 const EXTERNAL_IDENTITIES_TABLE: &str = "external_identities";
@@ -264,7 +264,17 @@ pub async fn run(
             .and_then(|v| v.parse::<u64>().ok())
             .map(Duration::from_secs)
             .unwrap_or(JWKS_CACHE_TTL);
-        let cache = JwksCache::new(jwks_url.clone(), reqwest::Client::new(), jwks_ttl);
+        let jwks_max_stale = std::env::var("JAZZ_JWKS_MAX_STALE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(JWKS_MAX_STALE);
+        let cache = JwksCache::new(
+            jwks_url.clone(),
+            reqwest::Client::new(),
+            jwks_ttl,
+            jwks_max_stale,
+        );
         // Warm the cache — fail fast if the JWKS endpoint is unreachable at startup.
         cache
             .load(false)

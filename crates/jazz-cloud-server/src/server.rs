@@ -51,6 +51,8 @@ const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 /// callers from triggering unbounded outbound fetches by sending JWTs with
 /// fabricated key IDs.
 const JWKS_FORCED_REFRESH_COOLDOWN: Duration = Duration::from_secs(10);
+/// Maximum time a stale keyset is served after TTL expiry.
+const JWKS_MAX_STALE: Duration = Duration::from_secs(300);
 const WORKER_SYNC_QUEUE_CAPACITY: usize = 4096;
 const WORKER_APP_QUANTUM: usize = 1;
 const LOCAL_MODE_HEADER: &str = "X-Jazz-Local-Mode";
@@ -1913,6 +1915,7 @@ struct ServerState {
     meta_store: Arc<MetaStore>,
     jwks_cache: tokio::sync::RwLock<HashMap<AppId, CachedJwks>>,
     jwks_cache_ttl: Duration,
+    jwks_max_stale: Duration,
     http_client: reqwest::Client,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
@@ -2105,6 +2108,11 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
             .and_then(|v| v.parse::<u64>().ok())
             .map(Duration::from_secs)
             .unwrap_or(JWKS_CACHE_TTL),
+        jwks_max_stale: std::env::var("JAZZ_JWKS_MAX_STALE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(JWKS_MAX_STALE),
         http_client,
         shutdown_tx: shutdown_tx.clone(),
     });
@@ -2578,7 +2586,33 @@ async fn load_jwks_for_app(
         }
     }
 
-    let jwks = fetch_jwks(&state.http_client, jwks_endpoint).await?;
+    let max_stale_us = (state.jwks_cache_ttl + state.jwks_max_stale)
+        .as_micros()
+        .min(u128::from(u64::MAX)) as u64;
+
+    let jwks = match fetch_jwks(&state.http_client, jwks_endpoint).await {
+        Ok(jwks) => jwks,
+        Err(e) => {
+            // Stale-if-error: serve the cached keyset if it's not too old.
+            if let Some(cached) = state.jwks_cache.read().await.get(&app_id) {
+                let age_us = now_timestamp_us().saturating_sub(cached.fetched_at_us);
+                if age_us <= max_stale_us {
+                    warn!(
+                        app_id = %app_id,
+                        error = %e,
+                        "JWKS fetch failed, serving stale cached keyset"
+                    );
+                    return Ok(cached.set.clone());
+                }
+                warn!(
+                    app_id = %app_id,
+                    error = %e,
+                    "JWKS fetch failed and stale keyset has expired"
+                );
+            }
+            return Err(e);
+        }
+    };
 
     let now = now_timestamp_us();
     let mut cache = state.jwks_cache.write().await;
