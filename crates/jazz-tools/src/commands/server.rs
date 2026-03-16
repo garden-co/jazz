@@ -13,11 +13,11 @@ use jazz_tools::runtime_tokio::TokioRuntime;
 use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
 use jazz_tools::storage::FjallStorage;
 use jazz_tools::sync_manager::{ClientId, Destination, DurabilityTier, SyncManager, SyncPayload};
-use jsonwebtoken::jwk::JwkSet;
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
 
 use crate::middleware::AuthConfig;
+use crate::middleware::auth::JwksCache;
 use crate::routes;
 
 const EXTERNAL_IDENTITIES_TABLE: &str = "external_identities";
@@ -197,6 +197,8 @@ pub struct ServerState {
     pub sync_broadcast: broadcast::Sender<(ClientId, SyncPayload)>,
     /// Authentication configuration
     pub auth_config: AuthConfig,
+    /// JWKS cache with TTL and on-demand refresh for key rotation.
+    pub jwks_cache: Option<JwksCache>,
     /// Persistent external identity mapping store.
     pub external_identity_store: Arc<ExternalIdentityStore>,
     /// In-memory cache: (issuer, subject) -> principal_id.
@@ -213,7 +215,7 @@ pub async fn run(
     app_id_str: &str,
     port: u16,
     data_dir: &str,
-    mut auth_config: AuthConfig,
+    auth_config: AuthConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Parse app ID
     let app_id = AppId::from_string(app_id_str)?;
@@ -255,11 +257,18 @@ pub async fn run(
         // Server destinations would be handled differently (e.g., HTTP push)
     });
 
-    // Preload JWKS when configured.
-    if let Some(jwks_url) = &auth_config.jwks_url {
-        let jwks = reqwest::get(jwks_url).await?.json::<JwkSet>().await?;
-        auth_config.jwks_set = Some(jwks);
-    }
+    // Initialise JWKS cache with TTL-based refresh and on-demand rotation support.
+    let jwks_cache = if let Some(ref jwks_url) = auth_config.jwks_url {
+        let cache = JwksCache::new(jwks_url.clone(), reqwest::Client::new());
+        // Warm the cache — fail fast if the JWKS endpoint is unreachable at startup.
+        cache
+            .load(false)
+            .await
+            .map_err(|e| format!("failed to fetch initial JWKS: {e}"))?;
+        Some(cache)
+    } else {
+        None
+    };
 
     // Log auth configuration (without revealing secrets)
     if auth_config.is_configured() {
@@ -299,6 +308,7 @@ pub async fn run(
         next_connection_id: std::sync::atomic::AtomicU64::new(1),
         sync_broadcast: sync_tx,
         auth_config,
+        jwks_cache,
         external_identity_store,
         external_identities: RwLock::new(external_identities),
     });
