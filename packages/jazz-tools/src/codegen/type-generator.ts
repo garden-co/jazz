@@ -321,7 +321,7 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
     const includedRelationsType = baseInterface + "IncludedRelations";
 
     lines.push(
-      `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}, R extends boolean = false> = Omit<${baseInterface}, Extract<keyof I, keyof ${baseInterface}>> & ${includedRelationsType}<I, R>;`,
+      `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}, R extends boolean = false> = ${baseInterface} & ${includedRelationsType}<I, R>;`,
     );
     lines.push(``);
   }
@@ -355,7 +355,7 @@ function generateSelectionTypes(schema: WasmSchema, relations: Map<string, Relat
 
     if (hasRelations) {
       lines.push(
-        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends ${selectableColumnType} = keyof ${baseInterface}, R extends boolean = false> = Omit<${baseInterface}Selected<S>, Extract<keyof I, keyof ${baseInterface}Selected<S>>> & ${includedRelationsType}<I, R>;`,
+        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends ${selectableColumnType} = keyof ${baseInterface}, R extends boolean = false> = ${baseInterface}Selected<S> & ${includedRelationsType}<I, R>;`,
       );
       lines.push("");
     }
