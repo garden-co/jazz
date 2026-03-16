@@ -33,11 +33,15 @@ function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+function stripReferenceSuffix(columnName: string): string {
+  return columnName.replace(/(?:_ids|Ids|_id|Id)$/, "");
+}
+
 /**
  * Analyze a WasmSchema and derive all forward and reverse relations.
  *
- * Forward relations: Created from FK columns, stripping _id suffix.
- *   e.g., parent_id -> parent
+ * Forward relations: Created from FK columns, stripping Id/_id/Ids/_ids suffixes.
+ *   e.g., parent_id -> parent, assignees_ids -> assignees
  *
  * Reverse relations: Created on the target table of each FK.
  *   e.g., todos.owner_id -> users gets a todosViaOwner reverse relation
@@ -67,8 +71,7 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
         const isForwardArray =
           col.column_type.type === "Array" && col.column_type.element.type === "Uuid";
 
-        // Forward relation: parent_id -> parent
-        const forwardName = col.name.replace(/_id$/, "");
+        const forwardName = stripReferenceSuffix(col.name);
         const forwardRelation: Relation = {
           name: forwardName,
           type: "forward",

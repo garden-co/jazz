@@ -1,6 +1,6 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, describe, it, expect, assert, expectTypeOf } from "vitest";
-import { app, Project, Todo, User } from "./fixtures/basic/app";
+import { app, Project, Todo, TodoInit, User } from "./fixtures/basic/app";
 
 function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -14,14 +14,14 @@ function insertProject(db: Db, name = "Test Project") {
   return db.insert(app.projects, { name });
 }
 
-function insertTodo(db: Db, data: Partial<Todo>) {
+function insertTodo(db: Db, data: Partial<TodoInit>) {
   return db.insert(app.todos, {
     title: data.title ?? "Test Todo",
     done: data.done ?? false,
     tags: data.tags ?? [],
-    project: data.project ?? insertProject(db).id,
-    owner: data.owner ?? undefined,
-    assignees: data.assignees ?? [],
+    projectId: data.projectId ?? insertProject(db).id,
+    ownerId: data.ownerId ?? undefined,
+    assigneesIds: data.assigneesIds ?? [],
   });
 }
 
