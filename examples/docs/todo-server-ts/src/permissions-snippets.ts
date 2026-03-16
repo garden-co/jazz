@@ -33,6 +33,15 @@ definePermissions(app, ({ policy, allOf, session }) => {
 });
 // #endregion permissions-simple-ts
 
+// #region permissions-always-ts
+definePermissions(app, ({ policy }) => {
+  policy.todos.allowRead.always();
+  policy.todos.allowInsert.always();
+  policy.todos.allowUpdate.always();
+  policy.todos.allowDelete.always();
+});
+// #endregion permissions-always-ts
+
 // #region permissions-never-ts
 definePermissions(app, ({ policy }) => {
   policy.todos.allowRead.never();

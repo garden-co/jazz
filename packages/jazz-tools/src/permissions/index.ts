@@ -423,6 +423,7 @@ interface ActionBuilder<WhereInput, Row> {
   where(
     input: Condition | PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
   ): Rule;
+  always(): Rule;
   never(): Rule;
 }
 
@@ -501,6 +502,10 @@ class UpdateRuleBuilder<WhereInput, Row> {
 
   never(): Rule {
     return this.where(neverCondition());
+  }
+
+  always(): Rule {
+    return this.where(alwaysCondition());
   }
 
   whereOld(
@@ -634,15 +639,18 @@ function buildTablePolicyBuilder(
   };
   const read: ActionBuilder<unknown, unknown> = {
     where: (input) => registerRule({ table, action: "read", using: resolveWhereInput(input) }),
+    always: () => read.where(alwaysCondition()),
     never: () => read.where(neverCondition()),
   };
   const insert: ActionBuilder<unknown, unknown> = {
     where: (input) =>
       registerRule({ table, action: "insert", withCheck: resolveWhereInput(input) }),
+    always: () => insert.where(alwaysCondition()),
     never: () => insert.where(neverCondition()),
   };
   const del: ActionBuilder<unknown, unknown> = {
     where: (input) => registerRule({ table, action: "delete", using: resolveWhereInput(input) }),
+    always: () => del.where(alwaysCondition()),
     never: () => del.where(neverCondition()),
   };
   const updateFactory = (): UpdateRuleBuilder<unknown, unknown> =>
@@ -1441,6 +1449,10 @@ export function anyOf(conditions: readonly unknown[]): Condition {
 
 export function allOf(conditions: readonly unknown[]): Condition {
   return compoundCondition("And", conditions);
+}
+
+function alwaysCondition(): Condition {
+  return allOf([]);
 }
 
 function neverCondition(): Condition {
