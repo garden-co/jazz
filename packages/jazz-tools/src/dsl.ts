@@ -200,10 +200,10 @@ class RefBuilder implements ColumnBuilder {
   }
 }
 
-class ArrayBuilder implements ColumnBuilder {
+class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
   private _nullable = false;
 
-  constructor(private _element: ColumnBuilder) {}
+  constructor(public _element: T) {}
 
   optional(): this {
     this._nullable = true;
@@ -372,7 +372,7 @@ export const col = {
   json: jsonColumn,
   enum: (...variants: string[]) => new EnumBuilder(...variants),
   ref: (targetTable: string) => new RefBuilder(targetTable),
-  array: (element: ColumnBuilder) => new ArrayBuilder(element),
+  array: <T extends ColumnBuilder>(element: T) => new ArrayBuilder(element),
 
   // Migration context
   add: () => new AddBuilder(),
