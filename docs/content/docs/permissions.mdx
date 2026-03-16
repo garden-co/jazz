@@ -46,6 +46,26 @@ Apps that do not need user-scoped filtering can still define explicit allow-all 
   </Tab>
 </Tabs>
 
+## Explicitly Deny an Operation (`.never()`)
+
+Use `.never()` when an operation should be impossible. It is equivalent to
+`.where(anyOf([]))` and compiles to a `FALSE` policy expression.
+
+This helper is available on read, insert, update, and delete policy builders.
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-never-ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include cwd lang="sql">
+      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-never-sql
+    </include>
+  </Tab>
+</Tabs>
+
 ## Combining Conditions (`allOf` / `anyOf`)
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
