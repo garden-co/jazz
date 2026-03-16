@@ -10,9 +10,9 @@ export async function createUploadFromBlob(db: Db, blob: Blob | File) {
   return db.insertDurable(
     app.uploads,
     {
-      owner_id: EXAMPLE_OWNER_ID,
+      ownerId: EXAMPLE_OWNER_ID,
       label: "Profile photo",
-      file: file.id,
+      fileId: file.id,
     },
     { tier: "edge" },
   );
@@ -30,9 +30,9 @@ export async function createUploadFromStream(db: Db, stream: ReadableStream<Uint
   return db.insertDurable(
     app.uploads,
     {
-      owner_id: EXAMPLE_OWNER_ID,
+      ownerId: EXAMPLE_OWNER_ID,
       label: "Camera import",
-      file: file.id,
+      fileId: file.id,
     },
     { tier: "edge" },
   );
@@ -46,7 +46,7 @@ export async function loadUploadBlob(db: Db, uploadId: string) {
     return null;
   }
 
-  const blob = await db.loadFileAsBlob(app, upload.file, { tier: "edge" });
+  const blob = await db.loadFileAsBlob(app, upload.fileId, { tier: "edge" });
   return blob;
 }
 // #endregion files-load-blob-ts
@@ -58,7 +58,7 @@ export async function loadUploadStream(db: Db, uploadId: string) {
     return null;
   }
 
-  const stream = await db.loadFileAsStream(app, upload.file, { tier: "edge" });
+  const stream = await db.loadFileAsStream(app, upload.fileId, { tier: "edge" });
   return stream;
 }
 // #endregion files-load-stream-ts
@@ -70,11 +70,11 @@ export async function deleteUploadWithFile(db: Db, uploadId: string) {
     return;
   }
 
-  const file = await db.one(app.files.where({ id: upload.file }), { tier: "edge" });
+  const file = await db.one(app.files.where({ id: upload.fileId }), { tier: "edge" });
 
   if (file) {
     // Delete chunks and the file while the parent upload row still exists.
-    for (const partId of file.parts) {
+    for (const partId of file.partIds) {
       db.delete(app.file_parts, partId);
     }
     db.delete(app.files, file.id);

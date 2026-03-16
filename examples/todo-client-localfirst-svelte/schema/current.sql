@@ -6,9 +6,9 @@ CREATE TABLE todos (
     title TEXT NOT NULL,
     done BOOLEAN NOT NULL,
     description TEXT,
-    owner_id TEXT NOT NULL,
-    parent UUID REFERENCES todos,
-    project UUID REFERENCES projects
+    ownerId TEXT NOT NULL,
+    parentId UUID REFERENCES todos,
+    projectId UUID REFERENCES projects
 );
 CREATE POLICY todos_select_policy ON todos FOR SELECT USING (TRUE);
 CREATE POLICY todos_insert_policy ON todos FOR INSERT WITH CHECK (owner_id = @session.user_id);

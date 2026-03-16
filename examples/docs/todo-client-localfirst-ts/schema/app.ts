@@ -19,9 +19,9 @@ export interface Todo {
   title: string;
   done: boolean;
   description?: string;
-  owner_id?: string;
-  parent?: string;
-  project?: string;
+  ownerId?: string;
+  parentId?: string;
+  projectId?: string;
 }
 
 export interface FilePart {
@@ -33,15 +33,15 @@ export interface File {
   id: string;
   name?: string;
   mimeType: string;
-  parts: string[];
+  partIds: string[];
   partSizes: number[];
 }
 
 export interface Upload {
   id: string;
-  owner_id: string;
+  ownerId: string;
   label: string;
-  file: string;
+  fileId: string;
 }
 
 export interface ProjectInit {
@@ -52,9 +52,9 @@ export interface TodoInit {
   title: string;
   done: boolean;
   description?: string;
-  owner_id?: string;
-  parent?: string;
-  project?: string;
+  ownerId?: string;
+  parentId?: string;
+  projectId?: string;
 }
 
 export interface FilePartInit {
@@ -64,14 +64,14 @@ export interface FilePartInit {
 export interface FileInit {
   name?: string;
   mimeType: string;
-  parts: string[];
+  partIds: string[];
   partSizes: number[];
 }
 
 export interface UploadInit {
-  owner_id: string;
+  ownerId: string;
   label: string;
-  file: string;
+  fileId: string;
 }
 
 export interface ProjectWhereInput {
@@ -87,9 +87,9 @@ export interface TodoWhereInput {
   title?: string | { eq?: string; ne?: string; contains?: string };
   done?: boolean;
   description?: string | { eq?: string; ne?: string; contains?: string };
-  owner_id?: string | { eq?: string; ne?: string; contains?: string };
-  parent?: string | { eq?: string; ne?: string; isNull?: boolean };
-  project?: string | { eq?: string; ne?: string; isNull?: boolean };
+  ownerId?: string | { eq?: string; ne?: string; contains?: string };
+  parentId?: string | { eq?: string; ne?: string; isNull?: boolean };
+  projectId?: string | { eq?: string; ne?: string; isNull?: boolean };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -107,7 +107,7 @@ export interface FileWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   name?: string | { eq?: string; ne?: string; contains?: string };
   mimeType?: string | { eq?: string; ne?: string; contains?: string };
-  parts?: string[] | { eq?: string[]; contains?: string };
+  partIds?: string[] | { eq?: string[]; contains?: string };
   partSizes?: number[] | { eq?: number[]; contains?: number };
   $canRead?: boolean;
   $canEdit?: boolean;
@@ -116,9 +116,9 @@ export interface FileWhereInput {
 
 export interface UploadWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
-  owner_id?: string | { eq?: string; ne?: string; contains?: string };
+  ownerId?: string | { eq?: string; ne?: string; contains?: string };
   label?: string | { eq?: string; ne?: string; contains?: string };
-  file?: string | { eq?: string; ne?: string };
+  fileId?: string | { eq?: string; ne?: string };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -141,11 +141,11 @@ export interface TodoInclude {
 }
 
 export interface FilePartInclude {
-  filesViaParts?: true | FileInclude | AnyFileQueryBuilder<any>;
+  filesViaPart?: true | FileInclude | AnyFileQueryBuilder<any>;
 }
 
 export interface FileInclude {
-  parts?: true | FilePartInclude | AnyFilePartQueryBuilder<any>;
+  part?: true | FilePartInclude | AnyFilePartQueryBuilder<any>;
   uploadsViaFile?: true | UploadInclude | AnyUploadQueryBuilder<any>;
 }
 
@@ -205,8 +205,8 @@ export type TodoIncludedRelations<I extends TodoInclude = {}, R extends boolean 
 
 export type FilePartIncludedRelations<I extends FilePartInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
-    K extends "filesViaParts"
-      ? NonNullable<I["filesViaParts"]> extends infer RelationInclude
+    K extends "filesViaPart"
+      ? NonNullable<I["filesViaPart"]> extends infer RelationInclude
         ? RelationInclude extends true
           ? File[]
           : RelationInclude extends AnyFileQueryBuilder<infer QueryRow>
@@ -220,8 +220,8 @@ export type FilePartIncludedRelations<I extends FilePartInclude = {}, R extends 
 
 export type FileIncludedRelations<I extends FileInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
-    K extends "parts"
-      ? NonNullable<I["parts"]> extends infer RelationInclude
+    K extends "part"
+      ? NonNullable<I["part"]> extends infer RelationInclude
         ? RelationInclude extends true
           ? FilePart[]
           : RelationInclude extends AnyFilePartQueryBuilder<infer QueryRow>
@@ -269,11 +269,11 @@ export interface TodoRelations {
 }
 
 export interface FilePartRelations {
-  filesViaParts: File[];
+  filesViaPart: File[];
 }
 
 export interface FileRelations {
-  parts: FilePart[];
+  part: FilePart[];
   uploadsViaFile: Upload[];
 }
 
@@ -362,14 +362,14 @@ export const wasmSchema: WasmSchema = {
         "nullable": true
       },
       {
-        "name": "owner_id",
+        "name": "ownerId",
         "column_type": {
           "type": "Text"
         },
         "nullable": true
       },
       {
-        "name": "parent",
+        "name": "parentId",
         "column_type": {
           "type": "Uuid"
         },
@@ -377,7 +377,7 @@ export const wasmSchema: WasmSchema = {
         "references": "todos"
       },
       {
-        "name": "project",
+        "name": "projectId",
         "column_type": {
           "type": "Uuid"
         },
@@ -439,7 +439,7 @@ export const wasmSchema: WasmSchema = {
         "nullable": false
       },
       {
-        "name": "parts",
+        "name": "partIds",
         "column_type": {
           "type": "Array",
           "element": {
@@ -464,7 +464,7 @@ export const wasmSchema: WasmSchema = {
   "uploads": {
     "columns": [
       {
-        "name": "owner_id",
+        "name": "ownerId",
         "column_type": {
           "type": "Text"
         },
@@ -478,7 +478,7 @@ export const wasmSchema: WasmSchema = {
         "nullable": false
       },
       {
-        "name": "file",
+        "name": "fileId",
         "column_type": {
           "type": "Uuid"
         },
@@ -957,7 +957,7 @@ export class FilePartQueryBuilder<I extends FilePartInclude = {}, S extends File
     return clone;
   }
 
-  hopTo(relation: "filesViaParts"): FilePartQueryBuilder<I, S, R> {
+  hopTo(relation: "filesViaPart"): FilePartQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -1154,7 +1154,7 @@ export class FileQueryBuilder<I extends FileInclude = {}, S extends FileSelectab
     return clone;
   }
 
-  hopTo(relation: "parts" | "uploadsViaFile"): FileQueryBuilder<I, S, R> {
+  hopTo(relation: "part" | "uploadsViaFile"): FileQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;

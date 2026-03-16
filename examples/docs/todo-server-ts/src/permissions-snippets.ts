@@ -5,19 +5,19 @@ import { app } from "../schema/app.js";
 // #region permissions-schema-ts
 table("projects", {
   name: col.string(),
-  owner_id: col.string(),
+  ownerId: col.string(),
 });
 
 table("todos", {
   title: col.string(),
   done: col.boolean(),
-  project: col.ref("projects").optional(),
-  owner_id: col.string(),
+  projectId: col.ref("projects").optional(),
+  ownerId: col.string(),
 });
 
 table("todoShares", {
-  todo: col.ref("todos"),
-  user_id: col.string(),
+  todoId: col.ref("todos"),
+  userId: col.string(),
   can_read: col.boolean(),
 });
 // #endregion permissions-schema-ts
