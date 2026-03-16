@@ -415,6 +415,138 @@ mod integration_tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
+    // ========================================================================
+    // JWKS Rotation Tests
+    // ========================================================================
+
+    fn make_jwt_with_kid(sub: &str, kid: &str, secret: &str) -> String {
+        let jwt_claims = JwtClaims {
+            sub: sub.to_string(),
+            iss: None,
+            jazz_principal_id: None,
+            claims: json!({}),
+            exp: future_exp(),
+        };
+        let key = EncodingKey::from_secret(secret.as_bytes());
+        let mut header = Header::new(jsonwebtoken::Algorithm::HS256);
+        header.kid = Some(kid.to_string());
+        encode(&header, &jwt_claims, &key).unwrap()
+    }
+
+    /// After key rotation, a JWT signed with the new key should succeed
+    /// because the server refreshes JWKS when it encounters an unknown kid.
+    ///
+    /// ```text
+    ///  startup            request (kid-new)
+    ///    |                      |
+    ///    v                      v
+    ///  fetch JWKS ──> cache has kid-old only
+    ///  (kid-old)       no match ──> force refresh
+    ///                              fetch JWKS (kid-new)
+    ///                              validate ──> 200 OK
+    /// ```
+    #[tokio::test]
+    async fn test_unknown_kid_triggers_jwks_refresh_and_succeeds() {
+        let server = TestServer::start_with_jwks_responses(vec![
+            test_server::hs256_jwks("kid-old", "secret-old"),
+            test_server::hs256_jwks("kid-new", "secret-new"),
+        ])
+        .await;
+
+        let token = make_jwt_with_kid("user-rotation", "kid-new", "secret-new");
+
+        let resp = client()
+            .post(format!("{}/sync", server.base_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(sync_body())
+            .send()
+            .await
+            .unwrap();
+
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "JWT with rotated key should succeed after JWKS refresh"
+        );
+        assert_eq!(
+            server.jwks_hits(),
+            2,
+            "should fetch JWKS twice: startup cache + one refresh for unknown kid"
+        );
+    }
+
+    /// A JWT with an invalid signature should remain 401 even after
+    /// the server attempts a JWKS refresh.
+    #[tokio::test]
+    async fn test_bad_signature_stays_unauthorized_after_refresh() {
+        let server = TestServer::start_with_jwks_responses(vec![
+            test_server::hs256_jwks("kid-sig", "good-secret"),
+            test_server::hs256_jwks("kid-sig", "good-secret"),
+        ])
+        .await;
+
+        let token = make_jwt_with_kid("user-invalid", "kid-sig", "wrong-secret");
+
+        let resp = client()
+            .post(format!("{}/sync", server.base_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(sync_body())
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "invalid signature must stay unauthorized after refresh"
+        );
+        assert_eq!(
+            server.jwks_hits(),
+            2,
+            "signature failure should trigger one refresh attempt"
+        );
+    }
+
+    /// Consecutive valid requests should use the cached JWKS without refetching.
+    #[tokio::test]
+    async fn test_jwks_cache_serves_consecutive_requests_without_refetch() {
+        let server = TestServer::start_with_jwks_responses(vec![test_server::hs256_jwks(
+            "kid-cached",
+            "secret-cached",
+        )])
+        .await;
+
+        let token = make_jwt_with_kid("user-cached", "kid-cached", "secret-cached");
+
+        let first = client()
+            .post(format!("{}/sync", server.base_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(sync_body())
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(first.status(), StatusCode::UNAUTHORIZED);
+
+        let second = client()
+            .post(format!("{}/sync", server.base_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(sync_body())
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(second.status(), StatusCode::UNAUTHORIZED);
+
+        assert_eq!(
+            server.jwks_hits(),
+            1,
+            "cached JWKS should serve multiple requests without refetching"
+        );
+    }
+
     #[tokio::test]
     async fn test_schema_hash_endpoint_returns_the_pushed_schema() {
         let server = TestServer::start().await;
