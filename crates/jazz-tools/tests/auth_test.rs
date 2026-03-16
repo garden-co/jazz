@@ -658,6 +658,53 @@ mod integration_tests {
         );
     }
 
+    /// Stale keysets should not be served forever. Once the entry is older
+    /// than TTL + max_stale, the fallback is refused and the request fails.
+    #[tokio::test]
+    async fn test_stale_jwks_refused_after_max_stale_expires() {
+        // TTL=1s, max_stale=1s → total window = 2s.
+        let server = TestServer::start_with_jwks_responses_and_cache_config(
+            vec![
+                test_server::hs256_jwks("kid-expiry", "secret-expiry"),
+                json!({ "keys": [] }),
+            ],
+            1, // TTL
+            1, // max_stale
+        )
+        .await;
+
+        let token = make_jwt_with_kid("user-expiry", "kid-expiry", "secret-expiry");
+
+        // First request: cache hit, validates OK.
+        let first = client()
+            .post(format!("{}/sync", server.base_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(sync_body())
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(first.status(), StatusCode::UNAUTHORIZED);
+
+        // Wait beyond TTL + max_stale (2s total).
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+
+        // Request should now fail — stale keyset is too old to serve.
+        let expired = client()
+            .post(format!("{}/sync", server.base_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(sync_body())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            expired.status(),
+            StatusCode::UNAUTHORIZED,
+            "stale keyset beyond max_stale should not be served"
+        );
+    }
+
     #[tokio::test]
     async fn test_schema_hash_endpoint_returns_the_pushed_schema() {
         let server = TestServer::start().await;

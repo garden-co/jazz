@@ -510,8 +510,8 @@ async fn stale_jwks_served_when_endpoint_goes_down_after_ttl_expiry() {
         json!({ "keys": [] }),
     ])
     .await;
-    let server = TestServer::start_with_env(vec![("JAZZ_JWKS_CACHE_TTL_SECS", "1".to_string())])
-        .await;
+    let server =
+        TestServer::start_with_env(vec![("JAZZ_JWKS_CACHE_TTL_SECS", "1".to_string())]).await;
     let app = server.create_app(&jwks_server.endpoint()).await;
 
     let token = make_jwt("user-stale", "kid-stale", "secret-stale");
@@ -533,6 +533,41 @@ async fn stale_jwks_served_when_endpoint_goes_down_after_ttl_expiry() {
         second.status(),
         StatusCode::UNAUTHORIZED,
         "request should succeed with stale JWKS when endpoint is down"
+    );
+}
+
+/// Stale keysets should not be served forever. Once the entry is older
+/// than TTL + max_stale, the fallback is refused and the request fails.
+#[tokio::test]
+async fn stale_jwks_refused_after_max_stale_expires() {
+    let jwks_server = JwksServer::start(vec![
+        hs256_jwks("kid-expiry", "secret-expiry"),
+        json!({ "keys": [] }),
+    ])
+    .await;
+    // TTL=1s, max_stale=1s → total window = 2s.
+    let server = TestServer::start_with_env(vec![
+        ("JAZZ_JWKS_CACHE_TTL_SECS", "1".to_string()),
+        ("JAZZ_JWKS_MAX_STALE_SECS", "1".to_string()),
+    ])
+    .await;
+    let app = server.create_app(&jwks_server.endpoint()).await;
+
+    let token = make_jwt("user-expiry", "kid-expiry", "secret-expiry");
+
+    // First request: validates OK.
+    let first = server.sync_with_bearer(&app.app_id, &token).await;
+    assert_ne!(first.status(), StatusCode::UNAUTHORIZED);
+
+    // Wait beyond TTL + max_stale (2s total).
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    // Request should now fail — stale keyset is too old to serve.
+    let expired = server.sync_with_bearer(&app.app_id, &token).await;
+    assert_eq!(
+        expired.status(),
+        StatusCode::UNAUTHORIZED,
+        "stale keyset beyond max_stale should not be served"
     );
 }
 
