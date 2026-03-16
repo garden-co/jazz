@@ -26,16 +26,16 @@ export interface Jam {
 
 export interface Beat {
   id: string;
-  jam: string;
-  instrument: string;
+  jamId: string;
+  instrumentId: string;
   beat_index: number;
   placed_by: string;
 }
 
 export interface Participant {
   id: string;
-  jam: string;
-  user_id: string;
+  jamId: string;
+  userId: string;
   display_name: string;
 }
 
@@ -53,15 +53,15 @@ export interface JamInit {
 }
 
 export interface BeatInit {
-  jam: string;
-  instrument: string;
+  jamId: string;
+  instrumentId: string;
   beat_index: number;
   placed_by: string;
 }
 
 export interface ParticipantInit {
-  jam: string;
-  user_id: string;
+  jamId: string;
+  userId: string;
   display_name: string;
 }
 
@@ -88,8 +88,8 @@ export interface JamWhereInput {
 
 export interface BeatWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
-  jam?: string | { eq?: string; ne?: string };
-  instrument?: string | { eq?: string; ne?: string };
+  jamId?: string | { eq?: string; ne?: string };
+  instrumentId?: string | { eq?: string; ne?: string };
   beat_index?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
   placed_by?: string | { eq?: string; ne?: string; contains?: string };
   $canRead?: boolean;
@@ -99,8 +99,8 @@ export interface BeatWhereInput {
 
 export interface ParticipantWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
-  jam?: string | { eq?: string; ne?: string };
-  user_id?: string | { eq?: string; ne?: string; contains?: string };
+  jamId?: string | { eq?: string; ne?: string };
+  userId?: string | { eq?: string; ne?: string; contains?: string };
   display_name?: string | { eq?: string; ne?: string; contains?: string };
   $canRead?: boolean;
   $canEdit?: boolean;
@@ -325,7 +325,7 @@ export const wasmSchema: WasmSchema = {
   "beats": {
     "columns": [
       {
-        "name": "jam",
+        "name": "jamId",
         "column_type": {
           "type": "Uuid"
         },
@@ -333,7 +333,7 @@ export const wasmSchema: WasmSchema = {
         "references": "jams"
       },
       {
-        "name": "instrument",
+        "name": "instrumentId",
         "column_type": {
           "type": "Uuid"
         },
@@ -359,7 +359,7 @@ export const wasmSchema: WasmSchema = {
   "participants": {
     "columns": [
       {
-        "name": "jam",
+        "name": "jamId",
         "column_type": {
           "type": "Uuid"
         },
@@ -367,7 +367,7 @@ export const wasmSchema: WasmSchema = {
         "references": "jams"
       },
       {
-        "name": "user_id",
+        "name": "userId",
         "column_type": {
           "type": "Text"
         },

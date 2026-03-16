@@ -25,7 +25,7 @@ export function TodoList() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !sessionUserId) return;
-    db.insert(app.todos, { title: title.trim(), done: false, owner_id: sessionUserId });
+    db.insert(app.todos, { title: title.trim(), done: false, ownerId: sessionUserId });
     setTitle("");
   };
 

@@ -19,9 +19,9 @@ export interface Todo {
   title: string;
   done: boolean;
   description?: string;
-  owner_id: string;
-  parent?: string;
-  project?: string;
+  ownerId: string;
+  parentId?: string;
+  projectId?: string;
 }
 
 export interface ProjectInit {
@@ -32,9 +32,9 @@ export interface TodoInit {
   title: string;
   done: boolean;
   description?: string;
-  owner_id: string;
-  parent?: string;
-  project?: string;
+  ownerId: string;
+  parentId?: string;
+  projectId?: string;
 }
 
 export interface ProjectWhereInput {
@@ -50,9 +50,9 @@ export interface TodoWhereInput {
   title?: string | { eq?: string; ne?: string; contains?: string };
   done?: boolean;
   description?: string | { eq?: string; ne?: string; contains?: string };
-  owner_id?: string | { eq?: string; ne?: string; contains?: string };
-  parent?: string | { eq?: string; ne?: string; isNull?: boolean };
-  project?: string | { eq?: string; ne?: string; isNull?: boolean };
+  ownerId?: string | { eq?: string; ne?: string; contains?: string };
+  parentId?: string | { eq?: string; ne?: string; isNull?: boolean };
+  projectId?: string | { eq?: string; ne?: string; isNull?: boolean };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -185,14 +185,14 @@ export const wasmSchema: WasmSchema = {
         "nullable": true
       },
       {
-        "name": "owner_id",
+        "name": "ownerId",
         "column_type": {
           "type": "Text"
         },
         "nullable": false
       },
       {
-        "name": "parent",
+        "name": "parentId",
         "column_type": {
           "type": "Uuid"
         },
@@ -200,7 +200,7 @@ export const wasmSchema: WasmSchema = {
         "references": "todos"
       },
       {
-        "name": "project",
+        "name": "projectId",
         "column_type": {
           "type": "Uuid"
         },
@@ -217,7 +217,7 @@ export const wasmSchema: WasmSchema = {
       "insert": {
         "with_check": {
           "type": "Cmp",
-          "column": "owner_id",
+          "column": "ownerId",
           "op": "Eq",
           "value": {
             "type": "SessionRef",
@@ -230,7 +230,7 @@ export const wasmSchema: WasmSchema = {
       "update": {
         "using": {
           "type": "Cmp",
-          "column": "owner_id",
+          "column": "ownerId",
           "op": "Eq",
           "value": {
             "type": "SessionRef",
@@ -241,7 +241,7 @@ export const wasmSchema: WasmSchema = {
         },
         "with_check": {
           "type": "Cmp",
-          "column": "owner_id",
+          "column": "ownerId",
           "op": "Eq",
           "value": {
             "type": "SessionRef",
@@ -254,7 +254,7 @@ export const wasmSchema: WasmSchema = {
       "delete": {
         "using": {
           "type": "Cmp",
-          "column": "owner_id",
+          "column": "ownerId",
           "op": "Eq",
           "value": {
             "type": "SessionRef",
