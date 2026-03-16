@@ -220,22 +220,15 @@ export interface TodoRelations {
   assignees: User[];
 }
 
-export type UserWithIncludes<I extends UserInclude = {}, R extends boolean = false> = Omit<
-  User,
-  Extract<keyof I, keyof User>
-> &
+export type UserWithIncludes<I extends UserInclude = {}, R extends boolean = false> = User &
   UserIncludedRelations<I, R>;
 
-export type ProjectWithIncludes<I extends ProjectInclude = {}, R extends boolean = false> = Omit<
-  Project,
-  Extract<keyof I, keyof Project>
-> &
-  ProjectIncludedRelations<I, R>;
+export type ProjectWithIncludes<
+  I extends ProjectInclude = {},
+  R extends boolean = false,
+> = Project & ProjectIncludedRelations<I, R>;
 
-export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Omit<
-  Todo,
-  Extract<keyof I, keyof Todo>
-> &
+export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Todo &
   TodoIncludedRelations<I, R>;
 
 export type UserSelectableColumn = keyof User | PermissionIntrospectionColumn | "*";
@@ -250,7 +243,7 @@ export type UserSelectedWithIncludes<
   I extends UserInclude = {},
   S extends UserSelectableColumn = keyof User,
   R extends boolean = false,
-> = Omit<UserSelected<S>, Extract<keyof I, keyof UserSelected<S>>> & UserIncludedRelations<I, R>;
+> = UserSelected<S> & UserIncludedRelations<I, R>;
 
 export type ProjectSelectableColumn = keyof Project | PermissionIntrospectionColumn | "*";
 export type ProjectOrderableColumn = keyof Project | PermissionIntrospectionColumn;
@@ -264,8 +257,7 @@ export type ProjectSelectedWithIncludes<
   I extends ProjectInclude = {},
   S extends ProjectSelectableColumn = keyof Project,
   R extends boolean = false,
-> = Omit<ProjectSelected<S>, Extract<keyof I, keyof ProjectSelected<S>>> &
-  ProjectIncludedRelations<I, R>;
+> = ProjectSelected<S> & ProjectIncludedRelations<I, R>;
 
 export type TodoSelectableColumn = keyof Todo | PermissionIntrospectionColumn | "*";
 export type TodoOrderableColumn = keyof Todo | PermissionIntrospectionColumn;
@@ -279,7 +271,7 @@ export type TodoSelectedWithIncludes<
   I extends TodoInclude = {},
   S extends TodoSelectableColumn = keyof Todo,
   R extends boolean = false,
-> = Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I, R>;
+> = TodoSelected<S> & TodoIncludedRelations<I, R>;
 
 export const wasmSchema: WasmSchema = {
   users: {

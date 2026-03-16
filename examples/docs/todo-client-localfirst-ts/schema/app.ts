@@ -281,50 +281,50 @@ export interface UploadRelations {
   file: File | undefined;
 }
 
-export type ProjectWithIncludes<I extends ProjectInclude = {}, R extends boolean = false> = Omit<Project, Extract<keyof I, keyof Project>> & ProjectIncludedRelations<I, R>;
+export type ProjectWithIncludes<I extends ProjectInclude = {}, R extends boolean = false> = Project & ProjectIncludedRelations<I, R>;
 
-export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Omit<Todo, Extract<keyof I, keyof Todo>> & TodoIncludedRelations<I, R>;
+export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Todo & TodoIncludedRelations<I, R>;
 
-export type FilePartWithIncludes<I extends FilePartInclude = {}, R extends boolean = false> = Omit<FilePart, Extract<keyof I, keyof FilePart>> & FilePartIncludedRelations<I, R>;
+export type FilePartWithIncludes<I extends FilePartInclude = {}, R extends boolean = false> = FilePart & FilePartIncludedRelations<I, R>;
 
-export type FileWithIncludes<I extends FileInclude = {}, R extends boolean = false> = Omit<File, Extract<keyof I, keyof File>> & FileIncludedRelations<I, R>;
+export type FileWithIncludes<I extends FileInclude = {}, R extends boolean = false> = File & FileIncludedRelations<I, R>;
 
-export type UploadWithIncludes<I extends UploadInclude = {}, R extends boolean = false> = Omit<Upload, Extract<keyof I, keyof Upload>> & UploadIncludedRelations<I, R>;
+export type UploadWithIncludes<I extends UploadInclude = {}, R extends boolean = false> = Upload & UploadIncludedRelations<I, R>;
 
 export type ProjectSelectableColumn = keyof Project | PermissionIntrospectionColumn | "*";
 export type ProjectOrderableColumn = keyof Project | PermissionIntrospectionColumn;
 
 export type ProjectSelected<S extends ProjectSelectableColumn = keyof Project> = "*" extends S ? Project : Pick<Project, Extract<S | "id", keyof Project>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type ProjectSelectedWithIncludes<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = keyof Project, R extends boolean = false> = Omit<ProjectSelected<S>, Extract<keyof I, keyof ProjectSelected<S>>> & ProjectIncludedRelations<I, R>;
+export type ProjectSelectedWithIncludes<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = keyof Project, R extends boolean = false> = ProjectSelected<S> & ProjectIncludedRelations<I, R>;
 
 export type TodoSelectableColumn = keyof Todo | PermissionIntrospectionColumn | "*";
 export type TodoOrderableColumn = keyof Todo | PermissionIntrospectionColumn;
 
 export type TodoSelected<S extends TodoSelectableColumn = keyof Todo> = "*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false> = Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I, R>;
+export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false> = TodoSelected<S> & TodoIncludedRelations<I, R>;
 
 export type FilePartSelectableColumn = keyof FilePart | PermissionIntrospectionColumn | "*";
 export type FilePartOrderableColumn = keyof FilePart | PermissionIntrospectionColumn;
 
 export type FilePartSelected<S extends FilePartSelectableColumn = keyof FilePart> = "*" extends S ? FilePart : Pick<FilePart, Extract<S | "id", keyof FilePart>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type FilePartSelectedWithIncludes<I extends FilePartInclude = {}, S extends FilePartSelectableColumn = keyof FilePart, R extends boolean = false> = Omit<FilePartSelected<S>, Extract<keyof I, keyof FilePartSelected<S>>> & FilePartIncludedRelations<I, R>;
+export type FilePartSelectedWithIncludes<I extends FilePartInclude = {}, S extends FilePartSelectableColumn = keyof FilePart, R extends boolean = false> = FilePartSelected<S> & FilePartIncludedRelations<I, R>;
 
 export type FileSelectableColumn = keyof File | PermissionIntrospectionColumn | "*";
 export type FileOrderableColumn = keyof File | PermissionIntrospectionColumn;
 
 export type FileSelected<S extends FileSelectableColumn = keyof File> = "*" extends S ? File : Pick<File, Extract<S | "id", keyof File>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type FileSelectedWithIncludes<I extends FileInclude = {}, S extends FileSelectableColumn = keyof File, R extends boolean = false> = Omit<FileSelected<S>, Extract<keyof I, keyof FileSelected<S>>> & FileIncludedRelations<I, R>;
+export type FileSelectedWithIncludes<I extends FileInclude = {}, S extends FileSelectableColumn = keyof File, R extends boolean = false> = FileSelected<S> & FileIncludedRelations<I, R>;
 
 export type UploadSelectableColumn = keyof Upload | PermissionIntrospectionColumn | "*";
 export type UploadOrderableColumn = keyof Upload | PermissionIntrospectionColumn;
 
 export type UploadSelected<S extends UploadSelectableColumn = keyof Upload> = "*" extends S ? Upload : Pick<Upload, Extract<S | "id", keyof Upload>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type UploadSelectedWithIncludes<I extends UploadInclude = {}, S extends UploadSelectableColumn = keyof Upload, R extends boolean = false> = Omit<UploadSelected<S>, Extract<keyof I, keyof UploadSelected<S>>> & UploadIncludedRelations<I, R>;
+export type UploadSelectedWithIncludes<I extends UploadInclude = {}, S extends UploadSelectableColumn = keyof Upload, R extends boolean = false> = UploadSelected<S> & UploadIncludedRelations<I, R>;
 
 export const wasmSchema: WasmSchema = {
   "projects": {

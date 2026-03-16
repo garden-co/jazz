@@ -228,41 +228,41 @@ export interface ParticipantRelations {
   jam: Jam | undefined;
 }
 
-export type InstrumentWithIncludes<I extends InstrumentInclude = {}, R extends boolean = false> = Omit<Instrument, Extract<keyof I, keyof Instrument>> & InstrumentIncludedRelations<I, R>;
+export type InstrumentWithIncludes<I extends InstrumentInclude = {}, R extends boolean = false> = Instrument & InstrumentIncludedRelations<I, R>;
 
-export type JamWithIncludes<I extends JamInclude = {}, R extends boolean = false> = Omit<Jam, Extract<keyof I, keyof Jam>> & JamIncludedRelations<I, R>;
+export type JamWithIncludes<I extends JamInclude = {}, R extends boolean = false> = Jam & JamIncludedRelations<I, R>;
 
-export type BeatWithIncludes<I extends BeatInclude = {}, R extends boolean = false> = Omit<Beat, Extract<keyof I, keyof Beat>> & BeatIncludedRelations<I, R>;
+export type BeatWithIncludes<I extends BeatInclude = {}, R extends boolean = false> = Beat & BeatIncludedRelations<I, R>;
 
-export type ParticipantWithIncludes<I extends ParticipantInclude = {}, R extends boolean = false> = Omit<Participant, Extract<keyof I, keyof Participant>> & ParticipantIncludedRelations<I, R>;
+export type ParticipantWithIncludes<I extends ParticipantInclude = {}, R extends boolean = false> = Participant & ParticipantIncludedRelations<I, R>;
 
 export type InstrumentSelectableColumn = keyof Instrument | PermissionIntrospectionColumn | "*";
 export type InstrumentOrderableColumn = keyof Instrument | PermissionIntrospectionColumn;
 
 export type InstrumentSelected<S extends InstrumentSelectableColumn = keyof Instrument> = "*" extends S ? Instrument : Pick<Instrument, Extract<S | "id", keyof Instrument>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type InstrumentSelectedWithIncludes<I extends InstrumentInclude = {}, S extends InstrumentSelectableColumn = keyof Instrument, R extends boolean = false> = Omit<InstrumentSelected<S>, Extract<keyof I, keyof InstrumentSelected<S>>> & InstrumentIncludedRelations<I, R>;
+export type InstrumentSelectedWithIncludes<I extends InstrumentInclude = {}, S extends InstrumentSelectableColumn = keyof Instrument, R extends boolean = false> = InstrumentSelected<S> & InstrumentIncludedRelations<I, R>;
 
 export type JamSelectableColumn = keyof Jam | PermissionIntrospectionColumn | "*";
 export type JamOrderableColumn = keyof Jam | PermissionIntrospectionColumn;
 
 export type JamSelected<S extends JamSelectableColumn = keyof Jam> = "*" extends S ? Jam : Pick<Jam, Extract<S | "id", keyof Jam>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type JamSelectedWithIncludes<I extends JamInclude = {}, S extends JamSelectableColumn = keyof Jam, R extends boolean = false> = Omit<JamSelected<S>, Extract<keyof I, keyof JamSelected<S>>> & JamIncludedRelations<I, R>;
+export type JamSelectedWithIncludes<I extends JamInclude = {}, S extends JamSelectableColumn = keyof Jam, R extends boolean = false> = JamSelected<S> & JamIncludedRelations<I, R>;
 
 export type BeatSelectableColumn = keyof Beat | PermissionIntrospectionColumn | "*";
 export type BeatOrderableColumn = keyof Beat | PermissionIntrospectionColumn;
 
 export type BeatSelected<S extends BeatSelectableColumn = keyof Beat> = "*" extends S ? Beat : Pick<Beat, Extract<S | "id", keyof Beat>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type BeatSelectedWithIncludes<I extends BeatInclude = {}, S extends BeatSelectableColumn = keyof Beat, R extends boolean = false> = Omit<BeatSelected<S>, Extract<keyof I, keyof BeatSelected<S>>> & BeatIncludedRelations<I, R>;
+export type BeatSelectedWithIncludes<I extends BeatInclude = {}, S extends BeatSelectableColumn = keyof Beat, R extends boolean = false> = BeatSelected<S> & BeatIncludedRelations<I, R>;
 
 export type ParticipantSelectableColumn = keyof Participant | PermissionIntrospectionColumn | "*";
 export type ParticipantOrderableColumn = keyof Participant | PermissionIntrospectionColumn;
 
 export type ParticipantSelected<S extends ParticipantSelectableColumn = keyof Participant> = "*" extends S ? Participant : Pick<Participant, Extract<S | "id", keyof Participant>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type ParticipantSelectedWithIncludes<I extends ParticipantInclude = {}, S extends ParticipantSelectableColumn = keyof Participant, R extends boolean = false> = Omit<ParticipantSelected<S>, Extract<keyof I, keyof ParticipantSelected<S>>> & ParticipantIncludedRelations<I, R>;
+export type ParticipantSelectedWithIncludes<I extends ParticipantInclude = {}, S extends ParticipantSelectableColumn = keyof Participant, R extends boolean = false> = ParticipantSelected<S> & ParticipantIncludedRelations<I, R>;
 
 export const wasmSchema: WasmSchema = {
   "instruments": {

@@ -811,10 +811,10 @@ describe("generateTypes with relations", () => {
       "export type TodoIncludedRelations<I extends TodoInclude = {}, R extends boolean = false> = {",
     );
     expect(output).toContain(
-      "export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Omit<Todo, Extract<keyof I, keyof Todo>> & TodoIncludedRelations<I, R>;",
+      "export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Todo & TodoIncludedRelations<I, R>;",
     );
     expect(output).toContain(
-      "export type UserWithIncludes<I extends UserInclude = {}, R extends boolean = false> = Omit<User, Extract<keyof I, keyof User>> & UserIncludedRelations<I, R>;",
+      "export type UserWithIncludes<I extends UserInclude = {}, R extends boolean = false> = User & UserIncludedRelations<I, R>;",
     );
     expect(output).toContain("[K in keyof I]-?:");
     expect(output).toContain('K extends "owner"');
@@ -887,9 +887,7 @@ describe("generateTypes with relations", () => {
     expect(output).toContain(
       "export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false>",
     );
-    expect(output).toContain(
-      "Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I, R>",
-    );
+    expect(output).toContain("TodoSelected<S> & TodoIncludedRelations<I, R>");
   });
 
   it("avoids collapsing nested array includes to never when selectors are optional", () => {
