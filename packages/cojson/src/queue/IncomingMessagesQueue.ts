@@ -1,4 +1,4 @@
-import { Counter, ValueType, metrics } from "@opentelemetry/api";
+import { Counter, Histogram, ValueType, metrics } from "@opentelemetry/api";
 import type { PeerState } from "../PeerState.js";
 import type { SyncMessage } from "../sync.js";
 import { LinkedList } from "./LinkedList.js";
@@ -15,6 +15,7 @@ export class IncomingMessagesQueue {
   private pullCounter: Counter;
   private pushCounter: Counter;
   private pushByTypeCounter: Counter;
+  private processingTimeHistogram: Histogram;
 
   queues: [LinkedList<SyncMessage>, PeerState][];
   peerToQueue: WeakMap<PeerState, LinkedList<SyncMessage>>;
@@ -41,6 +42,13 @@ export class IncomingMessagesQueue {
         description: "Number of messages pushed to the queue by message type",
         valueType: ValueType.INT,
         unit: "1",
+      });
+    this.processingTimeHistogram = metrics
+      .getMeter("cojson")
+      .createHistogram(`jazz.messagequeue.incoming.processing_time`, {
+        description: "Time spent processing incoming sync messages by type",
+        valueType: ValueType.DOUBLE,
+        unit: "ms",
       });
 
     /**
@@ -118,5 +126,14 @@ export class IncomingMessagesQueue {
     }
 
     return undefined;
+  }
+
+  public recordProcessingTime(
+    messageType: SyncMessage["action"],
+    durationMs: number,
+  ) {
+    this.processingTimeHistogram.record(durationMs, {
+      messageType,
+    });
   }
 }
