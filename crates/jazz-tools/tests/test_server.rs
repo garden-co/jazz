@@ -107,7 +107,24 @@ impl TestServer {
         let port = get_free_port();
         let data_dir = TempDir::new().expect("create temp dir");
         let jwks_server = JwksServer::start_with_responses(responses).await;
-        Self::start_inner(port, data_dir, jwks_server).await
+        Self::start_inner(port, data_dir, jwks_server, vec![]).await
+    }
+
+    /// Start a test server with programmable JWKS responses and a short cache TTL.
+    pub async fn start_with_jwks_responses_and_ttl(
+        responses: Vec<Value>,
+        ttl_secs: u64,
+    ) -> Self {
+        let port = get_free_port();
+        let data_dir = TempDir::new().expect("create temp dir");
+        let jwks_server = JwksServer::start_with_responses(responses).await;
+        Self::start_inner(
+            port,
+            data_dir,
+            jwks_server,
+            vec![("JAZZ_JWKS_CACHE_TTL_SECS", ttl_secs.to_string())],
+        )
+        .await
     }
 
     /// Number of times the JWKS endpoint has been hit.
@@ -119,10 +136,15 @@ impl TestServer {
     pub async fn start_on_port(port: u16) -> Self {
         let data_dir = TempDir::new().expect("create temp dir");
         let jwks_server = JwksServer::start(JWT_KID, JWT_SECRET).await;
-        Self::start_inner(port, data_dir, jwks_server).await
+        Self::start_inner(port, data_dir, jwks_server, vec![]).await
     }
 
-    async fn start_inner(port: u16, data_dir: TempDir, jwks_server: JwksServer) -> Self {
+    async fn start_inner(
+        port: u16,
+        data_dir: TempDir,
+        jwks_server: JwksServer,
+        extra_env: Vec<(&str, String)>,
+    ) -> Self {
         // Use a deterministic UUID app ID for testing
         let app_id = "00000000-0000-0000-0000-000000000001";
 
@@ -143,6 +165,7 @@ impl TestServer {
             )
             .env("JAZZ_ADMIN_SECRET", "admin-secret-for-integration-tests")
             .env("JAZZ_JWKS_URL", &jwks_server.url)
+            .envs(extra_env)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()

@@ -547,6 +547,117 @@ mod integration_tests {
         );
     }
 
+    /// Rapid requests with different unknown kids should not trigger unbounded
+    /// JWKS fetches. After the first forced refresh, subsequent unknown-kid
+    /// requests within the cooldown window should reuse the cached keyset
+    /// rather than hammering the IdP endpoint.
+    ///
+    /// ```text
+    ///  startup    req(kid-0)     req(kid-1)     req(kid-2)
+    ///    |            |              |              |
+    ///    v            v              v              v
+    ///  fetch(1)   no match →     no match →     no match →
+    ///             refresh(2)     cooldown ──>   cooldown ──>
+    ///             no match →     use cached     use cached
+    ///             401            401            401
+    /// ```
+    #[tokio::test]
+    async fn test_rapid_unknown_kids_do_not_trigger_unbounded_refreshes() {
+        let server = TestServer::start_with_jwks_responses(vec![test_server::hs256_jwks(
+            "kid-stable",
+            "secret-stable",
+        )])
+        .await;
+
+        // Startup fetch = hit 1. Now send 5 requests with different fabricated kids.
+        for i in 0..5 {
+            let token = make_jwt_with_kid(
+                "user-dos",
+                &format!("kid-fabricated-{i}"),
+                "irrelevant-secret",
+            );
+
+            let resp = client()
+                .post(format!("{}/sync", server.base_url()))
+                .header("Authorization", format!("Bearer {}", token))
+                .header("Content-Type", "application/json")
+                .body(sync_body())
+                .send()
+                .await
+                .unwrap();
+
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        // Without cooldown: 1 (startup) + 5 (one forced refresh per request) = 6
+        // With cooldown:    1 (startup) + 1 (first refresh, then cooldown) = 2
+        assert_eq!(
+            server.jwks_hits(),
+            2,
+            "rapid unknown-kid requests should trigger at most one refresh within the cooldown window"
+        );
+    }
+
+    /// When the JWKS endpoint goes down after the cache TTL expires, requests
+    /// with valid JWTs should still succeed using the stale cached keyset
+    /// rather than failing with an auth error.
+    ///
+    /// ```text
+    ///  startup         request OK       TTL expires    endpoint down    request
+    ///    |                |                 |               |              |
+    ///    v                v                 v               v              v
+    ///  fetch(1) ──>   cache hit ──>    cache stale     fetch(2) ──>    stale-if-error
+    ///  kid-A          validate OK      (1s TTL)        500 error       serve stale
+    ///                                                                  validate OK
+    /// ```
+    #[tokio::test]
+    async fn test_stale_jwks_served_when_endpoint_goes_down_after_ttl_expiry() {
+        // Response 1: valid key (startup fetch). Response 2+: 500 error (empty keys).
+        let server = TestServer::start_with_jwks_responses_and_ttl(
+            vec![
+                test_server::hs256_jwks("kid-stale", "secret-stale"),
+                json!({ "keys": [] }),
+            ],
+            1, // 1-second TTL
+        )
+        .await;
+
+        let token = make_jwt_with_kid("user-stale", "kid-stale", "secret-stale");
+
+        // First request: cache hit, validates OK.
+        let first = client()
+            .post(format!("{}/sync", server.base_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(sync_body())
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(
+            first.status(),
+            StatusCode::UNAUTHORIZED,
+            "first request should succeed with cached JWKS"
+        );
+
+        // Wait for TTL to expire.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        // Second request: TTL expired, fetch fails (empty keys), should serve stale.
+        let second = client()
+            .post(format!("{}/sync", server.base_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(sync_body())
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(
+            second.status(),
+            StatusCode::UNAUTHORIZED,
+            "request should succeed with stale JWKS when endpoint is down"
+        );
+    }
+
     #[tokio::test]
     async fn test_schema_hash_endpoint_returns_the_pushed_schema() {
         let server = TestServer::start().await;

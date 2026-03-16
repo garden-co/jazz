@@ -100,6 +100,10 @@ struct TestServer {
 
 impl TestServer {
     async fn start() -> Self {
+        Self::start_with_env(vec![]).await
+    }
+
+    async fn start_with_env(extra_env: Vec<(&str, String)>) -> Self {
         let data_dir = TempDir::new().expect("create temp data dir");
         let port = get_free_port();
 
@@ -116,6 +120,7 @@ impl TestServer {
                 "--worker-threads",
                 "1",
             ])
+            .envs(extra_env)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -450,6 +455,84 @@ async fn bad_signature_stays_unauthorized_after_refresh_retry() {
         jwks_server.hits(),
         2,
         "signature failure should trigger one refresh retry"
+    );
+}
+
+/// Rapid requests with different unknown kids should not trigger unbounded
+/// JWKS fetches. After the first forced refresh, subsequent unknown-kid
+/// requests within the cooldown window should reuse the cached keyset
+/// rather than hammering the IdP endpoint.
+///
+/// ```text
+///  req(kid-0)          req(kid-1)          req(kid-2)
+///    |                    |                    |
+///    v                    v                    v
+///  load(1) ──> miss    cache hit            cache hit
+///  no match →          no match →           no match →
+///  refresh(2)          cooldown ──>         cooldown ──>
+///  no match → 401      use cached → 401    use cached → 401
+/// ```
+#[tokio::test]
+async fn rapid_unknown_kids_do_not_trigger_unbounded_refreshes() {
+    let jwks_server = JwksServer::start(vec![hs256_jwks("kid-stable", "secret-stable")]).await;
+    let server = TestServer::start().await;
+    let app = server.create_app(&jwks_server.endpoint()).await;
+
+    // Send 5 requests with different fabricated kids in rapid succession.
+    for i in 0..5 {
+        let token = make_jwt(
+            "user-dos",
+            &format!("kid-fabricated-{i}"),
+            "irrelevant-secret",
+        );
+
+        let response = server.sync_with_bearer(&app.app_id, &token).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // Without cooldown: 1 (first load) + 5 (one forced refresh per request) = 6
+    // With cooldown:    1 (first load) + 1 (first refresh, then cooldown) = 2
+    assert_eq!(
+        jwks_server.hits(),
+        2,
+        "rapid unknown-kid requests should trigger at most one refresh within the cooldown window"
+    );
+}
+
+/// When the JWKS endpoint goes down after the cache TTL expires, requests
+/// with valid JWTs should still succeed using the stale cached keyset
+/// rather than failing with an auth error.
+#[tokio::test]
+async fn stale_jwks_served_when_endpoint_goes_down_after_ttl_expiry() {
+    // Response 1: valid key. Response 2+: empty keys (fetch_jwks rejects these).
+    let jwks_server = JwksServer::start(vec![
+        hs256_jwks("kid-stale", "secret-stale"),
+        json!({ "keys": [] }),
+    ])
+    .await;
+    let server = TestServer::start_with_env(vec![("JAZZ_JWKS_CACHE_TTL_SECS", "1".to_string())])
+        .await;
+    let app = server.create_app(&jwks_server.endpoint()).await;
+
+    let token = make_jwt("user-stale", "kid-stale", "secret-stale");
+
+    // First request: fetches JWKS (hit 1), validates OK.
+    let first = server.sync_with_bearer(&app.app_id, &token).await;
+    assert_ne!(
+        first.status(),
+        StatusCode::UNAUTHORIZED,
+        "first request should succeed with cached JWKS"
+    );
+
+    // Wait for TTL to expire.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // Second request: TTL expired, fetch fails (empty keys), should serve stale.
+    let second = server.sync_with_bearer(&app.app_id, &token).await;
+    assert_ne!(
+        second.status(),
+        StatusCode::UNAUTHORIZED,
+        "request should succeed with stale JWKS when endpoint is down"
     );
 }
 

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jazz_tools::query_manager::query::QueryBuilder;
 use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
@@ -17,7 +17,7 @@ use tokio::sync::{RwLock, broadcast};
 use tracing::info;
 
 use crate::middleware::AuthConfig;
-use crate::middleware::auth::JwksCache;
+use crate::middleware::auth::{JwksCache, JWKS_CACHE_TTL};
 use crate::routes;
 
 const EXTERNAL_IDENTITIES_TABLE: &str = "external_identities";
@@ -259,7 +259,12 @@ pub async fn run(
 
     // Initialise JWKS cache with TTL-based refresh and on-demand rotation support.
     let jwks_cache = if let Some(ref jwks_url) = auth_config.jwks_url {
-        let cache = JwksCache::new(jwks_url.clone(), reqwest::Client::new());
+        let jwks_ttl = std::env::var("JAZZ_JWKS_CACHE_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(JWKS_CACHE_TTL);
+        let cache = JwksCache::new(jwks_url.clone(), reqwest::Client::new(), jwks_ttl);
         // Warm the cache — fail fast if the JWKS endpoint is unreachable at startup.
         cache
             .load(false)

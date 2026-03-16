@@ -19,6 +19,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -44,7 +45,12 @@ const LOCAL_MODE_HEADER: &str = "X-Jazz-Local-Mode";
 const LOCAL_TOKEN_HEADER: &str = "X-Jazz-Local-Token";
 
 /// JWKS cache TTL — 5 minutes, matching the cloud server.
-const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+pub const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// Minimum interval between forced JWKS refreshes. Prevents unauthenticated
+/// callers from triggering unbounded outbound fetches by sending JWTs with
+/// fabricated key IDs.
+const JWKS_FORCED_REFRESH_COOLDOWN: Duration = Duration::from_secs(10);
 
 pub type ExternalIdentityMap = HashMap<(String, String), String>;
 
@@ -174,21 +180,42 @@ struct CachedJwksEntry {
 pub struct JwksCache {
     endpoint: String,
     http_client: reqwest::Client,
+    ttl: Duration,
     cached: RwLock<Option<CachedJwksEntry>>,
+    last_forced_refresh_us: AtomicU64,
 }
 
 impl JwksCache {
-    pub fn new(endpoint: String, http_client: reqwest::Client) -> Self {
+    pub fn new(endpoint: String, http_client: reqwest::Client, ttl: Duration) -> Self {
         Self {
             endpoint,
             http_client,
+            ttl,
             cached: RwLock::new(None),
+            last_forced_refresh_us: AtomicU64::new(0),
         }
     }
 
     /// Load the JWKS, returning a cached copy if fresh or fetching anew.
+    ///
+    /// When `force_refresh` is true but a forced refresh happened within the
+    /// cooldown window (10s), the request is downgraded to a cache read. This
+    /// prevents unauthenticated callers from using fabricated key IDs to
+    /// trigger unbounded outbound fetches.
     pub async fn load(&self, force_refresh: bool) -> Result<JwkSet, String> {
-        let ttl_us = JWKS_CACHE_TTL.as_micros().min(u128::from(u64::MAX)) as u64;
+        let ttl_us = self.ttl.as_micros().min(u128::from(u64::MAX)) as u64;
+        let cooldown_us = JWKS_FORCED_REFRESH_COOLDOWN
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+
+        // Downgrade forced refresh if within cooldown window.
+        let force_refresh = if force_refresh {
+            let last = self.last_forced_refresh_us.load(Ordering::SeqCst);
+            let age_us = now_timestamp_us().saturating_sub(last);
+            age_us > cooldown_us
+        } else {
+            false
+        };
 
         if !force_refresh {
             let guard = self.cached.read().await;
@@ -202,9 +229,14 @@ impl JwksCache {
 
         let jwks = fetch_jwks(&self.http_client, &self.endpoint).await?;
 
+        let now = now_timestamp_us();
+        if force_refresh {
+            self.last_forced_refresh_us.store(now, Ordering::SeqCst);
+        }
+
         *self.cached.write().await = Some(CachedJwksEntry {
             endpoint: self.endpoint.clone(),
-            fetched_at_us: now_timestamp_us(),
+            fetched_at_us: now,
             set: jwks.clone(),
         });
 

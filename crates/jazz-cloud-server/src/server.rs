@@ -47,6 +47,10 @@ use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+/// Minimum interval between forced JWKS refreshes. Prevents unauthenticated
+/// callers from triggering unbounded outbound fetches by sending JWTs with
+/// fabricated key IDs.
+const JWKS_FORCED_REFRESH_COOLDOWN: Duration = Duration::from_secs(10);
 const WORKER_SYNC_QUEUE_CAPACITY: usize = 4096;
 const WORKER_APP_QUANTUM: usize = 1;
 const LOCAL_MODE_HEADER: &str = "X-Jazz-Local-Mode";
@@ -1559,6 +1563,8 @@ struct ConnectionState {
 struct CachedJwks {
     endpoint: String,
     fetched_at_us: u64,
+    /// Per-app cooldown: timestamp of last forced refresh for this app's JWKS.
+    last_forced_refresh_us: u64,
     set: JwkSet,
 }
 
@@ -1906,6 +1912,7 @@ struct ServerState {
     workers: WorkerPool,
     meta_store: Arc<MetaStore>,
     jwks_cache: tokio::sync::RwLock<HashMap<AppId, CachedJwks>>,
+    jwks_cache_ttl: Duration,
     http_client: reqwest::Client,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
@@ -2093,6 +2100,11 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
         workers,
         meta_store,
         jwks_cache: tokio::sync::RwLock::new(HashMap::new()),
+        jwks_cache_ttl: std::env::var("JAZZ_JWKS_CACHE_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(JWKS_CACHE_TTL),
         http_client,
         shutdown_tx: shutdown_tx.clone(),
     });
@@ -2533,12 +2545,30 @@ async fn load_jwks_for_app(
     jwks_endpoint: &str,
     force_refresh: bool,
 ) -> Result<JwkSet, String> {
-    let ttl_us = JWKS_CACHE_TTL.as_micros().min(u128::from(u64::MAX)) as u64;
+    let ttl_us = state.jwks_cache_ttl.as_micros().min(u128::from(u64::MAX)) as u64;
+    let cooldown_us = JWKS_FORCED_REFRESH_COOLDOWN
+        .as_micros()
+        .min(u128::from(u64::MAX)) as u64;
 
-    let cached_jwks = if force_refresh {
-        None
-    } else {
-        state.jwks_cache.read().await.get(&app_id).cloned()
+    // Single read-lock: check cooldown and attempt cache hit together.
+    let (force_refresh, cached_jwks) = {
+        let cache = state.jwks_cache.read().await;
+        let cached = cache.get(&app_id).cloned();
+
+        // Downgrade forced refresh if this app's cooldown is still active.
+        let force_refresh = if force_refresh {
+            match &cached {
+                Some(entry) => {
+                    let age_us = now_timestamp_us().saturating_sub(entry.last_forced_refresh_us);
+                    age_us > cooldown_us
+                }
+                None => true, // no cache entry → no cooldown → allow refresh
+            }
+        } else {
+            false
+        };
+
+        (force_refresh, if force_refresh { None } else { cached })
     };
 
     if let Some(cached) = cached_jwks {
@@ -2550,11 +2580,22 @@ async fn load_jwks_for_app(
 
     let jwks = fetch_jwks(&state.http_client, jwks_endpoint).await?;
 
-    state.jwks_cache.write().await.insert(
+    let now = now_timestamp_us();
+    let mut cache = state.jwks_cache.write().await;
+    let prev_forced_refresh = cache
+        .get(&app_id)
+        .map(|c| c.last_forced_refresh_us)
+        .unwrap_or(0);
+    cache.insert(
         app_id,
         CachedJwks {
             endpoint: jwks_endpoint.to_string(),
-            fetched_at_us: now_timestamp_us(),
+            fetched_at_us: now,
+            last_forced_refresh_us: if force_refresh {
+                now
+            } else {
+                prev_forced_refresh
+            },
             set: jwks.clone(),
         },
     );
