@@ -482,6 +482,34 @@ describe("TS Query API", () => {
         // requireIncludes only affects Alice. Bob's remaining friends still load.
         expect(aliceFriend.friends.map((f) => f.id)).toEqual([alice.id]);
       });
+
+      it("rows skipped by requireIncludes affect limit-offset pagination", async () => {
+        const db = track(
+          await createDb({
+            appId: "test-app",
+            driver: { type: "persistent", dbName: uniqueDbName("require-includes-limit-offset") },
+          }),
+        );
+
+        const alice = insertUser(db);
+        const bob = insertUser(db);
+        const deletedUser = insertUser(db);
+
+        makeFriends(db, alice, bob);
+        makeFriends(db, bob, deletedUser);
+
+        const results = await db.all(
+          app.users.include({ friends: true }).requireIncludes().limit(1).offset(1),
+        );
+        expect(results.map((u) => u.id)).toEqual([bob.id]);
+
+        await db.delete(app.users, deletedUser.id);
+
+        const results2 = await db.all(
+          app.users.include({ friends: true }).requireIncludes().limit(1).offset(1),
+        );
+        expect(results2).toHaveLength(0);
+      });
     });
   });
 
