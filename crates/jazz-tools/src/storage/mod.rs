@@ -589,16 +589,17 @@ pub(crate) fn encode_value(value: &Value) -> Vec<u8> {
         }
 
         Value::Array(_) => {
-            // Arrays not typically indexed; use hash for equality only
+            // Arrays use serialized bytes for equality semantics.
+            // The durable key codec hashes oversized segments if needed.
             let mut bytes = vec![0x07];
-            // Simple approach: serialize and hash. Not order-preserving.
             let json = serde_json::to_string(value).unwrap_or_default();
             bytes.extend_from_slice(json.as_bytes());
             bytes
         }
 
         Value::Row { .. } => {
-            // Rows not typically indexed; use hash for equality only
+            // Rows use serialized bytes for equality semantics.
+            // The durable key codec hashes oversized segments if needed.
             let mut bytes = vec![0x08];
             let json = serde_json::to_string(value).unwrap_or_default();
             bytes.extend_from_slice(json.as_bytes());
