@@ -7,7 +7,7 @@ function uniqueDbName(label: string): string {
 }
 
 function insertUser(db: Db, name = "Test User") {
-  return db.insert(app.users, { name });
+  return db.insert(app.users, { name, friends: [] });
 }
 
 function insertProject(db: Db, name = "Test Project") {
@@ -23,6 +23,18 @@ function insertTodo(db: Db, data: Partial<Todo>) {
     owner: data.owner ?? undefined,
     assignees: data.assignees ?? [],
   });
+}
+
+function makeFriends(db: Db, user1: User, user2: User) {
+  const user1Friends = [...user1.friends, user2.id];
+  const user2Friends = [...user2.friends, user1.id];
+
+  db.update(app.users, user1.id, { friends: user1Friends });
+  db.update(app.users, user2.id, { friends: user2Friends });
+
+  // Keep the in-memory fixtures aligned with the DB row so later updates append correctly.
+  user1.friends = user1Friends;
+  user2.friends = user2Friends;
 }
 
 describe("TS Query API", () => {
@@ -408,6 +420,67 @@ describe("TS Query API", () => {
         );
         assert(result, "Result is not defined");
         expect(result.todosViaOwner).toEqual([{ id: todoId2 }]);
+      });
+
+      it("can use requireIncludes in nested includes", async () => {
+        const db = track(
+          await createDb({
+            appId: "test-app",
+            driver: { type: "persistent", dbName: uniqueDbName("require-includes-nested") },
+          }),
+        );
+
+        const alice = insertUser(db);
+        const bob = insertUser(db);
+        const deletedUser = insertUser(db);
+
+        makeFriends(db, alice, bob);
+        makeFriends(db, bob, deletedUser);
+
+        db.delete(app.users, deletedUser.id);
+
+        const result = await db.one(
+          app.users
+            .where({ id: { eq: alice.id } })
+            .include({ friends: app.users.include({ friends: true }).requireIncludes() }),
+        );
+
+        assert(result, "Result is not defined");
+        // Bob is not loaded because he's friends with a deleted user
+        // But Alice can still be loaded, because we didn't use requireIncludes on the top-level include
+        expect(result.friends).toHaveLength(0);
+      });
+
+      it("top-level requireIncludes does not affect inner includes", async () => {
+        const db = track(
+          await createDb({
+            appId: "test-app",
+            driver: { type: "persistent", dbName: uniqueDbName("require-includes-scalar-missing") },
+          }),
+        );
+
+        const alice = insertUser(db);
+        const bob = insertUser(db);
+        const deletedUser = insertUser(db);
+
+        makeFriends(db, alice, bob);
+        makeFriends(db, bob, deletedUser);
+
+        db.delete(app.users, deletedUser.id);
+
+        const result = await db.one(
+          app.users
+            .where({ id: { eq: alice.id } })
+            .include({ friends: { friends: true } })
+            .requireIncludes(),
+        );
+
+        assert(result, "Result is not defined");
+        expect(result.friends.map((f) => f.id)).toEqual([bob.id]);
+        const aliceFriend = result.friends[0];
+        assert(aliceFriend, "Alice's friend is not defined");
+        // requireIncludes only affects Alice. Bob's remaining friends still load.
+        expect(aliceFriend.friends.map((f) => f.id)).toEqual([alice.id]);
       });
     });
   });
