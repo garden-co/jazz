@@ -141,11 +141,11 @@ export interface TodoInclude {
 }
 
 export interface FilePartInclude {
-  filesViaPart?: true | FileInclude | AnyFileQueryBuilder<any>;
+  filesViaParts?: true | FileInclude | AnyFileQueryBuilder<any>;
 }
 
 export interface FileInclude {
-  part?: true | FilePartInclude | AnyFilePartQueryBuilder<any>;
+  parts?: true | FilePartInclude | AnyFilePartQueryBuilder<any>;
   uploadsViaFile?: true | UploadInclude | AnyUploadQueryBuilder<any>;
 }
 
@@ -205,8 +205,8 @@ export type TodoIncludedRelations<I extends TodoInclude = {}, R extends boolean 
 
 export type FilePartIncludedRelations<I extends FilePartInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
-    K extends "filesViaPart"
-      ? NonNullable<I["filesViaPart"]> extends infer RelationInclude
+    K extends "filesViaParts"
+      ? NonNullable<I["filesViaParts"]> extends infer RelationInclude
         ? RelationInclude extends true
           ? File[]
           : RelationInclude extends AnyFileQueryBuilder<infer QueryRow>
@@ -220,8 +220,8 @@ export type FilePartIncludedRelations<I extends FilePartInclude = {}, R extends 
 
 export type FileIncludedRelations<I extends FileInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
-    K extends "part"
-      ? NonNullable<I["part"]> extends infer RelationInclude
+    K extends "parts"
+      ? NonNullable<I["parts"]> extends infer RelationInclude
         ? RelationInclude extends true
           ? FilePart[]
           : RelationInclude extends AnyFilePartQueryBuilder<infer QueryRow>
@@ -269,11 +269,11 @@ export interface TodoRelations {
 }
 
 export interface FilePartRelations {
-  filesViaPart: File[];
+  filesViaParts: File[];
 }
 
 export interface FileRelations {
-  part: FilePart[];
+  parts: FilePart[];
   uploadsViaFile: Upload[];
 }
 
@@ -957,7 +957,7 @@ export class FilePartQueryBuilder<I extends FilePartInclude = {}, S extends File
     return clone;
   }
 
-  hopTo(relation: "filesViaPart"): FilePartQueryBuilder<I, S, R> {
+  hopTo(relation: "filesViaParts"): FilePartQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -1154,7 +1154,7 @@ export class FileQueryBuilder<I extends FileInclude = {}, S extends FileSelectab
     return clone;
   }
 
-  hopTo(relation: "part" | "uploadsViaFile"): FileQueryBuilder<I, S, R> {
+  hopTo(relation: "parts" | "uploadsViaFile"): FileQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;

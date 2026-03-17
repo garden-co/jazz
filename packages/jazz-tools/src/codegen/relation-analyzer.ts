@@ -3,6 +3,7 @@
  */
 
 import type { WasmSchema } from "../drivers/types.js";
+import pluralize from "pluralize-esm";
 
 /**
  * A relation between two tables (forward or reverse).
@@ -33,8 +34,10 @@ function capitalize(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-function stripReferenceSuffix(columnName: string): string {
-  return columnName.replace(/(?:_ids|Ids|_id|Id)$/, "");
+function forwardRefNameFromFK(columnName: string): string {
+  const withoutIdSuffix = columnName.replace(/(?:_ids|Ids|_id|Id)$/, "");
+  const requiresPluralization = columnName.endsWith("s");
+  return requiresPluralization ? pluralize.plural(withoutIdSuffix) : withoutIdSuffix;
 }
 
 /**
@@ -71,7 +74,7 @@ export function analyzeRelations(schema: WasmSchema): Map<string, Relation[]> {
         const isForwardArray =
           col.column_type.type === "Array" && col.column_type.element.type === "Uuid";
 
-        const forwardName = stripReferenceSuffix(col.name);
+        const forwardName = forwardRefNameFromFK(col.name);
         const forwardRelation: Relation = {
           name: forwardName,
           type: "forward",
