@@ -1,4 +1,11 @@
-import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 
 mkdirSync("./public", { recursive: true });
 
@@ -19,6 +26,14 @@ const glueJs = readFileSync("./pkg/cojson_core_wasm.js", "utf8").replace(
 );
 
 cpSync("./pkg/cojson_core_wasm_bg.wasm", "./public/cojson_core_wasm.wasm");
+
+if (existsSync("./public/snippets")) {
+  rmSync("./public/snippets", { recursive: true, force: true });
+}
+
+if (existsSync("./pkg/snippets")) {
+  cpSync("./pkg/snippets", "./public/snippets", { recursive: true });
+}
 
 writeFileSync("./public/cojson_core_wasm.js", glueJs);
 
