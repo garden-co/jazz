@@ -8,6 +8,7 @@
     "public/cojson_core_wasm.wasm.js",
     "public/cojson_core_wasm.wasm.d.ts",
     "public/cojson_core_wasm.wasm",
+    "public/snippets",
     "edge-lite.js",
     "index.js",
     "index.d.ts"

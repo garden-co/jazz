@@ -1,7 +1,40 @@
 use cojson_core::core::{CoJsonCoreError, SessionMapImpl};
 use serde::Serialize;
+use std::sync::Once;
 use thiserror::Error;
 use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen(inline_js = "
+export function dumpWasmPanic(message) {
+  queueMicrotask(() => {
+    throw new Error(`Wasm panic: ${message}`);
+  })
+}
+")]
+extern "C" {
+    #[wasm_bindgen(js_name = dumpWasmPanic)]
+    fn dump_wasm_panic(message: &str);
+}
+
+#[cfg(feature = "console_error_panic_hook")]
+fn install_panic_hook() {
+    static INSTALL_PANIC_HOOK: Once = Once::new();
+
+    INSTALL_PANIC_HOOK.call_once(|| {
+        std::panic::set_hook(Box::new(|panic_info| {
+            dump_wasm_panic(&panic_info.to_string());
+            console_error_panic_hook::hook(panic_info);
+        }));
+    });
+}
+
+#[cfg(not(feature = "console_error_panic_hook"))]
+fn install_panic_hook() {}
+
+#[wasm_bindgen(start)]
+pub fn init() {
+    install_panic_hook();
+}
 
 pub mod hash {
     pub mod blake3;
