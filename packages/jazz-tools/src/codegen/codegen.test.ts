@@ -656,6 +656,80 @@ describe("analyzeRelations", () => {
     );
   });
 
+  it("keeps singular array reference columns pluralized", () => {
+    const schema: WasmSchema = {
+      files: {
+        columns: [
+          {
+            name: "partIds",
+            column_type: { type: "Array", element: { type: "Uuid" } },
+            nullable: false,
+            references: "file_parts",
+          },
+        ],
+      },
+      file_parts: { columns: [] },
+    };
+
+    const relations = analyzeRelations(schema);
+
+    expect(relations.get("files")).toContainEqual(
+      expect.objectContaining({
+        name: "parts",
+        type: "forward",
+        toTable: "file_parts",
+        fromColumn: "partIds",
+        isArray: true,
+      }),
+    );
+    expect(relations.get("file_parts")).toContainEqual(
+      expect.objectContaining({
+        name: "filesViaParts",
+        type: "reverse",
+        toTable: "files",
+        toColumn: "partIds",
+        isArray: true,
+      }),
+    );
+  });
+
+  it("keeps already-plural array reference columns pluralized", () => {
+    const schema: WasmSchema = {
+      groups: {
+        columns: [
+          {
+            name: "assigneesIds",
+            column_type: { type: "Array", element: { type: "Uuid" } },
+            nullable: false,
+            references: "users",
+          },
+        ],
+      },
+      users: { columns: [] },
+    };
+
+    const relations = analyzeRelations(schema);
+
+    expect(relations.get("groups")).toContainEqual(
+      expect.objectContaining({
+        name: "assignees",
+        type: "forward",
+        toTable: "users",
+        fromColumn: "assigneesIds",
+        isArray: true,
+      }),
+    );
+    expect(relations.get("users")).toContainEqual(
+      expect.objectContaining({
+        name: "groupsViaAssignees",
+        type: "reverse",
+        toTable: "groups",
+        toColumn: "assigneesIds",
+        isArray: true,
+      }),
+    );
+  });
+
   it("handles self-referential relations", () => {
     const schema: WasmSchema = {
       todos: {
@@ -859,6 +933,23 @@ describe("generateTypes with relations", () => {
     expect(output).toContain("? User[] | undefined");
     expect(output).toContain("? QueryRow[] | undefined");
     expect(output).toContain("? UserWithIncludes<RelationInclude, false>[] | undefined");
+  });
+
+  it("uses pluralized relation names for array ref columns ending in Ids", () => {
+    table("file_parts", { data: col.bytes() });
+    table("files", {
+      partIds: col.array(col.ref("file_parts")),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("export interface FileInclude {");
+    expect(output).toContain("parts?: true | FilePartInclude | AnyFilePartQueryBuilder<any>;");
+    expect(output).toContain("export interface FilePartInclude {");
+    expect(output).toContain("filesViaParts?: true | FileInclude | AnyFileQueryBuilder<any>;");
+    expect(output).not.toContain("part?: true | FilePartInclude | AnyFilePartQueryBuilder<any>;");
+    expect(output).not.toContain("filesViaPart?: true | FileInclude | AnyFileQueryBuilder<any>;");
   });
 
   it("generates selection helper types", () => {
