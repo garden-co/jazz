@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "repro-useaccount-loop",
+    "slug": "repro-useaccount-loop",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "tools.jazz.reprouseaccountloop"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "package": "tools.jazz.reprouseaccountloop"
+    },
+    "plugins": ["expo-secure-store", "expo-sqlite"]
+  }
+}

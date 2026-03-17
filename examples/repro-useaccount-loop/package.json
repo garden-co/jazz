@@ -1,0 +1,35 @@
+{
+  "name": "repro-useaccount-loop",
+  "main": "index.ts",
+  "packageManager": "pnpm@10.16.1",
+  "scripts": {
+    "build": "expo prebuild",
+    "build:clean": "expo prebuild --clean",
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "@azure/core-asynciterator-polyfill": "^1.0.2",
+    "@react-native-community/netinfo": "11.4.1",
+    "expo": "catalog:expo",
+    "expo-secure-store": "~15.0.7",
+    "expo-sqlite": "~16.0.9",
+    "jazz-tools": "workspace:*",
+    "react": "catalog:expo",
+    "react-native": "0.81.5",
+    "react-native-fast-encoder": "^0.3.1",
+    "react-native-url-polyfill": "^3.0.0",
+    "react-native-get-random-values": "^1.11.0",
+    "react-native-nitro-modules": "0.26.4",
+    "readable-stream": "^4.7.0",
+    "cojson-core-rn": "workspace:*"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@types/react": "19.1.17",
+    "typescript": "~5.9.2"
+  },
+  "private": true
+}
