@@ -1,5 +1,5 @@
 import { createJazzClient, getActiveSyntheticAuth, JazzProvider } from "jazz-tools/react";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense } from "react";
 
 type DbConfig = Parameters<typeof createJazzClient>[0];
 
@@ -34,43 +34,9 @@ function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
 
 export function App({ config }: { config?: Partial<DbConfig> } = {}) {
   const resolvedConfig = defaultConfig(config);
-  const configKey = JSON.stringify(resolvedConfig);
-  const [client, setClient] = useState<Awaited<ReturnType<typeof createJazzClient>> | null>(null);
-  const [error, setError] = useState<unknown>(null);
-
-  useEffect(() => {
-    let active = true;
-    const client = createJazzClient(resolvedConfig);
-
-    client.then(
-      (resolved) => {
-        if (!active) {
-          resolved.shutdown();
-          return;
-        }
-        setClient(resolved);
-      },
-      (reason) => {
-        if (!active) return;
-        setError(reason);
-      },
-    );
-
-    return () => {
-      active = false;
-      client.then((resolved) => resolved.shutdown()).catch(() => {});
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [configKey]);
-
-  if (error) throw error;
-
-  if (!client) {
-    return <p id="joining-chat">Loading...</p>;
-  }
 
   return (
-    <JazzProvider client={client}>
+    <JazzProvider config={resolvedConfig} fallback={<p id="joining-chat">Loading...</p>}>
       <AppContent />
     </JazzProvider>
   );
