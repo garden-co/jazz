@@ -79,7 +79,7 @@ export type PolicyValue =
   | { type: "Literal"; value: Value }
   | { type: "SessionRef"; path: string[] };
 
-export type PolicyLiteralValue = Extract<PolicyValue, { type: "Literal" }>;
+export type PolicyLiteralValue = Value;
 
 export type PolicyExpr =
   | { type: "Cmp"; column: string; op: PolicyCmpOp; value: PolicyValue }

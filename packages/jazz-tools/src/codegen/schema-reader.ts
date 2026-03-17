@@ -92,7 +92,7 @@ function clonePolicyValue(value: DslPolicyValue): PolicyValue {
 }
 
 function clonePolicyLiteralValue(value: DslPolicyLiteralValue): PolicyLiteralValue {
-  return { type: "Literal", value: literalToWasmValue(value.value) };
+  return literalToWasmValue(value.value);
 }
 
 function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {

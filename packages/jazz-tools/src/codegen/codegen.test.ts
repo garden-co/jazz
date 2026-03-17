@@ -365,19 +365,19 @@ describe("schemaToWasm", () => {
           type: "SessionCmp",
           path: ["claims", "role"],
           op: "Eq",
-          value: { type: "Literal", value: { type: "Text", value: "manager" } },
+          value: { type: "Text", value: "manager" },
         },
         {
           type: "SessionContains",
           path: ["claims", "teamIds"],
-          value: { type: "Literal", value: { type: "Text", value: "team_a" } },
+          value: { type: "Text", value: "team_a" },
         },
         {
           type: "SessionInList",
           path: ["claims", "plan"],
           values: [
-            { type: "Literal", value: { type: "Text", value: "pro" } },
-            { type: "Literal", value: { type: "Text", value: "enterprise" } },
+            { type: "Text", value: "pro" },
+            { type: "Text", value: "enterprise" },
           ],
         },
       ],
