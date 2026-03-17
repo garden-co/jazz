@@ -32,7 +32,7 @@ export async function readTodosWithFilters(db: Db) {
 export async function readTodosWithWhereOperators(db: Db) {
   await db.all(app.todos.where({ done: false }));
   await db.all(app.todos.where({ title: { contains: "milk" } }));
-  await db.all(app.todos.where({ project: { ne: EXAMPLE_PROJECT_ID } }));
+  await db.all(app.todos.where({ projectId: { ne: EXAMPLE_PROJECT_ID } }));
 }
 // #endregion reading-where-operators-ts
 
@@ -90,7 +90,7 @@ export async function readDeletableTodos(db: Db) {
 export function buildTodoLineageQuery() {
   return app.todos.gather({
     start: { done: false },
-    step: ({ current }) => app.todos.where({ parent: current }).hopTo("parent"),
+    step: ({ current }) => app.todos.where({ parentId: current }).hopTo("parent"),
     maxDepth: 10,
   });
 }
@@ -101,8 +101,8 @@ export async function writeTodoCrud(db: Db, todoId: string) {
   db.insert(app.todos, {
     title: "Write docs",
     done: false,
-    owner_id: EXAMPLE_OWNER_ID,
-    project: EXAMPLE_PROJECT_ID,
+    ownerId: EXAMPLE_OWNER_ID,
+    projectId: EXAMPLE_PROJECT_ID,
   });
   db.update(app.todos, todoId, { done: true });
   db.delete(app.todos, todoId);
@@ -116,8 +116,8 @@ export async function writeTodoWithDurabilityTiers(db: Db) {
     {
       title: "Write docs with durability tier",
       done: false,
-      owner_id: EXAMPLE_OWNER_ID,
-      project: EXAMPLE_PROJECT_ID,
+      ownerId: EXAMPLE_OWNER_ID,
+      projectId: EXAMPLE_PROJECT_ID,
     },
     { tier: "edge" },
   );

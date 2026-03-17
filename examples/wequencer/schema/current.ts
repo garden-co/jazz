@@ -14,14 +14,14 @@ table("jams", {
 });
 
 table("beats", {
-  jam: col.ref("jams"),
-  instrument: col.ref("instruments"),
+  jamId: col.ref("jams"),
+  instrumentId: col.ref("instruments"),
   beat_index: col.int(), // 0–15
   placed_by: col.string(), // session user_id
 });
 
 table("participants", {
-  jam: col.ref("jams"),
-  user_id: col.string(),
+  jamId: col.ref("jams"),
+  userId: col.string(),
   display_name: col.string(),
 });

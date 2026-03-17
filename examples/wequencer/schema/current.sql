@@ -12,14 +12,14 @@ CREATE TABLE jams (
 );
 
 CREATE TABLE beats (
-    jam UUID REFERENCES jams NOT NULL,
-    instrument UUID REFERENCES instruments NOT NULL,
+    jamId UUID REFERENCES jams NOT NULL,
+    instrumentId UUID REFERENCES instruments NOT NULL,
     beat_index INTEGER NOT NULL,
     placed_by TEXT NOT NULL
 );
 
 CREATE TABLE participants (
-    jam UUID REFERENCES jams NOT NULL,
-    user_id TEXT NOT NULL,
+    jamId UUID REFERENCES jams NOT NULL,
+    userId TEXT NOT NULL,
     display_name TEXT NOT NULL
 );

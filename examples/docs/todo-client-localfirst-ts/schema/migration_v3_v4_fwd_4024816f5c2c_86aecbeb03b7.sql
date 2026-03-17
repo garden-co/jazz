@@ -1,0 +1,4 @@
+
+ALTER TABLE todos ADD COLUMN owner_id TEXT DEFAULT '';
+
+
