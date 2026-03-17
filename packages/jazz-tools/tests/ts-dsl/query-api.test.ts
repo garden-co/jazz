@@ -1,40 +1,40 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, describe, it, expect, assert, expectTypeOf } from "vitest";
-import { app, Project, Todo, User } from "./fixtures/basic/app";
+import { app, Project, Todo, TodoInit, User } from "./fixtures/basic/app";
 
 function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function insertUser(db: Db, name = "Test User") {
-  return db.insert(app.users, { name, friends: [] });
+  return db.insert(app.users, { name, friendsIds: [] });
 }
 
 function insertProject(db: Db, name = "Test Project") {
   return db.insert(app.projects, { name });
 }
 
-function insertTodo(db: Db, data: Partial<Todo>) {
+function insertTodo(db: Db, data: Partial<TodoInit>) {
   return db.insert(app.todos, {
     title: data.title ?? "Test Todo",
     done: data.done ?? false,
     tags: data.tags ?? [],
-    project: data.project ?? insertProject(db).id,
-    owner: data.owner ?? undefined,
-    assignees: data.assignees ?? [],
+    projectId: data.projectId ?? insertProject(db).id,
+    ownerId: data.ownerId ?? undefined,
+    assigneesIds: data.assigneesIds ?? [],
   });
 }
 
 function makeFriends(db: Db, user1: User, user2: User) {
-  const user1Friends = [...user1.friends, user2.id];
-  const user2Friends = [...user2.friends, user1.id];
+  const user1Friends = [...user1.friendsIds, user2.id];
+  const user2Friends = [...user2.friendsIds, user1.id];
 
-  db.update(app.users, user1.id, { friends: user1Friends });
-  db.update(app.users, user2.id, { friends: user2Friends });
+  db.update(app.users, user1.id, { friendsIds: user1Friends });
+  db.update(app.users, user2.id, { friendsIds: user2Friends });
 
   // Keep the in-memory fixtures aligned with the DB row so later updates append correctly.
-  user1.friends = user1Friends;
-  user2.friends = user2Friends;
+  user1.friendsIds = user1Friends;
+  user2.friendsIds = user2Friends;
 }
 
 describe("TS Query API", () => {
@@ -143,8 +143,8 @@ describe("TS Query API", () => {
       const { id: ownerId } = insertUser(db);
       const { id: todoId } = insertTodo(db, {
         title: "Write tests",
-        project: projectId,
-        owner: ownerId,
+        projectId: projectId,
+        ownerId: ownerId,
       });
 
       const results = await db.all(
@@ -154,8 +154,8 @@ describe("TS Query API", () => {
       expect(results.length).toBe(1);
       const todo = results[0];
       expect(todo.title).toBe("Write tests");
-      expectTypeOf(todo.owner).toEqualTypeOf<string | undefined>();
-      expect(todo.owner).toBe(ownerId);
+      expectTypeOf(todo.ownerId).toEqualTypeOf<string | undefined>();
+      expect(todo.ownerId).toBe(ownerId);
       expectTypeOf(todo.project).toEqualTypeOf<Project | undefined>();
       expect(todo.project?.name).toBe("Announcements");
     });
@@ -171,20 +171,20 @@ describe("TS Query API", () => {
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: ownerId } = insertUser(db);
       const { id: todoId } = insertTodo(db, {
-        project: projectId,
-        owner: ownerId,
+        projectId: projectId,
+        ownerId: ownerId,
       });
 
       const result = await db.one(
         app.todos
-          .select("owner")
+          .select("ownerId")
           .where({ id: { eq: todoId } })
           .include({ project: true }),
       );
 
       assert(result, "Result is not defined");
-      expectTypeOf(result.owner).toEqualTypeOf<string | undefined>();
-      expect(result.owner).toBe(ownerId);
+      expectTypeOf(result.ownerId).toEqualTypeOf<string | undefined>();
+      expect(result.ownerId).toBe(ownerId);
       expectTypeOf(result.project).toEqualTypeOf<Project | undefined>();
       assert(result.project, "Project include is not defined");
       expect(result.project.name).toBe("Announcements");
@@ -199,7 +199,7 @@ describe("TS Query API", () => {
       );
 
       const { id: todoId } = insertTodo(db, {
-        owner: undefined,
+        ownerId: undefined,
       });
 
       const result = await db.one(app.todos.where({ id: { eq: todoId } }).include({ owner: true }));
@@ -222,8 +222,8 @@ describe("TS Query API", () => {
       const { id: todoId } = insertTodo(db, {
         title: "Hello world",
         tags: ["general"],
-        project: projectId,
-        owner: ownerId,
+        projectId: projectId,
+        ownerId: ownerId,
       });
 
       const baseline = await db.all(app.todos.where({ id: { eq: todoId } }));
@@ -249,7 +249,7 @@ describe("TS Query API", () => {
 
       const project = insertProject(db);
       const todo = insertTodo(db, {
-        project: project.id,
+        projectId: project.id,
       });
 
       await db.delete(app.projects, project.id);
@@ -273,7 +273,7 @@ describe("TS Query API", () => {
       const assignee1 = insertUser(db);
       const assignee2 = insertUser(db);
       const todo = insertTodo(db, {
-        assignees: [assignee1.id, assignee2.id],
+        assigneesIds: [assignee1.id, assignee2.id],
       });
 
       await db.delete(app.users, assignee1.id);
@@ -296,10 +296,10 @@ describe("TS Query API", () => {
 
       const owner = insertUser(db);
       const { id: todoId } = insertTodo(db, {
-        owner: owner.id,
+        ownerId: owner.id,
       });
       const { id: todoId2 } = insertTodo(db, {
-        owner: owner.id,
+        ownerId: owner.id,
       });
 
       await db.delete(app.todos, todoId);
@@ -325,7 +325,7 @@ describe("TS Query API", () => {
 
         const project = insertProject(db);
         const todo = insertTodo(db, {
-          project: project.id,
+          projectId: project.id,
         });
 
         await db.delete(app.projects, project.id);
@@ -352,7 +352,7 @@ describe("TS Query API", () => {
         );
 
         const todo = insertTodo(db, {
-          owner: undefined,
+          ownerId: undefined,
         });
 
         const result = await db.one(
@@ -379,7 +379,7 @@ describe("TS Query API", () => {
         const assignee1 = insertUser(db);
         const assignee2 = insertUser(db);
         const todo = insertTodo(db, {
-          assignees: [assignee1.id, assignee2.id],
+          assigneesIds: [assignee1.id, assignee2.id],
         });
 
         await db.delete(app.users, assignee1.id);
@@ -404,10 +404,10 @@ describe("TS Query API", () => {
 
         const owner = insertUser(db);
         const { id: todoId } = insertTodo(db, {
-          owner: owner.id,
+          ownerId: owner.id,
         });
         const { id: todoId2 } = insertTodo(db, {
-          owner: owner.id,
+          ownerId: owner.id,
         });
 
         await db.delete(app.todos, todoId);
@@ -527,7 +527,7 @@ describe("TS Query API", () => {
         title: "Write tests",
         done: false,
         tags: ["dev"],
-        project: projectId,
+        projectId: projectId,
       });
 
       const result = await db.one(
@@ -567,9 +567,9 @@ describe("TS Query API", () => {
         title: "Write tests",
         done: false,
         tags: ["dev"],
-        project: projectId,
-        owner: ownerId,
-        assignees: [],
+        projectId: projectId,
+        ownerId: ownerId,
+        assigneesIds: [],
       });
 
       const result = await db.one(app.todos.select("*").where({ id: { eq: todoId } }));
@@ -581,9 +581,9 @@ describe("TS Query API", () => {
         title: "Write tests",
         done: false,
         tags: ["dev"],
-        project: projectId,
-        owner: ownerId,
-        assignees: [],
+        projectId,
+        ownerId,
+        assigneesIds: [],
       });
     });
 
@@ -602,15 +602,15 @@ describe("TS Query API", () => {
         title: "Draft docs",
         done: false,
         tags: ["dev"],
-        project: projectId,
-        assignees: [],
+        projectId,
+        assigneesIds: [],
       });
       const { id: lockedId } = insertTodo(db, {
         title: "Shipped docs",
         done: true,
         tags: ["docs"],
-        project: projectId,
-        assignees: [],
+        projectId,
+        assigneesIds: [],
       });
 
       const projected = await db.all(
@@ -690,9 +690,9 @@ describe("TS Query API", () => {
         title: "Write tests",
         done: false,
         tags: ["dev"],
-        project: projectId,
-        owner: ownerId,
-        assignees: [],
+        projectId,
+        ownerId,
+        assigneesIds: [],
       });
 
       const result = await db.one(
@@ -765,9 +765,9 @@ describe("TS Query API", () => {
         title: "Watch subscription",
         done: false,
         tags: ["dev"],
-        project: projectId,
-        owner: ownerId,
-        assignees: [],
+        projectId,
+        ownerId,
+        assigneesIds: [],
       });
 
       const delta = await deltaPromise;

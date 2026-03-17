@@ -55,7 +55,7 @@ table("projects", {
 
 table("todos", {
   title: col.string(),
-  owner_id: col.string(),
+  ownerId: col.string(),
 });
 `;
 }
@@ -70,7 +70,7 @@ table("projects", {
 
 table("todos", {
   title: col.string(),
-  owner_id: col.string(),
+  ownerId: col.string(),
 }, {
   permissions: {
     select: { type: "True" },
@@ -138,7 +138,7 @@ table("projects", {
 
 table("todos", {
   title: col.string(),
-  owner_id: col.string(),
+  ownerId: col.string(),
 });
 `;
 }
@@ -194,7 +194,7 @@ table("projects", {
 
 table("todos", {
   title: col.string(),
-  owner_id: col.string(),
+  ownerId: col.string(),
 });
 
 table("comments", {

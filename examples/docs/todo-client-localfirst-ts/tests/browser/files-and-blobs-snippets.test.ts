@@ -43,9 +43,9 @@ describe("files and blobs docs snippets", () => {
     expect(db.insertDurable).toHaveBeenCalledWith(
       app.uploads,
       {
-        owner_id: "local:example-owner",
+        ownerId: "local:example-owner",
         label: "Profile photo",
-        file: "file-blob-1",
+        fileId: "file-blob-1",
       },
       { tier: "edge" },
     );
@@ -65,9 +65,9 @@ describe("files and blobs docs snippets", () => {
     expect(db.insertDurable).toHaveBeenCalledWith(
       app.uploads,
       {
-        owner_id: "local:example-owner",
+        ownerId: "local:example-owner",
         label: "Camera import",
-        file: "file-stream-1",
+        fileId: "file-stream-1",
       },
       { tier: "edge" },
     );
@@ -77,9 +77,9 @@ describe("files and blobs docs snippets", () => {
     const db = makeDb();
     db.one.mockResolvedValueOnce({
       id: "upload-1",
-      owner_id: "local:example-owner",
+      ownerId: "local:example-owner",
       label: "x",
-      file: "file-1",
+      fileId: "file-1",
     });
 
     const blob = await loadUploadBlob(db as unknown as Db, "upload-1");
@@ -92,9 +92,9 @@ describe("files and blobs docs snippets", () => {
     const db = makeDb();
     db.one.mockResolvedValueOnce({
       id: "upload-1",
-      owner_id: "local:example-owner",
+      ownerId: "local:example-owner",
       label: "x",
-      file: "file-1",
+      fileId: "file-1",
     });
 
     const stream = await loadUploadStream(db as unknown as Db, "upload-1");
@@ -108,15 +108,15 @@ describe("files and blobs docs snippets", () => {
     db.one
       .mockResolvedValueOnce({
         id: "upload-1",
-        owner_id: "local:example-owner",
+        ownerId: "local:example-owner",
         label: "x",
-        file: "file-1",
+        fileId: "file-1",
       })
       .mockResolvedValueOnce({
         id: "file-1",
         name: "hello.txt",
         mimeType: "text/plain",
-        parts: ["part-1", "part-2"],
+        partIds: ["part-1", "part-2"],
         partSizes: [5, 5],
       });
 
@@ -133,25 +133,25 @@ describe("files and blobs docs snippets", () => {
       type: "InheritsReferencing",
       operation: "Select",
       source_table: "uploads",
-      via_column: "file",
+      via_column: "fileId",
     });
     expect(fileBlobPermissions.file_parts.select?.using).toEqual({
       type: "InheritsReferencing",
       operation: "Select",
       source_table: "files",
-      via_column: "parts",
+      via_column: "partIds",
     });
     expect(fileBlobPermissions.files.delete?.using).toEqual({
       type: "InheritsReferencing",
       operation: "Delete",
       source_table: "uploads",
-      via_column: "file",
+      via_column: "fileId",
     });
     expect(fileBlobPermissions.file_parts.delete?.using).toEqual({
       type: "InheritsReferencing",
       operation: "Delete",
       source_table: "files",
-      via_column: "parts",
+      via_column: "partIds",
     });
   });
 });

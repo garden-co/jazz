@@ -72,12 +72,12 @@ describe("schemaToWasm", () => {
   });
 
   it("converts ref to Uuid with references", () => {
-    table("items", { owner_id: col.ref("users") });
+    table("items", { ownerId: col.ref("users") });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
     expect(wasm.items.columns[0]).toEqual({
-      name: "owner_id",
+      name: "ownerId",
       column_type: { type: "Uuid" },
       nullable: false,
       references: "users",
@@ -97,12 +97,12 @@ describe("schemaToWasm", () => {
   });
 
   it("handles nullable refs", () => {
-    table("todos", { parent_id: col.ref("todos").optional() });
+    table("todos", { parentId: col.ref("todos").optional() });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
     expect(wasm.todos.columns[0]).toEqual({
-      name: "parent_id",
+      name: "parentId",
       column_type: { type: "Uuid" },
       nullable: true,
       references: "todos",
@@ -225,7 +225,7 @@ describe("schemaToWasm", () => {
 
   it("converts multiple tables", () => {
     table("users", { name: col.string() });
-    table("todos", { title: col.string(), user_id: col.ref("users") });
+    table("todos", { title: col.string(), userId: col.ref("users") });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
@@ -235,7 +235,7 @@ describe("schemaToWasm", () => {
   });
 
   it("carries table permissions into wasm schema", () => {
-    table("todos", { owner_id: col.string(), title: col.string() });
+    table("todos", { ownerId: col.string(), title: col.string() });
     const schema = getCollectedSchema();
     const ownerMatchesSession: import("../schema.js").PolicyExpr = {
       type: "Cmp",
@@ -296,7 +296,7 @@ describe("schemaToWasm", () => {
   });
 
   it("carries InheritsReferencing policies into wasm schema", () => {
-    table("files", { owner_id: col.string() });
+    table("files", { ownerId: col.string() });
     const schema = getCollectedSchema();
     schema.tables[0]!.policies = {
       select: {
@@ -438,12 +438,12 @@ describe("generateTypes", () => {
 
   it("maps ref columns to string type", () => {
     table("users", { name: col.string() });
-    table("todos", { owner_id: col.ref("users") });
+    table("todos", { ownerId: col.ref("users") });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("  owner_id: string;");
+    expect(output).toContain("  ownerId: string;");
   });
 
   it("maps array columns recursively", () => {
@@ -539,7 +539,7 @@ describe("generateClient", () => {
     table("todos", {
       title: col.string(),
       done: col.boolean(),
-      parent_id: col.ref("todos").optional(),
+      parentId: col.ref("todos").optional(),
     });
     const schema = getCollectedSchema();
     const output = generateClient(schema);
@@ -553,7 +553,7 @@ describe("generateClient", () => {
     expect(output).toContain("  id: string;");
     expect(output).toContain("  title: string;");
     expect(output).toContain("  done: boolean;");
-    expect(output).toContain("  parent_id?: string;");
+    expect(output).toContain("  parentId?: string;");
 
     // Init interface
     expect(output).toContain("export interface TodoInit {");
@@ -651,6 +651,80 @@ describe("analyzeRelations", () => {
         name: "parts",
         type: "forward",
         toTable: "file_parts",
+        isArray: true,
+      }),
+    );
+  });
+
+  it("keeps singular array reference columns pluralized", () => {
+    const schema: WasmSchema = {
+      files: {
+        columns: [
+          {
+            name: "partIds",
+            column_type: { type: "Array", element: { type: "Uuid" } },
+            nullable: false,
+            references: "file_parts",
+          },
+        ],
+      },
+      file_parts: { columns: [] },
+    };
+
+    const relations = analyzeRelations(schema);
+
+    expect(relations.get("files")).toContainEqual(
+      expect.objectContaining({
+        name: "parts",
+        type: "forward",
+        toTable: "file_parts",
+        fromColumn: "partIds",
+        isArray: true,
+      }),
+    );
+    expect(relations.get("file_parts")).toContainEqual(
+      expect.objectContaining({
+        name: "filesViaParts",
+        type: "reverse",
+        toTable: "files",
+        toColumn: "partIds",
+        isArray: true,
+      }),
+    );
+  });
+
+  it("keeps already-plural array reference columns pluralized", () => {
+    const schema: WasmSchema = {
+      groups: {
+        columns: [
+          {
+            name: "assigneesIds",
+            column_type: { type: "Array", element: { type: "Uuid" } },
+            nullable: false,
+            references: "users",
+          },
+        ],
+      },
+      users: { columns: [] },
+    };
+
+    const relations = analyzeRelations(schema);
+
+    expect(relations.get("groups")).toContainEqual(
+      expect.objectContaining({
+        name: "assignees",
+        type: "forward",
+        toTable: "users",
+        fromColumn: "assigneesIds",
+        isArray: true,
+      }),
+    );
+    expect(relations.get("users")).toContainEqual(
+      expect.objectContaining({
+        name: "groupsViaAssignees",
+        type: "reverse",
+        toTable: "groups",
+        toColumn: "assigneesIds",
         isArray: true,
       }),
     );
@@ -764,7 +838,7 @@ describe("generateTypes with relations", () => {
   });
 
   it("generates Include types", () => {
-    table("todos", { owner_id: col.ref("users") });
+    table("todos", { ownerId: col.ref("users") });
     table("users", { name: col.string() });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
@@ -779,7 +853,7 @@ describe("generateTypes with relations", () => {
   });
 
   it("generates Relations types", () => {
-    table("todos", { owner_id: col.ref("users") });
+    table("todos", { ownerId: col.ref("users") });
     table("users", { name: col.string() });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
@@ -790,7 +864,7 @@ describe("generateTypes with relations", () => {
   });
 
   it("generates reverse relations as arrays", () => {
-    table("todos", { owner_id: col.ref("users") });
+    table("todos", { ownerId: col.ref("users") });
     table("users", { name: col.string() });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
@@ -801,7 +875,7 @@ describe("generateTypes with relations", () => {
   });
 
   it("generates WithIncludes types", () => {
-    table("todos", { owner_id: col.ref("users") });
+    table("todos", { ownerId: col.ref("users") });
     table("users", { name: col.string() });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
@@ -811,10 +885,10 @@ describe("generateTypes with relations", () => {
       "export type TodoIncludedRelations<I extends TodoInclude = {}, R extends boolean = false> = {",
     );
     expect(output).toContain(
-      "export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Omit<Todo, Extract<keyof I, keyof Todo>> & TodoIncludedRelations<I, R>;",
+      "export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Todo & TodoIncludedRelations<I, R>;",
     );
     expect(output).toContain(
-      "export type UserWithIncludes<I extends UserInclude = {}, R extends boolean = false> = Omit<User, Extract<keyof I, keyof User>> & UserIncludedRelations<I, R>;",
+      "export type UserWithIncludes<I extends UserInclude = {}, R extends boolean = false> = User & UserIncludedRelations<I, R>;",
     );
     expect(output).toContain("[K in keyof I]-?:");
     expect(output).toContain('K extends "owner"');
@@ -839,7 +913,7 @@ describe("generateTypes with relations", () => {
 
   it("preserves undefined for nullable forward includes", () => {
     table("users", { name: col.string() });
-    table("todos", { owner_id: col.ref("users").optional() });
+    table("todos", { ownerId: col.ref("users").optional() });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
@@ -861,9 +935,26 @@ describe("generateTypes with relations", () => {
     expect(output).toContain("? UserWithIncludes<RelationInclude, false>[] | undefined");
   });
 
+  it("uses pluralized relation names for array ref columns ending in Ids", () => {
+    table("file_parts", { data: col.bytes() });
+    table("files", {
+      partIds: col.array(col.ref("file_parts")),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain("export interface FileInclude {");
+    expect(output).toContain("parts?: true | FilePartInclude | AnyFilePartQueryBuilder<any>;");
+    expect(output).toContain("export interface FilePartInclude {");
+    expect(output).toContain("filesViaParts?: true | FileInclude | AnyFileQueryBuilder<any>;");
+    expect(output).not.toContain("part?: true | FilePartInclude | AnyFilePartQueryBuilder<any>;");
+    expect(output).not.toContain("filesViaPart?: true | FileInclude | AnyFileQueryBuilder<any>;");
+  });
+
   it("generates selection helper types", () => {
     table("users", { name: col.string() });
-    table("todos", { owner_id: col.ref("users"), title: col.string() });
+    table("todos", { ownerId: col.ref("users"), title: col.string() });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
@@ -887,21 +978,19 @@ describe("generateTypes with relations", () => {
     expect(output).toContain(
       "export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false>",
     );
-    expect(output).toContain(
-      "Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I, R>",
-    );
+    expect(output).toContain("TodoSelected<S> & TodoIncludedRelations<I, R>");
   });
 
   it("avoids collapsing nested array includes to never when selectors are optional", () => {
-    table("teams", { legacy_id: col.string() });
+    table("teams", { legacyId: col.string() });
     table("resources", { kind: col.enum("branding") });
     table("resource_access_edges", {
-      resource: col.ref("resources"),
-      team: col.ref("teams"),
+      resourceId: col.ref("resources"),
+      teamId: col.ref("teams"),
       grant_role: col.enum("viewer", "editor", "manager"),
     });
     table("brandings", {
-      resource: col.ref("resources"),
+      resourceId: col.ref("resources"),
       name: col.string(),
     });
     const schema = getCollectedSchema();
@@ -918,7 +1007,7 @@ describe("generateTypes with relations", () => {
   it("generates Include types for self-referential tables", () => {
     table("todos", {
       title: col.string(),
-      parent_id: col.ref("todos").optional(),
+      parentId: col.ref("todos").optional(),
     });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
@@ -988,22 +1077,22 @@ describe("generateWhereInputTypes", () => {
 
   it("generates FK filter with isNull for nullable refs", () => {
     table("users", { name: col.string() });
-    table("todos", { owner_id: col.ref("users").optional() });
+    table("todos", { ownerId: col.ref("users").optional() });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("owner_id?: string | { eq?: string; ne?: string; isNull?: boolean };");
+    expect(output).toContain("ownerId?: string | { eq?: string; ne?: string; isNull?: boolean };");
   });
 
   it("generates FK filter without isNull for required refs", () => {
     table("users", { name: col.string() });
-    table("todos", { owner_id: col.ref("users") });
+    table("todos", { ownerId: col.ref("users") });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("owner_id?: string | { eq?: string; ne?: string };");
+    expect(output).toContain("ownerId?: string | { eq?: string; ne?: string };");
   });
 
   it("generates array filters with eq and contains", () => {
@@ -1056,7 +1145,7 @@ describe("generateQueryBuilderClasses", () => {
 
   it("generates QueryBuilder with Include constraint for tables with relations", () => {
     table("users", { name: col.string() });
-    table("todos", { owner_id: col.ref("users") });
+    table("todos", { ownerId: col.ref("users") });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
@@ -1069,7 +1158,7 @@ describe("generateQueryBuilderClasses", () => {
 
   it("generates include method for tables with relations", () => {
     table("users", { name: col.string() });
-    table("todos", { owner_id: col.ref("users") });
+    table("todos", { ownerId: col.ref("users") });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
@@ -1084,7 +1173,7 @@ describe("generateQueryBuilderClasses", () => {
 
   it("generates hopTo method for tables with relations", () => {
     table("users", { name: col.string() });
-    table("todos", { owner_id: col.ref("users") });
+    table("todos", { ownerId: col.ref("users") });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
@@ -1108,7 +1197,7 @@ describe("generateQueryBuilderClasses", () => {
 
   it("updates Include types with QueryBuilder union", () => {
     table("users", { name: col.string() });
-    table("todos", { owner_id: col.ref("users") });
+    table("todos", { ownerId: col.ref("users") });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
@@ -1157,7 +1246,7 @@ describe("generateQueryBuilderClasses", () => {
   });
 
   it("generates gather helper that compiles start + step", () => {
-    table("todos", { title: col.string(), parent_id: col.ref("todos").optional() });
+    table("todos", { title: col.string(), parentId: col.ref("todos").optional() });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
@@ -1211,7 +1300,7 @@ describe("QueryBuilder self-referential relations", () => {
   it("generates Include with QueryBuilder for self-referential tables", () => {
     table("todos", {
       title: col.string(),
-      parent_id: col.ref("todos").optional(),
+      parentId: col.ref("todos").optional(),
     });
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);

@@ -18,7 +18,7 @@ export interface PermissionIntrospectionColumns {
 export interface User {
   id: string;
   name: string;
-  friends: string[];
+  friendsIds: string[];
 }
 
 export interface Project {
@@ -31,14 +31,14 @@ export interface Todo {
   title: string;
   done: boolean;
   tags: string[];
-  project: string;
-  owner?: string;
-  assignees: string[];
+  projectId: string;
+  ownerId?: string;
+  assigneesIds: string[];
 }
 
 export interface UserInit {
   name: string;
-  friends: string[];
+  friendsIds: string[];
 }
 
 export interface ProjectInit {
@@ -49,15 +49,15 @@ export interface TodoInit {
   title: string;
   done: boolean;
   tags: string[];
-  project: string;
-  owner?: string;
-  assignees: string[];
+  projectId: string;
+  ownerId?: string;
+  assigneesIds: string[];
 }
 
 export interface UserWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   name?: string | { eq?: string; ne?: string; contains?: string };
-  friends?: string[] | { eq?: string[]; contains?: string };
+  friendsIds?: string[] | { eq?: string[]; contains?: string };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -76,9 +76,9 @@ export interface TodoWhereInput {
   title?: string | { eq?: string; ne?: string; contains?: string };
   done?: boolean;
   tags?: string[] | { eq?: string[]; contains?: string };
-  project?: string | { eq?: string; ne?: string };
-  owner?: string | { eq?: string; ne?: string; isNull?: boolean };
-  assignees?: string[] | { eq?: string[]; contains?: string };
+  projectId?: string | { eq?: string; ne?: string };
+  ownerId?: string | { eq?: string; ne?: string; isNull?: boolean };
+  assigneesIds?: string[] | { eq?: string[]; contains?: string };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -220,22 +220,15 @@ export interface TodoRelations {
   assignees: User[];
 }
 
-export type UserWithIncludes<I extends UserInclude = {}, R extends boolean = false> = Omit<
-  User,
-  Extract<keyof I, keyof User>
-> &
+export type UserWithIncludes<I extends UserInclude = {}, R extends boolean = false> = User &
   UserIncludedRelations<I, R>;
 
-export type ProjectWithIncludes<I extends ProjectInclude = {}, R extends boolean = false> = Omit<
-  Project,
-  Extract<keyof I, keyof Project>
-> &
-  ProjectIncludedRelations<I, R>;
+export type ProjectWithIncludes<
+  I extends ProjectInclude = {},
+  R extends boolean = false,
+> = Project & ProjectIncludedRelations<I, R>;
 
-export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Omit<
-  Todo,
-  Extract<keyof I, keyof Todo>
-> &
+export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Todo &
   TodoIncludedRelations<I, R>;
 
 export type UserSelectableColumn = keyof User | PermissionIntrospectionColumn | "*";
@@ -250,7 +243,7 @@ export type UserSelectedWithIncludes<
   I extends UserInclude = {},
   S extends UserSelectableColumn = keyof User,
   R extends boolean = false,
-> = Omit<UserSelected<S>, Extract<keyof I, keyof UserSelected<S>>> & UserIncludedRelations<I, R>;
+> = UserSelected<S> & UserIncludedRelations<I, R>;
 
 export type ProjectSelectableColumn = keyof Project | PermissionIntrospectionColumn | "*";
 export type ProjectOrderableColumn = keyof Project | PermissionIntrospectionColumn;
@@ -264,8 +257,7 @@ export type ProjectSelectedWithIncludes<
   I extends ProjectInclude = {},
   S extends ProjectSelectableColumn = keyof Project,
   R extends boolean = false,
-> = Omit<ProjectSelected<S>, Extract<keyof I, keyof ProjectSelected<S>>> &
-  ProjectIncludedRelations<I, R>;
+> = ProjectSelected<S> & ProjectIncludedRelations<I, R>;
 
 export type TodoSelectableColumn = keyof Todo | PermissionIntrospectionColumn | "*";
 export type TodoOrderableColumn = keyof Todo | PermissionIntrospectionColumn;
@@ -279,7 +271,7 @@ export type TodoSelectedWithIncludes<
   I extends TodoInclude = {},
   S extends TodoSelectableColumn = keyof Todo,
   R extends boolean = false,
-> = Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I, R>;
+> = TodoSelected<S> & TodoIncludedRelations<I, R>;
 
 export const wasmSchema: WasmSchema = {
   users: {
@@ -292,7 +284,7 @@ export const wasmSchema: WasmSchema = {
         nullable: false,
       },
       {
-        name: "friends",
+        name: "friendsIds",
         column_type: {
           type: "Array",
           element: {
@@ -342,7 +334,7 @@ export const wasmSchema: WasmSchema = {
         nullable: false,
       },
       {
-        name: "project",
+        name: "projectId",
         column_type: {
           type: "Uuid",
         },
@@ -350,7 +342,7 @@ export const wasmSchema: WasmSchema = {
         references: "projects",
       },
       {
-        name: "owner",
+        name: "ownerId",
         column_type: {
           type: "Uuid",
         },
@@ -358,7 +350,7 @@ export const wasmSchema: WasmSchema = {
         references: "users",
       },
       {
-        name: "assignees",
+        name: "assigneesIds",
         column_type: {
           type: "Array",
           element: {

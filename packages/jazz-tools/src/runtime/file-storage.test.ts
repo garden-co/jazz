@@ -11,7 +11,7 @@ interface StoredFile {
   id: string;
   name?: string;
   mimeType: string;
-  parts: string[];
+  partIds: string[];
   partSizes: number[];
 }
 
@@ -178,7 +178,7 @@ describe("createFileStorage", () => {
     expect(db.inserts.map((insert) => insert.table)).toEqual(["file_parts", "file_parts", "files"]);
     expect(Array.from((db.inserts[0]?.data.data as Uint8Array) ?? [])).toEqual([1, 2, 3, 4]);
     expect(Array.from((db.inserts[1]?.data.data as Uint8Array) ?? [])).toEqual([5, 6]);
-    expect(file.parts).toEqual(["file_parts-1", "file_parts-2"]);
+    expect(file.partIds).toEqual(["file_parts-1", "file_parts-2"]);
     expect(file.partSizes).toEqual([4, 2]);
     expect(file.name).toBe("demo.bin");
     expect(file.mimeType).toBe("application/test");
@@ -221,7 +221,7 @@ describe("createFileStorage", () => {
       id: "file-1",
       name: "demo.bin",
       mimeType: "application/test",
-      parts: ["part-1", "part-2"],
+      partIds: ["part-1", "part-2"],
       partSizes: [2, 3],
     });
     db.fileParts.set("part-1", { id: "part-1", data: Uint8Array.from([1, 2]) });
@@ -254,7 +254,7 @@ describe("createFileStorage", () => {
       id: "file-1",
       name: "demo.bin",
       mimeType: "application/test",
-      parts: ["part-1", "part-2"],
+      partIds: ["part-1", "part-2"],
       partSizes: [2, 3],
     });
     db.fileParts.set("part-1", { id: "part-1", data: Uint8Array.from([1, 2]) });
@@ -281,7 +281,7 @@ describe("createFileStorage", () => {
       id: "file-1",
       name: "demo.bin",
       mimeType: "application/test",
-      parts: ["part-1", "part-2"],
+      partIds: ["part-1", "part-2"],
       partSizes: [2, 3],
     });
     db.fileParts.set("part-1", { id: "part-1", data: Uint8Array.from([1, 2]) });

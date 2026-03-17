@@ -14,7 +14,7 @@
 
 	// #region auth-session-svelte-query
 	const ownedTodos = new QuerySubscription(
-		app.todos.where({ owner_id: sessionUserId ?? '__no-session__' }),
+		app.todos.where({ ownerId: sessionUserId ?? '__no-session__' }),
 	);
 	// #endregion auth-session-svelte-query
 
@@ -25,7 +25,7 @@
 		db.insert(app.todos, {
 			title,
 			done: false,
-			owner_id: sessionUserId,
+			ownerId: sessionUserId,
 		});
 	}
 	// #endregion auth-session-svelte-insert
