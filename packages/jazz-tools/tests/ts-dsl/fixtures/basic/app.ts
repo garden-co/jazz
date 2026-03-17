@@ -18,7 +18,7 @@ export interface PermissionIntrospectionColumns {
 export interface User {
   id: string;
   name: string;
-  friends: string[];
+  friendsIds: string[];
 }
 
 export interface Project {
@@ -38,7 +38,7 @@ export interface Todo {
 
 export interface UserInit {
   name: string;
-  friends: string[];
+  friendsIds: string[];
 }
 
 export interface ProjectInit {
@@ -57,7 +57,7 @@ export interface TodoInit {
 export interface UserWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   name?: string | { eq?: string; ne?: string; contains?: string };
-  friends?: string[] | { eq?: string[]; contains?: string };
+  friendsIds?: string[] | { eq?: string[]; contains?: string };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -284,7 +284,7 @@ export const wasmSchema: WasmSchema = {
         nullable: false,
       },
       {
-        name: "friends",
+        name: "friendsIds",
         column_type: {
           type: "Array",
           element: {

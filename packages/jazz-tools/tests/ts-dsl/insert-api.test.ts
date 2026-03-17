@@ -7,7 +7,7 @@ function uniqueDbName(label: string): string {
 }
 
 function insertOwner(db: Db, name = "Test User") {
-  return db.insert(app.users, { name, friends: [] });
+  return db.insert(app.users, { name, friendsIds: [] });
 }
 
 describe("TS Write API", () => {
