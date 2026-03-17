@@ -36,7 +36,7 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
     handled.current = true;
 
     db.insert(app.chatMembers, {
-      chat: chatId,
+      chatId,
       userId,
       joinCode: code,
     });

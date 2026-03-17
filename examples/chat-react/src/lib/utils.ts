@@ -60,29 +60,18 @@ export function getRandomUsername() {
   return `Anonymous ${animals[Math.floor(Math.random() * animals.length)]}`;
 }
 
-/** Decode a data URI (e.g. from FileReader.readAsDataURL) into a Blob. */
-export function dataUriToBlob(dataUri: string, mimeType: string): Blob {
-  const commaIdx = dataUri.indexOf(",");
-  if (commaIdx === -1) {
-    throw new Error("Invalid data URI: missing comma separator");
-  }
-  const byteString = atob(dataUri.slice(commaIdx + 1));
-  const ab = new ArrayBuffer(byteString.length);
-  const ia = new Uint8Array(ab);
-  for (let i = 0; i < byteString.length; i++) {
-    ia[i] = byteString.charCodeAt(i);
-  }
-  return new Blob([ab], { type: mimeType });
-}
-
-export function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
+export function downloadUrl(url: string, filename: string) {
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
+}
+
+export function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  downloadUrl(url, filename);
   URL.revokeObjectURL(url);
 }
 
@@ -105,18 +94,10 @@ export function logOut() {
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
-export function fileToBase64(file: File): Promise<string> {
+export function validateFileSize(file: File) {
   if (file.size > MAX_FILE_SIZE) {
-    return Promise.reject(
-      new Error(
-        `File is too large (${formatBytes(file.size)}). Maximum size is ${formatBytes(MAX_FILE_SIZE)}.`,
-      ),
+    throw new Error(
+      `File is too large (${formatBytes(file.size)}). Maximum size is ${formatBytes(MAX_FILE_SIZE)}.`,
     );
   }
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
 }
