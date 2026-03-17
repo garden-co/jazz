@@ -1,6 +1,6 @@
 :root {
   color: #111111;
-  background: #ededed;
+  background: #ffffff;
   font-family:
     ui-sans-serif,
     -apple-system,
@@ -64,15 +64,12 @@ select {
   margin-bottom: 52px;
 }
 
-.brand-mark {
-  color: #2563eb;
-  font-size: 4.75rem;
-  line-height: 1;
-}
-
-.brand-name {
-  font-size: 4.25rem;
-  font-weight: 500;
+.brand-logo {
+  display: block;
+  width: 12rem;
+  max-width: 100%;
+  margin: 0 auto;
+  color: #111111;
 }
 
 .uploader-layout {
@@ -87,7 +84,8 @@ select {
   width: min(100%, 840px);
   min-height: 228px;
   border: 2px dashed #aba39b;
-  background: rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: #f5f5f4;
   color: #111111;
   font-size: 1.05rem;
   transition:
@@ -119,7 +117,7 @@ select {
 .file-input {
   width: 100%;
   padding: 7px 10px;
-  background: #e4e4e4;
+  background: #f5f5f4;
 }
 
 .action-button,

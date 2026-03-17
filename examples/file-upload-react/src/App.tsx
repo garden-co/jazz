@@ -10,6 +10,7 @@ import {
 } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
 import { app, UploadWithIncludes, type File as JazzFile } from "../schema/app.js";
+import { Logo } from "./Logo.js";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -187,10 +188,7 @@ function FileUploadScreen() {
   return (
     <main className="page-shell">
       <header className="brand-header" aria-label="Jazz">
-        <span className="brand-mark" aria-hidden="true">
-          ♫
-        </span>
-        <span className="brand-name">jazz</span>
+        <Logo />
       </header>
 
       {!latestUpload ? (
