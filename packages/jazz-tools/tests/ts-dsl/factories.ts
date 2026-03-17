@@ -6,7 +6,7 @@ export function uniqueDbName(label: string): string {
 }
 
 export function insertUser(db: Db, name = "Test User"): User {
-  return db.insert(app.users, { name, friends: [] });
+  return db.insert(app.users, { name, friendsIds: [] });
 }
 
 export function insertProject(db: Db, name = "Test Project"): Project {
@@ -18,8 +18,8 @@ export function insertTodo(db: Db, data: Partial<Todo>): Todo {
     title: data.title ?? "Test Todo",
     done: data.done ?? false,
     tags: data.tags ?? [],
-    project: data.project ?? insertProject(db).id,
-    owner: data.owner ?? undefined,
-    assignees: data.assignees ?? [],
+    projectId: data.projectId ?? insertProject(db).id,
+    ownerId: data.ownerId ?? undefined,
+    assigneesIds: data.assigneesIds ?? [],
   });
 }
