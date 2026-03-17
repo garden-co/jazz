@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { createJazzClient, JazzProvider, getActiveSyntheticAuth } from "jazz-tools/react";
 import { Canvas } from "./Canvas.js";
 
@@ -41,38 +41,8 @@ function defaultConfig(
 
 export function App() {
   const resolvedConfig = useMemo(() => defaultConfig(), []);
-  const [client, setClient] = useState<Awaited<ReturnType<typeof createJazzClient>> | null>(null);
-  const [error, setError] = useState<unknown>(null);
-
-  useEffect(() => {
-    let active = true;
-    const pending = createJazzClient(resolvedConfig);
-
-    void pending.then(
-      (resolved) => {
-        if (!active) {
-          void resolved.shutdown();
-          return;
-        }
-        setClient(resolved);
-      },
-      (reason) => {
-        if (!active) return;
-        setError(reason);
-      },
-    );
-
-    return () => {
-      active = false;
-      void pending.then((resolved) => resolved.shutdown()).catch(() => {});
-    };
-  }, [resolvedConfig]);
-
-  if (error) throw error;
-  if (!client) return <main>Initializing Jazz client...</main>;
-
   return (
-    <JazzProvider client={client}>
+    <JazzProvider config={resolvedConfig} fallback={<main>Initializing Jazz client...</main>}>
       <main>
         <h1>Poster Shop</h1>
         <Canvas />

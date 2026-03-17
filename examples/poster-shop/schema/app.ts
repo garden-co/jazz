@@ -1,30 +1,34 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
 import type { WasmSchema, QueryBuilder, JsonSchemaToTs } from "jazz-tools";
-export type JsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | { [key: string]: JsonValue }
-  | JsonValue[];
+export type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];
 
 const __jsonSchema1 = {
-  $schema: "http://json-schema.org/draft-07/schema#",
-  type: "array",
-  items: {
-    type: "object",
-    properties: {
-      x: {
-        type: "number",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "x": {
+        "type": "number"
       },
-      y: {
-        type: "number",
-      },
+      "y": {
+        "type": "number"
+      }
     },
-    required: ["x", "y"],
-  },
+    "required": [
+      "x",
+      "y"
+    ]
+  }
 } as const;
 type __JsonType1 = JsonSchemaToTs<typeof __jsonSchema1>;
+
+export type PermissionIntrospectionColumn = "$canRead" | "$canEdit" | "$canDelete";
+export interface PermissionIntrospectionColumns {
+  $canRead: boolean | null;
+  $canEdit: boolean | null;
+  $canDelete: boolean | null;
+}
 
 export interface User {
   id: string;
@@ -70,12 +74,18 @@ export interface UserWhereInput {
   user_id?: string | { eq?: string; ne?: string; contains?: string };
   name?: string | { eq?: string; ne?: string; contains?: string };
   created_at?: string | { eq?: string; ne?: string; contains?: string };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
 export interface CanvasWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   name?: string | { eq?: string; ne?: string; contains?: string };
   created_at?: string | { eq?: string; ne?: string; contains?: string };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
 export interface StrokeWhereInput {
@@ -84,223 +94,232 @@ export interface StrokeWhereInput {
   user_id?: string | { eq?: string; ne?: string; contains?: string };
   points?: __JsonType1 | { eq?: __JsonType1; ne?: __JsonType1; in?: __JsonType1[] };
   created_at?: string | { eq?: string; ne?: string; contains?: string };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
 }
 
+type AnyUserQueryBuilder<T = any> = { readonly _table: "users" } & QueryBuilder<T>;
+type AnyCanvasQueryBuilder<T = any> = { readonly _table: "canvases" } & QueryBuilder<T>;
+type AnyStrokeQueryBuilder<T = any> = { readonly _table: "strokes" } & QueryBuilder<T>;
+
 export interface CanvasInclude {
-  strokesViaCanvas?: true | StrokeInclude | StrokeQueryBuilder;
+  strokesViaCanvas?: true | StrokeInclude | AnyStrokeQueryBuilder<any>;
 }
 
 export interface StrokeInclude {
-  canvas?: true | CanvasInclude | CanvasQueryBuilder;
+  canvas?: true | CanvasInclude | AnyCanvasQueryBuilder<any>;
 }
+
+export type CanvasIncludedRelations<I extends CanvasInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "strokesViaCanvas"
+      ? NonNullable<I["strokesViaCanvas"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Stroke[]
+          : RelationInclude extends AnyStrokeQueryBuilder<infer QueryRow>
+            ? QueryRow[]
+            : RelationInclude extends StrokeInclude
+              ? StrokeWithIncludes<RelationInclude, false>[]
+              : never
+        : never
+    : never;
+};
+
+export type StrokeIncludedRelations<I extends StrokeInclude = {}, R extends boolean = false> = {
+  [K in keyof I]-?:
+    K extends "canvas"
+      ? NonNullable<I["canvas"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? R extends true ? Canvas : Canvas | undefined
+          : RelationInclude extends AnyCanvasQueryBuilder<infer QueryRow>
+            ? R extends true ? QueryRow : QueryRow | undefined
+            : RelationInclude extends CanvasInclude
+              ? R extends true ? CanvasWithIncludes<RelationInclude, false> : CanvasWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : never;
+};
 
 export interface CanvasRelations {
   strokesViaCanvas: Stroke[];
 }
 
 export interface StrokeRelations {
-  canvas: Canvas;
+  canvas: Canvas | undefined;
 }
 
-export type CanvasWithIncludes<I extends CanvasInclude = {}> = Canvas & {
-  strokesViaCanvas?: NonNullable<I["strokesViaCanvas"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Stroke[]
-      : RelationInclude extends StrokeQueryBuilder<
-            infer QueryInclude extends StrokeInclude,
-            infer QuerySelect extends keyof Stroke | "*"
-          >
-        ? StrokeSelectedWithIncludes<QueryInclude, QuerySelect>[]
-        : RelationInclude extends StrokeInclude
-          ? StrokeWithIncludes<RelationInclude>[]
-          : never
-    : never;
-};
+export type CanvasWithIncludes<I extends CanvasInclude = {}, R extends boolean = false> = Canvas & CanvasIncludedRelations<I, R>;
 
-export type StrokeWithIncludes<I extends StrokeInclude = {}> = Stroke & {
-  canvas?: NonNullable<I["canvas"]> extends infer RelationInclude
-    ? RelationInclude extends true
-      ? Canvas
-      : RelationInclude extends CanvasQueryBuilder<
-            infer QueryInclude extends CanvasInclude,
-            infer QuerySelect extends keyof Canvas | "*"
-          >
-        ? CanvasSelectedWithIncludes<QueryInclude, QuerySelect>
-        : RelationInclude extends CanvasInclude
-          ? CanvasWithIncludes<RelationInclude>
-          : never
-    : never;
-};
+export type StrokeWithIncludes<I extends StrokeInclude = {}, R extends boolean = false> = Stroke & StrokeIncludedRelations<I, R>;
 
-export type UserSelected<S extends keyof User | "*" = keyof User> = "*" extends S
-  ? User
-  : Pick<User, Extract<S | "id", keyof User>>;
+export type UserSelectableColumn = keyof User | PermissionIntrospectionColumn | "*";
+export type UserOrderableColumn = keyof User | PermissionIntrospectionColumn;
 
-export type CanvasSelected<S extends keyof Canvas | "*" = keyof Canvas> = "*" extends S
-  ? Canvas
-  : Pick<Canvas, Extract<S | "id", keyof Canvas>>;
+export type UserSelected<S extends UserSelectableColumn = keyof User> = "*" extends S ? User : Pick<User, Extract<S | "id", keyof User>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type CanvasSelectedWithIncludes<
-  I extends CanvasInclude = {},
-  S extends keyof Canvas | "*" = keyof Canvas,
-> = CanvasSelected<S> & Omit<CanvasWithIncludes<I>, keyof Canvas>;
+export type CanvasSelectableColumn = keyof Canvas | PermissionIntrospectionColumn | "*";
+export type CanvasOrderableColumn = keyof Canvas | PermissionIntrospectionColumn;
 
-export type StrokeSelected<S extends keyof Stroke | "*" = keyof Stroke> = "*" extends S
-  ? Stroke
-  : Pick<Stroke, Extract<S | "id", keyof Stroke>>;
+export type CanvasSelected<S extends CanvasSelectableColumn = keyof Canvas> = "*" extends S ? Canvas : Pick<Canvas, Extract<S | "id", keyof Canvas>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type StrokeSelectedWithIncludes<
-  I extends StrokeInclude = {},
-  S extends keyof Stroke | "*" = keyof Stroke,
-> = StrokeSelected<S> & Omit<StrokeWithIncludes<I>, keyof Stroke>;
+export type CanvasSelectedWithIncludes<I extends CanvasInclude = {}, S extends CanvasSelectableColumn = keyof Canvas, R extends boolean = false> = CanvasSelected<S> & CanvasIncludedRelations<I, R>;
+
+export type StrokeSelectableColumn = keyof Stroke | PermissionIntrospectionColumn | "*";
+export type StrokeOrderableColumn = keyof Stroke | PermissionIntrospectionColumn;
+
+export type StrokeSelected<S extends StrokeSelectableColumn = keyof Stroke> = "*" extends S ? Stroke : Pick<Stroke, Extract<S | "id", keyof Stroke>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type StrokeSelectedWithIncludes<I extends StrokeInclude = {}, S extends StrokeSelectableColumn = keyof Stroke, R extends boolean = false> = StrokeSelected<S> & StrokeIncludedRelations<I, R>;
 
 export const wasmSchema: WasmSchema = {
-  users: {
-    columns: [
+  "users": {
+    "columns": [
       {
-        name: "user_id",
-        column_type: {
-          type: "Text",
+        "name": "user_id",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "name",
-        column_type: {
-          type: "Text",
+        "name": "name",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "created_at",
-        column_type: {
-          type: "Text",
+        "name": "created_at",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
-      },
+        "nullable": false
+      }
     ],
-    policies: {
-      select: {
-        using: {
-          type: "True",
-        },
+    "policies": {
+      "select": {
+        "using": {
+          "type": "True"
+        }
       },
-      insert: {
-        with_check: {
-          type: "True",
-        },
+      "insert": {
+        "with_check": {
+          "type": "True"
+        }
       },
-      update: {},
-      delete: {},
-    },
+      "update": {},
+      "delete": {}
+    }
   },
-  canvases: {
-    columns: [
+  "canvases": {
+    "columns": [
       {
-        name: "name",
-        column_type: {
-          type: "Text",
+        "name": "name",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "created_at",
-        column_type: {
-          type: "Text",
+        "name": "created_at",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
-      },
+        "nullable": false
+      }
     ],
-    policies: {
-      select: {
-        using: {
-          type: "True",
-        },
+    "policies": {
+      "select": {
+        "using": {
+          "type": "True"
+        }
       },
-      insert: {
-        with_check: {
-          type: "True",
-        },
+      "insert": {
+        "with_check": {
+          "type": "True"
+        }
       },
-      update: {},
-      delete: {},
-    },
+      "update": {},
+      "delete": {}
+    }
   },
-  strokes: {
-    columns: [
+  "strokes": {
+    "columns": [
       {
-        name: "canvas_id",
-        column_type: {
-          type: "Uuid",
+        "name": "canvas_id",
+        "column_type": {
+          "type": "Uuid"
         },
-        nullable: false,
-        references: "canvases",
+        "nullable": false,
+        "references": "canvases"
       },
       {
-        name: "user_id",
-        column_type: {
-          type: "Text",
+        "name": "user_id",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "points",
-        column_type: {
-          type: "Json",
-          schema: {
-            $schema: "http://json-schema.org/draft-07/schema#",
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                x: {
-                  type: "number",
+        "name": "points",
+        "column_type": {
+          "type": "Json",
+          "schema": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "x": {
+                  "type": "number"
                 },
-                y: {
-                  type: "number",
-                },
+                "y": {
+                  "type": "number"
+                }
               },
-              required: ["x", "y"],
-            },
-          },
+              "required": [
+                "x",
+                "y"
+              ]
+            }
+          }
         },
-        nullable: false,
+        "nullable": false
       },
       {
-        name: "created_at",
-        column_type: {
-          type: "Text",
+        "name": "created_at",
+        "column_type": {
+          "type": "Text"
         },
-        nullable: false,
-      },
+        "nullable": false
+      }
     ],
-    policies: {
-      select: {
-        using: {
-          type: "True",
-        },
+    "policies": {
+      "select": {
+        "using": {
+          "type": "True"
+        }
       },
-      insert: {
-        with_check: {
-          type: "True",
-        },
+      "insert": {
+        "with_check": {
+          "type": "True"
+        }
       },
-      update: {},
-      delete: {},
-    },
-  },
+      "update": {},
+      "delete": {}
+    }
+  }
 };
 
-export class UserQueryBuilder<
-  I extends Record<string, never> = {},
-  S extends keyof User | "*" = keyof User,
-> implements QueryBuilder<UserSelected<S>> {
+export class UserQueryBuilder<I extends Record<string, never> = {}, S extends UserSelectableColumn = keyof User, R extends boolean = false> implements QueryBuilder<UserSelected<S>> {
   readonly _table = "users";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: UserSelected<S>;
-  declare readonly _initType: UserInit;
+  readonly _rowType!: UserSelected<S>;
+  readonly _initType!: UserInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<Record<string, never>> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -314,7 +333,7 @@ export class UserQueryBuilder<
     step_hops: string[];
   };
 
-  where(conditions: UserWhereInput): UserQueryBuilder<I, S> {
+  where(conditions: UserWhereInput): UserQueryBuilder<I, S, R> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -331,25 +350,25 @@ export class UserQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof User | "*">(...columns: [NewS, ...NewS[]]): UserQueryBuilder<I, NewS> {
-    const clone = this._clone<I, NewS>();
+  select<NewS extends UserSelectableColumn>(...columns: [NewS, ...NewS[]]): UserQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
   }
 
-  orderBy(column: keyof User, direction: "asc" | "desc" = "asc"): UserQueryBuilder<I, S> {
+  orderBy(column: UserOrderableColumn, direction: "asc" | "desc" = "asc"): UserQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): UserQueryBuilder<I, S> {
+  limit(n: number): UserQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): UserQueryBuilder<I, S> {
+  offset(n: number): UserQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
@@ -359,7 +378,7 @@ export class UserQueryBuilder<
     start: UserWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): UserQueryBuilder<I, S> {
+  }): UserQueryBuilder<I, S, R> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -380,15 +399,13 @@ export class UserQueryBuilder<
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (
-      !stepOutput ||
-      typeof stepOutput !== "object" ||
-      typeof (stepOutput as { _build?: unknown })._build !== "function"
-    ) {
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(stepOutput._build()) as {
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -412,9 +429,7 @@ export class UserQueryBuilder<
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error(
-        "gather(...) step must include exactly one where condition bound to current.",
-      );
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
     }
 
     const currentCondition = currentConditions[0];
@@ -441,6 +456,7 @@ export class UserQueryBuilder<
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -454,13 +470,11 @@ export class UserQueryBuilder<
     return JSON.parse(this._build());
   }
 
-  private _clone<
-    CloneI extends Record<string, never> = I,
-    CloneS extends keyof User | "*" = S,
-  >(): UserQueryBuilder<CloneI, CloneS> {
-    const clone = new UserQueryBuilder<CloneI, CloneS>();
+  private _clone<CloneI extends Record<string, never> = I, CloneS extends UserSelectableColumn = S, CloneR extends boolean = R>(): UserQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new UserQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
@@ -477,16 +491,14 @@ export class UserQueryBuilder<
   }
 }
 
-export class CanvasQueryBuilder<
-  I extends CanvasInclude = {},
-  S extends keyof Canvas | "*" = keyof Canvas,
-> implements QueryBuilder<CanvasSelectedWithIncludes<I, S>> {
+export class CanvasQueryBuilder<I extends CanvasInclude = {}, S extends CanvasSelectableColumn = keyof Canvas, R extends boolean = false> implements QueryBuilder<CanvasSelectedWithIncludes<I, S, R>> {
   readonly _table = "canvases";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: CanvasSelectedWithIncludes<I, S>;
-  declare readonly _initType: CanvasInit;
+  readonly _rowType!: CanvasSelectedWithIncludes<I, S, R>;
+  readonly _initType!: CanvasInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<CanvasInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -500,7 +512,7 @@ export class CanvasQueryBuilder<
     step_hops: string[];
   };
 
-  where(conditions: CanvasWhereInput): CanvasQueryBuilder<I, S> {
+  where(conditions: CanvasWhereInput): CanvasQueryBuilder<I, S, R> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -517,39 +529,43 @@ export class CanvasQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Canvas | "*">(
-    ...columns: [NewS, ...NewS[]]
-  ): CanvasQueryBuilder<I, NewS> {
-    const clone = this._clone<I, NewS>();
+  select<NewS extends CanvasSelectableColumn>(...columns: [NewS, ...NewS[]]): CanvasQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
   }
 
-  include<NewI extends CanvasInclude>(relations: NewI): CanvasQueryBuilder<I & NewI, S> {
-    const clone = this._clone<I & NewI, S>();
+  include<NewI extends CanvasInclude>(relations: NewI): CanvasQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: keyof Canvas, direction: "asc" | "desc" = "asc"): CanvasQueryBuilder<I, S> {
+  requireIncludes(): CanvasQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: CanvasOrderableColumn, direction: "asc" | "desc" = "asc"): CanvasQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): CanvasQueryBuilder<I, S> {
+  limit(n: number): CanvasQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): CanvasQueryBuilder<I, S> {
+  offset(n: number): CanvasQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "strokesViaCanvas"): CanvasQueryBuilder<I, S> {
+  hopTo(relation: "strokesViaCanvas"): CanvasQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -559,7 +575,7 @@ export class CanvasQueryBuilder<
     start: CanvasWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): CanvasQueryBuilder<I, S> {
+  }): CanvasQueryBuilder<I, S, R> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -580,15 +596,13 @@ export class CanvasQueryBuilder<
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (
-      !stepOutput ||
-      typeof stepOutput !== "object" ||
-      typeof (stepOutput as { _build?: unknown })._build !== "function"
-    ) {
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(stepOutput._build()) as {
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -612,9 +626,7 @@ export class CanvasQueryBuilder<
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error(
-        "gather(...) step must include exactly one where condition bound to current.",
-      );
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
     }
 
     const currentCondition = currentConditions[0];
@@ -641,6 +653,7 @@ export class CanvasQueryBuilder<
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -654,13 +667,11 @@ export class CanvasQueryBuilder<
     return JSON.parse(this._build());
   }
 
-  private _clone<
-    CloneI extends CanvasInclude = I,
-    CloneS extends keyof Canvas | "*" = S,
-  >(): CanvasQueryBuilder<CloneI, CloneS> {
-    const clone = new CanvasQueryBuilder<CloneI, CloneS>();
+  private _clone<CloneI extends CanvasInclude = I, CloneS extends CanvasSelectableColumn = S, CloneR extends boolean = R>(): CanvasQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new CanvasQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
@@ -677,16 +688,14 @@ export class CanvasQueryBuilder<
   }
 }
 
-export class StrokeQueryBuilder<
-  I extends StrokeInclude = {},
-  S extends keyof Stroke | "*" = keyof Stroke,
-> implements QueryBuilder<StrokeSelectedWithIncludes<I, S>> {
+export class StrokeQueryBuilder<I extends StrokeInclude = {}, S extends StrokeSelectableColumn = keyof Stroke, R extends boolean = false> implements QueryBuilder<StrokeSelectedWithIncludes<I, S, R>> {
   readonly _table = "strokes";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: StrokeSelectedWithIncludes<I, S>;
-  declare readonly _initType: StrokeInit;
+  readonly _rowType!: StrokeSelectedWithIncludes<I, S, R>;
+  readonly _initType!: StrokeInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<StrokeInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -700,7 +709,7 @@ export class StrokeQueryBuilder<
     step_hops: string[];
   };
 
-  where(conditions: StrokeWhereInput): StrokeQueryBuilder<I, S> {
+  where(conditions: StrokeWhereInput): StrokeQueryBuilder<I, S, R> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -717,39 +726,43 @@ export class StrokeQueryBuilder<
     return clone;
   }
 
-  select<NewS extends keyof Stroke | "*">(
-    ...columns: [NewS, ...NewS[]]
-  ): StrokeQueryBuilder<I, NewS> {
-    const clone = this._clone<I, NewS>();
+  select<NewS extends StrokeSelectableColumn>(...columns: [NewS, ...NewS[]]): StrokeQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
   }
 
-  include<NewI extends StrokeInclude>(relations: NewI): StrokeQueryBuilder<I & NewI, S> {
-    const clone = this._clone<I & NewI, S>();
+  include<NewI extends StrokeInclude>(relations: NewI): StrokeQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: keyof Stroke, direction: "asc" | "desc" = "asc"): StrokeQueryBuilder<I, S> {
+  requireIncludes(): StrokeQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: StrokeOrderableColumn, direction: "asc" | "desc" = "asc"): StrokeQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): StrokeQueryBuilder<I, S> {
+  limit(n: number): StrokeQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): StrokeQueryBuilder<I, S> {
+  offset(n: number): StrokeQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "canvas"): StrokeQueryBuilder<I, S> {
+  hopTo(relation: "canvas"): StrokeQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -759,7 +772,7 @@ export class StrokeQueryBuilder<
     start: StrokeWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): StrokeQueryBuilder<I, S> {
+  }): StrokeQueryBuilder<I, S, R> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -780,15 +793,13 @@ export class StrokeQueryBuilder<
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (
-      !stepOutput ||
-      typeof stepOutput !== "object" ||
-      typeof (stepOutput as { _build?: unknown })._build !== "function"
-    ) {
+    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(stepOutput._build()) as {
+    const stepBuilt = JSON.parse(
+      stepOutput._build(),
+    ) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -812,9 +823,7 @@ export class StrokeQueryBuilder<
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error(
-        "gather(...) step must include exactly one where condition bound to current.",
-      );
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
     }
 
     const currentCondition = currentConditions[0];
@@ -841,6 +850,7 @@ export class StrokeQueryBuilder<
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -854,13 +864,11 @@ export class StrokeQueryBuilder<
     return JSON.parse(this._build());
   }
 
-  private _clone<
-    CloneI extends StrokeInclude = I,
-    CloneS extends keyof Stroke | "*" = S,
-  >(): StrokeQueryBuilder<CloneI, CloneS> {
-    const clone = new StrokeQueryBuilder<CloneI, CloneS>();
+  private _clone<CloneI extends StrokeInclude = I, CloneS extends StrokeSelectableColumn = S, CloneR extends boolean = R>(): StrokeQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new StrokeQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
