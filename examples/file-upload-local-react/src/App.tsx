@@ -11,9 +11,6 @@ import {
 import type { DbConfig } from "jazz-tools";
 import { app, UploadWithIncludes, type File as JazzFile } from "../schema/app.js";
 
-const BYTEA_MAX_BYTES = 1_048_576;
-const PART_SIZE_BYTES = 256 * 1024;
-
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   const units = ["KB", "MB", "GB", "TB"];
@@ -30,33 +27,7 @@ function canPreviewInline(mime: string): boolean {
   return mime.startsWith("image/") || mime.startsWith("video/") || mime === "application/pdf";
 }
 
-function concatChunks(chunks: Uint8Array[]): Uint8Array {
-  const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-  const combined = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    combined.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return combined;
-}
-
-function splitIntoParts(bytes: Uint8Array, partSize: number): Uint8Array[] {
-  const parts: Uint8Array[] = [];
-  for (let offset = 0; offset < bytes.length; offset += partSize) {
-    parts.push(bytes.slice(offset, Math.min(offset + partSize, bytes.length)));
-  }
-  return parts;
-}
-
-function toBlobBytes(bytes: Uint8Array): ArrayBuffer {
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  return copy.buffer;
-}
-
-// TODO make row+includes a subtype of row by separating the fk field from the resolved reference
-function Preview({ file, objectUrl }: { file: Omit<JazzFile, "parts">; objectUrl: string }) {
+function Preview({ file, objectUrl }: { file: JazzFile; objectUrl: string }) {
   if (file.mimeType.startsWith("image/")) {
     return <img className="preview-media" src={objectUrl} alt={file.name} />;
   }
@@ -126,30 +97,53 @@ function FileUploadScreen() {
             parts: true,
           },
         })
-        .orderBy("last_modified", "desc")
-        .limit(1),
+        .orderBy("lastModified", "desc")
+        .limit(1)
+        .requireIncludes(),
     ) ?? [];
   const latestUpload = uploads[0];
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
 
   useEffect(() => {
     if (!latestUpload) {
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
-        setObjectUrl(null);
+      setObjectUrl((current) => {
+        if (current) {
+          URL.revokeObjectURL(current);
+        }
+        return null;
+      });
+      return;
+    }
+
+    let isActive = true;
+
+    void (async () => {
+      try {
+        const blob = await db.loadFileAsBlob(app, latestUpload.file);
+        if (!isActive) {
+          return;
+        }
+
+        const nextObjectUrl = URL.createObjectURL(blob);
+        setObjectUrl((current) => {
+          if (current) {
+            URL.revokeObjectURL(current);
+          }
+          return nextObjectUrl;
+        });
+      } catch (reason) {
+        if (!isActive) {
+          return;
+        }
+
+        setError(reason instanceof Error ? reason.message : "Failed to load file preview.");
       }
-      return;
-    }
-    if (objectUrl) {
-      return;
-    }
-    const fileRecord = latestUpload.file;
-    const combined = concatChunks(fileRecord.parts.map((part) => part.data));
-    const blob = new Blob([toBlobBytes(combined)], {
-      type: fileRecord.mimeType || "application/octet-stream",
-    });
-    setObjectUrl(URL.createObjectURL(blob));
-  }, [latestUpload, objectUrl]);
+    })();
+
+    return () => {
+      isActive = false;
+    };
+  }, [db, latestUpload]);
 
   async function uploadFile(file: File) {
     if (!session?.user_id) {
@@ -160,32 +154,13 @@ function FileUploadScreen() {
     setError(null);
 
     try {
-      const buffer = new Uint8Array(await file.arrayBuffer());
-      const chunks = splitIntoParts(buffer, PART_SIZE_BYTES);
-      const oversizePart = chunks.find((chunk) => chunk.length > BYTEA_MAX_BYTES);
-      if (oversizePart) {
-        setError("A generated file part exceeded the Jazz BYTEA cell limit.");
-        return;
-      }
-
-      const insertedParts = chunks.map((chunk) =>
-        db.insert(app.file_parts, {
-          data: chunk,
-        }),
-      );
-
-      const insertedFile = db.insert(app.files, {
-        name: file.name,
-        mimeType: file.type || "application/octet-stream",
-        parts: insertedParts.map((part) => part.id),
-        partSizes: chunks.map((chunk) => chunk.length),
-      });
+      const insertedFile = await db.createFileFromBlob(app, file);
 
       db.insert(app.uploads, {
         size: file.size,
-        last_modified: new Date(file.lastModified),
-        file_id: insertedFile.id,
-        owner_id: session.user_id,
+        lastModified: new Date(file.lastModified),
+        fileId: insertedFile.id,
+        ownerId: session.user_id,
       });
 
       if (fileInputRef.current) {
