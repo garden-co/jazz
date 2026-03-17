@@ -58,13 +58,13 @@ describe("TS Update API", () => {
 
   it("nullable fields can be unset by setting them to null", async () => {
     const owner = insertUser(db);
-    const todo = insertTodo(db, { owner: owner.id });
+    const todo = insertTodo(db, { ownerId: owner.id });
 
-    db.update(app.todos, todo.id, { owner: null });
+    db.update(app.todos, todo.id, { ownerId: null });
 
     const updatedTodo = await db.one(app.todos.where({ id: { eq: todo.id } }));
     assert(updatedTodo);
-    expect(updatedTodo.owner).toBeUndefined();
+    expect(updatedTodo.ownerId).toBeUndefined();
   });
 
   it("required fields cannot be unset", async () => {
