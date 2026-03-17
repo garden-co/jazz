@@ -98,14 +98,31 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
         op: expr.op,
         value: clonePolicyValue(expr.value),
       };
+    case "SessionCmp":
+      return {
+        type: "SessionCmp",
+        path: [...expr.path],
+        op: expr.op,
+        value: clonePolicyValue(expr.value),
+      };
     case "IsNull":
       return { type: "IsNull", column: expr.column };
+    case "SessionIsNull":
+      return { type: "SessionIsNull", path: [...expr.path] };
     case "IsNotNull":
       return { type: "IsNotNull", column: expr.column };
+    case "SessionIsNotNull":
+      return { type: "SessionIsNotNull", path: [...expr.path] };
     case "Contains":
       return {
         type: "Contains",
         column: expr.column,
+        value: clonePolicyValue(expr.value),
+      };
+    case "SessionContains":
+      return {
+        type: "SessionContains",
+        path: [...expr.path],
         value: clonePolicyValue(expr.value),
       };
     case "In":
@@ -118,6 +135,12 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
       return {
         type: "InList",
         column: expr.column,
+        values: expr.values.map(clonePolicyValue),
+      };
+    case "SessionInList":
+      return {
+        type: "SessionInList",
+        path: [...expr.path],
         values: expr.values.map(clonePolicyValue),
       };
     case "Exists":

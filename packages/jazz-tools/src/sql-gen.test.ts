@@ -308,6 +308,51 @@ CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session
       "CREATE POLICY todos_select_policy ON todos FOR SELECT USING ((owner_id CONTAINS 'ali') AND (status IN ('active', 'trial')));",
     );
   });
+
+  it("generates session-left policy expressions", () => {
+    resetCollectedState();
+    table("todos", {
+      owner_id: col.string(),
+    });
+    const schema = getCollectedSchema();
+    schema.tables[0]!.policies = {
+      select: {
+        using: {
+          type: "And",
+          exprs: [
+            {
+              type: "SessionCmp",
+              path: ["claims", "role"],
+              op: "Eq",
+              value: { type: "Literal", value: "manager" },
+            },
+            {
+              type: "SessionInList",
+              path: ["claims", "plan"],
+              values: [
+                { type: "Literal", value: "pro" },
+                { type: "Literal", value: "enterprise" },
+              ],
+            },
+            {
+              type: "SessionContains",
+              path: ["claims", "teamIds"],
+              value: { type: "Literal", value: "team_a" },
+            },
+            {
+              type: "SessionIsNull",
+              path: ["claims", "deleted_at"],
+            },
+          ],
+        },
+      },
+    };
+
+    const sql = schemaToSql(schema);
+    expect(sql).toContain(
+      "CREATE POLICY todos_select_policy ON todos FOR SELECT USING ((@session.claims.role = 'manager') AND (@session.claims.plan IN ('pro', 'enterprise')) AND (@session.claims.teamIds CONTAINS 'team_a') AND (@session.claims.deleted_at IS NULL));",
+    );
+  });
 });
 
 describe("lensToSql", () => {
