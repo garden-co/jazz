@@ -2,7 +2,7 @@ import { table, col } from "jazz-tools";
 
 table("users", {
   name: col.string(),
-  friends: col.array(col.ref("users")),
+  friendsIds: col.array(col.ref("users")),
 });
 
 table("projects", {
