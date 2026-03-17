@@ -22,13 +22,12 @@ export const CreateChatRedirect = () => {
       createdBy: userId,
     });
 
-    db.insert(app.chatMembers, { chat: chat.id, userId });
+    db.insert(app.chatMembers, { chatId: chat.id, userId });
 
     db.insert(app.messages, {
-      chat: chat.id,
+      chatId: chat.id,
       text: "Hello world",
-      sender: myProfile.id,
-      senderId: userId,
+      senderId: myProfile.id,
       createdAt: new Date(),
     });
 

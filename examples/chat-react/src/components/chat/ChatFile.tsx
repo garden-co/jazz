@@ -1,15 +1,19 @@
+import { useDb } from "jazz-tools/react";
 import { DownloadIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { dataUriToBlob, downloadBlob, formatBytes } from "@/lib/utils";
-import type { Attachment } from "../../../schema/app.js";
+import { downloadBlob, formatBytes } from "@/lib/utils";
+import { app, type Attachment } from "../../../schema/app.js";
 
 interface ChatFileProps {
   attachment: Attachment;
 }
 
 export function ChatFile({ attachment }: ChatFileProps) {
-  const handleDownload = () => {
-    downloadBlob(dataUriToBlob(attachment.data, attachment.mimeType), attachment.name);
+  const db = useDb();
+
+  const handleDownload = async () => {
+    const blob = await db.loadFileAsBlob(app, attachment.fileId);
+    downloadBlob(blob, attachment.name);
   };
 
   return (

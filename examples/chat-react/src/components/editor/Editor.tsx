@@ -85,7 +85,7 @@ export const Editor = forwardRef<EditorHandle, EditorProps>(function Editor(
   // Expose the handle on the DOM element for browser tests.
   useEffect(() => {
     const el = containerRef.current;
-    if (el) (el as Record<string, unknown>).__editorHandle = handle;
+    if (el) (el as unknown as Record<string, unknown>).__editorHandle = handle;
   });
 
   useEffect(() => {

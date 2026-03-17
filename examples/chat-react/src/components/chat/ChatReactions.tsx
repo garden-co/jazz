@@ -92,7 +92,7 @@ export const MessageReactions = ({ messageId, isMe }: MessageReactionsProps) => 
   const session = useSession();
   const userId = session?.user_id;
 
-  const reactions = useAll(app.reactions.where({ message: messageId })) ?? [];
+  const reactions = useAll(app.reactions.where({ messageId })) ?? [];
 
   if (reactions.length === 0) return null;
 
@@ -110,7 +110,7 @@ export const MessageReactions = ({ messageId, isMe }: MessageReactionsProps) => 
       db.delete(app.reactions, myReaction.id);
     } else {
       db.insert(app.reactions, {
-        message: messageId,
+        messageId,
         userId,
         emoji,
       });

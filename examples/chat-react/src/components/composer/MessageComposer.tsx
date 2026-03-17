@@ -26,10 +26,9 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
       if (!html.trim()) return;
 
       db.insert(app.messages, {
-        chat: chatId,
+        chatId,
         text: html.trim(),
-        sender: myProfile.id,
-        senderId: userId,
+        senderId: myProfile.id,
         createdAt: new Date(),
       });
     },
@@ -37,24 +36,24 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
   );
 
   const handleSendAttachment = useCallback(
-    (attachment: AttachmentData) => {
+    async (attachment: AttachmentData) => {
       if (!userId || !myProfile) return;
 
+      const storedFile = await db.createFileFromBlob(app, attachment.file);
+
       const message = db.insert(app.messages, {
-        chat: chatId,
+        chatId,
         text: "",
-        sender: myProfile.id,
-        senderId: userId,
+        senderId: myProfile.id,
         createdAt: new Date(),
       });
 
       db.insert(app.attachments, {
-        message: message.id,
+        messageId: message.id,
         type: attachment.type,
-        name: attachment.name,
-        data: attachment.data,
-        mimeType: attachment.mimeType,
-        size: attachment.size,
+        name: attachment.file.name,
+        fileId: storedFile.id,
+        size: attachment.file.size,
       });
     },
     [userId, chatId, db, myProfile],

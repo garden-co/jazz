@@ -13,32 +13,31 @@ table("chats", {
 });
 
 table("chatMembers", {
-  chat: col.ref("chats"),
+  chatId: col.ref("chats"),
   userId: col.string(),
   joinCode: col.string().optional(),
 });
 
 table("messages", {
-  chat: col.ref("chats"),
+  chatId: col.ref("chats"),
   text: col.string(),
-  sender: col.ref("profiles"),
-  senderId: col.string(),
+  senderId: col.ref("profiles"),
   createdAt: col.timestamp(),
 });
 
 table("reactions", {
-  message: col.ref("messages"),
+  messageId: col.ref("messages"),
   userId: col.string(),
   emoji: col.string(),
 });
 
 table("canvases", {
-  chat: col.ref("chats"),
+  chatId: col.ref("chats"),
   createdAt: col.timestamp(),
 });
 
 table("strokes", {
-  canvas: col.ref("canvases"),
+  canvasId: col.ref("canvases"),
   ownerId: col.string(),
   color: col.string(),
   width: col.int(),
@@ -47,10 +46,20 @@ table("strokes", {
 });
 
 table("attachments", {
-  message: col.ref("messages"),
+  messageId: col.ref("messages"),
   type: col.string(),
   name: col.string(),
-  data: col.string(),
-  mimeType: col.string(),
+  fileId: col.ref("files"),
   size: col.int(),
+});
+
+table("file_parts", {
+  data: col.bytes(),
+});
+
+table("files", {
+  name: col.string().optional(),
+  mimeType: col.string(),
+  partIds: col.array(col.ref("file_parts")),
+  partSizes: col.array(col.int()),
 });
