@@ -1,3 +1,4 @@
+import { type MouseEvent, type PointerEvent } from "react";
 import { useDb } from "jazz-tools/react";
 import { DownloadIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -19,7 +20,16 @@ export function ChatFile({ attachment }: ChatFileProps) {
   return (
     <div className="rounded-xl my-2 flex flex-col">
       <span className="mb-2 wrap-anywhere">{attachment.name}</span>
-      <Button variant="secondary" onClick={handleDownload}>
+      <Button
+        variant="secondary"
+        onClick={(event) => {
+          event.stopPropagation();
+          void handleDownload();
+        }}
+        onPointerDown={(event) => {
+          event.stopPropagation();
+        }}
+      >
         <DownloadIcon />
         Download{" "}
         {attachment.size > 0 && <span className="text-sm">({formatBytes(attachment.size)})</span>}
