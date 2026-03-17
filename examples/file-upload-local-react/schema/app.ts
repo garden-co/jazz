@@ -13,7 +13,7 @@ export interface File {
   id: string;
   name: string;
   mimeType: string;
-  parts: string[];
+  partIds: string[];
   partSizes: number[];
 }
 
@@ -25,15 +25,15 @@ export interface FilePart {
 export interface Upload {
   id: string;
   size: number;
-  last_modified: Date;
-  file_id: string;
-  owner_id: string;
+  lastModified: Date;
+  fileId: string;
+  ownerId: string;
 }
 
 export interface FileInit {
   name: string;
   mimeType: string;
-  parts: string[];
+  partIds: string[];
   partSizes: number[];
 }
 
@@ -43,16 +43,16 @@ export interface FilePartInit {
 
 export interface UploadInit {
   size: number;
-  last_modified: Date;
-  file_id: string;
-  owner_id: string;
+  lastModified: Date;
+  fileId: string;
+  ownerId: string;
 }
 
 export interface FileWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   name?: string | { eq?: string; ne?: string; contains?: string };
   mimeType?: string | { eq?: string; ne?: string; contains?: string };
-  parts?: string[] | { eq?: string[]; contains?: string };
+  partIds?: string[] | { eq?: string[]; contains?: string };
   partSizes?: number[] | { eq?: number[]; contains?: number };
   $canRead?: boolean;
   $canEdit?: boolean;
@@ -70,9 +70,9 @@ export interface FilePartWhereInput {
 export interface UploadWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   size?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
-  last_modified?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
-  file_id?: string | { eq?: string; ne?: string };
-  owner_id?: string | { eq?: string; ne?: string; contains?: string };
+  lastModified?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  fileId?: string | { eq?: string; ne?: string };
+  ownerId?: string | { eq?: string; ne?: string; contains?: string };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -95,7 +95,7 @@ export interface UploadInclude {
   file?: true | FileInclude | AnyFileQueryBuilder<any>;
 }
 
-export type FileIncludedRelations<I extends FileInclude = {}> = {
+export type FileIncludedRelations<I extends FileInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
     K extends "parts"
       ? NonNullable<I["parts"]> extends infer RelationInclude
@@ -104,7 +104,7 @@ export type FileIncludedRelations<I extends FileInclude = {}> = {
           : RelationInclude extends AnyFilePartQueryBuilder<infer QueryRow>
             ? QueryRow[]
             : RelationInclude extends FilePartInclude
-              ? FilePartWithIncludes<RelationInclude>[]
+              ? FilePartWithIncludes<RelationInclude, false>[]
               : never
         : never
     : K extends "uploadsViaFile"
@@ -114,13 +114,13 @@ export type FileIncludedRelations<I extends FileInclude = {}> = {
           : RelationInclude extends AnyUploadQueryBuilder<infer QueryRow>
             ? QueryRow[]
             : RelationInclude extends UploadInclude
-              ? UploadWithIncludes<RelationInclude>[]
+              ? UploadWithIncludes<RelationInclude, false>[]
               : never
         : never
     : never;
 };
 
-export type FilePartIncludedRelations<I extends FilePartInclude = {}> = {
+export type FilePartIncludedRelations<I extends FilePartInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
     K extends "filesViaParts"
       ? NonNullable<I["filesViaParts"]> extends infer RelationInclude
@@ -129,22 +129,22 @@ export type FilePartIncludedRelations<I extends FilePartInclude = {}> = {
           : RelationInclude extends AnyFileQueryBuilder<infer QueryRow>
             ? QueryRow[]
             : RelationInclude extends FileInclude
-              ? FileWithIncludes<RelationInclude>[]
+              ? FileWithIncludes<RelationInclude, false>[]
               : never
         : never
     : never;
 };
 
-export type UploadIncludedRelations<I extends UploadInclude = {}> = {
+export type UploadIncludedRelations<I extends UploadInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
     K extends "file"
       ? NonNullable<I["file"]> extends infer RelationInclude
         ? RelationInclude extends true
-          ? File
+          ? R extends true ? File : File | undefined
           : RelationInclude extends AnyFileQueryBuilder<infer QueryRow>
-            ? QueryRow
+            ? R extends true ? QueryRow : QueryRow | undefined
             : RelationInclude extends FileInclude
-              ? FileWithIncludes<RelationInclude>
+              ? R extends true ? FileWithIncludes<RelationInclude, false> : FileWithIncludes<RelationInclude, false> | undefined
               : never
         : never
     : never;
@@ -160,35 +160,35 @@ export interface FilePartRelations {
 }
 
 export interface UploadRelations {
-  file: File;
+  file: File | undefined;
 }
 
-export type FileWithIncludes<I extends FileInclude = {}> = Omit<File, Extract<keyof I, keyof File>> & FileIncludedRelations<I>;
+export type FileWithIncludes<I extends FileInclude = {}, R extends boolean = false> = File & FileIncludedRelations<I, R>;
 
-export type FilePartWithIncludes<I extends FilePartInclude = {}> = Omit<FilePart, Extract<keyof I, keyof FilePart>> & FilePartIncludedRelations<I>;
+export type FilePartWithIncludes<I extends FilePartInclude = {}, R extends boolean = false> = FilePart & FilePartIncludedRelations<I, R>;
 
-export type UploadWithIncludes<I extends UploadInclude = {}> = Omit<Upload, Extract<keyof I, keyof Upload>> & UploadIncludedRelations<I>;
+export type UploadWithIncludes<I extends UploadInclude = {}, R extends boolean = false> = Upload & UploadIncludedRelations<I, R>;
 
 export type FileSelectableColumn = keyof File | PermissionIntrospectionColumn | "*";
 export type FileOrderableColumn = keyof File | PermissionIntrospectionColumn;
 
 export type FileSelected<S extends FileSelectableColumn = keyof File> = "*" extends S ? File : Pick<File, Extract<S | "id", keyof File>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type FileSelectedWithIncludes<I extends FileInclude = {}, S extends FileSelectableColumn = keyof File> = Omit<FileSelected<S>, Extract<keyof I, keyof FileSelected<S>>> & FileIncludedRelations<I>;
+export type FileSelectedWithIncludes<I extends FileInclude = {}, S extends FileSelectableColumn = keyof File, R extends boolean = false> = FileSelected<S> & FileIncludedRelations<I, R>;
 
 export type FilePartSelectableColumn = keyof FilePart | PermissionIntrospectionColumn | "*";
 export type FilePartOrderableColumn = keyof FilePart | PermissionIntrospectionColumn;
 
 export type FilePartSelected<S extends FilePartSelectableColumn = keyof FilePart> = "*" extends S ? FilePart : Pick<FilePart, Extract<S | "id", keyof FilePart>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type FilePartSelectedWithIncludes<I extends FilePartInclude = {}, S extends FilePartSelectableColumn = keyof FilePart> = Omit<FilePartSelected<S>, Extract<keyof I, keyof FilePartSelected<S>>> & FilePartIncludedRelations<I>;
+export type FilePartSelectedWithIncludes<I extends FilePartInclude = {}, S extends FilePartSelectableColumn = keyof FilePart, R extends boolean = false> = FilePartSelected<S> & FilePartIncludedRelations<I, R>;
 
 export type UploadSelectableColumn = keyof Upload | PermissionIntrospectionColumn | "*";
 export type UploadOrderableColumn = keyof Upload | PermissionIntrospectionColumn;
 
 export type UploadSelected<S extends UploadSelectableColumn = keyof Upload> = "*" extends S ? Upload : Pick<Upload, Extract<S | "id", keyof Upload>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type UploadSelectedWithIncludes<I extends UploadInclude = {}, S extends UploadSelectableColumn = keyof Upload> = Omit<UploadSelected<S>, Extract<keyof I, keyof UploadSelected<S>>> & UploadIncludedRelations<I>;
+export type UploadSelectedWithIncludes<I extends UploadInclude = {}, S extends UploadSelectableColumn = keyof Upload, R extends boolean = false> = UploadSelected<S> & UploadIncludedRelations<I, R>;
 
 export const wasmSchema: WasmSchema = {
   "files": {
@@ -208,7 +208,7 @@ export const wasmSchema: WasmSchema = {
         "nullable": false
       },
       {
-        "name": "parts",
+        "name": "partIds",
         "column_type": {
           "type": "Array",
           "element": {
@@ -251,14 +251,14 @@ export const wasmSchema: WasmSchema = {
         "nullable": false
       },
       {
-        "name": "last_modified",
+        "name": "lastModified",
         "column_type": {
           "type": "Timestamp"
         },
         "nullable": false
       },
       {
-        "name": "file_id",
+        "name": "fileId",
         "column_type": {
           "type": "Uuid"
         },
@@ -266,7 +266,7 @@ export const wasmSchema: WasmSchema = {
         "references": "files"
       },
       {
-        "name": "owner_id",
+        "name": "ownerId",
         "column_type": {
           "type": "Text"
         },
@@ -276,13 +276,14 @@ export const wasmSchema: WasmSchema = {
   }
 };
 
-export class FileQueryBuilder<I extends FileInclude = {}, S extends FileSelectableColumn = keyof File> implements QueryBuilder<FileSelectedWithIncludes<I, S>> {
+export class FileQueryBuilder<I extends FileInclude = {}, S extends FileSelectableColumn = keyof File, R extends boolean = false> implements QueryBuilder<FileSelectedWithIncludes<I, S, R>> {
   readonly _table = "files";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: FileSelectedWithIncludes<I, S>;
-  declare readonly _initType: FileInit;
+  readonly _rowType!: FileSelectedWithIncludes<I, S, R>;
+  readonly _initType!: FileInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<FileInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -296,7 +297,7 @@ export class FileQueryBuilder<I extends FileInclude = {}, S extends FileSelectab
     step_hops: string[];
   };
 
-  where(conditions: FileWhereInput): FileQueryBuilder<I, S> {
+  where(conditions: FileWhereInput): FileQueryBuilder<I, S, R> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -313,37 +314,43 @@ export class FileQueryBuilder<I extends FileInclude = {}, S extends FileSelectab
     return clone;
   }
 
-  select<NewS extends FileSelectableColumn>(...columns: [NewS, ...NewS[]]): FileQueryBuilder<I, NewS> {
-    const clone = this._clone<I, NewS>();
+  select<NewS extends FileSelectableColumn>(...columns: [NewS, ...NewS[]]): FileQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
   }
 
-  include<NewI extends FileInclude>(relations: NewI): FileQueryBuilder<I & NewI, S> {
-    const clone = this._clone<I & NewI, S>();
+  include<NewI extends FileInclude>(relations: NewI): FileQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: FileOrderableColumn, direction: "asc" | "desc" = "asc"): FileQueryBuilder<I, S> {
+  requireIncludes(): FileQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: FileOrderableColumn, direction: "asc" | "desc" = "asc"): FileQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): FileQueryBuilder<I, S> {
+  limit(n: number): FileQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): FileQueryBuilder<I, S> {
+  offset(n: number): FileQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "parts" | "uploadsViaFile"): FileQueryBuilder<I, S> {
+  hopTo(relation: "parts" | "uploadsViaFile"): FileQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -353,7 +360,7 @@ export class FileQueryBuilder<I extends FileInclude = {}, S extends FileSelectab
     start: FileWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): FileQueryBuilder<I, S> {
+  }): FileQueryBuilder<I, S, R> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -431,6 +438,7 @@ export class FileQueryBuilder<I extends FileInclude = {}, S extends FileSelectab
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -444,10 +452,11 @@ export class FileQueryBuilder<I extends FileInclude = {}, S extends FileSelectab
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends FileInclude = I, CloneS extends FileSelectableColumn = S>(): FileQueryBuilder<CloneI, CloneS> {
-    const clone = new FileQueryBuilder<CloneI, CloneS>();
+  private _clone<CloneI extends FileInclude = I, CloneS extends FileSelectableColumn = S, CloneR extends boolean = R>(): FileQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new FileQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
@@ -464,13 +473,14 @@ export class FileQueryBuilder<I extends FileInclude = {}, S extends FileSelectab
   }
 }
 
-export class FilePartQueryBuilder<I extends FilePartInclude = {}, S extends FilePartSelectableColumn = keyof FilePart> implements QueryBuilder<FilePartSelectedWithIncludes<I, S>> {
+export class FilePartQueryBuilder<I extends FilePartInclude = {}, S extends FilePartSelectableColumn = keyof FilePart, R extends boolean = false> implements QueryBuilder<FilePartSelectedWithIncludes<I, S, R>> {
   readonly _table = "file_parts";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: FilePartSelectedWithIncludes<I, S>;
-  declare readonly _initType: FilePartInit;
+  readonly _rowType!: FilePartSelectedWithIncludes<I, S, R>;
+  readonly _initType!: FilePartInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<FilePartInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -484,7 +494,7 @@ export class FilePartQueryBuilder<I extends FilePartInclude = {}, S extends File
     step_hops: string[];
   };
 
-  where(conditions: FilePartWhereInput): FilePartQueryBuilder<I, S> {
+  where(conditions: FilePartWhereInput): FilePartQueryBuilder<I, S, R> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -501,37 +511,43 @@ export class FilePartQueryBuilder<I extends FilePartInclude = {}, S extends File
     return clone;
   }
 
-  select<NewS extends FilePartSelectableColumn>(...columns: [NewS, ...NewS[]]): FilePartQueryBuilder<I, NewS> {
-    const clone = this._clone<I, NewS>();
+  select<NewS extends FilePartSelectableColumn>(...columns: [NewS, ...NewS[]]): FilePartQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
   }
 
-  include<NewI extends FilePartInclude>(relations: NewI): FilePartQueryBuilder<I & NewI, S> {
-    const clone = this._clone<I & NewI, S>();
+  include<NewI extends FilePartInclude>(relations: NewI): FilePartQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: FilePartOrderableColumn, direction: "asc" | "desc" = "asc"): FilePartQueryBuilder<I, S> {
+  requireIncludes(): FilePartQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: FilePartOrderableColumn, direction: "asc" | "desc" = "asc"): FilePartQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): FilePartQueryBuilder<I, S> {
+  limit(n: number): FilePartQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): FilePartQueryBuilder<I, S> {
+  offset(n: number): FilePartQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "filesViaParts"): FilePartQueryBuilder<I, S> {
+  hopTo(relation: "filesViaParts"): FilePartQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -541,7 +557,7 @@ export class FilePartQueryBuilder<I extends FilePartInclude = {}, S extends File
     start: FilePartWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): FilePartQueryBuilder<I, S> {
+  }): FilePartQueryBuilder<I, S, R> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -619,6 +635,7 @@ export class FilePartQueryBuilder<I extends FilePartInclude = {}, S extends File
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -632,10 +649,11 @@ export class FilePartQueryBuilder<I extends FilePartInclude = {}, S extends File
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends FilePartInclude = I, CloneS extends FilePartSelectableColumn = S>(): FilePartQueryBuilder<CloneI, CloneS> {
-    const clone = new FilePartQueryBuilder<CloneI, CloneS>();
+  private _clone<CloneI extends FilePartInclude = I, CloneS extends FilePartSelectableColumn = S, CloneR extends boolean = R>(): FilePartQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new FilePartQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
@@ -652,13 +670,14 @@ export class FilePartQueryBuilder<I extends FilePartInclude = {}, S extends File
   }
 }
 
-export class UploadQueryBuilder<I extends UploadInclude = {}, S extends UploadSelectableColumn = keyof Upload> implements QueryBuilder<UploadSelectedWithIncludes<I, S>> {
+export class UploadQueryBuilder<I extends UploadInclude = {}, S extends UploadSelectableColumn = keyof Upload, R extends boolean = false> implements QueryBuilder<UploadSelectedWithIncludes<I, S, R>> {
   readonly _table = "uploads";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: UploadSelectedWithIncludes<I, S>;
-  declare readonly _initType: UploadInit;
+  readonly _rowType!: UploadSelectedWithIncludes<I, S, R>;
+  readonly _initType!: UploadInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<UploadInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -672,7 +691,7 @@ export class UploadQueryBuilder<I extends UploadInclude = {}, S extends UploadSe
     step_hops: string[];
   };
 
-  where(conditions: UploadWhereInput): UploadQueryBuilder<I, S> {
+  where(conditions: UploadWhereInput): UploadQueryBuilder<I, S, R> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -689,37 +708,43 @@ export class UploadQueryBuilder<I extends UploadInclude = {}, S extends UploadSe
     return clone;
   }
 
-  select<NewS extends UploadSelectableColumn>(...columns: [NewS, ...NewS[]]): UploadQueryBuilder<I, NewS> {
-    const clone = this._clone<I, NewS>();
+  select<NewS extends UploadSelectableColumn>(...columns: [NewS, ...NewS[]]): UploadQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
   }
 
-  include<NewI extends UploadInclude>(relations: NewI): UploadQueryBuilder<I & NewI, S> {
-    const clone = this._clone<I & NewI, S>();
+  include<NewI extends UploadInclude>(relations: NewI): UploadQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: UploadOrderableColumn, direction: "asc" | "desc" = "asc"): UploadQueryBuilder<I, S> {
+  requireIncludes(): UploadQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: UploadOrderableColumn, direction: "asc" | "desc" = "asc"): UploadQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): UploadQueryBuilder<I, S> {
+  limit(n: number): UploadQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): UploadQueryBuilder<I, S> {
+  offset(n: number): UploadQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "file"): UploadQueryBuilder<I, S> {
+  hopTo(relation: "file"): UploadQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -729,7 +754,7 @@ export class UploadQueryBuilder<I extends UploadInclude = {}, S extends UploadSe
     start: UploadWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): UploadQueryBuilder<I, S> {
+  }): UploadQueryBuilder<I, S, R> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -807,6 +832,7 @@ export class UploadQueryBuilder<I extends UploadInclude = {}, S extends UploadSe
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -820,10 +846,11 @@ export class UploadQueryBuilder<I extends UploadInclude = {}, S extends UploadSe
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends UploadInclude = I, CloneS extends UploadSelectableColumn = S>(): UploadQueryBuilder<CloneI, CloneS> {
-    const clone = new UploadQueryBuilder<CloneI, CloneS>();
+  private _clone<CloneI extends UploadInclude = I, CloneS extends UploadSelectableColumn = S, CloneR extends boolean = R>(): UploadQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new UploadQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
