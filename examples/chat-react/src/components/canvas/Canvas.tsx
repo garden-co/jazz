@@ -55,7 +55,7 @@ export function CollaborativeCanvas({
   }, [profiles]);
 
   // Fetch all strokes for this canvas
-  const allStrokes = useAll(app.strokes.where({ canvas: canvasId })) ?? [];
+  const allStrokes = useAll(app.strokes.where({ canvasId })) ?? [];
 
   // Group strokes by ownerId
   const strokesByOwner: Record<string, StrokeData[]> = {};
@@ -159,7 +159,7 @@ export function CollaborativeCanvas({
     if (currentStrokeRef.current && userId) {
       const stroke = currentStrokeRef.current;
       db.insert(app.strokes, {
-        canvas: canvasId,
+        canvasId,
         ownerId: userId,
         color: stroke.color,
         width: stroke.width,

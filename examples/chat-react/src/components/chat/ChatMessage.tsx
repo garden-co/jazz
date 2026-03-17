@@ -44,7 +44,7 @@ export const ChatMessage = ({ message, sender, isMe, onDelete }: ChatMessageProp
   const senderProfiles = useAll(app.profiles.where({ userId: message.senderId })) ?? [];
   const resolvedSender = (senderProfiles[0] as unknown as Profile) ?? sender;
 
-  const attachments = useAll(app.attachments.where({ message: message.id })) ?? [];
+  const attachments = useAll(app.attachments.where({ messageId: message.id })) ?? [];
 
   const canvasMatch = message.text?.match(/^\[Canvas: ([^\]]+)\]$/);
   const canvasId = canvasMatch?.[1] ?? null;

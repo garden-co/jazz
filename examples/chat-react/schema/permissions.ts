@@ -13,7 +13,7 @@ export default definePermissions(app, ({ policy, session, anyOf, allowedTo }) =>
   policy.chats.allowRead.where((chat) =>
     anyOf([
       { isPublic: true },
-      policy.chatMembers.exists.where({ chat: chat.id, userId: session.user_id }),
+      policy.chatMembers.exists.where({ chatId: chat.id, userId: session.user_id }),
       { joinCode: session["claims.join_code"] },
     ]),
   );
@@ -27,37 +27,47 @@ export default definePermissions(app, ({ policy, session, anyOf, allowedTo }) =>
   // explicit chatMember check as a fallback for private chats in local mode.
   policy.messages.allowRead.where((message) =>
     anyOf([
-      allowedTo.read("chat"),
-      policy.chatMembers.exists.where({ chat: message.chat, userId: session.user_id }),
+      allowedTo.read("chatId"),
+      policy.chatMembers.exists.where({ chatId: message.chatId, userId: session.user_id }),
     ]),
   );
   policy.messages.allowInsert.where((message) =>
-    policy.chatMembers.exists.where({ chat: message.chat, userId: session.user_id }),
+    policy.chatMembers.exists.where({ chatId: message.chatId, userId: session.user_id }),
   );
   policy.messages.allowDelete.where({ senderId: session.user_id });
 
   // Reactions: inherit read from message; owner inserts/deletes
-  policy.reactions.allowRead.where(allowedTo.read("message"));
+  policy.reactions.allowRead.where(allowedTo.read("messageId"));
   policy.reactions.allowInsert.where({ userId: session.user_id });
   policy.reactions.allowDelete.where({ userId: session.user_id });
 
   // Canvases: same pattern as messages.
   policy.canvases.allowRead.where((canvas) =>
     anyOf([
-      allowedTo.read("chat"),
-      policy.chatMembers.exists.where({ chat: canvas.chat, userId: session.user_id }),
+      allowedTo.read("chatId"),
+      policy.chatMembers.exists.where({ chatId: canvas.chatId, userId: session.user_id }),
     ]),
   );
   policy.canvases.allowInsert.where((canvas) =>
-    policy.chatMembers.exists.where({ chat: canvas.chat, userId: session.user_id }),
+    policy.chatMembers.exists.where({ chatId: canvas.chatId, userId: session.user_id }),
   );
 
   // Strokes: inherit from canvas; owner deletes
-  policy.strokes.allowRead.where(allowedTo.read("canvas"));
-  policy.strokes.allowInsert.where(allowedTo.read("canvas"));
+  policy.strokes.allowRead.where(allowedTo.read("canvasId"));
+  policy.strokes.allowInsert.where(allowedTo.read("canvasId"));
   policy.strokes.allowDelete.where({ ownerId: session.user_id });
 
   // Attachments: inherit read from message; chat members can insert
-  policy.attachments.allowRead.where(allowedTo.read("message"));
-  policy.attachments.allowInsert.where(allowedTo.read("message"));
+  policy.attachments.allowRead.where(allowedTo.read("messageId"));
+  policy.attachments.allowInsert.where(allowedTo.read("messageId"));
+
+  // Files are created before the parent attachment row exists.
+  policy.files.allowInsert.where({});
+  policy.file_parts.allowInsert.where({});
+
+  // Files: inherit read and delete inherit from attachments
+  policy.files.allowRead.where(allowedTo.readReferencing(policy.attachments, "fileId"));
+  policy.file_parts.allowRead.where(allowedTo.readReferencing(policy.files, "partIds"));
+  policy.files.allowDelete.where(allowedTo.deleteReferencing(policy.attachments, "fileId"));
+  policy.file_parts.allowDelete.where(allowedTo.deleteReferencing(policy.files, "partIds"));
 });

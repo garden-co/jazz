@@ -28,7 +28,7 @@ export const ReactionPicker = ({ onPick, messageId }: ReactionPickerProps) => {
   const addReaction = (emoji: string) => {
     if (!session?.user_id) return;
     db.insert(app.reactions, {
-      message: messageId,
+      messageId,
       userId: session.user_id,
       emoji,
     });

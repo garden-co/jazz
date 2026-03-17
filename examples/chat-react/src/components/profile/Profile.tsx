@@ -72,7 +72,8 @@ function ProfileContent({ setOpen }: { setOpen: (v: boolean) => void }) {
 
   const handleAvatarRemove = () => {
     if (!myProfile) return;
-    db.update(app.profiles, myProfile.id, { avatar: null });
+    // TODO remove cast once https://github.com/garden-co/jazz2/pull/349 is merged
+    db.update(app.profiles, myProfile.id, { avatar: null as unknown as string });
   };
 
   return (
@@ -98,7 +99,9 @@ function ProfileContent({ setOpen }: { setOpen: (v: boolean) => void }) {
                 accept="image/*"
                 // Expose handler on DOM for browser tests (Radix portal blocks synthetic events)
                 ref={(el) => {
-                  if (el) (el as Record<string, unknown>).__handleAvatarChange = handleAvatarChange;
+                  if (el)
+                    (el as unknown as Record<string, unknown>).__handleAvatarChange =
+                      handleAvatarChange;
                 }}
                 onChange={handleAvatarChange}
               />

@@ -10,14 +10,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import { cn, fileToBase64 } from "@/lib/utils";
+import { cn, validateFileSize } from "@/lib/utils";
 
 export interface AttachmentData {
   type: "image" | "file";
-  name: string;
-  data: string;
-  mimeType: string;
-  size: number;
+  file: File;
 }
 
 interface UploadModalProps {
@@ -25,7 +22,7 @@ interface UploadModalProps {
   onOpenChange: (open: boolean) => void;
   accept?: string;
   title: string;
-  onUpload: (attachment: AttachmentData) => void;
+  onUpload: (attachment: AttachmentData) => Promise<void>;
 }
 
 export function UploadModal({ open, onOpenChange, accept, title, onUpload }: UploadModalProps) {
@@ -34,14 +31,14 @@ export function UploadModal({ open, onOpenChange, accept, title, onUpload }: Upl
   async function handleFile(file: File) {
     try {
       setIsUploading(true);
-      const data = await fileToBase64(file);
       const type = file.type.startsWith("image/") ? "image" : "file";
-      onUpload({ type, name: file.name, data, mimeType: file.type, size: file.size });
+      validateFileSize(file);
+      await onUpload({ type, file });
       toast.success("Upload successful");
       onOpenChange(false);
     } catch (err) {
       console.error(err);
-      toast.error("Upload failed");
+      toast.error(err instanceof Error ? err.message : "Upload failed");
     } finally {
       setIsUploading(false);
     }
@@ -78,7 +75,7 @@ export function UploadModal({ open, onOpenChange, accept, title, onUpload }: Upl
             accept={accept}
             // Expose handler on DOM for browser tests (Radix portal blocks synthetic events)
             ref={(el) => {
-              if (el) (el as Record<string, unknown>).__handleFile = handleFile;
+              if (el) (el as unknown as Record<string, unknown>).__handleFile = handleFile;
             }}
             onChange={(evt) => {
               const file = evt.target.files?.[0];

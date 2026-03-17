@@ -15,7 +15,7 @@ import { app } from "../../../schema/app.js";
 
 interface ActionMenuProps {
   chatId: string;
-  onAttachment?: (attachment: AttachmentData) => void;
+  onAttachment?: (attachment: AttachmentData) => Promise<void>;
 }
 
 export function ActionMenu({ chatId, onAttachment }: ActionMenuProps) {
@@ -30,7 +30,7 @@ export function ActionMenu({ chatId, onAttachment }: ActionMenuProps) {
   const chat = chats[0];
 
   const myMemberships =
-    useAll(app.chatMembers.where({ chat: chatId, userId: userId ?? "__none__" })) ?? [];
+    useAll(app.chatMembers.where({ chatId, userId: userId ?? "__none__" })) ?? [];
   const myJoinCode = myMemberships[0]?.joinCode ?? undefined;
 
   const myProfile = useMyProfile();
@@ -38,14 +38,13 @@ export function ActionMenu({ chatId, onAttachment }: ActionMenuProps) {
   const handleCreateCanvas = () => {
     if (!userId || !myProfile) return;
     const canvas = db.insert(app.canvases, {
-      chat: chatId,
+      chatId,
       createdAt: new Date(),
     });
     db.insert(app.messages, {
-      chat: chatId,
+      chatId,
       text: `[Canvas: ${canvas.id}]`,
-      sender: myProfile.id,
-      senderId: userId,
+      senderId: myProfile.id,
       createdAt: new Date(),
     });
   };
@@ -85,8 +84,8 @@ export function ActionMenu({ chatId, onAttachment }: ActionMenuProps) {
         onOpenChange={(isOpen) => !isOpen && setUploadMode(null)}
         title={uploadMode === "image" ? "Upload image" : "Upload file"}
         accept={uploadMode === "image" ? "image/*" : undefined}
-        onUpload={(attachment) => {
-          onAttachment?.(attachment);
+        onUpload={async (attachment) => {
+          await onAttachment?.(attachment);
           setUploadMode(null);
         }}
       />

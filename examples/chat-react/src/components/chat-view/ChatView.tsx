@@ -4,7 +4,7 @@ import { useDb, useAll, useSession } from "jazz-tools/react";
 import { ChatMessage } from "@/components/chat/ChatMessage";
 import { MessageComposer } from "@/components/composer/MessageComposer";
 import { Button } from "@/components/ui/button";
-import { app, type Profile } from "../../../schema/app.js";
+import { app } from "../../../schema/app.js";
 
 const INITIAL_MESSAGES_TO_SHOW = 20;
 const LOAD_MORE_STEP = 20;
@@ -53,7 +53,9 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   const messages =
     useAll(
       app.messages
-        .where({ chat: chatId })
+        .where({ chatId })
+        .include({ sender: true })
+        .requireIncludes()
         .orderBy("createdAt", "desc")
         .limit(showNLastMessages + 1),
     ) ?? [];
@@ -76,16 +78,17 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
     <>
       <div className="h-full flex-1 overflow-y-auto flex flex-col-reverse p-2 gap-8 pb-6">
         {messages.length > 0 ? (
-          messages.slice(0, showNLastMessages).map((msg) => (
-            <ChatMessage
-              key={msg.id}
-              message={msg}
-              // useAll erases .include() type info; sender is Profile at runtime
-              sender={msg.sender as unknown as Profile | undefined}
-              isMe={msg.senderId === userId}
-              onDelete={() => handleDelete(msg.id)}
-            />
-          ))
+          messages
+            .slice(0, showNLastMessages)
+            .map((msg) => (
+              <ChatMessage
+                key={msg.id}
+                message={msg}
+                sender={msg.sender}
+                isMe={msg.sender.userId === userId}
+                onDelete={() => handleDelete(msg.id)}
+              />
+            ))
         ) : (
           <div className="flex flex-col items-center justify-center py-10">
             <p className="text-muted-foreground text-sm">No messages yet</p>
