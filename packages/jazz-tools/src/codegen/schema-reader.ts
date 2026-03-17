@@ -8,6 +8,7 @@ import type {
   SqlType,
   TablePolicies as DslTablePolicies,
   PolicyExpr as DslPolicyExpr,
+  PolicyLiteralValue as DslPolicyLiteralValue,
   PolicyValue as DslPolicyValue,
 } from "../schema.js";
 import type {
@@ -17,6 +18,7 @@ import type {
   TableSchema,
   TablePolicies,
   PolicyExpr,
+  PolicyLiteralValue,
   PolicyValue,
   Value,
 } from "../drivers/types.js";
@@ -89,6 +91,10 @@ function clonePolicyValue(value: DslPolicyValue): PolicyValue {
   return { type: "Literal", value: literalToWasmValue(value.value) };
 }
 
+function clonePolicyLiteralValue(value: DslPolicyLiteralValue): PolicyLiteralValue {
+  return { type: "Literal", value: literalToWasmValue(value.value) };
+}
+
 function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
   switch (expr.type) {
     case "Cmp":
@@ -103,7 +109,7 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
         type: "SessionCmp",
         path: [...expr.path],
         op: expr.op,
-        value: clonePolicyValue(expr.value),
+        value: clonePolicyLiteralValue(expr.value),
       };
     case "IsNull":
       return { type: "IsNull", column: expr.column };
@@ -123,7 +129,7 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
       return {
         type: "SessionContains",
         path: [...expr.path],
-        value: clonePolicyValue(expr.value),
+        value: clonePolicyLiteralValue(expr.value),
       };
     case "In":
       return {
@@ -141,7 +147,7 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
       return {
         type: "SessionInList",
         path: [...expr.path],
-        values: expr.values.map(clonePolicyValue),
+        values: expr.values.map(clonePolicyLiteralValue),
       };
     case "Exists":
       return {
