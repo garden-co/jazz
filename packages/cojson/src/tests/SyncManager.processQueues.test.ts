@@ -1,10 +1,23 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  afterEach,
+  assert,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  vi,
+} from "vitest";
+import { PeerState } from "../PeerState.js";
 import { CO_VALUE_PRIORITY } from "../priority.js";
 import { StorageStreamingQueue } from "../queue/StorageStreamingQueue.js";
+import { ConnectedPeerChannel } from "../streamUtils.js";
 import {
   SyncMessagesLog,
+  createTestMetricReader,
+  hotSleep,
   loadCoValueOrFail,
   setupTestNode,
+  tearDownTestMetricReader,
   waitFor,
 } from "./testUtils.js";
 
@@ -17,6 +30,26 @@ describe("SyncManager.processQueues", () => {
       isSyncServer: true,
     });
   });
+
+  afterEach(() => {
+    tearDownTestMetricReader();
+    vi.restoreAllMocks();
+  });
+
+  function createMockPeerState(
+    id: string,
+    role: "client" | "server" = "client",
+  ) {
+    return new PeerState(
+      {
+        id,
+        role,
+        incoming: new ConnectedPeerChannel(),
+        outgoing: new ConnectedPeerChannel(),
+      },
+      undefined,
+    );
+  }
 
   describe("incoming messages processing", () => {
     test("should process incoming messages from peers", async () => {
@@ -53,6 +86,62 @@ describe("SyncManager.processQueues", () => {
       expect(loadedMap1.get("key")).toEqual("value1");
       expect(loadedMap2.get("key")).toEqual("value2");
       expect(loadedMap3.get("key")).toEqual("value3");
+    });
+  });
+
+  describe("metrics", () => {
+    test("should record incoming message processing time by type without peer role", async () => {
+      const metricReader = createTestMetricReader();
+      const client = setupTestNode();
+      const group = client.node.createGroup();
+      const peerState = createMockPeerState("peer-1");
+      const originalHandleSyncMessage =
+        client.node.syncManager.handleSyncMessage.bind(client.node.syncManager);
+
+      const handleSyncMessageSpy = vi
+        .spyOn(client.node.syncManager, "handleSyncMessage")
+        .mockImplementation((msg, peer) => {
+          hotSleep(10);
+          return originalHandleSyncMessage(msg, peer);
+        });
+
+      client.node.syncManager.pushMessage(
+        {
+          action: "load",
+          id: group.id,
+          header: false,
+          sessions: {},
+        },
+        peerState,
+      );
+      client.node.syncManager.pushMessage(
+        {
+          action: "reconcile-ack",
+          id: "batch-1",
+        },
+        peerState,
+      );
+
+      await waitFor(() => handleSyncMessageSpy.mock.calls.length === 2);
+
+      const loadValue = await metricReader.getMetricValue(
+        "jazz.messagequeue.incoming.processing_time",
+        { messageType: "load" },
+      );
+      const reconcileAckValue = await metricReader.getMetricValue(
+        "jazz.messagequeue.incoming.processing_time",
+        { messageType: "reconcile-ack" },
+      );
+
+      assert(typeof loadValue !== "number" && !!loadValue?.count);
+      expect(loadValue.count).toBe(1);
+      expect(loadValue.sum).toBeGreaterThan(0);
+
+      assert(
+        typeof reconcileAckValue !== "number" && !!reconcileAckValue?.count,
+      );
+      expect(reconcileAckValue.count).toBe(1);
+      expect(reconcileAckValue.sum).toBeGreaterThan(0);
     });
   });
 

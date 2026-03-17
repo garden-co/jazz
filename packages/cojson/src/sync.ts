@@ -707,10 +707,16 @@ export class SyncManager {
       // First, try to pull from incoming messages queue
       const messageEntry = this.messagesQueue.pull();
       if (messageEntry) {
+        const start = performance.now();
         try {
           this.handleSyncMessage(messageEntry.msg, messageEntry.peer);
         } catch (err) {
           logger.error("Error processing message", { err });
+        } finally {
+          this.messagesQueue.recordProcessingTime(
+            messageEntry.msg.action,
+            performance.now() - start,
+          );
         }
       }
 
