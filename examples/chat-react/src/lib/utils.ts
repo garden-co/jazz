@@ -64,9 +64,14 @@ export function downloadUrl(url: string, filename: string) {
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
+  a.rel = "noopener noreferrer";
+  a.target = "_blank";
   document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+  try {
+    a.click();
+  } finally {
+    document.body.removeChild(a);
+  }
 }
 
 export function downloadBlob(blob: Blob, filename: string) {

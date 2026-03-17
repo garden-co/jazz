@@ -1,4 +1,3 @@
-import { type MouseEvent, type PointerEvent } from "react";
 import { useDb } from "jazz-tools/react";
 import { DownloadIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
