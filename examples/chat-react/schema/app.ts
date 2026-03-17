@@ -261,7 +261,7 @@ export interface AttachmentInclude {
   message?: true | MessageInclude | AnyMessageQueryBuilder<any>;
 }
 
-export type ProfileIncludedRelations<I extends ProfileInclude = {}> = {
+export type ProfileIncludedRelations<I extends ProfileInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
     K extends "messagesViaSender"
       ? NonNullable<I["messagesViaSender"]> extends infer RelationInclude
@@ -270,13 +270,13 @@ export type ProfileIncludedRelations<I extends ProfileInclude = {}> = {
           : RelationInclude extends AnyMessageQueryBuilder<infer QueryRow>
             ? QueryRow[]
             : RelationInclude extends MessageInclude
-              ? MessageWithIncludes<RelationInclude>[]
+              ? MessageWithIncludes<RelationInclude, false>[]
               : never
         : never
     : never;
 };
 
-export type ChatIncludedRelations<I extends ChatInclude = {}> = {
+export type ChatIncludedRelations<I extends ChatInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
     K extends "chatMembersViaChat"
       ? NonNullable<I["chatMembersViaChat"]> extends infer RelationInclude
@@ -285,7 +285,7 @@ export type ChatIncludedRelations<I extends ChatInclude = {}> = {
           : RelationInclude extends AnyChatMemberQueryBuilder<infer QueryRow>
             ? QueryRow[]
             : RelationInclude extends ChatMemberInclude
-              ? ChatMemberWithIncludes<RelationInclude>[]
+              ? ChatMemberWithIncludes<RelationInclude, false>[]
               : never
         : never
     : K extends "messagesViaChat"
@@ -295,7 +295,7 @@ export type ChatIncludedRelations<I extends ChatInclude = {}> = {
           : RelationInclude extends AnyMessageQueryBuilder<infer QueryRow>
             ? QueryRow[]
             : RelationInclude extends MessageInclude
-              ? MessageWithIncludes<RelationInclude>[]
+              ? MessageWithIncludes<RelationInclude, false>[]
               : never
         : never
     : K extends "canvasesViaChat"
@@ -305,47 +305,47 @@ export type ChatIncludedRelations<I extends ChatInclude = {}> = {
           : RelationInclude extends AnyCanvasQueryBuilder<infer QueryRow>
             ? QueryRow[]
             : RelationInclude extends CanvasInclude
-              ? CanvasWithIncludes<RelationInclude>[]
+              ? CanvasWithIncludes<RelationInclude, false>[]
               : never
         : never
     : never;
 };
 
-export type ChatMemberIncludedRelations<I extends ChatMemberInclude = {}> = {
+export type ChatMemberIncludedRelations<I extends ChatMemberInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
     K extends "chat"
       ? NonNullable<I["chat"]> extends infer RelationInclude
         ? RelationInclude extends true
-          ? Chat
+          ? R extends true ? Chat : Chat | undefined
           : RelationInclude extends AnyChatQueryBuilder<infer QueryRow>
-            ? QueryRow
+            ? R extends true ? QueryRow : QueryRow | undefined
             : RelationInclude extends ChatInclude
-              ? ChatWithIncludes<RelationInclude>
+              ? R extends true ? ChatWithIncludes<RelationInclude, false> : ChatWithIncludes<RelationInclude, false> | undefined
               : never
         : never
     : never;
 };
 
-export type MessageIncludedRelations<I extends MessageInclude = {}> = {
+export type MessageIncludedRelations<I extends MessageInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
     K extends "chat"
       ? NonNullable<I["chat"]> extends infer RelationInclude
         ? RelationInclude extends true
-          ? Chat
+          ? R extends true ? Chat : Chat | undefined
           : RelationInclude extends AnyChatQueryBuilder<infer QueryRow>
-            ? QueryRow
+            ? R extends true ? QueryRow : QueryRow | undefined
             : RelationInclude extends ChatInclude
-              ? ChatWithIncludes<RelationInclude>
+              ? R extends true ? ChatWithIncludes<RelationInclude, false> : ChatWithIncludes<RelationInclude, false> | undefined
               : never
         : never
     : K extends "sender"
       ? NonNullable<I["sender"]> extends infer RelationInclude
         ? RelationInclude extends true
-          ? Profile
+          ? R extends true ? Profile : Profile | undefined
           : RelationInclude extends AnyProfileQueryBuilder<infer QueryRow>
-            ? QueryRow
+            ? R extends true ? QueryRow : QueryRow | undefined
             : RelationInclude extends ProfileInclude
-              ? ProfileWithIncludes<RelationInclude>
+              ? R extends true ? ProfileWithIncludes<RelationInclude, false> : ProfileWithIncludes<RelationInclude, false> | undefined
               : never
         : never
     : K extends "reactionsViaMessage"
@@ -355,7 +355,7 @@ export type MessageIncludedRelations<I extends MessageInclude = {}> = {
           : RelationInclude extends AnyReactionQueryBuilder<infer QueryRow>
             ? QueryRow[]
             : RelationInclude extends ReactionInclude
-              ? ReactionWithIncludes<RelationInclude>[]
+              ? ReactionWithIncludes<RelationInclude, false>[]
               : never
         : never
     : K extends "attachmentsViaMessage"
@@ -365,37 +365,37 @@ export type MessageIncludedRelations<I extends MessageInclude = {}> = {
           : RelationInclude extends AnyAttachmentQueryBuilder<infer QueryRow>
             ? QueryRow[]
             : RelationInclude extends AttachmentInclude
-              ? AttachmentWithIncludes<RelationInclude>[]
+              ? AttachmentWithIncludes<RelationInclude, false>[]
               : never
         : never
     : never;
 };
 
-export type ReactionIncludedRelations<I extends ReactionInclude = {}> = {
+export type ReactionIncludedRelations<I extends ReactionInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
     K extends "message"
       ? NonNullable<I["message"]> extends infer RelationInclude
         ? RelationInclude extends true
-          ? Message
+          ? R extends true ? Message : Message | undefined
           : RelationInclude extends AnyMessageQueryBuilder<infer QueryRow>
-            ? QueryRow
+            ? R extends true ? QueryRow : QueryRow | undefined
             : RelationInclude extends MessageInclude
-              ? MessageWithIncludes<RelationInclude>
+              ? R extends true ? MessageWithIncludes<RelationInclude, false> : MessageWithIncludes<RelationInclude, false> | undefined
               : never
         : never
     : never;
 };
 
-export type CanvasIncludedRelations<I extends CanvasInclude = {}> = {
+export type CanvasIncludedRelations<I extends CanvasInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
     K extends "chat"
       ? NonNullable<I["chat"]> extends infer RelationInclude
         ? RelationInclude extends true
-          ? Chat
+          ? R extends true ? Chat : Chat | undefined
           : RelationInclude extends AnyChatQueryBuilder<infer QueryRow>
-            ? QueryRow
+            ? R extends true ? QueryRow : QueryRow | undefined
             : RelationInclude extends ChatInclude
-              ? ChatWithIncludes<RelationInclude>
+              ? R extends true ? ChatWithIncludes<RelationInclude, false> : ChatWithIncludes<RelationInclude, false> | undefined
               : never
         : never
     : K extends "strokesViaCanvas"
@@ -405,37 +405,37 @@ export type CanvasIncludedRelations<I extends CanvasInclude = {}> = {
           : RelationInclude extends AnyStrokeQueryBuilder<infer QueryRow>
             ? QueryRow[]
             : RelationInclude extends StrokeInclude
-              ? StrokeWithIncludes<RelationInclude>[]
+              ? StrokeWithIncludes<RelationInclude, false>[]
               : never
         : never
     : never;
 };
 
-export type StrokeIncludedRelations<I extends StrokeInclude = {}> = {
+export type StrokeIncludedRelations<I extends StrokeInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
     K extends "canvas"
       ? NonNullable<I["canvas"]> extends infer RelationInclude
         ? RelationInclude extends true
-          ? Canvas
+          ? R extends true ? Canvas : Canvas | undefined
           : RelationInclude extends AnyCanvasQueryBuilder<infer QueryRow>
-            ? QueryRow
+            ? R extends true ? QueryRow : QueryRow | undefined
             : RelationInclude extends CanvasInclude
-              ? CanvasWithIncludes<RelationInclude>
+              ? R extends true ? CanvasWithIncludes<RelationInclude, false> : CanvasWithIncludes<RelationInclude, false> | undefined
               : never
         : never
     : never;
 };
 
-export type AttachmentIncludedRelations<I extends AttachmentInclude = {}> = {
+export type AttachmentIncludedRelations<I extends AttachmentInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
     K extends "message"
       ? NonNullable<I["message"]> extends infer RelationInclude
         ? RelationInclude extends true
-          ? Message
+          ? R extends true ? Message : Message | undefined
           : RelationInclude extends AnyMessageQueryBuilder<infer QueryRow>
-            ? QueryRow
+            ? R extends true ? QueryRow : QueryRow | undefined
             : RelationInclude extends MessageInclude
-              ? MessageWithIncludes<RelationInclude>
+              ? R extends true ? MessageWithIncludes<RelationInclude, false> : MessageWithIncludes<RelationInclude, false> | undefined
               : never
         : never
     : never;
@@ -452,104 +452,104 @@ export interface ChatRelations {
 }
 
 export interface ChatMemberRelations {
-  chat: Chat;
+  chat: Chat | undefined;
 }
 
 export interface MessageRelations {
-  chat: Chat;
-  sender: Profile;
+  chat: Chat | undefined;
+  sender: Profile | undefined;
   reactionsViaMessage: Reaction[];
   attachmentsViaMessage: Attachment[];
 }
 
 export interface ReactionRelations {
-  message: Message;
+  message: Message | undefined;
 }
 
 export interface CanvasRelations {
-  chat: Chat;
+  chat: Chat | undefined;
   strokesViaCanvas: Stroke[];
 }
 
 export interface StrokeRelations {
-  canvas: Canvas;
+  canvas: Canvas | undefined;
 }
 
 export interface AttachmentRelations {
-  message: Message;
+  message: Message | undefined;
 }
 
-export type ProfileWithIncludes<I extends ProfileInclude = {}> = Omit<Profile, Extract<keyof I, keyof Profile>> & ProfileIncludedRelations<I>;
+export type ProfileWithIncludes<I extends ProfileInclude = {}, R extends boolean = false> = Omit<Profile, Extract<keyof I, keyof Profile>> & ProfileIncludedRelations<I, R>;
 
-export type ChatWithIncludes<I extends ChatInclude = {}> = Omit<Chat, Extract<keyof I, keyof Chat>> & ChatIncludedRelations<I>;
+export type ChatWithIncludes<I extends ChatInclude = {}, R extends boolean = false> = Omit<Chat, Extract<keyof I, keyof Chat>> & ChatIncludedRelations<I, R>;
 
-export type ChatMemberWithIncludes<I extends ChatMemberInclude = {}> = Omit<ChatMember, Extract<keyof I, keyof ChatMember>> & ChatMemberIncludedRelations<I>;
+export type ChatMemberWithIncludes<I extends ChatMemberInclude = {}, R extends boolean = false> = Omit<ChatMember, Extract<keyof I, keyof ChatMember>> & ChatMemberIncludedRelations<I, R>;
 
-export type MessageWithIncludes<I extends MessageInclude = {}> = Omit<Message, Extract<keyof I, keyof Message>> & MessageIncludedRelations<I>;
+export type MessageWithIncludes<I extends MessageInclude = {}, R extends boolean = false> = Omit<Message, Extract<keyof I, keyof Message>> & MessageIncludedRelations<I, R>;
 
-export type ReactionWithIncludes<I extends ReactionInclude = {}> = Omit<Reaction, Extract<keyof I, keyof Reaction>> & ReactionIncludedRelations<I>;
+export type ReactionWithIncludes<I extends ReactionInclude = {}, R extends boolean = false> = Omit<Reaction, Extract<keyof I, keyof Reaction>> & ReactionIncludedRelations<I, R>;
 
-export type CanvasWithIncludes<I extends CanvasInclude = {}> = Omit<Canvas, Extract<keyof I, keyof Canvas>> & CanvasIncludedRelations<I>;
+export type CanvasWithIncludes<I extends CanvasInclude = {}, R extends boolean = false> = Omit<Canvas, Extract<keyof I, keyof Canvas>> & CanvasIncludedRelations<I, R>;
 
-export type StrokeWithIncludes<I extends StrokeInclude = {}> = Omit<Stroke, Extract<keyof I, keyof Stroke>> & StrokeIncludedRelations<I>;
+export type StrokeWithIncludes<I extends StrokeInclude = {}, R extends boolean = false> = Omit<Stroke, Extract<keyof I, keyof Stroke>> & StrokeIncludedRelations<I, R>;
 
-export type AttachmentWithIncludes<I extends AttachmentInclude = {}> = Omit<Attachment, Extract<keyof I, keyof Attachment>> & AttachmentIncludedRelations<I>;
+export type AttachmentWithIncludes<I extends AttachmentInclude = {}, R extends boolean = false> = Omit<Attachment, Extract<keyof I, keyof Attachment>> & AttachmentIncludedRelations<I, R>;
 
 export type ProfileSelectableColumn = keyof Profile | PermissionIntrospectionColumn | "*";
 export type ProfileOrderableColumn = keyof Profile | PermissionIntrospectionColumn;
 
 export type ProfileSelected<S extends ProfileSelectableColumn = keyof Profile> = "*" extends S ? Profile : Pick<Profile, Extract<S | "id", keyof Profile>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type ProfileSelectedWithIncludes<I extends ProfileInclude = {}, S extends ProfileSelectableColumn = keyof Profile> = Omit<ProfileSelected<S>, Extract<keyof I, keyof ProfileSelected<S>>> & ProfileIncludedRelations<I>;
+export type ProfileSelectedWithIncludes<I extends ProfileInclude = {}, S extends ProfileSelectableColumn = keyof Profile, R extends boolean = false> = Omit<ProfileSelected<S>, Extract<keyof I, keyof ProfileSelected<S>>> & ProfileIncludedRelations<I, R>;
 
 export type ChatSelectableColumn = keyof Chat | PermissionIntrospectionColumn | "*";
 export type ChatOrderableColumn = keyof Chat | PermissionIntrospectionColumn;
 
 export type ChatSelected<S extends ChatSelectableColumn = keyof Chat> = "*" extends S ? Chat : Pick<Chat, Extract<S | "id", keyof Chat>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type ChatSelectedWithIncludes<I extends ChatInclude = {}, S extends ChatSelectableColumn = keyof Chat> = Omit<ChatSelected<S>, Extract<keyof I, keyof ChatSelected<S>>> & ChatIncludedRelations<I>;
+export type ChatSelectedWithIncludes<I extends ChatInclude = {}, S extends ChatSelectableColumn = keyof Chat, R extends boolean = false> = Omit<ChatSelected<S>, Extract<keyof I, keyof ChatSelected<S>>> & ChatIncludedRelations<I, R>;
 
 export type ChatMemberSelectableColumn = keyof ChatMember | PermissionIntrospectionColumn | "*";
 export type ChatMemberOrderableColumn = keyof ChatMember | PermissionIntrospectionColumn;
 
 export type ChatMemberSelected<S extends ChatMemberSelectableColumn = keyof ChatMember> = "*" extends S ? ChatMember : Pick<ChatMember, Extract<S | "id", keyof ChatMember>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type ChatMemberSelectedWithIncludes<I extends ChatMemberInclude = {}, S extends ChatMemberSelectableColumn = keyof ChatMember> = Omit<ChatMemberSelected<S>, Extract<keyof I, keyof ChatMemberSelected<S>>> & ChatMemberIncludedRelations<I>;
+export type ChatMemberSelectedWithIncludes<I extends ChatMemberInclude = {}, S extends ChatMemberSelectableColumn = keyof ChatMember, R extends boolean = false> = Omit<ChatMemberSelected<S>, Extract<keyof I, keyof ChatMemberSelected<S>>> & ChatMemberIncludedRelations<I, R>;
 
 export type MessageSelectableColumn = keyof Message | PermissionIntrospectionColumn | "*";
 export type MessageOrderableColumn = keyof Message | PermissionIntrospectionColumn;
 
 export type MessageSelected<S extends MessageSelectableColumn = keyof Message> = "*" extends S ? Message : Pick<Message, Extract<S | "id", keyof Message>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type MessageSelectedWithIncludes<I extends MessageInclude = {}, S extends MessageSelectableColumn = keyof Message> = Omit<MessageSelected<S>, Extract<keyof I, keyof MessageSelected<S>>> & MessageIncludedRelations<I>;
+export type MessageSelectedWithIncludes<I extends MessageInclude = {}, S extends MessageSelectableColumn = keyof Message, R extends boolean = false> = Omit<MessageSelected<S>, Extract<keyof I, keyof MessageSelected<S>>> & MessageIncludedRelations<I, R>;
 
 export type ReactionSelectableColumn = keyof Reaction | PermissionIntrospectionColumn | "*";
 export type ReactionOrderableColumn = keyof Reaction | PermissionIntrospectionColumn;
 
 export type ReactionSelected<S extends ReactionSelectableColumn = keyof Reaction> = "*" extends S ? Reaction : Pick<Reaction, Extract<S | "id", keyof Reaction>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type ReactionSelectedWithIncludes<I extends ReactionInclude = {}, S extends ReactionSelectableColumn = keyof Reaction> = Omit<ReactionSelected<S>, Extract<keyof I, keyof ReactionSelected<S>>> & ReactionIncludedRelations<I>;
+export type ReactionSelectedWithIncludes<I extends ReactionInclude = {}, S extends ReactionSelectableColumn = keyof Reaction, R extends boolean = false> = Omit<ReactionSelected<S>, Extract<keyof I, keyof ReactionSelected<S>>> & ReactionIncludedRelations<I, R>;
 
 export type CanvasSelectableColumn = keyof Canvas | PermissionIntrospectionColumn | "*";
 export type CanvasOrderableColumn = keyof Canvas | PermissionIntrospectionColumn;
 
 export type CanvasSelected<S extends CanvasSelectableColumn = keyof Canvas> = "*" extends S ? Canvas : Pick<Canvas, Extract<S | "id", keyof Canvas>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type CanvasSelectedWithIncludes<I extends CanvasInclude = {}, S extends CanvasSelectableColumn = keyof Canvas> = Omit<CanvasSelected<S>, Extract<keyof I, keyof CanvasSelected<S>>> & CanvasIncludedRelations<I>;
+export type CanvasSelectedWithIncludes<I extends CanvasInclude = {}, S extends CanvasSelectableColumn = keyof Canvas, R extends boolean = false> = Omit<CanvasSelected<S>, Extract<keyof I, keyof CanvasSelected<S>>> & CanvasIncludedRelations<I, R>;
 
 export type StrokeSelectableColumn = keyof Stroke | PermissionIntrospectionColumn | "*";
 export type StrokeOrderableColumn = keyof Stroke | PermissionIntrospectionColumn;
 
 export type StrokeSelected<S extends StrokeSelectableColumn = keyof Stroke> = "*" extends S ? Stroke : Pick<Stroke, Extract<S | "id", keyof Stroke>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type StrokeSelectedWithIncludes<I extends StrokeInclude = {}, S extends StrokeSelectableColumn = keyof Stroke> = Omit<StrokeSelected<S>, Extract<keyof I, keyof StrokeSelected<S>>> & StrokeIncludedRelations<I>;
+export type StrokeSelectedWithIncludes<I extends StrokeInclude = {}, S extends StrokeSelectableColumn = keyof Stroke, R extends boolean = false> = Omit<StrokeSelected<S>, Extract<keyof I, keyof StrokeSelected<S>>> & StrokeIncludedRelations<I, R>;
 
 export type AttachmentSelectableColumn = keyof Attachment | PermissionIntrospectionColumn | "*";
 export type AttachmentOrderableColumn = keyof Attachment | PermissionIntrospectionColumn;
 
 export type AttachmentSelected<S extends AttachmentSelectableColumn = keyof Attachment> = "*" extends S ? Attachment : Pick<Attachment, Extract<S | "id", keyof Attachment>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type AttachmentSelectedWithIncludes<I extends AttachmentInclude = {}, S extends AttachmentSelectableColumn = keyof Attachment> = Omit<AttachmentSelected<S>, Extract<keyof I, keyof AttachmentSelected<S>>> & AttachmentIncludedRelations<I>;
+export type AttachmentSelectedWithIncludes<I extends AttachmentInclude = {}, S extends AttachmentSelectableColumn = keyof Attachment, R extends boolean = false> = Omit<AttachmentSelected<S>, Extract<keyof I, keyof AttachmentSelected<S>>> & AttachmentIncludedRelations<I, R>;
 
 export const wasmSchema: WasmSchema = {
   "profiles": {
@@ -1225,13 +1225,14 @@ export const wasmSchema: WasmSchema = {
   }
 };
 
-export class ProfileQueryBuilder<I extends ProfileInclude = {}, S extends ProfileSelectableColumn = keyof Profile> implements QueryBuilder<ProfileSelectedWithIncludes<I, S>> {
+export class ProfileQueryBuilder<I extends ProfileInclude = {}, S extends ProfileSelectableColumn = keyof Profile, R extends boolean = false> implements QueryBuilder<ProfileSelectedWithIncludes<I, S, R>> {
   readonly _table = "profiles";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: ProfileSelectedWithIncludes<I, S>;
-  declare readonly _initType: ProfileInit;
+  readonly _rowType!: ProfileSelectedWithIncludes<I, S, R>;
+  readonly _initType!: ProfileInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ProfileInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -1245,7 +1246,7 @@ export class ProfileQueryBuilder<I extends ProfileInclude = {}, S extends Profil
     step_hops: string[];
   };
 
-  where(conditions: ProfileWhereInput): ProfileQueryBuilder<I, S> {
+  where(conditions: ProfileWhereInput): ProfileQueryBuilder<I, S, R> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -1262,37 +1263,43 @@ export class ProfileQueryBuilder<I extends ProfileInclude = {}, S extends Profil
     return clone;
   }
 
-  select<NewS extends ProfileSelectableColumn>(...columns: [NewS, ...NewS[]]): ProfileQueryBuilder<I, NewS> {
-    const clone = this._clone<I, NewS>();
+  select<NewS extends ProfileSelectableColumn>(...columns: [NewS, ...NewS[]]): ProfileQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
   }
 
-  include<NewI extends ProfileInclude>(relations: NewI): ProfileQueryBuilder<I & NewI, S> {
-    const clone = this._clone<I & NewI, S>();
+  include<NewI extends ProfileInclude>(relations: NewI): ProfileQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: ProfileOrderableColumn, direction: "asc" | "desc" = "asc"): ProfileQueryBuilder<I, S> {
+  requireIncludes(): ProfileQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: ProfileOrderableColumn, direction: "asc" | "desc" = "asc"): ProfileQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): ProfileQueryBuilder<I, S> {
+  limit(n: number): ProfileQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): ProfileQueryBuilder<I, S> {
+  offset(n: number): ProfileQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "messagesViaSender"): ProfileQueryBuilder<I, S> {
+  hopTo(relation: "messagesViaSender"): ProfileQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -1302,7 +1309,7 @@ export class ProfileQueryBuilder<I extends ProfileInclude = {}, S extends Profil
     start: ProfileWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): ProfileQueryBuilder<I, S> {
+  }): ProfileQueryBuilder<I, S, R> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -1380,6 +1387,7 @@ export class ProfileQueryBuilder<I extends ProfileInclude = {}, S extends Profil
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -1393,10 +1401,11 @@ export class ProfileQueryBuilder<I extends ProfileInclude = {}, S extends Profil
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends ProfileInclude = I, CloneS extends ProfileSelectableColumn = S>(): ProfileQueryBuilder<CloneI, CloneS> {
-    const clone = new ProfileQueryBuilder<CloneI, CloneS>();
+  private _clone<CloneI extends ProfileInclude = I, CloneS extends ProfileSelectableColumn = S, CloneR extends boolean = R>(): ProfileQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new ProfileQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
@@ -1413,13 +1422,14 @@ export class ProfileQueryBuilder<I extends ProfileInclude = {}, S extends Profil
   }
 }
 
-export class ChatQueryBuilder<I extends ChatInclude = {}, S extends ChatSelectableColumn = keyof Chat> implements QueryBuilder<ChatSelectedWithIncludes<I, S>> {
+export class ChatQueryBuilder<I extends ChatInclude = {}, S extends ChatSelectableColumn = keyof Chat, R extends boolean = false> implements QueryBuilder<ChatSelectedWithIncludes<I, S, R>> {
   readonly _table = "chats";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: ChatSelectedWithIncludes<I, S>;
-  declare readonly _initType: ChatInit;
+  readonly _rowType!: ChatSelectedWithIncludes<I, S, R>;
+  readonly _initType!: ChatInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ChatInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -1433,7 +1443,7 @@ export class ChatQueryBuilder<I extends ChatInclude = {}, S extends ChatSelectab
     step_hops: string[];
   };
 
-  where(conditions: ChatWhereInput): ChatQueryBuilder<I, S> {
+  where(conditions: ChatWhereInput): ChatQueryBuilder<I, S, R> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -1450,37 +1460,43 @@ export class ChatQueryBuilder<I extends ChatInclude = {}, S extends ChatSelectab
     return clone;
   }
 
-  select<NewS extends ChatSelectableColumn>(...columns: [NewS, ...NewS[]]): ChatQueryBuilder<I, NewS> {
-    const clone = this._clone<I, NewS>();
+  select<NewS extends ChatSelectableColumn>(...columns: [NewS, ...NewS[]]): ChatQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
   }
 
-  include<NewI extends ChatInclude>(relations: NewI): ChatQueryBuilder<I & NewI, S> {
-    const clone = this._clone<I & NewI, S>();
+  include<NewI extends ChatInclude>(relations: NewI): ChatQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: ChatOrderableColumn, direction: "asc" | "desc" = "asc"): ChatQueryBuilder<I, S> {
+  requireIncludes(): ChatQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: ChatOrderableColumn, direction: "asc" | "desc" = "asc"): ChatQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): ChatQueryBuilder<I, S> {
+  limit(n: number): ChatQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): ChatQueryBuilder<I, S> {
+  offset(n: number): ChatQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "chatMembersViaChat" | "messagesViaChat" | "canvasesViaChat"): ChatQueryBuilder<I, S> {
+  hopTo(relation: "chatMembersViaChat" | "messagesViaChat" | "canvasesViaChat"): ChatQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -1490,7 +1506,7 @@ export class ChatQueryBuilder<I extends ChatInclude = {}, S extends ChatSelectab
     start: ChatWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): ChatQueryBuilder<I, S> {
+  }): ChatQueryBuilder<I, S, R> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -1568,6 +1584,7 @@ export class ChatQueryBuilder<I extends ChatInclude = {}, S extends ChatSelectab
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -1581,10 +1598,11 @@ export class ChatQueryBuilder<I extends ChatInclude = {}, S extends ChatSelectab
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends ChatInclude = I, CloneS extends ChatSelectableColumn = S>(): ChatQueryBuilder<CloneI, CloneS> {
-    const clone = new ChatQueryBuilder<CloneI, CloneS>();
+  private _clone<CloneI extends ChatInclude = I, CloneS extends ChatSelectableColumn = S, CloneR extends boolean = R>(): ChatQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new ChatQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
@@ -1601,13 +1619,14 @@ export class ChatQueryBuilder<I extends ChatInclude = {}, S extends ChatSelectab
   }
 }
 
-export class ChatMemberQueryBuilder<I extends ChatMemberInclude = {}, S extends ChatMemberSelectableColumn = keyof ChatMember> implements QueryBuilder<ChatMemberSelectedWithIncludes<I, S>> {
+export class ChatMemberQueryBuilder<I extends ChatMemberInclude = {}, S extends ChatMemberSelectableColumn = keyof ChatMember, R extends boolean = false> implements QueryBuilder<ChatMemberSelectedWithIncludes<I, S, R>> {
   readonly _table = "chatMembers";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: ChatMemberSelectedWithIncludes<I, S>;
-  declare readonly _initType: ChatMemberInit;
+  readonly _rowType!: ChatMemberSelectedWithIncludes<I, S, R>;
+  readonly _initType!: ChatMemberInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ChatMemberInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -1621,7 +1640,7 @@ export class ChatMemberQueryBuilder<I extends ChatMemberInclude = {}, S extends 
     step_hops: string[];
   };
 
-  where(conditions: ChatMemberWhereInput): ChatMemberQueryBuilder<I, S> {
+  where(conditions: ChatMemberWhereInput): ChatMemberQueryBuilder<I, S, R> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -1638,37 +1657,43 @@ export class ChatMemberQueryBuilder<I extends ChatMemberInclude = {}, S extends 
     return clone;
   }
 
-  select<NewS extends ChatMemberSelectableColumn>(...columns: [NewS, ...NewS[]]): ChatMemberQueryBuilder<I, NewS> {
-    const clone = this._clone<I, NewS>();
+  select<NewS extends ChatMemberSelectableColumn>(...columns: [NewS, ...NewS[]]): ChatMemberQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
   }
 
-  include<NewI extends ChatMemberInclude>(relations: NewI): ChatMemberQueryBuilder<I & NewI, S> {
-    const clone = this._clone<I & NewI, S>();
+  include<NewI extends ChatMemberInclude>(relations: NewI): ChatMemberQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: ChatMemberOrderableColumn, direction: "asc" | "desc" = "asc"): ChatMemberQueryBuilder<I, S> {
+  requireIncludes(): ChatMemberQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: ChatMemberOrderableColumn, direction: "asc" | "desc" = "asc"): ChatMemberQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): ChatMemberQueryBuilder<I, S> {
+  limit(n: number): ChatMemberQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): ChatMemberQueryBuilder<I, S> {
+  offset(n: number): ChatMemberQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "chat"): ChatMemberQueryBuilder<I, S> {
+  hopTo(relation: "chat"): ChatMemberQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -1678,7 +1703,7 @@ export class ChatMemberQueryBuilder<I extends ChatMemberInclude = {}, S extends 
     start: ChatMemberWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): ChatMemberQueryBuilder<I, S> {
+  }): ChatMemberQueryBuilder<I, S, R> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -1756,6 +1781,7 @@ export class ChatMemberQueryBuilder<I extends ChatMemberInclude = {}, S extends 
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -1769,10 +1795,11 @@ export class ChatMemberQueryBuilder<I extends ChatMemberInclude = {}, S extends 
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends ChatMemberInclude = I, CloneS extends ChatMemberSelectableColumn = S>(): ChatMemberQueryBuilder<CloneI, CloneS> {
-    const clone = new ChatMemberQueryBuilder<CloneI, CloneS>();
+  private _clone<CloneI extends ChatMemberInclude = I, CloneS extends ChatMemberSelectableColumn = S, CloneR extends boolean = R>(): ChatMemberQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new ChatMemberQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
@@ -1789,13 +1816,14 @@ export class ChatMemberQueryBuilder<I extends ChatMemberInclude = {}, S extends 
   }
 }
 
-export class MessageQueryBuilder<I extends MessageInclude = {}, S extends MessageSelectableColumn = keyof Message> implements QueryBuilder<MessageSelectedWithIncludes<I, S>> {
+export class MessageQueryBuilder<I extends MessageInclude = {}, S extends MessageSelectableColumn = keyof Message, R extends boolean = false> implements QueryBuilder<MessageSelectedWithIncludes<I, S, R>> {
   readonly _table = "messages";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: MessageSelectedWithIncludes<I, S>;
-  declare readonly _initType: MessageInit;
+  readonly _rowType!: MessageSelectedWithIncludes<I, S, R>;
+  readonly _initType!: MessageInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<MessageInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -1809,7 +1837,7 @@ export class MessageQueryBuilder<I extends MessageInclude = {}, S extends Messag
     step_hops: string[];
   };
 
-  where(conditions: MessageWhereInput): MessageQueryBuilder<I, S> {
+  where(conditions: MessageWhereInput): MessageQueryBuilder<I, S, R> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -1826,37 +1854,43 @@ export class MessageQueryBuilder<I extends MessageInclude = {}, S extends Messag
     return clone;
   }
 
-  select<NewS extends MessageSelectableColumn>(...columns: [NewS, ...NewS[]]): MessageQueryBuilder<I, NewS> {
-    const clone = this._clone<I, NewS>();
+  select<NewS extends MessageSelectableColumn>(...columns: [NewS, ...NewS[]]): MessageQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
   }
 
-  include<NewI extends MessageInclude>(relations: NewI): MessageQueryBuilder<I & NewI, S> {
-    const clone = this._clone<I & NewI, S>();
+  include<NewI extends MessageInclude>(relations: NewI): MessageQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: MessageOrderableColumn, direction: "asc" | "desc" = "asc"): MessageQueryBuilder<I, S> {
+  requireIncludes(): MessageQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: MessageOrderableColumn, direction: "asc" | "desc" = "asc"): MessageQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): MessageQueryBuilder<I, S> {
+  limit(n: number): MessageQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): MessageQueryBuilder<I, S> {
+  offset(n: number): MessageQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "chat" | "sender" | "reactionsViaMessage" | "attachmentsViaMessage"): MessageQueryBuilder<I, S> {
+  hopTo(relation: "chat" | "sender" | "reactionsViaMessage" | "attachmentsViaMessage"): MessageQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -1866,7 +1900,7 @@ export class MessageQueryBuilder<I extends MessageInclude = {}, S extends Messag
     start: MessageWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): MessageQueryBuilder<I, S> {
+  }): MessageQueryBuilder<I, S, R> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -1944,6 +1978,7 @@ export class MessageQueryBuilder<I extends MessageInclude = {}, S extends Messag
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -1957,10 +1992,11 @@ export class MessageQueryBuilder<I extends MessageInclude = {}, S extends Messag
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends MessageInclude = I, CloneS extends MessageSelectableColumn = S>(): MessageQueryBuilder<CloneI, CloneS> {
-    const clone = new MessageQueryBuilder<CloneI, CloneS>();
+  private _clone<CloneI extends MessageInclude = I, CloneS extends MessageSelectableColumn = S, CloneR extends boolean = R>(): MessageQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new MessageQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
@@ -1977,13 +2013,14 @@ export class MessageQueryBuilder<I extends MessageInclude = {}, S extends Messag
   }
 }
 
-export class ReactionQueryBuilder<I extends ReactionInclude = {}, S extends ReactionSelectableColumn = keyof Reaction> implements QueryBuilder<ReactionSelectedWithIncludes<I, S>> {
+export class ReactionQueryBuilder<I extends ReactionInclude = {}, S extends ReactionSelectableColumn = keyof Reaction, R extends boolean = false> implements QueryBuilder<ReactionSelectedWithIncludes<I, S, R>> {
   readonly _table = "reactions";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: ReactionSelectedWithIncludes<I, S>;
-  declare readonly _initType: ReactionInit;
+  readonly _rowType!: ReactionSelectedWithIncludes<I, S, R>;
+  readonly _initType!: ReactionInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ReactionInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -1997,7 +2034,7 @@ export class ReactionQueryBuilder<I extends ReactionInclude = {}, S extends Reac
     step_hops: string[];
   };
 
-  where(conditions: ReactionWhereInput): ReactionQueryBuilder<I, S> {
+  where(conditions: ReactionWhereInput): ReactionQueryBuilder<I, S, R> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -2014,37 +2051,43 @@ export class ReactionQueryBuilder<I extends ReactionInclude = {}, S extends Reac
     return clone;
   }
 
-  select<NewS extends ReactionSelectableColumn>(...columns: [NewS, ...NewS[]]): ReactionQueryBuilder<I, NewS> {
-    const clone = this._clone<I, NewS>();
+  select<NewS extends ReactionSelectableColumn>(...columns: [NewS, ...NewS[]]): ReactionQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
   }
 
-  include<NewI extends ReactionInclude>(relations: NewI): ReactionQueryBuilder<I & NewI, S> {
-    const clone = this._clone<I & NewI, S>();
+  include<NewI extends ReactionInclude>(relations: NewI): ReactionQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: ReactionOrderableColumn, direction: "asc" | "desc" = "asc"): ReactionQueryBuilder<I, S> {
+  requireIncludes(): ReactionQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: ReactionOrderableColumn, direction: "asc" | "desc" = "asc"): ReactionQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): ReactionQueryBuilder<I, S> {
+  limit(n: number): ReactionQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): ReactionQueryBuilder<I, S> {
+  offset(n: number): ReactionQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "message"): ReactionQueryBuilder<I, S> {
+  hopTo(relation: "message"): ReactionQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -2054,7 +2097,7 @@ export class ReactionQueryBuilder<I extends ReactionInclude = {}, S extends Reac
     start: ReactionWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): ReactionQueryBuilder<I, S> {
+  }): ReactionQueryBuilder<I, S, R> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -2132,6 +2175,7 @@ export class ReactionQueryBuilder<I extends ReactionInclude = {}, S extends Reac
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -2145,10 +2189,11 @@ export class ReactionQueryBuilder<I extends ReactionInclude = {}, S extends Reac
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends ReactionInclude = I, CloneS extends ReactionSelectableColumn = S>(): ReactionQueryBuilder<CloneI, CloneS> {
-    const clone = new ReactionQueryBuilder<CloneI, CloneS>();
+  private _clone<CloneI extends ReactionInclude = I, CloneS extends ReactionSelectableColumn = S, CloneR extends boolean = R>(): ReactionQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new ReactionQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
@@ -2165,13 +2210,14 @@ export class ReactionQueryBuilder<I extends ReactionInclude = {}, S extends Reac
   }
 }
 
-export class CanvasQueryBuilder<I extends CanvasInclude = {}, S extends CanvasSelectableColumn = keyof Canvas> implements QueryBuilder<CanvasSelectedWithIncludes<I, S>> {
+export class CanvasQueryBuilder<I extends CanvasInclude = {}, S extends CanvasSelectableColumn = keyof Canvas, R extends boolean = false> implements QueryBuilder<CanvasSelectedWithIncludes<I, S, R>> {
   readonly _table = "canvases";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: CanvasSelectedWithIncludes<I, S>;
-  declare readonly _initType: CanvasInit;
+  readonly _rowType!: CanvasSelectedWithIncludes<I, S, R>;
+  readonly _initType!: CanvasInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<CanvasInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -2185,7 +2231,7 @@ export class CanvasQueryBuilder<I extends CanvasInclude = {}, S extends CanvasSe
     step_hops: string[];
   };
 
-  where(conditions: CanvasWhereInput): CanvasQueryBuilder<I, S> {
+  where(conditions: CanvasWhereInput): CanvasQueryBuilder<I, S, R> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -2202,37 +2248,43 @@ export class CanvasQueryBuilder<I extends CanvasInclude = {}, S extends CanvasSe
     return clone;
   }
 
-  select<NewS extends CanvasSelectableColumn>(...columns: [NewS, ...NewS[]]): CanvasQueryBuilder<I, NewS> {
-    const clone = this._clone<I, NewS>();
+  select<NewS extends CanvasSelectableColumn>(...columns: [NewS, ...NewS[]]): CanvasQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
   }
 
-  include<NewI extends CanvasInclude>(relations: NewI): CanvasQueryBuilder<I & NewI, S> {
-    const clone = this._clone<I & NewI, S>();
+  include<NewI extends CanvasInclude>(relations: NewI): CanvasQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: CanvasOrderableColumn, direction: "asc" | "desc" = "asc"): CanvasQueryBuilder<I, S> {
+  requireIncludes(): CanvasQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: CanvasOrderableColumn, direction: "asc" | "desc" = "asc"): CanvasQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): CanvasQueryBuilder<I, S> {
+  limit(n: number): CanvasQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): CanvasQueryBuilder<I, S> {
+  offset(n: number): CanvasQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "chat" | "strokesViaCanvas"): CanvasQueryBuilder<I, S> {
+  hopTo(relation: "chat" | "strokesViaCanvas"): CanvasQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -2242,7 +2294,7 @@ export class CanvasQueryBuilder<I extends CanvasInclude = {}, S extends CanvasSe
     start: CanvasWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): CanvasQueryBuilder<I, S> {
+  }): CanvasQueryBuilder<I, S, R> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -2320,6 +2372,7 @@ export class CanvasQueryBuilder<I extends CanvasInclude = {}, S extends CanvasSe
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -2333,10 +2386,11 @@ export class CanvasQueryBuilder<I extends CanvasInclude = {}, S extends CanvasSe
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends CanvasInclude = I, CloneS extends CanvasSelectableColumn = S>(): CanvasQueryBuilder<CloneI, CloneS> {
-    const clone = new CanvasQueryBuilder<CloneI, CloneS>();
+  private _clone<CloneI extends CanvasInclude = I, CloneS extends CanvasSelectableColumn = S, CloneR extends boolean = R>(): CanvasQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new CanvasQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
@@ -2353,13 +2407,14 @@ export class CanvasQueryBuilder<I extends CanvasInclude = {}, S extends CanvasSe
   }
 }
 
-export class StrokeQueryBuilder<I extends StrokeInclude = {}, S extends StrokeSelectableColumn = keyof Stroke> implements QueryBuilder<StrokeSelectedWithIncludes<I, S>> {
+export class StrokeQueryBuilder<I extends StrokeInclude = {}, S extends StrokeSelectableColumn = keyof Stroke, R extends boolean = false> implements QueryBuilder<StrokeSelectedWithIncludes<I, S, R>> {
   readonly _table = "strokes";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: StrokeSelectedWithIncludes<I, S>;
-  declare readonly _initType: StrokeInit;
+  readonly _rowType!: StrokeSelectedWithIncludes<I, S, R>;
+  readonly _initType!: StrokeInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<StrokeInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -2373,7 +2428,7 @@ export class StrokeQueryBuilder<I extends StrokeInclude = {}, S extends StrokeSe
     step_hops: string[];
   };
 
-  where(conditions: StrokeWhereInput): StrokeQueryBuilder<I, S> {
+  where(conditions: StrokeWhereInput): StrokeQueryBuilder<I, S, R> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -2390,37 +2445,43 @@ export class StrokeQueryBuilder<I extends StrokeInclude = {}, S extends StrokeSe
     return clone;
   }
 
-  select<NewS extends StrokeSelectableColumn>(...columns: [NewS, ...NewS[]]): StrokeQueryBuilder<I, NewS> {
-    const clone = this._clone<I, NewS>();
+  select<NewS extends StrokeSelectableColumn>(...columns: [NewS, ...NewS[]]): StrokeQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
   }
 
-  include<NewI extends StrokeInclude>(relations: NewI): StrokeQueryBuilder<I & NewI, S> {
-    const clone = this._clone<I & NewI, S>();
+  include<NewI extends StrokeInclude>(relations: NewI): StrokeQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: StrokeOrderableColumn, direction: "asc" | "desc" = "asc"): StrokeQueryBuilder<I, S> {
+  requireIncludes(): StrokeQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: StrokeOrderableColumn, direction: "asc" | "desc" = "asc"): StrokeQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): StrokeQueryBuilder<I, S> {
+  limit(n: number): StrokeQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): StrokeQueryBuilder<I, S> {
+  offset(n: number): StrokeQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "canvas"): StrokeQueryBuilder<I, S> {
+  hopTo(relation: "canvas"): StrokeQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -2430,7 +2491,7 @@ export class StrokeQueryBuilder<I extends StrokeInclude = {}, S extends StrokeSe
     start: StrokeWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): StrokeQueryBuilder<I, S> {
+  }): StrokeQueryBuilder<I, S, R> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -2508,6 +2569,7 @@ export class StrokeQueryBuilder<I extends StrokeInclude = {}, S extends StrokeSe
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -2521,10 +2583,11 @@ export class StrokeQueryBuilder<I extends StrokeInclude = {}, S extends StrokeSe
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends StrokeInclude = I, CloneS extends StrokeSelectableColumn = S>(): StrokeQueryBuilder<CloneI, CloneS> {
-    const clone = new StrokeQueryBuilder<CloneI, CloneS>();
+  private _clone<CloneI extends StrokeInclude = I, CloneS extends StrokeSelectableColumn = S, CloneR extends boolean = R>(): StrokeQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new StrokeQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
@@ -2541,13 +2604,14 @@ export class StrokeQueryBuilder<I extends StrokeInclude = {}, S extends StrokeSe
   }
 }
 
-export class AttachmentQueryBuilder<I extends AttachmentInclude = {}, S extends AttachmentSelectableColumn = keyof Attachment> implements QueryBuilder<AttachmentSelectedWithIncludes<I, S>> {
+export class AttachmentQueryBuilder<I extends AttachmentInclude = {}, S extends AttachmentSelectableColumn = keyof Attachment, R extends boolean = false> implements QueryBuilder<AttachmentSelectedWithIncludes<I, S, R>> {
   readonly _table = "attachments";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: AttachmentSelectedWithIncludes<I, S>;
-  declare readonly _initType: AttachmentInit;
+  readonly _rowType!: AttachmentSelectedWithIncludes<I, S, R>;
+  readonly _initType!: AttachmentInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<AttachmentInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -2561,7 +2625,7 @@ export class AttachmentQueryBuilder<I extends AttachmentInclude = {}, S extends 
     step_hops: string[];
   };
 
-  where(conditions: AttachmentWhereInput): AttachmentQueryBuilder<I, S> {
+  where(conditions: AttachmentWhereInput): AttachmentQueryBuilder<I, S, R> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -2578,37 +2642,43 @@ export class AttachmentQueryBuilder<I extends AttachmentInclude = {}, S extends 
     return clone;
   }
 
-  select<NewS extends AttachmentSelectableColumn>(...columns: [NewS, ...NewS[]]): AttachmentQueryBuilder<I, NewS> {
-    const clone = this._clone<I, NewS>();
+  select<NewS extends AttachmentSelectableColumn>(...columns: [NewS, ...NewS[]]): AttachmentQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
   }
 
-  include<NewI extends AttachmentInclude>(relations: NewI): AttachmentQueryBuilder<I & NewI, S> {
-    const clone = this._clone<I & NewI, S>();
+  include<NewI extends AttachmentInclude>(relations: NewI): AttachmentQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: AttachmentOrderableColumn, direction: "asc" | "desc" = "asc"): AttachmentQueryBuilder<I, S> {
+  requireIncludes(): AttachmentQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: AttachmentOrderableColumn, direction: "asc" | "desc" = "asc"): AttachmentQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): AttachmentQueryBuilder<I, S> {
+  limit(n: number): AttachmentQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): AttachmentQueryBuilder<I, S> {
+  offset(n: number): AttachmentQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "message"): AttachmentQueryBuilder<I, S> {
+  hopTo(relation: "message"): AttachmentQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -2618,7 +2688,7 @@ export class AttachmentQueryBuilder<I extends AttachmentInclude = {}, S extends 
     start: AttachmentWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): AttachmentQueryBuilder<I, S> {
+  }): AttachmentQueryBuilder<I, S, R> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -2696,6 +2766,7 @@ export class AttachmentQueryBuilder<I extends AttachmentInclude = {}, S extends 
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -2709,10 +2780,11 @@ export class AttachmentQueryBuilder<I extends AttachmentInclude = {}, S extends 
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends AttachmentInclude = I, CloneS extends AttachmentSelectableColumn = S>(): AttachmentQueryBuilder<CloneI, CloneS> {
-    const clone = new AttachmentQueryBuilder<CloneI, CloneS>();
+  private _clone<CloneI extends AttachmentInclude = I, CloneS extends AttachmentSelectableColumn = S, CloneR extends boolean = R>(): AttachmentQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new AttachmentQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
