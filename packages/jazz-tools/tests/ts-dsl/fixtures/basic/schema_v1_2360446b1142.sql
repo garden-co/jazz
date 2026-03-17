@@ -16,5 +16,6 @@ CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (done = FALSE) WITH 
 CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (done = FALSE);
 
 CREATE TABLE users (
-    name TEXT NOT NULL
+    name TEXT NOT NULL,
+    friends UUID[] REFERENCES users NOT NULL
 );

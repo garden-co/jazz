@@ -1,5 +1,6 @@
 CREATE TABLE users (
-    name TEXT NOT NULL
+    name TEXT NOT NULL,
+    friends UUID[] REFERENCES users NOT NULL
 );
 
 CREATE TABLE projects (
