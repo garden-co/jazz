@@ -174,6 +174,35 @@ describe("AuthSecretStorage", () => {
       const stored = JSON.parse((await kvStore.get("jazz-logged-in-secret"))!);
       expect(stored).toEqual(payload);
     });
+
+    it("should not set isAuthenticated = true until the storage write completes", async () => {
+      // Intercept the underlying KV write to create a controlled window where
+      // the write is in-flight but has not yet completed. Without the fix,
+      // set() calls emitUpdate() immediately (without awaiting setWithoutNotify),
+      // so isAuthenticated would be true before resolveWrite() is called.
+      const originalKvSet = kvStore.set.bind(kvStore);
+      let resolveWrite!: () => void;
+      const writePending = new Promise<void>((r) => (resolveWrite = r));
+      vi.spyOn(kvStore, "set").mockImplementationOnce(async (key, value) => {
+        await writePending;
+        return originalKvSet(key, value);
+      });
+
+      const setPromise = authSecretStorage.set({
+        accountID: "test123" as ID<Account>,
+        accountSecret:
+          "secret123" as `sealerSecret_z${string}/signerSecret_z${string}`,
+        provider: "passphrase",
+      });
+
+      // Storage write is still pending — isAuthenticated must not be true yet.
+      expect(authSecretStorage.isAuthenticated).toBe(false);
+
+      resolveWrite();
+      await setPromise;
+
+      expect(authSecretStorage.isAuthenticated).toBe(true);
+    });
   });
 
   describe("onUpdate", () => {

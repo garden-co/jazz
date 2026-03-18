@@ -8,6 +8,8 @@ import { createWorkerAccount, startSyncServer } from "../sync-utils.js";
 
 describe("SessionRepository", () => {
   let syncServer: any;
+  let jazzSchema: ReturnType<typeof createJazzSchema>;
+  let workerCredentials: { accountID: string; agentSecret: string };
 
   let databaseSchema: Database;
   let databaseRoot: co.loaded<Database, { group: true }>;
@@ -21,7 +23,12 @@ describe("SessionRepository", () => {
       peer: `ws://localhost:${syncServer.port}`,
     });
 
-    const JazzSchema = createJazzSchema({
+    workerCredentials = {
+      accountID: workerAccount.accountID,
+      agentSecret: workerAccount.agentSecret,
+    };
+
+    jazzSchema = createJazzSchema({
       user: {
         modelName: "user",
         fields: {
@@ -47,14 +54,14 @@ describe("SessionRepository", () => {
     });
 
     const result = await startWorker({
-      AccountSchema: JazzSchema.WorkerAccount,
+      AccountSchema: jazzSchema.WorkerAccount,
       syncServer: `ws://localhost:${syncServer.port}`,
       accountID: workerAccount.accountID,
       accountSecret: workerAccount.agentSecret,
     });
 
-    databaseSchema = JazzSchema.DatabaseRoot;
-    databaseRoot = await JazzSchema.loadDatabase(result.worker);
+    databaseSchema = jazzSchema.DatabaseRoot;
+    databaseRoot = await jazzSchema.loadDatabase(result.worker);
     worker = result.worker;
   });
 
@@ -414,6 +421,70 @@ describe("SessionRepository", () => {
       ]);
 
       expect(deleted).toBe(0);
+    });
+  });
+
+  describe("cross-worker session lookup", () => {
+    it("should find a session on a fresh worker immediately after create + ensureSync on Worker A", async () => {
+      // Worker A: create user and session, then ensureSync so the sync server
+      // has the data before Worker B tries to read it.
+      const userRepository = new UserRepository(
+        databaseSchema,
+        databaseRoot,
+        worker,
+      );
+      const user = await userRepository.create("user", {
+        email: "cross-worker@test.com",
+      });
+
+      const sessionRepositoryA = new SessionRepository(
+        databaseSchema,
+        databaseRoot,
+        worker,
+        {},
+        true, // ensureSync=true so coValuesTracker is set up
+      );
+
+      await sessionRepositoryA.create("session", {
+        token: "cross-worker-token",
+        userId: user.$jazz.id,
+      });
+
+      // Guarantee the session CoValue has reached the sync server before
+      // Worker B connects — this is what the adapter does after create().
+      await sessionRepositoryA.ensureSync();
+
+      // Worker B: a fresh second connection using the same Jazz worker account,
+      // simulating a second server instance handling /get-session.
+      const workerBResult = await startWorker({
+        AccountSchema: jazzSchema.WorkerAccount,
+        syncServer: `ws://localhost:${syncServer.port}`,
+        accountID: workerCredentials.accountID,
+        accountSecret: workerCredentials.agentSecret,
+      });
+
+      const databaseRootB = await jazzSchema.loadDatabase(workerBResult.worker);
+
+      const sessionRepositoryB = new SessionRepository(
+        jazzSchema.DatabaseRoot,
+        databaseRootB,
+        workerBResult.worker,
+      );
+
+      // Worker B looks up the session by token — no retry, exactly as the
+      // adapter's findOne path does. If loadUnique's skipRetry:true fires
+      // before the sync server delivers the CoValue, this returns null.
+      const found = await sessionRepositoryB.findByUnique("session", [
+        {
+          connector: "AND",
+          operator: "eq",
+          field: "token",
+          value: "cross-worker-token",
+        },
+      ]);
+
+      expect(found).not.toBeNull();
+      expect(found?.token).toBe("cross-worker-token");
     });
   });
 });
