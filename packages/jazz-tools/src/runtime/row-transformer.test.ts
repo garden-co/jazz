@@ -359,6 +359,50 @@ describe("transformRows", () => {
     ]);
   });
 
+  it("expands mixed wildcard and magic projections while preserving includes", () => {
+    const rows: WasmRow[] = [
+      {
+        id: "todo-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Uuid", value: "user-1" },
+          { type: "Boolean", value: true },
+          {
+            type: "Array",
+            value: [
+              {
+                type: "Row",
+                value: {
+                  id: "user-1",
+                  values: [{ type: "Text", value: "Alice" }, { type: "Null" }],
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const result = transformRows(rows, relationSchema, "todos", { owner: true }, [
+      "*",
+      "$canDelete",
+    ]);
+
+    expect(result).toEqual([
+      {
+        id: "todo-1",
+        title: "Buy milk",
+        owner_id: "user-1",
+        $canDelete: true,
+        owner: {
+          id: "user-1",
+          name: "Alice",
+          manager_id: undefined,
+        },
+      },
+    ]);
+  });
+
   it("maps forward include arrays to relation names with id", () => {
     const rows: WasmRow[] = [
       {
