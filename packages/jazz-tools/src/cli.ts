@@ -257,10 +257,10 @@ async function ensurePermissionsTestStub(schemaDir: string): Promise<void> {
  * Permissions test starter.
  *
  * Suggested shape (jazz-tools/testing):
- * - startLocalJazzServer(...) for an isolated server
- * - seedRows(...) to set up synthetic fixtures
- * - scopedClientForClaims(...) for request-scoped user clients
- * - expectAllowed(...) / expectDenied(...) assertions
+ * - createPolicyTestApp(...) for an isolated test app
+ * - testApp.seed(...) to set up synthetic fixtures
+ * - testApp.as(...) for request-scoped user clients
+ * - testApp.expectAllowed(...) / testApp.expectDenied(...) assertions
  */
 import { describe, it } from "vitest";
 
