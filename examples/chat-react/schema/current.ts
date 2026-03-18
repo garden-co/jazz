@@ -7,6 +7,7 @@ table("profiles", {
 });
 
 table("chats", {
+  name: col.string().optional(),
   isPublic: col.boolean(),
   createdBy: col.string(),
   joinCode: col.string().optional(),

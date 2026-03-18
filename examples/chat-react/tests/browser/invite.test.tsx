@@ -192,27 +192,31 @@ describe("Invite Flow E2E", () => {
       "Secret message should appear for user A",
     );
 
-    // Open the action menu and click "Invite to chat"
-    const plusButton =
-      aliceContainer.querySelector<HTMLElement>("button:has(.lucide-plus)") ??
-      [...aliceContainer.querySelectorAll("button")].find((b) => b.querySelector(".lucide-plus"));
-    if (plusButton) {
-      await act(async () => simulateClick(plusButton as HTMLElement));
-    }
-
+    // Open the ChatSettings sheet via the gear icon in the header
     await waitFor(
-      () =>
-        [...document.querySelectorAll('[data-slot="dropdown-menu-item"]')].some((i) =>
-          i.textContent?.toLowerCase().includes("invite"),
-        ),
-      3000,
-      "Invite menu item should appear",
+      () => aliceContainer.querySelector('[data-testid="chat-header"]') !== null,
+      5000,
+      "ChatHeader should be visible",
     );
 
-    const inviteItem = [...document.querySelectorAll('[data-slot="dropdown-menu-item"]')].find(
-      (i) => i.textContent?.toLowerCase().includes("invite"),
+    const gearButton = aliceContainer.querySelector<HTMLElement>(
+      '[data-testid="chat-header"] button:has(.lucide-settings)',
+    );
+    expect(gearButton).toBeTruthy();
+    await act(async () => simulateClick(gearButton!));
+
+    await waitFor(
+      () => document.querySelector('[data-slot="sheet-content"]') !== null,
+      5000,
+      "ChatSettings sheet should open",
+    );
+
+    // Click "Invite to chat" in the settings sheet
+    const inviteButton = [...document.querySelectorAll('[data-slot="sheet-content"] button')].find(
+      (b) => b.textContent?.toLowerCase().includes("invite"),
     ) as HTMLElement;
-    await act(async () => simulateClick(inviteItem));
+    expect(inviteButton).toBeTruthy();
+    await act(async () => simulateClick(inviteButton));
 
     // Wait for the share modal and read the invite link
     await waitFor(

@@ -178,7 +178,7 @@ describe("Send permission — private chat INSERT policy", () => {
   // check should find her chatMember row.
   // -------------------------------------------------------------------------
 
-  it("Hypothesis A: private chat creator can send a message (chatMember INSERT policy)", async () => {
+  it("private chat creator can send a message", async () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
 
     const aliceContainer = await mountApp({
@@ -228,7 +228,7 @@ describe("Send permission — private chat INSERT policy", () => {
   // then be able to INSERT a message via the same EXISTS policy check.
   // -------------------------------------------------------------------------
 
-  it("Hypothesis B: invited chatMember can send a message (chatMember INSERT policy)", async () => {
+  it("invited member can send a message", async () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
 
     // --- Alice: create private chat and generate an invite link -------------
@@ -247,27 +247,31 @@ describe("Send permission — private chat INSERT policy", () => {
 
     await aliceCreatePrivateChat(aliceContainer);
 
-    // Open the "+" action menu
-    const plusButton =
-      aliceContainer.querySelector<HTMLElement>("button:has(.lucide-plus)") ??
-      ([...aliceContainer.querySelectorAll("button")].find((b) =>
-        b.querySelector(".lucide-plus"),
-      ) as HTMLElement | undefined);
-    if (!plusButton) throw new Error("Could not find action menu + button");
-    await act(async () => simulateClick(plusButton));
+    // Open the ChatSettings sheet via the gear icon in the header
+    await waitFor(
+      () => aliceContainer.querySelector('[data-testid="chat-header"]') !== null,
+      5000,
+      "ChatHeader should be visible",
+    );
+
+    const gearButton = aliceContainer.querySelector<HTMLElement>(
+      '[data-testid="chat-header"] button:has(.lucide-settings)',
+    );
+    if (!gearButton) throw new Error("Could not find settings gear button");
+    await act(async () => simulateClick(gearButton));
 
     await waitFor(
-      () =>
-        [...document.querySelectorAll('[data-slot="dropdown-menu-item"]')].some((i) =>
-          i.textContent?.toLowerCase().includes("invite"),
-        ),
-      3000,
-      "Invite menu item should appear",
+      () => document.querySelector('[data-slot="sheet-content"]') !== null,
+      5000,
+      "ChatSettings sheet should open",
     );
-    const inviteItem = [...document.querySelectorAll('[data-slot="dropdown-menu-item"]')].find(
-      (i) => i.textContent?.toLowerCase().includes("invite"),
+
+    // Click "Invite to chat" in the settings sheet
+    const inviteButton = [...document.querySelectorAll('[data-slot="sheet-content"] button')].find(
+      (b) => b.textContent?.toLowerCase().includes("invite"),
     ) as HTMLElement;
-    await act(async () => simulateClick(inviteItem));
+    if (!inviteButton) throw new Error("Could not find invite button in settings");
+    await act(async () => simulateClick(inviteButton));
 
     await waitFor(
       () => document.querySelector<HTMLInputElement>("input#link") !== null,

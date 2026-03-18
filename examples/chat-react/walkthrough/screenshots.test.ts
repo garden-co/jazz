@@ -62,20 +62,27 @@ test("capture walkthrough screenshots", async ({ browser }) => {
   await alicePage.locator("button").filter({ hasText: "New Private Chat" }).click();
   await alicePage.waitForSelector("#messageEditor", { timeout: 15_000 });
 
-  // ── Alice: open share dialog, capture invite link ─────────────────────────
+  // ── Alice: open ChatSettings, capture invite link ────────────────────────
 
-  await alicePage.locator("button:has(.lucide-plus)").click();
+  await alicePage.waitForSelector('[data-testid="chat-header"]', { timeout: 5_000 });
+  await alicePage.locator('[data-testid="chat-header"] button:has(.lucide-settings)').click();
+  await alicePage.waitForSelector('[data-slot="sheet-content"]', { timeout: 5_000 });
   await alicePage
-    .locator('[data-slot="dropdown-menu-item"]')
+    .locator('[data-slot="sheet-content"] button')
     .filter({ hasText: /invite/i })
     .waitFor({ timeout: 5_000 });
   await alicePage
-    .locator('[data-slot="dropdown-menu-item"]')
+    .locator('[data-slot="sheet-content"] button')
     .filter({ hasText: /invite/i })
     .click();
   await alicePage.waitForSelector("input#link", { timeout: 5_000 });
   const inviteLink = await alicePage.locator("input#link").inputValue();
   await alicePage.locator("button").filter({ hasText: "Done" }).click();
+  await alicePage.waitForTimeout(300);
+  // Close the settings sheet
+  const sheetClose = alicePage.locator('[data-slot="sheet-content"] .lucide-x').locator('..');
+  await sheetClose.click();
+  await alicePage.waitForTimeout(300);
 
   // Give the server time to receive Alice's private chat before Bob arrives.
   // The jazz client syncs in the background; 4s is generous but avoids a race.

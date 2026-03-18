@@ -18,6 +18,7 @@ export interface Profile {
 
 export interface Chat {
   id: string;
+  name?: string;
   isPublic: boolean;
   createdBy: string;
   joinCode?: string;
@@ -90,6 +91,7 @@ export interface ProfileInit {
 }
 
 export interface ChatInit {
+  name?: string;
   isPublic: boolean;
   createdBy: string;
   joinCode?: string;
@@ -159,6 +161,7 @@ export interface ProfileWhereInput {
 
 export interface ChatWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
+  name?: string | { eq?: string; ne?: string; contains?: string };
   isPublic?: boolean;
   createdBy?: string | { eq?: string; ne?: string; contains?: string };
   joinCode?: string | { eq?: string; ne?: string; contains?: string };
@@ -752,6 +755,13 @@ export const wasmSchema: WasmSchema = {
   "chats": {
     "columns": [
       {
+        "name": "name",
+        "column_type": {
+          "type": "Text"
+        },
+        "nullable": true
+      },
+      {
         "name": "isPublic",
         "column_type": {
           "type": "Boolean"
@@ -850,7 +860,72 @@ export const wasmSchema: WasmSchema = {
           }
         }
       },
-      "update": {},
+      "update": {
+        "using": {
+          "type": "Exists",
+          "table": "chatMembers",
+          "condition": {
+            "type": "And",
+            "exprs": [
+              {
+                "type": "Cmp",
+                "column": "chatId",
+                "op": "Eq",
+                "value": {
+                  "type": "SessionRef",
+                  "path": [
+                    "__jazz_outer_row",
+                    "id"
+                  ]
+                }
+              },
+              {
+                "type": "Cmp",
+                "column": "userId",
+                "op": "Eq",
+                "value": {
+                  "type": "SessionRef",
+                  "path": [
+                    "user_id"
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "with_check": {
+          "type": "Exists",
+          "table": "chatMembers",
+          "condition": {
+            "type": "And",
+            "exprs": [
+              {
+                "type": "Cmp",
+                "column": "chatId",
+                "op": "Eq",
+                "value": {
+                  "type": "SessionRef",
+                  "path": [
+                    "__jazz_outer_row",
+                    "id"
+                  ]
+                }
+              },
+              {
+                "type": "Cmp",
+                "column": "userId",
+                "op": "Eq",
+                "value": {
+                  "type": "SessionRef",
+                  "path": [
+                    "user_id"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
       "delete": {}
     }
   },
@@ -882,15 +957,52 @@ export const wasmSchema: WasmSchema = {
     "policies": {
       "select": {
         "using": {
-          "type": "Cmp",
-          "column": "userId",
-          "op": "Eq",
-          "value": {
-            "type": "SessionRef",
-            "path": [
-              "user_id"
-            ]
-          }
+          "type": "Or",
+          "exprs": [
+            {
+              "type": "Cmp",
+              "column": "userId",
+              "op": "Eq",
+              "value": {
+                "type": "SessionRef",
+                "path": [
+                  "user_id"
+                ]
+              }
+            },
+            {
+              "type": "Exists",
+              "table": "chatMembers",
+              "condition": {
+                "type": "And",
+                "exprs": [
+                  {
+                    "type": "Cmp",
+                    "column": "chatId",
+                    "op": "Eq",
+                    "value": {
+                      "type": "SessionRef",
+                      "path": [
+                        "__jazz_outer_row",
+                        "chatId"
+                      ]
+                    }
+                  },
+                  {
+                    "type": "Cmp",
+                    "column": "userId",
+                    "op": "Eq",
+                    "value": {
+                      "type": "SessionRef",
+                      "path": [
+                        "user_id"
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ]
         }
       },
       "insert": {
@@ -907,7 +1019,19 @@ export const wasmSchema: WasmSchema = {
         }
       },
       "update": {},
-      "delete": {}
+      "delete": {
+        "using": {
+          "type": "Cmp",
+          "column": "userId",
+          "op": "Eq",
+          "value": {
+            "type": "SessionRef",
+            "path": [
+              "user_id"
+            ]
+          }
+        }
+      }
     }
   },
   "messages": {

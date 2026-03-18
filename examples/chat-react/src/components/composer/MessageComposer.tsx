@@ -39,7 +39,7 @@ export function MessageComposer({ chatId }: MessageComposerProps) {
     async (attachment: AttachmentData) => {
       if (!userId || !myProfile) return;
 
-      const storedFile = await db.createFileFromBlob(app, attachment.file);
+      const storedFile = await db.createFileFromBlob(app, attachment.file, { tier: "edge" });
 
       const message = db.insert(app.messages, {
         chatId,

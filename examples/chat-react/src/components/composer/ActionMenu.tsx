@@ -1,7 +1,6 @@
 import { useState } from "react";
-import { useDb, useSession, useAll } from "jazz-tools/react";
-import { BrushIcon, CloudUploadIcon, ImageIcon, PlusIcon, Share2Icon } from "lucide-react";
-import { ShareModal } from "@/components/composer/ShareModal";
+import { useDb, useSession } from "jazz-tools/react";
+import { BrushIcon, CloudUploadIcon, ImageIcon, PlusIcon } from "lucide-react";
 import { UploadModal, type AttachmentData } from "@/components/composer/UploadModal";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,16 +21,8 @@ export function ActionMenu({ chatId, onAttachment }: ActionMenuProps) {
   const db = useDb();
   const session = useSession();
   const userId = session?.user_id;
-  const [willShare, setWillShare] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [uploadMode, setUploadMode] = useState<"image" | "file" | null>(null);
-
-  const chats = useAll(app.chats.where({ id: chatId })) ?? [];
-  const chat = chats[0];
-
-  const myMemberships =
-    useAll(app.chatMembers.where({ chatId, userId: userId ?? "__none__" })) ?? [];
-  const myJoinCode = myMemberships[0]?.joinCode ?? undefined;
 
   const myProfile = useMyProfile();
 
@@ -70,12 +61,6 @@ export function ActionMenu({ chatId, onAttachment }: ActionMenuProps) {
           <DropdownMenuItem onSelect={handleCreateCanvas}>
             <BrushIcon /> Canvas
           </DropdownMenuItem>
-
-          {chat && chat.createdBy === userId && (
-            <DropdownMenuItem onSelect={() => setWillShare(true)}>
-              <Share2Icon /> Invite to chat
-            </DropdownMenuItem>
-          )}
         </DropdownMenuContent>
       </DropdownMenu>
 
@@ -89,15 +74,6 @@ export function ActionMenu({ chatId, onAttachment }: ActionMenuProps) {
           setUploadMode(null);
         }}
       />
-
-      {chat && (
-        <ShareModal
-          chatId={chatId}
-          joinCode={myJoinCode}
-          open={willShare}
-          onOpenChange={setWillShare}
-        />
-      )}
     </>
   );
 }
