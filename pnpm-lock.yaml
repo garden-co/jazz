@@ -383,14 +383,42 @@ importers:
         specifier: catalog:default
         version: 4.0.18(@types/node@20.19.35)(@vitest/browser-playwright@4.0.18)(@vitest/ui@4.0.18)(jiti@2.6.1)(jsdom@28.1.0)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
 
+  examples/file-upload-react:
+    dependencies:
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../../packages/jazz-tools
+      react:
+        specifier: 19.2.4
+        version: 19.2.4
+      react-dom:
+        specifier: 19.2.4
+        version: 19.2.4(react@19.2.4)
+    devDependencies:
+      '@types/react':
+        specifier: ^19.0.0
+        version: 19.2.14
+      '@types/react-dom':
+        specifier: ^19.0.0
+        version: 19.2.3(@types/react@19.2.14)
+      '@vitejs/plugin-react':
+        specifier: ^4.0.0
+        version: 4.7.0(vite@6.4.1(@types/node@25.3.3)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
+      typescript:
+        specifier: catalog:default
+        version: 5.9.3
+      vite:
+        specifier: ^6.0.0
+        version: 6.4.1(@types/node@25.3.3)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
+      vitest:
+        specifier: catalog:default
+        version: 4.0.18(@types/node@25.3.3)(@vitest/browser-playwright@4.0.18)(@vitest/ui@4.0.18)(jiti@2.6.1)(jsdom@28.1.0)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
+
   examples/todo-client-localfirst-expo:
     dependencies:
       expo:
         specifier: ^54.0.0
         version: 54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
-      jazz-rn:
-        specifier: workspace:*
-        version: link:../../crates/jazz-rn
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
@@ -662,6 +690,9 @@ importers:
       expo:
         specifier: '>=54'
         version: 54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
+      jazz-rn:
+        specifier: workspace:*
+        version: link:../../crates/jazz-rn
       jazz-wasm:
         specifier: workspace:*
         version: link:../../crates/jazz-wasm
@@ -708,9 +739,6 @@ importers:
       fake-indexeddb:
         specifier: ^5.0.2
         version: 5.0.2
-      jazz-rn:
-        specifier: workspace:*
-        version: link:../../crates/jazz-rn
       react-dom:
         specifier: 19.2.4
         version: 19.2.4(react@19.2.4)

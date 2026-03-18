@@ -13,7 +13,7 @@ pub fn parse_query_value(value: JsonValue) -> Result<Query, String> {
 #[cfg(test)]
 mod tests {
     use super::{parse_query_json, parse_query_value};
-    use crate::query_manager::query::Query;
+    use crate::query_manager::query::{ArraySubqueryRequirement, Query};
     use crate::query_manager::relation_ir::{PredicateCmpOp, PredicateExpr, RelExpr, ValueRef};
     use crate::query_manager::types::Value;
 
@@ -83,6 +83,34 @@ mod tests {
             },
             other => panic!("unexpected relation_ir: {:?}", other),
         }
+    }
+
+    #[test]
+    fn parses_array_subquery_requirement_payload() {
+        let raw = serde_json::json!({
+            "table": "todos",
+            "branches": ["main"],
+            "array_subqueries": [{
+                "column_name": "owner",
+                "table": "users",
+                "joins": [],
+                "inner_column": "id",
+                "outer_column": "todos.owner_id",
+                "filters": [],
+                "order_by": [],
+                "limit": 1,
+                "requirement": "AtLeastOne",
+                "nested_arrays": []
+            }],
+            "relation_ir": { "TableScan": { "table": "todos" } }
+        });
+
+        let query = parse_query_json(&raw.to_string()).expect("parse query");
+        assert_eq!(query.array_subqueries.len(), 1);
+        assert_eq!(
+            query.array_subqueries[0].requirement,
+            ArraySubqueryRequirement::AtLeastOne
+        );
     }
 
     #[test]

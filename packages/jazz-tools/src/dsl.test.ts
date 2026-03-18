@@ -48,11 +48,11 @@ describe("ref DSL", () => {
   it("stores references on ref columns", () => {
     resetCollectedState();
     table("todos", {
-      image: col.ref("files"),
+      imageId: col.ref("files"),
     });
     const schema = getCollectedSchema();
     expect(schema.tables[0]?.columns[0]).toMatchObject({
-      name: "image",
+      name: "imageId",
       references: "files",
     });
   });
@@ -60,13 +60,29 @@ describe("ref DSL", () => {
   it("stores references on array(ref(...)) columns", () => {
     resetCollectedState();
     table("files", {
-      parts: col.array(col.ref("file_parts")),
+      partIds: col.array(col.ref("file_parts")),
     });
     const schema = getCollectedSchema();
     expect(schema.tables[0]?.columns[0]).toMatchObject({
-      name: "parts",
+      name: "partIds",
       references: "file_parts",
     });
+  });
+
+  it("rejects scalar reference columns not ending in Id or _id", () => {
+    resetCollectedState();
+    // @ts-expect-error ref columns must end in Id or _id
+    expect(() => table("todos", { image: col.ref("files") })).toThrow(
+      "Invalid reference key 'image'. Rename it to 'image_id' or 'imageId'.",
+    );
+  });
+
+  it("rejects array(ref(...)) columns not ending in Ids or _ids", () => {
+    resetCollectedState();
+    // @ts-expect-error array(ref(...)) columns must end in Ids or _ids
+    expect(() => table("todos", { images: col.array(col.ref("files")) })).toThrow(
+      "Invalid array reference key 'images'. Rename it to 'images_ids' or 'imagesIds'.",
+    );
   });
 });
 

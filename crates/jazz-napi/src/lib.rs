@@ -438,6 +438,38 @@ impl NapiRuntime {
         }))
     }
 
+    #[napi(js_name = "insertWithSession")]
+    pub fn insert_with_session(
+        &self,
+        table: String,
+        #[napi(ts_arg_type = "any")] values: serde_json::Value,
+        session_json: Option<String>,
+    ) -> napi::Result<serde_json::Value> {
+        let js_values: Vec<Value> = serde_json::from_value(values)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
+        let groove_values = convert_values(js_values);
+        let session = parse_session_json(session_json)?;
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        let (object_id, row_values) = core
+            .insert(&table, groove_values, session.as_ref())
+            .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
+        let row_values = align_row_values_to_declared_schema(
+            &self.declared_schema,
+            core.current_schema(),
+            &TableName::new(table.clone()),
+            row_values,
+        );
+
+        Ok(serde_json::json!({
+            "id": object_id.uuid().to_string(),
+            "values": row_values,
+        }))
+    }
+
     #[napi]
     pub fn update(
         &self,
@@ -462,6 +494,32 @@ impl NapiRuntime {
         Ok(())
     }
 
+    #[napi(js_name = "updateWithSession")]
+    pub fn update_with_session(
+        &self,
+        object_id: String,
+        #[napi(ts_arg_type = "any")] values: serde_json::Value,
+        session_json: Option<String>,
+    ) -> napi::Result<()> {
+        let uuid = uuid::Uuid::parse_str(&object_id)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let session = parse_session_json(session_json)?;
+
+        let partial_values: HashMap<String, Value> = serde_json::from_value(values)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
+        let updates = convert_updates(partial_values);
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.update(oid, updates, session.as_ref())
+            .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?;
+
+        Ok(())
+    }
+
     #[napi(js_name = "delete")]
     pub fn delete_row(&self, object_id: String) -> napi::Result<()> {
         let uuid = uuid::Uuid::parse_str(&object_id)
@@ -473,6 +531,27 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         core.delete(oid, None)
+            .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?;
+
+        Ok(())
+    }
+
+    #[napi(js_name = "deleteWithSession")]
+    pub fn delete_with_session(
+        &self,
+        object_id: String,
+        session_json: Option<String>,
+    ) -> napi::Result<()> {
+        let uuid = uuid::Uuid::parse_str(&object_id)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let session = parse_session_json(session_json)?;
+
+        let mut core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        core.delete(oid, session.as_ref())
             .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?;
 
         Ok(())
@@ -696,6 +775,44 @@ impl NapiRuntime {
         }))
     }
 
+    #[napi(js_name = "insertDurableWithSession", ts_return_type = "Promise<any>")]
+    pub async fn insert_durable_with_session(
+        &self,
+        table: String,
+        #[napi(ts_arg_type = "any")] values: serde_json::Value,
+        session_json: Option<String>,
+        tier: String,
+    ) -> napi::Result<serde_json::Value> {
+        let persistence_tier = parse_tier(&tier)?;
+        let js_values: Vec<Value> = serde_json::from_value(values)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
+        let groove_values = convert_values(js_values);
+        let session = parse_session_json(session_json)?;
+
+        let ((object_id, row_values), receiver) = {
+            let mut core = self
+                .core
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            let ((object_id, row_values), receiver) = core
+                .insert_persisted(&table, groove_values, session.as_ref(), persistence_tier)
+                .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
+            let row_values = align_row_values_to_declared_schema(
+                &self.declared_schema,
+                core.current_schema(),
+                &TableName::new(table.clone()),
+                row_values,
+            );
+            ((object_id, row_values), receiver)
+        };
+
+        let _ = receiver.await;
+        Ok(serde_json::json!({
+            "id": object_id.uuid().to_string(),
+            "values": row_values,
+        }))
+    }
+
     #[napi(js_name = "updateDurable", ts_return_type = "Promise<void>")]
     pub async fn update_durable(
         &self,
@@ -726,6 +843,38 @@ impl NapiRuntime {
         Ok(())
     }
 
+    #[napi(js_name = "updateDurableWithSession", ts_return_type = "Promise<void>")]
+    pub async fn update_durable_with_session(
+        &self,
+        object_id: String,
+        #[napi(ts_arg_type = "any")] values: serde_json::Value,
+        session_json: Option<String>,
+        tier: String,
+    ) -> napi::Result<()> {
+        let persistence_tier = parse_tier(&tier)?;
+
+        let uuid = uuid::Uuid::parse_str(&object_id)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let session = parse_session_json(session_json)?;
+
+        let partial_values: HashMap<String, Value> = serde_json::from_value(values)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
+        let updates = convert_updates(partial_values);
+
+        let receiver = {
+            let mut core = self
+                .core
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            core.update_persisted(oid, updates, session.as_ref(), persistence_tier)
+                .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?
+        };
+
+        let _ = receiver.await;
+        Ok(())
+    }
+
     #[napi(js_name = "deleteDurable", ts_return_type = "Promise<void>")]
     pub async fn delete_durable(&self, object_id: String, tier: String) -> napi::Result<()> {
         let persistence_tier = parse_tier(&tier)?;
@@ -740,6 +889,33 @@ impl NapiRuntime {
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             core.delete_persisted(oid, None, persistence_tier)
+                .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?
+        };
+
+        let _ = receiver.await;
+        Ok(())
+    }
+
+    #[napi(js_name = "deleteDurableWithSession", ts_return_type = "Promise<void>")]
+    pub async fn delete_durable_with_session(
+        &self,
+        object_id: String,
+        session_json: Option<String>,
+        tier: String,
+    ) -> napi::Result<()> {
+        let persistence_tier = parse_tier(&tier)?;
+
+        let uuid = uuid::Uuid::parse_str(&object_id)
+            .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
+        let oid = ObjectId::from_uuid(uuid);
+        let session = parse_session_json(session_json)?;
+
+        let receiver = {
+            let mut core = self
+                .core
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?;
+            core.delete_persisted(oid, session.as_ref(), persistence_tier)
                 .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?
         };
 

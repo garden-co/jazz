@@ -9,7 +9,7 @@ table("todos", {
   title: col.string(),
   done: col.boolean(),
   description: col.string().optional(),
-  parent: col.ref("todos").optional(),
-  project: col.ref("projects").optional(),
+  parentId: col.ref("todos").optional(),
+  projectId: col.ref("projects").optional(),
 });
 // #endregion schema-svelte

@@ -13,7 +13,7 @@
 	function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
 		if (!title.trim() || !sessionUserId) return;
-		db.insert(app.todos, { title: title.trim(), done: false, owner_id: sessionUserId });
+		db.insert(app.todos, { title: title.trim(), done: false, ownerId: sessionUserId });
 		title = '';
 	}
 </script>

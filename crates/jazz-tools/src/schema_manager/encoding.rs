@@ -637,6 +637,11 @@ const POLICY_EXPR_EXISTS_REL: u8 = 13;
 const POLICY_EXPR_INHERITS_REFERENCING: u8 = 14;
 const POLICY_EXPR_CONTAINS: u8 = 15;
 const POLICY_EXPR_IN_LIST: u8 = 16;
+const POLICY_EXPR_SESSION_CMP: u8 = 17;
+const POLICY_EXPR_SESSION_IS_NULL: u8 = 18;
+const POLICY_EXPR_SESSION_IS_NOT_NULL: u8 = 19;
+const POLICY_EXPR_SESSION_CONTAINS: u8 = 20;
+const POLICY_EXPR_SESSION_IN_LIST: u8 = 21;
 
 const POLICY_VALUE_LITERAL: u8 = 1;
 const POLICY_VALUE_SESSION_REF: u8 = 2;
@@ -708,18 +713,49 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             encode_cmp_op(buf, op);
             encode_policy_value(buf, value);
         }
+        PolicyExpr::SessionCmp { path, op, value } => {
+            buf.push(POLICY_EXPR_SESSION_CMP);
+            write_u32(buf, path.len() as u32);
+            for part in path {
+                write_string(buf, part);
+            }
+            encode_cmp_op(buf, op);
+            encode_value(buf, value);
+        }
         PolicyExpr::IsNull { column } => {
             buf.push(POLICY_EXPR_IS_NULL);
             write_string(buf, column);
+        }
+        PolicyExpr::SessionIsNull { path } => {
+            buf.push(POLICY_EXPR_SESSION_IS_NULL);
+            write_u32(buf, path.len() as u32);
+            for part in path {
+                write_string(buf, part);
+            }
         }
         PolicyExpr::IsNotNull { column } => {
             buf.push(POLICY_EXPR_IS_NOT_NULL);
             write_string(buf, column);
         }
+        PolicyExpr::SessionIsNotNull { path } => {
+            buf.push(POLICY_EXPR_SESSION_IS_NOT_NULL);
+            write_u32(buf, path.len() as u32);
+            for part in path {
+                write_string(buf, part);
+            }
+        }
         PolicyExpr::Contains { column, value } => {
             buf.push(POLICY_EXPR_CONTAINS);
             write_string(buf, column);
             encode_policy_value(buf, value);
+        }
+        PolicyExpr::SessionContains { path, value } => {
+            buf.push(POLICY_EXPR_SESSION_CONTAINS);
+            write_u32(buf, path.len() as u32);
+            for part in path {
+                write_string(buf, part);
+            }
+            encode_value(buf, value);
         }
         PolicyExpr::In {
             column,
@@ -738,6 +774,17 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             write_u32(buf, values.len() as u32);
             for value in values {
                 encode_policy_value(buf, value);
+            }
+        }
+        PolicyExpr::SessionInList { path, values } => {
+            buf.push(POLICY_EXPR_SESSION_IN_LIST);
+            write_u32(buf, path.len() as u32);
+            for part in path {
+                write_string(buf, part);
+            }
+            write_u32(buf, values.len() as u32);
+            for value in values {
+                encode_value(buf, value);
             }
         }
         PolicyExpr::Exists { table, condition } => {
@@ -820,18 +867,57 @@ fn decode_policy_expr(
             let value = decode_policy_value(data, offset)?;
             Ok(PolicyExpr::Cmp { column, op, value })
         }
+        POLICY_EXPR_SESSION_CMP => {
+            let count = read_u32(data, offset)? as usize;
+            let mut path = Vec::with_capacity(count);
+            for _ in 0..count {
+                path.push(read_string(data, offset, "policy_session_cmp_path")?);
+            }
+            let op = decode_cmp_op(data, offset)?;
+            let value = decode_value(data, offset)?;
+            Ok(PolicyExpr::SessionCmp { path, op, value })
+        }
         POLICY_EXPR_IS_NULL => {
             let column = read_string(data, offset, "policy_is_null_column")?;
             Ok(PolicyExpr::IsNull { column })
+        }
+        POLICY_EXPR_SESSION_IS_NULL => {
+            let count = read_u32(data, offset)? as usize;
+            let mut path = Vec::with_capacity(count);
+            for _ in 0..count {
+                path.push(read_string(data, offset, "policy_session_is_null_path")?);
+            }
+            Ok(PolicyExpr::SessionIsNull { path })
         }
         POLICY_EXPR_IS_NOT_NULL => {
             let column = read_string(data, offset, "policy_is_not_null_column")?;
             Ok(PolicyExpr::IsNotNull { column })
         }
+        POLICY_EXPR_SESSION_IS_NOT_NULL => {
+            let count = read_u32(data, offset)? as usize;
+            let mut path = Vec::with_capacity(count);
+            for _ in 0..count {
+                path.push(read_string(
+                    data,
+                    offset,
+                    "policy_session_is_not_null_path",
+                )?);
+            }
+            Ok(PolicyExpr::SessionIsNotNull { path })
+        }
         POLICY_EXPR_CONTAINS => {
             let column = read_string(data, offset, "policy_contains_column")?;
             let value = decode_policy_value(data, offset)?;
             Ok(PolicyExpr::Contains { column, value })
+        }
+        POLICY_EXPR_SESSION_CONTAINS => {
+            let count = read_u32(data, offset)? as usize;
+            let mut path = Vec::with_capacity(count);
+            for _ in 0..count {
+                path.push(read_string(data, offset, "policy_session_contains_path")?);
+            }
+            let value = decode_value(data, offset)?;
+            Ok(PolicyExpr::SessionContains { path, value })
         }
         POLICY_EXPR_IN => {
             let column = read_string(data, offset, "policy_in_column")?;
@@ -853,6 +939,19 @@ fn decode_policy_expr(
                 values.push(decode_policy_value(data, offset)?);
             }
             Ok(PolicyExpr::InList { column, values })
+        }
+        POLICY_EXPR_SESSION_IN_LIST => {
+            let path_count = read_u32(data, offset)? as usize;
+            let mut path = Vec::with_capacity(path_count);
+            for _ in 0..path_count {
+                path.push(read_string(data, offset, "policy_session_in_list_path")?);
+            }
+            let value_count = read_u32(data, offset)? as usize;
+            let mut values = Vec::with_capacity(value_count);
+            for _ in 0..value_count {
+                values.push(decode_value(data, offset)?);
+            }
+            Ok(PolicyExpr::SessionInList { path, values })
         }
         POLICY_EXPR_EXISTS => {
             let table = read_string(data, offset, "policy_exists_table")?;
@@ -1577,6 +1676,55 @@ mod tests {
                         ]
             )
         ));
+    }
+
+    #[test]
+    fn schema_roundtrip_with_session_left_policy() {
+        let expected = PolicyExpr::And(vec![
+            PolicyExpr::SessionCmp {
+                path: vec!["claims".to_string(), "role".to_string()],
+                op: CmpOp::Eq,
+                value: Value::Text("manager".to_string()),
+            },
+            PolicyExpr::SessionInList {
+                path: vec!["claims".to_string(), "plan".to_string()],
+                values: vec![
+                    Value::Text("pro".to_string()),
+                    Value::Text("enterprise".to_string()),
+                ],
+            },
+            PolicyExpr::SessionContains {
+                path: vec!["claims".to_string(), "teamIds".to_string()],
+                value: Value::Text("team_a".to_string()),
+            },
+            PolicyExpr::SessionIsNull {
+                path: vec!["claims".to_string(), "deleted_at".to_string()],
+            },
+            PolicyExpr::SessionIsNotNull {
+                path: vec!["userId".to_string()],
+            },
+        ]);
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("todos")
+                    .column("id", ColumnType::Uuid)
+                    .column("owner_id", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(expected.clone())),
+            )
+            .build();
+
+        let encoded = encode_schema(&schema);
+        let decoded = decode_schema(&encoded).expect("schema should decode");
+        let using = decoded
+            .get(&TableName::new("todos"))
+            .expect("todos table should exist")
+            .policies
+            .select
+            .using
+            .as_ref()
+            .expect("select policy should exist");
+
+        assert_eq!(using, &expected);
     }
 
     #[test]
