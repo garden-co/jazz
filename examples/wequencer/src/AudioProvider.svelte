@@ -365,20 +365,18 @@
 		untrack(() => {
 			for (const instrument of currentInstruments) {
 				if (loadedPlayers.has(instrument.id)) continue;
-
-				// Bytea comes back as plain Array due to JSON deserialization (mai-ammr)
-				const soundData = instrument.sound;
-				if (!soundData || (soundData as unknown as unknown[]).length === 0) continue;
-				const bytes = new Uint8Array(soundData as unknown as ArrayLike<number>);
-				const blob = new Blob([bytes]);
-				const url = URL.createObjectURL(blob);
+				if (!instrument.soundFileId) continue;
 
 				loadedPlayers.set(instrument.id, {
 					instrumentId: instrument.id,
 					player: undefined,
 				});
 
-				loadPlayer(url, instrument.id)
+				db.loadFileAsBlob(app, instrument.soundFileId, { tier: "edge" })
+					.then((blob) => {
+						const url = URL.createObjectURL(blob);
+						return loadPlayer(url, instrument.id);
+					})
 					.then((player) => {
 						loadedPlayers.set(instrument.id, {
 							instrumentId: instrument.id,
@@ -387,7 +385,6 @@
 					})
 					.catch((err) => {
 						console.error(`Failed to load player for ${instrument.name}:`, err);
-						URL.revokeObjectURL(url);
 					});
 			}
 		});
