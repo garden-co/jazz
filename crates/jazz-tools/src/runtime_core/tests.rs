@@ -1,8 +1,13 @@
 use super::*;
-use crate::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
+use crate::query_manager::policy::PolicyExpr;
+use crate::query_manager::query::QueryBuilder;
+use crate::query_manager::types::{ColumnType, SchemaBuilder, TablePolicies, TableSchema};
 use crate::schema_manager::AppId;
 use crate::storage::MemoryStorage;
-use crate::sync_manager::SyncManager;
+use crate::sync_manager::{
+    ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
+    SyncManager, SyncPayload,
+};
 use std::sync::{Arc, Mutex};
 
 type TestCore = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
@@ -17,10 +22,27 @@ fn test_schema() -> Schema {
         .build()
 }
 
-fn create_test_runtime() -> TestCore {
-    let schema = test_schema();
-    let app_id = AppId::from_name("test-app");
-    let sync_manager = SyncManager::new();
+fn protected_documents_schema() -> Schema {
+    let policies = TablePolicies::new()
+        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+        .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]));
+
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("documents")
+                .column("owner_id", ColumnType::Text)
+                .column("title", ColumnType::Text)
+                .policies(policies),
+        )
+        .build()
+}
+
+fn create_runtime_with_schema_and_sync_manager(
+    schema: Schema,
+    app_name: &str,
+    sync_manager: SyncManager,
+) -> TestCore {
+    let app_id = AppId::from_name(app_name);
     let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
     let mut core = RuntimeCore::new(
         schema_manager,
@@ -30,6 +52,20 @@ fn create_test_runtime() -> TestCore {
     );
     core.immediate_tick();
     core
+}
+
+fn create_runtime_with_schema(schema: Schema, app_name: &str) -> TestCore {
+    create_runtime_with_schema_and_sync_manager(schema, app_name, SyncManager::new())
+}
+
+fn create_test_runtime() -> TestCore {
+    create_runtime_with_schema(test_schema(), "test-app")
+}
+
+fn documents_query_by_title(title: &str) -> Query {
+    QueryBuilder::new("documents")
+        .filter_eq("title", Value::Text(title.into()))
+        .build()
 }
 
 /// Helper to execute a query synchronously via subscribe/tick/unsubscribe.
@@ -48,6 +84,201 @@ fn execute_query(core: &mut TestCore, query: Query) -> Vec<(ObjectId, Vec<Value>
         .query_manager_mut()
         .unsubscribe_with_sync(sub_id);
     results
+}
+
+fn execute_runtime_query(
+    core: &mut TestCore,
+    query: Query,
+    session: Option<Session>,
+) -> Vec<(ObjectId, Vec<Value>)> {
+    execute_runtime_query_with_propagation(
+        core,
+        query,
+        session,
+        crate::sync_manager::QueryPropagation::Full,
+    )
+}
+
+fn execute_local_runtime_query(
+    core: &mut TestCore,
+    query: Query,
+    session: Option<Session>,
+) -> Vec<(ObjectId, Vec<Value>)> {
+    execute_runtime_query_with_propagation(
+        core,
+        query,
+        session,
+        crate::sync_manager::QueryPropagation::LocalOnly,
+    )
+}
+
+fn execute_runtime_query_with_propagation(
+    core: &mut TestCore,
+    query: Query,
+    session: Option<Session>,
+    propagation: crate::sync_manager::QueryPropagation,
+) -> Vec<(ObjectId, Vec<Value>)> {
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+
+    let mut future = core.query_with_propagation(
+        query,
+        session,
+        ReadDurabilityOptions::default(),
+        propagation,
+    );
+
+    match Pin::new(&mut future).poll(&mut cx) {
+        Poll::Ready(Ok(results)) => results,
+        Poll::Ready(Err(err)) => panic!("query should succeed: {err:?}"),
+        Poll::Pending => panic!("query should resolve immediately"),
+    }
+}
+
+fn decode_added_rows(delta: &SubscriptionDelta) -> Vec<(ObjectId, Vec<Value>)> {
+    delta
+        .ordered_delta
+        .added
+        .iter()
+        .filter_map(|row| {
+            decode_row(&delta.descriptor, &row.row.data)
+                .ok()
+                .map(|values| (row.row.id, values))
+        })
+        .collect()
+}
+
+fn pump_client_messages_to_server(
+    client: &mut TestCore,
+    server: &mut TestCore,
+    server_id: ServerId,
+    client_id: ClientId,
+) {
+    client.batched_tick();
+    for entry in client.sync_sender().take() {
+        if entry.destination == Destination::Server(server_id) {
+            server.park_sync_message(InboxEntry {
+                source: Source::Client(client_id),
+                payload: entry.payload,
+            });
+        }
+    }
+    server.batched_tick();
+    server.immediate_tick();
+}
+
+fn pump_server_with_three_clients(
+    server: &mut TestCore,
+    writer: &mut TestCore,
+    writer_server_id: ServerId,
+    writer_client_id: ClientId,
+    alice_reader: &mut TestCore,
+    alice_reader_server_id: ServerId,
+    alice_reader_client_id: ClientId,
+    bob_reader: &mut TestCore,
+    bob_reader_server_id: ServerId,
+    bob_reader_client_id: ClientId,
+) -> Vec<OutboxEntry> {
+    let mut server_outputs = Vec::new();
+
+    for _ in 0..10 {
+        let mut any_messages = false;
+
+        writer.batched_tick();
+        for entry in writer.sync_sender().take() {
+            if entry.destination == Destination::Server(writer_server_id) {
+                any_messages = true;
+                server.park_sync_message(InboxEntry {
+                    source: Source::Client(writer_client_id),
+                    payload: entry.payload,
+                });
+            }
+        }
+
+        alice_reader.batched_tick();
+        for entry in alice_reader.sync_sender().take() {
+            if entry.destination == Destination::Server(alice_reader_server_id) {
+                any_messages = true;
+                server.park_sync_message(InboxEntry {
+                    source: Source::Client(alice_reader_client_id),
+                    payload: entry.payload,
+                });
+            }
+        }
+
+        bob_reader.batched_tick();
+        for entry in bob_reader.sync_sender().take() {
+            if entry.destination == Destination::Server(bob_reader_server_id) {
+                any_messages = true;
+                server.park_sync_message(InboxEntry {
+                    source: Source::Client(bob_reader_client_id),
+                    payload: entry.payload,
+                });
+            }
+        }
+
+        server.batched_tick();
+        let server_out = server.sync_sender().take();
+        server_outputs.extend(server_out.iter().cloned());
+        for entry in server_out {
+            match entry.destination {
+                Destination::Client(client_id) if client_id == writer_client_id => {
+                    any_messages = true;
+                    writer.park_sync_message(InboxEntry {
+                        source: Source::Server(writer_server_id),
+                        payload: entry.payload,
+                    });
+                }
+                Destination::Client(client_id) if client_id == alice_reader_client_id => {
+                    any_messages = true;
+                    alice_reader.park_sync_message(InboxEntry {
+                        source: Source::Server(alice_reader_server_id),
+                        payload: entry.payload,
+                    });
+                }
+                Destination::Client(client_id) if client_id == bob_reader_client_id => {
+                    any_messages = true;
+                    bob_reader.park_sync_message(InboxEntry {
+                        source: Source::Server(bob_reader_server_id),
+                        payload: entry.payload,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        writer.batched_tick();
+        writer.immediate_tick();
+        alice_reader.batched_tick();
+        alice_reader.immediate_tick();
+        bob_reader.batched_tick();
+        bob_reader.immediate_tick();
+
+        if !any_messages {
+            break;
+        }
+    }
+
+    server_outputs
+}
+
+fn outbox_has_object_update_for_client(
+    entries: &[OutboxEntry],
+    client_id: ClientId,
+    object_id: ObjectId,
+) -> bool {
+    entries.iter().any(|entry| {
+        matches!(
+            &entry.destination,
+            Destination::Client(dest_client_id) if *dest_client_id == client_id
+        ) && matches!(
+            &entry.payload,
+            SyncPayload::ObjectUpdated {
+                object_id: payload_object_id,
+                ..
+            } if *payload_object_id == object_id
+        )
+    })
 }
 
 #[test]
@@ -180,6 +411,339 @@ fn test_runtime_core_update_delete() {
 }
 
 #[test]
+fn rc_user_inserted_row_stays_hidden_from_other_sessions() {
+    let schema = protected_documents_schema();
+    let mut client = create_runtime_with_schema(schema.clone(), "scope-bypass-test");
+    let mut server = create_runtime_with_schema(schema, "scope-bypass-test");
+
+    let alice_session = Session::new("alice");
+    let title = "alice-private-doc";
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+
+    server.add_client(client_id, Some(alice_session.clone()));
+    client.add_server(server_id);
+    assert_eq!(
+        server
+            .schema_manager()
+            .query_manager()
+            .sync_manager()
+            .get_client(client_id)
+            .expect("client should be registered on server")
+            .role,
+        ClientRole::User,
+        "test must exercise the user auth path instead of a trusted-role bypass"
+    );
+
+    // Clear any connection-startup traffic so this test only inspects the write under test.
+    client.batched_tick();
+    server.batched_tick();
+    client.sync_sender().take();
+    server.sync_sender().take();
+
+    let values = vec![Value::Text("alice".into()), Value::Text(title.into())];
+    let (document_id, row_values) = client
+        .insert("documents", values.clone(), Some(&alice_session))
+        .expect("alice insert should satisfy local insert policy");
+
+    pump_client_messages_to_server(&mut client, &mut server, server_id, client_id);
+
+    let alice_results = execute_runtime_query(
+        &mut server,
+        documents_query_by_title(title),
+        Some(Session::new("alice")),
+    );
+    assert_eq!(
+        alice_results.len(),
+        1,
+        "alice should be able to read her row"
+    );
+    assert_eq!(alice_results[0].0, document_id);
+    assert_eq!(alice_results[0].1, row_values);
+
+    let bob_results = execute_runtime_query(
+        &mut server,
+        documents_query_by_title(title),
+        Some(Session::new("bob")),
+    );
+    assert!(
+        bob_results.is_empty(),
+        "bob should not be able to read alice's row after a client-originated insert"
+    );
+}
+
+#[test]
+fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
+    let schema = protected_documents_schema();
+    let mut writer = create_runtime_with_schema(schema.clone(), "scope-bypass-subscription-test");
+    let mut alice_reader =
+        create_runtime_with_schema(schema.clone(), "scope-bypass-subscription-test");
+    let mut bob_reader =
+        create_runtime_with_schema(schema.clone(), "scope-bypass-subscription-test");
+    let mut server = create_runtime_with_schema_and_sync_manager(
+        schema,
+        "scope-bypass-subscription-test",
+        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+    );
+
+    let alice_session = Session::new("alice");
+    let bob_session = Session::new("bob");
+    let writer_client_id = ClientId::new();
+    let writer_server_id = ServerId::new();
+    let alice_reader_client_id = ClientId::new();
+    let alice_reader_server_id = ServerId::new();
+    let bob_reader_client_id = ClientId::new();
+    let bob_reader_server_id = ServerId::new();
+    let title = "alice-private-doc";
+
+    server.add_client(writer_client_id, Some(alice_session.clone()));
+    writer.add_server(writer_server_id);
+    server.add_client(alice_reader_client_id, Some(alice_session.clone()));
+    alice_reader.add_server(alice_reader_server_id);
+    server.add_client(bob_reader_client_id, Some(bob_session.clone()));
+    bob_reader.add_server(bob_reader_server_id);
+
+    assert_eq!(
+        server
+            .schema_manager()
+            .query_manager()
+            .sync_manager()
+            .get_client(writer_client_id)
+            .expect("writer client should be registered on server")
+            .role,
+        ClientRole::User,
+        "writer must use the user auth path"
+    );
+    assert_eq!(
+        server
+            .schema_manager()
+            .query_manager()
+            .sync_manager()
+            .get_client(alice_reader_client_id)
+            .expect("alice reader should be registered on server")
+            .role,
+        ClientRole::User,
+        "alice reader must use the user auth path"
+    );
+    assert_eq!(
+        server
+            .schema_manager()
+            .query_manager()
+            .sync_manager()
+            .get_client(bob_reader_client_id)
+            .expect("bob reader should be registered on server")
+            .role,
+        ClientRole::User,
+        "bob reader must use the user auth path"
+    );
+
+    let alice_deliveries = Arc::new(Mutex::new(Vec::<Vec<(ObjectId, Vec<Value>)>>::new()));
+    let alice_deliveries_clone = alice_deliveries.clone();
+    let _alice_reader_handle = alice_reader
+        .subscribe(
+            Query::new("documents"),
+            move |delta| {
+                let rows = decode_added_rows(&delta);
+                if !rows.is_empty() {
+                    alice_deliveries_clone.lock().unwrap().push(rows);
+                }
+            },
+            Some(alice_session.clone()),
+        )
+        .expect("alice reader subscription should be created");
+
+    let bob_deliveries = Arc::new(Mutex::new(Vec::<Vec<(ObjectId, Vec<Value>)>>::new()));
+    let bob_deliveries_clone = bob_deliveries.clone();
+    let _bob_reader_handle = bob_reader
+        .subscribe(
+            Query::new("documents"),
+            move |delta| {
+                let rows = decode_added_rows(&delta);
+                if !rows.is_empty() {
+                    bob_deliveries_clone.lock().unwrap().push(rows);
+                }
+            },
+            Some(bob_session.clone()),
+        )
+        .expect("bob reader subscription should be created");
+
+    pump_server_with_three_clients(
+        &mut server,
+        &mut writer,
+        writer_server_id,
+        writer_client_id,
+        &mut alice_reader,
+        alice_reader_server_id,
+        alice_reader_client_id,
+        &mut bob_reader,
+        bob_reader_server_id,
+        bob_reader_client_id,
+    );
+
+    assert_eq!(
+        server
+            .schema_manager()
+            .query_manager()
+            .sync_manager()
+            .get_client(alice_reader_client_id)
+            .expect("alice reader should still be connected")
+            .queries
+            .len(),
+        1,
+        "server should register alice's active query before the write"
+    );
+    assert_eq!(
+        server
+            .schema_manager()
+            .query_manager()
+            .sync_manager()
+            .get_client(bob_reader_client_id)
+            .expect("bob reader should still be connected")
+            .queries
+            .len(),
+        1,
+        "server should register bob's active query before the write"
+    );
+
+    let values = vec![Value::Text("alice".into()), Value::Text(title.into())];
+    let (document_id, row_values) = writer
+        .insert("documents", values.clone(), Some(&alice_session))
+        .expect("alice insert should succeed through the public client API");
+
+    let server_outputs_after_write = pump_server_with_three_clients(
+        &mut server,
+        &mut writer,
+        writer_server_id,
+        writer_client_id,
+        &mut alice_reader,
+        alice_reader_server_id,
+        alice_reader_client_id,
+        &mut bob_reader,
+        bob_reader_server_id,
+        bob_reader_client_id,
+    );
+
+    let server_results = execute_runtime_query(
+        &mut server,
+        documents_query_by_title(title),
+        Some(alice_session.clone()),
+    );
+    assert_eq!(
+        server_results,
+        vec![(document_id, row_values.clone())],
+        "server should store the synced row for alice"
+    );
+    assert!(
+        outbox_has_object_update_for_client(
+            &server_outputs_after_write,
+            alice_reader_client_id,
+            document_id,
+        ),
+        "server should forward alice's row to an authorized downstream alice reader"
+    );
+    assert!(
+        !outbox_has_object_update_for_client(
+            &server_outputs_after_write,
+            bob_reader_client_id,
+            document_id,
+        ),
+        "server must not forward alice's row to bob on the wire"
+    );
+
+    let alice_received_rows: Vec<(ObjectId, Vec<Value>)> = alice_deliveries
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|rows| rows.iter().cloned())
+        .collect();
+    assert_eq!(
+        alice_received_rows,
+        vec![(document_id, row_values.clone())],
+        "authorized alice reader should receive exactly the inserted row"
+    );
+
+    let leaked_rows: Vec<(ObjectId, Vec<Value>)> = bob_deliveries
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|rows| rows.iter().cloned())
+        .collect();
+    assert!(
+        leaked_rows.is_empty(),
+        "bob should not receive alice's row through an active downstream subscription"
+    );
+
+    let alice_reader_results = execute_local_runtime_query(
+        &mut alice_reader,
+        documents_query_by_title(title),
+        Some(alice_session.clone()),
+    );
+    assert_eq!(
+        alice_reader_results,
+        vec![(document_id, row_values.clone())],
+        "authorized alice reader should also be able to query the synced row"
+    );
+
+    let bob_reader_results = execute_local_runtime_query(
+        &mut bob_reader,
+        documents_query_by_title(title),
+        Some(bob_session.clone()),
+    );
+    assert!(
+        bob_reader_results.is_empty(),
+        "bob's local state should stay empty after alice's write is forwarded through the server"
+    );
+
+    let mut fresh_bob_query = bob_reader.query_with_propagation(
+        documents_query_by_title(title),
+        Some(bob_session.clone()),
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::Worker),
+            local_updates: crate::query_manager::manager::LocalUpdates::Deferred,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(
+        Pin::new(&mut fresh_bob_query).poll(&mut cx).is_pending(),
+        "fresh bob full query should wait for Worker settlement instead of resolving from local empty state"
+    );
+
+    let server_outputs_after_fresh_bob_query = pump_server_with_three_clients(
+        &mut server,
+        &mut writer,
+        writer_server_id,
+        writer_client_id,
+        &mut alice_reader,
+        alice_reader_server_id,
+        alice_reader_client_id,
+        &mut bob_reader,
+        bob_reader_server_id,
+        bob_reader_client_id,
+    );
+    assert!(
+        !outbox_has_object_update_for_client(
+            &server_outputs_after_fresh_bob_query,
+            bob_reader_client_id,
+            document_id,
+        ),
+        "fresh bob full query must not cause alice's row to be sent downstream"
+    );
+
+    match Pin::new(&mut fresh_bob_query).poll(&mut cx) {
+        Poll::Ready(Ok(results)) => {
+            assert!(
+                results.is_empty(),
+                "fresh bob full query should resolve to an empty result after server settlement"
+            );
+        }
+        Poll::Ready(Err(err)) => panic!("fresh bob full query should succeed: {err:?}"),
+        Poll::Pending => panic!("fresh bob full query should resolve after Worker settlement"),
+    }
+}
+
+#[test]
 fn test_park_sync_message() {
     use crate::object::BranchName;
     use crate::sync_manager::{Source, SyncPayload};
@@ -203,11 +767,6 @@ fn test_park_sync_message() {
 // =========================================================================
 // Durability API Tests (3-tier: A ↔ B[Worker] ↔ C[EdgeServer])
 // =========================================================================
-
-use crate::sync_manager::{
-    ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
-    SyncPayload,
-};
 
 /// Three-tier RuntimeCore setup for durability tests.
 struct ThreeTierRC {
