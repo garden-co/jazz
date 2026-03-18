@@ -929,7 +929,7 @@ impl WasmRuntime {
     /// catalogue sync messages (from queue_full_sync_to_server) are sent
     /// before the call returns, rather than being deferred to a microtask.
     #[wasm_bindgen(js_name = addServer)]
-    pub fn add_server(&self) {
+    pub fn add_server(&self, server_catalogue_state_hash: Option<String>) {
         let _span = info_span!("wasm::addServer", tier = self.tier_label).entered();
         let server_id = {
             let mut slot = self.upstream_server_id.borrow_mut();
@@ -945,7 +945,10 @@ impl WasmRuntime {
         // Re-attach semantics: remove existing upstream edge then add again so
         // replay/full-sync runs on every successful reconnect.
         core.remove_server(server_id);
-        core.add_server(server_id);
+        core.add_server_with_catalogue_state_hash(
+            server_id,
+            server_catalogue_state_hash.as_deref(),
+        );
         core.batched_tick();
     }
 

@@ -9,6 +9,8 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use blake3::Hasher;
+
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use crate::query_manager::query::{Query, QueryBuilder};
@@ -373,6 +375,46 @@ impl SchemaManager {
     /// Get all registered lens edges as (source, target) hash pairs.
     pub fn lens_edges(&self) -> Vec<(SchemaHash, SchemaHash)> {
         self.context.lenses.keys().copied().collect()
+    }
+
+    /// Compute a canonical digest of the catalogue state known to this manager.
+    pub fn catalogue_state_hash(&self) -> String {
+        let mut hasher = Hasher::new();
+        hasher.update(b"jazz-catalogue-state-v1");
+
+        let mut schemas: Vec<_> = self.known_schemas.iter().collect();
+        schemas.sort_by(|(left_hash, _), (right_hash, _)| {
+            left_hash.as_bytes().cmp(right_hash.as_bytes())
+        });
+        hasher.update(&(schemas.len() as u64).to_le_bytes());
+        for (hash, schema) in schemas {
+            hasher.update(b"schema");
+            hasher.update(hash.as_bytes());
+            let encoded = encode_schema(schema);
+            hash_len_prefixed(&mut hasher, &encoded);
+        }
+
+        let mut lenses: Vec<_> = self.context.lenses.values().collect();
+        lenses.sort_by(|left, right| {
+            left.source_hash
+                .as_bytes()
+                .cmp(right.source_hash.as_bytes())
+                .then_with(|| {
+                    left.target_hash
+                        .as_bytes()
+                        .cmp(right.target_hash.as_bytes())
+                })
+        });
+        hasher.update(&(lenses.len() as u64).to_le_bytes());
+        for lens in lenses {
+            hasher.update(b"lens");
+            hasher.update(lens.source_hash.as_bytes());
+            hasher.update(lens.target_hash.as_bytes());
+            let encoded = encode_lens_transform(&lens.forward);
+            hash_len_prefixed(&mut hasher, &encoded);
+        }
+
+        hasher.finalize().to_hex().to_string()
     }
 
     /// Get access to the underlying context.
@@ -949,6 +991,11 @@ fn normalize_schema(mut schema: Schema) -> Schema {
         normalize_table_schema(table_schema);
     }
     schema
+}
+
+fn hash_len_prefixed(hasher: &mut Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
 }
 
 fn normalize_table_schema(table_schema: &mut crate::query_manager::types::TableSchema) {
