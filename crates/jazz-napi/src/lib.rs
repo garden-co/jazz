@@ -812,7 +812,7 @@ impl NapiRuntime {
     }
 
     #[napi(js_name = "addServer")]
-    pub fn add_server(&self) -> napi::Result<()> {
+    pub fn add_server(&self, server_catalogue_state_hash: Option<String>) -> napi::Result<()> {
         let server_id = {
             let mut slot = self
                 .upstream_server_id
@@ -833,7 +833,10 @@ impl NapiRuntime {
         // Re-attach semantics: remove existing upstream edge then add again so
         // replay/full-sync runs on every successful reconnect.
         core.remove_server(server_id);
-        core.add_server(server_id);
+        core.add_server_with_catalogue_state_hash(
+            server_id,
+            server_catalogue_state_hash.as_deref(),
+        );
         Ok(())
     }
 
