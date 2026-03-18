@@ -1539,6 +1539,9 @@ fn evaluate_session_in_list(path: &[String], values: &[Value], session: &Session
     let Some(session_value) = resolve_session_value(path, session) else {
         return false;
     };
+    if matches!(session_value, Value::Null) {
+        return false;
+    }
 
     values.iter().any(|candidate| candidate == &session_value)
 }
@@ -2461,6 +2464,15 @@ mod tests {
         assert!(evaluate_policy_expr(
             &PolicyExpr::SessionIsNull {
                 path: vec!["claims".into(), "deleted_at".into()],
+            },
+            &content,
+            &desc,
+            &session,
+        ));
+        assert!(!evaluate_policy_expr(
+            &PolicyExpr::SessionInList {
+                path: vec!["claims".into(), "deleted_at".into()],
+                values: vec![Value::Null, Value::Text("fallback".into())],
             },
             &content,
             &desc,
