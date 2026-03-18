@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -431,6 +432,8 @@ pub struct PendingPermissionCheck {
     pub client_id: ClientId,
     pub payload: SyncPayload,
     pub session: Session,
+    /// When schema resolution started deferring this check.
+    pub schema_wait_started_at: Option<Instant>,
     /// Object metadata for policy evaluation.
     pub metadata: HashMap<String, String>,
     /// Old content for UPDATE/DELETE (None for INSERT).
