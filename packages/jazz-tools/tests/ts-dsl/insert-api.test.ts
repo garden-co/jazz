@@ -99,7 +99,7 @@ describe("TS Insert API", () => {
     expect(result).toBeUndefined();
 
     const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }));
-    expect(updated.done).toBe(true);
+    expect(updated!.done).toBe(true);
   });
 
   it("can wait for updates to be persisted up to a specific durability tier", async () => {
@@ -120,7 +120,7 @@ describe("TS Insert API", () => {
     await pending;
 
     const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "worker" });
-    expect(updated.done).toBe(true);
+    expect(updated!.done).toBe(true);
   });
 
   it("deletes rows synchronously without returning a promise", async () => {

@@ -442,7 +442,7 @@ function conditionsToRelPredicate(
     return "True";
   }
   if (conditions.length === 1) {
-    return conditionToRelPredicate(conditions[0], schema, table, scope);
+    return conditionToRelPredicate(conditions[0]!, schema, table, scope);
   }
   return {
     And: conditions.map((condition) => conditionToRelPredicate(condition, schema, table, scope)),

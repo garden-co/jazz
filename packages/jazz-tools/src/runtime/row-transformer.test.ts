@@ -223,7 +223,7 @@ describe("transformRows", () => {
       "todos",
     );
 
-    expect(result[0].priority).toBeUndefined();
+    expect(result[0]!.priority).toBeUndefined();
   });
 
   it("throws for unknown table", () => {
