@@ -172,7 +172,9 @@ const app = {
 describe("permissions type inference", () => {
   it("infers row callback and where key types", () => {
     definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
+      expectTypeOf(session.user_id.path).toEqualTypeOf<string[]>();
       expectTypeOf(session.userId.path).toEqualTypeOf<string[]>();
+      expectTypeOf(session["claims.role"].path).toEqualTypeOf<string[]>();
 
       const reachableTeams = policy.teams.gather({
         start: { kind: "individual", identity_key: session.userId },
@@ -192,6 +194,7 @@ describe("permissions type inference", () => {
         policy.todos.allowRead.where((todo) =>
           anyOf([
             { done: false },
+            session.where({ "claims.role": "manager" }),
             policy.projects.exists.where({
               id: todo.projectId,
               ownerId: session.userId,
