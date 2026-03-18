@@ -68,6 +68,14 @@ definePermissions(app, ({ policy, allOf, anyOf, allowedTo, session }) => {
 });
 // #endregion permissions-combinators-ts
 
+// #region permissions-session-claims-ts
+definePermissions(app, ({ policy, anyOf, session }) => {
+  policy.todos.allowRead.where(
+    anyOf([{ owner_id: session.user_id }, session.where({ "claims.role": "manager" })]),
+  );
+});
+// #endregion permissions-session-claims-ts
+
 // #region permissions-recursive-inherits-ts
 definePermissions(app, ({ policy, allowedTo }) => {
   policy.todos.allowRead.where(allowedTo.read("parent"));
