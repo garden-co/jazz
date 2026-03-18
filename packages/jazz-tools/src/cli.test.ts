@@ -299,6 +299,52 @@ describe("cli migrations", () => {
     expect(generated).toContain('t.add("notes", { default: null });');
   });
 
+  it("generates createTable/dropTable steps for table additions and removals", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "abababababababababababababababababababababababababababababababab";
+    const toHash = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith(`/schema/${fromHash}`)) {
+        return new Response(
+          JSON.stringify({
+            legacy_users: {
+              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      if (input.endsWith(`/schema/${toHash}`)) {
+        return new Response(
+          JSON.stringify({
+            users: {
+              columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const filePath = await createMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash,
+      toHash,
+    });
+
+    const generated = await readFile(filePath, "utf8");
+    expect(generated).toContain('m.dropTable("legacy_users");');
+    expect(generated).toContain('m.createTable("users");');
+  });
+
   it("pushes a reviewed migration via the admin migrations endpoint", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
@@ -341,6 +387,58 @@ export default defineMigration({
       expect(body.fromHash).toBe(fromHash);
       expect(body.toHash).toBe(toHash);
       expect(body.forwardSql).toContain("ALTER TABLE users RENAME COLUMN email TO email_address;");
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pushMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash,
+      toHash,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("pushes reviewed table creation migrations via the admin migrations endpoint", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+
+    const fromHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const toHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    const migrationPath = join(migrationsDir, `20260318-create-${fromHash}-${toHash}.ts`);
+
+    await writeFile(
+      migrationPath,
+      `
+import { col } from ${JSON.stringify(dslPath)};
+import { defineMigration } from ${JSON.stringify(migrationsPath)};
+
+export default defineMigration({
+  fromHash: ${JSON.stringify(fromHash)},
+  toHash: ${JSON.stringify(toHash)},
+  from: {},
+  to: {
+    users: {
+      name: col.string(),
+    },
+  },
+  migrate: (m) => {
+    m.createTable("users");
+  },
+});
+`,
+    );
+
+    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      expect(body.fromHash).toBe(fromHash);
+      expect(body.toHash).toBe(toHash);
+      expect(body.forwardSql).toContain("CREATE TABLE users (");
+      expect(body.forwardSql).toContain("name TEXT NOT NULL");
       return new Response(JSON.stringify({ ok: true }), { status: 201 });
     });
     vi.stubGlobal("fetch", fetchMock);

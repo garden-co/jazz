@@ -1,7 +1,18 @@
 import type { AnyTypedColumnBuilder, ColumnBuilderOptional, ColumnBuilderSqlType } from "./dsl.js";
 import { assertUserColumnNameAllowed } from "./magic-columns.js";
-import type { Lens, Schema, TSTypeFromSqlType } from "./schema.js";
-import type { CompactSchema, DefinedSchema, SchemaDefinition } from "./typed-app.js";
+import type {
+  Lens,
+  Schema,
+  Table as SchemaAstTable,
+  TSTypeFromSqlType,
+  TableLens,
+} from "./schema.js";
+import type {
+  CompactSchema,
+  DefinedSchema,
+  SchemaDefinition,
+  TableDefinition,
+} from "./typed-app.js";
 
 type SchemaLike = SchemaDefinition | DefinedSchema<any>;
 
@@ -14,6 +25,14 @@ type NormalizedSchema<TSchema extends SchemaLike> =
 
 type TableName<TSchema extends SchemaLike> = Extract<keyof NormalizedSchema<TSchema>, string>;
 type SharedTableName<TFrom extends SchemaLike, TTo extends SchemaLike> = Extract<
+  TableName<TFrom>,
+  TableName<TTo>
+>;
+type AddedTableName<TFrom extends SchemaLike, TTo extends SchemaLike> = Exclude<
+  TableName<TTo>,
+  TableName<TFrom>
+>;
+type RemovedTableName<TFrom extends SchemaLike, TTo extends SchemaLike> = Exclude<
   TableName<TFrom>,
   TableName<TTo>
 >;
@@ -88,6 +107,8 @@ export interface MigrationBuilder<TFrom extends SchemaLike, TTo extends SchemaLi
     table: TTable,
     build: (table: MigrationTableEditor<TFrom, TTo, TTable>) => unknown,
   ): void;
+  createTable<TTable extends AddedTableName<TFrom, TTo>>(table: TTable): void;
+  dropTable<TTable extends RemovedTableName<TFrom, TTo>>(table: TTable): void;
 }
 
 class TableMigrationBuilder<
@@ -95,7 +116,7 @@ class TableMigrationBuilder<
   TTo extends SchemaLike,
   TTable extends SharedTableName<TFrom, TTo>,
 > implements MigrationTableEditor<TFrom, TTo, TTable> {
-  private readonly operations: Lens["operations"] = [];
+  private readonly operations: TableLens["operations"] = [];
 
   constructor(
     private readonly tableName: TTable,
@@ -151,7 +172,7 @@ class TableMigrationBuilder<
     return this;
   }
 
-  build(): Lens | null {
+  build(): TableLens | null {
     if (this.operations.length === 0) {
       return null;
     }
@@ -161,6 +182,16 @@ class TableMigrationBuilder<
       operations: [...this.operations],
     };
   }
+}
+
+function tableDefinitionToAst(tableName: string, definition: TableDefinition): SchemaAstTable {
+  return {
+    name: tableName,
+    columns: Object.entries(definition).map(([columnName, builder]) => {
+      assertUserColumnNameAllowed(columnName);
+      return builder._build(columnName);
+    }),
+  };
 }
 
 class MigrationCollector<
@@ -189,17 +220,27 @@ class MigrationCollector<
       this.forward.push(lens);
     }
   }
+
+  createTable<TTable extends AddedTableName<TFrom, TTo>>(table: TTable): void {
+    this.forward.push({
+      type: "create_table",
+      table: tableDefinitionToAst(table, this.toDefinition[table] as unknown as TableDefinition),
+    });
+  }
+
+  dropTable<TTable extends RemovedTableName<TFrom, TTo>>(table: TTable): void {
+    this.forward.push({
+      type: "drop_table",
+      table: tableDefinitionToAst(table, this.fromDefinition[table] as unknown as TableDefinition),
+    });
+  }
 }
 
 function definitionToSchema(definition: SchemaDefinition): Schema {
   return {
-    tables: Object.entries(definition).map(([tableName, tableDefinition]) => ({
-      name: tableName,
-      columns: Object.entries(tableDefinition).map(([columnName, builder]) => {
-        assertUserColumnNameAllowed(columnName);
-        return builder._build(columnName);
-      }),
-    })),
+    tables: Object.entries(definition).map(([tableName, tableDefinition]) =>
+      tableDefinitionToAst(tableName, tableDefinition),
+    ),
   };
 }
 
