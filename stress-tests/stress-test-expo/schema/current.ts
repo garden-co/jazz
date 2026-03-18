@@ -9,6 +9,6 @@ table("todos", {
   done: col.boolean(),
   description: col.string().optional(),
   owner_id: col.string(),
-  parent: col.ref("todos").optional(),
-  project: col.ref("projects").optional(),
+  parent_id: col.ref("todos").optional(),
+  project_id: col.ref("projects").optional(),
 });
