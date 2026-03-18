@@ -140,10 +140,14 @@ fn decode_added_rows(delta: &SubscriptionDelta) -> Vec<(ObjectId, Vec<Value>)> {
         .ordered_delta
         .added
         .iter()
-        .filter_map(|row| {
-            decode_row(&delta.descriptor, &row.row.data)
-                .ok()
-                .map(|values| (row.row.id, values))
+        .map(|row| {
+            let values = decode_row(&delta.descriptor, &row.row.data).unwrap_or_else(|err| {
+                panic!(
+                    "subscription row {:?} should decode successfully: {err:?}",
+                    row.row.id
+                )
+            });
+            (row.row.id, values)
         })
         .collect()
 }
@@ -1638,16 +1642,7 @@ fn rc_subscribe_settled_tier() {
         s.a.subscribe_with_durability_and_propagation(
             Query::new("users"),
             move |delta| {
-                let rows: Vec<(ObjectId, Vec<Value>)> = delta
-                    .ordered_delta
-                    .added
-                    .iter()
-                    .filter_map(|row| {
-                        decode_row(&delta.descriptor, &row.row.data)
-                            .ok()
-                            .map(|vals| (row.row.id, vals))
-                    })
-                    .collect();
+                let rows = decode_added_rows(&delta);
                 received_clone.lock().unwrap().push(rows);
             },
             None,
@@ -1692,16 +1687,7 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
         s.a.subscribe_with_durability_and_propagation(
             Query::new("users"),
             move |delta| {
-                let rows: Vec<(ObjectId, Vec<Value>)> = delta
-                    .ordered_delta
-                    .added
-                    .iter()
-                    .filter_map(|row| {
-                        decode_row(&delta.descriptor, &row.row.data)
-                            .ok()
-                            .map(|vals| (row.row.id, vals))
-                    })
-                    .collect();
+                let rows = decode_added_rows(&delta);
                 received_clone.lock().unwrap().push(rows);
             },
             None,
