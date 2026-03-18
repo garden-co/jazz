@@ -93,8 +93,7 @@ function normalizeSelect(value: unknown): string[] {
     return [];
   }
 
-  const select = value.filter((column): column is string => typeof column === "string");
-  return select.includes("*") ? [] : select;
+  return value.filter((column): column is string => typeof column === "string");
 }
 
 function normalizeGather(value: unknown): BuiltGather | undefined {

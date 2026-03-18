@@ -1032,7 +1032,7 @@ describe("generateTypes with relations", () => {
       "export type TodoSelected<S extends TodoSelectableColumn = keyof Todo>",
     );
     expect(output).toContain(
-      '"*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>',
+      '("*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>',
     );
     expect(output).toContain(
       "export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false>",

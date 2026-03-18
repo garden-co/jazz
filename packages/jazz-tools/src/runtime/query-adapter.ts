@@ -19,6 +19,7 @@ import {
   type NormalizedIncludeEntry,
   type NormalizedIncludeSpec,
 } from "./query-builder-shape.js";
+import { hiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 import type {
   RelColumnRef,
   RelExpr,
@@ -163,18 +164,6 @@ function toWasmValue(value: unknown, columnType: ColumnType): object {
   throw new Error(`Unsupported value type: ${typeof value}`);
 }
 
-/**
- * Translate includes to array_subqueries for the WASM query format.
- *
- * @param includes Object mapping relation names to boolean or nested includes
- * @param tableName Current table name
- * @param relations Map from table name to relations on that table
- * @returns Array of array_subquery objects
- */
-function hiddenIncludeColumnName(relationName: string): string {
-  return `__jazz_include_${relationName}`;
-}
-
 function includeRequirementForRelation(
   relation: Relation,
   requireIncludes: boolean,
@@ -187,12 +176,10 @@ function includeRequirementForRelation(
 }
 
 function visibleSelectColumns(
-  select: readonly string[],
+  resolvedSelect: readonly string[],
   includeProjectionColumns: readonly string[] = [],
 ): string[] | null {
-  // `id` is not an explicit column, and is always included
-  const explicitColumns = select.filter((column) => column !== "id");
-  const columns = [...explicitColumns, ...includeProjectionColumns];
+  const columns = [...resolvedSelect, ...includeProjectionColumns];
   return columns.length > 0 ? columns : null;
 }
 
@@ -285,10 +272,13 @@ function toArraySubqueries(
     }
     validateIncludeBuilderSpec(rel, spec, relName);
 
-    const includeProjectionColumns =
-      spec.select.length > 0
-        ? Object.keys(spec.includes).map((relationName) => hiddenIncludeColumnName(relationName))
-        : [];
+    const hasExplicitSelect = spec.select.length > 0;
+    const resolvedSelectColumns = hasExplicitSelect
+      ? resolveSelectedColumns(rel.toTable, schema, spec.select)
+      : [];
+    const includeProjectionColumns = hasExplicitSelect
+      ? Object.keys(spec.includes).map((relationName) => hiddenIncludeColumnName(relationName))
+      : [];
     const filters = spec.conditions.map((condition) =>
       conditionToArraySubqueryFilter(condition, schema, rel.toTable),
     );
@@ -297,10 +287,10 @@ function toArraySubqueries(
       direction === "desc" ? "Descending" : "Ascending",
     ]);
     const nestedArrays = toArraySubqueries(spec.includes, rel.toTable, relations, schema, {
-      hideCurrentLevelColumnNames: spec.select.length > 0,
+      hideCurrentLevelColumnNames: hasExplicitSelect,
       requireIncludes: spec.requireIncludes,
     });
-    const selectColumns = visibleSelectColumns(spec.select, includeProjectionColumns);
+    const selectColumns = visibleSelectColumns(resolvedSelectColumns, includeProjectionColumns);
 
     // Build the subquery based on relation type
     if (rel.type === "forward") {
@@ -691,16 +681,18 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
   const builder = normalizeBuiltQuery(JSON.parse(builderJson), "");
   const relations = analyzeRelations(schema);
   const relation = translateBuilderToRelationIr(builderJson, schema);
-  const selectColumns = builder.select;
-  const includeProjectionColumns =
-    selectColumns.length > 0
-      ? Object.keys(builder.includes).map((relationName) => hiddenIncludeColumnName(relationName))
-      : [];
+  const hasExplicitSelect = builder.select.length > 0;
+  const selectColumns = hasExplicitSelect
+    ? resolveSelectedColumns(builder.table, schema, builder.select)
+    : [];
+  const includeProjectionColumns = hasExplicitSelect
+    ? Object.keys(builder.includes).map((relationName) => hiddenIncludeColumnName(relationName))
+    : [];
   const projectedColumns = visibleSelectColumns(selectColumns, includeProjectionColumns);
   const query = {
     table: builder.table,
     array_subqueries: toArraySubqueries(builder.includes, builder.table, relations, schema, {
-      hideCurrentLevelColumnNames: selectColumns.length > 0,
+      hideCurrentLevelColumnNames: hasExplicitSelect,
       requireIncludes: builder.requireIncludes,
     }),
     relation_ir: relation,
