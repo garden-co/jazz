@@ -373,8 +373,18 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
 
     /// Add a server connection.
     pub fn add_server(&self, server_id: ServerId) -> Result<(), RuntimeError> {
+        self.add_server_with_catalogue_state_hash(server_id, None)
+    }
+
+    /// Add a server connection, optionally comparing the upstream catalogue
+    /// digest first so unchanged catalogue objects are not replayed.
+    pub fn add_server_with_catalogue_state_hash(
+        &self,
+        server_id: ServerId,
+        remote_catalogue_state_hash: Option<&str>,
+    ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.add_server(server_id);
+        core.add_server_with_catalogue_state_hash(server_id, remote_catalogue_state_hash);
         Ok(())
     }
 
@@ -445,6 +455,12 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.schema_manager().known_schema_hashes())
+    }
+
+    /// Return a canonical digest of the runtime's catalogue state.
+    pub fn catalogue_state_hash(&self) -> Result<String, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.schema_manager().catalogue_state_hash())
     }
 
     /// Get a known schema by hash from catalogue state.
