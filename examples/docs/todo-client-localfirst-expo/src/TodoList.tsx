@@ -40,7 +40,7 @@ export function TodoList() {
   const addTodo = () => {
     const trimmed = title.trim();
     if (!trimmed || !sessionUserId) return;
-    db.insert(app.todos, { title: trimmed, done: false, owner_id: sessionUserId });
+    db.insert(app.todos, { title: trimmed, done: false, ownerId: sessionUserId });
     setTitle("");
   };
 

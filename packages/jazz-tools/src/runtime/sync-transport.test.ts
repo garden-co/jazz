@@ -10,6 +10,7 @@ import {
   normalizePathPrefix,
   readBinaryFrames,
   sendSyncPayload,
+  sendSyncPayloadBatch,
   SyncStreamController,
   type RuntimeSyncOutboxCallback,
 } from "./sync-transport.js";
@@ -116,8 +117,8 @@ describe("sync-transport", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
-    const firstBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    const secondBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
+    const firstBody = JSON.parse(fetchMock.mock.calls[0]![1].body as string);
+    const secondBody = JSON.parse(fetchMock.mock.calls[1]![1].body as string);
 
     expect(firstBody.client_id).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
@@ -136,7 +137,7 @@ describe("sync-transport", () => {
       jwtToken: "token",
     });
 
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    const body = JSON.parse(fetchMock.mock.calls[0]![1].body as string);
     expect(body.client_id).toBe(providedClientId);
   });
 
@@ -170,7 +171,7 @@ describe("sync-transport", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/apps/app-123/sync");
+    expect(fetchMock.mock.calls[0]![0]).toBe("http://localhost:3000/apps/app-123/sync");
   });
 
   it("posts non-catalogue payloads with backend secret when provided", async () => {
@@ -183,13 +184,13 @@ describe("sync-transport", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+    expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
       "Content-Type": "application/json",
       "X-Jazz-Backend-Secret": "backend-secret",
     });
-    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("Authorization");
-    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("X-Jazz-Local-Mode");
-    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("X-Jazz-Local-Token");
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("Authorization");
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Mode");
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Token");
   });
 
   it("skips catalogue payload sync when admin secret is missing", async () => {
@@ -234,13 +235,13 @@ describe("sync-transport", () => {
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+    expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
       "Content-Type": "application/json",
       "X-Jazz-Admin-Secret": "admin-secret",
     });
-    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("Authorization");
-    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("X-Jazz-Local-Mode");
-    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("X-Jazz-Local-Token");
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("Authorization");
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Mode");
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Token");
   });
 
   it("posts link-external with bearer and local auth headers", async () => {
@@ -265,11 +266,11 @@ describe("sync-transport", () => {
 
     expect(result.created).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe(
+    expect(fetchMock.mock.calls[0]![0]).toBe(
       "http://localhost:3000/apps/app-123/auth/link-external",
     );
-    expect(fetchMock.mock.calls[0][1].method).toBe("POST");
-    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+    expect(fetchMock.mock.calls[0]![1].method).toBe("POST");
+    expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
       Authorization: "Bearer jwt-token",
       "X-Jazz-Local-Mode": "anonymous",
       "X-Jazz-Local-Token": "device-token",
@@ -293,7 +294,11 @@ describe("sync-transport", () => {
   it("stream controller attaches on Connected and forwards sync payloads", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       streamResponse([
-        { type: "Connected", client_id: "server-client-1" },
+        {
+          type: "Connected",
+          client_id: "server-client-1",
+          catalogue_state_hash: "catalogue-1",
+        },
         { type: "SyncUpdate", payload: { Ping: {} } },
       ]),
     );
@@ -318,6 +323,7 @@ describe("sync-transport", () => {
     controller.start("http://localhost:3000");
 
     await vi.waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
+    expect(onConnected).toHaveBeenCalledWith("catalogue-1");
     await vi.waitFor(() =>
       expect(onSyncMessage).toHaveBeenCalledWith(JSON.stringify({ Ping: {} })),
     );
@@ -378,11 +384,11 @@ describe("sync-transport", () => {
     controller.start("http://localhost:3000");
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 
-    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+    expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
       Accept: "application/octet-stream",
       "X-Jazz-Backend-Secret": "backend-secret",
     });
-    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("Authorization");
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("Authorization");
 
     controller.stop();
   });
@@ -438,7 +444,13 @@ describe("sync-transport", () => {
   });
 
   it("labels callback failures separately from parse failures", async () => {
-    const response = streamResponse([{ type: "Connected", client_id: "server-client-4" }]);
+    const response = streamResponse([
+      {
+        type: "Connected",
+        client_id: "server-client-4",
+        catalogue_state_hash: "catalogue-4",
+      },
+    ]);
     const reader = response.body!.getReader();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -460,7 +472,11 @@ describe("sync-transport", () => {
   it("runtime-bound stream controller maps stream events to runtime hooks", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       streamResponse([
-        { type: "Connected", client_id: "server-client-3" },
+        {
+          type: "Connected",
+          client_id: "server-client-3",
+          catalogue_state_hash: "catalogue-3",
+        },
         { type: "SyncUpdate", payload: { Ping: {} } },
       ]),
     );
@@ -485,6 +501,7 @@ describe("sync-transport", () => {
     controller.start("http://localhost:3000");
 
     await vi.waitFor(() => expect(runtime.addServer).toHaveBeenCalledTimes(1));
+    expect(runtime.addServer).toHaveBeenCalledWith("catalogue-3");
     await vi.waitFor(() =>
       expect(runtime.onSyncMessageReceived).toHaveBeenCalledWith(JSON.stringify({ Ping: {} })),
     );
@@ -545,12 +562,12 @@ describe("sync-transport", () => {
 
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 
-      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body as string) as {
-        payload: unknown;
+      const requestBody = JSON.parse(fetchMock.mock.calls[0]![1].body as string) as {
+        payloads: unknown[];
       };
-      expect(requestBody.payload).toEqual(JSON.parse(payloadJson));
-      expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/sync");
-      expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+      expect(requestBody.payloads).toEqual([JSON.parse(payloadJson)]);
+      expect(fetchMock.mock.calls[0]![0]).toBe("http://localhost:3000/sync");
+      expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
         "X-Jazz-Backend-Secret": "backend-secret",
       });
     },
@@ -568,5 +585,104 @@ describe("sync-transport", () => {
     router("server", "upstream-1", JSON.stringify({ Ping: {} }), false);
 
     await vi.waitFor(() => expect(onServerPayloadError).toHaveBeenCalledWith(error));
+  });
+
+  // ---------------------------------------------------------------------------
+  // sendSyncPayloadBatch
+  //
+  // RED: sendSyncPayloadBatch does not exist yet — these tests will fail at
+  // import time until it is exported from sync-transport.ts.
+  // ---------------------------------------------------------------------------
+
+  describe("sendSyncPayloadBatch", () => {
+    const playerPayload = (id: string) =>
+      JSON.stringify({
+        ObjectUpdated: { object_id: id, branch_name: "main", commits: [] },
+      });
+
+    it("sends all payloads in a single POST using the always-array wire format", async () => {
+      // alice updates her position 3 times in one tick — should be 1 fetch call,
+      // not 3
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+      (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      const payloads = [playerPayload("id-1"), playerPayload("id-2"), playerPayload("id-3")];
+
+      await sendSyncPayloadBatch("http://localhost:3000", payloads, {
+        jwtToken: "alice-token",
+        clientId: "client-alice",
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const body = JSON.parse(fetchMock.mock.calls[0]![1].body as string);
+      expect(body.payloads).toHaveLength(3);
+      expect(body.client_id).toBe("client-alice");
+      // Each element is the parsed payload, not the raw JSON string
+      expect(body.payloads[0]!).toEqual(JSON.parse(payloads[0]!));
+      expect(body.payloads[1]!).toEqual(JSON.parse(payloads[1]!));
+      expect(body.payloads[2]!).toEqual(JSON.parse(payloads[2]!));
+    });
+
+    it("preserves payload order in the POST body", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+      (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      // bob's collected flag goes false→true→false in one tick; order must be preserved
+      const p1 = JSON.stringify({
+        ObjectUpdated: { object_id: "p1", branch_name: "main", commits: [] },
+      });
+      const p2 = JSON.stringify({
+        ObjectUpdated: { object_id: "p2", branch_name: "main", commits: [] },
+      });
+      const p3 = JSON.stringify({
+        ObjectUpdated: { object_id: "p3", branch_name: "main", commits: [] },
+      });
+
+      await sendSyncPayloadBatch("http://localhost:3000", [p1, p2, p3], {
+        jwtToken: "bob-token",
+      });
+
+      const body = JSON.parse(fetchMock.mock.calls[0]![1].body as string);
+      expect(body.payloads[0]!.ObjectUpdated.object_id).toBe("p1");
+      expect(body.payloads[1]!.ObjectUpdated.object_id).toBe("p2");
+      expect(body.payloads[2]!.ObjectUpdated.object_id).toBe("p3");
+    });
+
+    it("applies JWT auth header", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+      (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      await sendSyncPayloadBatch("http://localhost:3000", [playerPayload("id-1")], {
+        jwtToken: "alice-jwt",
+      });
+
+      expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
+        Authorization: "Bearer alice-jwt",
+      });
+    });
+
+    it("posts to path-prefixed route when provided", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+      (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      await sendSyncPayloadBatch("http://localhost:3000", [playerPayload("id-1")], {
+        jwtToken: "token",
+        pathPrefix: "apps/app-42",
+      });
+
+      expect(fetchMock.mock.calls[0]![0]).toBe("http://localhost:3000/apps/app-42/sync");
+    });
+
+    it("throws on non-2xx response", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue({ ok: false, status: 503, statusText: "Service Unavailable" });
+      (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        sendSyncPayloadBatch("http://localhost:3000", [playerPayload("id-1")], {}),
+      ).rejects.toThrow("503");
+    });
   });
 });

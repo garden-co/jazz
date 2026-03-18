@@ -141,43 +141,43 @@ describe("schemaToSql", () => {
     resetCollectedState();
     table("todos", {
       title: col.string(),
-      owner_id: col.ref("users"),
+      ownerId: col.ref("users"),
     });
     const schema = getCollectedSchema();
 
     const sql = schemaToSql(schema);
 
-    expect(sql).toContain("owner_id UUID REFERENCES users NOT NULL");
+    expect(sql).toContain("ownerId UUID REFERENCES users NOT NULL");
   });
 
   it("generates nullable UUID REFERENCES for optional ref", () => {
     resetCollectedState();
     table("todos", {
       title: col.string(),
-      parent_id: col.ref("todos").optional(),
+      parentId: col.ref("todos").optional(),
     });
     const schema = getCollectedSchema();
 
     const sql = schemaToSql(schema);
 
-    expect(sql).toContain("parent_id UUID REFERENCES todos");
-    expect(sql).not.toContain("parent_id UUID REFERENCES todos NOT NULL");
+    expect(sql).toContain("parentId UUID REFERENCES todos");
+    expect(sql).not.toContain("parentId UUID REFERENCES todos NOT NULL");
   });
 
   it("stores references in Column metadata", () => {
     resetCollectedState();
     table("todos", {
-      owner_id: col.ref("users"),
-      parent_id: col.ref("todos").optional(),
+      ownerId: col.ref("users"),
+      parentId: col.ref("todos").optional(),
     });
     const schema = getCollectedSchema();
 
-    const owner = schema.tables[0].columns.find((c) => c.name === "owner_id")!;
+    const owner = schema.tables[0]!.columns.find((c) => c.name === "ownerId")!;
     expect(owner.sqlType).toBe("UUID");
     expect(owner.references).toBe("users");
     expect(owner.nullable).toBe(false);
 
-    const parent = schema.tables[0].columns.find((c) => c.name === "parent_id")!;
+    const parent = schema.tables[0]!.columns.find((c) => c.name === "parentId")!;
     expect(parent.sqlType).toBe("UUID");
     expect(parent.references).toBe("todos");
     expect(parent.nullable).toBe(true);
@@ -186,11 +186,11 @@ describe("schemaToSql", () => {
   it("stores references in array(ref(...)) metadata", () => {
     resetCollectedState();
     table("files", {
-      parts: col.array(col.ref("file_parts")),
+      partIds: col.array(col.ref("file_parts")),
     });
     const schema = getCollectedSchema();
 
-    const parts = schema.tables[0].columns.find((c) => c.name === "parts")!;
+    const parts = schema.tables[0]!.columns.find((c) => c.name === "partIds")!;
     expect(parts.sqlType).toEqual({ kind: "ARRAY", element: "UUID" });
     expect(parts.references).toBe("file_parts");
     expect(parts.nullable).toBe(false);
@@ -200,8 +200,8 @@ describe("schemaToSql", () => {
     resetCollectedState();
     table("todos", {
       title: col.string(),
-      parent_id: col.ref("todos").optional(),
-      owner_id: col.ref("users"),
+      parentId: col.ref("todos").optional(),
+      ownerId: col.ref("users"),
     });
     const schema = getCollectedSchema();
 
@@ -209,8 +209,8 @@ describe("schemaToSql", () => {
 
     expect(sql).toBe(`CREATE TABLE todos (
     title TEXT NOT NULL,
-    parent_id UUID REFERENCES todos,
-    owner_id UUID REFERENCES users NOT NULL
+    parentId UUID REFERENCES todos,
+    ownerId UUID REFERENCES users NOT NULL
 );
 `);
   });
@@ -219,12 +219,12 @@ describe("schemaToSql", () => {
     resetCollectedState();
     table("todos", {
       title: col.string(),
-      owner_id: col.string(),
+      ownerId: col.string(),
     });
     const schema = getCollectedSchema();
     const ownerMatchesSession: import("./schema.js").PolicyExpr = {
       type: "Cmp",
-      column: "owner_id",
+      column: "ownerId",
       op: "Eq",
       value: { type: "SessionRef", path: ["user_id"] },
     };
@@ -240,19 +240,19 @@ describe("schemaToSql", () => {
 
     expect(sql).toBe(`CREATE TABLE todos (
     title TEXT NOT NULL,
-    owner_id TEXT NOT NULL
+    ownerId TEXT NOT NULL
 );
-CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);
-CREATE POLICY todos_insert_policy ON todos FOR INSERT WITH CHECK (owner_id = @session.user_id);
-CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (owner_id = @session.user_id) WITH CHECK (owner_id = @session.user_id);
-CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session.user_id);
+CREATE POLICY todos_select_policy ON todos FOR SELECT USING (ownerId = @session.user_id);
+CREATE POLICY todos_insert_policy ON todos FOR INSERT WITH CHECK (ownerId = @session.user_id);
+CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (ownerId = @session.user_id) WITH CHECK (ownerId = @session.user_id);
+CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (ownerId = @session.user_id);
 `);
   });
 
   it("generates INHERITS REFERENCING policy expressions", () => {
     resetCollectedState();
     table("files", {
-      owner_id: col.string(),
+      ownerId: col.string(),
     });
     const schema = getCollectedSchema();
 
@@ -276,7 +276,7 @@ CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session
   it("generates CONTAINS and IN-list policy expressions", () => {
     resetCollectedState();
     table("todos", {
-      owner_id: col.string(),
+      ownerId: col.string(),
       status: col.string(),
     });
     const schema = getCollectedSchema();
@@ -287,7 +287,7 @@ CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session
           exprs: [
             {
               type: "Contains",
-              column: "owner_id",
+              column: "ownerId",
               value: { type: "Literal", value: "ali" },
             },
             {
@@ -305,7 +305,52 @@ CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session
 
     const sql = schemaToSql(schema);
     expect(sql).toContain(
-      "CREATE POLICY todos_select_policy ON todos FOR SELECT USING ((owner_id CONTAINS 'ali') AND (status IN ('active', 'trial')));",
+      "CREATE POLICY todos_select_policy ON todos FOR SELECT USING ((ownerId CONTAINS 'ali') AND (status IN ('active', 'trial')));",
+    );
+  });
+
+  it("generates session-left policy expressions", () => {
+    resetCollectedState();
+    table("todos", {
+      owner_id: col.string(),
+    });
+    const schema = getCollectedSchema();
+    schema.tables[0]!.policies = {
+      select: {
+        using: {
+          type: "And",
+          exprs: [
+            {
+              type: "SessionCmp",
+              path: ["claims", "role"],
+              op: "Eq",
+              value: { type: "Literal", value: "manager" },
+            },
+            {
+              type: "SessionInList",
+              path: ["claims", "plan"],
+              values: [
+                { type: "Literal", value: "pro" },
+                { type: "Literal", value: "enterprise" },
+              ],
+            },
+            {
+              type: "SessionContains",
+              path: ["claims", "teamIds"],
+              value: { type: "Literal", value: "team_a" },
+            },
+            {
+              type: "SessionIsNull",
+              path: ["claims", "deleted_at"],
+            },
+          ],
+        },
+      },
+    };
+
+    const sql = schemaToSql(schema);
+    expect(sql).toContain(
+      "CREATE POLICY todos_select_policy ON todos FOR SELECT USING ((@session.claims.role = 'manager') AND (@session.claims.plan IN ('pro', 'enterprise')) AND (@session.claims.teamIds CONTAINS 'team_a') AND (@session.claims.deleted_at IS NULL));",
     );
   });
 });

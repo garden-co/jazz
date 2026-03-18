@@ -266,14 +266,14 @@ fn basic_auth_header(username: &str, password: &str) -> String {
 fn sync_body() -> Value {
     json!({
         "client_id": "01234567-89ab-cdef-0123-456789abcdef",
-        "payload": {
+        "payloads": [{
             "ObjectUpdated": {
                 "object_id": "01234567-89ab-cdef-0123-456789abcdef",
                 "metadata": null,
                 "branch_name": "main",
                 "commits": []
             }
-        }
+        }]
     })
 }
 
@@ -739,7 +739,7 @@ async fn schema_catalogue_sync_and_retrieval_round_trip() {
 
     let sync_payload = json!({
         "client_id": Uuid::new_v4().to_string(),
-        "payload": {
+        "payloads": [{
             "ObjectUpdated": {
                 "object_id": object_id,
                 "metadata": {
@@ -757,7 +757,7 @@ async fn schema_catalogue_sync_and_retrieval_round_trip() {
                     }
                 ]
             }
-        }
+        }]
     });
 
     let sync_response = server
