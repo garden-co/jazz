@@ -99,6 +99,22 @@ export function isExpectedFetchAbortError(error: unknown, signal?: AbortSignal):
   return false;
 }
 
+function logSchemaWarningPayload(payload: any, logPrefix = ""): void {
+  const warning = payload?.SchemaWarning;
+  if (!warning) return;
+
+  const rowCount = warning.rowCount ?? warning.row_count ?? 0;
+  const tableName = warning.tableName ?? warning.table_name ?? "unknown";
+  const fromHash = warning.fromHash ?? warning.from_hash ?? "unknown";
+  const toHash = warning.toHash ?? warning.to_hash ?? "unknown";
+
+  console.warn(
+    `${logPrefix}Detected ${rowCount} rows of ${tableName} with differing schema versions. ` +
+      `To ensure data visibility and forward/backward compatibility please create a new migration with ` +
+      `\`npx jazz-tools migrations create ${fromHash} ${toHash}\``,
+  );
+}
+
 /**
  * Shared binary-stream lifecycle (connect/reconnect/auth-refresh/teardown).
  *
@@ -677,6 +693,7 @@ export async function readBinaryFrames(
         if (event.type === "Connected" && event.client_id) {
           callbacks.onConnected?.(event.client_id, event.catalogue_state_hash ?? null);
         } else if (event.type === "SyncUpdate") {
+          logSchemaWarningPayload(event.payload, logPrefix);
           callbacks.onSyncMessage(JSON.stringify(event.payload));
         }
       } catch (error) {

@@ -12,7 +12,7 @@ use crate::schema_manager::{LensTransformer, SchemaContext};
 use crate::storage::{CatalogueManifestOp, Storage};
 use crate::sync_manager::{
     ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
-    SyncManager,
+    SchemaWarning, SyncManager,
 };
 
 use super::graph::{QueryCompileError, QueryGraph};
@@ -178,6 +178,8 @@ pub(crate) struct QuerySubscription {
     pub(crate) current_ordered_ids: Vec<ObjectId>,
     /// Whether this subscription should be forwarded to upstream servers.
     pub(crate) propagation: QueryPropagation,
+    /// Schema mismatch warnings already emitted for the latest settled state.
+    pub(crate) reported_schema_warnings: HashSet<SchemaWarningKey>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -252,6 +254,62 @@ pub(super) struct ServerQuerySubscription {
     pub(super) settled_once: bool,
     /// Whether this subscription should be propagated to upstream servers.
     pub(super) propagation: QueryPropagation,
+    /// Schema mismatch warnings already emitted for the latest settled state.
+    pub(super) reported_schema_warnings: HashSet<SchemaWarningKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct SchemaWarningKey {
+    pub(crate) table_name: String,
+    pub(crate) from_hash: SchemaHash,
+    pub(crate) to_hash: SchemaHash,
+}
+
+impl SchemaWarningKey {
+    fn from_warning(warning: &SchemaWarning) -> Self {
+        Self {
+            table_name: warning.table_name.clone(),
+            from_hash: warning.from_hash,
+            to_hash: warning.to_hash,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct SchemaWarningAccumulator {
+    counts: HashMap<SchemaWarningKey, usize>,
+}
+
+impl SchemaWarningAccumulator {
+    pub(super) fn record(&mut self, table_name: &str, from_hash: SchemaHash, to_hash: SchemaHash) {
+        let key = SchemaWarningKey {
+            table_name: table_name.to_string(),
+            from_hash,
+            to_hash,
+        };
+        *self.counts.entry(key).or_default() += 1;
+    }
+
+    pub(super) fn warnings_for_query(&self, query_id: QueryId) -> Vec<SchemaWarning> {
+        let mut warnings: Vec<SchemaWarning> = self
+            .counts
+            .iter()
+            .map(|(key, row_count)| SchemaWarning {
+                query_id,
+                table_name: key.table_name.clone(),
+                row_count: *row_count,
+                from_hash: key.from_hash,
+                to_hash: key.to_hash,
+            })
+            .collect();
+        warnings.sort_by(|a, b| {
+            a.table_name
+                .cmp(&b.table_name)
+                .then_with(|| a.from_hash.to_string().cmp(&b.from_hash.to_string()))
+                .then_with(|| a.to_hash.to_string().cmp(&b.to_hash.to_string()))
+        });
+        warnings
+    }
 }
 
 /// A catalogue object update received via sync.
@@ -320,6 +378,41 @@ pub struct QueryManager {
 }
 
 impl QueryManager {
+    pub(super) fn finalize_schema_warnings(
+        reported: &mut HashSet<SchemaWarningKey>,
+        warnings: Vec<SchemaWarning>,
+    ) -> Vec<SchemaWarning> {
+        let current_keys: HashSet<SchemaWarningKey> = warnings
+            .iter()
+            .map(SchemaWarningKey::from_warning)
+            .collect();
+        let new_warnings = warnings
+            .into_iter()
+            .filter(|warning| !reported.contains(&SchemaWarningKey::from_warning(warning)))
+            .collect();
+        *reported = current_keys;
+        new_warnings
+    }
+
+    pub(super) fn log_schema_warning(
+        warning: &SchemaWarning,
+        subscription_id: Option<QuerySubscriptionId>,
+    ) {
+        tracing::warn!(
+            sub_id = subscription_id.map(|id| id.0),
+            query_id = warning.query_id.0,
+            table = warning.table_name,
+            row_count = warning.row_count,
+            from_hash = %warning.from_hash,
+            to_hash = %warning.to_hash,
+            "Detected {} rows of {} with differing schema versions. To ensure data visibility and forward/backward compatibility please create a new migration with `npx jazz-tools migrations create {} {}`",
+            warning.row_count,
+            warning.table_name,
+            warning.from_hash,
+            warning.to_hash,
+        );
+    }
+
     pub fn server_subscription_telemetry(&self) -> Vec<ServerSubscriptionTelemetryGroup> {
         let mut groups: HashMap<String, ServerSubscriptionTelemetryGroup> = HashMap::new();
 
@@ -716,6 +809,7 @@ impl QueryManager {
             let _sub_span = tracing::trace_span!("settle_subscription", sub_id = sub_id.0, table = %subscription.graph.table).entered();
             let branches = &subscription.branches;
             let table = subscription.graph.table.as_str().to_string();
+            let mut schema_warnings = SchemaWarningAccumulator::default();
 
             // Row loader returns None for empty content (hard delete tombstones)
             // Soft deletes have preserved content and can be materialized normally
@@ -782,7 +876,12 @@ impl QueryManager {
                             ));
                         }
                         Err(err) => {
-                            tracing::warn!(
+                            schema_warnings.record(
+                                &table,
+                                source_hash,
+                                schema_context.current_hash,
+                            );
+                            tracing::debug!(
                                 sub_id = sub_id.0,
                                 row_id = %id,
                                 table = %table,
@@ -790,7 +889,7 @@ impl QueryManager {
                                 source_schema = %source_hash.short(),
                                 target_schema = %schema_context.current_hash.short(),
                                 error = %err,
-                                "lens transform failed; dropping row from query result"
+                                "lens transform failed; row will be counted in aggregated schema warning"
                             );
                             return None;
                         }
@@ -807,6 +906,13 @@ impl QueryManager {
             };
 
             let delta = subscription.graph.settle(storage_ref, row_loader);
+            let new_schema_warnings = Self::finalize_schema_warnings(
+                &mut subscription.reported_schema_warnings,
+                schema_warnings.warnings_for_query(QueryId(sub_id.0)),
+            );
+            for warning in &new_schema_warnings {
+                Self::log_schema_warning(warning, Some(*sub_id));
+            }
             if !delta.added.is_empty() || !delta.removed.is_empty() {
                 tracing::debug!(
                     sub_id = sub_id.0,

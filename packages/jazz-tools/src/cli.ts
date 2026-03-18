@@ -3,7 +3,7 @@
 // CLI for jazz-tools schema tooling
 
 import { spawn } from "child_process";
-import { access, readdir, writeFile } from "fs/promises";
+import { access, mkdir, readFile, readdir, writeFile } from "fs/promises";
 import { join, basename, dirname, resolve } from "path";
 import { pathToFileURL } from "url";
 import { register as registerCjs } from "tsx/cjs/api";
@@ -12,6 +12,11 @@ import { schemaToSql, lensesToSql } from "./sql-gen.js";
 import { getCollectedSchema, getCollectedMigrations, resetCollectedState } from "./dsl.js";
 import { generateClient } from "./codegen/index.js";
 import type { Lens, Schema, TablePolicies, OperationPolicy } from "./schema.js";
+import type { ColumnDescriptor, ColumnType, WasmSchema } from "./drivers/types.js";
+import { buildEndpointUrl } from "./runtime/sync-transport.js";
+import { fetchStoredWasmSchema } from "./runtime/schema-fetch.js";
+import { schemaDefinitionToAst } from "./migrations.js";
+import type { DefinedMigration } from "./migrations.js";
 
 export interface BuildOptions {
   jazzBin: string;
@@ -377,6 +382,457 @@ export async function build(options: BuildOptions): Promise<void> {
   await runJazzBuild(jazzBin, schemaDir);
 }
 
+export interface MigrationCommandOptions {
+  serverUrl: string;
+  adminSecret: string;
+  migrationsDir: string;
+}
+
+export interface CreateMigrationOptions extends MigrationCommandOptions {
+  fromHash: string;
+  toHash: string;
+}
+
+export interface PushMigrationOptions extends MigrationCommandOptions {
+  fromHash: string;
+  toHash: string;
+}
+
+function getFlagValue(args: string[], flag: string): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === flag) {
+      return args[i + 1];
+    }
+    const prefix = `${flag}=`;
+    if (arg.startsWith(prefix)) {
+      return arg.slice(prefix.length);
+    }
+  }
+  return undefined;
+}
+
+function resolveMigrationOptions(args: string[]): MigrationCommandOptions {
+  const serverUrl = getFlagValue(args, "--server-url") ?? process.env.JAZZ_SERVER_URL;
+  const adminSecret = getFlagValue(args, "--admin-secret") ?? process.env.JAZZ_ADMIN_SECRET;
+  const migrationsDir = resolve(
+    process.cwd(),
+    getFlagValue(args, "--migrations-dir") ?? join(process.cwd(), "migrations"),
+  );
+
+  if (!serverUrl) {
+    throw new Error("Missing server URL. Pass --server-url <url> or set JAZZ_SERVER_URL.");
+  }
+
+  if (!adminSecret) {
+    throw new Error("Missing admin secret. Pass --admin-secret <secret> or set JAZZ_ADMIN_SECRET.");
+  }
+
+  return {
+    serverUrl,
+    adminSecret,
+    migrationsDir,
+  };
+}
+
+function normalizeFullSchemaHash(hash: string, label: string): string {
+  const normalized = hash.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(normalized)) {
+    throw new Error(`${label} must be a 64-character lowercase hex schema hash.`);
+  }
+  return normalized;
+}
+
+function columnTypeSignature(columnType: ColumnType): string {
+  return JSON.stringify(columnType);
+}
+
+function columnsEqual(left: ColumnDescriptor, right: ColumnDescriptor): boolean {
+  return (
+    left.name === right.name &&
+    left.nullable === right.nullable &&
+    left.references === right.references &&
+    columnTypeSignature(left.column_type) === columnTypeSignature(right.column_type)
+  );
+}
+
+function tableSchemasEqual(
+  left: WasmSchema[string] | undefined,
+  right: WasmSchema[string] | undefined,
+): boolean {
+  if (!left || !right) {
+    return false;
+  }
+
+  if (left.columns.length !== right.columns.length) {
+    return false;
+  }
+
+  return left.columns.every((column, index) => columnsEqual(column, right.columns[index]!));
+}
+
+function changedTableNames(fromSchema: WasmSchema, toSchema: WasmSchema): string[] {
+  const names = new Set([...Object.keys(fromSchema), ...Object.keys(toSchema)]);
+  return [...names].filter(
+    (tableName) => !tableSchemasEqual(fromSchema[tableName], toSchema[tableName]),
+  );
+}
+
+function pickWitnessSchema(schema: WasmSchema, tableNames: readonly string[]): WasmSchema {
+  return Object.fromEntries(
+    tableNames
+      .filter((tableName) => schema[tableName])
+      .map((tableName) => [tableName, schema[tableName]!]),
+  );
+}
+
+function indentBlock(text: string, indent: number): string {
+  const prefix = " ".repeat(indent);
+  return text
+    .split("\n")
+    .map((line) => (line.length === 0 ? line : `${prefix}${line}`))
+    .join("\n");
+}
+
+function baseBuilderExpression(columnType: ColumnType, references?: string): string {
+  switch (columnType.type) {
+    case "Text":
+      return "col.string()";
+    case "Boolean":
+      return "col.boolean()";
+    case "Integer":
+      return "col.int()";
+    case "Double":
+      return "col.float()";
+    case "Timestamp":
+      return "col.timestamp()";
+    case "Bytea":
+      return "col.bytes()";
+    case "Json":
+      return columnType.schema ? `col.json(${JSON.stringify(columnType.schema)})` : "col.json()";
+    case "Enum":
+      return `col.enum(${columnType.variants.map((variant) => JSON.stringify(variant)).join(", ")})`;
+    case "Uuid":
+      if (!references) {
+        throw new Error("Migration stub generation does not yet support bare UUID columns.");
+      }
+      return `col.ref(${JSON.stringify(references)})`;
+    case "Array":
+      return `col.array(${baseBuilderExpression(columnType.element, references)})`;
+    case "BigInt":
+      throw new Error("Migration stub generation does not yet support BIGINT columns.");
+    case "Row":
+      throw new Error("Migration stub generation does not yet support row-valued columns.");
+  }
+}
+
+function builderExpressionForColumn(column: ColumnDescriptor): string {
+  const base = baseBuilderExpression(column.column_type, column.references);
+  return column.nullable ? `${base}.optional()` : base;
+}
+
+function renderSchemaWitness(schema: WasmSchema): string {
+  const tableEntries = Object.entries(schema)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([tableName, tableSchema]) => {
+      const columnLines = tableSchema.columns.map(
+        (column) => `${JSON.stringify(column.name)}: ${builderExpressionForColumn(column)},`,
+      );
+      return `${JSON.stringify(tableName)}: {\n${indentBlock(columnLines.join("\n"), 2)}\n}`;
+    });
+
+  if (tableEntries.length === 0) {
+    return "{}";
+  }
+
+  return `{\n${indentBlock(tableEntries.join(",\n"), 2)}\n}`;
+}
+
+type TableSuggestion = {
+  tableName: string;
+  comments: string[];
+  operations: string[];
+};
+
+function inferTableSuggestions(
+  tableName: string,
+  fromTable: WasmSchema[string],
+  toTable: WasmSchema[string],
+): TableSuggestion {
+  const fromColumns = new Map(fromTable.columns.map((column) => [column.name, column]));
+  const toColumns = new Map(toTable.columns.map((column) => [column.name, column]));
+  const comments: string[] = [];
+  const operations: string[] = [];
+
+  const removedColumns = [...fromColumns.keys()].filter((name) => !toColumns.has(name));
+  const addedColumns = [...toColumns.keys()].filter((name) => !fromColumns.has(name));
+
+  if (removedColumns.length === 1 && addedColumns.length === 1) {
+    const removed = fromColumns.get(removedColumns[0]!)!;
+    const added = toColumns.get(addedColumns[0]!)!;
+    if (
+      removed.nullable === added.nullable &&
+      removed.references === added.references &&
+      columnTypeSignature(removed.column_type) === columnTypeSignature(added.column_type)
+    ) {
+      comments.push(
+        `Possible rename detected: ${JSON.stringify(removed.name)} -> ${JSON.stringify(added.name)}.`,
+      );
+    }
+  }
+
+  for (const columnName of addedColumns) {
+    const column = toColumns.get(columnName)!;
+    if (column.nullable) {
+      operations.push(`t.add(${JSON.stringify(columnName)}, { default: null });`);
+    } else {
+      comments.push(
+        `Added required column ${JSON.stringify(columnName)} needs an explicit default.`,
+      );
+    }
+  }
+
+  for (const columnName of removedColumns) {
+    const column = fromColumns.get(columnName)!;
+    if (column.nullable) {
+      operations.push(`t.drop(${JSON.stringify(columnName)}, { backwardsDefault: null });`);
+    } else {
+      comments.push(
+        `Removed required column ${JSON.stringify(columnName)} needs an explicit backwardsDefault.`,
+      );
+    }
+  }
+
+  return {
+    tableName,
+    comments,
+    operations,
+  };
+}
+
+function renderMigrationBody(
+  fromSchema: WasmSchema,
+  toSchema: WasmSchema,
+): { body: string; witnessFrom: WasmSchema; witnessTo: WasmSchema } {
+  const changedTables = changedTableNames(fromSchema, toSchema);
+  const witnessFrom = pickWitnessSchema(fromSchema, changedTables);
+  const witnessTo = pickWitnessSchema(toSchema, changedTables);
+  const lines: string[] = [];
+
+  for (const tableName of changedTables) {
+    const fromTable = fromSchema[tableName];
+    const toTable = toSchema[tableName];
+
+    if (!fromTable) {
+      lines.push(
+        `// TODO: table ${JSON.stringify(tableName)} was added. Table-level migrations are not supported yet.`,
+      );
+      continue;
+    }
+
+    if (!toTable) {
+      lines.push(
+        `// TODO: table ${JSON.stringify(tableName)} was removed. Table-level migrations are not supported yet.`,
+      );
+      continue;
+    }
+
+    const suggestion = inferTableSuggestions(tableName, fromTable, toTable);
+    lines.push(`m.table(${JSON.stringify(tableName)}, (t) => {`);
+    for (const comment of suggestion.comments) {
+      lines.push(`  // TODO: ${comment}`);
+    }
+    for (const operation of suggestion.operations) {
+      lines.push(`  ${operation}`);
+    }
+    if (suggestion.comments.length === 0 && suggestion.operations.length === 0) {
+      lines.push("  // TODO: No safe migration steps were inferred automatically.");
+    }
+    lines.push("});");
+    lines.push("");
+  }
+
+  if (lines.length === 0) {
+    lines.push("// TODO: No schema differences were detected.");
+  }
+
+  return {
+    body: lines.join("\n").trimEnd(),
+    witnessFrom,
+    witnessTo,
+  };
+}
+
+async function packageVersion(): Promise<string> {
+  const packageJson = JSON.parse(
+    await readFile(new URL("../package.json", import.meta.url), "utf8"),
+  ) as { version?: string };
+  return packageJson.version ?? "unknown";
+}
+
+function createDateStamp(now: Date = new Date()): string {
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}${month}${day}`;
+}
+
+function migrationFilename(migrationsDir: string, fromHash: string, toHash: string): string {
+  return join(migrationsDir, `${createDateStamp()}-unnamed-${fromHash}-${toHash}.ts`);
+}
+
+function renderMigrationStub(input: {
+  fromHash: string;
+  toHash: string;
+  fromSchema: WasmSchema;
+  toSchema: WasmSchema;
+}): string {
+  const rendered = renderMigrationBody(input.fromSchema, input.toSchema);
+  return `import { col, defineMigration } from "jazz-tools";
+
+export default defineMigration({
+  fromHash: ${JSON.stringify(input.fromHash)},
+  toHash: ${JSON.stringify(input.toHash)},
+  from: ${renderSchemaWitness(rendered.witnessFrom)},
+  to: ${renderSchemaWitness(rendered.witnessTo)},
+  migrate: (m) => {
+${indentBlock(rendered.body, 4)}
+  },
+});
+`;
+}
+
+function isDefinedMigration(value: unknown): value is DefinedMigration {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.fromHash === "string" &&
+    typeof candidate.toHash === "string" &&
+    typeof candidate.from === "object" &&
+    candidate.from !== null &&
+    typeof candidate.to === "object" &&
+    candidate.to !== null &&
+    Array.isArray(candidate.forward)
+  );
+}
+
+async function loadDefinedMigration(filePath: string): Promise<DefinedMigration> {
+  const url = pathToFileURL(filePath).href + `?v=${++importCounter}`;
+  const loaded = (await import(url)) as { default?: unknown; migration?: unknown };
+  const migration = loaded.default ?? loaded.migration;
+  if (!isDefinedMigration(migration)) {
+    throw new Error(
+      `Invalid migration export in ${basename(filePath)}. Export default defineMigration(...).`,
+    );
+  }
+  return migration;
+}
+
+async function findMigrationFile(
+  migrationsDir: string,
+  fromHash: string,
+  toHash: string,
+): Promise<string> {
+  const files = await readdir(migrationsDir);
+  const matches = files
+    .filter((file) => file.endsWith(".ts"))
+    .filter((file) => file.includes(`-${fromHash}-${toHash}.ts`));
+
+  if (matches.length === 0) {
+    throw new Error(`No migration file found in ${migrationsDir} for ${fromHash} -> ${toHash}.`);
+  }
+
+  if (matches.length > 1) {
+    throw new Error(
+      `Multiple migration files found for ${fromHash} -> ${toHash}: ${matches.join(", ")}`,
+    );
+  }
+
+  return join(migrationsDir, matches[0]!);
+}
+
+export async function createMigration(options: CreateMigrationOptions): Promise<string> {
+  const fromHash = normalizeFullSchemaHash(options.fromHash, "fromHash");
+  const toHash = normalizeFullSchemaHash(options.toHash, "toHash");
+
+  await mkdir(options.migrationsDir, { recursive: true });
+
+  const [{ schema: fromSchema }, { schema: toSchema }] = await Promise.all([
+    fetchStoredWasmSchema(options.serverUrl, {
+      adminSecret: options.adminSecret,
+      schemaHash: fromHash,
+    }),
+    fetchStoredWasmSchema(options.serverUrl, {
+      adminSecret: options.adminSecret,
+      schemaHash: toHash,
+    }),
+  ]);
+
+  const filePath = migrationFilename(options.migrationsDir, fromHash, toHash);
+  if (await pathExists(filePath)) {
+    throw new Error(`Migration stub already exists: ${filePath}`);
+  }
+
+  const stub = renderMigrationStub({ fromHash, toHash, fromSchema, toSchema });
+  await writeFile(filePath, stub);
+
+  const version = await packageVersion();
+  console.log(`Generated: ${filePath}`);
+  console.log("");
+  console.log("Next steps:");
+  console.log("1. Fill in migrate().");
+  console.log("2. Rename the file by replacing 'unnamed'.");
+  console.log(`3. Run npx jazz-tools@${version} migrations push ${fromHash} ${toHash}`);
+
+  return filePath;
+}
+
+export async function pushMigration(options: PushMigrationOptions): Promise<void> {
+  const fromHash = normalizeFullSchemaHash(options.fromHash, "fromHash");
+  const toHash = normalizeFullSchemaHash(options.toHash, "toHash");
+  const filePath = await findMigrationFile(options.migrationsDir, fromHash, toHash);
+  const migration = await loadDefinedMigration(filePath);
+
+  if (migration.fromHash !== fromHash || migration.toHash !== toHash) {
+    throw new Error(
+      `Migration ${basename(filePath)} exports ${migration.fromHash} -> ${migration.toHash}, expected ${fromHash} -> ${toHash}.`,
+    );
+  }
+
+  // Validate that the schema witnesses are valid definitions before publishing.
+  schemaDefinitionToAst(migration.from as any);
+  schemaDefinitionToAst(migration.to as any);
+
+  if (migration.forward.length === 0) {
+    throw new Error(`Migration ${basename(filePath)} has no steps. Fill in migrate() before push.`);
+  }
+
+  const forwardSql = lensesToSql(migration.forward, "fwd");
+  const response = await fetch(buildEndpointUrl(options.serverUrl, "/admin/migrations"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Jazz-Admin-Secret": options.adminSecret,
+    },
+    body: JSON.stringify({
+      fromHash,
+      toHash,
+      forwardSql,
+    }),
+  });
+
+  if (!response.ok) {
+    const bodyText = await response.text().catch(() => "");
+    const detail = bodyText ? ` - ${bodyText}` : "";
+    throw new Error(`Migration push failed: ${response.status} ${response.statusText}${detail}`);
+  }
+
+  console.log(`Pushed migration ${fromHash} -> ${toHash} from ${basename(filePath)}.`);
+}
+
 function isMainModule(): boolean {
   const entry = process.argv[1];
   if (!entry) {
@@ -386,22 +842,60 @@ function isMainModule(): boolean {
 }
 
 if (isMainModule()) {
-  const { command, options } = parseArgs();
+  const command = process.argv[2] ?? "";
 
-  switch (command) {
-    case "build":
-      build(options).catch((err) => {
-        console.error(err.message);
-        process.exit(1);
-      });
-      break;
-    default:
-      console.log("Usage: node <path-to-jazz-tools>/dist/cli.js build [options]");
-      console.log("\nCommands:");
-      console.log("  build    Generate SQL from TypeScript schemas and run jazz-tools build");
-      console.log("\nOptions:");
-      console.log("  --jazz-bin <path>    Path to jazz binary (default: jazz-tools)");
-      console.log("  --schema-dir <path>  Path to schema directory (default: ./schema)");
-      process.exit(command ? 1 : 0);
+  if (command === "build") {
+    const { options } = parseArgs();
+    build(options).catch((err) => {
+      console.error(err.message);
+      process.exit(1);
+    });
+  } else if (command === "migrations") {
+    const subcommand = process.argv[3] ?? "";
+    const fromHash = process.argv[4];
+    const toHash = process.argv[5];
+    const sharedArgs = process.argv.slice(6);
+
+    if (!fromHash || !toHash) {
+      console.error(
+        "Usage: node dist/cli.js migrations <create|push> <fromHash> <toHash> [options]",
+      );
+      process.exit(1);
+    }
+
+    const options = resolveMigrationOptions(sharedArgs);
+    const task =
+      subcommand === "create"
+        ? createMigration({ ...options, fromHash, toHash })
+        : subcommand === "push"
+          ? pushMigration({ ...options, fromHash, toHash })
+          : Promise.reject(
+              new Error(
+                "Usage: node dist/cli.js migrations <create|push> <fromHash> <toHash> [options]",
+              ),
+            );
+
+    task.catch((err) => {
+      console.error(err.message);
+      process.exit(1);
+    });
+  } else {
+    console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
+    console.log("\nCommands:");
+    console.log(
+      "  build                 Generate SQL from TypeScript schemas and run jazz-tools build",
+    );
+    console.log(
+      "  migrations create     Generate a typed migration stub from two known schema hashes",
+    );
+    console.log("  migrations push       Push a reviewed migration edge to the server");
+    console.log("\nBuild options:");
+    console.log("  --jazz-bin <path>     Path to jazz binary (default: jazz-tools)");
+    console.log("  --schema-dir <path>   Path to schema directory (default: ./schema)");
+    console.log("\nMigration options:");
+    console.log("  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL)");
+    console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
+    console.log("  --migrations-dir <p>  Path to migrations directory (default: ./migrations)");
+    process.exit(command ? 1 : 0);
   }
 }

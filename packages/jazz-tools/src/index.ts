@@ -77,6 +77,7 @@ export {
   TypedTableQueryBuilder,
   permissionIntrospectionColumns,
 } from "./typed-app.js";
+export { defineMigration } from "./migrations.js";
 export type {
   TableDefinition,
   SchemaDefinition,
@@ -107,6 +108,7 @@ export type {
   TableMetaOf,
   WhereOf,
 } from "./typed-app.js";
+export type { DefinedMigration, MigrationBuilder, MigrationTableEditor } from "./migrations.js";
 
 // Storage drivers
 export * from "./drivers/index.js";

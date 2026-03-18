@@ -135,6 +135,7 @@ impl QueryManager {
                 achieved_tiers,
                 current_ordered_ids: Vec::new(),
                 propagation,
+                reported_schema_warnings: HashSet::new(),
             },
         );
 
@@ -193,6 +194,7 @@ impl QueryManager {
                 achieved_tiers: HashSet::new(),
                 current_ordered_ids: Vec::new(),
                 propagation: QueryPropagation::Full,
+                reported_schema_warnings: HashSet::new(),
             },
         );
 

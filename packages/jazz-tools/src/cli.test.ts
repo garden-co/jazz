@@ -3,10 +3,11 @@ import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
-import { build } from "./cli.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { build, createMigration, pushMigration } from "./cli.js";
 
 const dslPath = fileURLToPath(new URL("./dsl.ts", import.meta.url));
+const migrationsPath = fileURLToPath(new URL("./migrations.ts", import.meta.url));
 const permissionsDslPath = fileURLToPath(new URL("./permissions/index.ts", import.meta.url));
 // Bin integration tests run in a subprocess that loads dist/cli.js, so current.ts must import
 // from the compiled dist to share the same dsl module instance (and thus _collectedSchema state).
@@ -18,6 +19,7 @@ const distPermissionsDslPath = fileURLToPath(
 const tempRoots: string[] = [];
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
   await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -242,6 +244,116 @@ describe("cli build basic output", () => {
     await build({ schemaDir, jazzBin });
 
     await readFile(join(schemaDir, "app.ts"), "utf8");
+  });
+});
+
+describe("cli migrations", () => {
+  it("generates a typed migration stub from stored schema hashes", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const toHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith(`/schema/${fromHash}`)) {
+        return new Response(
+          JSON.stringify({
+            todos: {
+              columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      if (input.endsWith(`/schema/${toHash}`)) {
+        return new Response(
+          JSON.stringify({
+            todos: {
+              columns: [
+                { name: "title", column_type: { type: "Text" }, nullable: false },
+                { name: "notes", column_type: { type: "Text" }, nullable: true },
+              ],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const filePath = await createMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash,
+      toHash,
+    });
+
+    const generated = await readFile(filePath, "utf8");
+    expect(generated).toContain("defineMigration");
+    expect(generated).toContain(`fromHash: "${fromHash}"`);
+    expect(generated).toContain(`toHash: "${toHash}"`);
+    expect(generated).toContain('t.add("notes", { default: null });');
+  });
+
+  it("pushes a reviewed migration via the admin migrations endpoint", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+
+    const fromHash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const toHash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const migrationPath = join(migrationsDir, `20260318-rename-${fromHash}-${toHash}.ts`);
+
+    await writeFile(
+      migrationPath,
+      `
+import { col } from ${JSON.stringify(dslPath)};
+import { defineMigration } from ${JSON.stringify(migrationsPath)};
+
+export default defineMigration({
+  fromHash: ${JSON.stringify(fromHash)},
+  toHash: ${JSON.stringify(toHash)},
+  from: {
+    users: {
+      email: col.string(),
+    },
+  },
+  to: {
+    users: {
+      email_address: col.string(),
+    },
+  },
+  migrate: (m) => {
+    m.table("users", (t) => {
+      t.rename("email", "email_address");
+    });
+  },
+});
+`,
+    );
+
+    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      expect(body.fromHash).toBe(fromHash);
+      expect(body.toHash).toBe(toHash);
+      expect(body.forwardSql).toContain("ALTER TABLE users RENAME COLUMN email TO email_address;");
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pushMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash,
+      toHash,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
