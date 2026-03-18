@@ -207,6 +207,24 @@ describe("permissions type inference", () => {
     });
   });
 
+  it("exposes never() on read/insert/update/delete builders", () => {
+    definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.never(),
+      policy.todos.allowInsert.never(),
+      policy.todos.allowUpdate.never(),
+      policy.todos.allowDelete.never(),
+    ]);
+  });
+
+  it("exposes always() on read/insert/update/delete builders", () => {
+    definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.always(),
+      policy.todos.allowInsert.always(),
+      policy.todos.allowUpdate.always(),
+      policy.todos.allowDelete.always(),
+    ]);
+  });
+
   it("rejects invalid table/column usage at compile time where possible", () => {
     definePermissions(app, ({ policy, allowedTo }) => [
       policy.todos.allowRead.where({ done: true }),

@@ -33,6 +33,24 @@ definePermissions(app, ({ policy, allOf, session }) => {
 });
 // #endregion permissions-simple-ts
 
+// #region permissions-always-ts
+definePermissions(app, ({ policy }) => {
+  policy.todos.allowRead.always();
+  policy.todos.allowInsert.always();
+  policy.todos.allowUpdate.always();
+  policy.todos.allowDelete.always();
+});
+// #endregion permissions-always-ts
+
+// #region permissions-never-ts
+definePermissions(app, ({ policy }) => {
+  policy.todos.allowRead.never();
+  policy.todos.allowInsert.never();
+  policy.todos.allowUpdate.never();
+  policy.todos.allowDelete.never();
+});
+// #endregion permissions-never-ts
+
 // #region permissions-allowed-to-ts
 definePermissions(app, ({ policy, anyOf, allOf, allowedTo }) => {
   policy.todos.allowRead.where(anyOf([{ done: false }, allowedTo.read("project")]));

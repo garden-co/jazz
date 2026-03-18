@@ -483,6 +483,36 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("supports never() across read/insert/update/delete policies", () => {
+    const compiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.never(),
+      policy.todos.allowInsert.never(),
+      policy.todos.allowUpdate.never(),
+      policy.todos.allowDelete.never(),
+    ]);
+
+    expect(compiled.todos.select?.using).toEqual({ type: "False" });
+    expect(compiled.todos.insert?.with_check).toEqual({ type: "False" });
+    expect(compiled.todos.update?.using).toEqual({ type: "False" });
+    expect(compiled.todos.update?.with_check).toEqual({ type: "False" });
+    expect(compiled.todos.delete?.using).toEqual({ type: "False" });
+  });
+
+  it("supports always() across read/insert/update/delete policies", () => {
+    const compiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.always(),
+      policy.todos.allowInsert.always(),
+      policy.todos.allowUpdate.always(),
+      policy.todos.allowDelete.always(),
+    ]);
+
+    expect(compiled.todos.select?.using).toEqual({ type: "True" });
+    expect(compiled.todos.insert?.with_check).toEqual({ type: "True" });
+    expect(compiled.todos.update?.using).toEqual({ type: "True" });
+    expect(compiled.todos.update?.with_check).toEqual({ type: "True" });
+    expect(compiled.todos.delete?.using).toEqual({ type: "True" });
+  });
+
   it("supports allowedTo.readReferencing helper", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
       policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "projectId")),
