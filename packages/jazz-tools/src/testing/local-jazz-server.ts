@@ -34,6 +34,7 @@ export interface StartLocalJazzServerOptions {
 }
 
 export interface LocalJazzServerHandle {
+  appId: string;
   port: number;
   url: string;
   child: ChildProcess;
@@ -339,6 +340,7 @@ export async function startLocalJazzServer(
   };
 
   return {
+    appId,
     port,
     url: `http://127.0.0.1:${port}`,
     child,

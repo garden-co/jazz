@@ -14,6 +14,8 @@ use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, TableName, TablePolicies,
     TableSchema, Value,
 };
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+use crate::storage::FjallStorage;
 use crate::storage::{MemoryStorage, Storage};
 use crate::sync_manager::SyncManager;
 
@@ -74,6 +76,21 @@ fn create_query_manager(
     (qm, MemoryStorage::new())
 }
 
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+fn create_query_manager_with_fjall(
+    sync_manager: SyncManager,
+    schema: Schema,
+) -> (QueryManager, tempfile::TempDir, FjallStorage) {
+    let mut qm = QueryManager::new(sync_manager);
+    qm.set_current_schema(schema, "dev", "main");
+
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.fjall");
+    let storage = FjallStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
+
+    (qm, temp_dir, storage)
+}
+
 /// Get the current branch name from a QueryManager.
 fn get_branch(qm: &QueryManager) -> String {
     qm.schema_context().branch_name().as_str().to_string()
@@ -95,11 +112,75 @@ fn json_documents_schema(schema: Option<serde_json::Value>) -> Schema {
     out
 }
 
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+fn large_index_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("todos"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("done", ColumnType::Boolean),
+        ])
+        .into(),
+    );
+    schema.insert(
+        TableName::new("tag_lists"),
+        RowDescriptor::new(vec![ColumnDescriptor::new(
+            "labels",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Text),
+            },
+        )])
+        .into(),
+    );
+    schema.insert(
+        TableName::new("documents"),
+        RowDescriptor::new(vec![ColumnDescriptor::new(
+            "payload",
+            ColumnType::Json { schema: None },
+        )])
+        .into(),
+    );
+    schema.insert(
+        TableName::new("file_parts"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("label", ColumnType::Text)]).into(),
+    );
+    schema.insert(
+        TableName::new("files"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new(
+                "parts",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Uuid),
+                },
+            )
+            .references("file_parts"),
+        ])
+        .into(),
+    );
+    schema
+}
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+fn oversized_text() -> String {
+    "x".repeat(40_000)
+}
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+fn oversized_json() -> String {
+    format!(r#"{{"body":"{}"}}"#, oversized_text())
+}
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+fn oversized_ref_array(member_id: ObjectId) -> Value {
+    Value::Array((0..1_500).map(|_| Value::Uuid(member_id)).collect())
+}
+
 /// Helper to execute a query synchronously via subscribe/process/unsubscribe.
 /// Returns Vec<(ObjectId, Vec<Value>)> matching old execute() return type.
-fn execute_query(
+fn execute_query<H: Storage>(
     qm: &mut QueryManager,
-    storage: &mut MemoryStorage,
+    storage: &mut H,
     query: Query,
 ) -> Result<Vec<(ObjectId, Vec<Value>)>, QueryError> {
     let sub_id = qm.subscribe(query)?;
@@ -655,6 +736,134 @@ fn update_row() {
         0,
         "Old indexed value should no longer match"
     );
+}
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[test]
+fn fjall_oversized_text_insert_stays_queryable() {
+    let sync_manager = SyncManager::new();
+    let schema = large_index_schema();
+    let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "todos",
+            &[Value::Text(oversized_text()), Value::Boolean(false)],
+        )
+        .expect("oversized indexed text insert should succeed");
+
+    let oversized = oversized_text();
+    let query = qm
+        .query("todos")
+        .filter_eq("title", Value::Text(oversized.clone()))
+        .build();
+    let rows = execute_query(&mut qm, &mut storage, query).expect("query oversized text");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, handle.row_id);
+    assert_eq!(rows[0].1[0], Value::Text(oversized));
+}
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[test]
+fn fjall_oversized_json_insert_stays_queryable() {
+    let sync_manager = SyncManager::new();
+    let schema = large_index_schema();
+    let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
+
+    let payload = oversized_json();
+    let handle = qm
+        .insert(&mut storage, "documents", &[Value::Text(payload.clone())])
+        .expect("oversized indexed json insert should succeed");
+
+    let query = qm
+        .query("documents")
+        .filter_eq("payload", Value::Text(payload.clone()))
+        .build();
+    let rows = execute_query(&mut qm, &mut storage, query).expect("query oversized json");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, handle.row_id);
+    assert_eq!(rows[0].1, vec![Value::Text(payload)]);
+}
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[test]
+fn fjall_oversized_ref_array_insert_stays_queryable() {
+    let sync_manager = SyncManager::new();
+    let schema = large_index_schema();
+    let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
+
+    let member = qm
+        .insert(&mut storage, "file_parts", &[Value::Text("part-a".into())])
+        .expect("insert referenced row");
+    let parts = oversized_ref_array(member.row_id);
+    let handle = qm
+        .insert(&mut storage, "files", std::slice::from_ref(&parts))
+        .expect("oversized indexed array(ref) insert should succeed");
+
+    let query = qm.query("files").filter_eq("parts", parts.clone()).build();
+    let rows = execute_query(&mut qm, &mut storage, query).expect("query oversized array(ref)");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, handle.row_id);
+    assert_eq!(rows[0].1, vec![parts.clone()]);
+
+    let branch = get_branch(&qm);
+    let member_lookup =
+        storage.index_lookup("files", "parts", &branch, &Value::Uuid(member.row_id));
+    assert!(
+        member_lookup.contains(&handle.row_id),
+        "array(ref) membership index should still track each referenced row id"
+    );
+}
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[test]
+fn fjall_oversized_text_update_reindexes_to_new_value() {
+    let sync_manager = SyncManager::new();
+    let schema = large_index_schema();
+    let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "todos",
+            &[Value::Text("keep-me".into()), Value::Boolean(false)],
+        )
+        .expect("insert initial row");
+
+    let oversized = oversized_text();
+    qm.update(
+        &mut storage,
+        handle.row_id,
+        &[Value::Text(oversized.clone()), Value::Boolean(false)],
+    )
+    .expect("oversized indexed text update should succeed");
+
+    let new_query = qm
+        .query("todos")
+        .filter_eq("title", Value::Text(oversized.clone()))
+        .build();
+    let new_rows =
+        execute_query(&mut qm, &mut storage, new_query).expect("query oversized indexed value");
+    assert_eq!(new_rows.len(), 1);
+    assert_eq!(new_rows[0].0, handle.row_id);
+
+    let query = qm.query("todos").build();
+    let rows = execute_query(&mut qm, &mut storage, query).expect("query after update");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, handle.row_id);
+    assert_eq!(
+        rows[0].1,
+        vec![Value::Text(oversized), Value::Boolean(false)]
+    );
+
+    let old_query = qm
+        .query("todos")
+        .filter_eq("title", Value::Text("keep-me".into()))
+        .build();
+    let old_rows =
+        execute_query(&mut qm, &mut storage, old_query).expect("query old indexed value");
+    assert_eq!(old_rows.len(), 0, "old title index entry should be removed");
 }
 
 #[test]
@@ -4389,112 +4598,6 @@ fn files_with_parts_descriptor() -> RowDescriptor {
 }
 
 #[test]
-fn scalar_uuid_fk_insert_and_update_validation() {
-    let sync_manager = SyncManager::new();
-    let schema = scalar_fk_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-
-    let missing_author = ObjectId::new();
-    let insert_missing = qm.insert(
-        &mut storage,
-        "posts",
-        &[Value::Text("missing".into()), Value::Uuid(missing_author)],
-    );
-    assert!(
-        matches!(
-            insert_missing,
-            Err(QueryError::UuidForeignKeyViolation { ref column, .. }) if column == "author_id"
-        ),
-        "insert with missing UUID reference should fail: {insert_missing:?}"
-    );
-
-    let author = qm
-        .insert(&mut storage, "users", &[Value::Text("Alice".into())])
-        .unwrap();
-    let post = qm
-        .insert(
-            &mut storage,
-            "posts",
-            &[Value::Text("ok".into()), Value::Uuid(author.row_id)],
-        )
-        .unwrap();
-
-    qm.update(
-        &mut storage,
-        post.row_id,
-        &[Value::Text("still-ok".into()), Value::Uuid(author.row_id)],
-    )
-    .unwrap();
-
-    let update_missing = qm.update(
-        &mut storage,
-        post.row_id,
-        &[Value::Text("broken".into()), Value::Uuid(ObjectId::new())],
-    );
-    assert!(
-        matches!(
-            update_missing,
-            Err(QueryError::UuidForeignKeyViolation { .. })
-        ),
-        "update with missing UUID reference should fail: {update_missing:?}"
-    );
-}
-
-#[test]
-fn uuid_array_fk_insert_and_update_validation() {
-    let sync_manager = SyncManager::new();
-    let schema = file_storage_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-
-    let missing = ObjectId::new();
-    let insert_missing = qm.insert(
-        &mut storage,
-        "files",
-        &[Value::Array(vec![Value::Uuid(missing)])],
-    );
-    assert!(
-        matches!(
-            insert_missing,
-            Err(QueryError::UuidArrayForeignKeyViolation { ref column, .. }) if column == "parts"
-        ),
-        "insert with missing UUID[] reference should fail: {insert_missing:?}"
-    );
-
-    let part = qm
-        .insert(&mut storage, "file_parts", &[Value::Text("A".into())])
-        .unwrap();
-    let file = qm
-        .insert(
-            &mut storage,
-            "files",
-            &[Value::Array(vec![
-                Value::Uuid(part.row_id),
-                Value::Uuid(part.row_id),
-            ])],
-        )
-        .unwrap();
-    qm.update(
-        &mut storage,
-        file.row_id,
-        &[Value::Array(vec![Value::Uuid(part.row_id)])],
-    )
-    .unwrap();
-
-    let update_missing = qm.update(
-        &mut storage,
-        file.row_id,
-        &[Value::Array(vec![Value::Uuid(ObjectId::new())])],
-    );
-    assert!(
-        matches!(
-            update_missing,
-            Err(QueryError::UuidArrayForeignKeyViolation { .. })
-        ),
-        "update with missing UUID[] reference should fail: {update_missing:?}"
-    );
-}
-
-#[test]
 fn uuid_array_fk_forward_materialization_preserves_order_and_duplicates() {
     let sync_manager = SyncManager::new();
     let schema = file_storage_schema();
@@ -4643,139 +4746,6 @@ fn uuid_array_fk_reverse_membership_and_index_updates_on_edit() {
     assert!(ids_for_b_after.contains(&file.row_id));
 }
 
-#[test]
-fn server_permission_checks_reject_missing_scalar_fk_writes() {
-    use crate::commit::{Commit, StoredState};
-    use crate::sync_manager::{
-        ClientId, ClientRole, InboxEntry, ObjectMetadata, Source, SyncError, SyncPayload,
-    };
-
-    let sync_manager = SyncManager::new();
-    let schema = scalar_fk_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-    let branch = get_branch(&qm);
-
-    let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
-    qm.sync_manager_mut()
-        .set_client_role(client_id, ClientRole::User);
-    qm.sync_manager_mut()
-        .set_client_session(client_id, PolicySession::new("alice"));
-
-    let post_descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("title", ColumnType::Text),
-        ColumnDescriptor::new("author_id", ColumnType::Uuid),
-    ]);
-
-    let missing_author = ObjectId::new();
-    let inserted_post_id = ObjectId::new();
-    let insert_metadata =
-        std::collections::HashMap::from([(MetadataKey::Table.to_string(), "posts".to_string())]);
-    qm.sync_manager_mut().object_manager.receive_object(
-        &mut storage,
-        inserted_post_id,
-        insert_metadata.clone(),
-    );
-    let insert_payload = SyncPayload::ObjectUpdated {
-        object_id: inserted_post_id,
-        metadata: Some(ObjectMetadata {
-            id: inserted_post_id,
-            metadata: insert_metadata,
-        }),
-        branch_name: branch.clone().into(),
-        commits: vec![Commit {
-            parents: smallvec![],
-            content: encode_row(
-                &post_descriptor,
-                &[
-                    Value::Text("from-client".into()),
-                    Value::Uuid(missing_author),
-                ],
-            )
-            .unwrap(),
-            timestamp: 1000,
-            author: inserted_post_id,
-            metadata: None,
-            stored_state: StoredState::Stored,
-            ack_state: Default::default(),
-        }],
-    };
-
-    qm.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Client(client_id),
-        payload: insert_payload,
-    });
-    qm.process(&mut storage);
-
-    let outbox = qm.sync_manager_mut().take_outbox();
-    let insert_rejection = outbox.iter().find_map(|entry| match &entry.payload {
-        SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => Some(reason.as_str()),
-        _ => None,
-    });
-    assert!(
-        matches!(insert_rejection, Some(reason) if reason.contains("uuid foreign key violation")),
-        "insert should be rejected for missing scalar FK: {outbox:?}"
-    );
-
-    let author = qm
-        .insert(&mut storage, "users", &[Value::Text("Author".into())])
-        .unwrap();
-    let post = qm
-        .insert(
-            &mut storage,
-            "posts",
-            &[Value::Text("seed".into()), Value::Uuid(author.row_id)],
-        )
-        .unwrap();
-    let seed_row = qm.get_row(post.row_id).expect("seed post should exist");
-    assert_eq!(seed_row.1[1], Value::Uuid(author.row_id));
-
-    let update_payload = SyncPayload::ObjectUpdated {
-        object_id: post.row_id,
-        metadata: None,
-        branch_name: branch.clone().into(),
-        commits: vec![Commit {
-            parents: smallvec![post.row_commit_id],
-            content: encode_row(
-                &post_descriptor,
-                &[
-                    Value::Text("update-attempt".into()),
-                    Value::Uuid(ObjectId::new()),
-                ],
-            )
-            .unwrap(),
-            timestamp: 2000,
-            author: post.row_id,
-            metadata: None,
-            stored_state: StoredState::Stored,
-            ack_state: Default::default(),
-        }],
-    };
-
-    qm.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Client(client_id),
-        payload: update_payload,
-    });
-    qm.process(&mut storage);
-
-    let outbox = qm.sync_manager_mut().take_outbox();
-    let update_rejection = outbox.iter().find_map(|entry| match &entry.payload {
-        SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => Some(reason.as_str()),
-        _ => None,
-    });
-    assert!(
-        matches!(update_rejection, Some(reason) if reason.contains("uuid foreign key violation")),
-        "update should be rejected for missing scalar FK: {outbox:?}"
-    );
-
-    let post_after = qm.get_row(post.row_id).expect("post should still exist");
-    assert_eq!(
-        post_after.1[1],
-        Value::Uuid(author.row_id),
-        "rejected update must not overwrite existing scalar FK value"
-    );
-}
-
 fn users_posts_schema() -> Schema {
     let mut schema = Schema::new();
     schema.insert(
@@ -4819,6 +4789,33 @@ fn users_with_posts_descriptor() -> RowDescriptor {
             },
         ),
     ])
+}
+
+fn groups_users_array_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Integer),
+            ColumnDescriptor::new("name", ColumnType::Text),
+        ])
+        .into(),
+    );
+    schema.insert(
+        TableName::new("groups"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new(
+                "member_ids",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Integer),
+                },
+            ),
+        ])
+        .into(),
+    );
+    schema
 }
 
 #[test]
@@ -5031,6 +5028,128 @@ fn array_subquery_user_with_no_posts() {
     // Posts array should be empty
     let posts = values[2].as_array().expect("Should have posts array");
     assert_eq!(posts.len(), 0, "User with no posts should have empty array");
+}
+
+#[test]
+fn array_subquery_require_result_filters_and_readds_rows() {
+    let sync_manager = SyncManager::new();
+    let schema = users_posts_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .with_array("posts", |sub| {
+            sub.from("posts")
+                .correlate("author_id", "users.id")
+                .require_result()
+        })
+        .build();
+
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+
+    let initial_updates = qm.take_updates();
+    let initial_delta = initial_updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("Should have subscription update");
+    assert!(
+        initial_delta.added.is_empty(),
+        "user without posts should be filtered when include is required"
+    );
+
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Integer(100),
+            Value::Text("Hello world".into()),
+            Value::Integer(1),
+        ],
+    )
+    .unwrap();
+    qm.process(&mut storage);
+
+    let follow_up_updates = qm.take_updates();
+    let follow_up_delta = follow_up_updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("Should have subscription update after post insert");
+
+    assert_eq!(follow_up_delta.added.len(), 1);
+    let row = decode_row(
+        &users_with_posts_descriptor(),
+        &follow_up_delta.added[0].data,
+    )
+    .unwrap();
+    assert_eq!(row[0], Value::Integer(1));
+    assert_eq!(row[1], Value::Text("Alice".into()));
+    assert_eq!(row[2].as_array().expect("posts array").len(), 1);
+}
+
+#[test]
+fn array_subquery_require_full_cardinality_filters_incomplete_array_refs() {
+    let sync_manager = SyncManager::new();
+    let schema = groups_users_array_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "groups",
+        &[
+            Value::Integer(10),
+            Value::Text("Maintainers".into()),
+            Value::Array(vec![Value::Integer(1), Value::Integer(2)]),
+        ],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("groups")
+        .with_array("members", |sub| {
+            sub.from("users")
+                .correlate("user_id", "groups.member_ids")
+                .require_match_correlation_cardinality()
+        })
+        .build();
+
+    let initial_results = execute_query(&mut qm, &mut storage, query.clone()).unwrap();
+    assert!(
+        initial_results.is_empty(),
+        "group should be filtered when one referenced member is missing"
+    );
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(2), Value::Text("Bob".into())],
+    )
+    .unwrap();
+    let follow_up_results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(follow_up_results.len(), 1);
+    let row = &follow_up_results[0].1;
+    assert_eq!(row[0], Value::Integer(10));
+    assert_eq!(row[1], Value::Text("Maintainers".into()));
+    assert_eq!(
+        row[2],
+        Value::Array(vec![Value::Integer(1), Value::Integer(2)])
+    );
+    assert_eq!(row[3].as_array().expect("members array").len(), 2);
 }
 
 #[test]

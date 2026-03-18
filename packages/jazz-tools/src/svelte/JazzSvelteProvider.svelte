@@ -20,12 +20,13 @@
 	Promise.resolve(client)
 		.then((c) => {
 			if (cancelled) {
-				void c.shutdown();
+				c.shutdown();
 				return;
 			}
 			resolvedClient = c;
 			ctx.db = c.db;
 			ctx.session = c.session;
+			ctx.manager = c.manager;
 		})
 		.catch((reason) => {
 			error = reason instanceof Error ? reason : new Error(String(reason));

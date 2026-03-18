@@ -16,7 +16,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let result = self
             .schema_manager
             .insert_with_session(&mut self.storage, table, &values, session)
-            .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
+            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_id = result.row_id;
         let row_values = result.row_values;
         debug!(object_id = %row_id, "inserted");
@@ -37,7 +37,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         self.schema_manager
             .query_manager_mut()
             .update_with_session(&mut self.storage, object_id, &current_values, session)
-            .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
+            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
 
         self.immediate_tick();
         Ok(())
@@ -53,7 +53,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         self.schema_manager
             .query_manager_mut()
             .delete_with_session(&mut self.storage, object_id, session)
-            .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
+            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         debug!("deleted");
         self.immediate_tick();
         Ok(())
@@ -75,7 +75,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let result = self
             .schema_manager
             .insert_with_session(&mut self.storage, table, &values, session)
-            .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
+            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_id = result.row_id;
         let row_commit_id = result.row_commit_id;
         let row_values = result.row_values;
@@ -114,7 +114,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .schema_manager
             .query_manager_mut()
             .update_with_session(&mut self.storage, object_id, &current_values, session)
-            .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
+            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
 
         let (sender, receiver) = oneshot::channel();
         if self
@@ -178,7 +178,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .schema_manager
             .query_manager_mut()
             .delete_with_session(&mut self.storage, object_id, session)
-            .map_err(|e| RuntimeError::WriteError(format!("{:?}", e)))?;
+            .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
 
         let (sender, receiver) = oneshot::channel();
         if self
