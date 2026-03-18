@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
@@ -20,6 +21,8 @@ enum WriteSchemaResolution {
     PendingSchema,
     Unresolved,
 }
+
+const SCHEMA_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl QueryManager {
     fn should_sync_policy_context_rows(&self, client_id: ClientId) -> bool {
@@ -519,7 +522,7 @@ impl QueryManager {
     pub(super) fn evaluate_write_permission<H: Storage>(
         &mut self,
         storage: &mut H,
-        check: PendingPermissionCheck,
+        mut check: PendingPermissionCheck,
     ) {
         // Get table name from metadata
         let table_name = match check.metadata.get(MetadataKey::Table.as_str()) {
@@ -547,10 +550,35 @@ impl QueryManager {
         let table_schema = match self.resolve_write_table_schema(table_name, branch_name) {
             WriteSchemaResolution::Resolved(schema) => *schema,
             WriteSchemaResolution::PendingSchema => {
+                let wait_started_at = check
+                    .schema_wait_started_at
+                    .get_or_insert_with(Instant::now);
+                let wait_elapsed = wait_started_at.elapsed();
+
+                if wait_elapsed >= SCHEMA_RESOLUTION_TIMEOUT {
+                    tracing::warn!(
+                        operation = ?check.operation,
+                        table = %table_name,
+                        branch = %branch_name,
+                        waited_ms = wait_elapsed.as_millis() as u64,
+                        "denying deferred write because schema did not become available in time"
+                    );
+                    let reason = format!(
+                        "{:?} denied on table {} - schema unavailable for branch {} after waiting {}s",
+                        check.operation,
+                        table_name.0,
+                        branch_name,
+                        SCHEMA_RESOLUTION_TIMEOUT.as_secs()
+                    );
+                    self.sync_manager.reject_permission_check(check, reason);
+                    return;
+                }
+
                 tracing::debug!(
                     operation = ?check.operation,
                     table = %table_name,
                     branch = %branch_name,
+                    waited_ms = wait_elapsed.as_millis() as u64,
                     "deferring write permission check until schema becomes available"
                 );
                 self.sync_manager

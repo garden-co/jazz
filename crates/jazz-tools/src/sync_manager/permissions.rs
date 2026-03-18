@@ -80,6 +80,7 @@ impl SyncManager {
             client_id,
             payload,
             session,
+            schema_wait_started_at: None,
             metadata,
             old_content,
             new_content,
