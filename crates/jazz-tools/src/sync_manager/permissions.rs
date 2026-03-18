@@ -12,6 +12,11 @@ impl SyncManager {
         std::mem::take(&mut self.pending_permission_checks)
     }
 
+    /// Re-queue permission checks that could not be evaluated yet.
+    pub fn requeue_pending_permission_checks(&mut self, checks: Vec<PendingPermissionCheck>) {
+        self.pending_permission_checks.extend(checks);
+    }
+
     /// Approve a pending permission check, applying the payload.
     ///
     /// This takes the full PendingPermissionCheck since it was already taken

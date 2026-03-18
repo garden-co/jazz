@@ -630,6 +630,98 @@ fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
 }
 
 #[test]
+fn rebac_insert_waits_for_schema_then_denies_for_composed_branch() {
+    let schema = rebac_test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let branch = ComposedBranchName::new("dev", schema_hash, "main")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+
+    // Server mode starts without a fixed current schema and may learn schemas later.
+    let sync_manager = SyncManager::new();
+    let mut qm = QueryManager::new(sync_manager);
+    let mut storage = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    qm.sync_manager_mut().add_client(client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+
+    let obj_id = ObjectId::new();
+    let metadata = document_metadata();
+    let commit = Commit {
+        parents: smallvec![],
+        content: encode_document("bob", "Should Be Denied", None),
+        timestamp: 1000,
+        author: ObjectId::new(),
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: Some(ObjectMetadata {
+                id: obj_id,
+                metadata: metadata.clone(),
+            }),
+            branch_name: branch.clone().into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    // First pass should defer until the schema becomes available instead of allowing or denying.
+    qm.process(&mut storage);
+
+    assert!(
+        qm.sync_manager_mut().take_outbox().is_empty(),
+        "Composed-branch writes should wait for schema activation before emitting a result"
+    );
+
+    let pending = qm.sync_manager_mut().take_pending_permission_checks();
+    assert_eq!(
+        pending.len(),
+        1,
+        "Write should remain pending until the matching schema arrives"
+    );
+    qm.sync_manager_mut()
+        .requeue_pending_permission_checks(pending);
+
+    let tips = qm
+        .sync_manager_mut()
+        .object_manager
+        .get_tip_ids(obj_id, &branch);
+    assert!(
+        tips.is_err() || !tips.unwrap().contains(&commit.id()),
+        "Deferred insert must not be applied before the schema is known"
+    );
+
+    let mut known_schemas = HashMap::new();
+    known_schemas.insert(schema_hash, schema);
+    qm.set_known_schemas(Arc::new(known_schemas));
+
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let denied = outbox.iter().any(|entry| {
+        matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::PermissionDenied { .. }),
+            ) if *id == client_id
+        )
+    });
+    assert!(
+        denied,
+        "Once the schema is available, the deferred insert should be denied by policy"
+    );
+}
+
+#[test]
 fn rebac_insert_denied_when_schema_unresolved_for_branch() {
     let schema = rebac_test_schema();
     let schema_hash = SchemaHash::compute(&schema);
