@@ -1314,6 +1314,7 @@ describe("generateQueryBuilderClasses", () => {
     expect(output).toContain("step: (ctx: { current: string }) => QueryBuilder<unknown>;");
     expect(output).toContain("const stepOutput = options.step({ current: currentToken });");
     expect(output).toContain("if (stepHops.length !== 1) {");
+    expect(output).toContain("if (currentCondition === undefined) {");
     expect(output).toContain("const withStart = this.where(options.start);");
     expect(output).toContain("clone._gatherVal = {");
   });
