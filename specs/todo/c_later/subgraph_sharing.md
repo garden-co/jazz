@@ -2,7 +2,7 @@
 
 Optimization opportunities for array subqueries.
 
-> Status quo: [specs/status-quo/subgraph_sharing.md](../status-quo/subgraph_sharing.md)
+> Status quo: [specs/status-quo/subgraph_sharing.md](../../status-quo/subgraph_sharing.md)
 
 ## Shared Hash Index (Recommended First Optimization)
 
