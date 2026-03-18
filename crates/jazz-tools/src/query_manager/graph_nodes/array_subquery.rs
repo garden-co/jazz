@@ -9,6 +9,7 @@ use ahash::{AHashMap, AHashSet};
 
 use crate::object::ObjectId;
 use crate::query_manager::encoding::{decode_row, encode_row};
+use crate::query_manager::query::ArraySubqueryRequirement;
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, LoadedRow, RowDescriptor, Schema, Tuple, TupleDelta,
     TupleDescriptor, TupleElement, TupleProvenance, Value,
@@ -64,6 +65,8 @@ pub struct ArraySubqueryNode {
 
     /// Source of the correlation value from the outer tuple.
     outer_correlation: Correlate,
+    /// Requirement for whether the correlated result must exist.
+    requirement: ArraySubqueryRequirement,
 
     /// Per-outer-row state: outer_id → latest outer tuple + evaluated array.
     instances: AHashMap<ObjectId, ArrayInstanceState>,
@@ -97,6 +100,7 @@ impl ArraySubqueryNode {
         outer_descriptor: TupleDescriptor,
         subgraph_template: SubgraphTemplate,
         outer_correlation: Correlate,
+        requirement: ArraySubqueryRequirement,
         array_column_name: String,
         schema: Schema,
     ) -> Self {
@@ -132,6 +136,7 @@ impl ArraySubqueryNode {
             subgraph_template,
             schema,
             outer_correlation,
+            requirement,
             instances: AHashMap::new(),
             current_tuples: AHashSet::new(),
             dirty: true,
@@ -173,8 +178,12 @@ impl ArraySubqueryNode {
                     .as_ref()
                     .map(|state| state.provenance.clone())
                     .unwrap_or_default();
+                let old_correlation = state
+                    .as_ref()
+                    .map(|state| state.correlation_value.clone())
+                    .unwrap_or(Value::Null);
                 if let Some(old_output) =
-                    self.build_output_tuple(&tuple, &old_array, &old_provenance)
+                    self.build_output_tuple(&tuple, &old_correlation, &old_array, &old_provenance)
                 {
                     self.current_tuples.remove(&old_output);
                     result.removed.push(old_output);
@@ -196,16 +205,19 @@ impl ArraySubqueryNode {
                         outer_id,
                         ArrayInstanceState {
                             outer_tuple: tuple.clone(),
-                            correlation_value,
+                            correlation_value: correlation_value.clone(),
                             array_result: array_result.clone(),
                             provenance: provenance.clone(),
                         },
                     );
 
                     // Build output tuple with array column
-                    if let Some(output_tuple) =
-                        self.build_output_tuple(&tuple, &array_result, &provenance)
-                    {
+                    if let Some(output_tuple) = self.build_output_tuple(
+                        &tuple,
+                        &correlation_value,
+                        &array_result,
+                        &provenance,
+                    ) {
                         self.current_tuples.insert(output_tuple.clone());
                         result.added.push(output_tuple);
                     }
@@ -251,7 +263,9 @@ impl ArraySubqueryNode {
                 (Value::Array(vec![]), TupleProvenance::default())
             };
 
-            if let (Some(outer_id), Some(correlation_value)) = (new_outer_id, new_correlation) {
+            if let (Some(outer_id), Some(correlation_value)) =
+                (new_outer_id, new_correlation.clone())
+            {
                 self.instances.insert(
                     outer_id,
                     ArrayInstanceState {
@@ -263,13 +277,28 @@ impl ArraySubqueryNode {
                 );
             }
 
-            if let (Some(old_output), Some(new_output)) = (
-                self.build_output_tuple(&old_tuple, &old_array, &old_provenance),
-                self.build_output_tuple(&new_tuple, &new_array, &new_provenance),
-            ) {
-                self.current_tuples.remove(&old_output);
-                self.current_tuples.insert(new_output.clone());
-                result.updated.push((old_output, new_output));
+            let old_output = old_correlation.as_ref().and_then(|correlation| {
+                self.build_output_tuple(&old_tuple, correlation, &old_array, &old_provenance)
+            });
+            let new_output = new_correlation.as_ref().and_then(|correlation| {
+                self.build_output_tuple(&new_tuple, correlation, &new_array, &new_provenance)
+            });
+
+            match (old_output, new_output) {
+                (Some(old_output), Some(new_output)) => {
+                    self.current_tuples.remove(&old_output);
+                    self.current_tuples.insert(new_output.clone());
+                    result.updated.push((old_output, new_output));
+                }
+                (Some(old_output), None) => {
+                    self.current_tuples.remove(&old_output);
+                    result.removed.push(old_output);
+                }
+                (None, Some(new_output)) => {
+                    self.current_tuples.insert(new_output.clone());
+                    result.added.push(new_output);
+                }
+                (None, None) => {}
             }
         }
 
@@ -356,9 +385,14 @@ impl ArraySubqueryNode {
     fn build_output_tuple(
         &self,
         outer_tuple: &Tuple,
+        correlation_value: &Value,
         array_result: &Value,
         inner_provenance: &TupleProvenance,
     ) -> Option<Tuple> {
+        if !self.requirement_satisfied(correlation_value, array_result) {
+            return None;
+        }
+
         let element = outer_tuple.get(0)?;
         let outer_id = element.id();
         let outer_content = element.content()?;
@@ -387,6 +421,22 @@ impl ArraySubqueryNode {
         ))
     }
 
+    fn requirement_satisfied(&self, correlation_value: &Value, array_result: &Value) -> bool {
+        let Value::Array(rows) = array_result else {
+            return self.requirement == ArraySubqueryRequirement::Optional;
+        };
+
+        match self.requirement {
+            ArraySubqueryRequirement::Optional => true,
+            ArraySubqueryRequirement::AtLeastOne => !rows.is_empty(),
+            ArraySubqueryRequirement::MatchCorrelationCardinality => match correlation_value {
+                Value::Array(elements) => rows.len() == elements.len(),
+                Value::Null => false,
+                _ => rows.len() == 1,
+            },
+        }
+    }
+
     /// Re-evaluate all instances when inner data changes.
     /// Returns deltas for any arrays that changed.
     pub fn reevaluate_all<F>(&mut self, io: &dyn Storage, row_loader: &mut F) -> TupleDelta
@@ -410,20 +460,37 @@ impl ArraySubqueryNode {
             let (new_array, new_provenance) =
                 self.evaluate_subgraph(&old_state.correlation_value, io, row_loader);
 
-            if (old_state.array_result != new_array || old_state.provenance != new_provenance)
-                && let (Some(old_tuple), Some(new_tuple)) = (
-                    self.build_output_tuple(
-                        &old_state.outer_tuple,
-                        &old_state.array_result,
-                        &old_state.provenance,
-                    ),
-                    self.build_output_tuple(&old_state.outer_tuple, &new_array, &new_provenance),
-                )
-            {
-                result.updated.push((old_tuple.clone(), new_tuple.clone()));
+            if old_state.array_result != new_array || old_state.provenance != new_provenance {
+                let old_tuple = self.build_output_tuple(
+                    &old_state.outer_tuple,
+                    &old_state.correlation_value,
+                    &old_state.array_result,
+                    &old_state.provenance,
+                );
+                let new_tuple = self.build_output_tuple(
+                    &old_state.outer_tuple,
+                    &old_state.correlation_value,
+                    &new_array,
+                    &new_provenance,
+                );
 
-                self.current_tuples.remove(&old_tuple);
-                self.current_tuples.insert(new_tuple);
+                match (old_tuple, new_tuple) {
+                    (Some(old_tuple), Some(new_tuple)) => {
+                        result.updated.push((old_tuple.clone(), new_tuple.clone()));
+                        self.current_tuples.remove(&old_tuple);
+                        self.current_tuples.insert(new_tuple);
+                    }
+                    (Some(old_tuple), None) => {
+                        self.current_tuples.remove(&old_tuple);
+                        result.removed.push(old_tuple);
+                    }
+                    (None, Some(new_tuple)) => {
+                        self.current_tuples.insert(new_tuple.clone());
+                        result.added.push(new_tuple);
+                    }
+                    (None, None) => {}
+                }
+
                 self.instances.insert(
                     outer_id,
                     ArrayInstanceState {
@@ -460,9 +527,15 @@ impl RowNode for ArraySubqueryNode {
             if let Some(outer_id) = tuple.first_id() {
                 self.instances.remove(&outer_id);
             }
-            if let Some(output) =
-                self.build_output_tuple(&tuple, &Value::Array(vec![]), &TupleProvenance::default())
-            {
+            let correlation_value = self
+                .extract_correlation_value(&tuple)
+                .unwrap_or(Value::Null);
+            if let Some(output) = self.build_output_tuple(
+                &tuple,
+                &correlation_value,
+                &Value::Array(vec![]),
+                &TupleProvenance::default(),
+            ) {
                 self.current_tuples.remove(&output);
                 result.removed.push(output);
             }
@@ -483,9 +556,15 @@ impl RowNode for ArraySubqueryNode {
                     },
                 );
             }
-            if let Some(output) =
-                self.build_output_tuple(&tuple, &Value::Array(vec![]), &TupleProvenance::default())
-            {
+            let correlation_value = self
+                .extract_correlation_value(&tuple)
+                .unwrap_or(Value::Null);
+            if let Some(output) = self.build_output_tuple(
+                &tuple,
+                &correlation_value,
+                &Value::Array(vec![]),
+                &TupleProvenance::default(),
+            ) {
                 self.current_tuples.insert(output.clone());
                 result.added.push(output);
             }
@@ -561,6 +640,7 @@ mod tests {
             outer_descriptor,
             template,
             Correlate::Col(0),
+            ArraySubqueryRequirement::Optional,
             "posts".to_string(),
             schema,
         );
@@ -595,6 +675,7 @@ mod tests {
             outer_descriptor,
             template,
             Correlate::Col(0),
+            ArraySubqueryRequirement::Optional,
             "posts".to_string(),
             schema.clone(),
         );
@@ -636,6 +717,7 @@ mod tests {
             outer_descriptor,
             template,
             Correlate::Id,
+            ArraySubqueryRequirement::Optional,
             "posts".to_string(),
             schema.clone(),
         );

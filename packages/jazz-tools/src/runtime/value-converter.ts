@@ -145,6 +145,9 @@ export function toUpdateRecord(
     if (!col) {
       throw new Error(`Unknown column "${key}" on table "${tableName}"`);
     }
+    if (value === null && !col.nullable) {
+      throw new Error(`Cannot set required field '${key}' to null`);
+    }
     result[key] = toValue(value, col.column_type);
   }
   return result;

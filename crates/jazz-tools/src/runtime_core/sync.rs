@@ -15,10 +15,23 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
     /// Add a server connection.
     pub fn add_server(&mut self, server_id: ServerId) {
+        self.add_server_with_catalogue_state_hash(server_id, None);
+    }
+
+    /// Add a server connection, optionally comparing the upstream catalogue
+    /// digest first so unchanged catalogue objects are not replayed.
+    pub fn add_server_with_catalogue_state_hash(
+        &mut self,
+        server_id: ServerId,
+        remote_catalogue_state_hash: Option<&str>,
+    ) {
         info!(%server_id, "adding server");
+        let local_catalogue_state_hash = self.schema_manager.catalogue_state_hash();
+        let skip_catalogue_sync = remote_catalogue_state_hash
+            .is_some_and(|remote_hash| remote_hash == local_catalogue_state_hash);
         self.schema_manager
             .query_manager_mut()
-            .add_server(server_id);
+            .add_server_with_catalogue_match(server_id, skip_catalogue_sync);
         self.immediate_tick();
     }
 

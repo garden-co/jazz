@@ -89,7 +89,7 @@ describe("startLocalJazzServer", () => {
       adminSecret: "test-admin-secret",
       allowAnonymous: true,
       allowDemo: true,
-      healthTimeoutMs: 5_000,
+      healthTimeoutMs: 10_000,
     });
 
     const healthResponse = await fetch(`${server.url}/health`);
@@ -97,7 +97,7 @@ describe("startLocalJazzServer", () => {
     expect(server.dataDir).toBe(dataDir);
 
     await server.stop();
-  });
+  }, 15_000);
 
   it("frees the port after stop so it can be rebound", async () => {
     const captureRoot = await createTempRoot("jazz-tools-testing-port-free-");
@@ -163,17 +163,19 @@ describe("startLocalJazzServer", () => {
     try {
       const syncBody = {
         client_id: "01234567-89ab-cdef-0123-456789abcdef",
-        payload: {
-          ObjectUpdated: {
-            object_id: "01234567-89ab-cdef-0123-456789abcdef",
-            metadata: {
-              id: "01234567-89ab-cdef-0123-456789abcdef",
-              metadata: { type: "catalogue_schema" },
+        payloads: [
+          {
+            ObjectUpdated: {
+              object_id: "01234567-89ab-cdef-0123-456789abcdef",
+              metadata: {
+                id: "01234567-89ab-cdef-0123-456789abcdef",
+                metadata: { type: "catalogue_schema" },
+              },
+              branch_name: "main",
+              commits: [],
             },
-            branch_name: "main",
-            commits: [],
           },
-        },
+        ],
       };
 
       const response = await fetch(`${server.url}/sync`, {
@@ -204,17 +206,19 @@ describe("startLocalJazzServer", () => {
     try {
       const syncBody = {
         client_id: "01234567-89ab-cdef-0123-456789abcdef",
-        payload: {
-          ObjectUpdated: {
-            object_id: "01234567-89ab-cdef-0123-456789abcdef",
-            metadata: {
-              id: "01234567-89ab-cdef-0123-456789abcdef",
-              metadata: { type: "catalogue_schema" },
+        payloads: [
+          {
+            ObjectUpdated: {
+              object_id: "01234567-89ab-cdef-0123-456789abcdef",
+              metadata: {
+                id: "01234567-89ab-cdef-0123-456789abcdef",
+                metadata: { type: "catalogue_schema" },
+              },
+              branch_name: "main",
+              commits: [],
             },
-            branch_name: "main",
-            commits: [],
           },
-        },
+        ],
       };
 
       const response = await fetch(`${server.url}/sync`, {

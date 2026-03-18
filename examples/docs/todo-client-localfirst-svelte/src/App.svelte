@@ -1,7 +1,11 @@
 <!-- #region provider-svelte -->
 <script lang="ts">
 	import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
+	import AuthSessionExamples from './AuthSessionExamples.svelte';
 	import TodoList from './TodoList.svelte';
+
+	// Keep docs-only auth snippets in the compiled example app.
+	void AuthSessionExamples;
 
 	const client = createJazzClient({
 		appId: 'todo-svelte-example',

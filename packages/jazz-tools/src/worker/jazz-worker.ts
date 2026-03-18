@@ -9,6 +9,7 @@
 import type { InitMessage, MainToWorkerMessage, WorkerToMainMessage } from "./worker-protocol.js";
 import {
   sendSyncPayload,
+  sendSyncPayloadBatch,
   readBinaryFrames,
   generateClientId,
   buildEventsUrl,
@@ -17,6 +18,7 @@ import {
   OutboxDestinationKind,
 } from "../runtime/sync-transport.js";
 import { normalizeRuntimeSchemaJson } from "../drivers/schema-wire.js";
+import { ServerPayloadBatcher } from "./server-payload-batcher.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
 // (Cannot use lib "WebWorker" as it conflicts with DOM types in the main tsconfig)
@@ -50,6 +52,33 @@ let syncBatchFlushQueued = false;
 let initComplete = false;
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 let bootstrapCatalogueForwarding = false;
+
+// Accumulates non-catalogue server-bound payloads within a microtask boundary
+// and flushes them as a single ordered batch POST.
+const serverPayloadBatcher = new ServerPayloadBatcher(async (payloads) => {
+  if (!activeServerUrl) return;
+  try {
+    await sendSyncPayloadBatch(
+      activeServerUrl,
+      payloads,
+      {
+        jwtToken,
+        localAuthMode,
+        localAuthToken,
+        adminSecret,
+        clientId: serverClientId,
+        pathPrefix: activeServerPathPrefix,
+      },
+      "[worker] ",
+    );
+  } catch (error) {
+    if (!isExpectedFetchAbortError(error)) {
+      console.error("[worker] Sync batch POST error:", error);
+    }
+    detachServer();
+    scheduleReconnect();
+  }
+});
 let peerRuntimeClientByPeerId = new Map<string, string>();
 let peerIdByRuntimeClient = new Map<string, string>();
 let peerTermByPeerId = new Map<string, number>();
@@ -60,9 +89,10 @@ function resolveAbsoluteWasmUrlFromInitError(error: unknown): string | null {
 
   const message = error instanceof Error ? error.message : String(error ?? "");
   const match = message.match(/(\/[^"'\s]+\.wasm)/);
-  if (!match) return null;
+  const wasmPath = match?.[1];
+  if (!wasmPath) return null;
 
-  return new URL(match[1], origin).href;
+  return new URL(wasmPath, origin).href;
 }
 
 async function runWithRootRelativeFetchSupport<T>(operation: () => Promise<T>): Promise<T> {
@@ -238,13 +268,17 @@ async function handleInit(msg: InitMessage): Promise<void> {
 
           // Server-bound → HTTP POST to upstream
           if (activeServerUrl) {
-            void sendToServer(activeServerUrl, payload as string, isCatalogue).catch((error) => {
-              if (!isExpectedFetchAbortError(error)) {
-                console.error("[worker] Sync POST error:", error);
-              }
-              detachServer();
-              scheduleReconnect();
-            });
+            if (isCatalogue) {
+              sendToServer(activeServerUrl, payload as string, isCatalogue).catch((error) => {
+                if (!isExpectedFetchAbortError(error)) {
+                  console.error("[worker] Sync POST error:", error);
+                }
+                detachServer();
+                scheduleReconnect();
+              });
+            } else {
+              serverPayloadBatcher.enqueue(payload as string);
+            }
           }
         }
       },

@@ -1,6 +1,6 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-alpha.15",
+  "version": "2.0.0-alpha.20",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "bin": {
     "jazz-tools": "bin/jazz-tools.js"
@@ -53,6 +53,11 @@
       "svelte": "./dist/svelte/index.js",
       "default": "./dist/svelte/index.js"
     },
+    "./expo/polyfills": {
+      "types": "./dist/expo/polyfills.d.ts",
+      "react-native": "./dist/expo/polyfills.js",
+      "default": "./dist/expo/polyfills.js"
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
@@ -71,10 +76,12 @@
   },
   "dependencies": {
     "@standard-schema/spec": "^1.1.0",
+    "jazz-rn": "workspace:*",
     "jazz-wasm": "workspace:*",
     "json-schema-to-ts": "^3.1.1",
     "pluralize-esm": "^9.0.5",
-    "tsx": "^4.0.0"
+    "tsx": "^4.0.0",
+    "web-streams-polyfill": "^4.2.0"
   },
   "devDependencies": {
     "@sveltejs/package": "^2.0.0",
@@ -85,7 +92,6 @@
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
     "fake-indexeddb": "^5.0.2",
-    "jazz-rn": "workspace:*",
     "react-dom": "^19.0.0",
     "svelte": "^5.0.0",
     "typescript": "catalog:default",
@@ -96,12 +102,20 @@
     "zod": "^4.3.6"
   },
   "peerDependencies": {
+    "expo": ">=54",
     "react": "^18 || ^19",
+    "react-native": ">=0.76",
     "svelte": "^5.0.0",
     "vue": "^3.5.0"
   },
   "peerDependenciesMeta": {
+    "expo": {
+      "optional": true
+    },
     "react": {
+      "optional": true
+    },
+    "react-native": {
       "optional": true
     },
     "svelte": {

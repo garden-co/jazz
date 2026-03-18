@@ -37,6 +37,13 @@ pub enum QueryError {
     EncodingError(String),
     ObjectNotFound(ObjectId),
     QueryCompilationError(String),
+    IndexValueTooLarge {
+        table: TableName,
+        column: String,
+        branch: String,
+        key_bytes: usize,
+        max_key_bytes: usize,
+    },
     IndexError(String),
     /// Cannot undelete or truncate a row that is not soft-deleted.
     RowNotDeleted(ObjectId),
@@ -48,20 +55,6 @@ pub enum QueryError {
     PolicyDenied {
         table: TableName,
         operation: Operation,
-    },
-    /// UUID reference points at a missing row.
-    UuidForeignKeyViolation {
-        table: TableName,
-        column: String,
-        referenced_table: TableName,
-        missing_id: ObjectId,
-    },
-    /// UUID[] reference points at a missing row.
-    UuidArrayForeignKeyViolation {
-        table: TableName,
-        column: String,
-        referenced_table: TableName,
-        missing_id: ObjectId,
     },
     /// Unknown schema hash - client should sync schema first.
     UnknownSchema(SchemaHash),
@@ -80,6 +73,16 @@ impl std::fmt::Display for QueryError {
             QueryError::EncodingError(msg) => write!(f, "encoding error: {msg}"),
             QueryError::ObjectNotFound(id) => write!(f, "object not found: {:?}", id),
             QueryError::QueryCompilationError(msg) => write!(f, "query compilation error: {msg}"),
+            QueryError::IndexValueTooLarge {
+                table,
+                column,
+                branch,
+                key_bytes,
+                max_key_bytes,
+            } => write!(
+                f,
+                "indexed value too large for {table}.{column} on branch {branch}: index key would be {key_bytes} bytes (max {max_key_bytes})"
+            ),
             QueryError::IndexError(msg) => write!(f, "index error: {msg}"),
             QueryError::RowNotDeleted(id) => write!(f, "row not deleted: {:?}", id),
             QueryError::RowAlreadyDeleted(id) => write!(f, "row already deleted: {:?}", id),
@@ -87,26 +90,6 @@ impl std::fmt::Display for QueryError {
             QueryError::PolicyDenied { table, operation } => {
                 write!(f, "policy denied {} on table {}", operation, table)
             }
-            QueryError::UuidForeignKeyViolation {
-                table,
-                column,
-                referenced_table,
-                missing_id,
-            } => write!(
-                f,
-                "uuid foreign key violation on {}.{}: missing referenced row {} in table {}",
-                table, column, missing_id, referenced_table
-            ),
-            QueryError::UuidArrayForeignKeyViolation {
-                table,
-                column,
-                referenced_table,
-                missing_id,
-            } => write!(
-                f,
-                "uuid[] foreign key violation on {}.{}: missing referenced row {} in table {}",
-                table, column, missing_id, referenced_table
-            ),
             QueryError::UnknownSchema(hash) => {
                 write!(
                     f,
@@ -254,6 +237,8 @@ pub(super) struct ServerQuerySubscription {
     pub(super) query: Query,
     /// Compiled QueryGraph (with client's session for policy filtering).
     pub(super) graph: QueryGraph,
+    /// Subscription-specific schema context derived from the downstream client schema.
+    pub(super) schema_context: SchemaContext,
     /// Client's session for permission evaluation.
     pub(super) session: Option<Session>,
     /// Resolved branches (from query.branches or schema context at creation time).
@@ -551,14 +536,20 @@ impl QueryManager {
         // Recompile server-side subscriptions
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
             if sub.needs_recompile {
+                let query_for_compile =
+                    Self::query_for_server_compile(&sub.query, &sub.schema_context);
                 // Recompile the graph
                 match Self::compile_graph(
-                    &sub.query,
-                    &self.schema,
+                    &query_for_compile,
+                    &sub.schema_context.current_schema,
                     sub.session.clone(),
-                    &self.schema_context,
+                    &sub.schema_context,
                 ) {
                     Ok(new_graph) => {
+                        sub.branches = Self::resolved_server_query_branches(
+                            &query_for_compile,
+                            &sub.schema_context,
+                        );
                         sub.graph = new_graph;
                         sub.needs_recompile = false;
                     }
@@ -1171,13 +1162,21 @@ impl QueryManager {
                     &Value::Uuid(update.object_id),
                     update.object_id,
                 );
-                let _ = storage.index_insert(
+                if let Err(error) = storage.index_insert(
                     &table,
                     "_id_deleted",
                     branch,
                     &Value::Uuid(update.object_id),
                     update.object_id,
-                );
+                ) {
+                    tracing::error!(
+                        table,
+                        branch,
+                        object_id = %update.object_id,
+                        %error,
+                        "failed to insert synced _id_deleted index entry"
+                    );
+                }
             }
             self.mark_subscriptions_dirty(&table);
             self.mark_row_deleted_in_subscriptions(&table, update.object_id);
@@ -1196,14 +1195,22 @@ impl QueryManager {
 
         if was_soft_deleted {
             // This is an undelete - remove from _id_deleted, add to _id and column indices
-            let _ = Self::update_indices_for_undelete_on_branch(
+            if let Err(error) = Self::update_indices_for_undelete_on_branch(
                 storage,
                 &table,
                 branch,
                 update.object_id,
                 &new_data,
                 &descriptor,
-            );
+            ) {
+                tracing::error!(
+                    table,
+                    branch,
+                    object_id = %update.object_id,
+                    %error,
+                    "failed to update indices for synced undelete"
+                );
+            }
             self.mark_subscriptions_dirty(&table);
             return;
         }
@@ -1211,18 +1218,26 @@ impl QueryManager {
         // Normal update handling
         if update.is_new_object || update.previous_commit_ids.is_empty() {
             // First commit on branch (new object or synced first commit) - insert into all indices
-            let _ = Self::update_indices_for_insert_on_branch(
+            if let Err(error) = Self::update_indices_for_insert_on_branch(
                 storage,
                 &table,
                 branch,
                 update.object_id,
                 &new_data,
                 &descriptor,
-            );
+            ) {
+                tracing::error!(
+                    table,
+                    branch,
+                    object_id = %update.object_id,
+                    %error,
+                    "failed to update indices for synced insert"
+                );
+            }
         } else if let Some(old_data) = update.old_content {
             // Synced update - compute index delta using old_content
             // TODO: Future merge strategies - currently last-writer-wins by timestamp
-            let _ = Self::update_indices_for_update_on_branch(
+            if let Err(error) = Self::update_indices_for_update_on_branch(
                 storage,
                 &table,
                 branch,
@@ -1230,7 +1245,15 @@ impl QueryManager {
                 &old_data,
                 &new_data,
                 &descriptor,
-            );
+            ) {
+                tracing::error!(
+                    table,
+                    branch,
+                    object_id = %update.object_id,
+                    %error,
+                    "failed to update indices for synced update"
+                );
+            }
         } else {
             panic!(
                 "missing old_content for historical sync update: object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",

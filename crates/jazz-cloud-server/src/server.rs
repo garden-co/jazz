@@ -20,7 +20,8 @@ use base64::Engine;
 use bytes::Bytes;
 use hmac::{Hmac, Mac};
 use jazz_tools::jazz_transport::{
-    ConnectionId, ErrorResponse, ServerEvent, SuccessResponse, SyncPayloadRequest,
+    ConnectionId, ErrorResponse, ServerEvent, SyncBatchRequest, SyncBatchResponse,
+    SyncPayloadResult,
 };
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::QueryBuilder;
@@ -682,6 +683,10 @@ enum WorkerCommand {
         app_id: AppId,
         response: tokio::sync::oneshot::Sender<Result<Vec<String>, String>>,
     },
+    GetCatalogueStateHash {
+        app_id: AppId,
+        response: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
 }
 
 impl WorkerCommand {
@@ -694,7 +699,8 @@ impl WorkerCommand {
             | WorkerCommand::SyncAsBackend { app_id, .. }
             | WorkerCommand::SyncAsAdmin { app_id, .. }
             | WorkerCommand::GetCatalogueSchema { app_id, .. }
-            | WorkerCommand::GetSchemaHashes { app_id, .. } => *app_id,
+            | WorkerCommand::GetSchemaHashes { app_id, .. }
+            | WorkerCommand::GetCatalogueStateHash { app_id, .. } => *app_id,
         }
     }
 }
@@ -955,6 +961,20 @@ impl WorkerPool {
         let worker = self.send_command(command)?;
         match response_rx.await {
             Ok(Ok(schema_hashes)) => Ok(schema_hashes),
+            Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
+            Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
+        }
+    }
+
+    async fn get_catalogue_state_hash(&self, app_id: AppId) -> Result<String, WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::GetCatalogueStateHash {
+            app_id,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        match response_rx.await {
+            Ok(Ok(catalogue_state_hash)) => Ok(catalogue_state_hash),
             Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
             Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
         }
@@ -1889,6 +1909,24 @@ async fn run_worker_loop(
                         });
                     if response.send(result).is_err() {
                         warn!(worker, app_id = %app_id, "schema hashes response receiver dropped");
+                    }
+                }
+                WorkerCommand::GetCatalogueStateHash { app_id, response } => {
+                    let result = app_runtimes
+                        .get(&app_id)
+                        .ok_or_else(|| format!("missing runtime for app {app_id}"))
+                        .and_then(|runtime| {
+                            runtime
+                                .runtime
+                                .catalogue_state_hash()
+                                .map_err(|err| err.to_string())
+                        });
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            "catalogue state hash response receiver dropped"
+                        );
                     }
                 }
             }
@@ -3136,6 +3174,20 @@ async fn events_handler(
         }
     }
 
+    let catalogue_state_hash = match state.workers.get_catalogue_state_hash(app_id).await {
+        Ok(hash) => Some(hash),
+        Err(err) => {
+            warn!(
+                app_id = %app_id,
+                worker,
+                client_id = %client_id,
+                ?err,
+                "failed to read catalogue state hash for events handshake"
+            );
+            None
+        }
+    };
+
     let connection_id = app.next_connection_id.fetch_add(1, Ordering::SeqCst);
     {
         let mut connections = app.connections.write().await;
@@ -3175,6 +3227,7 @@ async fn events_handler(
             connection_id: ConnectionId(connection_id),
             client_id: client_id_str,
             next_sync_seq: Some(next_sync_seq),
+            catalogue_state_hash: catalogue_state_hash.clone(),
         };
         yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected));
 
@@ -3228,7 +3281,7 @@ async fn sync_handler(
     State(state): State<Arc<ServerState>>,
     AxumPath(path): AxumPath<AppPath>,
     headers: HeaderMap,
-    Json(request): Json<SyncPayloadRequest>,
+    Json(request): Json<SyncBatchRequest>,
 ) -> impl IntoResponse {
     let app_id = match parse_app_id(&path.app_id) {
         Ok(id) => id,
@@ -3274,19 +3327,10 @@ async fn sync_handler(
     };
     let has_session_header = headers.get("X-Jazz-Session").is_some();
 
-    let dispatch_result = if is_admin {
-        state
-            .workers
-            .sync_as_admin(app_id, request.client_id, request.payload)
-            .await
-    } else if is_backend && !has_session_header {
-        state
-            .workers
-            .sync_as_backend(app_id, request.client_id, request.payload)
-            .await
-    } else {
-        let session = match extract_session(&headers, app_id, &cfg, &state).await {
-            Ok(Some(session)) => session,
+    // Resolve session once for the whole batch (only needed for non-admin/non-backend).
+    let session = if !(is_admin || is_backend && !has_session_header) {
+        match extract_session(&headers, app_id, &cfg, &state).await {
+            Ok(Some(session)) => Some(session),
             Ok(None) => {
                 return (
                     StatusCode::UNAUTHORIZED,
@@ -3299,21 +3343,52 @@ async fn sync_handler(
             Err((status, msg)) => {
                 return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
             }
-        };
-
-        state
-            .workers
-            .sync_as_session(app_id, request.client_id, session, request.payload)
-            .await
+        }
+    } else {
+        None
     };
 
-    match dispatch_result {
-        Ok(()) => Json(SuccessResponse::default()).into_response(),
-        Err(err) => {
-            let (status, message) = worker_dispatch_status_and_message(err);
-            (status, Json(ErrorResponse::internal(message))).into_response()
+    // Apply each payload in order, collecting per-payload results.
+    let mut results = Vec::with_capacity(request.payloads.len());
+    for payload in request.payloads {
+        let dispatch_result = if is_admin {
+            state
+                .workers
+                .sync_as_admin(app_id, request.client_id, payload)
+                .await
+        } else if is_backend && !has_session_header {
+            state
+                .workers
+                .sync_as_backend(app_id, request.client_id, payload)
+                .await
+        } else {
+            state
+                .workers
+                .sync_as_session(
+                    app_id,
+                    request.client_id,
+                    session.clone().expect("session resolved above"),
+                    payload,
+                )
+                .await
+        };
+
+        match dispatch_result {
+            Ok(()) => results.push(SyncPayloadResult {
+                ok: true,
+                error: None,
+            }),
+            Err(err) => {
+                let (_status, message) = worker_dispatch_status_and_message(err);
+                results.push(SyncPayloadResult {
+                    ok: false,
+                    error: Some(message),
+                });
+            }
         }
     }
+
+    Json(SyncBatchResponse { results }).into_response()
 }
 
 async fn schema_catalogue_handler(

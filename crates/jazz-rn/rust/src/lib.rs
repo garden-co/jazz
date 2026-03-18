@@ -64,9 +64,9 @@ fn json_err(e: serde_json::Error) -> JazzRnError {
     }
 }
 
-fn runtime_err<E: std::fmt::Debug>(e: E) -> JazzRnError {
+fn runtime_err<E: std::fmt::Display>(e: E) -> JazzRnError {
     JazzRnError::Runtime {
-        message: format!("{:?}", e),
+        message: e.to_string(),
     }
 }
 

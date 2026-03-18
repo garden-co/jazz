@@ -28,7 +28,7 @@ export async function whereExamples(db: Db) {
 
   // Explicit operators
   await db.all(app.todos.where({ title: { contains: "milk" } }));
-  await db.all(app.todos.where({ project: { ne: "00000000-0000-0000-0000-000000000000" } }));
+  await db.all(app.todos.where({ projectId: { ne: "00000000-0000-0000-0000-000000000000" } }));
 }
 // #endregion where-operators-svelte
 

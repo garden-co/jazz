@@ -132,7 +132,7 @@ describe("attachDevTools active query subscription bridge", () => {
     ];
     const nextSubscriptions: ActiveQuerySubscriptionTrace[] = [
       {
-        ...initialSubscriptions[0],
+        ...initialSubscriptions[0]!,
         id: "sub-2",
       },
     ];

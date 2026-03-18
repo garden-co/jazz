@@ -3,7 +3,14 @@ export { createJazzClient, type JazzClient } from "./create-jazz-client.js";
 export { createJazzRnRuntime, type CreateJazzRnRuntimeOptions } from "./create-jazz-rn-runtime.js";
 export { JazzRnRuntimeAdapter, type JazzRnRuntimeBinding } from "./jazz-rn-runtime-adapter.js";
 export { useAll, useAllSuspense } from "./use-all.js";
-export { JazzProvider, useDb, useSession, type JazzProviderProps } from "./provider.js";
+export {
+  JazzProvider,
+  type JazzProviderProps,
+  JazzClientProvider,
+  type JazzClientProviderProps,
+  useDb,
+  useSession,
+} from "./provider.js";
 export {
   useLinkExternalIdentity,
   type LinkExternalIdentityInput,

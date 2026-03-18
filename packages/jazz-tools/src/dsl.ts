@@ -184,6 +184,36 @@ export type ColumnAlias<
                     ? ArrayColumn<ElementSql, Optional, Ref>
                     : TypedColumnBuilder<Sql, Optional, Ref>;
 
+type RefColumnKey = `${string}Id` | `${string}_id`;
+type RefArrayColumnKey = `${string}Ids` | `${string}_ids`;
+
+function isValidRefColumnKey(name: string): name is RefColumnKey {
+  return name.endsWith("Id") || name.endsWith("_id");
+}
+
+function isValidRefArrayColumnKey(name: string): name is RefArrayColumnKey {
+  return name.endsWith("Ids") || name.endsWith("_ids");
+}
+
+function validateReferenceColumnName(name: string, builder: ColumnBuilder): void {
+  if (!builder._references) {
+    return;
+  }
+
+  if (builder instanceof ArrayBuilder) {
+    if (!isValidRefArrayColumnKey(name)) {
+      throw new Error(
+        `Invalid array reference key '${name}'. Rename it to '${name}_ids' or '${name}Ids'.`,
+      );
+    }
+    return;
+  }
+
+  if (!isValidRefColumnKey(name)) {
+    throw new Error(`Invalid reference key '${name}'. Rename it to '${name}_id' or '${name}Id'.`);
+  }
+}
+
 class ScalarBuilder implements ColumnBuilder {
   private _nullable = false;
 
@@ -293,10 +323,10 @@ class RefBuilder implements ColumnBuilder {
   }
 }
 
-class ArrayBuilder implements ColumnBuilder {
+class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
   private _nullable = false;
 
-  constructor(private _element: ColumnBuilder) {}
+  constructor(public _element: T) {}
 
   optional(): this {
     this._nullable = true;
@@ -493,7 +523,28 @@ export const col = {
 let collectedTables: Table[] = [];
 let collectedMigrations: TableMigration[] = [];
 
-export function table(name: string, columns: Record<string, ColumnBuilder>): void {
+type ScalarIdColumnError<K extends string> =
+  `Invalid reference key '${K}'. Rename it to '${K}_id' or '${K}Id'`;
+
+type ArrayIdColumnError<K extends string> =
+  `Invalid array reference key '${K}'. Rename it to '${K}_ids' or '${K}Ids'`;
+
+type EnforceReferenceColumnNames<T extends Record<string, ColumnBuilder>> = {
+  [K in keyof T & string]: T[K] extends RefBuilder
+    ? K extends RefColumnKey
+      ? T[K]
+      : ScalarIdColumnError<K>
+    : T[K] extends ArrayBuilder<RefBuilder>
+      ? K extends RefArrayColumnKey
+        ? T[K]
+        : ArrayIdColumnError<K>
+      : T[K];
+};
+
+export function table<const T extends Record<string, ColumnBuilder>>(
+  name: string,
+  columns: EnforceReferenceColumnNames<T>,
+): void {
   if (arguments.length > 2) {
     throw new Error(
       "Inline table permissions are no longer supported in current.ts. " +
@@ -502,7 +553,8 @@ export function table(name: string, columns: Record<string, ColumnBuilder>): voi
   }
 
   const cols: Column[] = [];
-  for (const [colName, builder] of Object.entries(columns)) {
+  for (const [colName, builder] of Object.entries(columns as Record<string, ColumnBuilder>)) {
+    validateReferenceColumnName(colName, builder);
     assertUserColumnNameAllowed(colName);
     cols.push(builder._build(colName));
   }
@@ -529,12 +581,10 @@ export function getCollectedSchema(): Schema {
 }
 
 export function getCollectedMigration(): Lens | null {
-  if (collectedMigrations.length === 0) {
+  const migration = collectedMigrations.shift();
+  if (!migration) {
     return null;
   }
-
-  const migration = collectedMigrations[0];
-  collectedMigrations = [];
 
   const operations: LensOp[] = migration.operations.map(({ column, op }) => {
     switch (op._type) {
