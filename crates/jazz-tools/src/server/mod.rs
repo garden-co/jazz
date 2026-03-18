@@ -17,7 +17,7 @@ mod testing;
 pub use builder::{BuiltServer, ServerBuilder};
 pub use external_identity_store::{ExternalIdentityRow, ExternalIdentityStore};
 #[cfg(feature = "test-utils")]
-pub use testing::{TestingJwksServer, TestingServer, TestingServerOptions};
+pub use testing::{TestingJwksServer, TestingServer, TestingServerBuilder};
 
 pub type DynStorage = Box<dyn Storage + Send>;
 
