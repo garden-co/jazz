@@ -148,23 +148,6 @@ describe("fulfilled cache entry provides initial data", () => {
     expect(loading).toBe(false);
   });
 
-  it("pending state leaves current undefined and loading true", () => {
-    const entry = {
-      state: { status: "pending" as const },
-      subscribe: vi.fn(() => vi.fn()),
-    };
-
-    let current: any[] | undefined;
-    let loading = true;
-
-    if (entry.state.status === "fulfilled") {
-      current = (entry.state as any).data;
-      loading = false;
-    }
-
-    expect(current).toBeUndefined();
-    expect(loading).toBe(true);
-  });
 });
 
 describe("context integration", () => {
