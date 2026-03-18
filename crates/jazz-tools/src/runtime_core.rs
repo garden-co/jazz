@@ -37,7 +37,7 @@ use crate::query_manager::manager::{QueryError, QueryUpdate};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, Schema, TableName, Value};
-use crate::schema_manager::SchemaManager;
+use crate::schema_manager::{Lens, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};
 
@@ -321,6 +321,16 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let id = self.schema_manager.persist_schema(&mut self.storage);
         info!(object_id = %id, "persisted schema to catalogue");
         id
+    }
+
+    /// Publish a reviewed lens edge to the active schema manager and catalogue.
+    pub fn publish_lens(&mut self, lens: &Lens) -> Result<ObjectId, RuntimeError> {
+        let id = self
+            .schema_manager
+            .publish_lens(&mut self.storage, lens)
+            .map_err(|error| RuntimeError::WriteError(error.to_string()))?;
+        self.immediate_tick();
+        Ok(id)
     }
     // =========================================================================
     // Schema/State Access

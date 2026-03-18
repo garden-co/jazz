@@ -560,6 +560,18 @@ impl SchemaManager {
         object_id
     }
 
+    /// Register a reviewed lens in memory, activate any newly reachable schemas,
+    /// and persist the corresponding catalogue object for sync.
+    pub fn publish_lens<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        lens: &Lens,
+    ) -> Result<ObjectId, SchemaError> {
+        self.register_lens(lens.clone())?;
+        self.activate_pending_and_sync_to_query_manager();
+        Ok(self.persist_lens(storage, lens))
+    }
+
     /// Materialize known schema/lens catalogue objects into object storage for sync replay.
     ///
     /// Rehydration restores schema/lens knowledge into memory, but downstream sync replay

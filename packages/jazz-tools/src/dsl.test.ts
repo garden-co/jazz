@@ -71,7 +71,6 @@ describe("ref DSL", () => {
 
   it("rejects scalar reference columns not ending in Id or _id", () => {
     resetCollectedState();
-    // @ts-expect-error ref columns must end in Id or _id
     expect(() => table("todos", { image: col.ref("files") })).toThrow(
       "Invalid reference key 'image'. Rename it to 'image_id' or 'imageId'.",
     );
@@ -79,7 +78,6 @@ describe("ref DSL", () => {
 
   it("rejects array(ref(...)) columns not ending in Ids or _ids", () => {
     resetCollectedState();
-    // @ts-expect-error array(ref(...)) columns must end in Ids or _ids
     expect(() => table("todos", { images: col.array(col.ref("files")) })).toThrow(
       "Invalid array reference key 'images'. Rename it to 'images_ids' or 'imagesIds'.",
     );

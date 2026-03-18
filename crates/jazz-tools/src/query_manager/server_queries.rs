@@ -9,7 +9,9 @@ use crate::schema_manager::LensTransformer;
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, ClientRole, PendingPermissionCheck, QueryId, SyncPayload};
 
-use super::manager::{PolicyCheckState, QueryManager, ServerQuerySubscription};
+use super::manager::{
+    PolicyCheckState, QueryManager, SchemaWarningAccumulator, ServerQuerySubscription,
+};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::policy_graph::PolicyGraph;
 use super::session::Session;
@@ -24,6 +26,14 @@ enum WriteSchemaResolution {
 }
 
 const SCHEMA_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
+
+struct RowTransformContext<'a> {
+    table: &'a str,
+    branch_schema_map:
+        &'a std::collections::HashMap<String, crate::query_manager::types::SchemaHash>,
+    schema_context: &'a crate::schema_manager::SchemaContext,
+    schema_warnings: &'a mut SchemaWarningAccumulator,
+}
 
 impl QueryManager {
     pub(super) fn build_server_subscription_context(
@@ -122,19 +132,14 @@ impl QueryManager {
         content: Vec<u8>,
         commit_id: CommitId,
         branch_name: BranchName,
-        table: &str,
-        branch_schema_map: &std::collections::HashMap<
-            String,
-            crate::query_manager::types::SchemaHash,
-        >,
-        schema_context: &crate::schema_manager::SchemaContext,
+        context: &mut RowTransformContext<'_>,
     ) -> Option<LoadedRow> {
-        let source_hash = branch_schema_map.get(branch_name.as_str()).copied();
+        let source_hash = context.branch_schema_map.get(branch_name.as_str()).copied();
 
         if let Some(source_hash) = source_hash
-            && source_hash != schema_context.current_hash
+            && source_hash != context.schema_context.current_hash
         {
-            let transformer = LensTransformer::new(schema_context, table);
+            let transformer = LensTransformer::new(context.schema_context, context.table);
             match transformer.transform(&content, commit_id, source_hash) {
                 Ok(result) => {
                     return Some(LoadedRow::new(
@@ -144,14 +149,19 @@ impl QueryManager {
                     ));
                 }
                 Err(err) => {
-                    tracing::warn!(
+                    context.schema_warnings.record(
+                        context.table,
+                        source_hash,
+                        context.schema_context.current_hash,
+                    );
+                    tracing::debug!(
                         row_id = %id,
-                        table,
+                        table = context.table,
                         source_branch = %branch_name,
                         source_schema = %source_hash.short(),
-                        target_schema = %schema_context.current_hash.short(),
+                        target_schema = %context.schema_context.current_hash.short(),
                         error = %err,
-                        "lens transform failed; dropping row from server query result"
+                        "lens transform failed; row will be counted in aggregated schema warning"
                     );
                     return None;
                 }
@@ -235,6 +245,7 @@ impl QueryManager {
     pub(super) fn process_pending_query_subscriptions<H: Storage>(&mut self, storage: &mut H) {
         let pending = self.sync_manager.take_pending_query_subscriptions();
         let mut deferred = Vec::new();
+        let mut schema_warning_notifications = Vec::new();
 
         for sub in pending {
             let Some((schema_for_compile, subscription_context)) =
@@ -293,6 +304,13 @@ impl QueryManager {
             let branches =
                 Self::resolved_server_query_branches(&query_for_compile, &subscription_context);
             let table = sub.query.table.as_str().to_string();
+            let mut schema_warnings = SchemaWarningAccumulator::default();
+            let mut transform_context = RowTransformContext {
+                table: &table,
+                branch_schema_map: &branch_schema_map,
+                schema_context: &subscription_context,
+                schema_warnings: &mut schema_warnings,
+            };
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
                 let obj = om.get_or_load(id, storage_ref, &branches)?;
                 let mut best: Option<(u64, Vec<u8>, CommitId, BranchName)> = None;
@@ -331,13 +349,21 @@ impl QueryManager {
                     content,
                     commit_id,
                     branch_name,
-                    &table,
-                    &branch_schema_map,
-                    &subscription_context,
+                    &mut transform_context,
                 )
             };
 
             let _delta = graph.settle(storage_ref, row_loader);
+            let mut reported_schema_warnings = HashSet::new();
+            let new_schema_warnings = Self::finalize_schema_warnings(
+                &mut reported_schema_warnings,
+                schema_warnings.warnings_for_query(sub.query_id),
+            );
+            schema_warning_notifications.extend(
+                new_schema_warnings
+                    .into_iter()
+                    .map(|warning| (sub.client_id, warning)),
+            );
 
             // Sync the rows needed for the client to reproduce the current result
             // locally, including any ordered prefix required by pagination.
@@ -386,8 +412,13 @@ impl QueryManager {
                     needs_recompile: false,
                     settled_once: false,
                     propagation: sub.propagation,
+                    reported_schema_warnings,
                 },
             );
+        }
+
+        for (client_id, warning) in schema_warning_notifications {
+            self.sync_manager.emit_schema_warning(client_id, warning);
         }
 
         // Re-queue subscriptions whose schema wasn't available yet
@@ -434,6 +465,8 @@ impl QueryManager {
             Option<Session>,
         )> = Vec::new();
         let mut settled_notifications: Vec<(ClientId, QueryId)> = Vec::new();
+        let mut schema_warning_notifications: Vec<(ClientId, crate::sync_manager::SchemaWarning)> =
+            Vec::new();
 
         let trusted_clients: HashSet<ClientId> = self
             .sync_manager
@@ -457,6 +490,13 @@ impl QueryManager {
             let branches = &sub.branches;
             let table = sub.query.table.as_str().to_string();
             let branch_schema_map = Self::branch_schema_map_for_context(&sub.schema_context);
+            let mut schema_warnings = SchemaWarningAccumulator::default();
+            let mut transform_context = RowTransformContext {
+                table: &table,
+                branch_schema_map: &branch_schema_map,
+                schema_context: &sub.schema_context,
+                schema_warnings: &mut schema_warnings,
+            };
 
             // Row loader for this subscription
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
@@ -497,15 +537,22 @@ impl QueryManager {
                     content,
                     commit_id,
                     branch_name,
-                    &table,
-                    &branch_schema_map,
-                    &sub.schema_context,
+                    &mut transform_context,
                 )
             };
 
             let new_scope = {
                 // Settle the graph
                 let _delta = sub.graph.settle(storage, row_loader);
+                let new_schema_warnings = Self::finalize_schema_warnings(
+                    &mut sub.reported_schema_warnings,
+                    schema_warnings.warnings_for_query(*query_id),
+                );
+                schema_warning_notifications.extend(
+                    new_schema_warnings
+                        .into_iter()
+                        .map(|warning| (*client_id, warning)),
+                );
 
                 // Emit QuerySettled on first settlement
                 if !sub.settled_once {
@@ -541,6 +588,10 @@ impl QueryManager {
         for (client_id, query_id, new_scope, session) in scope_updates {
             self.sync_manager
                 .set_client_query_scope(client_id, query_id, new_scope, session);
+        }
+
+        for (client_id, warning) in schema_warning_notifications {
+            self.sync_manager.emit_schema_warning(client_id, warning);
         }
 
         // Emit QuerySettled notifications

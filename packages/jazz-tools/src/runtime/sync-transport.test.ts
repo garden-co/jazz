@@ -469,6 +469,54 @@ describe("sync-transport", () => {
     expect(errorSpy).not.toHaveBeenCalledWith("[client] Stream parse error:", expect.any(Error));
   });
 
+  it("logs schema warnings that arrive over the stream", async () => {
+    const response = streamResponse([
+      {
+        type: "SyncUpdate",
+        payload: {
+          SchemaWarning: {
+            queryId: 7,
+            tableName: "todos",
+            rowCount: 3,
+            fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          },
+        },
+      },
+    ]);
+    const reader = response.body!.getReader();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const onSyncMessage = vi.fn();
+
+    await readBinaryFrames(
+      reader,
+      {
+        onSyncMessage,
+      },
+      "[client] ",
+    );
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[client] Detected 3 rows of todos with differing schema versions."),
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "npx jazz-tools migrations create aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      ),
+    );
+    expect(onSyncMessage).toHaveBeenCalledWith(
+      JSON.stringify({
+        SchemaWarning: {
+          queryId: 7,
+          tableName: "todos",
+          rowCount: 3,
+          fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        },
+      }),
+    );
+  });
+
   it("runtime-bound stream controller maps stream events to runtime hooks", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       streamResponse([

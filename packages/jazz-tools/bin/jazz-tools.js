@@ -157,23 +157,31 @@ if (command === "mcp") {
 
   ensureExecutable(binaryPath, rustBinOverride ?? binaryName ?? localBinaryName);
 
-  if (command === "build") {
+  if (command === "build" || command === "migrations") {
     const schemaDirArg = parseSchemaDir(args.slice(1));
     const schemaDir = resolve(process.cwd(), schemaDirArg);
     const currentTsPath = join(schemaDir, "current.ts");
     const tsCliPath = join(here, "..", "dist", "cli.js");
 
-    if (existsSync(currentTsPath) && existsSync(tsCliPath)) {
-      console.log(`Detected ${schemaDirArg}/current.ts. Running TypeScript schema build.`);
-      const tsBuildResult = spawnSync(
-        process.execPath,
-        [tsCliPath, "build", "--schema-dir", schemaDirArg, "--jazz-bin", binaryPath],
-        {
-          stdio: "inherit",
-          env: process.env,
-        },
-      );
-      exitWithSpawnResult(tsBuildResult, "TypeScript schema build");
+    if (command === "build") {
+      if (existsSync(currentTsPath) && existsSync(tsCliPath)) {
+        console.log(`Detected ${schemaDirArg}/current.ts. Running TypeScript schema build.`);
+        const tsBuildResult = spawnSync(
+          process.execPath,
+          [tsCliPath, "build", "--schema-dir", schemaDirArg, "--jazz-bin", binaryPath],
+          {
+            stdio: "inherit",
+            env: process.env,
+          },
+        );
+        exitWithSpawnResult(tsBuildResult, "TypeScript schema build");
+      }
+    } else if (existsSync(tsCliPath)) {
+      const tsCommandResult = spawnSync(process.execPath, [tsCliPath, ...args], {
+        stdio: "inherit",
+        env: process.env,
+      });
+      exitWithSpawnResult(tsCommandResult, "TypeScript migrations CLI");
     }
   }
 

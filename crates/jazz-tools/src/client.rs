@@ -796,6 +796,20 @@ fn handle_server_event(
             Ok(())
         }
         ServerEvent::SyncUpdate { seq, payload } => {
+            if let SyncPayload::SchemaWarning(warning) = payload.as_ref() {
+                tracing::warn!(
+                    query_id = warning.query_id.0,
+                    table = warning.table_name,
+                    row_count = warning.row_count,
+                    from_hash = %warning.from_hash,
+                    to_hash = %warning.to_hash,
+                    "Detected {} rows of {} with differing schema versions. To ensure data visibility and forward/backward compatibility please create a new migration with `npx jazz-tools migrations create {} {}`",
+                    warning.row_count,
+                    warning.table_name,
+                    warning.from_hash,
+                    warning.to_hash,
+                );
+            }
             let entry = InboxEntry {
                 source: Source::Server(server_id),
                 payload: *payload,

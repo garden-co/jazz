@@ -24,7 +24,7 @@ use crate::middleware::auth::{
     validate_backend_secret, validate_jwt_identity,
 };
 use crate::query_manager::types::SchemaHash;
-use crate::schema_manager::AppId;
+use crate::schema_manager::{AppId, Lens, parse_lens};
 use crate::server::{ConnectionState, ServerState};
 use crate::sync_manager::ClientId;
 
@@ -34,6 +34,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/sync", post(sync_handler))
         .route("/schema/:hash", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
+        .route("/admin/migrations", post(publish_migration_handler))
         .route(
             "/admin/introspection/subscriptions",
             get(admin_subscription_introspection_handler),
@@ -75,6 +76,22 @@ struct AdminSubscriptionIntrospectionResponse {
     app_id: String,
     generated_at: u64,
     queries: Vec<crate::query_manager::manager::ServerSubscriptionTelemetryGroup>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishMigrationRequest {
+    from_hash: String,
+    to_hash: String,
+    forward_sql: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishMigrationResponse {
+    object_id: String,
+    from_hash: String,
+    to_hash: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -492,6 +509,142 @@ async fn schema_hashes_handler(
     }
 }
 
+/// Publish a reviewed migration edge into the catalogue.
+///
+/// Requires a valid admin secret. The source and target schemas must already be
+/// known to the server; only the lens edge itself is created here.
+async fn publish_migration_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<PublishMigrationRequest>,
+) -> impl IntoResponse {
+    let admin_secret = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match validate_admin_secret(admin_secret, &state.auth_config) {
+        Ok(()) => {}
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    }
+
+    let source_hash = match parse_schema_hash_param(&request.from_hash) {
+        Ok(hash) => hash,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(message)),
+            )
+                .into_response();
+        }
+    };
+
+    let target_hash = match parse_schema_hash_param(&request.to_hash) {
+        Ok(hash) => hash,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(message)),
+            )
+                .into_response();
+        }
+    };
+
+    match state.runtime.known_schema(&source_hash) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "source schema catalogue not found for hash {}",
+                    source_hash
+                ))),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(format!(
+                    "failed to read source schema catalogue: {err}"
+                ))),
+            )
+                .into_response();
+        }
+    }
+
+    match state.runtime.known_schema(&target_hash) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "target schema catalogue not found for hash {}",
+                    target_hash
+                ))),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(format!(
+                    "failed to read target schema catalogue: {err}"
+                ))),
+            )
+                .into_response();
+        }
+    }
+
+    let forward = match parse_lens(&request.forward_sql) {
+        Ok(transform) => transform,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse::bad_request(format!(
+                    "invalid forward migration SQL: {err}"
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    let lens = Lens::new(source_hash, target_hash, forward);
+    let object_id = match state.runtime.publish_lens(&lens) {
+        Ok(object_id) => object_id,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(format!(
+                    "failed to publish migration lens: {err}"
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    if let Err(err) = state.runtime.flush().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(format!(
+                "failed to flush published migration lens: {err}"
+            ))),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::CREATED,
+        Json(PublishMigrationResponse {
+            object_id: object_id.to_string(),
+            from_hash: request.from_hash,
+            to_hash: request.to_hash,
+        }),
+    )
+        .into_response()
+}
+
 async fn admin_subscription_introspection_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -803,7 +956,7 @@ mod tests {
         ClientId, InboxEntry, QueryId, QueryPropagation, Source, SyncPayload,
     };
     use axum::body;
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use serde_json::Value;
     use tower::ServiceExt;
 
@@ -860,6 +1013,7 @@ mod tests {
         axum::Router::new()
             .route("/schema/:hash", get(schema_handler))
             .route("/schemas", get(schema_hashes_handler))
+            .route("/admin/migrations", post(publish_migration_handler))
             .route(
                 "/admin/introspection/subscriptions",
                 get(admin_subscription_introspection_handler),
@@ -1129,6 +1283,79 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bad_hash_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn publish_migration_requires_admin_and_persists_lens() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email_address", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let state = make_state_with_schema(v2).await;
+        state
+            .runtime
+            .add_known_schema(v1)
+            .expect("seed known schema for publish test");
+        let app = make_test_router(state.clone());
+
+        let request_body = serde_json::json!({
+            "fromHash": v1_hash.to_string(),
+            "toHash": v2_hash.to_string(),
+            "forwardSql": "ALTER TABLE users RENAME COLUMN email TO email_address;"
+        });
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/admin/migrations")
+                    .header("Content-Type", "application/json")
+                    .body(axum::body::Body::from(request_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let created = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/admin/migrations")
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::from(request_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let lens = state
+            .runtime
+            .with_schema_manager(|schema_manager| {
+                schema_manager.get_lens(&v1_hash, &v2_hash).cloned()
+            })
+            .expect("read schema manager lens");
+        assert!(
+            lens.is_some(),
+            "published lens should be registered in schema manager"
+        );
     }
 
     #[tokio::test]

@@ -24,7 +24,7 @@ use crate::runtime_core::{
     QueryFuture, ReadDurabilityOptions, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler,
     SubscriptionDelta, SyncSender,
 };
-use crate::schema_manager::{QuerySchemaContext, SchemaManager};
+use crate::schema_manager::{Lens, QuerySchemaContext, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryPropagation, ServerId};
 
@@ -209,6 +209,12 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn persist_schema(&self) -> Result<ObjectId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.persist_schema())
+    }
+
+    /// Publish a reviewed lens edge to the local catalogue and active schema manager.
+    pub fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.publish_lens(lens)?)
     }
 
     // =========================================================================
@@ -469,6 +475,13 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(core.schema_manager().get_known_schema(schema_hash).cloned())
     }
 
+    /// Seed an additional known schema into the in-memory schema manager.
+    pub fn add_known_schema(&self, schema: Schema) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.schema_manager_mut().add_known_schema(schema);
+        Ok(())
+    }
+
     /// Return grouped telemetry for active downstream server subscriptions.
     pub fn server_subscription_telemetry(
         &self,
@@ -487,6 +500,15 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn with_storage<R>(&self, f: impl FnOnce(&S) -> R) -> Result<R, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(f(core.storage()))
+    }
+
+    /// Access the underlying schema manager while holding the core lock.
+    pub fn with_schema_manager<R>(
+        &self,
+        f: impl FnOnce(&SchemaManager) -> R,
+    ) -> Result<R, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(f(core.schema_manager()))
     }
 
     /// Subscribe to a query with explicit schema context (for server use).
