@@ -120,7 +120,7 @@ pub async fn wait_for_edge_query_ready(client: &JazzClient, table: &str, timeout
 /// This keeps the testing server's backend/admin secrets intact, which is
 /// appropriate for general integration tests that are not asserting user policy
 /// enforcement.
-pub async fn connect_client(
+pub async fn connect_admin_client(
     server: &TestingServer,
     schema: Schema,
     user_id: &str,
@@ -141,7 +141,7 @@ pub async fn connect_client(
 ///
 /// This strips the testing server's backend/admin secrets so policy tests
 /// exercise the same authorization path as a normal user client.
-pub async fn connect_jwt_client(
+pub async fn connect_client(
     server: &TestingServer,
     schema: Schema,
     user_id: &str,
