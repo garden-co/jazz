@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
@@ -15,6 +16,14 @@ use super::session::Session;
 use super::types::{
     ComposedBranchName, LoadedRow, RowDescriptor, Schema, TableName, TableSchema, Value,
 };
+
+enum WriteSchemaResolution {
+    Resolved(Box<TableSchema>),
+    PendingSchema,
+    Unresolved,
+}
+
+const SCHEMA_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl QueryManager {
     pub(super) fn build_server_subscription_context(
@@ -549,6 +558,80 @@ impl QueryManager {
         }
     }
 
+    fn schema_for_write_hash(&self, schema_hash: super::types::SchemaHash) -> Option<&Schema> {
+        if self.schema_context.is_initialized() && schema_hash == self.schema_context.current_hash {
+            return Some(self.schema.as_ref());
+        }
+
+        self.schema_context
+            .get_schema(&schema_hash)
+            .or_else(|| self.known_schemas.get(&schema_hash))
+    }
+
+    fn resolve_write_table_schema(
+        &mut self,
+        table_name: TableName,
+        branch_name: BranchName,
+    ) -> WriteSchemaResolution {
+        let parsed_branch = ComposedBranchName::parse(&branch_name);
+        let schema_hash = self
+            .branch_schema_map
+            .get(branch_name.as_str())
+            .copied()
+            .or_else(|| {
+                parsed_branch
+                    .as_ref()
+                    .and_then(|composed| self.find_schema_by_short_hash(&composed.schema_hash))
+            });
+
+        if let Some(schema_hash) = schema_hash {
+            self.branch_schema_map
+                .insert(branch_name.as_str().to_string(), schema_hash);
+
+            let Some(schema) = self.schema_for_write_hash(schema_hash) else {
+                return WriteSchemaResolution::PendingSchema;
+            };
+
+            return schema
+                .get(&table_name)
+                .cloned()
+                .map(Box::new)
+                .map(WriteSchemaResolution::Resolved)
+                .unwrap_or(WriteSchemaResolution::Unresolved);
+        }
+
+        // When the write targets the current initialized branch, self.schema is authoritative.
+        if self.schema_context.is_initialized()
+            && branch_name.as_str() == self.schema_context.branch_name().as_str()
+        {
+            return self
+                .schema
+                .get(&table_name)
+                .cloned()
+                .map(Box::new)
+                .map(WriteSchemaResolution::Resolved)
+                .unwrap_or(WriteSchemaResolution::Unresolved);
+        }
+
+        // In pure local/client mode (no server-known schemas and a non-empty current schema),
+        // self.schema is still authoritative.
+        if self.known_schemas.is_empty() && !self.schema.is_empty() {
+            return self
+                .schema
+                .get(&table_name)
+                .cloned()
+                .map(Box::new)
+                .map(WriteSchemaResolution::Resolved)
+                .unwrap_or(WriteSchemaResolution::Unresolved);
+        }
+
+        if parsed_branch.is_some() {
+            return WriteSchemaResolution::PendingSchema;
+        }
+
+        WriteSchemaResolution::Unresolved
+    }
+
     /// Evaluate a write permission check.
     ///
     /// If the simple parts of the policy fail, reject immediately.
@@ -561,24 +644,83 @@ impl QueryManager {
     pub(super) fn evaluate_write_permission<H: Storage>(
         &mut self,
         storage: &mut H,
-        check: PendingPermissionCheck,
+        mut check: PendingPermissionCheck,
     ) {
         // Get table name from metadata
         let table_name = match check.metadata.get(MetadataKey::Table.as_str()) {
             Some(t) => TableName::new(t),
             None => {
-                // Not a row object, allow
+                // No table metadata means this is not a row write (e.g. generic object data),
+                // so ReBAC row policies do not apply.
+                tracing::trace!(
+                    operation = ?check.operation,
+                    metadata_keys = ?check.metadata.keys().collect::<Vec<_>>(),
+                    "allowing write with no table metadata (non-row object)"
+                );
                 self.sync_manager.approve_permission_check(storage, check);
                 return;
             }
         };
 
-        // Look up table schema - clone to avoid borrowing self
-        let table_schema = match self.schema.get(&table_name).cloned() {
-            Some(s) => s,
-            None => {
-                // Unknown table, allow
-                self.sync_manager.approve_permission_check(storage, check);
+        let branch_name = match &check.payload {
+            SyncPayload::ObjectUpdated { branch_name, .. } => *branch_name,
+            SyncPayload::ObjectTruncated { branch_name, .. } => *branch_name,
+            _ => BranchName::new(self.current_branch()),
+        };
+
+        // Look up table schema for the write branch.
+        let table_schema = match self.resolve_write_table_schema(table_name, branch_name) {
+            WriteSchemaResolution::Resolved(schema) => *schema,
+            WriteSchemaResolution::PendingSchema => {
+                let wait_started_at = check
+                    .schema_wait_started_at
+                    .get_or_insert_with(Instant::now);
+                let wait_elapsed = wait_started_at.elapsed();
+
+                if wait_elapsed >= SCHEMA_RESOLUTION_TIMEOUT {
+                    tracing::warn!(
+                        operation = ?check.operation,
+                        table = %table_name,
+                        branch = %branch_name,
+                        waited_ms = wait_elapsed.as_millis() as u64,
+                        "denying deferred write because schema did not become available in time"
+                    );
+                    let reason = format!(
+                        "{:?} denied on table {} - schema unavailable for branch {} after waiting {}s",
+                        check.operation,
+                        table_name.0,
+                        branch_name,
+                        SCHEMA_RESOLUTION_TIMEOUT.as_secs()
+                    );
+                    self.sync_manager.reject_permission_check(check, reason);
+                    return;
+                }
+
+                tracing::debug!(
+                    operation = ?check.operation,
+                    table = %table_name,
+                    branch = %branch_name,
+                    waited_ms = wait_elapsed.as_millis() as u64,
+                    "deferring write permission check until schema becomes available"
+                );
+                self.sync_manager
+                    .requeue_pending_permission_checks(vec![check]);
+                return;
+            }
+            WriteSchemaResolution::Unresolved => {
+                // Fail closed: if we cannot resolve the table schema for this write,
+                // we cannot safely evaluate permissions.
+                tracing::warn!(
+                    operation = ?check.operation,
+                    table = %table_name,
+                    branch = %branch_name,
+                    "denying write because schema could not be resolved"
+                );
+                let reason = format!(
+                    "{:?} denied on table {} - schema unavailable for branch {}",
+                    check.operation, table_name.0, branch_name
+                );
+                self.sync_manager.reject_permission_check(check, reason);
                 return;
             }
         };
@@ -614,6 +756,12 @@ impl QueryManager {
         let policy = match policy {
             Some(p) => p.clone(),
             None => {
+                tracing::trace!(
+                    operation = ?check.operation,
+                    table = %table_name,
+                    branch = %branch_name,
+                    "allowing write because no policy is defined for operation"
+                );
                 self.sync_manager.approve_permission_check(storage, check);
                 return;
             }
@@ -634,6 +782,12 @@ impl QueryManager {
             Some(c) => c,
             None => {
                 // No content to evaluate - allow
+                tracing::trace!(
+                    operation = ?check.operation,
+                    table = %table_name,
+                    branch = %branch_name,
+                    "allowing write because there is no content to evaluate"
+                );
                 self.sync_manager.approve_permission_check(storage, check);
                 return;
             }
@@ -641,6 +795,15 @@ impl QueryManager {
 
         // Evaluate simple parts of the policy
         let result = evaluate_simple_parts(&policy, content, &table_schema.columns, &check.session);
+        tracing::trace!(
+            operation = ?check.operation,
+            table = %table_name,
+            branch = %branch_name,
+            session_user_id = %check.session.user_id,
+            passed = result.passed,
+            complex_clause_count = result.complex_clauses.len(),
+            "evaluated write policy simple parts"
+        );
 
         if !result.passed {
             // Simple parts failed - reject immediately
