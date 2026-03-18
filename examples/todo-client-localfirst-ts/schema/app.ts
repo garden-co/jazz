@@ -19,9 +19,9 @@ export interface Todo {
   title: string;
   done: boolean;
   description?: string;
-  owner_id: string;
-  parent?: string;
-  project?: string;
+  ownerId: string;
+  parentId?: string;
+  projectId?: string;
 }
 
 export interface ProjectInit {
@@ -32,9 +32,9 @@ export interface TodoInit {
   title: string;
   done: boolean;
   description?: string;
-  owner_id: string;
-  parent?: string;
-  project?: string;
+  ownerId: string;
+  parentId?: string;
+  projectId?: string;
 }
 
 export interface ProjectWhereInput {
@@ -50,9 +50,9 @@ export interface TodoWhereInput {
   title?: string | { eq?: string; ne?: string; contains?: string };
   done?: boolean;
   description?: string | { eq?: string; ne?: string; contains?: string };
-  owner_id?: string | { eq?: string; ne?: string; contains?: string };
-  parent?: string | { eq?: string; ne?: string; isNull?: boolean };
-  project?: string | { eq?: string; ne?: string; isNull?: boolean };
+  ownerId?: string | { eq?: string; ne?: string; contains?: string };
+  parentId?: string | { eq?: string; ne?: string; isNull?: boolean };
+  projectId?: string | { eq?: string; ne?: string; isNull?: boolean };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -71,7 +71,7 @@ export interface TodoInclude {
   project?: true | ProjectInclude | AnyProjectQueryBuilder<any>;
 }
 
-export type ProjectIncludedRelations<I extends ProjectInclude = {}> = {
+export type ProjectIncludedRelations<I extends ProjectInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
     K extends "todosViaProject"
       ? NonNullable<I["todosViaProject"]> extends infer RelationInclude
@@ -80,13 +80,13 @@ export type ProjectIncludedRelations<I extends ProjectInclude = {}> = {
           : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
             ? QueryRow[]
             : RelationInclude extends TodoInclude
-              ? TodoWithIncludes<RelationInclude>[]
+              ? TodoWithIncludes<RelationInclude, false>[]
               : never
         : never
     : never;
 };
 
-export type TodoIncludedRelations<I extends TodoInclude = {}> = {
+export type TodoIncludedRelations<I extends TodoInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
     K extends "parent"
       ? NonNullable<I["parent"]> extends infer RelationInclude
@@ -95,7 +95,7 @@ export type TodoIncludedRelations<I extends TodoInclude = {}> = {
           : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
             ? QueryRow | undefined
             : RelationInclude extends TodoInclude
-              ? TodoWithIncludes<RelationInclude> | undefined
+              ? TodoWithIncludes<RelationInclude, false> | undefined
               : never
         : never
     : K extends "todosViaParent"
@@ -105,7 +105,7 @@ export type TodoIncludedRelations<I extends TodoInclude = {}> = {
           : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
             ? QueryRow[]
             : RelationInclude extends TodoInclude
-              ? TodoWithIncludes<RelationInclude>[]
+              ? TodoWithIncludes<RelationInclude, false>[]
               : never
         : never
     : K extends "project"
@@ -115,7 +115,7 @@ export type TodoIncludedRelations<I extends TodoInclude = {}> = {
           : RelationInclude extends AnyProjectQueryBuilder<infer QueryRow>
             ? QueryRow | undefined
             : RelationInclude extends ProjectInclude
-              ? ProjectWithIncludes<RelationInclude> | undefined
+              ? ProjectWithIncludes<RelationInclude, false> | undefined
               : never
         : never
     : never;
@@ -126,28 +126,28 @@ export interface ProjectRelations {
 }
 
 export interface TodoRelations {
-  parent: Todo;
+  parent: Todo | undefined;
   todosViaParent: Todo[];
-  project: Project;
+  project: Project | undefined;
 }
 
-export type ProjectWithIncludes<I extends ProjectInclude = {}> = Omit<Project, Extract<keyof I, keyof Project>> & ProjectIncludedRelations<I>;
+export type ProjectWithIncludes<I extends ProjectInclude = {}, R extends boolean = false> = Project & ProjectIncludedRelations<I, R>;
 
-export type TodoWithIncludes<I extends TodoInclude = {}> = Omit<Todo, Extract<keyof I, keyof Todo>> & TodoIncludedRelations<I>;
+export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Todo & TodoIncludedRelations<I, R>;
 
 export type ProjectSelectableColumn = keyof Project | PermissionIntrospectionColumn | "*";
 export type ProjectOrderableColumn = keyof Project | PermissionIntrospectionColumn;
 
 export type ProjectSelected<S extends ProjectSelectableColumn = keyof Project> = "*" extends S ? Project : Pick<Project, Extract<S | "id", keyof Project>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type ProjectSelectedWithIncludes<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = keyof Project> = Omit<ProjectSelected<S>, Extract<keyof I, keyof ProjectSelected<S>>> & ProjectIncludedRelations<I>;
+export type ProjectSelectedWithIncludes<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = keyof Project, R extends boolean = false> = ProjectSelected<S> & ProjectIncludedRelations<I, R>;
 
 export type TodoSelectableColumn = keyof Todo | PermissionIntrospectionColumn | "*";
 export type TodoOrderableColumn = keyof Todo | PermissionIntrospectionColumn;
 
 export type TodoSelected<S extends TodoSelectableColumn = keyof Todo> = "*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo> = Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I>;
+export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false> = TodoSelected<S> & TodoIncludedRelations<I, R>;
 
 export const wasmSchema: WasmSchema = {
   "projects": {
@@ -185,14 +185,14 @@ export const wasmSchema: WasmSchema = {
         "nullable": true
       },
       {
-        "name": "owner_id",
+        "name": "ownerId",
         "column_type": {
           "type": "Text"
         },
         "nullable": false
       },
       {
-        "name": "parent",
+        "name": "parentId",
         "column_type": {
           "type": "Uuid"
         },
@@ -200,7 +200,7 @@ export const wasmSchema: WasmSchema = {
         "references": "todos"
       },
       {
-        "name": "project",
+        "name": "projectId",
         "column_type": {
           "type": "Uuid"
         },
@@ -217,7 +217,7 @@ export const wasmSchema: WasmSchema = {
       "insert": {
         "with_check": {
           "type": "Cmp",
-          "column": "owner_id",
+          "column": "ownerId",
           "op": "Eq",
           "value": {
             "type": "SessionRef",
@@ -230,7 +230,7 @@ export const wasmSchema: WasmSchema = {
       "update": {
         "using": {
           "type": "Cmp",
-          "column": "owner_id",
+          "column": "ownerId",
           "op": "Eq",
           "value": {
             "type": "SessionRef",
@@ -241,7 +241,7 @@ export const wasmSchema: WasmSchema = {
         },
         "with_check": {
           "type": "Cmp",
-          "column": "owner_id",
+          "column": "ownerId",
           "op": "Eq",
           "value": {
             "type": "SessionRef",
@@ -254,7 +254,7 @@ export const wasmSchema: WasmSchema = {
       "delete": {
         "using": {
           "type": "Cmp",
-          "column": "owner_id",
+          "column": "ownerId",
           "op": "Eq",
           "value": {
             "type": "SessionRef",
@@ -268,13 +268,14 @@ export const wasmSchema: WasmSchema = {
   }
 };
 
-export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = keyof Project> implements QueryBuilder<ProjectSelectedWithIncludes<I, S>> {
+export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = keyof Project, R extends boolean = false> implements QueryBuilder<ProjectSelectedWithIncludes<I, S, R>> {
   readonly _table = "projects";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: ProjectSelectedWithIncludes<I, S>;
-  declare readonly _initType: ProjectInit;
+  readonly _rowType!: ProjectSelectedWithIncludes<I, S, R>;
+  readonly _initType!: ProjectInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<ProjectInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -288,7 +289,7 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends Projec
     step_hops: string[];
   };
 
-  where(conditions: ProjectWhereInput): ProjectQueryBuilder<I, S> {
+  where(conditions: ProjectWhereInput): ProjectQueryBuilder<I, S, R> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -305,37 +306,43 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends Projec
     return clone;
   }
 
-  select<NewS extends ProjectSelectableColumn>(...columns: [NewS, ...NewS[]]): ProjectQueryBuilder<I, NewS> {
-    const clone = this._clone<I, NewS>();
+  select<NewS extends ProjectSelectableColumn>(...columns: [NewS, ...NewS[]]): ProjectQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
   }
 
-  include<NewI extends ProjectInclude>(relations: NewI): ProjectQueryBuilder<I & NewI, S> {
-    const clone = this._clone<I & NewI, S>();
+  include<NewI extends ProjectInclude>(relations: NewI): ProjectQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: ProjectOrderableColumn, direction: "asc" | "desc" = "asc"): ProjectQueryBuilder<I, S> {
+  requireIncludes(): ProjectQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: ProjectOrderableColumn, direction: "asc" | "desc" = "asc"): ProjectQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): ProjectQueryBuilder<I, S> {
+  limit(n: number): ProjectQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): ProjectQueryBuilder<I, S> {
+  offset(n: number): ProjectQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "todosViaProject"): ProjectQueryBuilder<I, S> {
+  hopTo(relation: "todosViaProject"): ProjectQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -345,7 +352,7 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends Projec
     start: ProjectWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): ProjectQueryBuilder<I, S> {
+  }): ProjectQueryBuilder<I, S, R> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -423,6 +430,7 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends Projec
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -436,10 +444,11 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends Projec
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends ProjectInclude = I, CloneS extends ProjectSelectableColumn = S>(): ProjectQueryBuilder<CloneI, CloneS> {
-    const clone = new ProjectQueryBuilder<CloneI, CloneS>();
+  private _clone<CloneI extends ProjectInclude = I, CloneS extends ProjectSelectableColumn = S, CloneR extends boolean = R>(): ProjectQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new ProjectQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
@@ -456,13 +465,14 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends Projec
   }
 }
 
-export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo> implements QueryBuilder<TodoSelectedWithIncludes<I, S>> {
+export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false> implements QueryBuilder<TodoSelectedWithIncludes<I, S, R>> {
   readonly _table = "todos";
   readonly _schema: WasmSchema = wasmSchema;
-  declare readonly _rowType: TodoSelectedWithIncludes<I, S>;
-  declare readonly _initType: TodoInit;
+  readonly _rowType!: TodoSelectedWithIncludes<I, S, R>;
+  readonly _initType!: TodoInit;
   private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
   private _includes: Partial<TodoInclude> = {};
+  private _requireIncludes = false;
   private _selectColumns?: string[];
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
@@ -476,7 +486,7 @@ export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectab
     step_hops: string[];
   };
 
-  where(conditions: TodoWhereInput): TodoQueryBuilder<I, S> {
+  where(conditions: TodoWhereInput): TodoQueryBuilder<I, S, R> {
     const clone = this._clone();
     for (const [key, value] of Object.entries(conditions)) {
       if (value === undefined) continue;
@@ -493,37 +503,43 @@ export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectab
     return clone;
   }
 
-  select<NewS extends TodoSelectableColumn>(...columns: [NewS, ...NewS[]]): TodoQueryBuilder<I, NewS> {
-    const clone = this._clone<I, NewS>();
+  select<NewS extends TodoSelectableColumn>(...columns: [NewS, ...NewS[]]): TodoQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
   }
 
-  include<NewI extends TodoInclude>(relations: NewI): TodoQueryBuilder<I & NewI, S> {
-    const clone = this._clone<I & NewI, S>();
+  include<NewI extends TodoInclude>(relations: NewI): TodoQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
     clone._includes = { ...this._includes, ...relations };
     return clone;
   }
 
-  orderBy(column: TodoOrderableColumn, direction: "asc" | "desc" = "asc"): TodoQueryBuilder<I, S> {
+  requireIncludes(): TodoQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(column: TodoOrderableColumn, direction: "asc" | "desc" = "asc"): TodoQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
   }
 
-  limit(n: number): TodoQueryBuilder<I, S> {
+  limit(n: number): TodoQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._limitVal = n;
     return clone;
   }
 
-  offset(n: number): TodoQueryBuilder<I, S> {
+  offset(n: number): TodoQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._offsetVal = n;
     return clone;
   }
 
-  hopTo(relation: "parent" | "todosViaParent" | "project"): TodoQueryBuilder<I, S> {
+  hopTo(relation: "parent" | "todosViaParent" | "project"): TodoQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -533,7 +549,7 @@ export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectab
     start: TodoWhereInput;
     step: (ctx: { current: string }) => QueryBuilder<unknown>;
     maxDepth?: number;
-  }): TodoQueryBuilder<I, S> {
+  }): TodoQueryBuilder<I, S, R> {
     if (options.start === undefined) {
       throw new Error("gather(...) requires start where conditions.");
     }
@@ -611,6 +627,7 @@ export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectab
       table: this._table,
       conditions: this._conditions,
       includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
       select: this._selectColumns,
       orderBy: this._orderBys,
       limit: this._limitVal,
@@ -624,10 +641,11 @@ export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectab
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends TodoInclude = I, CloneS extends TodoSelectableColumn = S>(): TodoQueryBuilder<CloneI, CloneS> {
-    const clone = new TodoQueryBuilder<CloneI, CloneS>();
+  private _clone<CloneI extends TodoInclude = I, CloneS extends TodoSelectableColumn = S, CloneR extends boolean = R>(): TodoQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new TodoQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;

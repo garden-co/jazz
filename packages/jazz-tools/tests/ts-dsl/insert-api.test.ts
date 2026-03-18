@@ -7,7 +7,7 @@ function uniqueDbName(label: string): string {
 }
 
 function insertOwner(db: Db, name = "Test User") {
-  return db.insert(app.users, { name });
+  return db.insert(app.users, { name, friendsIds: [] });
 }
 
 describe("TS Write API", () => {
@@ -37,8 +37,9 @@ describe("TS Write API", () => {
       title: "Test Todo",
       done: true,
       tags: ["tag1", "tag2"],
-      project: project.id,
-      owner: owner.id,
+      projectId: project.id,
+      ownerId: owner.id,
+      assigneesIds: [],
     });
 
     expect(todo).toEqual({
@@ -46,8 +47,9 @@ describe("TS Write API", () => {
       title: "Test Todo",
       done: true,
       tags: ["tag1", "tag2"],
-      project: project.id,
-      owner: owner.id,
+      projectId: project.id,
+      ownerId: owner.id,
+      assigneesIds: [],
     });
   });
 
@@ -70,8 +72,9 @@ describe("TS Write API", () => {
         title: "Test Todo",
         done: true,
         tags: ["tag1", "tag2"],
-        project: project.id,
-        owner: owner.id,
+        projectId: project.id,
+        ownerId: owner.id,
+        assigneesIds: [],
       },
       { tier: "worker" },
     );
@@ -81,8 +84,9 @@ describe("TS Write API", () => {
       title: "Test Todo",
       done: true,
       tags: ["tag1", "tag2"],
-      project: project.id,
-      owner: owner.id,
+      projectId: project.id,
+      ownerId: owner.id,
+      assigneesIds: [],
     });
   });
 
@@ -93,8 +97,9 @@ describe("TS Write API", () => {
       title: "Test Todo",
       done: false,
       tags: ["tag1", "tag2"],
-      project: project.id,
-      owner: owner.id,
+      projectId: project.id,
+      ownerId: owner.id,
+      assigneesIds: [],
     });
 
     const result = db.update(app.todos, todo.id, { done: true });
@@ -111,8 +116,9 @@ describe("TS Write API", () => {
       title: "Test Todo",
       done: false,
       tags: ["tag1", "tag2"],
-      project: project.id,
-      owner: owner.id,
+      projectId: project.id,
+      ownerId: owner.id,
+      assigneesIds: [],
     });
 
     const pending = db.updateDurable(app.todos, todo.id, { done: true }, { tier: "worker" });
@@ -131,8 +137,9 @@ describe("TS Write API", () => {
       title: "Test Todo",
       done: false,
       tags: ["tag1", "tag2"],
-      project: project.id,
-      owner: owner.id,
+      projectId: project.id,
+      ownerId: owner.id,
+      assigneesIds: [],
     });
 
     const result = db.delete(app.todos, todo.id);
@@ -155,8 +162,9 @@ describe("TS Write API", () => {
         title: "Test Todo",
         done: false,
         tags: ["tag1", "tag2"],
-        project: project.id,
-        owner: owner.id,
+        projectId: project.id,
+        ownerId: owner.id,
+        assigneesIds: [],
       },
       { tier: "worker" },
     );

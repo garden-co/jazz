@@ -133,12 +133,47 @@ fn large_index_schema() -> Schema {
         )])
         .into(),
     );
+    schema.insert(
+        TableName::new("documents"),
+        RowDescriptor::new(vec![ColumnDescriptor::new(
+            "payload",
+            ColumnType::Json { schema: None },
+        )])
+        .into(),
+    );
+    schema.insert(
+        TableName::new("file_parts"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("label", ColumnType::Text)]).into(),
+    );
+    schema.insert(
+        TableName::new("files"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new(
+                "parts",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Uuid),
+                },
+            )
+            .references("file_parts"),
+        ])
+        .into(),
+    );
     schema
 }
 
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 fn oversized_text() -> String {
     "x".repeat(40_000)
+}
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+fn oversized_json() -> String {
+    format!(r#"{{"body":"{}"}}"#, oversized_text())
+}
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+fn oversized_ref_array(member_id: ObjectId) -> Value {
+    Value::Array((0..1_500).map(|_| Value::Uuid(member_id)).collect())
 }
 
 /// Helper to execute a query synchronously via subscribe/process/unsubscribe.
@@ -705,75 +740,85 @@ fn update_row() {
 
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 #[test]
-fn fjall_oversized_text_insert_returns_index_error_instead_of_panicking() {
+fn fjall_oversized_text_insert_stays_queryable() {
     let sync_manager = SyncManager::new();
     let schema = large_index_schema();
     let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
 
-    let err = qm
+    let handle = qm
         .insert(
             &mut storage,
             "todos",
             &[Value::Text(oversized_text()), Value::Boolean(false)],
         )
-        .expect_err("oversized indexed text insert should fail cleanly");
-    assert!(
-        matches!(
-            &err,
-            QueryError::IndexValueTooLarge {
-                table,
-                column,
-                ..
-            } if *table == TableName::new("todos") && column == "title"
-        ),
-        "unexpected error: {err:?}"
-    );
+        .expect("oversized indexed text insert should succeed");
 
-    let query = qm.query("todos").build();
-    let rows = execute_query(&mut qm, &mut storage, query).expect("query after failed insert");
-    assert!(
-        rows.is_empty(),
-        "failed insert should not leave a partially inserted row behind"
-    );
+    let oversized = oversized_text();
+    let query = qm
+        .query("todos")
+        .filter_eq("title", Value::Text(oversized.clone()))
+        .build();
+    let rows = execute_query(&mut qm, &mut storage, query).expect("query oversized text");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, handle.row_id);
+    assert_eq!(rows[0].1[0], Value::Text(oversized));
 }
 
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 #[test]
-fn fjall_oversized_array_text_insert_returns_index_error_instead_of_panicking() {
+fn fjall_oversized_json_insert_stays_queryable() {
     let sync_manager = SyncManager::new();
     let schema = large_index_schema();
     let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
 
-    let err = qm
-        .insert(
-            &mut storage,
-            "tag_lists",
-            &[Value::Array(vec![Value::Text(oversized_text())])],
-        )
-        .expect_err("oversized indexed array(text) insert should fail cleanly");
-    assert!(
-        matches!(
-            &err,
-            QueryError::IndexValueTooLarge {
-                table,
-                column,
-                ..
-            } if *table == TableName::new("tag_lists") && column == "labels"
-        ),
-        "unexpected error: {err:?}"
-    );
+    let payload = oversized_json();
+    let handle = qm
+        .insert(&mut storage, "documents", &[Value::Text(payload.clone())])
+        .expect("oversized indexed json insert should succeed");
 
-    let query = qm.query("tag_lists").build();
-    let rows = execute_query(&mut qm, &mut storage, query).expect("query after failed insert");
+    let query = qm
+        .query("documents")
+        .filter_eq("payload", Value::Text(payload.clone()))
+        .build();
+    let rows = execute_query(&mut qm, &mut storage, query).expect("query oversized json");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, handle.row_id);
+    assert_eq!(rows[0].1, vec![Value::Text(payload)]);
+}
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[test]
+fn fjall_oversized_ref_array_insert_stays_queryable() {
+    let sync_manager = SyncManager::new();
+    let schema = large_index_schema();
+    let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
+
+    let member = qm
+        .insert(&mut storage, "file_parts", &[Value::Text("part-a".into())])
+        .expect("insert referenced row");
+    let parts = oversized_ref_array(member.row_id);
+    let handle = qm
+        .insert(&mut storage, "files", std::slice::from_ref(&parts))
+        .expect("oversized indexed array(ref) insert should succeed");
+
+    let query = qm.query("files").filter_eq("parts", parts.clone()).build();
+    let rows = execute_query(&mut qm, &mut storage, query).expect("query oversized array(ref)");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, handle.row_id);
+    assert_eq!(rows[0].1, vec![parts.clone()]);
+
+    let branch = get_branch(&qm);
+    let member_lookup =
+        storage.index_lookup("files", "parts", &branch, &Value::Uuid(member.row_id));
     assert!(
-        rows.is_empty(),
-        "failed insert should not leave a partially inserted row behind"
+        member_lookup.contains(&handle.row_id),
+        "array(ref) membership index should still track each referenced row id"
     );
 }
 
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 #[test]
-fn fjall_oversized_text_update_returns_index_error_and_preserves_old_index() {
+fn fjall_oversized_text_update_reindexes_to_new_value() {
     let sync_manager = SyncManager::new();
     let schema = large_index_schema();
     let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
@@ -786,32 +831,30 @@ fn fjall_oversized_text_update_returns_index_error_and_preserves_old_index() {
         )
         .expect("insert initial row");
 
-    let err = qm
-        .update(
-            &mut storage,
-            handle.row_id,
-            &[Value::Text(oversized_text()), Value::Boolean(false)],
-        )
-        .expect_err("oversized indexed text update should fail cleanly");
-    assert!(
-        matches!(
-            &err,
-            QueryError::IndexValueTooLarge {
-                table,
-                column,
-                ..
-            } if *table == TableName::new("todos") && column == "title"
-        ),
-        "unexpected error: {err:?}"
-    );
+    let oversized = oversized_text();
+    qm.update(
+        &mut storage,
+        handle.row_id,
+        &[Value::Text(oversized.clone()), Value::Boolean(false)],
+    )
+    .expect("oversized indexed text update should succeed");
+
+    let new_query = qm
+        .query("todos")
+        .filter_eq("title", Value::Text(oversized.clone()))
+        .build();
+    let new_rows =
+        execute_query(&mut qm, &mut storage, new_query).expect("query oversized indexed value");
+    assert_eq!(new_rows.len(), 1);
+    assert_eq!(new_rows[0].0, handle.row_id);
 
     let query = qm.query("todos").build();
-    let rows = execute_query(&mut qm, &mut storage, query).expect("query after failed update");
+    let rows = execute_query(&mut qm, &mut storage, query).expect("query after update");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].0, handle.row_id);
     assert_eq!(
         rows[0].1,
-        vec![Value::Text("keep-me".into()), Value::Boolean(false)]
+        vec![Value::Text(oversized), Value::Boolean(false)]
     );
 
     let old_query = qm
@@ -820,151 +863,7 @@ fn fjall_oversized_text_update_returns_index_error_and_preserves_old_index() {
         .build();
     let old_rows =
         execute_query(&mut qm, &mut storage, old_query).expect("query old indexed value");
-    assert_eq!(
-        old_rows.len(),
-        1,
-        "failed update should keep the old title index entry queryable"
-    );
-
-    let new_query = qm
-        .query("todos")
-        .filter_eq("title", Value::Text(oversized_text()))
-        .build();
-    let new_rows =
-        execute_query(&mut qm, &mut storage, new_query).expect("query oversized indexed value");
-    assert_eq!(
-        new_rows.len(),
-        0,
-        "failed update should not expose the new value"
-    );
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-#[test]
-fn fjall_oversized_array_text_update_returns_index_error_and_preserves_old_index() {
-    let sync_manager = SyncManager::new();
-    let schema = large_index_schema();
-    let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
-
-    let original_labels = Value::Array(vec![Value::Text("keep-me".into())]);
-    let handle = qm
-        .insert(
-            &mut storage,
-            "tag_lists",
-            std::slice::from_ref(&original_labels),
-        )
-        .expect("insert initial row");
-
-    let err = qm
-        .update(
-            &mut storage,
-            handle.row_id,
-            &[Value::Array(vec![Value::Text(oversized_text())])],
-        )
-        .expect_err("oversized indexed array(text) update should fail cleanly");
-    assert!(
-        matches!(
-            &err,
-            QueryError::IndexValueTooLarge {
-                table,
-                column,
-                ..
-            } if *table == TableName::new("tag_lists") && column == "labels"
-        ),
-        "unexpected error: {err:?}"
-    );
-
-    let query = qm.query("tag_lists").build();
-    let rows = execute_query(&mut qm, &mut storage, query).expect("query after failed update");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, handle.row_id);
-    assert_eq!(rows[0].1, vec![original_labels.clone()]);
-
-    let old_query = qm
-        .query("tag_lists")
-        .filter_eq("labels", original_labels)
-        .build();
-    let old_rows =
-        execute_query(&mut qm, &mut storage, old_query).expect("query old indexed array value");
-    assert_eq!(
-        old_rows.len(),
-        1,
-        "failed update should keep the old array index entry queryable"
-    );
-}
-
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
-#[test]
-fn fjall_update_can_heal_synced_row_with_oversized_index_value() {
-    use std::collections::HashMap;
-
-    use crate::commit::{Commit, StoredState};
-
-    let sync_manager = SyncManager::new();
-    let schema = large_index_schema();
-    let (mut qm, _temp_dir, mut storage) = create_query_manager_with_fjall(sync_manager, schema);
-    let branch = get_branch(&qm);
-    let row_id = ObjectId::new();
-    let oversized = oversized_text();
-
-    let mut metadata = HashMap::new();
-    metadata.insert(MetadataKey::Table.to_string(), "todos".to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_object(&mut storage, row_id, metadata);
-
-    let descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("title", ColumnType::Text),
-        ColumnDescriptor::new("done", ColumnType::Boolean),
-    ]);
-    let commit = Commit {
-        parents: smallvec![],
-        content: encode_row(
-            &descriptor,
-            &[Value::Text(oversized.clone()), Value::Boolean(false)],
-        )
-        .unwrap(),
-        timestamp: 1000,
-        author: row_id,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &branch, commit)
-        .unwrap();
-    qm.process(&mut storage);
-
-    assert_eq!(
-        storage.index_lookup("todos", "title", &branch, &Value::Text(oversized.clone())),
-        Vec::<ObjectId>::new(),
-        "oversized synced value should not create a title index entry"
-    );
-
-    qm.update(
-        &mut storage,
-        row_id,
-        &[Value::Text("healed".into()), Value::Boolean(false)],
-    )
-    .expect("local update should heal a row left in partial index state");
-
-    let healed_query = qm
-        .query("todos")
-        .filter_eq("title", Value::Text("healed".into()))
-        .build();
-    let healed_rows =
-        execute_query(&mut qm, &mut storage, healed_query).expect("query healed indexed value");
-    assert_eq!(healed_rows.len(), 1);
-    assert_eq!(healed_rows[0].0, row_id);
-
-    let row = qm
-        .get_row(row_id)
-        .expect("row should still exist after healing");
-    assert_eq!(
-        row.1,
-        vec![Value::Text("healed".into()), Value::Boolean(false)]
-    );
+    assert_eq!(old_rows.len(), 0, "old title index entry should be removed");
 }
 
 #[test]
@@ -4892,6 +4791,33 @@ fn users_with_posts_descriptor() -> RowDescriptor {
     ])
 }
 
+fn groups_users_array_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("user_id", ColumnType::Integer),
+            ColumnDescriptor::new("name", ColumnType::Text),
+        ])
+        .into(),
+    );
+    schema.insert(
+        TableName::new("groups"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new(
+                "member_ids",
+                ColumnType::Array {
+                    element: Box::new(ColumnType::Integer),
+                },
+            ),
+        ])
+        .into(),
+    );
+    schema
+}
+
 #[test]
 fn array_subquery_single_user_with_posts() {
     let sync_manager = SyncManager::new();
@@ -5102,6 +5028,128 @@ fn array_subquery_user_with_no_posts() {
     // Posts array should be empty
     let posts = values[2].as_array().expect("Should have posts array");
     assert_eq!(posts.len(), 0, "User with no posts should have empty array");
+}
+
+#[test]
+fn array_subquery_require_result_filters_and_readds_rows() {
+    let sync_manager = SyncManager::new();
+    let schema = users_posts_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("users")
+        .with_array("posts", |sub| {
+            sub.from("posts")
+                .correlate("author_id", "users.id")
+                .require_result()
+        })
+        .build();
+
+    let sub_id = qm.subscribe(query).unwrap();
+    qm.process(&mut storage);
+
+    let initial_updates = qm.take_updates();
+    let initial_delta = initial_updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("Should have subscription update");
+    assert!(
+        initial_delta.added.is_empty(),
+        "user without posts should be filtered when include is required"
+    );
+
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Integer(100),
+            Value::Text("Hello world".into()),
+            Value::Integer(1),
+        ],
+    )
+    .unwrap();
+    qm.process(&mut storage);
+
+    let follow_up_updates = qm.take_updates();
+    let follow_up_delta = follow_up_updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("Should have subscription update after post insert");
+
+    assert_eq!(follow_up_delta.added.len(), 1);
+    let row = decode_row(
+        &users_with_posts_descriptor(),
+        &follow_up_delta.added[0].data,
+    )
+    .unwrap();
+    assert_eq!(row[0], Value::Integer(1));
+    assert_eq!(row[1], Value::Text("Alice".into()));
+    assert_eq!(row[2].as_array().expect("posts array").len(), 1);
+}
+
+#[test]
+fn array_subquery_require_full_cardinality_filters_incomplete_array_refs() {
+    let sync_manager = SyncManager::new();
+    let schema = groups_users_array_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "groups",
+        &[
+            Value::Integer(10),
+            Value::Text("Maintainers".into()),
+            Value::Array(vec![Value::Integer(1), Value::Integer(2)]),
+        ],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(1), Value::Text("Alice".into())],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("groups")
+        .with_array("members", |sub| {
+            sub.from("users")
+                .correlate("user_id", "groups.member_ids")
+                .require_match_correlation_cardinality()
+        })
+        .build();
+
+    let initial_results = execute_query(&mut qm, &mut storage, query.clone()).unwrap();
+    assert!(
+        initial_results.is_empty(),
+        "group should be filtered when one referenced member is missing"
+    );
+
+    qm.insert(
+        &mut storage,
+        "users",
+        &[Value::Integer(2), Value::Text("Bob".into())],
+    )
+    .unwrap();
+    let follow_up_results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(follow_up_results.len(), 1);
+    let row = &follow_up_results[0].1;
+    assert_eq!(row[0], Value::Integer(10));
+    assert_eq!(row[1], Value::Text("Maintainers".into()));
+    assert_eq!(
+        row[2],
+        Value::Array(vec![Value::Integer(1), Value::Integer(2)])
+    );
+    assert_eq!(row[3].as_array().expect("members array").len(), 2);
 }
 
 #[test]

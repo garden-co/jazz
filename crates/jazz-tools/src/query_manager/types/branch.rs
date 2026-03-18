@@ -139,15 +139,45 @@ fn hash_policy_expr(hasher: &mut blake3::Hasher, expr: &PolicyExpr) {
                 }
             }
         }
+        PolicyExpr::SessionCmp { path, op, value } => {
+            hasher.update(&[16]);
+            for part in path {
+                hasher.update(part.as_bytes());
+                hasher.update(&[0]);
+            }
+            match op {
+                CmpOp::Eq => hasher.update(&[1]),
+                CmpOp::Ne => hasher.update(&[2]),
+                CmpOp::Lt => hasher.update(&[3]),
+                CmpOp::Le => hasher.update(&[4]),
+                CmpOp::Gt => hasher.update(&[5]),
+                CmpOp::Ge => hasher.update(&[6]),
+            };
+            hash_value(hasher, value);
+        }
         PolicyExpr::IsNull { column } => {
             hasher.update(&[2]);
             hasher.update(column.as_bytes());
             hasher.update(&[0]);
         }
+        PolicyExpr::SessionIsNull { path } => {
+            hasher.update(&[17]);
+            for part in path {
+                hasher.update(part.as_bytes());
+                hasher.update(&[0]);
+            }
+        }
         PolicyExpr::IsNotNull { column } => {
             hasher.update(&[3]);
             hasher.update(column.as_bytes());
             hasher.update(&[0]);
+        }
+        PolicyExpr::SessionIsNotNull { path } => {
+            hasher.update(&[18]);
+            for part in path {
+                hasher.update(part.as_bytes());
+                hasher.update(&[0]);
+            }
         }
         PolicyExpr::Contains { column, value } => {
             hasher.update(&[14]);
@@ -166,6 +196,14 @@ fn hash_policy_expr(hasher: &mut blake3::Hasher, expr: &PolicyExpr) {
                     }
                 }
             }
+        }
+        PolicyExpr::SessionContains { path, value } => {
+            hasher.update(&[19]);
+            for part in path {
+                hasher.update(part.as_bytes());
+                hasher.update(&[0]);
+            }
+            hash_value(hasher, value);
         }
         PolicyExpr::In {
             column,
@@ -198,6 +236,17 @@ fn hash_policy_expr(hasher: &mut blake3::Hasher, expr: &PolicyExpr) {
                         }
                     }
                 }
+            }
+        }
+        PolicyExpr::SessionInList { path, values } => {
+            hasher.update(&[20]);
+            for part in path {
+                hasher.update(part.as_bytes());
+                hasher.update(&[0]);
+            }
+            hasher.update(&(values.len() as u64).to_le_bytes());
+            for value in values {
+                hash_value(hasher, value);
             }
         }
         PolicyExpr::Exists { table, condition } => {

@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { createJazzClient, JazzProvider } from "jazz-tools/vue";
+import AuthSessionExamples from "./AuthSessionExamples.vue";
 import TodoList from "./TodoList.vue";
+
+// Keep docs-only auth snippets in the compiled example app.
+void AuthSessionExamples;
 
 const client = createJazzClient({
   appId: "todo-vue-example",

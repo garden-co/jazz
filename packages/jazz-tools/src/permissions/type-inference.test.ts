@@ -172,7 +172,9 @@ const app = {
 describe("permissions type inference", () => {
   it("infers row callback and where key types", () => {
     definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
+      expectTypeOf(session.user_id.path).toEqualTypeOf<string[]>();
       expectTypeOf(session.userId.path).toEqualTypeOf<string[]>();
+      expectTypeOf(session["claims.role"].path).toEqualTypeOf<string[]>();
 
       const reachableTeams = policy.teams.gather({
         start: { kind: "individual", identity_key: session.userId },
@@ -192,6 +194,7 @@ describe("permissions type inference", () => {
         policy.todos.allowRead.where((todo) =>
           anyOf([
             { done: false },
+            session.where({ "claims.role": "manager" }),
             policy.projects.exists.where({
               id: todo.projectId,
               ownerId: session.userId,
@@ -205,6 +208,24 @@ describe("permissions type inference", () => {
         policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "projectId")),
       ];
     });
+  });
+
+  it("exposes never() on read/insert/update/delete builders", () => {
+    definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.never(),
+      policy.todos.allowInsert.never(),
+      policy.todos.allowUpdate.never(),
+      policy.todos.allowDelete.never(),
+    ]);
+  });
+
+  it("exposes always() on read/insert/update/delete builders", () => {
+    definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.always(),
+      policy.todos.allowInsert.always(),
+      policy.todos.allowUpdate.always(),
+      policy.todos.allowDelete.always(),
+    ]);
   });
 
   it("rejects invalid table/column usage at compile time where possible", () => {

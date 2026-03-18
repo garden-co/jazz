@@ -1,5 +1,27 @@
 # jazz-napi
 
+## 2.0.0-alpha.20
+
+### Patch Changes
+
+- 9f4d4d9: Bound oversized index keys by keeping as much real value prefix as fits in the durable key and appending a length plus hash overflow trailer.
+
+  This keeps large indexed string and JSON equality lookups working without exceeding storage key limits, while preserving prefix-based ordering instead of collapsing oversized values to a pure hash ordering. Large `array(ref(...))` values also continue to support exact array equality and per-member reference indexing.
+
+## 2.0.0-alpha.19
+
+### Patch Changes
+
+- 1cf799c: Configure `jazz-napi` to generate scoped `@garden-co/*` native package names at the source and publish the generated loader from release builds.
+
+## 2.0.0-alpha.18
+
+### Patch Changes
+
+- 33bc53f: Fail indexed writes cleanly when an indexed value would exceed the storage key limit instead of panicking in native storage.
+
+  Oversized indexed inserts and updates now return a normal mutation error to JS callers, and local updates can recover rows that were previously left in a partial index state by older panic-driven failures.
+
 ## 2.0.0-alpha.17
 
 ### Patch Changes

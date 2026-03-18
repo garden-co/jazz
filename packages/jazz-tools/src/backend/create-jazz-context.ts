@@ -1,8 +1,9 @@
 import { NapiRuntime } from "jazz-napi";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
-import { JazzClient, type RequestLike, type SessionClient } from "../runtime/client.js";
+import { JazzClient, sessionFromRequest, type RequestLike } from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
+import { createDbFromClient, type Db, type DbConfig } from "../runtime/db.js";
 import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
 
 export interface BackendSchemaSource {
@@ -84,9 +85,9 @@ function resolveSchema(input: BackendSchemaInput): WasmSchema {
 /**
  * Server-side Jazz context with lazy runtime setup.
  *
- * The first call to `client()`, `asBackend()`, `forRequest()`, or `forSession()` initializes
- * a NAPI runtime and JazzClient using the provided app/schema source. Later
- * calls reuse the same initialized runtime.
+ * The first call to `db()`, `asBackend()`, `forRequest()`, or `forSession()`
+ * initializes a NAPI runtime and backing client using the provided app/schema source.
+ * Later calls reuse the same initialized runtime.
  */
 export class JazzContext {
   private readonly config: ResolvedBackendContextConfig;
@@ -105,7 +106,7 @@ export class JazzContext {
     const selected = source ?? this.defaultSchemaInput;
     if (!selected) {
       throw new Error(
-        "No schema source provided. Pass `app` to createJazzContext or provide a schema source when calling client()/asBackend()/forRequest()/forSession().",
+        "No schema source provided. Pass `app` to createJazzContext or provide a schema source when calling db()/asBackend()/forRequest()/forSession().",
       );
     }
     return resolveSchema(selected);
@@ -155,10 +156,29 @@ export class JazzContext {
     return this.clientInstance;
   }
 
+  private buildDbConfig(): DbConfig {
+    return {
+      appId: this.config.appId,
+      driver: this.config.driver.type === "memory" ? { type: "memory" } : { type: "persistent" },
+      serverUrl: this.config.serverUrl,
+      serverPathPrefix: this.config.serverPathPrefix,
+      env: this.config.env,
+      userBranch: this.config.userBranch,
+      jwtToken: this.config.jwtToken,
+      localAuthMode: this.config.localAuthMode,
+      localAuthToken: this.config.localAuthToken,
+      adminSecret: this.config.adminSecret,
+    };
+  }
+
+  private wrapDb(client: JazzClient, session?: Session): Db {
+    return createDbFromClient(this.buildDbConfig(), client, session);
+  }
+
   /**
    * Get the shared Jazz client, lazily creating it on first access.
    */
-  client(source?: BackendSchemaInput): JazzClient {
+  private getClient(source?: BackendSchemaInput): JazzClient {
     const schema = this.resolveSchema(source);
     const schemaJson = serializeRuntimeSchema(schema);
 
@@ -176,24 +196,52 @@ export class JazzContext {
   }
 
   /**
-   * Get a backend-scoped client authenticated with `backendSecret`.
+   * Get a high-level `Db` using the context's configured auth/runtime identity.
    */
-  asBackend(source?: BackendSchemaInput): JazzClient {
-    return this.client(source).asBackend();
+  db(source?: BackendSchemaInput): Db {
+    return this.wrapDb(this.getClient(source));
   }
 
   /**
-   * Build a requester-scoped client from an authenticated request.
+   * Get a backend-scoped `Db` authenticated with `backendSecret`.
    */
-  forRequest(request: RequestLike, source?: BackendSchemaInput): SessionClient {
-    return this.client(source).forRequest(request);
+  asBackend(source?: BackendSchemaInput): Db {
+    return this.wrapDb(this.getClient(source).asBackend());
   }
 
   /**
-   * Build a session-scoped client for server-side impersonation flows.
+   * Enable backend-authenticated sync for a scoped `Db` when this context is connected
+   * to a sync server. Local-only runtimes can scope sessions without backend auth.
    */
-  forSession(session: Session, source?: BackendSchemaInput): SessionClient {
-    return this.client(source).forSession(session);
+  private enableBackendSyncIfConfigured(client: JazzClient): void {
+    if (!this.config.serverUrl) {
+      return;
+    }
+    if (!this.config.backendSecret) {
+      throw new Error(
+        "backendSecret required for request/session-scoped sync when serverUrl is configured.",
+      );
+    }
+    client.asBackend();
+  }
+
+  /**
+   * Build a requester-scoped `Db` from an authenticated request.
+   */
+  forRequest(request: RequestLike, source?: BackendSchemaInput): Db {
+    const client = this.getClient(source);
+    const session = sessionFromRequest(request);
+    this.enableBackendSyncIfConfigured(client);
+    return this.wrapDb(client, session);
+  }
+
+  /**
+   * Build a session-scoped `Db` for server-side impersonation flows.
+   */
+  forSession(session: Session, source?: BackendSchemaInput): Db {
+    const client = this.getClient(source);
+    this.enableBackendSyncIfConfigured(client);
+    return this.wrapDb(client, session);
   }
 
   /**

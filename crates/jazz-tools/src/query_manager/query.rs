@@ -387,6 +387,15 @@ impl Conjunction {
 }
 
 /// Specification for an array subquery (correlated subquery producing array column).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ArraySubqueryRequirement {
+    #[default]
+    Optional,
+    AtLeastOne,
+    MatchCorrelationCardinality,
+}
+
+/// Specification for an array subquery (correlated subquery producing array column).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArraySubquerySpec {
     /// Name for the output array column.
@@ -407,6 +416,9 @@ pub struct ArraySubquerySpec {
     pub order_by: Vec<(String, SortDirection)>,
     /// Limit on inner query results.
     pub limit: Option<usize>,
+    /// Optional requirement for whether the correlated result must exist.
+    #[serde(default)]
+    pub requirement: ArraySubqueryRequirement,
     /// Nested array subqueries (for recursive structures).
     pub nested_arrays: Vec<ArraySubquerySpec>,
 }
@@ -424,6 +436,7 @@ impl ArraySubquerySpec {
             select_columns: None,
             order_by: Vec::new(),
             limit: None,
+            requirement: ArraySubqueryRequirement::Optional,
             nested_arrays: Vec::new(),
         }
     }
@@ -966,6 +979,7 @@ pub struct ArraySubqueryBuilder {
     select_columns: Option<Vec<String>>,
     order_by: Vec<(String, SortDirection)>,
     limit: Option<usize>,
+    requirement: ArraySubqueryRequirement,
     nested_arrays: Vec<ArraySubquerySpec>,
 }
 
@@ -982,6 +996,7 @@ impl ArraySubqueryBuilder {
             select_columns: None,
             order_by: Vec::new(),
             limit: None,
+            requirement: ArraySubqueryRequirement::Optional,
             nested_arrays: Vec::new(),
         }
     }
@@ -1060,6 +1075,21 @@ impl ArraySubqueryBuilder {
         self
     }
 
+    /// Require that the correlated subquery returns at least one row.
+    pub fn require_result(mut self) -> Self {
+        self.requirement = ArraySubqueryRequirement::AtLeastOne;
+        self
+    }
+
+    /// Require that the correlated subquery fully resolves every correlated id.
+    ///
+    /// Intended for forward `UUID[] REFERENCES ...` includes where missing elements
+    /// should suppress the outer row.
+    pub fn require_match_correlation_cardinality(mut self) -> Self {
+        self.requirement = ArraySubqueryRequirement::MatchCorrelationCardinality;
+        self
+    }
+
     /// Add a nested array subquery.
     ///
     /// # Example
@@ -1093,6 +1123,7 @@ impl ArraySubqueryBuilder {
             select_columns: self.select_columns,
             order_by: self.order_by,
             limit: self.limit,
+            requirement: self.requirement,
             nested_arrays: self.nested_arrays,
         }
     }
@@ -1548,6 +1579,38 @@ mod tests {
     }
 
     #[test]
+    fn query_with_required_array_subquery() {
+        let query = QueryBuilder::new("users")
+            .with_array("posts", |sub| {
+                sub.from("posts")
+                    .correlate("author_id", "users.id")
+                    .require_result()
+            })
+            .build();
+
+        assert_eq!(
+            query.array_subqueries[0].requirement,
+            ArraySubqueryRequirement::AtLeastOne
+        );
+    }
+
+    #[test]
+    fn query_with_cardinality_matched_array_subquery() {
+        let query = QueryBuilder::new("todos")
+            .with_array("assignees", |sub| {
+                sub.from("users")
+                    .correlate("id", "todos.assignee_ids")
+                    .require_match_correlation_cardinality()
+            })
+            .build();
+
+        assert_eq!(
+            query.array_subqueries[0].requirement,
+            ArraySubqueryRequirement::MatchCorrelationCardinality
+        );
+    }
+
+    #[test]
     fn query_with_nested_array_subquery() {
         let query = QueryBuilder::new("users")
             .with_array("posts", |sub| {
@@ -1786,6 +1849,21 @@ mod tests {
 
         let bytes = postcard::to_allocvec(&query).expect("serialize query postcard");
         let decoded: Query = postcard::from_bytes(&bytes).expect("deserialize query postcard");
+
+        assert_eq!(query, decoded);
+    }
+
+    #[test]
+    fn query_with_required_array_subquery_json_serialization() {
+        let query = QueryBuilder::new("orgs")
+            .branch("main")
+            .with_array("users", |b| {
+                b.from("users").correlate("id", "org_id").require_result()
+            })
+            .build();
+
+        let json = serde_json::to_string(&query).expect("serialize");
+        let decoded: Query = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(query, decoded);
     }

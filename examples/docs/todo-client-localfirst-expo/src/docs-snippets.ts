@@ -30,7 +30,7 @@ export async function whereExamples(db: Db) {
 
   // Explicit operators
   await db.all(app.todos.where({ title: { contains: "milk" } }));
-  await db.all(app.todos.where({ project: { ne: EXAMPLE_PROJECT_ID } }));
+  await db.all(app.todos.where({ projectId: { ne: EXAMPLE_PROJECT_ID } }));
 }
 // #endregion where-operators-expo
 
@@ -104,8 +104,8 @@ export async function writeWithDurabilityTier(db: Db, todoTitle: string) {
     {
       title: todoTitle,
       done: false,
-      owner_id: EXAMPLE_OWNER_ID,
-      project: EXAMPLE_PROJECT_ID,
+      ownerId: EXAMPLE_OWNER_ID,
+      projectId: EXAMPLE_PROJECT_ID,
     },
     { tier: "worker" },
   );
