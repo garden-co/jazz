@@ -147,7 +147,6 @@ describe("fulfilled cache entry provides initial data", () => {
     expect(current).toEqual([alice]);
     expect(loading).toBe(false);
   });
-
 });
 
 describe("context integration", () => {
