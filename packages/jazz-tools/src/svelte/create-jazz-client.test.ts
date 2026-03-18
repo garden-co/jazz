@@ -117,7 +117,7 @@ describe("svelte/createJazzClient", () => {
     expect(mocks.resolveClientSession).toHaveBeenCalledWith(resolvedConfig);
 
     expect(mocks.orchestratorInstances).toHaveLength(1);
-    const manager = mocks.orchestratorInstances[0];
+    const manager = mocks.orchestratorInstances[0]!;
     expect(manager.config).toEqual({ appId: resolvedConfig.appId });
     expect(manager.db).toBe(db);
     expect(manager.init).toHaveBeenCalledTimes(1);
@@ -129,8 +129,8 @@ describe("svelte/createJazzClient", () => {
     await client.shutdown();
     expect(manager.shutdown).toHaveBeenCalledTimes(1);
     expect(db.shutdown).toHaveBeenCalledTimes(1);
-    expect(manager.shutdown.mock.invocationCallOrder[0]).toBeLessThan(
-      db.shutdown.mock.invocationCallOrder[0],
+    expect(manager.shutdown.mock.invocationCallOrder[0]!).toBeLessThan(
+      db.shutdown.mock.invocationCallOrder[0]!,
     );
   });
 
@@ -158,7 +158,7 @@ describe("svelte/createJazzClient", () => {
 
     await expect(createJazzClient(config)).rejects.toBe(initError);
     expect(mocks.orchestratorInstances).toHaveLength(1);
-    expect(mocks.orchestratorInstances[0].init).toHaveBeenCalledTimes(1);
+    expect(mocks.orchestratorInstances[0]!.init).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -177,10 +177,10 @@ describe("svelte/createExtensionJazzClient", () => {
     expect(mocks.createDbFromInspectedPage).toHaveBeenCalledTimes(1);
     expect(db.getConfig).toHaveBeenCalledTimes(1);
     expect(mocks.orchestratorInstances).toHaveLength(1);
-    expect(mocks.orchestratorInstances[0].config).toEqual({ appId: "devtools-app" });
+    expect(mocks.orchestratorInstances[0]!.config).toEqual({ appId: "devtools-app" });
     expect(client.db).toBe(db);
     expect(client.session).toBeNull();
-    expect(client.manager).toBe(mocks.orchestratorInstances[0]);
+    expect(client.manager).toBe(mocks.orchestratorInstances[0]!);
   });
 
   it("SV-EXT-02: rejects when config is missing", async () => {

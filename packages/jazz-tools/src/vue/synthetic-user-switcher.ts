@@ -20,9 +20,11 @@ export interface SyntheticUserSwitcherProps {
 }
 
 function getActiveProfile(store: SyntheticUserStore): SyntheticUserProfile {
-  return (
-    store.profiles.find((profile) => profile.id === store.activeProfileId) ?? store.profiles[0]
-  );
+  const fallbackProfile = store.profiles[0];
+  if (!fallbackProfile) {
+    throw new Error("Synthetic user store must contain at least one profile.");
+  }
+  return store.profiles.find((profile) => profile.id === store.activeProfileId) ?? fallbackProfile;
 }
 
 export const SyntheticUserSwitcher = defineComponent({
@@ -142,8 +144,12 @@ export const SyntheticUserSwitcher = defineComponent({
       const nextProfiles = store.value.profiles.filter(
         (profile) => profile.id !== store.value.activeProfileId,
       );
+      const nextActiveProfile = nextProfiles[0];
+      if (!nextActiveProfile) {
+        return;
+      }
       const nextStore: SyntheticUserStore = {
-        activeProfileId: nextProfiles[0].id,
+        activeProfileId: nextActiveProfile.id,
         profiles: nextProfiles,
       };
       applyStore(nextStore, true);

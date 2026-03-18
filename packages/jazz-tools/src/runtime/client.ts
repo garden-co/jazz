@@ -443,10 +443,14 @@ export function sessionFromRequest(request: RequestLike): Session {
   if (parts.length < 2) {
     throw new Error("Invalid JWT format");
   }
+  const payloadPart = parts[1];
+  if (payloadPart === undefined) {
+    throw new Error("Invalid JWT format");
+  }
 
   let payload: unknown;
   try {
-    payload = JSON.parse(decodeBase64Url(parts[1]));
+    payload = JSON.parse(decodeBase64Url(payloadPart));
   } catch {
     throw new Error("Invalid JWT payload");
   }
@@ -874,6 +878,9 @@ export class JazzClient {
     const valuesByColumn = new Map<string, Value>();
     for (let index = 0; index < runtimeTable.columns.length; index += 1) {
       const column = runtimeTable.columns[index];
+      if (!column) {
+        return values;
+      }
       const value = values[index];
       if (value === undefined) {
         return values;

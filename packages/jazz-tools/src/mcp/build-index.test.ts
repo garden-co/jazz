@@ -220,23 +220,23 @@ describe("splitIntoSections", () => {
     const body = "Intro text.\n\n## Section One\n\nContent one.\n\n## Section Two\n\nContent two.";
     const sections = splitIntoSections(body);
     expect(sections).toHaveLength(3); // preamble + 2 sections
-    expect(sections[1].heading).toBe("Section One");
-    expect(sections[2].heading).toBe("Section Two");
+    expect(sections[1]!.heading).toBe("Section One");
+    expect(sections[2]!.heading).toBe("Section Two");
   });
 
   it("treats content before first ## as a section with empty heading", () => {
     const body = "Preamble text.\n\n## First Section\n\nContent.";
     const sections = splitIntoSections(body);
-    expect(sections[0].heading).toBe("");
-    expect(sections[0].body).toContain("Preamble text.");
+    expect(sections[0]!.heading).toBe("");
+    expect(sections[0]!.body).toContain("Preamble text.");
   });
 
   it("returns a single section with empty heading for pages with no ## headings", () => {
     const body = "Just content, no sections.";
     const sections = splitIntoSections(body);
     expect(sections).toHaveLength(1);
-    expect(sections[0].heading).toBe("");
-    expect(sections[0].body).toBe("Just content, no sections.");
+    expect(sections[0]!.heading).toBe("");
+    expect(sections[0]!.body).toBe("Just content, no sections.");
   });
 });
 

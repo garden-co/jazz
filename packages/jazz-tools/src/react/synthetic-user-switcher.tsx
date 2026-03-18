@@ -18,9 +18,11 @@ export interface SyntheticUserSwitcherProps extends SyntheticUserStorageOptions 
 }
 
 function getActiveProfile(store: SyntheticUserStore): SyntheticUserProfile {
-  return (
-    store.profiles.find((profile) => profile.id === store.activeProfileId) ?? store.profiles[0]
-  );
+  const fallbackProfile = store.profiles[0];
+  if (!fallbackProfile) {
+    throw new Error("Synthetic user store must contain at least one profile.");
+  }
+  return store.profiles.find((profile) => profile.id === store.activeProfileId) ?? fallbackProfile;
 }
 
 export function SyntheticUserSwitcher({
@@ -91,8 +93,10 @@ export function SyntheticUserSwitcher({
   const handleRemoveProfile = () => {
     if (store.profiles.length <= 1) return;
     const nextProfiles = store.profiles.filter((profile) => profile.id !== store.activeProfileId);
+    const nextActiveProfile = nextProfiles[0];
+    if (!nextActiveProfile) return;
     const nextStore: SyntheticUserStore = {
-      activeProfileId: nextProfiles[0].id,
+      activeProfileId: nextActiveProfile.id,
       profiles: nextProfiles,
     };
     applyStore(nextStore, true);

@@ -83,7 +83,7 @@ describe("db.subscribeAll NAPI Fjall integration", () => {
       const rows = await env.waitForRows(
         client,
         todosByDone(false),
-        (entries) => entries.length === 1 && readRowTitle(entries[0]) === "visible",
+        (entries) => entries.length === 1 && readRowTitle(entries[0]!) === "visible",
       );
 
       expect(rows).toHaveLength(1);

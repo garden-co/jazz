@@ -1270,13 +1270,7 @@ export class Db {
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T => {
-      return transformRows<T>(
-        [row],
-        outputSchema,
-        outputTable,
-        outputIncludes,
-        builtQuery.select,
-      )[0];
+      return transformRow<T>(row, outputSchema, outputTable, outputIncludes, builtQuery.select);
     };
 
     const subId = client.subscribeInternal(
@@ -1539,7 +1533,7 @@ class ClientBackedDb extends Db {
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T =>
-      transformRows<T>([row], outputSchema, outputTable, outputIncludes, builtQuery.select)[0];
+      transformRow<T>(row, outputSchema, outputTable, outputIncludes, builtQuery.select);
 
     const subId = this.runtimeClient.subscribeInternal(
       wasmQuery,

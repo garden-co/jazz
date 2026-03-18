@@ -33,7 +33,7 @@ describe("JazzRnRuntimeAdapter", () => {
     new JazzRnRuntimeAdapter(binding, {});
 
     const onBatchedTickNeeded = binding.onBatchedTickNeeded as ReturnType<typeof vi.fn>;
-    const callbackObject = onBatchedTickNeeded.mock.calls[0][0];
+    const callbackObject = onBatchedTickNeeded.mock.calls[0]![0];
 
     callbackObject.requestBatchedTick();
     expect(binding.batchedTick).not.toHaveBeenCalled();
@@ -75,7 +75,7 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(onSyncMessageToSend).toHaveBeenCalledTimes(1);
 
     // New callback shape: direct 4-arg payload (after RN callback API update).
-    const callbackObject = onSyncMessageToSend.mock.calls[0][0];
+    const callbackObject = onSyncMessageToSend.mock.calls[0]![0];
     callbackObject.onSyncMessage("server", "server-1", "{}", false);
     expect(syncHandler).toHaveBeenCalledWith("server", "server-1", "{}", false);
 
@@ -84,7 +84,7 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(handle).toBe(7);
 
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
-    const subscriptionCallback = subscribeMock.mock.calls[0][1];
+    const subscriptionCallback = subscribeMock.mock.calls[0]![1];
     subscriptionCallback.onUpdate('{"added":[],"removed":[],"updated":[],"pending":false}');
     expect(onUpdate).toHaveBeenCalledWith({
       added: [],
@@ -110,9 +110,9 @@ describe("JazzRnRuntimeAdapter", () => {
 
     const executeMock = binding.executeSubscription as ReturnType<typeof vi.fn>;
     expect(executeMock).toHaveBeenCalledTimes(1);
-    expect(executeMock.mock.calls[0][0]).toBe(9n);
+    expect(executeMock.mock.calls[0]![0]).toBe(9n);
 
-    const callbackObject = executeMock.mock.calls[0][1];
+    const callbackObject = executeMock.mock.calls[0]![1];
     callbackObject.onUpdate('{"added":[],"removed":[],"updated":[],"pending":false}');
     expect(onUpdate).toHaveBeenCalledWith({
       added: [],
@@ -133,7 +133,7 @@ describe("JazzRnRuntimeAdapter", () => {
       throw new Error("sync boom");
     });
     const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
-    const syncCallback = onSyncMessageToSend.mock.calls[0][0];
+    const syncCallback = onSyncMessageToSend.mock.calls[0]![0];
     expect(() => syncCallback.onSyncMessage("server", "server-1", "{}", false)).not.toThrow();
 
     const onUpdate = vi.fn(() => {
@@ -141,7 +141,7 @@ describe("JazzRnRuntimeAdapter", () => {
     });
     adapter.subscribe("{}", onUpdate, null, null);
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
-    const subscriptionCallback = subscribeMock.mock.calls[0][1];
+    const subscriptionCallback = subscribeMock.mock.calls[0]![1];
     expect(() => subscriptionCallback.onUpdate("[]")).not.toThrow();
   });
 
@@ -152,7 +152,7 @@ describe("JazzRnRuntimeAdapter", () => {
     adapter.onSyncMessageToSend(syncHandler);
 
     const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
-    const callbackObject = onSyncMessageToSend.mock.calls[0][0];
+    const callbackObject = onSyncMessageToSend.mock.calls[0]![0];
     expect(() =>
       (callbackObject as any).onSyncMessage(
         JSON.stringify({
@@ -171,7 +171,7 @@ describe("JazzRnRuntimeAdapter", () => {
     const onUpdate = vi.fn();
     adapter.subscribe("{}", onUpdate, null, null);
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
-    const subscriptionCallback = subscribeMock.mock.calls[0][1];
+    const subscriptionCallback = subscribeMock.mock.calls[0]![1];
 
     subscriptionCallback.onUpdate(
       JSON.stringify({

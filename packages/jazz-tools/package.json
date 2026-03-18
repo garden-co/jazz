@@ -68,7 +68,7 @@
     "build": "tsc && cp src/worker/jazz-worker.ts dist/worker/jazz-worker.ts && pnpm build:test && pnpm build:svelte",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
     "test": "vitest run --config vitest.config.ts",
-    "build:test": "node dist/cli.js build --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.typecheck.tests.json && tsc --project tsconfig.tests.json",
+    "build:test": "node dist/cli.js build --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json",
     "test:browser": "vitest run --config vitest.config.browser.ts",
     "bench:realistic:browser": "vitest run --config vitest.config.browser.ts tests/browser/realistic-bench.test.ts",
     "stage:local": "node scripts/stage-local-binary.mjs",

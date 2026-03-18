@@ -190,7 +190,7 @@ describe("JazzClient.forRequest", () => {
     await scopedClient.query('{"table":"todos"}');
 
     expect(queryCalls.length).toBe(1);
-    expect(queryCalls[0][1]).toBe(
+    expect(queryCalls[0]![1]).toBe(
       JSON.stringify({
         user_id: "user-123",
         claims: { role: "admin" },
@@ -210,7 +210,7 @@ describe("JazzClient.forRequest", () => {
 
     await scopedClient.query('{"table":"todos"}');
 
-    expect(queryCalls[0][1]).toBe(
+    expect(queryCalls[0]![1]).toBe(
       JSON.stringify({
         user_id: "user-456",
         claims: {},
@@ -257,7 +257,7 @@ describe("JazzClient.forRequest", () => {
 
     await scopedClient.query(builder);
 
-    expect(queryCalls[0][0]).toBe(builder._build());
+    expect(queryCalls[0]![0]).toBe(builder._build());
   });
 
   it("translates schema-aware query builders for session-scoped query calls", async () => {
@@ -284,7 +284,7 @@ describe("JazzClient.forRequest", () => {
 
     await scopedClient.query(builder);
 
-    const parsed = JSON.parse(queryCalls[0][0]) as Record<string, unknown>;
+    const parsed = JSON.parse(queryCalls[0]![0]) as Record<string, unknown>;
     expect(parsed.table).toBe("todos");
     expect(parsed).toHaveProperty("relation_ir");
   });
@@ -301,7 +301,7 @@ describe("JazzClient.forRequest", () => {
     client.subscribe(builder, () => {});
 
     expect(createSubscriptionCalls).toHaveLength(1);
-    expect(createSubscriptionCalls[0][0]).toBe(builder._build());
+    expect(createSubscriptionCalls[0]![0]).toBe(builder._build());
     expect(executeSubscriptionCalls).toHaveLength(0);
     await flushMicrotasks();
     expect(executeSubscriptionCalls).toHaveLength(1);
@@ -325,7 +325,7 @@ describe("JazzClient.forRequest", () => {
     client.subscribe(builder, () => {});
 
     expect(createSubscriptionCalls).toHaveLength(1);
-    const parsed = JSON.parse(createSubscriptionCalls[0][0]) as Record<string, unknown>;
+    const parsed = JSON.parse(createSubscriptionCalls[0]![0]) as Record<string, unknown>;
     expect(parsed.table).toBe("todos");
     expect(parsed).toHaveProperty("relation_ir");
   });
@@ -336,7 +336,7 @@ describe("JazzClient.forRequest", () => {
     client.subscribe('{"table":"todos"}', callback);
     await flushMicrotasks();
 
-    const onUpdate = executeSubscriptionCalls[0][1];
+    const onUpdate = executeSubscriptionCalls[0]![1];
     onUpdate(
       JSON.stringify({
         added: [{ row: { id: "row-a", values: [] }, index: 0 }],
@@ -375,7 +375,7 @@ describe("JazzClient.forRequest", () => {
     client.subscribe('{"table":"todos"}', callback);
     await flushMicrotasks();
 
-    const onUpdate = executeSubscriptionCalls[0][1];
+    const onUpdate = executeSubscriptionCalls[0]![1];
     onUpdate(null, [
       {
         kind: 0,
@@ -402,7 +402,7 @@ describe("JazzClient.forRequest", () => {
     client.subscribe('{"table":"todos"}', callback);
     await flushMicrotasks();
 
-    const onUpdate = executeSubscriptionCalls[0][1];
+    const onUpdate = executeSubscriptionCalls[0]![1];
     expect(() =>
       onUpdate(
         JSON.stringify({
@@ -419,13 +419,13 @@ describe("JazzClient.forRequest", () => {
   it("passes query propagation options to runtime query", async () => {
     const { client, queryCalls } = makeClient();
     await client.query('{"table":"todos"}', { propagation: "local-only" });
-    expect(queryCalls[0][3]).toBe(JSON.stringify({ propagation: "local-only" }));
+    expect(queryCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
   });
 
   it("passes query propagation options to runtime createSubscription", () => {
     const { client, createSubscriptionCalls } = makeClient();
     client.subscribe('{"table":"todos"}', () => {}, { propagation: "local-only" });
-    expect(createSubscriptionCalls[0][3]).toBe(JSON.stringify({ propagation: "local-only" }));
+    expect(createSubscriptionCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
   });
 
   // =========================================================================
