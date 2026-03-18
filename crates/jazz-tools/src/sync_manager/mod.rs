@@ -159,7 +159,20 @@ impl SyncManager {
 
     /// Add a server connection. Queues all existing objects to sync.
     pub fn add_server(&mut self, server_id: ServerId) {
+        self.add_server_with_catalogue_match(server_id, false);
+    }
+
+    /// Add a server connection, optionally skipping catalogue replay when both
+    /// sides already advertise the same catalogue state.
+    pub fn add_server_with_catalogue_match(
+        &mut self,
+        server_id: ServerId,
+        skip_catalogue_sync: bool,
+    ) {
         self.servers.insert(server_id, ServerState::default());
+        if skip_catalogue_sync {
+            self.mark_catalogue_sent_for_server(server_id);
+        }
         self.queue_full_sync_to_server(server_id);
     }
 

@@ -4,6 +4,54 @@ use crate::object::{BranchName, ObjectId};
 use std::collections::{HashMap, HashSet};
 
 impl SyncManager {
+    pub(super) fn is_catalogue_metadata(metadata: &HashMap<String, String>) -> bool {
+        matches!(
+            metadata
+                .get(crate::metadata::MetadataKey::Type.as_str())
+                .map(|value| value.as_str()),
+            Some(kind)
+                if kind == crate::metadata::ObjectType::CatalogueSchema.as_str()
+                    || kind == crate::metadata::ObjectType::CatalogueLens.as_str()
+        )
+    }
+
+    /// Mark all existing catalogue objects as already sent for this server.
+    ///
+    /// This is used when the upstream server reports the same catalogue digest
+    /// during the connect handshake, allowing us to skip replaying schema/lens
+    /// objects while still performing the normal full sync for row data.
+    pub(super) fn mark_catalogue_sent_for_server(&mut self, server_id: ServerId) {
+        let Some(_server) = self.servers.get(&server_id) else {
+            return;
+        };
+
+        let mut sent_metadata = HashSet::new();
+        let mut sent_tips = Vec::new();
+
+        for (object_id, object) in &self.object_manager.objects {
+            if !Self::is_catalogue_metadata(&object.metadata) {
+                continue;
+            }
+
+            sent_metadata.insert(*object_id);
+            for (branch_name, branch) in &object.branches {
+                sent_tips.push((
+                    *object_id,
+                    *branch_name,
+                    branch.tips.iter().copied().collect::<HashSet<_>>(),
+                ));
+            }
+        }
+
+        let Some(server) = self.servers.get_mut(&server_id) else {
+            return;
+        };
+        server.sent_metadata.extend(sent_metadata);
+        for (object_id, branch_name, tips) in sent_tips {
+            server.sent_tips.insert((object_id, branch_name), tips);
+        }
+    }
+
     /// Queue all existing objects to sync to a new server.
     pub(super) fn queue_full_sync_to_server(&mut self, server_id: ServerId) {
         let _span = tracing::debug_span!("queue_full_sync_to_server", %server_id).entered();
