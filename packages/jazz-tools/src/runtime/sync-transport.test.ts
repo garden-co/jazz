@@ -294,7 +294,11 @@ describe("sync-transport", () => {
   it("stream controller attaches on Connected and forwards sync payloads", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       streamResponse([
-        { type: "Connected", client_id: "server-client-1" },
+        {
+          type: "Connected",
+          client_id: "server-client-1",
+          catalogue_state_hash: "catalogue-1",
+        },
         { type: "SyncUpdate", payload: { Ping: {} } },
       ]),
     );
@@ -319,6 +323,7 @@ describe("sync-transport", () => {
     controller.start("http://localhost:3000");
 
     await vi.waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
+    expect(onConnected).toHaveBeenCalledWith("catalogue-1");
     await vi.waitFor(() =>
       expect(onSyncMessage).toHaveBeenCalledWith(JSON.stringify({ Ping: {} })),
     );
@@ -439,7 +444,13 @@ describe("sync-transport", () => {
   });
 
   it("labels callback failures separately from parse failures", async () => {
-    const response = streamResponse([{ type: "Connected", client_id: "server-client-4" }]);
+    const response = streamResponse([
+      {
+        type: "Connected",
+        client_id: "server-client-4",
+        catalogue_state_hash: "catalogue-4",
+      },
+    ]);
     const reader = response.body!.getReader();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -461,7 +472,11 @@ describe("sync-transport", () => {
   it("runtime-bound stream controller maps stream events to runtime hooks", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       streamResponse([
-        { type: "Connected", client_id: "server-client-3" },
+        {
+          type: "Connected",
+          client_id: "server-client-3",
+          catalogue_state_hash: "catalogue-3",
+        },
         { type: "SyncUpdate", payload: { Ping: {} } },
       ]),
     );
@@ -486,6 +501,7 @@ describe("sync-transport", () => {
     controller.start("http://localhost:3000");
 
     await vi.waitFor(() => expect(runtime.addServer).toHaveBeenCalledTimes(1));
+    expect(runtime.addServer).toHaveBeenCalledWith("catalogue-3");
     await vi.waitFor(() =>
       expect(runtime.onSyncMessageReceived).toHaveBeenCalledWith(JSON.stringify({ Ping: {} })),
     );

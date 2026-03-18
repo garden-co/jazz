@@ -182,13 +182,6 @@ impl JazzClient {
             .persist_schema()
             .map_err(|e| JazzError::Storage(e.to_string()))?;
 
-        // Register server with sync manager if connected
-        if server_connection.is_some()
-            && let Err(e) = runtime.add_server(server_id)
-        {
-            tracing::warn!("Failed to register server with sync manager: {}", e);
-        }
-
         // Spawn binary stream listener if connected to server
         let (initial_stream_ready_tx, initial_stream_ready_rx) = if server_connection.is_some() {
             let (tx, rx) = oneshot::channel();
@@ -251,12 +244,19 @@ impl JazzClient {
                                             match serde_json::from_slice::<ServerEvent>(json) {
                                                 Ok(event) => {
                                                     if matches!(
-                                                        event,
+                                                        &event,
                                                         ServerEvent::Connected { .. }
                                                     ) && let Some(tx) =
                                                         initial_stream_ready_tx.take()
                                                     {
-                                                        let _ = tx.send(());
+                                                        let catalogue_state_hash = match &event {
+                                                            ServerEvent::Connected {
+                                                                catalogue_state_hash,
+                                                                ..
+                                                            } => catalogue_state_hash.clone(),
+                                                            _ => None,
+                                                        };
+                                                        let _ = tx.send(catalogue_state_hash);
                                                     }
                                                     if let Err(e) = handle_server_event(
                                                         event,
@@ -302,19 +302,35 @@ impl JazzClient {
             None
         };
 
-        if let Some(initial_stream_ready_rx) = initial_stream_ready_rx {
-            tokio::time::timeout(Duration::from_secs(10), initial_stream_ready_rx)
-                .await
-                .map_err(|_| {
-                    JazzError::Connection(
-                        "timed out waiting for server event stream to connect".to_string(),
-                    )
-                })?
-                .map_err(|_| {
-                    JazzError::Connection(
-                        "server event stream ended before sending Connected".to_string(),
-                    )
-                })?;
+        let initial_server_catalogue_state_hash =
+            if let Some(initial_stream_ready_rx) = initial_stream_ready_rx {
+                tokio::time::timeout(Duration::from_secs(10), initial_stream_ready_rx)
+                    .await
+                    .map_err(|_| {
+                        JazzError::Connection(
+                            "timed out waiting for server event stream to connect".to_string(),
+                        )
+                    })?
+                    .map_err(|_| {
+                        JazzError::Connection(
+                            "server event stream ended before sending Connected".to_string(),
+                        )
+                    })?
+            } else {
+                None
+            };
+
+        // Register server with sync manager if connected.
+        //
+        // The initial Connected event carries the server's catalogue digest, so
+        // we wait for it before deciding whether catalogue replay can be skipped.
+        if server_connection.is_some()
+            && let Err(e) = runtime.add_server_with_catalogue_state_hash(
+                server_id,
+                initial_server_catalogue_state_hash.as_deref(),
+            )
+        {
+            tracing::warn!("Failed to register server with sync manager: {}", e);
         }
 
         Ok(Self {
@@ -765,6 +781,7 @@ fn handle_server_event(
             connection_id,
             client_id,
             next_sync_seq,
+            ..
         } => {
             tracing::info!(
                 "Stream connected with id: {:?}, client_id: {}",

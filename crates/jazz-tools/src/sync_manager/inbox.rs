@@ -500,6 +500,10 @@ impl SyncManager {
         branch_name: BranchName,
         commits: Vec<Commit>,
     ) -> HashSet<CommitId> {
+        if let Some(meta) = metadata.as_ref() {
+            self.track_catalogue_object(object_id, &meta.metadata);
+        }
+
         // If we don't have this object yet and metadata is provided, create it
         if self.object_manager.get(object_id).is_none() {
             if let Some(meta) = metadata {
