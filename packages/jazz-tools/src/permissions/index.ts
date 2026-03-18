@@ -299,6 +299,11 @@ class PermissionRelationBuilder implements PermissionRelation {
       );
     }
     const currentFilter = currentFilters[0];
+    if (!currentFilter) {
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
+    }
     const stepFilters = stepState.filters.filter((filter) => filter !== currentFilter);
     const stepJoin = stepState.joins[0];
 
@@ -1015,7 +1020,7 @@ function andRelPredicates(predicates: RelPredicateExpr[]): RelPredicateExpr {
     return "True";
   }
   if (predicates.length === 1) {
-    return predicates[0];
+    return predicates[0]!;
   }
   return { And: predicates };
 }
@@ -1068,7 +1073,7 @@ function applyRelationTail(options: {
   let hasHopJoin = false;
 
   for (let i = 0; i < options.joins.length; i += 1) {
-    const join = options.joins[i];
+    const join = options.joins[i]!;
     const rightScope = options.joinAlias(join, i);
     relation = {
       Join: {
@@ -1629,7 +1634,7 @@ function andExpr(exprs: PolicyExpr[]): PolicyExpr {
     return { type: "True" };
   }
   if (exprs.length === 1) {
-    return exprs[0];
+    return exprs[0]!;
   }
   return { type: "And", exprs };
 }
@@ -1673,7 +1678,7 @@ function compileRules(
     if (!compiled[rule.table]) {
       compiled[rule.table] = emptyTablePolicies();
     }
-    const tablePolicies = compiled[rule.table];
+    const tablePolicies = compiled[rule.table]!;
     switch (rule.action) {
       case "read":
         tablePolicies.select = mergeOperationPolicy(tablePolicies.select, {

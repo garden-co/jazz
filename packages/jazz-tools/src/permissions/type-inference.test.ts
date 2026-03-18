@@ -174,7 +174,7 @@ describe("permissions type inference", () => {
     definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
       expectTypeOf(session.user_id.path).toEqualTypeOf<string[]>();
       expectTypeOf(session.userId.path).toEqualTypeOf<string[]>();
-      expectTypeOf(session["claims.role"].path).toEqualTypeOf<string[]>();
+      expectTypeOf(session["claims.role"]!.path).toEqualTypeOf<string[]>();
 
       const reachableTeams = policy.teams.gather({
         start: { kind: "individual", identity_key: session.userId },

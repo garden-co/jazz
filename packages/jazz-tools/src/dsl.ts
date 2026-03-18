@@ -475,12 +475,10 @@ export function getCollectedSchema(): Schema {
 }
 
 export function getCollectedMigration(): Lens | null {
-  if (collectedMigrations.length === 0) {
+  const migration = collectedMigrations.shift();
+  if (!migration) {
     return null;
   }
-
-  const migration = collectedMigrations[0];
-  collectedMigrations = [];
 
   const operations: LensOp[] = migration.operations.map(({ column, op }) => {
     switch (op._type) {

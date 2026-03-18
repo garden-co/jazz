@@ -138,6 +138,7 @@ function transformRowValues(
 
   for (let i = 0; i < baseColumns.length; i++) {
     const col = baseColumns[i];
+    if (!col) continue;
     const value = values[i];
     if (value !== undefined) {
       obj[col.name] = unwrapValue(value, col.columnType);
@@ -148,6 +149,7 @@ function transformRowValues(
     const value = values[baseColumns.length + i];
     if (value === undefined) continue;
     const plan = includePlans[i];
+    if (!plan) continue;
     obj[plan.relation.name] = transformIncludedValue(value, plan, schema);
   }
 
@@ -240,5 +242,9 @@ export function transformRow<T>(
   includes: IncludeSpec = {},
   projection?: readonly string[],
 ): T {
-  return transformRows<T>([row], schema, tableName, includes, projection)[0];
+  const transformed = transformRows<T>([row], schema, tableName, includes, projection)[0];
+  if (transformed === undefined) {
+    throw new Error(`Failed to transform row for table "${tableName}"`);
+  }
+  return transformed;
 }

@@ -98,8 +98,9 @@ describe("SubscriptionsOrchestrator integration coverage", () => {
       );
 
       const latest = observedSnapshots[observedSnapshots.length - 1];
-      expect(latest.some((row) => row.id === inserted.id)).toBe(true);
-      expect(latest.some((row) => row.title === "first")).toBe(true);
+      expect(latest).toBeDefined();
+      expect(latest!.some((row) => row.id === inserted.id)).toBe(true);
+      expect(latest!.some((row) => row.title === "first")).toBe(true);
       expect(entry.status).toBe("fulfilled");
 
       unsubscribe();
