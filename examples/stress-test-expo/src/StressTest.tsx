@@ -95,7 +95,8 @@ export function StressTest() {
   const db = useDb();
   const session = useSession();
   const sessionUserId = session?.user_id ?? null;
-  const todos = useAll(app.todos) ?? [];
+  const [subscribed, setSubscribed] = useState(false);
+  const todos = useAll(subscribed ? app.todos : undefined) ?? [];
 
   const [count, setCount] = useState("15000");
   const [isRunning, setIsRunning] = useState(false);
@@ -264,6 +265,17 @@ export function StressTest() {
         </Pressable>
       </View>
 
+      {/* Subscription toggle */}
+      <Pressable
+        style={[
+          styles.button,
+          subscribed ? styles.subscribeActiveButton : styles.subscribeInactiveButton,
+        ]}
+        onPress={() => setSubscribed((v) => !v)}
+      >
+        <Text style={styles.buttonText}>Subscription: {subscribed ? "ON" : "OFF"}</Text>
+      </Pressable>
+
       {isRunning && (
         <View style={styles.progressSection}>
           <View style={styles.progressRow}>
@@ -359,6 +371,12 @@ const styles = StyleSheet.create({
   abortButton: {
     backgroundColor: "#d97706",
     paddingHorizontal: 12,
+  },
+  subscribeActiveButton: {
+    backgroundColor: "#2563eb",
+  },
+  subscribeInactiveButton: {
+    backgroundColor: "#6b7280",
   },
   buttonText: {
     color: "#fff",
