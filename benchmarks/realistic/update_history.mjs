@@ -216,6 +216,9 @@ function criterionBenchmarkId(benchmark) {
   if (groupId === "realistic_phase1/hotspot_history") {
     return "native-criterion:r7_hotspot_history";
   }
+  if (groupId === "realistic_phase1/subscribed_write_path") {
+    return "native-criterion:r9_subscribed_write_path";
+  }
   return null;
 }
 
