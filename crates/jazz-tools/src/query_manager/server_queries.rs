@@ -15,6 +15,12 @@ use super::types::{
     ComposedBranchName, LoadedRow, RowDescriptor, Schema, TableName, TableSchema, Value,
 };
 
+enum WriteSchemaResolution {
+    Resolved(Box<TableSchema>),
+    PendingSchema,
+    Unresolved,
+}
+
 impl QueryManager {
     fn should_sync_policy_context_rows(&self, client_id: ClientId) -> bool {
         self.sync_manager
@@ -427,57 +433,78 @@ impl QueryManager {
         }
     }
 
+    fn schema_for_write_hash(&self, schema_hash: super::types::SchemaHash) -> Option<&Schema> {
+        if self.schema_context.is_initialized() && schema_hash == self.schema_context.current_hash {
+            return Some(self.schema.as_ref());
+        }
+
+        self.schema_context
+            .get_schema(&schema_hash)
+            .or_else(|| self.known_schemas.get(&schema_hash))
+    }
+
     fn resolve_write_table_schema(
         &mut self,
         table_name: TableName,
         branch_name: BranchName,
-    ) -> Option<TableSchema> {
-        if let Some(schema_hash) = self
+    ) -> WriteSchemaResolution {
+        let parsed_branch = ComposedBranchName::parse(&branch_name);
+        let schema_hash = self
             .branch_schema_map
             .get(branch_name.as_str())
             .copied()
             .or_else(|| {
-                ComposedBranchName::parse(&branch_name)
+                parsed_branch
+                    .as_ref()
                     .and_then(|composed| self.find_schema_by_short_hash(&composed.schema_hash))
-            })
-        {
+            });
+
+        if let Some(schema_hash) = schema_hash {
             self.branch_schema_map
                 .insert(branch_name.as_str().to_string(), schema_hash);
 
-            if schema_hash == self.schema_context.current_hash
-                && let Some(schema) = self.schema.get(&table_name)
-            {
-                return Some(schema.clone());
-            }
+            let Some(schema) = self.schema_for_write_hash(schema_hash) else {
+                return WriteSchemaResolution::PendingSchema;
+            };
 
-            if let Some(schema) = self.schema_context.get_schema(&schema_hash)
-                && let Some(table_schema) = schema.get(&table_name)
-            {
-                return Some(table_schema.clone());
-            }
-
-            if let Some(schema) = self.known_schemas.get(&schema_hash)
-                && let Some(table_schema) = schema.get(&table_name)
-            {
-                return Some(table_schema.clone());
-            }
+            return schema
+                .get(&table_name)
+                .cloned()
+                .map(Box::new)
+                .map(WriteSchemaResolution::Resolved)
+                .unwrap_or(WriteSchemaResolution::Unresolved);
         }
 
-        // In local/client mode there is no known_schemas context, so self.schema is authoritative.
-        if self.known_schemas.is_empty() {
-            return self.schema.get(&table_name).cloned();
-        }
-
-        // In server mode, only trust self.schema when the write targets the currently
-        // active schema branch. This avoids evaluating permissions against a stale
-        // schema from a different branch.
+        // When the write targets the current initialized branch, self.schema is authoritative.
         if self.schema_context.is_initialized()
             && branch_name.as_str() == self.schema_context.branch_name().as_str()
         {
-            return self.schema.get(&table_name).cloned();
+            return self
+                .schema
+                .get(&table_name)
+                .cloned()
+                .map(Box::new)
+                .map(WriteSchemaResolution::Resolved)
+                .unwrap_or(WriteSchemaResolution::Unresolved);
         }
 
-        None
+        // In pure local/client mode (no server-known schemas and a non-empty current schema),
+        // self.schema is still authoritative.
+        if self.known_schemas.is_empty() && !self.schema.is_empty() {
+            return self
+                .schema
+                .get(&table_name)
+                .cloned()
+                .map(Box::new)
+                .map(WriteSchemaResolution::Resolved)
+                .unwrap_or(WriteSchemaResolution::Unresolved);
+        }
+
+        if parsed_branch.is_some() {
+            return WriteSchemaResolution::PendingSchema;
+        }
+
+        WriteSchemaResolution::Unresolved
     }
 
     /// Evaluate a write permission check.
@@ -518,8 +545,19 @@ impl QueryManager {
 
         // Look up table schema for the write branch.
         let table_schema = match self.resolve_write_table_schema(table_name, branch_name) {
-            Some(s) => s,
-            None => {
+            WriteSchemaResolution::Resolved(schema) => *schema,
+            WriteSchemaResolution::PendingSchema => {
+                tracing::debug!(
+                    operation = ?check.operation,
+                    table = %table_name,
+                    branch = %branch_name,
+                    "deferring write permission check until schema becomes available"
+                );
+                self.sync_manager
+                    .requeue_pending_permission_checks(vec![check]);
+                return;
+            }
+            WriteSchemaResolution::Unresolved => {
                 // Fail closed: if we cannot resolve the table schema for this write,
                 // we cannot safely evaluate permissions.
                 tracing::warn!(
