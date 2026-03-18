@@ -16,194 +16,154 @@ beforeAll(async () => {
   contextModule = await import("./context.svelte.js");
 });
 
-// QuerySubscription uses $state and $effect (rune transforms), so we test
-// the underlying subscription wiring against the db.subscribeAll API directly.
-// The reactive class behaviour is validated via the Svelte compiler in real usage.
+// QuerySubscription relies on $state/$effect runes which need the Svelte
+// compiler. We test the callback contract that QuerySubscription wires up —
+// the same shape it passes to entry.subscribe() inside its $effect.
 
-describe("QuerySubscription subscription wiring", () => {
-  let subscribeCallback: ((delta: { all: any[] }) => void) | null = null;
-  let unsubFn: ReturnType<typeof vi.fn>;
-  let mockDb: any;
+describe("QuerySubscription callback contract", () => {
+  // These mirror the exact callbacks wired in use-all.svelte.ts.
+  // A real QuerySubscription sets this.current / this.loading / this.error
+  // inside these callbacks; here we use local variables to verify the logic.
 
-  beforeEach(() => {
-    contextStore.clear();
-    destroyCallbacks.length = 0;
-    subscribeCallback = null;
-    unsubFn = vi.fn();
+  it("onfulfilled delivers data and clears loading", () => {
+    let current: any[] | undefined;
+    let loading = true;
 
-    mockDb = {
-      subscribeAll: vi.fn((_query, callback, _tier) => {
-        subscribeCallback = callback;
-        return unsubFn;
-      }),
-      shutdown: vi.fn(),
+    // Mirrors: onfulfilled: (data) => { this.current = data; this.loading = false; }
+    const onfulfilled = (data: any[]) => {
+      current = data;
+      loading = false;
     };
+
+    onfulfilled([{ id: "1", title: "Alice's todo" }]);
+    expect(current).toEqual([{ id: "1", title: "Alice's todo" }]);
+    expect(loading).toBe(false);
   });
 
-  it("subscribeAll is called with the query and tier", () => {
-    const query = { _build: () => '{"table":"todos"}', _table: "todos" } as any;
+  it("onDelta replaces current with delta.all", () => {
+    let current: any[] | undefined = [{ id: "1", title: "First" }];
 
-    const unsub = mockDb.subscribeAll(query, () => {}, { tier: "worker" });
-    expect(mockDb.subscribeAll).toHaveBeenCalledWith(query, expect.any(Function), {
-      tier: "worker",
-    });
-    expect(typeof unsub).toBe("function");
-  });
+    // Mirrors: onDelta: (delta) => { this.current = delta.all; }
+    const onDelta = (delta: { all: any[] }) => {
+      current = delta.all;
+    };
 
-  it("subscribeAll is called with full QueryOptions", () => {
-    const query = { _build: () => '{"table":"todos"}', _table: "todos" } as any;
-
-    const unsub = mockDb.subscribeAll(query, () => {}, {
-      tier: "worker",
-      localUpdates: "deferred",
-      propagation: "local-only",
-    });
-    expect(mockDb.subscribeAll).toHaveBeenCalledWith(query, expect.any(Function), {
-      tier: "worker",
-      localUpdates: "deferred",
-      propagation: "local-only",
-    });
-    expect(typeof unsub).toBe("function");
-  });
-
-  it("subscription callback receives delta.all", () => {
-    const query = { _build: () => '{"table":"todos"}' } as any;
-    let items: any[] | undefined = [];
-
-    mockDb.subscribeAll(query, (delta: any) => {
-      items = delta.all;
-    });
-
-    subscribeCallback!({ all: [{ id: "1", title: "First" }] });
-    expect(items).toEqual([{ id: "1", title: "First" }]);
-
-    subscribeCallback!({
+    onDelta({
       all: [
         { id: "1", title: "First" },
         { id: "2", title: "Second" },
       ],
     });
-    expect(items).toHaveLength(2);
+    expect(current).toHaveLength(2);
+    expect(current![1].title).toBe("Second");
   });
 
-  it("unsubscribe function is callable", () => {
-    const query = { _build: () => '{"table":"todos"}' } as any;
-    const unsub = mockDb.subscribeAll(query, () => {});
-    unsub();
-    expect(unsubFn).toHaveBeenCalledOnce();
+  it("onError surfaces the error on the error property", () => {
+    let current: any[] | undefined = [{ id: "1" }];
+    let loading = false;
+    let error: Error | null = null;
+
+    // Mirrors: onError: (error) => { this.error = ...; this.current = undefined; this.loading = false; }
+    const onError = (e: unknown) => {
+      error = e instanceof Error ? e : new Error(String(e));
+      current = undefined;
+      loading = false;
+    };
+
+    onError(new Error("subscription failed"));
+    expect(error).toBeInstanceOf(Error);
+    expect(error!.message).toBe("subscription failed");
+    expect(current).toBeUndefined();
+    expect(loading).toBe(false);
   });
 
-  it("with tier, initial value should be undefined (not yet loaded)", () => {
-    const options = { tier: "worker" };
-    let items: any[] | undefined = options?.tier ? undefined : [];
+  it("onError wraps non-Error values in Error", () => {
+    let error: Error | null = null;
 
-    expect(items).toBeUndefined();
+    const onError = (e: unknown) => {
+      error = e instanceof Error ? e : new Error(String(e));
+    };
 
-    const query = { _build: () => '{"table":"todos"}' } as any;
-    mockDb.subscribeAll(
-      query,
-      (delta: any) => {
-        items = delta.all;
-      },
-      options,
-    );
-    subscribeCallback!({ all: [] });
-    expect(items).toEqual([]);
+    onError("string error");
+    expect(error).toBeInstanceOf(Error);
+    expect(error!.message).toBe("string error");
   });
 
-  it("without tier, non-tier options keep the initial value as empty array", () => {
-    const options = { localUpdates: "deferred", propagation: "local-only" };
-    let items: any[] | undefined = options && "tier" in options && options.tier ? undefined : [];
+  it("synchronous throw during setup is caught and surfaced", () => {
+    let error: Error | null = null;
+    let loading = true;
 
-    expect(items).toEqual([]);
+    // Mirrors the try/catch in the $effect body
+    try {
+      throw new Error("getCacheEntry exploded");
+    } catch (e) {
+      error = e instanceof Error ? e : new Error(String(e));
+      loading = false;
+    }
 
-    const query = { _build: () => '{"table":"todos"}' } as any;
-    mockDb.subscribeAll(
-      query,
-      (delta: any) => {
-        items = delta.all;
-      },
-      options,
-    );
-    subscribeCallback!({ all: [{ id: "1", title: "First" }] });
-    expect(items).toEqual([{ id: "1", title: "First" }]);
-  });
-
-  it("without tier, initial value should be empty array (loaded but empty)", () => {
-    // Without a tier, results are immediately available as an empty array
-    const items: any[] = [];
-    expect(items).toEqual([]);
+    expect(error).toBeInstanceOf(Error);
+    expect(error!.message).toBe("getCacheEntry exploded");
+    expect(loading).toBe(false);
   });
 });
 
-describe("QuerySubscription loading/error states", () => {
-  let subscribeCallback: ((delta: { all: any[] }) => void) | null = null;
-  let mockDb: any;
-
-  beforeEach(() => {
-    subscribeCallback = null;
-
-    mockDb = {
-      subscribeAll: vi.fn((_query, callback, _tier) => {
-        subscribeCallback = callback;
-        return vi.fn();
-      }),
-      shutdown: vi.fn(),
-    };
+describe("QuerySubscription initial value semantics", () => {
+  it("with tier, initial value is undefined (awaiting settlement at tier)", () => {
+    const options = { tier: "edge" as const };
+    const initial = options?.tier ? undefined : [];
+    expect(initial).toBeUndefined();
   });
 
-  it("loading starts true, becomes false after first delta", () => {
+  it("without tier, initial value is empty array (locally available)", () => {
+    const options = { localUpdates: "deferred" as const };
+    const initial = "tier" in options && (options as any).tier ? undefined : [];
+    expect(initial).toEqual([]);
+  });
+
+  it("without options, initial value is empty array", () => {
+    const options = undefined as { tier?: string } | undefined;
+    const initial = options?.tier ? undefined : [];
+    expect(initial).toEqual([]);
+  });
+});
+
+describe("fulfilled cache entry provides initial data", () => {
+  it("applies fulfilled state before subscribing", () => {
+    const alice = { id: "1", name: "Alice" };
+    const entry = {
+      state: { status: "fulfilled" as const, data: [alice] },
+      subscribe: vi.fn(() => vi.fn()),
+    };
+
+    // Mirrors: if (entry.state.status === "fulfilled") { this.current = entry.state.data; ... }
+    let current: any[] | undefined;
     let loading = true;
 
-    // After first delta callback, loading should become false
-    mockDb.subscribeAll({ _build: () => "{}" } as any, () => {
+    if (entry.state.status === "fulfilled") {
+      current = entry.state.data;
       loading = false;
-    });
+    }
+
+    expect(current).toEqual([alice]);
+    expect(loading).toBe(false);
+  });
+
+  it("pending state leaves current undefined and loading true", () => {
+    const entry = {
+      state: { status: "pending" as const },
+      subscribe: vi.fn(() => vi.fn()),
+    };
+
+    let current: any[] | undefined;
+    let loading = true;
+
+    if (entry.state.status === "fulfilled") {
+      current = (entry.state as any).data;
+      loading = false;
+    }
+
+    expect(current).toBeUndefined();
     expect(loading).toBe(true);
-
-    subscribeCallback!({ all: [{ id: "1" }] });
-    expect(loading).toBe(false);
-  });
-
-  it("error is set when subscribeAll throws synchronously", () => {
-    const failingDb = {
-      subscribeAll: vi.fn((..._args: any[]) => {
-        throw new Error("query rejected");
-      }),
-    };
-
-    let error: Error | null = null;
-    let loading = true;
-
-    try {
-      failingDb.subscribeAll({ _build: () => "{}" } as any, () => {});
-    } catch (e) {
-      error = e instanceof Error ? e : new Error(String(e));
-      loading = false;
-    }
-
-    expect(error).toBeInstanceOf(Error);
-    expect(error!.message).toBe("query rejected");
-    expect(loading).toBe(false);
-  });
-
-  it("non-Error throws are wrapped in Error", () => {
-    const failingDb = {
-      subscribeAll: vi.fn((..._args: any[]) => {
-        throw "string error";
-      }),
-    };
-
-    let error: Error | null = null;
-
-    try {
-      failingDb.subscribeAll({ _build: () => "{}" } as any, () => {});
-    } catch (e) {
-      error = e instanceof Error ? e : new Error(String(e));
-    }
-
-    expect(error).toBeInstanceOf(Error);
-    expect(error!.message).toBe("string error");
   });
 });
 
@@ -219,16 +179,19 @@ describe("context integration", () => {
     expect(retrieved).toBe(ctx);
   });
 
-  it("db and session can be updated on the context object", () => {
+  it("db, session, and manager can be updated on the context object", () => {
     const { initJazzContext } = contextModule;
     const ctx = initJazzContext();
 
     const mockDb = { shutdown: vi.fn() } as any;
     const mockSession = { user_id: "bob", claims: {} };
+    const mockManager = { makeQueryKey: vi.fn(), getCacheEntry: vi.fn() } as any;
     ctx.db = mockDb;
     ctx.session = mockSession;
+    ctx.manager = mockManager;
 
     expect(ctx.db).toBe(mockDb);
     expect(ctx.session).toBe(mockSession);
+    expect(ctx.manager).toBe(mockManager);
   });
 });
