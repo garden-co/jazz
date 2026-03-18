@@ -74,3 +74,4 @@ Remaining work items and future designs live in [`specs/todo/`](todo/). Notable:
 - **[Storage: Multi-tab Leader Election](todo/a_mvp/multi_tab_leader_election.md)** — Browser tab ownership for OPFS-backed worker storage
 - **[Storage: Browser E2E Suite](todo/a_mvp/browser_e2e_test_suite.md)** — End-to-end verification for browser runtime + worker + sync
 - **[TypeScript Client Codegen: Relations Demo](todo/a_mvp/codegen_relations_demo.md)** — Example app coverage for generated relation APIs
+- **[Policy Query-Time Constant Folding](todo/c_later/policy_query_time_constant_folding.md)** — Track broader follow-up work for evaluating row-independent policy checks once per query instead of once per row
