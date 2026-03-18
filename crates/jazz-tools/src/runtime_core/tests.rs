@@ -1867,6 +1867,55 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
     );
 }
 
+#[test]
+fn test_matching_catalogue_hash_skips_catalogue_replay_on_add_server() {
+    let schema = test_schema();
+    let app_id = AppId::from_name("test-app");
+    let sync_manager = SyncManager::new();
+    let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+    let mut core = RuntimeCore::new(
+        schema_manager,
+        MemoryStorage::new(),
+        NoopScheduler,
+        VecSyncSender::new(),
+    );
+
+    let schema_obj_id = core.persist_schema();
+    let row_values = vec![
+        Value::Uuid(ObjectId::new()),
+        Value::Text("Alice".to_string()),
+    ];
+    let (row_object_id, _) = core.insert("users", row_values, None).unwrap();
+
+    let catalogue_state_hash = core.schema_manager().catalogue_state_hash();
+
+    let server_id = ServerId::new();
+    core.add_server_with_catalogue_state_hash(server_id, Some(&catalogue_state_hash));
+    core.batched_tick();
+
+    let messages = core.sync_sender().take();
+    let catalogue_msg = messages.iter().find(|m| {
+        matches!(
+            &m.payload,
+            SyncPayload::ObjectUpdated { object_id, .. } if *object_id == schema_obj_id
+        )
+    });
+    let row_msg = messages.iter().find(|m| {
+        matches!(
+            &m.payload,
+            SyncPayload::ObjectUpdated { object_id, .. } if *object_id == row_object_id
+        )
+    });
+
+    assert!(
+        catalogue_msg.is_none(),
+        "Catalogue replay should be skipped when hashes already match"
+    );
+    assert!(
+        row_msg.is_some(),
+        "Regular row objects should still be sent during the full sync walk"
+    );
+}
 // =========================================================================
 // Foreign Key — No Write-Time Validation
 // =========================================================================

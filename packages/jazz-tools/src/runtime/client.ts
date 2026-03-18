@@ -94,7 +94,7 @@ export interface Runtime {
   unsubscribe(handle: number): void;
   onSyncMessageReceived(payload: Uint8Array | string): void;
   onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
-  addServer(): void;
+  addServer(serverCatalogueStateHash?: string | null): void;
   removeServer(): void;
   addClient(): string;
   getSchema(): any;

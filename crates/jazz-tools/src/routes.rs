@@ -192,6 +192,7 @@ async fn events_handler(
 
     // Capture client_id string for stream
     let client_id_str = client_id.to_string();
+    let catalogue_state_hash = state.runtime.catalogue_state_hash().ok();
 
     // Create stream that emits length-prefixed binary frames
     let stream = async_stream::stream! {
@@ -200,6 +201,7 @@ async fn events_handler(
             connection_id: ConnectionId(connection_id),
             client_id: client_id_str.clone(),
             next_sync_seq: None,
+            catalogue_state_hash: catalogue_state_hash.clone(),
         };
         yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected));
 

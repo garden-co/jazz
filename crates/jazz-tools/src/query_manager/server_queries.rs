@@ -4,6 +4,7 @@ use std::sync::Arc;
 use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
+use crate::schema_manager::LensTransformer;
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, ClientRole, PendingPermissionCheck, QueryId, SyncPayload};
 
@@ -16,6 +17,145 @@ use super::types::{
 };
 
 impl QueryManager {
+    pub(super) fn build_server_subscription_context(
+        &self,
+        query: &crate::query_manager::query::Query,
+    ) -> Option<(Arc<Schema>, crate::schema_manager::SchemaContext)> {
+        if !self.schema.is_empty() {
+            return Some((self.schema.clone(), self.schema_context.clone()));
+        }
+
+        let composed = query
+            .branches
+            .first()
+            .and_then(|b| ComposedBranchName::parse(&BranchName::new(b)))?;
+        let full_hash = self.find_schema_by_short_hash(&composed.schema_hash)?;
+        let target_schema = self.known_schemas.get(&full_hash)?.clone();
+
+        let mut schema_context = crate::schema_manager::SchemaContext::new(
+            target_schema.clone(),
+            &composed.env,
+            &composed.user_branch,
+        );
+
+        for lens in self.schema_context.lenses.values() {
+            schema_context.register_lens(lens.clone());
+        }
+
+        for (hash, schema) in self.known_schemas.iter() {
+            if *hash != full_hash {
+                schema_context.add_pending_schema(schema.clone());
+            }
+        }
+
+        schema_context.try_activate_pending();
+
+        Some((Arc::new(target_schema), schema_context))
+    }
+
+    pub(super) fn branch_schema_map_for_context(
+        schema_context: &crate::schema_manager::SchemaContext,
+    ) -> std::collections::HashMap<String, crate::query_manager::types::SchemaHash> {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            schema_context.branch_name().as_str().to_string(),
+            schema_context.current_hash,
+        );
+
+        for hash in schema_context.live_schemas.keys() {
+            let branch =
+                ComposedBranchName::new(&schema_context.env, *hash, &schema_context.user_branch)
+                    .to_branch_name();
+            map.insert(branch.as_str().to_string(), *hash);
+        }
+
+        map
+    }
+
+    pub(super) fn resolved_server_query_branches(
+        query: &crate::query_manager::query::Query,
+        schema_context: &crate::schema_manager::SchemaContext,
+    ) -> Vec<String> {
+        let all_branches = || {
+            schema_context
+                .all_branch_names()
+                .into_iter()
+                .map(|b| b.as_str().to_string())
+                .collect()
+        };
+
+        if query.branches.is_empty() {
+            return all_branches();
+        }
+
+        let current_branch = schema_context.branch_name().as_str().to_string();
+        if query.branches.len() == 1 && query.branches[0] == current_branch {
+            return all_branches();
+        }
+
+        query.branches.clone()
+    }
+
+    pub(super) fn query_for_server_compile(
+        query: &crate::query_manager::query::Query,
+        schema_context: &crate::schema_manager::SchemaContext,
+    ) -> crate::query_manager::query::Query {
+        let mut normalized = query.clone();
+        let current_branch = schema_context.branch_name().as_str().to_string();
+        if normalized.branches.len() == 1 && normalized.branches[0] == current_branch {
+            normalized.branches.clear();
+        }
+        normalized
+    }
+
+    fn load_row_with_schema_transform(
+        id: ObjectId,
+        content: Vec<u8>,
+        commit_id: CommitId,
+        branch_name: BranchName,
+        table: &str,
+        branch_schema_map: &std::collections::HashMap<
+            String,
+            crate::query_manager::types::SchemaHash,
+        >,
+        schema_context: &crate::schema_manager::SchemaContext,
+    ) -> Option<LoadedRow> {
+        let source_hash = branch_schema_map.get(branch_name.as_str()).copied();
+
+        if let Some(source_hash) = source_hash
+            && source_hash != schema_context.current_hash
+        {
+            let transformer = LensTransformer::new(schema_context, table);
+            match transformer.transform(&content, commit_id, source_hash) {
+                Ok(result) => {
+                    return Some(LoadedRow::new(
+                        result.data,
+                        commit_id,
+                        [(id, branch_name)].into_iter().collect(),
+                    ));
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        row_id = %id,
+                        table,
+                        source_branch = %branch_name,
+                        source_schema = %source_hash.short(),
+                        target_schema = %schema_context.current_hash.short(),
+                        error = %err,
+                        "lens transform failed; dropping row from server query result"
+                    );
+                    return None;
+                }
+            }
+        }
+
+        Some(LoadedRow::new(
+            content,
+            commit_id,
+            [(id, branch_name)].into_iter().collect(),
+        ))
+    }
+
     fn should_sync_policy_context_rows(&self, client_id: ClientId) -> bool {
         self.sync_manager
             .get_client(client_id)
@@ -88,30 +228,11 @@ impl QueryManager {
         let mut deferred = Vec::new();
 
         for sub in pending {
-            // Resolve schema: use self.schema if available, otherwise look up from known_schemas (server mode)
-            let schema_for_compile: Arc<Schema> = if !self.schema.is_empty() {
-                self.schema.clone()
-            } else {
-                // Server mode: resolve schema from known_schemas via branch name (short hash prefix match)
-                let schema = sub
-                    .query
-                    .branches
-                    .first()
-                    .and_then(|b| ComposedBranchName::parse(&BranchName::new(b)))
-                    .and_then(|composed| {
-                        // Use prefix match since branch only contains short hash
-                        self.find_schema_by_short_hash(&composed.schema_hash)
-                    })
-                    .and_then(|full_hash| self.known_schemas.get(&full_hash))
-                    .cloned();
-                match schema {
-                    Some(s) => Arc::new(s),
-                    None => {
-                        // Schema not available yet — re-queue for next process() call
-                        deferred.push(sub);
-                        continue;
-                    }
-                }
+            let Some((schema_for_compile, subscription_context)) =
+                self.build_server_subscription_context(&sub.query)
+            else {
+                deferred.push(sub);
+                continue;
             };
 
             // Defence in depth: if the subscription has no session (client omitted
@@ -126,11 +247,13 @@ impl QueryManager {
             });
 
             // Build QueryGraph with client's session for policy filtering (schema-aware)
+            let query_for_compile =
+                Self::query_for_server_compile(&sub.query, &subscription_context);
             let graph = Self::compile_graph(
-                &sub.query,
+                &query_for_compile,
                 &schema_for_compile,
                 session_for_policy.clone(),
-                &self.schema_context,
+                &subscription_context,
             );
 
             let Ok(mut graph) = graph else {
@@ -152,23 +275,15 @@ impl QueryManager {
             };
 
             let sync_policy_context_rows = self.should_sync_policy_context_rows(sub.client_id);
+            let branch_schema_map = Self::branch_schema_map_for_context(&subscription_context);
 
             // Initial settle to populate the graph
             let om = &mut self.sync_manager.object_manager;
             let storage_ref: &dyn Storage = storage;
 
-            // Resolve branches: use explicit branches or fall back to schema context
-            let branches: Vec<String> = if sub.query.branches.is_empty() {
-                self.schema_context
-                    .all_branch_names()
-                    .into_iter()
-                    .map(|b| b.as_str().to_string())
-                    .collect()
-            } else {
-                sub.query.branches.clone()
-            };
-
-            // Simple row loader for server-side graphs (no schema transform needed)
+            let branches =
+                Self::resolved_server_query_branches(&query_for_compile, &subscription_context);
+            let table = sub.query.table.as_str().to_string();
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
                 let obj = om.get_or_load(id, storage_ref, &branches)?;
                 let mut best: Option<(u64, Vec<u8>, CommitId, BranchName)> = None;
@@ -200,14 +315,16 @@ impl QueryManager {
                         }
                     }
                 }
-                best.filter(|(_, content, _, _)| !content.is_empty()).map(
-                    |(_, content, commit_id, branch_name)| {
-                        LoadedRow::new(
-                            content,
-                            commit_id,
-                            [(id, branch_name)].into_iter().collect(),
-                        )
-                    },
+                let (_, content, commit_id, branch_name) =
+                    best.filter(|(_, content, _, _)| !content.is_empty())?;
+                Self::load_row_with_schema_transform(
+                    id,
+                    content,
+                    commit_id,
+                    branch_name,
+                    &table,
+                    &branch_schema_map,
+                    &subscription_context,
                 )
             };
 
@@ -253,6 +370,7 @@ impl QueryManager {
                 ServerQuerySubscription {
                     query: sub.query,
                     graph,
+                    schema_context: subscription_context,
                     session: session_for_policy,
                     branches,
                     last_scope: scope,
@@ -328,6 +446,8 @@ impl QueryManager {
 
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
             let branches = &sub.branches;
+            let table = sub.query.table.as_str().to_string();
+            let branch_schema_map = Self::branch_schema_map_for_context(&sub.schema_context);
 
             // Row loader for this subscription
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
@@ -361,14 +481,16 @@ impl QueryManager {
                         }
                     }
                 }
-                best.filter(|(_, content, _, _)| !content.is_empty()).map(
-                    |(_, content, commit_id, branch_name)| {
-                        LoadedRow::new(
-                            content,
-                            commit_id,
-                            [(id, branch_name)].into_iter().collect(),
-                        )
-                    },
+                let (_, content, commit_id, branch_name) =
+                    best.filter(|(_, content, _, _)| !content.is_empty())?;
+                Self::load_row_with_schema_transform(
+                    id,
+                    content,
+                    commit_id,
+                    branch_name,
+                    &table,
+                    &branch_schema_map,
+                    &sub.schema_context,
                 )
             };
 
