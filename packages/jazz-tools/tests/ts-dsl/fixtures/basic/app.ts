@@ -234,10 +234,10 @@ export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = fal
 export type UserSelectableColumn = keyof User | PermissionIntrospectionColumn | "*";
 export type UserOrderableColumn = keyof User | PermissionIntrospectionColumn;
 
-export type UserSelected<S extends UserSelectableColumn = keyof User> = "*" extends S
+export type UserSelected<S extends UserSelectableColumn = keyof User> = ("*" extends S
   ? User
-  : Pick<User, Extract<S | "id", keyof User>> &
-      Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+  : Pick<User, Extract<S | "id", keyof User>>) &
+  Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type UserSelectedWithIncludes<
   I extends UserInclude = {},
@@ -248,10 +248,10 @@ export type UserSelectedWithIncludes<
 export type ProjectSelectableColumn = keyof Project | PermissionIntrospectionColumn | "*";
 export type ProjectOrderableColumn = keyof Project | PermissionIntrospectionColumn;
 
-export type ProjectSelected<S extends ProjectSelectableColumn = keyof Project> = "*" extends S
+export type ProjectSelected<S extends ProjectSelectableColumn = keyof Project> = ("*" extends S
   ? Project
-  : Pick<Project, Extract<S | "id", keyof Project>> &
-      Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+  : Pick<Project, Extract<S | "id", keyof Project>>) &
+  Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type ProjectSelectedWithIncludes<
   I extends ProjectInclude = {},
@@ -262,10 +262,10 @@ export type ProjectSelectedWithIncludes<
 export type TodoSelectableColumn = keyof Todo | PermissionIntrospectionColumn | "*";
 export type TodoOrderableColumn = keyof Todo | PermissionIntrospectionColumn;
 
-export type TodoSelected<S extends TodoSelectableColumn = keyof Todo> = "*" extends S
+export type TodoSelected<S extends TodoSelectableColumn = keyof Todo> = ("*" extends S
   ? Todo
-  : Pick<Todo, Extract<S | "id", keyof Todo>> &
-      Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+  : Pick<Todo, Extract<S | "id", keyof Todo>>) &
+  Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type TodoSelectedWithIncludes<
   I extends TodoInclude = {},

@@ -349,7 +349,7 @@ function generateSelectionTypes(schema: WasmSchema, relations: Map<string, Relat
     lines.push("");
 
     lines.push(
-      `export type ${baseInterface}Selected<S extends ${selectableColumnType} = keyof ${baseInterface}> = "*" extends S ? ${baseInterface} : Pick<${baseInterface}, Extract<S | "id", keyof ${baseInterface}>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;`,
+      `export type ${baseInterface}Selected<S extends ${selectableColumnType} = keyof ${baseInterface}> = ("*" extends S ? ${baseInterface} : Pick<${baseInterface}, Extract<S | "id", keyof ${baseInterface}>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;`,
     );
     lines.push("");
 

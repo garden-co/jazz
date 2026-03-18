@@ -674,6 +674,23 @@ describe("TS Query API", () => {
           $canDelete: true,
         },
       ]);
+
+      const fullRowWithDeletePermission = await db.one(
+        app.todos.select("*", "$canDelete").where({ id: { eq: editableId } }),
+      );
+
+      assert(fullRowWithDeletePermission, "Result is not defined");
+      expectTypeOf(fullRowWithDeletePermission.$canDelete).toEqualTypeOf<boolean | null>();
+      expect(fullRowWithDeletePermission).toEqual({
+        id: editableId,
+        title: "Draft docs",
+        done: false,
+        tags: ["dev"],
+        projectId,
+        ownerId: undefined,
+        assigneesIds: [],
+        $canDelete: true,
+      });
     });
 
     it("include builders can project nested relation columns", async () => {
