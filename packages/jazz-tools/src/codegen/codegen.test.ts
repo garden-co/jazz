@@ -324,6 +324,65 @@ describe("schemaToWasm", () => {
       delete: {},
     });
   });
+
+  it("carries session-left policies into wasm schema", () => {
+    table("todos", { owner_id: col.string() });
+    const schema = getCollectedSchema();
+    schema.tables[0]!.policies = {
+      select: {
+        using: {
+          type: "And",
+          exprs: [
+            {
+              type: "SessionCmp",
+              path: ["claims", "role"],
+              op: "Eq",
+              value: { type: "Literal", value: "manager" },
+            },
+            {
+              type: "SessionContains",
+              path: ["claims", "teamIds"],
+              value: { type: "Literal", value: "team_a" },
+            },
+            {
+              type: "SessionInList",
+              path: ["claims", "plan"],
+              values: [
+                { type: "Literal", value: "pro" },
+                { type: "Literal", value: "enterprise" },
+              ],
+            },
+          ],
+        },
+      },
+    };
+
+    const wasm = schemaToWasm(schema);
+    expect(wasm.todos.policies?.select?.using).toEqual({
+      type: "And",
+      exprs: [
+        {
+          type: "SessionCmp",
+          path: ["claims", "role"],
+          op: "Eq",
+          value: { type: "Text", value: "manager" },
+        },
+        {
+          type: "SessionContains",
+          path: ["claims", "teamIds"],
+          value: { type: "Text", value: "team_a" },
+        },
+        {
+          type: "SessionInList",
+          path: ["claims", "plan"],
+          values: [
+            { type: "Text", value: "pro" },
+            { type: "Text", value: "enterprise" },
+          ],
+        },
+      ],
+    });
+  });
 });
 
 describe("generateTypes", () => {

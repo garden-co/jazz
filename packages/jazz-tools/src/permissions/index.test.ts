@@ -994,6 +994,124 @@ describe("permissions DSL", () => {
     expect(emptyInCompiled.todos.select?.using).toEqual({ type: "False" });
   });
 
+  it("compiles session.where(...) predicates and composes them with row predicates", () => {
+    const compiled = definePermissions(app, ({ policy, allOf, anyOf, session }) => [
+      policy.todos.allowRead.where(
+        allOf([
+          { ownerId: session.userId },
+          session.where({
+            "claims.role": "manager",
+            user_id: { ne: null },
+          }),
+        ]),
+      ),
+      policy.todos.allowRead.where(
+        anyOf([
+          session.where({ "claims.plan": { in: ["pro", "enterprise"] } }),
+          session.where({ "claims.teamIds": { contains: "team_a" } }),
+        ]),
+      ),
+    ]);
+
+    expect(compiled.todos.select?.using).toEqual({
+      type: "Or",
+      exprs: [
+        {
+          type: "And",
+          exprs: [
+            {
+              type: "Cmp",
+              column: "ownerId",
+              op: "Eq",
+              value: {
+                type: "SessionRef",
+                path: ["userId"],
+              },
+            },
+            {
+              type: "And",
+              exprs: [
+                {
+                  type: "SessionCmp",
+                  path: ["claims", "role"],
+                  op: "Eq",
+                  value: {
+                    type: "Literal",
+                    value: "manager",
+                  },
+                },
+                {
+                  type: "SessionIsNotNull",
+                  path: ["user_id"],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          type: "SessionInList",
+          path: ["claims", "plan"],
+          values: [
+            {
+              type: "Literal",
+              value: "pro",
+            },
+            {
+              type: "Literal",
+              value: "enterprise",
+            },
+          ],
+        },
+        {
+          type: "SessionContains",
+          path: ["claims", "teamIds"],
+          value: {
+            type: "Literal",
+            value: "team_a",
+          },
+        },
+      ],
+    });
+  });
+
+  it("rejects invalid session.where(...) value shapes", () => {
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.todos.allowRead.where(session.where({ "claims.role": session.userId })),
+      ]),
+    ).toThrow(/session references are not supported/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.todos.allowRead.where((todo) => session.where({ "claims.role": todo.ownerId })),
+      ]),
+    ).toThrow(/row references are not supported/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.todos.allowRead.where(session.where({ claims: { role: "manager" } })),
+      ]),
+    ).toThrow(/nested object claim syntax is not supported|dotted path keys/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.todos.allowRead.where(
+          session.where({ "claims.plan": { in: "pro" } as unknown as Record<string, unknown> }),
+        ),
+      ]),
+    ).toThrow(/expects an array of literal values/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.todos.allowRead.where(
+          session.where({
+            "claims.role": { startsWith: "man" } as unknown as Record<string, unknown>,
+          }),
+        ),
+      ]),
+    ).toThrow(/unsupported session\.where operator "startsWith"/i);
+  });
+
   it("rejects unsupported where operators and invalid compound combinator inputs", () => {
     expect(() =>
       definePermissions(app, ({ policy }) => [

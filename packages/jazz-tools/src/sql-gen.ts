@@ -102,16 +102,26 @@ function policyExprToSql(expr: PolicyExpr): string {
   switch (expr.type) {
     case "Cmp":
       return `${sqlIdentifier(expr.column)} ${cmpOpToSql(expr.op)} ${policyValueToSql(expr.value)}`;
+    case "SessionCmp":
+      return `@session.${sessionPathToSql(expr.path)} ${cmpOpToSql(expr.op)} ${policyValueToSql(expr.value)}`;
     case "IsNull":
       return `${sqlIdentifier(expr.column)} IS NULL`;
+    case "SessionIsNull":
+      return `@session.${sessionPathToSql(expr.path)} IS NULL`;
     case "IsNotNull":
       return `${sqlIdentifier(expr.column)} IS NOT NULL`;
+    case "SessionIsNotNull":
+      return `@session.${sessionPathToSql(expr.path)} IS NOT NULL`;
     case "Contains":
       return `${sqlIdentifier(expr.column)} CONTAINS ${policyValueToSql(expr.value)}`;
+    case "SessionContains":
+      return `@session.${sessionPathToSql(expr.path)} CONTAINS ${policyValueToSql(expr.value)}`;
     case "In":
       return `${sqlIdentifier(expr.column)} IN @session.${sessionPathToSql(expr.session_path)}`;
     case "InList":
       return `${sqlIdentifier(expr.column)} IN (${expr.values.map(policyValueToSql).join(", ")})`;
+    case "SessionInList":
+      return `@session.${sessionPathToSql(expr.path)} IN (${expr.values.map(policyValueToSql).join(", ")})`;
     case "Exists":
       return `EXISTS (SELECT FROM ${sqlIdentifier(expr.table)} WHERE ${policyExprToSql(expr.condition)})`;
     case "ExistsRel":
