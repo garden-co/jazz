@@ -6,7 +6,7 @@ This is architecturally separate from joins (which produce flat rows). Array sub
 
 ## Current Approach: Recompile Per Binding
 
-The straightforward approach: each outer row gets its own compiled query graph. This is simple and correct, though not optimal for large result sets (see [optimization TODOs](../todo/subgraph_sharing.md)).
+The straightforward approach: each outer row gets its own compiled query graph. This is simple and correct, though not optimal for large result sets (see [optimization TODOs](../todo/c_later/subgraph_sharing.md)).
 
 For each unique outer row:
 
