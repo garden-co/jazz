@@ -21,11 +21,44 @@ const DEFAULT_APP_ID_STR: &str = "00000000-0000-0000-0000-000000000001";
 const JWT_KID: &str = "test-jwks-kid";
 const JWT_SECRET: &str = "test-jwt-secret-for-integration";
 
+/// Builder for configuring and starting a [`TestingServer`].
 #[derive(Debug, Default)]
-pub struct TestingServerOptions {
-    pub port: Option<u16>,
-    pub app_id: Option<AppId>,
-    pub data_dir: Option<PathBuf>,
+pub struct TestingServerBuilder {
+    port: Option<u16>,
+    app_id: Option<AppId>,
+    data_dir: Option<PathBuf>,
+    schema: Option<Schema>,
+}
+
+impl TestingServerBuilder {
+    /// Creates a builder with the default test-server configuration.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = Some(port);
+        self
+    }
+
+    pub fn with_app_id(mut self, app_id: AppId) -> Self {
+        self.app_id = Some(app_id);
+        self
+    }
+
+    pub fn with_data_dir(mut self, data_dir: impl Into<PathBuf>) -> Self {
+        self.data_dir = Some(data_dir.into());
+        self
+    }
+
+    pub fn with_schema(mut self, schema: Schema) -> Self {
+        self.schema = Some(schema);
+        self
+    }
+
+    pub async fn start(self) -> TestingServer {
+        TestingServer::start_from_builder(self).await
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -82,14 +115,30 @@ impl TestingServer {
     pub const BACKEND_SECRET: &str = "backend-secret-for-integration-tests";
     pub const ADMIN_SECRET: &str = "admin-secret-for-integration-tests";
 
-    pub async fn start() -> Self {
-        Self::start_with_options(TestingServerOptions::default()).await
+    /// Creates a builder for configuring a test server before startup.
+    pub fn builder() -> TestingServerBuilder {
+        TestingServerBuilder::new()
     }
 
-    pub async fn start_with_options(options: TestingServerOptions) -> Self {
-        let port = options.port.unwrap_or_else(get_free_port);
-        let app_id = options.app_id.unwrap_or_else(Self::default_app_id);
-        let (data_dir, owned_data_dir) = prepare_data_dir(options.data_dir);
+    pub async fn start() -> Self {
+        Self::builder().start().await
+    }
+
+    pub async fn start_with_schema(schema: Schema) -> Self {
+        Self::builder().with_schema(schema).start().await
+    }
+
+    async fn start_from_builder(builder: TestingServerBuilder) -> Self {
+        let TestingServerBuilder {
+            port,
+            app_id,
+            data_dir,
+            schema,
+        } = builder;
+
+        let port = port.unwrap_or_else(get_free_port);
+        let app_id = app_id.unwrap_or_else(Self::default_app_id);
+        let (data_dir, owned_data_dir) = prepare_data_dir(data_dir);
         let jwks_server = TestingJwksServer::start().await;
 
         let auth_config = AuthConfig {
@@ -101,12 +150,13 @@ impl TestingServer {
             admin_secret: Some(Self::ADMIN_SECRET.to_string()),
         };
 
-        let built = ServerBuilder::new(app_id)
+        let mut server_builder = ServerBuilder::new(app_id)
             .with_auth_config(auth_config)
-            .with_persistent_storage(data_dir.to_string_lossy().into_owned())
-            .build()
-            .await
-            .expect("build test server");
+            .with_persistent_storage(data_dir.to_string_lossy().into_owned());
+        if let Some(schema) = schema {
+            server_builder = server_builder.with_schema(schema);
+        }
+        let built = server_builder.build().await.expect("build test server");
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
