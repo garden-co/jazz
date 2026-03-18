@@ -40,7 +40,7 @@ export function createJazzClient(config: DbConfig): Promise<JazzClient> {
 
 async function createExtensionJazzClientInternal(): Promise<JazzClient> {
   const db = await createDbFromInspectedPage();
-  const connectedConfig = db.getConnectedConfig();
+  const connectedConfig = db.getConfig();
   if (!connectedConfig) {
     throw new Error("DevTools bridge did not provide an inspected page config.");
   }

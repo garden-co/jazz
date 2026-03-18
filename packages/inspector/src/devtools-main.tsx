@@ -1,7 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { MemoryRouter } from "react-router";
-import { createExtensionJazzClient, JazzProvider } from "jazz-tools/react";
+import { createExtensionJazzClient, JazzClientProvider } from "jazz-tools/react";
 import { getRegisteredWasmSchema, onDevToolsPortDisconnect } from "jazz-tools";
 import { use, useEffect, useMemo } from "react";
 import { DevtoolsProvider } from "./contexts/devtools-context";
@@ -25,13 +25,13 @@ function App() {
   }
 
   return (
-    <JazzProvider client={client}>
+    <JazzClientProvider client={extensionClient}>
       <DevtoolsProvider wasmSchema={wasmSchema} runtime="extension">
         <MemoryRouter>
           <InspectorRoutes />
         </MemoryRouter>
       </DevtoolsProvider>
-    </JazzProvider>
+    </JazzClientProvider>
   );
 }
 

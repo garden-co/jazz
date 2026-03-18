@@ -29,7 +29,7 @@ Define policies in `schema/permissions.ts` for TypeScript DSL apps, or directly 
   </Tab>
 </Tabs>
 
-Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.where({})` / `USING (TRUE)`).
+Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})` / `USING (TRUE)`).
 
 ## Simple Policies
 
@@ -42,6 +42,46 @@ Apps that do not need user-scoped filtering can still define explicit allow-all 
   <Tab value="SQL">
     <include cwd lang="sql">
       ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-simple-sql
+    </include>
+  </Tab>
+</Tabs>
+
+## Explicitly Allow an Operation (`.always()`)
+
+Use `.always()` when an operation should always be permitted. It is equivalent to
+`.where({})` and compiles to a `TRUE` policy expression.
+
+This helper is available on read, insert, update, and delete policy builders.
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-always-ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include cwd lang="sql">
+      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-always-sql
+    </include>
+  </Tab>
+</Tabs>
+
+## Explicitly Deny an Operation (`.never()`)
+
+Use `.never()` when an operation should be impossible. It is equivalent to
+`.where(anyOf([]))` and compiles to a `FALSE` policy expression.
+
+This helper is available on read, insert, update, and delete policy builders.
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-never-ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include cwd lang="sql">
+      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-never-sql
     </include>
   </Tab>
 </Tabs>
@@ -62,6 +102,14 @@ Apps that do not need user-scoped filtering can still define explicit allow-all 
 </Tabs>
 
 `allOf([...])` compiles to logical `AND`, and `anyOf([...])` compiles to logical `OR`.
+
+## JWT Session Claims
+
+When external auth JWTs carry claims, `session.where(...)` lets you check them directly in permissions without mapping them onto row columns first.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
+</include>
 
 ## Inherited Access Policies (`allowedTo.*`)
 

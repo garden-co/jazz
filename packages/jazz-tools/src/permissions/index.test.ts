@@ -483,6 +483,36 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("supports never() across read/insert/update/delete policies", () => {
+    const compiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.never(),
+      policy.todos.allowInsert.never(),
+      policy.todos.allowUpdate.never(),
+      policy.todos.allowDelete.never(),
+    ]);
+
+    expect(compiled.todos.select?.using).toEqual({ type: "False" });
+    expect(compiled.todos.insert?.with_check).toEqual({ type: "False" });
+    expect(compiled.todos.update?.using).toEqual({ type: "False" });
+    expect(compiled.todos.update?.with_check).toEqual({ type: "False" });
+    expect(compiled.todos.delete?.using).toEqual({ type: "False" });
+  });
+
+  it("supports always() across read/insert/update/delete policies", () => {
+    const compiled = definePermissions(app, ({ policy }) => [
+      policy.todos.allowRead.always(),
+      policy.todos.allowInsert.always(),
+      policy.todos.allowUpdate.always(),
+      policy.todos.allowDelete.always(),
+    ]);
+
+    expect(compiled.todos.select?.using).toEqual({ type: "True" });
+    expect(compiled.todos.insert?.with_check).toEqual({ type: "True" });
+    expect(compiled.todos.update?.using).toEqual({ type: "True" });
+    expect(compiled.todos.update?.with_check).toEqual({ type: "True" });
+    expect(compiled.todos.delete?.using).toEqual({ type: "True" });
+  });
+
   it("supports allowedTo.readReferencing helper", () => {
     const compiled = definePermissions(app, ({ policy, allowedTo }) => [
       policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "projectId")),
@@ -613,13 +643,13 @@ describe("permissions DSL", () => {
           policy.exists(
             policy.people
               .where({ profileId: profile.id })
-              .hopTo("friendshipsViaPersonAId")
+              .hopTo("friendshipsViaPersonA")
               .where({ personBId: session.personId }),
           ),
           policy.exists(
             policy.people
               .where({ profileId: profile.id })
-              .hopTo("friendshipsViaPersonBId")
+              .hopTo("friendshipsViaPersonB")
               .where({ personAId: session.personId }),
           ),
         ]),
@@ -962,6 +992,124 @@ describe("permissions DSL", () => {
       policy.todos.allowRead.where({ ownerId: { in: [] } } as unknown as TodoWhere),
     ]);
     expect(emptyInCompiled.todos.select?.using).toEqual({ type: "False" });
+  });
+
+  it("compiles session.where(...) predicates and composes them with row predicates", () => {
+    const compiled = definePermissions(app, ({ policy, allOf, anyOf, session }) => [
+      policy.todos.allowRead.where(
+        allOf([
+          { ownerId: session.userId },
+          session.where({
+            "claims.role": "manager",
+            user_id: { ne: null },
+          }),
+        ]),
+      ),
+      policy.todos.allowRead.where(
+        anyOf([
+          session.where({ "claims.plan": { in: ["pro", "enterprise"] } }),
+          session.where({ "claims.teamIds": { contains: "team_a" } }),
+        ]),
+      ),
+    ]);
+
+    expect(compiled.todos.select?.using).toEqual({
+      type: "Or",
+      exprs: [
+        {
+          type: "And",
+          exprs: [
+            {
+              type: "Cmp",
+              column: "ownerId",
+              op: "Eq",
+              value: {
+                type: "SessionRef",
+                path: ["userId"],
+              },
+            },
+            {
+              type: "And",
+              exprs: [
+                {
+                  type: "SessionCmp",
+                  path: ["claims", "role"],
+                  op: "Eq",
+                  value: {
+                    type: "Literal",
+                    value: "manager",
+                  },
+                },
+                {
+                  type: "SessionIsNotNull",
+                  path: ["user_id"],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          type: "SessionInList",
+          path: ["claims", "plan"],
+          values: [
+            {
+              type: "Literal",
+              value: "pro",
+            },
+            {
+              type: "Literal",
+              value: "enterprise",
+            },
+          ],
+        },
+        {
+          type: "SessionContains",
+          path: ["claims", "teamIds"],
+          value: {
+            type: "Literal",
+            value: "team_a",
+          },
+        },
+      ],
+    });
+  });
+
+  it("rejects invalid session.where(...) value shapes", () => {
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.todos.allowRead.where(session.where({ "claims.role": session.userId })),
+      ]),
+    ).toThrow(/session references are not supported/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.todos.allowRead.where((todo) => session.where({ "claims.role": todo.ownerId })),
+      ]),
+    ).toThrow(/row references are not supported/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.todos.allowRead.where(session.where({ claims: { role: "manager" } })),
+      ]),
+    ).toThrow(/nested object claim syntax is not supported|dotted path keys/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.todos.allowRead.where(
+          session.where({ "claims.plan": { in: "pro" } as unknown as Record<string, unknown> }),
+        ),
+      ]),
+    ).toThrow(/expects an array of literal values/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.todos.allowRead.where(
+          session.where({
+            "claims.role": { startsWith: "man" } as unknown as Record<string, unknown>,
+          }),
+        ),
+      ]),
+    ).toThrow(/unsupported session\.where operator "startsWith"/i);
   });
 
   it("rejects unsupported where operators and invalid compound combinator inputs", () => {

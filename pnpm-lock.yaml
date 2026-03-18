@@ -23,11 +23,6 @@ overrides:
   react: 19.2.4
   react-dom: 19.2.4
 
-patchedDependencies:
-  uniffi-bindgen-react-native@0.29.3-1:
-    hash: 651a1477b2643feac62679f63fd8996d65d416d6b2f5ee7f84fea45a8561bacb
-    path: patches/uniffi-bindgen-react-native@0.29.3-1.patch
-
 importers:
 
   .:
@@ -80,8 +75,8 @@ importers:
   crates/jazz-rn:
     dependencies:
       uniffi-bindgen-react-native:
-        specifier: 0.29.3-1
-        version: 0.29.3-1(patch_hash=651a1477b2643feac62679f63fd8996d65d416d6b2f5ee7f84fea45a8561bacb)
+        specifier: 0.30.0-1
+        version: 0.30.0-1
     devDependencies:
       '@commitlint/config-conventional':
         specifier: ^19.8.1
@@ -234,9 +229,6 @@ importers:
       react-native:
         specifier: 0.81.5
         version: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4)
-      web-streams-polyfill:
-        specifier: ^4.2.0
-        version: 4.2.0
     devDependencies:
       '@babel/plugin-transform-flow-strip-types':
         specifier: ^7.27.1
@@ -244,9 +236,6 @@ importers:
       '@types/react':
         specifier: ^19.0.0
         version: 19.2.14
-      babel-plugin-transform-import-meta:
-        specifier: ^2.3.3
-        version: 2.3.3(@babel/core@7.29.0)
       babel-preset-expo:
         specifier: ~54.0.10
         version: 54.0.10(@babel/core@7.29.0)(@babel/runtime@7.28.6)(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))(react-refresh@0.14.2)
@@ -394,14 +383,42 @@ importers:
         specifier: catalog:default
         version: 4.0.18(@types/node@20.19.35)(@vitest/browser-playwright@4.0.18)(@vitest/ui@4.0.18)(jiti@2.6.1)(jsdom@28.1.0)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
 
+  examples/file-upload-react:
+    dependencies:
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../../packages/jazz-tools
+      react:
+        specifier: 19.2.4
+        version: 19.2.4
+      react-dom:
+        specifier: 19.2.4
+        version: 19.2.4(react@19.2.4)
+    devDependencies:
+      '@types/react':
+        specifier: ^19.0.0
+        version: 19.2.14
+      '@types/react-dom':
+        specifier: ^19.0.0
+        version: 19.2.3(@types/react@19.2.14)
+      '@vitejs/plugin-react':
+        specifier: ^4.0.0
+        version: 4.7.0(vite@6.4.1(@types/node@25.3.3)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))
+      typescript:
+        specifier: catalog:default
+        version: 5.9.3
+      vite:
+        specifier: ^6.0.0
+        version: 6.4.1(@types/node@25.3.3)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
+      vitest:
+        specifier: catalog:default
+        version: 4.0.18(@types/node@25.3.3)(@vitest/browser-playwright@4.0.18)(@vitest/ui@4.0.18)(jiti@2.6.1)(jsdom@28.1.0)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
+
   examples/todo-client-localfirst-expo:
     dependencies:
       expo:
         specifier: ^54.0.0
         version: 54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
-      jazz-rn:
-        specifier: workspace:*
-        version: link:../../crates/jazz-rn
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
@@ -414,9 +431,6 @@ importers:
       react-native:
         specifier: 0.81.5
         version: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4)
-      web-streams-polyfill:
-        specifier: ^4.2.0
-        version: 4.2.0
     devDependencies:
       '@babel/plugin-transform-flow-strip-types':
         specifier: ^7.27.1
@@ -424,9 +438,6 @@ importers:
       '@types/react':
         specifier: ^19.0.0
         version: 19.2.14
-      babel-plugin-transform-import-meta:
-        specifier: ^2.3.3
-        version: 2.3.3(@babel/core@7.29.0)
       babel-preset-expo:
         specifier: ~54.0.10
         version: 54.0.10(@babel/core@7.29.0)(@babel/runtime@7.28.6)(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))(react-refresh@0.17.0)
@@ -676,6 +687,12 @@ importers:
       '@standard-schema/spec':
         specifier: ^1.1.0
         version: 1.1.0
+      expo:
+        specifier: '>=54'
+        version: 54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
+      jazz-rn:
+        specifier: workspace:*
+        version: link:../../crates/jazz-rn
       jazz-wasm:
         specifier: workspace:*
         version: link:../../crates/jazz-wasm
@@ -688,9 +705,15 @@ importers:
       react:
         specifier: 19.2.4
         version: 19.2.4
+      react-native:
+        specifier: '>=0.76'
+        version: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4)
       tsx:
         specifier: ^4.0.0
         version: 4.21.0
+      web-streams-polyfill:
+        specifier: ^4.2.0
+        version: 4.2.0
     devDependencies:
       '@sveltejs/package':
         specifier: ^2.0.0
@@ -716,9 +739,6 @@ importers:
       fake-indexeddb:
         specifier: ^5.0.2
         version: 5.0.2
-      jazz-rn:
-        specifier: workspace:*
-        version: link:../../crates/jazz-rn
       react-dom:
         specifier: 19.2.4
         version: 19.2.4(react@19.2.4)
@@ -4884,11 +4904,6 @@ packages:
 
   babel-plugin-transform-flow-enums@0.0.2:
     resolution: {integrity: sha512-g4aaCrDDOsWjbm0PUUeVnkcVd6AKJsVc/MbnPhEotEpkeJQP6b8nzewohQi7+QS8UyPehOhGWn0nOwjvWpmMvQ==}
-
-  babel-plugin-transform-import-meta@2.3.3:
-    resolution: {integrity: sha512-bbh30qz1m6ZU1ybJoNOhA2zaDvmeXMnGNBMVMDOJ1Fni4+wMBoy/j7MTRVmqAUCIcy54/rEnr9VEBsfcgbpm3Q==}
-    peerDependencies:
-      '@babel/core': ^7.10.0
 
   babel-preset-current-node-syntax@1.2.0:
     resolution: {integrity: sha512-E/VlAEzRrsLEb2+dv8yp3bo4scof3l9nR4lrld+Iy5NyVqgVYUJnDAmunkhPMisRI32Qc4iRiz425d8vM++2fg==}
@@ -9482,8 +9497,8 @@ packages:
     resolution: {integrity: sha512-+QBBXBCvifc56fsbuxZQ6Sic3wqqc3WWaqxs58gvJrcOuN83HGTCwz3oS5phzU9LthRNE9VrJCFCLUgHeeFnfA==}
     engines: {node: '>=18'}
 
-  uniffi-bindgen-react-native@0.29.3-1:
-    resolution: {integrity: sha512-o6gXZsAh55yuvhwF2WSFdIHV4phyfWcCmg4DuyfJWJ7CvUz1UcIz2S4u9SmXAz1jsuqvu6Xc9hexrRBB0a5osg==}
+  uniffi-bindgen-react-native@0.30.0-1:
+    resolution: {integrity: sha512-rffyNPTQ2qFx7deaLXYVBhXcy4pDrjtEc28Pc1Rwt532IGEQquT7eNvvLKIgX6G5xODi6Yfni1zFs5u+O2QL1A==}
     hasBin: true
 
   unified@11.0.5:
@@ -14808,12 +14823,6 @@ snapshots:
       '@babel/plugin-syntax-flow': 7.28.6(@babel/core@7.29.0)
     transitivePeerDependencies:
       - '@babel/core'
-
-  babel-plugin-transform-import-meta@2.3.3(@babel/core@7.29.0):
-    dependencies:
-      '@babel/core': 7.29.0
-      '@babel/template': 7.28.6
-      tslib: 2.8.1
 
   babel-preset-current-node-syntax@1.2.0(@babel/core@7.29.0):
     dependencies:
@@ -20591,7 +20600,7 @@ snapshots:
 
   unicorn-magic@0.3.0: {}
 
-  uniffi-bindgen-react-native@0.29.3-1(patch_hash=651a1477b2643feac62679f63fd8996d65d416d6b2f5ee7f84fea45a8561bacb): {}
+  uniffi-bindgen-react-native@0.30.0-1: {}
 
   unified@11.0.5:
     dependencies:

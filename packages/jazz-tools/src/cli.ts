@@ -4,16 +4,14 @@
 
 import { spawn } from "child_process";
 import { access, readdir, writeFile } from "fs/promises";
-import { join, basename, dirname } from "path";
+import { join, basename, dirname, resolve } from "path";
 import { pathToFileURL } from "url";
-import { register } from "tsx/esm/api";
+import { register as registerCjs } from "tsx/cjs/api";
+import { register as registerEsm } from "tsx/esm/api";
 import { schemaToSql, lensesToSql } from "./sql-gen.js";
 import { getCollectedSchema, getCollectedMigrations, resetCollectedState } from "./dsl.js";
 import { generateClient } from "./codegen/index.js";
 import type { Lens, Schema, TablePolicies, OperationPolicy } from "./schema.js";
-
-// Allow loading `.ts` schema files when invoked via `node dist/cli.js`.
-register();
 
 export interface BuildOptions {
   jazzBin: string;
@@ -37,12 +35,23 @@ function parseArgs(): { command: string; options: BuildOptions } {
   return { command, options: { jazzBin, schemaDir } };
 }
 
-// Counter for cache-busting dynamic imports
+// Allow loading `.ts` schema files when invoked via `node dist/cli.js`.
+registerEsm();
+
+// Counter for cache-busting module loads.
 let importCounter = 0;
+
+function requirePermissionsModule<T>(filePath: string): T {
+  const loader = registerCjs({ namespace: `jazz-tools-cli-permissions-${++importCounter}` });
+  try {
+    return loader.require(resolve(filePath), import.meta.url) as T;
+  } finally {
+    loader.unregister();
+  }
+}
 
 async function loadSchemaModule(filePath: string): Promise<void> {
   resetCollectedState();
-  // Add cache-busting query param since Node.js caches dynamic imports
   const url = pathToFileURL(filePath).href + `?v=${++importCounter}`;
   await import(url);
 }
@@ -54,7 +63,6 @@ async function loadSchema(filePath: string): Promise<Schema> {
 
 async function loadMigrationModule(filePath: string): Promise<Lens[]> {
   resetCollectedState();
-  // Add cache-busting query param since Node.js caches dynamic imports
   const url = pathToFileURL(filePath).href + `?v=${++importCounter}`;
   await import(url);
   return getCollectedMigrations();
@@ -154,8 +162,7 @@ function isPermissionsMap(input: unknown): input is Record<string, TablePolicies
 }
 
 async function loadPermissionsModule(filePath: string): Promise<Record<string, TablePolicies>> {
-  const url = pathToFileURL(filePath).href + `?v=${++importCounter}`;
-  const module = await import(url);
+  const module = requirePermissionsModule<Record<string, unknown>>(filePath);
   const candidate = module.default ?? module.permissions ?? null;
   if (!candidate) {
     throw new Error(
@@ -250,10 +257,10 @@ async function ensurePermissionsTestStub(schemaDir: string): Promise<void> {
  * Permissions test starter.
  *
  * Suggested shape (jazz-tools/testing):
- * - startLocalJazzServer(...) for an isolated server
- * - seedRows(...) to set up synthetic fixtures
- * - scopedClientForClaims(...) for request-scoped user clients
- * - expectAllowed(...) / expectDenied(...) assertions
+ * - createPolicyTestApp(...) for an isolated test app
+ * - testApp.seed(...) to set up synthetic fixtures
+ * - testApp.as(...) for request-scoped user clients
+ * - testApp.expectAllowed(...) / testApp.expectDenied(...) assertions
  */
 import { describe, it } from "vitest";
 

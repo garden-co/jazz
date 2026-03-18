@@ -11,17 +11,55 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { WasmSchema } from "../drivers/types.js";
-import type { JazzClient, Row } from "./client.js";
-import type { QueryBuilder } from "./db.js";
+import type { Row } from "./client.js";
+import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { pushSchemaCatalogue, startLocalJazzServer } from "../testing/local-jazz-server.js";
 import { createNapiRuntime, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 
-type Todo = {
+type SimpleTodo = {
   id: string;
   title: string;
   done: boolean;
+};
+
+type SimpleTodoInit = {
+  title: string;
+  done: boolean;
+};
+
+type TimestampProject = {
+  id: string;
+  name: string;
+  created_at: Date;
+  updated_at: Date;
+};
+
+type TimestampProjectInit = {
+  name: string;
+  created_at: Date;
+  updated_at: Date;
+};
+
+type PolicyTodo = {
+  id: string;
+  title: string;
+  done: boolean;
+  description?: string;
+  parent?: string;
+  project?: string;
+  owner_id: string;
+};
+
+type PolicyTodoInit = {
+  title: string;
+  done: boolean;
+  description?: string;
+  parent?: string;
+  project?: string;
+  owner_id: string;
 };
 
 type SyncRequestBody = {
@@ -151,10 +189,17 @@ const TODO_SERVER_WASM_SCHEMA: WasmSchema = {
   },
 };
 
-const allTodosQuery: QueryBuilder<Todo> = {
+const simpleTodosTable: TableProxy<SimpleTodo, SimpleTodoInit> = {
   _table: "todos",
   _schema: TEST_SCHEMA,
-  _rowType: undefined as unknown as Todo,
+  _rowType: undefined as unknown as SimpleTodo,
+  _initType: undefined as unknown as SimpleTodoInit,
+};
+
+const allTodosQuery: QueryBuilder<SimpleTodo> = {
+  _table: "todos",
+  _schema: TEST_SCHEMA,
+  _rowType: undefined as unknown as SimpleTodo,
   _build() {
     return JSON.stringify({
       table: "todos",
@@ -165,6 +210,52 @@ const allTodosQuery: QueryBuilder<Todo> = {
     });
   },
 };
+
+const timestampProjectsTable: TableProxy<TimestampProject, TimestampProjectInit> = {
+  _table: "projects",
+  _schema: TIMESTAMP_SCHEMA,
+  _rowType: undefined as unknown as TimestampProject,
+  _initType: undefined as unknown as TimestampProjectInit,
+};
+
+const policyTodosTable: TableProxy<PolicyTodo, PolicyTodoInit> = {
+  _table: "todos",
+  _schema: TODO_SERVER_WASM_SCHEMA,
+  _rowType: undefined as unknown as PolicyTodo,
+  _initType: undefined as unknown as PolicyTodoInit,
+};
+
+const allPolicyTodosQuery: QueryBuilder<PolicyTodo> = {
+  _table: "todos",
+  _schema: TODO_SERVER_WASM_SCHEMA,
+  _rowType: undefined as unknown as PolicyTodo,
+  _build() {
+    return JSON.stringify({
+      table: "todos",
+      conditions: [],
+      includes: {},
+      orderBy: [],
+      offset: 0,
+    });
+  },
+};
+
+function policyTodoByIdQuery(id: string): QueryBuilder<PolicyTodo> {
+  return {
+    _table: "todos",
+    _schema: TODO_SERVER_WASM_SCHEMA,
+    _rowType: undefined as unknown as PolicyTodo,
+    _build() {
+      return JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "id", op: "eq", value: id }],
+        includes: {},
+        orderBy: [],
+        offset: 0,
+      });
+    },
+  };
+}
 
 const BASIC_SCHEMA_DIR = fileURLToPath(new URL("../testing/fixtures/basic", import.meta.url));
 const TODO_SERVER_SCHEMA_DIR = fileURLToPath(
@@ -328,19 +419,20 @@ async function startSyncCaptureServer(): Promise<SyncCaptureServerHandle> {
   };
 }
 
-async function waitForRows(
-  client: JazzClient,
-  predicate: (rows: Row[]) => boolean,
+async function waitForQueryRows<T>(
+  db: Db,
+  query: QueryBuilder<T>,
+  predicate: (rows: T[]) => boolean,
   timeoutMs = 20_000,
   queryOptions: { tier?: "worker" | "edge" | "global" } = { tier: "edge" },
-): Promise<Row[]> {
+): Promise<T[]> {
   const deadline = Date.now() + timeoutMs;
-  let lastRows: Row[] = [];
+  let lastRows: T[] = [];
   let lastError: unknown = undefined;
 
   while (Date.now() < deadline) {
     try {
-      const rows = await client.query(allTodosQuery, queryOptions);
+      const rows = await db.all(query, queryOptions);
       if (predicate(rows)) return rows;
       lastRows = rows;
     } catch (error) {
@@ -469,14 +561,6 @@ async function settleAsyncSyncWork(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 50));
 }
 
-function decodeSessionHeader(headerValue: string | string[] | undefined): Record<string, unknown> {
-  const encoded = Array.isArray(headerValue) ? headerValue[0] : headerValue;
-  if (!encoded) {
-    throw new Error("expected X-Jazz-Session header to be present");
-  }
-  return JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as Record<string, unknown>;
-}
-
 function toBase64Url(value: unknown): string {
   return base64Url(Buffer.from(JSON.stringify(value), "utf8"));
 }
@@ -508,6 +592,68 @@ async function createTempDir(prefix: string): Promise<string> {
 }
 
 describe("NAPI integration", () => {
+  it("supports oversized indexed persistent mutations from JS callers", async () => {
+    const { NapiRuntime } = await loadNapiModule();
+    const dataPath = await createTempDir("jazz-napi-large-index-");
+    const runtime = new NapiRuntime(
+      serializeRuntimeSchema(TEST_SCHEMA),
+      `napi-large-index-${randomUUID()}`,
+      "test",
+      "main",
+      dataPath,
+    ) as unknown as {
+      insert(table: string, values: unknown): Row;
+      update(objectId: string, updates: Record<string, unknown>): void;
+      query(queryJson: string): Promise<Row[]>;
+      close(): void;
+    };
+
+    const oversizedTitle = "x".repeat(40_000);
+    const updatedOversizedTitle = "y".repeat(45_000);
+    const queryJson = translateQuery(allTodosQuery._build(), TEST_SCHEMA);
+
+    try {
+      const insertedRow = runtime.insert("todos", [
+        { type: "Text", value: oversizedTitle },
+        { type: "Boolean", value: false },
+      ]);
+
+      let rows = await runtime.query(queryJson);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: insertedRow.id });
+      expect(rows[0]?.values[0]).toEqual({ type: "Text", value: oversizedTitle });
+      expect(rows[0]?.values[1]).toEqual({ type: "Boolean", value: false });
+
+      const secondRow = runtime.insert("todos", [
+        { type: "Text", value: "kept title" },
+        { type: "Boolean", value: false },
+      ]);
+
+      runtime.update(secondRow.id, {
+        title: { type: "Text", value: updatedOversizedTitle },
+      });
+
+      rows = await runtime.query(queryJson);
+      expect(rows).toHaveLength(2);
+
+      const insertedOversized = rows.find((row) => row.id === insertedRow.id);
+      expect(insertedOversized).toBeDefined();
+      expect(insertedOversized?.values[0]).toEqual({ type: "Text", value: oversizedTitle });
+      expect(insertedOversized?.values[1]).toEqual({ type: "Boolean", value: false });
+
+      const updatedOversized = rows.find((row) => row.id === secondRow.id);
+      expect(updatedOversized).toBeDefined();
+      expect(updatedOversized?.values[0]).toEqual({
+        type: "Text",
+        value: updatedOversizedTitle,
+      });
+      expect(updatedOversized?.values[1]).toEqual({ type: "Boolean", value: false });
+    } finally {
+      runtime.close();
+      await rm(dataPath, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it("emits the real nested onSyncMessageToSend callback shape from the compiled addon", async () => {
     const runtime = await createNapiRuntime(TEST_SCHEMA, {
       appId: `napi-contract-${randomUUID()}`,
@@ -612,7 +758,7 @@ describe("NAPI integration", () => {
   it("posts backend query subscriptions upstream via createJazzContext(...).asBackend()", async () => {
     const captureServer = await startSyncCaptureServer();
     let context: {
-      asBackend(): JazzClient;
+      asBackend(): Db;
       shutdown(): Promise<void>;
     } | null = null;
 
@@ -626,8 +772,8 @@ describe("NAPI integration", () => {
         backendSecret: "napi-backend-secret",
       });
 
-      const client = context.asBackend();
-      const subscriptionId = client.subscribe(allTodosQuery, () => undefined, { tier: "edge" });
+      const db = context.asBackend();
+      const unsubscribe = db.subscribeAll(allTodosQuery, () => undefined, { tier: "edge" });
 
       await vi.waitFor(
         () => expect(captureServer.syncRequests.filter(isQuerySubscriptionRequest)).toHaveLength(1),
@@ -636,7 +782,7 @@ describe("NAPI integration", () => {
         },
       );
 
-      client.unsubscribe(subscriptionId);
+      unsubscribe();
 
       const request = captureServer.syncRequests.find(isQuerySubscriptionRequest);
       if (!request) {
@@ -668,7 +814,7 @@ describe("NAPI integration", () => {
     const captureServer = await startSyncCaptureServer();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     let context: {
-      asBackend(): JazzClient;
+      asBackend(): Db;
       shutdown(): Promise<void>;
     } | null = null;
 
@@ -682,8 +828,8 @@ describe("NAPI integration", () => {
         backendSecret: "napi-backend-secret",
       });
 
-      const client = context.asBackend();
-      const subscriptionId = client.subscribe(allTodosQuery, () => undefined, { tier: "edge" });
+      const db = context.asBackend();
+      const unsubscribe = db.subscribeAll(allTodosQuery, () => undefined, { tier: "edge" });
 
       await vi.waitFor(
         () => expect(captureServer.syncRequests.filter(isQuerySubscriptionRequest)).toHaveLength(1),
@@ -705,7 +851,7 @@ describe("NAPI integration", () => {
         },
       );
 
-      client.unsubscribe(subscriptionId);
+      unsubscribe();
 
       const querySubscriptions = captureServer.syncRequests.filter(isQuerySubscriptionRequest);
       expect(querySubscriptions[1]?.body.client_id).toBe("server-client-2");
@@ -720,200 +866,275 @@ describe("NAPI integration", () => {
     }
   }, 25_000);
 
-  it("sends backend impersonation headers for createJazzContext(...).forSession() mutations", async () => {
-    const captureServer = await startSyncCaptureServer();
+  it("applies createJazzContext(...).forSession() mutations through high-level Db APIs", async () => {
+    const port = await getAvailablePort();
+    const appId = randomUUID();
+    const backendSecret = "napi-session-secret";
+    const adminSecret = "napi-session-admin-secret";
+    const server = await startLocalJazzServer({
+      appId,
+      port,
+      backendSecret,
+      adminSecret,
+    });
     let context: {
-      forSession(session: { user_id: string; claims: Record<string, unknown> }): {
-        create(table: string, values: Array<Record<string, unknown>>): Promise<string>;
-        update(objectId: string, updates: Record<string, unknown>): Promise<void>;
-        delete(objectId: string): Promise<void>;
-      };
+      asBackend(): Db;
+      forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
       shutdown(): Promise<void>;
     } | null = null;
 
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
-      context = createJazzContext({
-        appId: `napi-session-headers-${randomUUID()}`,
-        app: { wasmSchema: TEST_SCHEMA },
-        driver: { type: "memory" },
-        serverUrl: captureServer.baseUrl,
-        backendSecret: "napi-session-secret",
+
+      await pushSchemaCatalogue({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schemaDir: TODO_SERVER_SCHEMA_DIR,
+        env: "test",
+        userBranch: "main",
       });
 
-      const session = {
-        user_id: "session-user",
+      context = createJazzContext({
+        appId,
+        app: { wasmSchema: TODO_SERVER_WASM_SCHEMA },
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret,
+        env: "test",
+        userBranch: "main",
+        tier: "worker",
+      });
+
+      const backendDb = context.asBackend();
+      const aliceDb = context.forSession({
+        user_id: "alice",
         claims: { role: "editor", team: "alpha" },
-      };
-      const scopedClient = context.forSession(session);
-      const createdObjectId = await scopedClient.create("todos", [
-        { type: "Text", value: "session-created-item" },
-        { type: "Boolean", value: false },
-      ]);
-
-      await scopedClient.update(createdObjectId, {
-        done: { type: "Boolean", value: true },
-      });
-      await scopedClient.delete(createdObjectId);
-
-      await vi.waitFor(() => expect(captureServer.objectRequests).toHaveLength(3), {
-        timeout: 15_000,
       });
 
-      for (const request of captureServer.objectRequests) {
-        expect(request.headers["x-jazz-backend-secret"]).toBe("napi-session-secret");
-        expect(decodeSessionHeader(request.headers["x-jazz-session"])).toEqual(session);
-        expect(request.headers.authorization).toBeUndefined();
-        expect(request.headers["x-jazz-local-mode"]).toBeUndefined();
-        expect(request.headers["x-jazz-local-token"]).toBeUndefined();
-      }
-
-      expect(captureServer.objectRequests[0]).toMatchObject({
-        method: "POST",
-        pathname: "/sync/object",
-        body: {
-          table: "todos",
-          values: [
-            { type: "Text", value: "session-created-item" },
-            { type: "Boolean", value: false },
-          ],
-          schema_context: {
-            env: "dev",
-            user_branch: "main",
-            schema_hash: expect.any(String),
+      const createdTodo = await withTimeout(
+        aliceDb.insertDurable(
+          policyTodosTable,
+          {
+            title: "session-created-item",
+            done: false,
+            description: "created via forSession",
+            owner_id: "alice",
           },
+          { tier: "edge" },
+        ),
+        10_000,
+        "session insert timed out",
+      );
+
+      await vi.waitFor(
+        async () => {
+          expect(
+            await withTimeout(
+              backendDb.one(policyTodoByIdQuery(createdTodo.id), { tier: "edge" }),
+              10_000,
+              "backend session read timed out",
+            ),
+          ).toMatchObject({
+            id: createdTodo.id,
+            title: "session-created-item",
+            done: false,
+            owner_id: "alice",
+          });
         },
-      });
-      expect(captureServer.objectRequests[1]).toMatchObject({
-        method: "PUT",
-        pathname: "/sync/object",
-        body: {
-          object_id: createdObjectId,
-          updates: [["done", { type: "Boolean", value: true }]],
-          schema_context: {
-            env: "dev",
-            user_branch: "main",
-            schema_hash: expect.any(String),
+        { timeout: 20_000 },
+      );
+
+      await expect(
+        aliceDb.insertDurable(
+          policyTodosTable,
+          {
+            title: "session-policy-denied",
+            done: false,
+            description: "",
+            owner_id: "bob",
           },
+          { tier: "edge" },
+        ),
+      ).rejects.toThrow();
+
+      await withTimeout(
+        aliceDb.updateDurable(policyTodosTable, createdTodo.id, { done: true }, { tier: "edge" }),
+        10_000,
+        "session update timed out",
+      );
+
+      await vi.waitFor(
+        async () => {
+          expect(
+            await withTimeout(
+              backendDb.one(policyTodoByIdQuery(createdTodo.id), { tier: "edge" }),
+              10_000,
+              "backend session update read timed out",
+            ),
+          ).toMatchObject({
+            id: createdTodo.id,
+            done: true,
+          });
         },
-      });
-      expect(captureServer.objectRequests[2]).toMatchObject({
-        method: "POST",
-        pathname: "/sync/object/delete",
-        body: {
-          object_id: createdObjectId,
-          schema_context: {
-            env: "dev",
-            user_branch: "main",
-            schema_hash: expect.any(String),
-          },
+        { timeout: 20_000 },
+      );
+
+      await withTimeout(
+        aliceDb.deleteDurable(policyTodosTable, createdTodo.id, { tier: "edge" }),
+        10_000,
+        "session delete timed out",
+      );
+
+      await vi.waitFor(
+        async () => {
+          expect(
+            await withTimeout(
+              backendDb.one(policyTodoByIdQuery(createdTodo.id), { tier: "edge" }),
+              10_000,
+              "backend session delete read timed out",
+            ),
+          ).toBeNull();
         },
-      });
+        { timeout: 20_000 },
+      );
     } finally {
       if (context) {
         await context.shutdown();
       }
       await settleAsyncSyncWork();
-      await captureServer.stop();
+      await server.stop();
     }
-  }, 20_000);
+  }, 60_000);
 
-  it("extracts JWT request auth and still sends backend impersonation headers for createJazzContext(...).forRequest()", async () => {
-    const captureServer = await startSyncCaptureServer();
+  it("extracts JWT request auth and applies createJazzContext(...).forRequest() mutations via Db", async () => {
+    const port = await getAvailablePort();
+    const appId = randomUUID();
+    const backendSecret = "napi-request-secret";
+    const adminSecret = "napi-request-admin-secret";
+    const server = await startLocalJazzServer({
+      appId,
+      port,
+      backendSecret,
+      adminSecret,
+    });
     let context: {
-      forRequest(request: { headers: Record<string, string> }): {
-        create(table: string, values: Array<Record<string, unknown>>): Promise<string>;
-      };
+      asBackend(): Db;
+      forRequest(request: { headers: Record<string, string> }): Db;
       shutdown(): Promise<void>;
     } | null = null;
 
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
+
+      await pushSchemaCatalogue({
+        serverUrl: server.url,
+        appId,
+        adminSecret,
+        schemaDir: TODO_SERVER_SCHEMA_DIR,
+        env: "test",
+        userBranch: "main",
+      });
+
       context = createJazzContext({
-        appId: `napi-request-headers-${randomUUID()}`,
-        app: { wasmSchema: TEST_SCHEMA },
+        appId,
+        app: { wasmSchema: TODO_SERVER_WASM_SCHEMA },
         driver: { type: "memory" },
-        serverUrl: captureServer.baseUrl,
-        backendSecret: "napi-request-secret",
+        serverUrl: server.url,
+        backendSecret,
+        env: "test",
+        userBranch: "main",
+        tier: "worker",
       });
 
-      const jwt = makeJwt({
-        sub: "request-user",
-        claims: { role: "reviewer", tenant: "beta" },
-      });
-      const scopedClient = context.forRequest({
+      const backendDb = context.asBackend();
+      const requestDb = context.forRequest({
         headers: {
-          authorization: `Bearer ${jwt}`,
+          authorization: `Bearer ${makeJwt({
+            sub: "request-user",
+            claims: { role: "reviewer", tenant: "beta" },
+          })}`,
         },
       });
 
-      const createdObjectId = await scopedClient.create("todos", [
-        { type: "Text", value: "request-created-item" },
-        { type: "Boolean", value: false },
-      ]);
-
-      await vi.waitFor(() => expect(captureServer.objectRequests).toHaveLength(1), {
-        timeout: 15_000,
-      });
-
-      expect(createdObjectId).toBe("captured-object-1");
-      expect(captureServer.objectRequests[0]).toMatchObject({
-        method: "POST",
-        pathname: "/sync/object",
-        body: {
-          table: "todos",
-          values: [
-            { type: "Text", value: "request-created-item" },
-            { type: "Boolean", value: false },
-          ],
-        },
-      });
-      expect(captureServer.objectRequests[0]?.headers["x-jazz-backend-secret"]).toBe(
-        "napi-request-secret",
+      const createdTodo = await withTimeout(
+        requestDb.insertDurable(
+          policyTodosTable,
+          {
+            title: "request-created-item",
+            done: false,
+            description: "created via forRequest",
+            owner_id: "request-user",
+          },
+          { tier: "edge" },
+        ),
+        10_000,
+        "request insert timed out",
       );
-      expect(
-        decodeSessionHeader(captureServer.objectRequests[0]?.headers["x-jazz-session"]),
-      ).toEqual({
-        user_id: "request-user",
-        claims: { role: "reviewer", tenant: "beta" },
-      });
-      expect(captureServer.objectRequests[0]?.headers.authorization).toBeUndefined();
-      expect(captureServer.objectRequests[0]?.headers["x-jazz-local-mode"]).toBeUndefined();
-      expect(captureServer.objectRequests[0]?.headers["x-jazz-local-token"]).toBeUndefined();
+
+      await vi.waitFor(
+        async () => {
+          expect(
+            await withTimeout(
+              requestDb.all(allPolicyTodosQuery, { tier: "edge" }),
+              10_000,
+              "request-scoped read timed out",
+            ),
+          ).toEqual([
+            expect.objectContaining({
+              id: createdTodo.id,
+              title: "request-created-item",
+              owner_id: "request-user",
+            }),
+          ]);
+        },
+        { timeout: 20_000 },
+      );
+
+      await expect(
+        requestDb.insertDurable(
+          policyTodosTable,
+          {
+            title: "request-policy-denied",
+            done: false,
+            description: "",
+            owner_id: "someone-else",
+          },
+          { tier: "edge" },
+        ),
+      ).rejects.toThrow();
+
+      await vi.waitFor(
+        async () => {
+          expect(
+            await withTimeout(
+              backendDb.one(policyTodoByIdQuery(createdTodo.id), { tier: "edge" }),
+              10_000,
+              "backend request read timed out",
+            ),
+          ).toMatchObject({
+            id: createdTodo.id,
+            title: "request-created-item",
+            owner_id: "request-user",
+          });
+        },
+        { timeout: 20_000 },
+      );
     } finally {
       if (context) {
         await context.shutdown();
       }
       await settleAsyncSyncWork();
-      await captureServer.stop();
+      await server.stop();
     }
-  }, 20_000);
+  }, 60_000);
 
   it("filters session-scoped query reads over backend-authenticated sync", async () => {
     const port = await getAvailablePort();
     const appId = randomUUID();
     const backendSecret = "napi-query-backend-secret";
     const adminSecret = "napi-query-admin-secret";
-    const queryAllTodos = translateQuery(
-      JSON.stringify({
-        table: "todos",
-        conditions: [],
-        includes: {},
-        orderBy: [],
-        offset: 0,
-      }),
-      TODO_SERVER_WASM_SCHEMA,
-    );
-    const rowTitles = (rows: Row[]): string[] =>
-      rows
-        .map((row) => {
-          const title = row.values[0];
-          if (title?.type !== "Text") {
-            throw new Error(`expected text title at column 0, got ${JSON.stringify(title)}`);
-          }
-          return title.value;
-        })
-        .sort();
+    const rowTitles = (rows: PolicyTodo[]): string[] => rows.map((row) => row.title).sort();
 
     const jwks = await JwksServer.start(JWT_SECRET);
     const server = await startLocalJazzServer({
@@ -924,25 +1145,21 @@ describe("NAPI integration", () => {
       adminSecret,
     });
     let bobContext: {
-      client(): JazzClient;
+      db(): Db;
       shutdown(): Promise<void>;
     } | null = null;
     let carolContext: {
-      client(): JazzClient;
+      db(): Db;
       shutdown(): Promise<void>;
     } | null = null;
     let aliceContext: {
-      client(): JazzClient;
+      db(): Db;
       shutdown(): Promise<void>;
     } | null = null;
     let readerContext: {
-      asBackend(): JazzClient;
-      forSession(session: { user_id: string; claims: Record<string, unknown> }): {
-        query(query: string, options?: { tier?: "worker" | "edge" | "global" }): Promise<Row[]>;
-      };
-      forRequest(request: { headers: Record<string, string> }): {
-        query(query: string, options?: { tier?: "worker" | "edge" | "global" }): Promise<Row[]>;
-      };
+      asBackend(): Db;
+      forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
+      forRequest(request: { headers: Record<string, string> }): Db;
       shutdown(): Promise<void>;
     } | null = null;
 
@@ -999,53 +1216,47 @@ describe("NAPI integration", () => {
         tier: "worker",
       });
 
-      const bobWriter = bobContext.client();
-      const carolWriter = carolContext.client();
-      const aliceWriter = aliceContext.client();
+      const bobWriter = bobContext.db();
+      const carolWriter = carolContext.db();
+      const aliceWriter = aliceContext.db();
 
       await withTimeout(
-        bobWriter.createDurable(
-          "todos",
-          [
-            { type: "Text", value: "bob-item" },
-            { type: "Boolean", value: false },
-            { type: "Text", value: "" },
-            { type: "Null" },
-            { type: "Null" },
-            { type: "Text", value: "bob" },
-          ],
+        bobWriter.insertDurable(
+          policyTodosTable,
+          {
+            title: "bob-item",
+            done: false,
+            description: "",
+            owner_id: "bob",
+          },
           { tier: "edge" },
         ),
         10_000,
         "bob writer create timed out",
       );
       await withTimeout(
-        carolWriter.createDurable(
-          "todos",
-          [
-            { type: "Text", value: "carol-item" },
-            { type: "Boolean", value: false },
-            { type: "Text", value: "" },
-            { type: "Null" },
-            { type: "Null" },
-            { type: "Text", value: "carol" },
-          ],
+        carolWriter.insertDurable(
+          policyTodosTable,
+          {
+            title: "carol-item",
+            done: false,
+            description: "",
+            owner_id: "carol",
+          },
           { tier: "edge" },
         ),
         10_000,
         "carol writer create timed out",
       );
       await withTimeout(
-        aliceWriter.createDurable(
-          "todos",
-          [
-            { type: "Text", value: "alice-item" },
-            { type: "Boolean", value: false },
-            { type: "Text", value: "" },
-            { type: "Null" },
-            { type: "Null" },
-            { type: "Text", value: "alice" },
-          ],
+        aliceWriter.insertDurable(
+          policyTodosTable,
+          {
+            title: "alice-item",
+            done: false,
+            description: "",
+            owner_id: "alice",
+          },
           { tier: "edge" },
         ),
         10_000,
@@ -1053,11 +1264,11 @@ describe("NAPI integration", () => {
       );
 
       const readerBackend = readerContext.asBackend();
-      const aliceSessionClient = readerContext.forSession({
+      const aliceSessionDb = readerContext.forSession({
         user_id: "alice",
         claims: {},
       });
-      const aliceRequestClient = readerContext.forRequest({
+      const aliceRequestDb = readerContext.forRequest({
         headers: {
           authorization: `Bearer ${makeJwt({ sub: "alice" })}`,
         },
@@ -1068,7 +1279,7 @@ describe("NAPI integration", () => {
           expect(
             rowTitles(
               await withTimeout(
-                readerBackend.queryInternal(queryAllTodos, undefined, { tier: "edge" }),
+                readerBackend.all(allPolicyTodosQuery, { tier: "edge" }),
                 10_000,
                 "backend reader query timed out",
               ),
@@ -1083,7 +1294,7 @@ describe("NAPI integration", () => {
           expect(
             rowTitles(
               await withTimeout(
-                aliceSessionClient.query(queryAllTodos, { tier: "edge" }),
+                aliceSessionDb.all(allPolicyTodosQuery, { tier: "edge" }),
                 10_000,
                 "alice session query timed out",
               ),
@@ -1098,7 +1309,7 @@ describe("NAPI integration", () => {
           expect(
             rowTitles(
               await withTimeout(
-                aliceRequestClient.query(queryAllTodos, { tier: "edge" }),
+                aliceRequestDb.all(allPolicyTodosQuery, { tier: "edge" }),
                 10_000,
                 "alice request query timed out",
               ),
@@ -1138,11 +1349,11 @@ describe("NAPI integration", () => {
       adminSecret,
     });
     let writerContext: {
-      asBackend(): JazzClient;
+      asBackend(): Db;
       shutdown(): Promise<void>;
     } | null = null;
     let readerContext: {
-      asBackend(): JazzClient;
+      asBackend(): Db;
       shutdown(): Promise<void>;
     } | null = null;
 
@@ -1174,40 +1385,43 @@ describe("NAPI integration", () => {
       const writer = writerContext.asBackend();
       const reader = readerContext.asBackend();
 
-      await waitForRows(reader, (rows) => rows.length === 0);
+      await waitForQueryRows(reader, allTodosQuery, (rows) => rows.length === 0);
 
-      const createdRow = await writer.createDurable(
-        "todos",
-        [
-          { type: "Text", value: "napi-shared-item" },
-          { type: "Boolean", value: false },
-        ],
+      const createdRow = await writer.insertDurable(
+        simpleTodosTable,
+        {
+          title: "napi-shared-item",
+          done: false,
+        },
         { tier: "edge" },
       );
       const rowId = createdRow.id;
 
-      const rowsAfterCreate = await waitForRows(reader, (rows) =>
+      const rowsAfterCreate = await waitForQueryRows(reader, allTodosQuery, (rows) =>
         rows.some((row) => row.id === rowId),
       );
       const replicatedRow = rowsAfterCreate.find((row) => row.id === rowId);
-      expect(replicatedRow?.values[0]).toEqual({ type: "Text", value: "napi-shared-item" });
-      expect(replicatedRow?.values[1]).toEqual({ type: "Boolean", value: false });
+      expect(replicatedRow).toMatchObject({
+        id: rowId,
+        title: "napi-shared-item",
+        done: false,
+      });
 
-      await writer.updateDurable(
-        rowId,
-        { done: { type: "Boolean", value: true } },
-        { tier: "edge" },
-      );
+      await writer.updateDurable(simpleTodosTable, rowId, { done: true }, { tier: "edge" });
 
-      const rowsAfterUpdate = await waitForRows(reader, (rows) => {
+      const rowsAfterUpdate = await waitForQueryRows(reader, allTodosQuery, (rows) => {
         const row = rows.find((entry) => entry.id === rowId);
-        return Boolean(row?.values[1]?.type === "Boolean" && row.values[1].value === true);
+        return row?.done === true;
       });
       const updatedRow = rowsAfterUpdate.find((row) => row.id === rowId);
-      expect(updatedRow?.values[1]).toEqual({ type: "Boolean", value: true });
+      expect(updatedRow?.done).toBe(true);
 
-      await writer.deleteDurable(rowId, { tier: "edge" });
-      await waitForRows(reader, (rows) => !rows.some((row) => row.id === rowId));
+      await writer.deleteDurable(simpleTodosTable, rowId, { tier: "edge" });
+      await waitForQueryRows(
+        reader,
+        allTodosQuery,
+        (rows) => !rows.some((row) => row.id === rowId),
+      );
     } finally {
       if (writerContext) {
         await writerContext.shutdown();
@@ -1225,11 +1439,11 @@ describe("NAPI integration", () => {
     const dataPath = join(dataRoot, "runtime.skv");
     const appId = randomUUID();
     let writerContext: {
-      client(): JazzClient;
+      db(): Db;
       shutdown(): Promise<void>;
     } | null = null;
     let reopenedContext: {
-      client(): JazzClient;
+      db(): Db;
       shutdown(): Promise<void>;
     } | null = null;
 
@@ -1242,20 +1456,24 @@ describe("NAPI integration", () => {
         driver: { type: "persistent", dataPath },
       });
 
-      const writer = writerContext.client();
-      const createdRow = await writer.createDurable(
-        "todos",
-        [
-          { type: "Text", value: "persisted-local-item" },
-          { type: "Boolean", value: false },
-        ],
+      const writer = writerContext.db();
+      const createdRow = await writer.insertDurable(
+        simpleTodosTable,
+        {
+          title: "persisted-local-item",
+          done: false,
+        },
         { tier: "worker" },
       );
       const rowId = createdRow.id;
 
-      await waitForRows(writer, (rows) => rows.some((row) => row.id === rowId), 10_000, {
-        tier: "worker",
-      });
+      await waitForQueryRows(
+        writer,
+        allTodosQuery,
+        (rows) => rows.some((row) => row.id === rowId),
+        10_000,
+        { tier: "worker" },
+      );
 
       await writerContext.shutdown();
       writerContext = null;
@@ -1267,17 +1485,21 @@ describe("NAPI integration", () => {
         driver: { type: "persistent", dataPath },
       });
 
-      const reopened = reopenedContext.client();
-      const reopenedRows = await waitForRows(
+      const reopened = reopenedContext.db();
+      const reopenedRows = await waitForQueryRows(
         reopened,
+        allTodosQuery,
         (rows) => rows.some((row) => row.id === rowId),
         10_000,
         { tier: "worker" },
       );
 
       const reopenedRow = reopenedRows.find((row) => row.id === rowId);
-      expect(reopenedRow?.values[0]).toEqual({ type: "Text", value: "persisted-local-item" });
-      expect(reopenedRow?.values[1]).toEqual({ type: "Boolean", value: false });
+      expect(reopenedRow).toMatchObject({
+        id: rowId,
+        title: "persisted-local-item",
+        done: false,
+      });
     } finally {
       if (writerContext) {
         await writerContext.shutdown();
@@ -1294,13 +1516,12 @@ describe("NAPI integration", () => {
     const dataPath = join(dataRoot, "runtime.skv");
     const timestamp = 1773285322816;
     let context: {
-      client(): JazzClient;
+      db(): Db;
       shutdown(): Promise<void>;
     } | null = null;
 
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
-      const { toValueArray } = await import("./value-converter.js");
 
       context = createJazzContext({
         appId: randomUUID(),
@@ -1308,25 +1529,21 @@ describe("NAPI integration", () => {
         driver: { type: "persistent", dataPath },
       });
 
-      const values = toValueArray(
-        {
-          name: "timestamp-probe",
-          created_at: new Date(timestamp),
-          updated_at: new Date(timestamp),
-        },
-        TIMESTAMP_SCHEMA,
-        "projects",
-      );
-
       await expect(
-        context.client().createDurable("projects", values, { tier: "worker" }),
+        context.db().insertDurable(
+          timestampProjectsTable,
+          {
+            name: "timestamp-probe",
+            created_at: new Date(timestamp),
+            updated_at: new Date(timestamp),
+          },
+          { tier: "worker" },
+        ),
       ).resolves.toEqual({
         id: expect.any(String),
-        values: [
-          { type: "Text", value: "timestamp-probe" },
-          { type: "Timestamp", value: timestamp },
-          { type: "Timestamp", value: timestamp },
-        ],
+        name: "timestamp-probe",
+        created_at: new Date(timestamp),
+        updated_at: new Date(timestamp),
       });
     } finally {
       if (context) {

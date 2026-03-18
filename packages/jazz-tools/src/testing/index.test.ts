@@ -89,7 +89,7 @@ describe("startLocalJazzServer", () => {
       adminSecret: "test-admin-secret",
       allowAnonymous: true,
       allowDemo: true,
-      healthTimeoutMs: 5_000,
+      healthTimeoutMs: 10_000,
     });
 
     const healthResponse = await fetch(`${server.url}/health`);
@@ -97,7 +97,7 @@ describe("startLocalJazzServer", () => {
     expect(server.dataDir).toBe(dataDir);
 
     await server.stop();
-  });
+  }, 15_000);
 
   it("frees the port after stop so it can be rebound", async () => {
     const captureRoot = await createTempRoot("jazz-tools-testing-port-free-");

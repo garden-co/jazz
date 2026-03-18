@@ -1,5 +1,66 @@
 # jazz-tools
 
+## 2.0.0-alpha.20
+
+### Patch Changes
+
+- 9f4d4d9: Bound oversized index keys by keeping as much real value prefix as fits in the durable key and appending a length plus hash overflow trailer.
+
+  This keeps large indexed string and JSON equality lookups working without exceeding storage key limits, while preserving prefix-based ordering instead of collapsing oversized values to a pure hash ordering. Large `array(ref(...))` values also continue to support exact array equality and per-member reference indexing.
+
+- Updated dependencies [9f4d4d9]
+  - jazz-wasm@2.0.0-alpha.20
+  - jazz-rn@2.0.0-alpha.20
+
+## 2.0.0-alpha.19
+
+### Patch Changes
+
+- f2c10a1: Simplify `jazz-tools/backend` to expose only the high-level `Db` and `createJazzContext` APIs. `JazzContext` no longer exposes a low-level `client()` escape hatch, and the backend entrypoint no longer re-exports low-level runtime client and transport internals.
+- 4015614: Add `.requireIncludes()` option to query builders to avoid loading rows if any of their included references are missing
+- ecb2db8: Add high-level `Db` helpers for chunked browser file storage:
+  `createFileFromBlob(...)`, `createFileFromStream(...)`, `loadFileAsBlob(...)`,
+  and `loadFileAsStream(...)`.
+
+  Document the conventional `files` / `file_parts` schema, permission setup, and
+  blob/stream usage on the new Files & Blobs docs page.
+  - jazz-wasm@2.0.0-alpha.19
+  - jazz-rn@2.0.0-alpha.19
+
+## 2.0.0-alpha.18
+
+### Patch Changes
+
+- ca2b0b0: Fix generated `schema/app.ts` query builder class fields for Expo compatibility by replacing `declare readonly` phantom fields with `readonly ...!:`.
+
+  Expo's Babel pipeline rejects `declare` class fields without Flow-specific options, causing generated schemas to fail compilation in React Native apps. This change keeps the same type inference intent and does not change runtime behavior.
+
+- 33bc53f: Fail indexed writes cleanly when an indexed value would exceed the storage key limit instead of panicking in native storage.
+
+  Oversized indexed inserts and updates now return a normal mutation error to JS callers, and local updates can recover rows that were previously left in a partial index state by older panic-driven failures.
+
+- d9261b7: Move Jazz client creation into the default React and React Native `JazzProvider` so Strict Mode remounts do not trigger extra startup delays, while still exposing `JazzClientProvider` for apps that need to supply their own client instance.
+- 83f4f5d: Use xxHash-based checksums for `opfs-btree` pages and superblocks to reduce checksum overhead in persistent browser storage.
+
+  Existing OPFS stores created by older builds are not checksum-compatible with this change and will need to be recreated after upgrading.
+
+- Updated dependencies [33bc53f]
+- Updated dependencies [83f4f5d]
+  - jazz-wasm@2.0.0-alpha.18
+  - jazz-rn@2.0.0-alpha.18
+
+## 2.0.0-alpha.17
+
+### Patch Changes
+
+- 9002dde: Fix `jazz build` not regenerating `app.ts` on subsequent builds.
+
+  The bin entry point was treating the TypeScript schema build as a one-time bootstrap step, skipping it whenever `current.sql` already existed. Removed the guard so `app.ts` and `current.sql` are always regenerated when `current.ts` is present.
+
+- 6672f98: Remove local write-time foreign-key existence checks so inserts and updates no longer fail just because a referenced row has not been synced into the active query set yet.
+- bb10f1c: Add a shared `jazz-tools/expo/polyfills` entrypoint for Expo apps and ensure published `jazz-rn` packages include the generated C++ bindings required for native builds.
+  - jazz-wasm@2.0.0-alpha.17
+
 ## 2.0.0-alpha.16
 
 ### Patch Changes

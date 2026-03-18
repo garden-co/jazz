@@ -7,6 +7,7 @@ import type { ColumnType } from "../drivers/types.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
 import { magicColumnType } from "../magic-columns.js";
 import { normalizeIncludeEntries, type NormalizedIncludeSpec } from "./query-builder-shape.js";
+import { resolveSelectedColumns } from "./select-projection.js";
 
 export type { WasmValue };
 
@@ -30,17 +31,7 @@ function resolveBaseColumns(
     throw new Error(`Unknown table "${tableName}" in schema`);
   }
 
-  if (!projection || projection.length === 0) {
-    return table.columns.map((column) => ({
-      name: column.name,
-      columnType: column.column_type,
-    }));
-  }
-
-  return projection
-    .filter(
-      (columnName): columnName is string => typeof columnName === "string" && columnName !== "id",
-    )
+  return resolveSelectedColumns(tableName, schema, projection)
     .map((columnName) => {
       const magicType = magicColumnType(columnName);
       if (magicType) {

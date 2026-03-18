@@ -48,7 +48,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                 durability.local_updates,
                 propagation,
             )
-            .map_err(|e| RuntimeError::QueryError(format!("{:?}", e)))
+            .map_err(|e| RuntimeError::QueryError(e.to_string()))
     }
 
     fn activate_subscription(
@@ -287,7 +287,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let query_sub_id = self
             .schema_manager
             .subscribe_with_schema_context(query, schema_context, session)
-            .map_err(|e| RuntimeError::QueryError(format!("{:?}", e)))?;
+            .map_err(|e| RuntimeError::QueryError(e.to_string()))?;
 
         self.immediate_tick();
         Ok(crate::sync_manager::QueryId(query_sub_id.0))
@@ -335,7 +335,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             ) {
             Ok(id) => id,
             Err(e) => {
-                let _ = sender.send(Err(RuntimeError::QueryError(format!("{:?}", e))));
+                let _ = sender.send(Err(RuntimeError::QueryError(e.to_string())));
                 return QueryFuture::new(receiver);
             }
         };

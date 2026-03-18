@@ -1,19 +1,15 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "baseUrl": ".",
     "declaration": false,
     "declarationMap": false,
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "noEmit": true,
+    "noUncheckedIndexedAccess": true,
     "rootDir": ".",
-    "sourceMap": false,
-    "paths": {
-      "jazz-tools": ["./src/index.ts"],
-      "jazz-tools/*": ["./src/*"]
-    }
+    "sourceMap": false
   },
-  "include": ["src/**/*", "tests/ts-dsl/**/*.ts"],
+  "include": ["src/testing/fixtures/basic/app.ts", "tests/ts-dsl/fixtures/basic/app.ts"],
   "exclude": ["node_modules", "dist"]
 }

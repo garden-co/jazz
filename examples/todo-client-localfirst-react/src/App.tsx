@@ -1,14 +1,15 @@
 import * as React from "react";
 import {
-  createJazzClient,
   JazzProvider,
   getActiveSyntheticAuth,
   attachDevTools,
+  useJazzClient,
 } from "jazz-tools/react";
+import type { DbConfig } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
 import { app } from "../schema/app.js";
 
-type JazzProviderClientConfig = NonNullable<Parameters<typeof createJazzClient>[0]>;
+const devToolsAttachedClients = new WeakSet<object>();
 
 function readEnvAppId(): string | undefined {
   return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
@@ -16,9 +17,7 @@ function readEnvAppId(): string | undefined {
 }
 
 // #region context-setup-react
-function defaultConfig(
-  overrides: Partial<JazzProviderClientConfig> = {},
-): JazzProviderClientConfig {
+function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
   const appId = overrides.appId ?? readEnvAppId() ?? "6316f08d-d5d1-41df-82b8-8c16aa26db84";
   const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
@@ -35,60 +34,39 @@ function defaultConfig(
 // #endregion context-setup-react
 
 type AppProps = {
-  config?: Partial<JazzProviderClientConfig>;
+  config?: Partial<DbConfig>;
   fallback?: React.ReactNode;
 };
+
+function DevToolsRegistration() {
+  const client = useJazzClient();
+
+  React.useEffect(() => {
+    if (devToolsAttachedClients.has(client as object)) {
+      return;
+    }
+
+    void attachDevTools(client, app.wasmSchema);
+    devToolsAttachedClients.add(client as object);
+
+    if (location.origin.includes("localhost")) {
+      Object.defineProperty(window, "jazzClient", {
+        value: client,
+        writable: true,
+      });
+    }
+  }, [client]);
+
+  return null;
+}
 
 // #region context-setup-react
 export function App({ config, fallback }: AppProps = {}) {
   const resolvedConfig = defaultConfig(config);
-  const configKey = JSON.stringify(resolvedConfig);
-  const [client, setClient] = React.useState<Awaited<ReturnType<typeof createJazzClient>> | null>(
-    null,
-  );
-  const [error, setError] = React.useState<unknown>(null);
-
-  React.useEffect(() => {
-    let active = true;
-    const pending = createJazzClient(resolvedConfig);
-
-    void pending.then(
-      (resolved) => {
-        if (!active) {
-          void resolved.shutdown();
-          return;
-        }
-        setClient(resolved);
-        attachDevTools(resolved, app.wasmSchema);
-        if (location.origin.includes("localhost")) {
-          Object.defineProperty(window, "jazzClient", {
-            value: resolved,
-            writable: true,
-          });
-        }
-      },
-      (reason) => {
-        if (!active) return;
-        setError(reason);
-      },
-    );
-
-    return () => {
-      active = false;
-      void pending.then((resolved) => resolved.shutdown()).catch(() => {});
-    };
-  }, [configKey]);
-
-  if (error) {
-    throw error;
-  }
-
-  if (!client) {
-    return <>{fallback ?? <p>Loading...</p>}</>;
-  }
 
   return (
-    <JazzProvider client={client}>
+    <JazzProvider config={resolvedConfig} fallback={fallback ?? <p>Loading...</p>}>
+      <DevToolsRegistration />
       <h1>Todos</h1>
       <TodoList />
     </JazzProvider>
