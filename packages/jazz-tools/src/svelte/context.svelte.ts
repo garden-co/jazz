@@ -1,16 +1,18 @@
 import { getContext, setContext } from "svelte";
 import type { Db } from "../runtime/db.js";
 import type { Session } from "../runtime/context.js";
+import type { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
 
 const JAZZ_CTX_KEY = Symbol("jazz");
 
 export interface JazzContext {
   db: Db | null;
   session: Session | null;
+  manager: SubscriptionsOrchestrator | null;
 }
 
 export function initJazzContext(): JazzContext {
-  const ctx: JazzContext = $state({ db: null, session: null });
+  const ctx: JazzContext = $state({ db: null, session: null, manager: null });
   setContext(JAZZ_CTX_KEY, ctx);
   return ctx;
 }
