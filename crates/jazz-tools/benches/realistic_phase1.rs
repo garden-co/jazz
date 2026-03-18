@@ -1,3 +1,6 @@
+#[path = "common/mod.rs"]
+mod permission_bench_common;
+
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -16,7 +19,7 @@ use jazz_tools::commit::{Commit, CommitId, StoredState};
 use jazz_tools::object::{BranchName, Object, ObjectId};
 use jazz_tools::object_manager::ObjectManager;
 use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr};
-use jazz_tools::query_manager::query::QueryBuilder;
+use jazz_tools::query_manager::query::{Query, QueryBuilder};
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{
     ColumnType, Schema, SchemaBuilder, TablePolicies, TableSchema, Value,
@@ -36,6 +39,7 @@ use serde::Deserialize;
 use tempfile::TempDir;
 
 type BenchRuntime = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
+const OBSERVER_BENCH_USER_ID: &str = "benchmark_user";
 
 #[derive(Debug, Clone, Deserialize)]
 struct ProfileConfig {
@@ -124,6 +128,13 @@ struct R8ScenarioConfig {
     #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
     #[serde(default = "default_many_branches_cache_size_bytes")]
     cache_size_bytes: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct R9ScenarioConfig {
+    id: String,
+    scale: usize,
+    subscription_count: usize,
 }
 
 #[allow(clippy::enum_variant_names)]
@@ -219,6 +230,13 @@ struct R8Scenario {
     payload_bytes: usize,
     #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
     cache_size_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+struct R9Scenario {
+    id: String,
+    scale: usize,
+    subscription_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -1846,6 +1864,81 @@ fn realistic_r8_many_branches_cold_load_fjall(c: &mut Criterion) {
 #[cfg(not(all(feature = "fjall", not(target_arch = "wasm32"))))]
 fn realistic_r8_many_branches_cold_load_fjall(_c: &mut Criterion) {}
 
+fn realistic_r9_subscribed_write_path(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r9_scenario(select_ci_path(
+        "benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
+        "benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
+    ));
+    let benchmark_name = format!(
+        "{}_{}_docs{}_subs{}",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase(),
+        scenario.scale,
+        scenario.subscription_count
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/subscribed_write_path");
+    configure_group(&mut group, 10, 10);
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let mut core = permission_bench_common::create_runtime();
+            let data = permission_bench_common::setup_data(
+                &mut core,
+                scenario.scale,
+                OBSERVER_BENCH_USER_ID,
+            );
+            let session = permission_bench_common::create_session(OBSERVER_BENCH_USER_ID);
+            let mut handles = Vec::with_capacity(scenario.subscription_count);
+
+            for _ in 0..scenario.subscription_count {
+                let handle = core
+                    .subscribe(Query::new("documents"), |_delta| {}, Some(session.clone()))
+                    .expect("subscribe observe_all");
+                handles.push(handle);
+            }
+            core.immediate_tick();
+            core.batched_tick();
+
+            let doc_ids = data.owned_documents;
+            let mut doc_idx = 0usize;
+            let mut update_counter = 0u64;
+
+            b.iter(|| {
+                update_counter += 1;
+                let doc_id = doc_ids[doc_idx % doc_ids.len()];
+                doc_idx += 1;
+
+                core.update(
+                    doc_id,
+                    vec![
+                        (
+                            "content".to_string(),
+                            Value::Text(format!("Observed updated content {}", update_counter)),
+                        ),
+                        (
+                            "created_at".to_string(),
+                            Value::Timestamp(
+                                permission_bench_common::current_timestamp() + update_counter,
+                            ),
+                        ),
+                    ],
+                    Some(&session),
+                )
+                .expect("update with observer should succeed");
+            });
+
+            black_box(handles.len());
+        },
+    );
+
+    group.finish();
+}
+
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 struct ManyBranchesSeededDb {
     _tempdir: TempDir,
@@ -2159,6 +2252,15 @@ fn load_r8_scenario(path: &str) -> R8Scenario {
     }
 }
 
+fn load_r9_scenario(path: &str) -> R9Scenario {
+    let raw: R9ScenarioConfig = load_json(path);
+    R9Scenario {
+        id: raw.id,
+        scale: raw.scale.max(1),
+        subscription_count: raw.subscription_count.max(1),
+    }
+}
+
 fn ci_variant_enabled() -> bool {
     matches!(
         env::var("JAZZ_REALISTIC_VARIANT"),
@@ -2389,6 +2491,7 @@ criterion_group!(
     realistic_r8_many_branches_write,
     realistic_r8_many_branches_scan_heads,
     realistic_r8_many_branches_scan_leaf_heads,
-    realistic_r8_many_branches_cold_load_fjall
+    realistic_r8_many_branches_cold_load_fjall,
+    realistic_r9_subscribed_write_path
 );
 criterion_main!(benches);

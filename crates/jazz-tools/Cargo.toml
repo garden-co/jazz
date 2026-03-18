@@ -113,6 +113,10 @@ tower = { version = "0.5", features = ["util"] }
 name = "realistic_phase1"
 harness = false
 
+[[bench]]
+name = "observer_write_path"
+harness = false
+
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]
