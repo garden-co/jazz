@@ -87,7 +87,10 @@ async fn create_document(client: &JazzClient, owner_id: &str, title: &str) -> Ob
 #[tokio::test]
 async fn select_policies_filter_subscription_results_per_client_session() {
     let schema = select_policy_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
     let alice =
         connect_jwt_client(&server, schema.clone(), "alice", "documents", READY_TIMEOUT).await;
     let bob = connect_jwt_client(&server, schema, "bob", "documents", READY_TIMEOUT).await;
@@ -171,7 +174,10 @@ async fn select_policies_filter_subscription_results_per_client_session() {
 #[tokio::test]
 async fn insert_policies_are_enforced_by_server_for_client_sync() {
     let schema = write_policy_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
     let intruder = connect_jwt_client(
         &server,
         schema.clone(),
@@ -262,7 +268,10 @@ async fn insert_policies_are_enforced_by_server_for_client_sync() {
 #[tokio::test]
 async fn update_and_delete_policies_block_unauthorized_server_mutations() {
     let schema = write_policy_schema();
-    let server = TestingServer::start_with_schema(schema.clone()).await;
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
     let alice =
         connect_jwt_client(&server, schema.clone(), "alice", "documents", READY_TIMEOUT).await;
     let bob = connect_jwt_client(&server, schema.clone(), "bob", "documents", READY_TIMEOUT).await;
