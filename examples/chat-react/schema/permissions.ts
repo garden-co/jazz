@@ -8,8 +8,8 @@ export default definePermissions(app, ({ policy, session, anyOf, allowedTo }) =>
   policy.profiles.allowUpdate.where({ userId: session.user_id });
 
   // Chats: readable if public, by chat members, or by anyone presenting a
-  // valid join code (pre-authorises reading before the chatMember is inserted).
-  // Once inserted, no need to keep the join code claim
+  // valid join code claim (pre-authorises reading before the chatMember is
+  // inserted). Once inserted, the claim is no longer needed.
   policy.chats.allowRead.where((chat) =>
     anyOf([
       { isPublic: true },
@@ -18,13 +18,21 @@ export default definePermissions(app, ({ policy, session, anyOf, allowedTo }) =>
     ]),
   );
   policy.chats.allowInsert.where({ createdBy: session.user_id });
+  policy.chats.allowUpdate.where((chat) =>
+    policy.chatMembers.exists.where({ chatId: chat.id, userId: session.user_id }),
+  );
 
-  // Chat members: read own memberships; can only add yourself
-  policy.chatMembers.allowRead.where({ userId: session.user_id });
+  // Chat members: read own rows + other members of your chats.
+  policy.chatMembers.allowRead.where((member) =>
+    anyOf([
+      { userId: session.user_id },
+      policy.chatMembers.exists.where({ chatId: member.chatId, userId: session.user_id }),
+    ]),
+  );
   policy.chatMembers.allowInsert.where({ userId: session.user_id });
+  policy.chatMembers.allowDelete.where({ userId: session.user_id });
 
-  // Messages: inherit read from chat (handles public-chat sync ordering), plus
-  // explicit chatMember check as a fallback for private chats in local mode.
+  // Messages: inherit read from chat, plus chatMember fallback for private chats.
   policy.messages.allowRead.where((message) =>
     anyOf([
       allowedTo.read("chatId"),
@@ -65,7 +73,7 @@ export default definePermissions(app, ({ policy, session, anyOf, allowedTo }) =>
   policy.files.allowInsert.where({});
   policy.file_parts.allowInsert.where({});
 
-  // Files: inherit read and delete inherit from attachments
+  // Files: inherit read and delete from attachments
   policy.files.allowRead.where(allowedTo.readReferencing(policy.attachments, "fileId"));
   policy.file_parts.allowRead.where(allowedTo.readReferencing(policy.files, "partIds"));
   policy.files.allowDelete.where(allowedTo.deleteReferencing(policy.attachments, "fileId"));

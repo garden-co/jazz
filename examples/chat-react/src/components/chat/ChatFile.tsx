@@ -12,7 +12,7 @@ export function ChatFile({ attachment }: ChatFileProps) {
   const db = useDb();
 
   const handleDownload = async () => {
-    const blob = await db.loadFileAsBlob(app, attachment.fileId);
+    const blob = await db.loadFileAsBlob(app, attachment.fileId, { tier: "edge" });
     downloadBlob(blob, attachment.name);
   };
 
@@ -21,9 +21,9 @@ export function ChatFile({ attachment }: ChatFileProps) {
       <span className="mb-2 wrap-anywhere">{attachment.name}</span>
       <Button
         variant="secondary"
-        onClick={(event) => {
+        onClick={async (event) => {
           event.stopPropagation();
-          void handleDownload();
+          await handleDownload();
         }}
         onPointerDown={(event) => {
           event.stopPropagation();

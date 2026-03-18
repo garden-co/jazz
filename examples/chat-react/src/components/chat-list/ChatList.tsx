@@ -70,7 +70,9 @@ export const ChatList = () => {
 
       {memberships.map((membership) => {
         // useAll erases .include() type info; chat is Chat at runtime
-        const chat = membership.chat as unknown as { id: string; isPublic: boolean } | undefined;
+        const chat = membership.chat as unknown as
+          | { id: string; isPublic: boolean; name?: string }
+          | undefined;
         return (
           <ChatListItem
             key={membership.id}

@@ -42,7 +42,7 @@ export function InviteHandler({ chatId, code }: InviteHandlerProps) {
     });
 
     navigate(`/#/chat/${chatId}`);
-  }, [chatLoaded, db, userId, myProfile, chatId]);
+  }, [chatLoaded, db, userId, myProfile, chatId, code]);
 
   return (
     <div id="joining-chat" className="p-8 text-center text-muted-foreground italic">

@@ -320,6 +320,9 @@ importers:
       '@vitest/browser-playwright':
         specifier: catalog:default
         version: 4.0.18(playwright@1.58.2)(vite@6.4.1(@types/node@25.2.3)(jiti@2.6.1)(lightningcss@1.31.1)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2))(vitest@4.0.18)
+      tsx:
+        specifier: ^4.0.0
+        version: 4.21.0
       tw-animate-css:
         specifier: ^1.4.0
         version: 1.4.0

@@ -10,7 +10,7 @@ html: true
 
 # How Chat uses Jazz
 
-A walkthrough of a real-time, permission-aware chat app — built with Jazz and React.
+A walkthrough of a real-time chat app with row-level permissions, built with Jazz and React.
 
 Public rooms, private chats, invite links, emoji reactions, file uploads, collaborative canvases.
 
@@ -20,7 +20,7 @@ Public rooms, private chats, invite links, emoji reactions, file uploads, collab
 
 ## What is Jazz?
 
-Jazz is a **local-first** sync framework. Every client runs a full database in a WASM worker, persisted to disk via OPFS. Changes sync to an edge server and fan out to all connected clients in real time.
+Jazz is a **local-first** sync framework. Every client runs a full database in a WASM worker, persisted in the browser's private filesystem. Changes sync to a server and reach all connected clients in real time.
 
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 212" width="520" height="196" style="display:block;margin:0.5rem auto">
   <defs>
@@ -33,16 +33,16 @@ Jazz is a **local-first** sync framework. Every client runs a full database in a
   <rect x="8" y="130" width="170" height="74" rx="8" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
   <text x="93" y="154" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size="13" font-weight="700" fill="#1e40af">Browser A</text>
   <text x="93" y="174" text-anchor="middle" font-family="ui-monospace,monospace" font-size="11" fill="#1e3a8a">WASM worker</text>
-  <text x="93" y="192" text-anchor="middle" font-family="ui-monospace,monospace" font-size="11" fill="#1e3a8a">OPFS (local DB)</text>
+  <text x="93" y="192" text-anchor="middle" font-family="ui-monospace,monospace" font-size="11" fill="#1e3a8a">Local DB</text>
   <rect x="382" y="130" width="170" height="74" rx="8" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
   <text x="467" y="154" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size="13" font-weight="700" fill="#1e40af">Browser B</text>
   <text x="467" y="174" text-anchor="middle" font-family="ui-monospace,monospace" font-size="11" fill="#1e3a8a">WASM worker</text>
-  <text x="467" y="192" text-anchor="middle" font-family="ui-monospace,monospace" font-size="11" fill="#1e3a8a">OPFS (local DB)</text>
+  <text x="467" y="192" text-anchor="middle" font-family="ui-monospace,monospace" font-size="11" fill="#1e3a8a">Local DB</text>
   <line x1="215" y1="68" x2="93" y2="128" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="5,3" marker-start="url(#arrs)" marker-end="url(#arr)"/>
   <line x1="345" y1="68" x2="467" y2="128" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="5,3" marker-start="url(#arrs)" marker-end="url(#arr)"/>
 </svg>
 
-Writes are **instant locally** — sync happens in the background. Row-level **policies** are enforced on the server; only authorised data reaches the local store.
+Writes are **instant locally**. Row-level **policies** are enforced on the server, so only authorised data reaches each client.
 
 ---
 
@@ -50,7 +50,7 @@ Writes are **instant locally** — sync happens in the background. Row-level **p
 
 ## The schema
 
-**[`schema/current.ts`](../schema/current.ts)** — source of truth. `jazz-tools build` produces a SQL migration and typed query-builder interfaces.
+**[`schema/current.ts`](../schema/current.ts)** defines the tables. `jazz-tools build` generates SQL and typed TypeScript helpers.
 
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.8rem;margin-top:0.4rem">
 
@@ -61,36 +61,36 @@ table("profiles", {
   avatar: col.string().optional(),
 });
 table("chats", {
+  name: col.string().optional(),
   isPublic: col.boolean(),
   createdBy: col.string(),
   joinCode: col.string().optional(),
 });
 table("chatMembers", {
-  chat: col.ref("chats"),
+  chatId: col.ref("chats"),
   userId: col.string(),
   joinCode: col.string().optional(),
 });
 table("messages", {
-  chat: col.ref("chats"),
+  chatId: col.ref("chats"),
   text: col.string(),
-  sender: col.ref("profiles"),
-  senderId: col.string(),
+  senderId: col.ref("profiles"),
   createdAt: col.timestamp(),
 });
 ```
 
 ```typescript
 table("reactions", {
-  message: col.ref("messages"),
+  messageId: col.ref("messages"),
   userId: col.string(),
   emoji: col.string(),
 });
 table("canvases", {
-  chat: col.ref("chats"),
+  chatId: col.ref("chats"),
   createdAt: col.timestamp(),
 });
 table("strokes", {
-  canvas: col.ref("canvases"),
+  canvasId: col.ref("canvases"),
   ownerId: col.string(),
   color: col.string(),
   width: col.int(),
@@ -98,11 +98,10 @@ table("strokes", {
   createdAt: col.timestamp(),
 });
 table("attachments", {
-  message: col.ref("messages"),
+  messageId: col.ref("messages"),
   type: col.string(),
   name: col.string(),
-  data: col.string(),
-  mimeType: col.string(),
+  fileId: col.ref("files"),
   size: col.int(),
 });
 ```
@@ -113,28 +112,24 @@ table("attachments", {
 
 ## Client setup
 
-One call to `createJazzClient` initialises the WASM worker, opens the OPFS database, and begins syncing. `JazzProvider` makes the `db` handle available to every component.
+`JazzProvider` wraps your app. Pass it a config and `createJazzClient` — Jazz takes care of the WASM worker, the local database, and the sync connection.
 
 **[`src/App.tsx`](../src/App.tsx)**
 
 ```typescript
 import { createJazzClient, JazzProvider } from "jazz-tools/react";
 
-const client = createJazzClient({
-  appId:     import.meta.env.VITE_JAZZ_APP_ID ?? "chat-react-example",
-  serverUrl: import.meta.env.VITE_JAZZ_SERVER_URL,
-});
-
 export function App() {
   return (
-    <JazzProvider client={client}>
+    <JazzProvider config={defaultConfig()} createJazzClient={createJazzClient}
+                  fallback={<p>Loading...</p>}>
       <AppContent />
     </JazzProvider>
   );
 }
 ```
 
-That's the entire setup. Jazz handles the WebSocket, the local store, and the sync layer.
+That's the entire setup.
 
 ---
 
@@ -158,16 +153,22 @@ const userId = session?.user_id;
 
 ![bg contain right:38%](screenshots/03-message-sent.png)
 
-`useAll` subscribes to a live query against the local database and re-renders the component on every change, from any user, anywhere.
+`useAll` subscribes to a query against the local database. When data changes — including changes from other users — the component re-renders.
 
 **[`src/components/chat-view/ChatView.tsx`](../src/components/chat-view/ChatView.tsx)**
 
 ```typescript
 const messages =
-  useAll(app.messages.where({ chat: chatId }).orderBy("createdAt", "desc").limit(20)) ?? [];
+  useAll(
+    app.messages
+      .where({ chatId })
+      .include({ sender: true })
+      .orderBy("createdAt", "desc")
+      .limit(20),
+  ) ?? [];
 ```
 
-When a remote user sends a message, it appears instantly. Jazz pushes the change to every subscriber automatically.
+When a remote user sends a message, it appears instantly.
 
 ---
 
@@ -175,40 +176,39 @@ When a remote user sends a message, it appears instantly. Jazz pushes the change
 
 ![bg contain right:38%](screenshots/02-composing.png)
 
-Writes to the local database return immediately. Sync to the edge server happens in the background.
+Writes return immediately. The local database is the source of truth; the server catches up in the background.
 
 **[`src/components/composer/MessageComposer.tsx`](../src/components/composer/MessageComposer.tsx)**
 
 ```typescript
 const handleSend = (html: string) => {
   db.insert(app.messages, {
-    chat: chatId,
+    chatId,
     text: html.trim(),
-    sender: myProfile.id,
-    senderId: userId,
+    senderId: myProfile.id,
     createdAt: new Date(),
   });
 };
 ```
 
-The local write is the source of truth. The server catches up silently.
+No loading spinners, no optimistic UI layer. The insert is the UI update.
 
 ---
 
 ## Permissions — the policy DSL
 
-Policies live in **[`schema/permissions.ts`](../schema/permissions.ts)**, written in a typed DSL. They compile to a policy AST embedded in the schema and are enforced server-side on every sync request.
+Policies live in **[`schema/permissions.ts`](../schema/permissions.ts)**, written in a typed DSL. They're compiled into the schema and enforced on the server on every sync.
 
 ```typescript
 // Messages: only chat members can read or send
 policy.messages.allowRead.where((msg) =>
   anyOf([
-    allowedTo.read("chat"), // inherits from parent: public chats are readable
-    policy.chatMembers.exists.where({ chat: msg.chat, userId: session.user_id }),
+    allowedTo.read("chatId"), // inherits from parent: public chats are readable
+    policy.chatMembers.exists.where({ chatId: msg.chatId, userId: session.user_id }),
   ]),
 );
 policy.messages.allowInsert.where((msg) =>
-  policy.chatMembers.exists.where({ chat: msg.chat, userId: session.user_id }),
+  policy.chatMembers.exists.where({ chatId: msg.chatId, userId: session.user_id }),
 );
 policy.messages.allowDelete.where({ senderId: session.user_id });
 ```
@@ -221,7 +221,7 @@ Row-level security is a schema concern. Components contain no auth logic.
 
 ![bg contain right:38%](screenshots/08-chat-list.png)
 
-The `chats` policy layers three access conditions without any backend logic:
+The `chats` policy combines three conditions, with no backend code:
 
 ```typescript
 policy.chats.allowRead.where((chat) =>
@@ -229,7 +229,7 @@ policy.chats.allowRead.where((chat) =>
     { isPublic: true }, // public rooms
     policy.chatMembers.exists.where({
       // accepted members
-      chat: chat.id,
+      chatId: chat.id,
       userId: session.user_id,
     }),
     { joinCode: session["claims.join_code"] }, // invite link bearer
@@ -237,7 +237,7 @@ policy.chats.allowRead.where((chat) =>
 );
 ```
 
-The `claims.join_code` condition is what makes the invite flow work — a client can present a join code as an ephemeral session claim without being a member yet.
+The third condition is how invites work: a client attaches a temporary credential to its subscription, and the server checks it against the chat's join code.
 
 ---
 
@@ -248,24 +248,43 @@ Private chats carry a `joinCode`. Sharing `/#/invite/:chatId/:code` lets anyone 
 **[`src/components/InviteHandler.tsx`](../src/components/InviteHandler.tsx)**
 
 ```typescript
-// Step 1: subscribe with the join code as an ephemeral session claim.
-// The server's chats policy matches { joinCode: session["claims.join_code"] }
-// and syncs the chat row locally — satisfying the FK constraint before INSERT.
+// Step 1: subscribe with the join code as a temporary credential.
+// The server matches it against the chat's joinCode and syncs the row.
 db.subscribeAll(
   app.chats.where({ id: chatId }),
   (delta) => {
-    if (delta.all.length > 0) setChatReady(true);
+    if (delta.all.length > 0) setChatLoaded(true);
   },
   undefined,
   { user_id: userId, claims: { join_code: code } },
 );
 
 // Step 2: once the chat row is local, insert the membership and navigate.
-db.insert(app.chatMembers, { chat: chatId, userId, joinCode: code });
+db.insert(app.chatMembers, { chatId, userId, joinCode: code });
 navigate(`/#/chat/${chatId}`);
 ```
 
-The claim is never stored — it exists only for this subscription's lifetime.
+The credential is never stored. It exists only for this subscription.
+
+---
+
+## Chat header and settings
+
+The `ChatHeader` shows the chat name (or participant names and date) with a settings button. The `ChatSettings` sheet lets members rename the chat, view the member list, share an invite, or leave.
+
+```typescript
+// Display name: shows other members' names, or an explicit title if set
+const displayName = useChatDisplayName(chatId, chat?.name);
+
+// Any member can rename the chat (clear the name to revert to participants)
+db.update(app.chats, chatId, { name: newName || null });
+
+// Leave: delete your own membership, navigate to the chat list
+db.delete(app.chatMembers, myMembership.id);
+navigate("/#/chats");
+```
+
+When a user opens a public chat they haven't joined yet, `ChatView` adds them as a member automatically.
 
 ---
 
@@ -278,46 +297,43 @@ Each reaction is a row. The query is live; toggling one is a synchronous insert 
 **[`src/components/chat/ChatReactions.tsx`](../src/components/chat/ChatReactions.tsx)**
 
 ```typescript
-const reactions = useAll(app.reactions.where({ message: messageId })) ?? [];
+const reactions = useAll(app.reactions.where({ messageId })) ?? [];
 
 const handleToggle = (emoji: string) => {
   const mine = reactions.find((r) => r.emoji === emoji && r.userId === userId);
   if (mine) {
     db.delete(app.reactions, mine.id);
   } else {
-    db.insert(app.reactions, { message: messageId, userId, emoji });
+    db.insert(app.reactions, { messageId, userId, emoji });
   }
 };
 ```
 
-`allowDelete` is scoped to `{ userId: session.user_id }` — ownership is enforced by the policy itself, with no access logic needed in the component.
+`allowDelete` is scoped to `{ userId: session.user_id }` — you can only remove your own reactions. The policy handles it; the component doesn't check.
 
 ---
 
-## Attachments — files as rows
+## Attachments — Jazz file storage
 
-File uploads are stored as base64 strings directly in the `attachments` table.
+Jazz splits files into chunks and handles reassembly. Uploads wait for server confirmation so the data is available to other users immediately.
 
 ```typescript
-const message = db.insert(app.messages, {
-  chat: chatId,
-  text: "",
-  sender: myProfile.id,
-  senderId: userId,
-  createdAt: new Date(),
-});
+// Upload: store on the edge, wait for confirmation
+const storedFile = await db.createFileFromBlob(app, attachment.file, { tier: "edge" });
 
 db.insert(app.attachments, {
-  message: message.id,
+  messageId: message.id,
   type: attachment.type,
-  name: attachment.name,
-  data: attachment.data, // base64
-  mimeType: attachment.mimeType,
-  size: attachment.size,
+  name: attachment.file.name,
+  fileId: storedFile.id,
+  size: attachment.file.size,
 });
+
+// Download: fetch from the edge
+const blob = await db.loadFileAsBlob(app, attachment.fileId, { tier: "edge" });
 ```
 
-Attachments inherit their read policy from the parent message via `allowedTo.read("message")`.
+Attachments inherit their read policy from the parent message via `allowedTo.read("messageId")`.
 
 ---
 
@@ -329,7 +345,7 @@ Each chat can host shared drawing canvases. Strokes are rows synced in real time
 
 ```typescript
 // Live — re-renders whenever any stroke is added or removed
-const allStrokes = useAll(app.strokes.where({ canvas: canvasId })) ?? [];
+const allStrokes = useAll(app.strokes.where({ canvasId })) ?? [];
 
 // Clear your own strokes — policy enforces ownerId check server-side
 for (const s of allStrokes.filter((s) => s.ownerId === userId)) {
@@ -337,20 +353,7 @@ for (const s of allStrokes.filter((s) => s.ownerId === userId)) {
 }
 ```
 
-Strokes inherit read access from their canvas, which inherits from the chat. `allowDelete` is scoped to `{ ownerId: session.user_id }`. The canvas component has no explicit access checks.
-
----
-
-## Fire-and-forget writes
-
-All writes in this app use the synchronous path: `db.insert` / `db.delete` return immediately. Sync to the edge server happens in the background.
-
-```typescript
-db.insert(app.chatMembers, { chat: chatId, userId, joinCode: code });
-navigate(`/#/chat/${chatId}`);
-```
-
-The membership row is written locally first. The local database satisfies queries instantly while the server catches up.
+Strokes inherit read access from their canvas, which inherits from the chat. The canvas component has no explicit access checks.
 
 ---
 
@@ -358,11 +361,13 @@ The membership row is written locally first. The local database satisfies querie
 
 | API                                         | Notes                                                     |
 | ------------------------------------------- | --------------------------------------------------------- |
-| `createJazzClient`                          | Initialises WASM worker + OPFS database, begins syncing   |
-| `JazzProvider`                              | Provides `db` to every component                          |
-| `useDb()`                                   | Db handle — callable from any component in the tree       |
+| `createJazzClient`                          | Passed to JazzProvider — sets up the WASM worker and sync |
+| `JazzProvider`                              | Makes the db available to all child components             |
+| `useDb()`                                   | Returns the db handle for queries and writes               |
 | `useSession()`                              | Current user identity (`user_id`)                         |
-| `useAll(query)`                             | React hook — live query, re-renders on every change       |
-| `db.insert` / `db.delete`                   | Synchronous local writes — sync to edge in the background |
-| `db.subscribeAll(query, cb, opts, session)` | Manual subscription with optional session-claim override  |
-| `definePermissions`                         | Policy DSL — row-level security compiled into the schema  |
+| `useAll(query)`                             | Live query hook — re-renders on changes                    |
+| `db.insert` / `db.delete` / `db.update`    | Synchronous local writes, synced in the background         |
+| `db.insertDurable`                          | Async write — resolves when confirmed at the given tier   |
+| `db.createFileFromBlob` / `loadFileAsBlob`  | File upload and download                                   |
+| `db.subscribeAll(query, cb, opts, session)` | Manual subscription with optional credential override      |
+| `definePermissions`                         | Policy DSL — row-level security defined in the schema      |
