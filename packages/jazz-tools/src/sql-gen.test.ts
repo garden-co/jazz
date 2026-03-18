@@ -399,6 +399,70 @@ describe("lensToSql", () => {
     );
   });
 
+  it("handles create table operations", () => {
+    expect(
+      lensToSql(
+        {
+          type: "create_table",
+          table: {
+            name: "users",
+            columns: [{ name: "name", sqlType: "TEXT", nullable: false }],
+          },
+        },
+        "fwd",
+      ),
+    ).toBe(`CREATE TABLE users (
+    name TEXT NOT NULL
+);
+`);
+
+    expect(
+      lensToSql(
+        {
+          type: "create_table",
+          table: {
+            name: "users",
+            columns: [{ name: "name", sqlType: "TEXT", nullable: false }],
+          },
+        },
+        "bwd",
+      ),
+    ).toBe(`DROP TABLE users;
+`);
+  });
+
+  it("handles drop table operations", () => {
+    expect(
+      lensToSql(
+        {
+          type: "drop_table",
+          table: {
+            name: "legacy_users",
+            columns: [{ name: "email", sqlType: "TEXT", nullable: false }],
+          },
+        },
+        "fwd",
+      ),
+    ).toBe(`DROP TABLE legacy_users;
+`);
+
+    expect(
+      lensToSql(
+        {
+          type: "drop_table",
+          table: {
+            name: "legacy_users",
+            columns: [{ name: "email", sqlType: "TEXT", nullable: false }],
+          },
+        },
+        "bwd",
+      ),
+    ).toBe(`CREATE TABLE legacy_users (
+    email TEXT NOT NULL
+);
+`);
+  });
+
   it("rejects reserved magic-column namespace in introduced lens columns", () => {
     expect(() =>
       lensToSql(

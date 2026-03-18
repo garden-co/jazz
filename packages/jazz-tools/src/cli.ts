@@ -401,6 +401,9 @@ export interface PushMigrationOptions extends MigrationCommandOptions {
 function getFlagValue(args: string[], flag: string): string | undefined {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
+    if (!arg) {
+      continue;
+    }
     if (arg === flag) {
       return args[i + 1];
     }
@@ -624,16 +627,14 @@ function renderMigrationBody(
     const toTable = toSchema[tableName];
 
     if (!fromTable) {
-      lines.push(
-        `// TODO: table ${JSON.stringify(tableName)} was added. Table-level migrations are not supported yet.`,
-      );
+      lines.push(`m.createTable(${JSON.stringify(tableName)});`);
+      lines.push("");
       continue;
     }
 
     if (!toTable) {
-      lines.push(
-        `// TODO: table ${JSON.stringify(tableName)} was removed. Table-level migrations are not supported yet.`,
-      );
+      lines.push(`m.dropTable(${JSON.stringify(tableName)});`);
+      lines.push("");
       continue;
     }
 

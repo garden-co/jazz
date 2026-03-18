@@ -256,6 +256,19 @@ function lensOpToBackwardSql(table: string, op: LensOp): string {
 }
 
 export function lensToSql(lens: Lens, direction: "fwd" | "bwd"): string {
+  if ("type" in lens) {
+    switch (lens.type) {
+      case "create_table":
+        return direction === "fwd"
+          ? `${tableToSql(lens.table)}\n`
+          : `DROP TABLE ${sqlIdentifier(lens.table.name)};\n`;
+      case "drop_table":
+        return direction === "fwd"
+          ? `DROP TABLE ${sqlIdentifier(lens.table.name)};\n`
+          : `${tableToSql(lens.table)}\n`;
+    }
+  }
+
   for (const op of lens.operations) {
     if (op.type !== "drop") {
       assertUserColumnNameAllowed(op.column);
