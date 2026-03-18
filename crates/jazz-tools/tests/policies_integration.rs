@@ -12,7 +12,7 @@ use jazz_tools::{
     TableSchema, Value,
 };
 use support::{
-    collect_stream_deltas, connect_jwt_client, has_added, has_any_change, has_removed, has_updated,
+    collect_stream_deltas, connect_client, has_added, has_any_change, has_removed, has_updated,
     wait_for_rows, wait_for_subscription_update,
 };
 
@@ -91,9 +91,8 @@ async fn select_policies_filter_subscription_results_per_client_session() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let alice =
-        connect_jwt_client(&server, schema.clone(), "alice", "documents", READY_TIMEOUT).await;
-    let bob = connect_jwt_client(&server, schema, "bob", "documents", READY_TIMEOUT).await;
+    let alice = connect_client(&server, schema.clone(), "alice", "documents", READY_TIMEOUT).await;
+    let bob = connect_client(&server, schema, "bob", "documents", READY_TIMEOUT).await;
     let query = QueryBuilder::new("documents").build();
 
     let mut alice_stream = alice
@@ -178,7 +177,7 @@ async fn insert_policies_are_enforced_by_server_for_client_sync() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let intruder = connect_jwt_client(
+    let intruder = connect_client(
         &server,
         schema.clone(),
         "mallory",
@@ -186,7 +185,7 @@ async fn insert_policies_are_enforced_by_server_for_client_sync() {
         READY_TIMEOUT,
     )
     .await;
-    let observer = connect_jwt_client(
+    let observer = connect_client(
         &server,
         schema.clone(),
         "observer",
@@ -194,7 +193,7 @@ async fn insert_policies_are_enforced_by_server_for_client_sync() {
         READY_TIMEOUT,
     )
     .await;
-    let alice = connect_jwt_client(&server, schema, "alice", "documents", READY_TIMEOUT).await;
+    let alice = connect_client(&server, schema, "alice", "documents", READY_TIMEOUT).await;
     let query = QueryBuilder::new("documents").build();
 
     let mut observer_stream = observer
@@ -272,11 +271,9 @@ async fn update_and_delete_policies_block_unauthorized_server_mutations() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let alice =
-        connect_jwt_client(&server, schema.clone(), "alice", "documents", READY_TIMEOUT).await;
-    let bob = connect_jwt_client(&server, schema.clone(), "bob", "documents", READY_TIMEOUT).await;
-    let observer =
-        connect_jwt_client(&server, schema, "observer", "documents", READY_TIMEOUT).await;
+    let alice = connect_client(&server, schema.clone(), "alice", "documents", READY_TIMEOUT).await;
+    let bob = connect_client(&server, schema.clone(), "bob", "documents", READY_TIMEOUT).await;
+    let observer = connect_client(&server, schema, "observer", "documents", READY_TIMEOUT).await;
     let query = QueryBuilder::new("documents").build();
 
     let mut observer_stream = observer

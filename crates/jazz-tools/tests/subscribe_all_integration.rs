@@ -10,8 +10,8 @@ use jazz_tools::{
     Value,
 };
 use support::{
-    collect_stream_deltas, connect_client, has_added, has_any_change, has_removed, has_updated,
-    wait_for_rows, wait_for_subscription_update,
+    collect_stream_deltas, connect_admin_client, has_added, has_any_change, has_removed,
+    has_updated, wait_for_rows, wait_for_subscription_update,
 };
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -75,7 +75,7 @@ impl ClientPair {
     async fn start() -> Self {
         let server = TestingServer::start().await;
         let schema = subscription_schema();
-        let writer = connect_client(
+        let writer = connect_admin_client(
             &server,
             schema.clone(),
             "subscribe-all-writer",
@@ -83,7 +83,7 @@ impl ClientPair {
             READY_TIMEOUT,
         )
         .await;
-        let subscriber = connect_client(
+        let subscriber = connect_admin_client(
             &server,
             schema,
             "subscribe-all-subscriber",
@@ -345,7 +345,7 @@ async fn subscribe_all_supports_condition_filters() {
 
     let server = TestingServer::start().await;
     let schema = subscription_schema();
-    let writer = connect_client(
+    let writer = connect_admin_client(
         &server,
         schema.clone(),
         "condition-writer",
@@ -501,7 +501,7 @@ async fn subscribe_all_supports_condition_filters() {
     ];
 
     for case in cases {
-        let subscriber = connect_client(
+        let subscriber = connect_admin_client(
             &server,
             schema.clone(),
             &format!("condition-subscriber-{}", case.name),
