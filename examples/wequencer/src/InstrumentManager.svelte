@@ -15,11 +15,11 @@
 		uploading = true;
 
 		try {
-			const buffer = await file.arrayBuffer();
+			const jazzFile = await db.createFileFromBlob(app, file, { tier: "edge" });
 			const maxOrder = Math.max(0, ...(instruments.current ?? []).map((i) => i.display_order));
 			db.insert(app.instruments, {
 				name: name.trim(),
-				sound: new Uint8Array(buffer),
+				soundFileId: jazzFile.id,
 				display_order: maxOrder + 1,
 			});
 			name = '';

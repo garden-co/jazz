@@ -1,8 +1,19 @@
 import { table, col } from "jazz-tools";
 
+table("file_parts", {
+  data: col.bytes(),
+});
+
+table("files", {
+  name: col.string().optional(),
+  mimeType: col.string(),
+  partIds: col.array(col.ref("file_parts")),
+  partSizes: col.array(col.int()),
+});
+
 table("instruments", {
   name: col.string(),
-  sound: col.bytes(),
+  soundFileId: col.ref("files"),
   display_order: col.int(),
 });
 
