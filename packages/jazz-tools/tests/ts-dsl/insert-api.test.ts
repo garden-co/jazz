@@ -1,16 +1,9 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { app } from "./fixtures/basic/app";
+import { insertUser, uniqueDbName } from "./factories";
 
-function uniqueDbName(label: string): string {
-  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function insertOwner(db: Db, name = "Test User") {
-  return db.insert(app.users, { name, friendsIds: [] });
-}
-
-describe("TS Write API", () => {
+describe("TS Insert API", () => {
   let db: Db;
 
   beforeEach(async () => {
@@ -26,7 +19,7 @@ describe("TS Write API", () => {
 
   it("returns the inserted row", async () => {
     const project = db.insert(app.projects, { name: "Test Project" });
-    const owner = insertOwner(db);
+    const owner = insertUser(db);
 
     expect(project).toEqual({
       id: expect.any(String),
@@ -64,7 +57,7 @@ describe("TS Write API", () => {
       id: expect.any(String),
       name: "Test Project",
     });
-    const owner = insertOwner(db);
+    const owner = insertUser(db);
 
     const todo = await db.insertDurable(
       app.todos,
@@ -92,7 +85,7 @@ describe("TS Write API", () => {
 
   it("updates rows synchronously without returning a promise", async () => {
     const project = db.insert(app.projects, { name: "Test Project" });
-    const owner = insertOwner(db);
+    const owner = insertUser(db);
     const todo = db.insert(app.todos, {
       title: "Test Todo",
       done: false,
@@ -111,7 +104,7 @@ describe("TS Write API", () => {
 
   it("can wait for updates to be persisted up to a specific durability tier", async () => {
     const project = db.insert(app.projects, { name: "Test Project" });
-    const owner = insertOwner(db);
+    const owner = insertUser(db);
     const todo = db.insert(app.todos, {
       title: "Test Todo",
       done: false,
@@ -132,7 +125,7 @@ describe("TS Write API", () => {
 
   it("deletes rows synchronously without returning a promise", async () => {
     const project = db.insert(app.projects, { name: "Test Project" });
-    const owner = insertOwner(db);
+    const owner = insertUser(db);
     const todo = db.insert(app.todos, {
       title: "Test Todo",
       done: false,
@@ -155,7 +148,7 @@ describe("TS Write API", () => {
       { name: "Test Project" },
       { tier: "worker" },
     );
-    const owner = insertOwner(db);
+    const owner = insertUser(db);
     const todo = await db.insertDurable(
       app.todos,
       {
