@@ -1,4 +1,4 @@
-import { useEffect, useState, type MouseEvent, type PointerEvent } from "react";
+import { useEffect, useState } from "react";
 import { useDb } from "jazz-tools/react";
 import { DownloadIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -17,14 +17,15 @@ export function ChatImage({ attachment }: ChatImageProps) {
     let isActive = true;
     let objectUrl: string | null = null;
 
-    void db.loadFileAsBlob(app, attachment.fileId).then((blob) => {
-      if (!isActive) {
-        return;
-      }
+    async function loadImage() {
+      const blob = await db.loadFileAsBlob(app, attachment.fileId, { tier: "edge" });
+      if (!isActive) return;
 
       objectUrl = URL.createObjectURL(blob);
       setImageUrl(objectUrl);
-    });
+    }
+
+    loadImage();
 
     return () => {
       isActive = false;
@@ -34,7 +35,7 @@ export function ChatImage({ attachment }: ChatImageProps) {
     };
   }, [attachment.fileId, db]);
 
-  const handleDownload = async () => {
+  const handleDownload = () => {
     if (!imageUrl) return;
     downloadUrl(imageUrl, attachment.name);
   };
@@ -50,7 +51,7 @@ export function ChatImage({ attachment }: ChatImageProps) {
         className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity"
         onClick={(event) => {
           event.stopPropagation();
-          void handleDownload();
+          handleDownload();
         }}
         onPointerDown={(event) => {
           event.stopPropagation();

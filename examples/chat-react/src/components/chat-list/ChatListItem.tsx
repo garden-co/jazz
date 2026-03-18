@@ -19,16 +19,18 @@ import {
   ItemMedia,
   ItemTitle,
 } from "@/components/ui/item";
+import { useChatDisplayName } from "@/hooks/useChatDisplayName";
 import { navigate } from "@/hooks/useRouter";
 
 interface ChatListItemProps {
   chatId: string;
-  chat?: { id: string; isPublic: boolean };
+  chat?: { id: string; isPublic: boolean; name?: string };
   onDelete: () => void;
 }
 
 export function ChatListItem({ chatId, chat, onDelete }: ChatListItemProps) {
   const isPublic = chat?.isPublic ?? true;
+  const displayName = useChatDisplayName(chatId, chat?.name);
 
   return (
     <Item
@@ -39,7 +41,7 @@ export function ChatListItem({ chatId, chat, onDelete }: ChatListItemProps) {
     >
       <ItemMedia>{isPublic ? <MessagesSquareIcon /> : <LockIcon />}</ItemMedia>
       <ItemContent>
-        <ItemTitle>Chat</ItemTitle>
+        <ItemTitle>{displayName}</ItemTitle>
         <ItemDescription>
           {isPublic ? "Public " : "Private "}
           chat

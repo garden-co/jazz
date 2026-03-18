@@ -371,86 +371,7 @@ describe("Chat App E2E", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 6. Create a private chat and send a secret message
-  // -------------------------------------------------------------------------
-
-  it("creates a private chat and sends a secret message", async () => {
-    const el = await mountApp({ dbName: uniqueDbName("private") });
-
-    await waitFor(
-      () => el.querySelector("#messageEditor") !== null,
-      10000,
-      "Editor should be visible",
-    );
-
-    // Navigate to chat list
-    await waitFor(
-      () => el.querySelector('header [data-slot="dropdown-menu-trigger"]') !== null,
-      5000,
-      "NavBar menu button should appear",
-    );
-    const menuButton = el.querySelector<HTMLElement>('header [data-slot="dropdown-menu-trigger"]')!;
-    await act(async () => simulateClick(menuButton));
-
-    await waitFor(
-      () => {
-        const items = document.querySelectorAll('[data-slot="dropdown-menu-item"]');
-        return [...items].some((i) => i.textContent?.includes("Chat List"));
-      },
-      3000,
-      "Chat List should appear",
-    );
-
-    const chatListItem = [...document.querySelectorAll('[data-slot="dropdown-menu-item"]')].find(
-      (i) => i.textContent?.includes("Chat List"),
-    ) as HTMLElement;
-    if (chatListItem) {
-      await act(async () => simulateClick(chatListItem));
-    }
-
-    // Click "New Private Chat"
-    await waitFor(
-      () => {
-        const buttons = el.querySelectorAll("button");
-        return [...buttons].some((b) => b.textContent?.includes("New Private Chat"));
-      },
-      5000,
-      "New Private Chat button should appear",
-    );
-
-    const privateChatButton = [...el.querySelectorAll("button")].find((b) =>
-      b.textContent?.includes("New Private Chat"),
-    ) as HTMLElement;
-    if (privateChatButton) {
-      await act(async () => simulateClick(privateChatButton));
-    }
-
-    // Wait for redirect and send a secret message
-    await waitFor(
-      () => el.querySelector("#messageEditor") !== null,
-      10000,
-      "Private chat editor should appear",
-    );
-
-    const editor = el.querySelector<HTMLElement>("#messageEditor")!;
-    const sendButton = [...el.querySelectorAll("button")].find((b) =>
-      b.querySelector(".lucide-send"),
-    );
-
-    await act(async () => typeIntoEditor(editor, "Secret Data"));
-    if (sendButton) {
-      await act(async () => simulateClick(sendButton));
-    }
-
-    await waitFor(
-      () => el.textContent?.includes("Secret Data") ?? false,
-      5000,
-      "Secret message should appear",
-    );
-  });
-
-  // -------------------------------------------------------------------------
-  // 7. Private access denied (ReBAC enforced)
+  // 6. Private access denied (ReBAC enforced)
   //
   //    User A creates a private chat and sends "Secret Data".
   //    User B mounts and navigates to the same chat URL.
@@ -688,15 +609,11 @@ describe("Chat App E2E", () => {
     // and would look like "019c…" or "false" — the above assertion covers both.
   });
 
-  it("does not show private messages to non-members", async () => {
+  it("denies access and hides messages for non-members of a private chat", async () => {
     const { bobContainer } = await setupPrivateChatAccess();
 
     // The secret message should NOT be visible to a non-member
     expect(bobContainer.textContent?.includes("Secret Data")).toBeFalsy();
-  });
-
-  it("shows an access error for non-members of a private chat", async () => {
-    const { bobContainer } = await setupPrivateChatAccess();
 
     // Non-members should see an access denied indicator
     const text = bobContainer.textContent?.toLowerCase() ?? "";

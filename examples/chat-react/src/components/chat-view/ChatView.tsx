@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2Icon } from "lucide-react";
 import { useDb, useAll, useSession } from "jazz-tools/react";
 import { ChatMessage } from "@/components/chat/ChatMessage";
+import { ChatHeader } from "@/components/chat-view/ChatHeader";
 import { MessageComposer } from "@/components/composer/MessageComposer";
 import { Button } from "@/components/ui/button";
 import { app } from "../../../schema/app.js";
@@ -23,11 +24,26 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   // After a brief sync window, if the chat row is still not visible to this
   // user, we know they don't have permission (private chat, not a member).
   const chatRows = useAll(app.chats.where({ id: chatId })) ?? [];
+  const chat = chatRows[0];
   const chatKnown = chatRows.length > 0;
+
+  // Auto-join: if the user can see the chat but isn't a member yet, insert a
+  // chatMember row so they appear in the member list and can send messages.
+  const myMemberships =
+    useAll(app.chatMembers.where({ chatId, userId: userId ?? "__none__" })) ?? [];
+  const isMember = myMemberships.length > 0;
+  const autoJoined = useRef(false);
+
+  useEffect(() => {
+    if (!userId || !chatKnown || isMember || autoJoined.current) return;
+    autoJoined.current = true;
+    db.insert(app.chatMembers, { chatId, userId });
+  }, [userId, chatKnown, isMember, chatId, db]);
 
   const [accessChecked, setAccessChecked] = useState(false);
   useEffect(() => {
     setAccessChecked(false);
+    autoJoined.current = false;
     const timer = setTimeout(() => setAccessChecked(true), 1500);
     return () => clearTimeout(timer);
   }, [chatId]);
@@ -55,7 +71,6 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
       app.messages
         .where({ chatId })
         .include({ sender: true })
-        .requireIncludes()
         .orderBy("createdAt", "desc")
         .limit(showNLastMessages + 1),
     ) ?? [];
@@ -76,6 +91,7 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
 
   return (
     <>
+      <ChatHeader chatId={chatId} />
       <div className="h-full flex-1 overflow-y-auto flex flex-col-reverse p-2 gap-8 pb-6">
         {messages.length > 0 ? (
           messages

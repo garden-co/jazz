@@ -20,16 +20,19 @@ CREATE TABLE chatMembers (
     userId TEXT NOT NULL,
     joinCode TEXT
 );
-CREATE POLICY chatMembers_select_policy ON chatMembers FOR SELECT USING (userId = @session.user_id);
+CREATE POLICY chatMembers_select_policy ON chatMembers FOR SELECT USING ((userId = @session.user_id) OR (EXISTS (SELECT FROM chatMembers WHERE (chatId = @session.__jazz_outer_row.chatId) AND (userId = @session.user_id))));
 CREATE POLICY chatMembers_insert_policy ON chatMembers FOR INSERT WITH CHECK (userId = @session.user_id);
+CREATE POLICY chatMembers_delete_policy ON chatMembers FOR DELETE USING (userId = @session.user_id);
 
 CREATE TABLE chats (
+    name TEXT,
     isPublic BOOLEAN NOT NULL,
     createdBy TEXT NOT NULL,
     joinCode TEXT
 );
 CREATE POLICY chats_select_policy ON chats FOR SELECT USING ((isPublic = TRUE) OR (EXISTS (SELECT FROM chatMembers WHERE (chatId = @session.__jazz_outer_row.id) AND (userId = @session.user_id))) OR (joinCode = @session.claims.join_code));
 CREATE POLICY chats_insert_policy ON chats FOR INSERT WITH CHECK (createdBy = @session.user_id);
+CREATE POLICY chats_update_policy ON chats FOR UPDATE USING (EXISTS (SELECT FROM chatMembers WHERE (chatId = @session.__jazz_outer_row.id) AND (userId = @session.user_id))) WITH CHECK (EXISTS (SELECT FROM chatMembers WHERE (chatId = @session.__jazz_outer_row.id) AND (userId = @session.user_id)));
 
 CREATE TABLE file_parts (
     data BYTEA NOT NULL
