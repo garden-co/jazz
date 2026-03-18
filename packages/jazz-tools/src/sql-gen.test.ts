@@ -172,12 +172,12 @@ describe("schemaToSql", () => {
     });
     const schema = getCollectedSchema();
 
-    const owner = schema.tables[0].columns.find((c) => c.name === "ownerId")!;
+    const owner = schema.tables[0]!.columns.find((c) => c.name === "ownerId")!;
     expect(owner.sqlType).toBe("UUID");
     expect(owner.references).toBe("users");
     expect(owner.nullable).toBe(false);
 
-    const parent = schema.tables[0].columns.find((c) => c.name === "parentId")!;
+    const parent = schema.tables[0]!.columns.find((c) => c.name === "parentId")!;
     expect(parent.sqlType).toBe("UUID");
     expect(parent.references).toBe("todos");
     expect(parent.nullable).toBe(true);
@@ -190,7 +190,7 @@ describe("schemaToSql", () => {
     });
     const schema = getCollectedSchema();
 
-    const parts = schema.tables[0].columns.find((c) => c.name === "partIds")!;
+    const parts = schema.tables[0]!.columns.find((c) => c.name === "partIds")!;
     expect(parts.sqlType).toEqual({ kind: "ARRAY", element: "UUID" });
     expect(parts.references).toBe("file_parts");
     expect(parts.nullable).toBe(false);

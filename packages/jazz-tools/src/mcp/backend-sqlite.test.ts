@@ -6,6 +6,11 @@ import { DatabaseSync } from "node:sqlite";
 
 import { createSqliteBackend } from "./backend-sqlite.js";
 
+function firstResult<T>(values: T[]): T {
+  expect(values.length).toBeGreaterThan(0);
+  return values[0]!;
+}
+
 // ---------------------------------------------------------------------------
 // Fixture DB
 //
@@ -149,12 +154,12 @@ describe("search()", () => {
     const backend = await createSqliteBackend(dbPath);
     const results = backend.search("installation", 10);
     expect(results.length).toBeGreaterThan(0);
-    expect(results[0].slug).toBe("getting-started");
+    expect(results[0]!.slug).toBe("getting-started");
   });
 
   it("result shape has title, slug, section, snippet", async () => {
     const backend = await createSqliteBackend(dbPath);
-    const [result] = backend.search("installation", 1);
+    const result = firstResult(backend.search("installation", 1));
     expect(typeof result.title).toBe("string");
     expect(typeof result.slug).toBe("string");
     expect(typeof result.section).toBe("string");
@@ -163,7 +168,7 @@ describe("search()", () => {
 
   it("section maps to the ## heading of the matching section", async () => {
     const backend = await createSqliteBackend(dbPath);
-    const [result] = backend.search("installation", 1);
+    const result = firstResult(backend.search("installation", 1));
     expect(result.section).toBe("Installation");
   });
 
@@ -180,7 +185,7 @@ describe("search()", () => {
 
   it("snippet is a non-empty string", async () => {
     const backend = await createSqliteBackend(dbPath);
-    const [result] = backend.search("installation", 1);
+    const result = firstResult(backend.search("installation", 1));
     expect(result.snippet.length).toBeGreaterThan(0);
   });
 
@@ -188,7 +193,7 @@ describe("search()", () => {
     const backend = await createSqliteBackend(dbPath);
     // "subscriptions" appears exclusively in reading-data
     const results = backend.search("subscriptions", 10);
-    expect(results[0].slug).toBe("reading-data");
+    expect(results[0]!.slug).toBe("reading-data");
   });
 });
 
@@ -249,7 +254,7 @@ describe("listPages()", () => {
 
   it("each entry has title, slug, description", async () => {
     const backend = await createSqliteBackend(dbPath);
-    const [page] = backend.listPages();
+    const page = firstResult(backend.listPages());
     expect(typeof page.title).toBe("string");
     expect(typeof page.slug).toBe("string");
     expect(typeof page.description).toBe("string");

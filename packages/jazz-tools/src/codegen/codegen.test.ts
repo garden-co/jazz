@@ -16,7 +16,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.items.columns[0]).toEqual({
+    expect(wasm.items!.columns[0]).toEqual({
       name: "name",
       column_type: { type: "Text" },
       nullable: false,
@@ -28,7 +28,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.items.columns[0]).toEqual({
+    expect(wasm.items!.columns[0]).toEqual({
       name: "active",
       column_type: { type: "Boolean" },
       nullable: false,
@@ -40,7 +40,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.items.columns[0]).toEqual({
+    expect(wasm.items!.columns[0]).toEqual({
       name: "count",
       column_type: { type: "Integer" },
       nullable: false,
@@ -52,7 +52,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.items.columns[0]).toEqual({
+    expect(wasm.items!.columns[0]).toEqual({
       name: "created_at",
       column_type: { type: "Timestamp" },
       nullable: false,
@@ -64,7 +64,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.items.columns[0]).toEqual({
+    expect(wasm.items!.columns[0]).toEqual({
       name: "price",
       column_type: { type: "Double" },
       nullable: false,
@@ -76,7 +76,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.items.columns[0]).toEqual({
+    expect(wasm.items!.columns[0]).toEqual({
       name: "ownerId",
       column_type: { type: "Uuid" },
       nullable: false,
@@ -89,7 +89,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.items.columns[0]).toEqual({
+    expect(wasm.items!.columns[0]).toEqual({
       name: "description",
       column_type: { type: "Text" },
       nullable: true,
@@ -101,7 +101,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.todos.columns[0]).toEqual({
+    expect(wasm.todos!.columns[0]).toEqual({
       name: "parentId",
       column_type: { type: "Uuid" },
       nullable: true,
@@ -114,7 +114,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.items.columns[0]).toEqual({
+    expect(wasm.items!.columns[0]).toEqual({
       name: "tags",
       column_type: { type: "Array", element: { type: "Text" } },
       nullable: false,
@@ -126,7 +126,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.items.columns[0]).toEqual({
+    expect(wasm.items!.columns[0]).toEqual({
       name: "matrix",
       column_type: {
         type: "Array",
@@ -141,7 +141,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.items.columns[0]).toEqual({
+    expect(wasm.items!.columns[0]).toEqual({
       name: "owner_ids",
       column_type: { type: "Array", element: { type: "Uuid" } },
       nullable: false,
@@ -154,7 +154,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.tasks.columns[0]).toEqual({
+    expect(wasm.tasks!.columns[0]).toEqual({
       name: "status",
       column_type: { type: "Enum", variants: ["done", "in_progress", "todo"] },
       nullable: false,
@@ -166,7 +166,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.documents.columns[0]).toEqual({
+    expect(wasm.documents!.columns[0]).toEqual({
       name: "payload",
       column_type: { type: "Json", schema: undefined },
       nullable: false,
@@ -186,7 +186,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.documents.columns[0]).toEqual({
+    expect(wasm.documents!.columns[0]).toEqual({
       name: "payload",
       column_type: {
         type: "Json",
@@ -211,7 +211,7 @@ describe("schemaToWasm", () => {
     const schema = getCollectedSchema();
     const wasm = schemaToWasm(schema);
 
-    const column = wasm.documents.columns[0];
+    const column = wasm.documents!.columns[0];
     expect(column?.column_type.type).toBe("Json");
     if (column?.column_type.type !== "Json") {
       throw new Error("expected Json column type");
@@ -230,8 +230,8 @@ describe("schemaToWasm", () => {
     const wasm = schemaToWasm(schema);
 
     expect(Object.keys(wasm)).toEqual(["users", "todos"]);
-    expect(wasm.users.columns).toHaveLength(1);
-    expect(wasm.todos.columns).toHaveLength(2);
+    expect(wasm.users!.columns).toHaveLength(1);
+    expect(wasm.todos!.columns).toHaveLength(2);
   });
 
   it("carries table permissions into wasm schema", () => {
@@ -253,7 +253,7 @@ describe("schemaToWasm", () => {
 
     const wasm = schemaToWasm(schema);
 
-    expect(wasm.todos.policies).toEqual({
+    expect(wasm.todos!.policies).toEqual({
       select: {
         using: {
           type: "Cmp",
@@ -310,7 +310,7 @@ describe("schemaToWasm", () => {
     };
 
     const wasm = schemaToWasm(schema);
-    expect(wasm.files.policies).toEqual({
+    expect(wasm.files!.policies).toEqual({
       select: {
         using: {
           type: "InheritsReferencing",
@@ -358,7 +358,7 @@ describe("schemaToWasm", () => {
     };
 
     const wasm = schemaToWasm(schema);
-    expect(wasm.todos.policies?.select?.using).toEqual({
+    expect(wasm.todos!.policies?.select?.using).toEqual({
       type: "And",
       exprs: [
         {

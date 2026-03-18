@@ -5,6 +5,11 @@ import { join } from "node:path";
 
 import { createNaiveBackend } from "./backend-naive.js";
 
+function firstResult<T>(values: T[]): T {
+  expect(values.length).toBeGreaterThan(0);
+  return values[0]!;
+}
+
 // ---------------------------------------------------------------------------
 // Fixture txt — exact format produced by buildIndex
 //
@@ -115,7 +120,7 @@ describe("search()", () => {
 
   it("result shape has title, slug, section, snippet", async () => {
     const backend = await createNaiveBackend(txtPath);
-    const [result] = backend.search("installation", 1);
+    const result = firstResult(backend.search("installation", 1));
     expect(typeof result.title).toBe("string");
     expect(typeof result.slug).toBe("string");
     expect(typeof result.section).toBe("string");
@@ -124,7 +129,7 @@ describe("search()", () => {
 
   it("section maps to the ## heading of the matching section", async () => {
     const backend = await createNaiveBackend(txtPath);
-    const [result] = backend.search("installation", 1);
+    const result = firstResult(backend.search("installation", 1));
     expect(result.section).toBe("Installation");
   });
 
@@ -154,12 +159,12 @@ describe("search()", () => {
     // but only implicitly in the preamble
     const results = backend.search("installation", 10);
     // The Installation section (with "installation" twice) should rank first
-    expect(results[0].section).toBe("Installation");
+    expect(results[0]!.section).toBe("Installation");
   });
 
   it("snippet is a non-empty string", async () => {
     const backend = await createNaiveBackend(txtPath);
-    const [result] = backend.search("installation", 1);
+    const result = firstResult(backend.search("installation", 1));
     expect(result.snippet.length).toBeGreaterThan(0);
   });
 });
@@ -210,7 +215,7 @@ describe("listPages()", () => {
 
   it("each entry has title, slug, description", async () => {
     const backend = await createNaiveBackend(txtPath);
-    const [page] = backend.listPages();
+    const page = firstResult(backend.listPages());
     expect(typeof page.title).toBe("string");
     expect(typeof page.slug).toBe("string");
     expect(typeof page.description).toBe("string");
