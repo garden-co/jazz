@@ -603,9 +603,9 @@ describe("sync-transport", () => {
       expect(body.payloads).toHaveLength(3);
       expect(body.client_id).toBe("client-alice");
       // Each element is the parsed payload, not the raw JSON string
-      expect(body.payloads[0]!!).toEqual(JSON.parse(payloads[0]!));
-      expect(body.payloads[1]!!).toEqual(JSON.parse(payloads[1]!));
-      expect(body.payloads[2]!!).toEqual(JSON.parse(payloads[2]!));
+      expect(body.payloads[0]!).toEqual(JSON.parse(payloads[0]!));
+      expect(body.payloads[1]!).toEqual(JSON.parse(payloads[1]!));
+      expect(body.payloads[2]!).toEqual(JSON.parse(payloads[2]!));
     });
 
     it("preserves payload order in the POST body", async () => {
@@ -628,9 +628,9 @@ describe("sync-transport", () => {
       });
 
       const body = JSON.parse(fetchMock.mock.calls[0]![1].body as string);
-      expect(body.payloads[0]!!.ObjectUpdated.object_id).toBe("p1");
-      expect(body.payloads[1]!!.ObjectUpdated.object_id).toBe("p2");
-      expect(body.payloads[2]!!.ObjectUpdated.object_id).toBe("p3");
+      expect(body.payloads[0]!.ObjectUpdated.object_id).toBe("p1");
+      expect(body.payloads[1]!.ObjectUpdated.object_id).toBe("p2");
+      expect(body.payloads[2]!.ObjectUpdated.object_id).toBe("p3");
     });
 
     it("applies JWT auth header", async () => {
