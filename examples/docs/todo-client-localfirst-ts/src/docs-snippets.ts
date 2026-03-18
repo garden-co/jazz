@@ -77,6 +77,10 @@ export async function readTodoPermissionIntrospection(db: Db) {
   );
 }
 
+export async function readTodosWithDeletePermission(db: Db) {
+  return db.all(app.todos.select("*", "$canDelete").orderBy("title", "asc"));
+}
+
 export async function readEditableTodos(db: Db) {
   return db.all(app.todos.where({ $canEdit: true }).select("title", "$canEdit"));
 }

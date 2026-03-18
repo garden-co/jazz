@@ -25,6 +25,7 @@ import {
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { resolveClientSessionSync } from "./client-session.js";
 import { translateQuery } from "./query-adapter.js";
+import { isHiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -837,20 +838,20 @@ export class JazzClient {
       return values;
     }
 
-    const projectedBaseColumnCount =
+    const projectedVisibleColumnCount =
       selectColumns.length > 0
-        ? selectColumns.filter((columnName) =>
-            declaredTable.columns.some((column) => column.name === columnName),
+        ? resolveSelectedColumns(table, this.context.schema, selectColumns).filter(
+            (columnName) => !isHiddenIncludeColumnName(columnName),
           ).length
         : 0;
 
-    if (projectedBaseColumnCount > 0) {
-      if (values.length < projectedBaseColumnCount) {
+    if (projectedVisibleColumnCount > 0) {
+      if (values.length < projectedVisibleColumnCount) {
         return values;
       }
 
-      const projectedValues = values.slice(0, projectedBaseColumnCount);
-      const trailingValues = values.slice(projectedBaseColumnCount);
+      const projectedValues = values.slice(0, projectedVisibleColumnCount);
+      const trailingValues = values.slice(projectedVisibleColumnCount);
       if (arraySubqueries.length === 0) {
         return projectedValues.concat(trailingValues);
       }
