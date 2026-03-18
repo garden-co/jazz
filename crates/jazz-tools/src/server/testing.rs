@@ -26,6 +26,7 @@ pub struct TestingServerOptions {
     pub port: Option<u16>,
     pub app_id: Option<AppId>,
     pub data_dir: Option<PathBuf>,
+    pub schema: Option<Schema>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -86,6 +87,14 @@ impl TestingServer {
         Self::start_with_options(TestingServerOptions::default()).await
     }
 
+    pub async fn start_with_schema(schema: Schema) -> Self {
+        Self::start_with_options(TestingServerOptions {
+            schema: Some(schema),
+            ..TestingServerOptions::default()
+        })
+        .await
+    }
+
     pub async fn start_with_options(options: TestingServerOptions) -> Self {
         let port = options.port.unwrap_or_else(get_free_port);
         let app_id = options.app_id.unwrap_or_else(Self::default_app_id);
@@ -101,12 +110,13 @@ impl TestingServer {
             admin_secret: Some(Self::ADMIN_SECRET.to_string()),
         };
 
-        let built = ServerBuilder::new(app_id)
+        let mut builder = ServerBuilder::new(app_id)
             .with_auth_config(auth_config)
-            .with_persistent_storage(data_dir.to_string_lossy().into_owned())
-            .build()
-            .await
-            .expect("build test server");
+            .with_persistent_storage(data_dir.to_string_lossy().into_owned());
+        if let Some(schema) = options.schema {
+            builder = builder.with_schema(schema);
+        }
+        let built = builder.build().await.expect("build test server");
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
