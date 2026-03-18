@@ -74,3 +74,5 @@ Remaining work items and future designs live in [`specs/todo/`](todo/). Notable:
 - **[Storage: Browser E2E Suite](todo/a_mvp/browser_e2e_test_suite.md)** — End-to-end verification for browser runtime + worker + sync
 - **[Built-in File Storage](todo/a_mvp/built_in_file_storage.md)** — Framework-native file/blob storage using relational tables and chunked binary parts
 - **[Weak Tests](todo/a_mvp/weak_tests.md)** — Remaining test-hardening follow-up across query, schema, and runtime coverage
+- **[TypeScript Client Codegen: Relations Demo](todo/a_mvp/codegen_relations_demo.md)** — Example app coverage for generated relation APIs
+- **[Policy Query-Time Constant Folding](todo/c_later/policy_query_time_constant_folding.md)** — Track broader follow-up work for evaluating row-independent policy checks once per query instead of once per row
