@@ -11,12 +11,27 @@ The design supports:
 - transaction-batched delivery
 - nested descendant tracking through Jazz `resolve` queries
 - best-effort descendant resolution
-- strict historical graph membership
+- current-membership replay
 
 This design intentionally satisfies the approved "history + live" requirement through `subscribeChanges(...)` plus `currentCursor(...)`.
 There is no separate pull-style `readChanges(...)` API in v1.
 
 This design does not include any search or example-app work.
+
+## Vocabulary
+
+| Term | Definition |
+|---|---|
+| **frontier** | A per-session map of `SessionID → txIndex` recording the highest transaction index already seen for that session. Used to resume replay without re-processing already-delivered transactions. |
+| **cursor** | An opaque string that encodes the frontier of every tracked node at a point in time. Passed back to `subscribeChanges` to resume from that checkpoint. |
+| **backlog** | Transactions that were written after the cursor was taken but before `subscribeChanges` is called. Replayed in causal order before live tail begins. |
+| **tail** | The live-tail mode: delivering new transactions as they arrive, after any backlog replay is complete. A subscription without a cursor starts directly in tail mode. |
+| **replay** | Re-processing historical transactions from each node's frontier up to the current head, in merged causal order across all nodes in the graph. |
+| **graph** | The set of CoValues reachable from the root via the `resolve` query. Includes the root itself and all resolved descendants at any depth. |
+| **graph diff** | A set of IDs that entered (`added`), left (`removed`), or received new transactions (`changed`) in the current update cycle. |
+| **current-membership replay** | Replay only covers nodes that are reachable at the time `subscribeChanges` is called. Nodes detached before that point are silently skipped. |
+| **node** | A single CoValue within the active graph. Each node tracks its own frontier for incremental replay. |
+| **batch** | A `ChangeBatch`: one transaction's worth of semantic changes, plus author, timestamp, and a cursor checkpoint. |
 
 ## Architecture / Components
 
@@ -61,9 +76,7 @@ It captures:
 
 - reachable CoValue IDs
 - parent-child edges
-- logical path segments
-- per-node `knownState`
-- unresolved descendants so replay can continue best-effort
+- per-node session frontiers (`knownState.sessions`)
 
 `ReplayEngine` is responsible for replaying post-cursor transactions across the active graph in one merged order.
 It uses existing `CoValueCore.getValidSortedTransactions(...)` and the existing transaction ordering in `CoValueCore.compareTransactions(...)`.
@@ -80,10 +93,8 @@ Transaction metadata stays internal to replay ordering and checkpoint progressio
 It owns:
 
 - the root `SubscriptionScope`
-- the active graph snapshot
+- the active graph (maintained incrementally via `subscribeToGraphDiff`)
 - the last emitted cursor
-- replay state
-- live tail state
 
 ### Reusing Existing Jazz Primitives
 
@@ -94,6 +105,109 @@ The design intentionally reuses current internals instead of creating a second g
 - `CoValueCore.getValidSortedTransactions(...)` already exposes the sorted, decrypted transaction stream needed for replay.
 - `knownState.sessions` already provides the per-session frontier needed for resume.
 - existing inspector transaction helpers provide good precedent for semantic translation of list and text changes.
+
+### SubscriptionScope Modifications
+
+The CDC subsystem surfaces friction with `SubscriptionScope`'s current API.
+The following targeted modifications make the CDC implementation cleaner, more efficient, and free of unsafe casts.
+They are listed from least to most architectural, but all are worth making.
+
+#### 1. Make `resolve` a public readonly field
+
+`resolve` is currently private.
+The CDC works around this with an unsafe cast:
+
+```ts
+const resolve = (scope as unknown as { resolve: ResolveValue }).resolve;
+```
+
+Making it `readonly` on the constructor eliminates the cast with zero behavior change.
+
+```ts
+constructor(
+  public node: LocalNode,
+  public readonly resolve: RefsToResolve<any>,  // was private
+  public id: string,
+  ...
+)
+```
+
+#### 2. Add `parentId` to child scopes
+
+Child scopes are self-contained and do not know who created them.
+The CDC must therefore thread `parentId` manually through every recursive traversal of the scope tree.
+
+Adding `readonly parentId: string | undefined` to the constructor — set by `loadChildNode` when it creates child scopes — makes scope trees self-describing:
+
+```ts
+constructor(
+  public node: LocalNode,
+  public readonly resolve: RefsToResolve<any>,
+  public id: string,
+  public schema: RefEncoded<CoValue>,
+  public readonly parentId: string | undefined,  // new
+  ...
+)
+```
+
+This removes external parent tracking from `GraphSnapshot` and the recursive snapshot builders.
+
+#### 3. Add a `frontier` accessor
+
+The CDC accesses the session frontier for each node via four levels of raw-layer indirection:
+
+```ts
+current.$jazz.raw.core.knownState().sessions
+```
+
+A convenience accessor on `SubscriptionScope` isolates the raw-layer access to one place:
+
+```ts
+get frontier(): Record<SessionID, number> | undefined {
+  if (this.value.type !== CoValueLoadingState.LOADED) return undefined;
+  return this.value.value.$jazz.raw.core.knownState().sessions as Record<SessionID, number>;
+}
+```
+
+#### 4. Add an `allDescendants()` iterator
+
+`graphSnapshotFromScope` in the CDC reimplements a recursive walk of `scope.childNodes` that the scope tree already represents.
+A flat iterator over all reachable descendant scopes eliminates this duplication and replaces the hand-rolled recursive visitor:
+
+```ts
+*allDescendants(): IterableIterator<SubscriptionScope<CoValue>> {
+  for (const child of this.childNodes.values()) {
+    yield child;
+    yield* child.allDescendants();
+  }
+}
+```
+
+With this in place, `graphSnapshotFromScope` becomes a single flat loop over `scope.allDescendants()`, and `loadAttachedSubtree` can read the already-loaded child scope from `childNodes` instead of opening a redundant new `SubscriptionScope`.
+
+#### 5. Add a root-level graph-diff subscription
+
+The highest-leverage change.
+The root scope aggregates child-change information from its entire subtree and fires a single, deduplicated diff per update cycle:
+
+```ts
+subscribeToGraphDiff(
+  callback: (diff: {
+    added: Set<string>;
+    removed: Set<string>;
+    changed: Set<string>;
+  }) => void
+): () => void
+```
+
+- `added`: IDs that entered the reachable graph this cycle (newly attached subtrees)
+- `removed`: IDs that left the reachable graph this cycle (detached subtrees)
+- `changed`: IDs whose transactions advanced this cycle (value updates)
+
+`loadChildren()` already computes which children were added and removed — it iterates `idsToLoad` vs `childNodes.keys()` — but currently discards that information after returning a bare `hasChanged: boolean`.
+`subscribeToGraphDiff` surfaces it, aggregated upward through the tree to the root.
+
+With this primitive, `ChangeSubscriptionController` maintains its active graph incrementally by applying the diff directly, and no longer needs a separate `#currentSnapshot` or the sync/prune passes that go with it.
 
 ### Replay-to-Live-Tail Handoff
 
@@ -109,7 +223,7 @@ Transactions that arrive during replay are buffered and processed in order after
 
 - loads the root with `bestEffortResolution: true`
 - builds a `GraphSnapshot` from the resulting subscription tree
-- serializes the graph membership and frontiers into an opaque cursor
+- serializes the per-node session frontiers into an opaque cursor
 
 #### 2. `subscribeChanges(...)` without a cursor
 
@@ -126,30 +240,21 @@ This keeps the no-cursor case cheap and aligns with the approved tail-from-now d
 `subscribeChanges(...)` with a cursor:
 
 - decodes and validates the cursor
-- loads the root graph with the requested `resolve`
-- reconstructs the active graph from the cursor and current scope
-- replays all eligible transactions after the cursor
-- switches into live tail mode using the same merged ordering rules
+- loads the root graph with the requested `resolve` via `SubscriptionScope`
+- applies the saved per-node frontiers to nodes currently in the graph; nodes no longer reachable are silently skipped; nodes new since the cursor have no saved frontier and are replayed from the beginning
+- replays all transactions after each node's frontier in merged order
+- continues tailing live changes via `subscribeToGraphDiff`
 
-### Strict Historical Membership
+### Current-Membership Replay
 
-Strict historical membership is required.
+The replay node set is determined once from the graph that is currently reachable via `SubscriptionScope` at the time `subscribeChanges(...)` is called.
+Only those nodes are eligible for replay; the set does not change mid-replay.
 
-If a descendant was reachable at one time and later detached from the root graph:
+Nodes that were attached between the cursor and now but have since been detached are not in the current graph and are silently skipped.
+Nodes that were attached after the cursor and are still present have no saved frontier; they are replayed from the beginning.
 
-- its earlier reachable changes must still replay
-- its later detached changes must not replay
-
-This means replay cannot be based only on current reachability.
-The replay engine must update graph membership after every translated transaction.
-
-When a transaction attaches a new descendant subtree:
-
-- the subtree becomes eligible for subsequent CDC immediately after the attaching transaction
-
-When a transaction detaches a subtree:
-
-- that subtree stops being eligible immediately after the detaching transaction
+This is correct for the primary use cases — search indexing, audit logs, event pipelines — because a detached node will already have produced a structural change event (`list-delete`, `map-delete`) that the consumer can act on.
+Its intermediate mutations while attached are irrelevant once it is gone.
 
 ### Best-Effort Descendant Failures
 
@@ -217,7 +322,7 @@ type ChangeBatch = {
 };
 
 /**
- * All changes share `coValueId` (the CoValue that changed) and `path`.
+ * `coValueId` identifies the CoValue that changed.
  * `parentId` is the immediate parent in the resolved graph; it is absent only
  * for changes on the root CoValue itself.
  * `index` reflects the logical list index after the transaction is applied.
@@ -227,7 +332,6 @@ type Change =
       kind: "list-insert";
       coValueId: string;
       parentId?: string;
-      path: ChangePath;
       index: number;
       value: JsonValue | { refId: string };
     }
@@ -235,7 +339,6 @@ type Change =
       kind: "list-delete";
       coValueId: string;
       parentId?: string;
-      path: ChangePath;
       index: number;
       deletedRefId?: string;
     }
@@ -243,7 +346,6 @@ type Change =
       kind: "list-replace";
       coValueId: string;
       parentId?: string;
-      path: ChangePath;
       index: number;
       value: JsonValue | { refId: string };
       replacedRefId?: string;
@@ -252,7 +354,6 @@ type Change =
       kind: "map-set";
       coValueId: string;
       parentId?: string;
-      path: ChangePath;
       key: string;
       value: JsonValue | { refId: string };
     }
@@ -260,29 +361,20 @@ type Change =
       kind: "map-delete";
       coValueId: string;
       parentId?: string;
-      path: ChangePath;
       key: string;
     }
   | {
       kind: "text-change";
       coValueId: string;
       parentId?: string;
-      path: ChangePath;
       text: string;
     }
   | {
       kind: "feed-append";
       coValueId: string;
       parentId?: string;
-      path: ChangePath;
       value: JsonValue | { refId: string };
     };
-
-type ChangePath = Array<
-  | { kind: "root"; coValueId: string }
-  | { kind: "map-key"; key: string; coValueId?: string }
-  | { kind: "list-item"; refId?: string; index?: number }
->;
 ```
 
 Example:
@@ -298,11 +390,6 @@ const batch: ChangeBatch = {
       kind: "map-set",
       coValueId: "co_zTask123",
       parentId: "co_zList456",
-      path: [
-        { kind: "root", coValueId: "co_zList456" },
-        { kind: "list-item", refId: "co_zTask123", index: 2 },
-        { kind: "map-key", key: "title" },
-      ],
       key: "title",
       value: "Buy milk",
     },
@@ -313,14 +400,16 @@ const batch: ChangeBatch = {
 ### Cursor Internals
 
 The cursor stays opaque publicly.
-Internally it should be a versioned encoded structure containing:
+Internally it is a versioned encoded structure containing only:
 
 - `version`
 - `rootId`
 - `resolveFingerprint`
-- active reachable node IDs
-- parent edges and enough path metadata to restore identity
-- per-node `knownState.sessions`
+- `frontiers`: a map from CoValue ID to per-session sequence numbers (`Record<string, Record<SessionID, number>>`)
+
+Graph topology — which nodes are reachable, their parent edges — is not stored in the cursor.
+It is re-derived from the live `SubscriptionScope` on resume.
+Frontiers for nodes no longer in the current graph are ignored; nodes present in the current graph with no frontier entry are replayed from the beginning.
 
 The `resolveFingerprint` must be stable for semantically equivalent resolve queries.
 The implementation should normalize keys before encoding (e.g. `{ b: true, a: true }` and `{ a: true, b: true }` must produce the same fingerprint).
@@ -414,17 +503,29 @@ const rootScope = new SubscriptionScope(
   unstableBranch,
 );
 
-const snapshot = graphSnapshotFromScope(rootScope);
-const replay = createReplayEngine(cursor, snapshot);
+// The graph is fixed at replay start from current reachability.
+// Frontiers from the cursor are applied to matching nodes.
+const graph = buildActiveGraphFromScope(rootScope, cursor);
 
-while (replay.hasNext()) {
-  const next = replay.popNextTransaction();
-  const batch = translateTransaction(next, replay.currentGraph());
+while (true) {
+  const next = pickNextTransaction(graph);
+  if (!next) break;
 
+  const { node, tx } = next;
+  const changes = translateTransaction(node, tx);
+  advanceFrontier(node, tx);
+
+  if (changes.length === 0) continue;
+
+  const batch = { cursor: encodeCursor(graph), ...metadata(tx), changes };
   listener(batch, handle);
-  replay.advance(batch.cursor);
-  replay.applyGraphChanges(batch);
 }
+
+// Switch to live tail via subscribeToGraphDiff — no separate mode needed.
+rootScope.subscribeToGraphDiff((diff) => {
+  applyDiff(graph, diff);
+  processNewTransactions(graph, listener, handle);
+});
 ```
 
 ### Translation Rules
@@ -632,7 +733,7 @@ Add integration tests for:
 - root CoMap, CoList, CoPlainText, and CoFeed as the root schema
 - descendant `CoMap`, `CoList`, `CoPlainText`, and `CoFeed` semantics
 - meaningful-change filtering for no-op or losing writes
-- strict detach behavior for descendants removed from the root graph
+- detached descendants are not replayed (current-membership replay)
 - best-effort descendant authorization and availability failures
 - cursor incompatibility for different root IDs or different resolve shapes throws `CursorError` synchronously
 - stable replay ordering across merged branches
@@ -661,11 +762,13 @@ test("replays backlog and then tails live updates", async () => {
 ```
 
 ```ts
-test("does not emit changes from a detached descendant after removal", async () => {
+test("does not replay a descendant that was detached before subscribeChanges is called", async () => {
   const cursor = await currentCursor(TaskList, listId, {
     resolve: { $each: { notes: true } },
   });
 
+  // Entry is removed after the cursor is taken. It is no longer in the
+  // current graph when subscribeChanges runs, so nothing about it replays.
   removeEntryFromList();
   mutateDetachedEntry();
 
@@ -702,9 +805,10 @@ test("works with a CoMap root", async () => {
 
 Add focused unit tests for:
 
-- cursor encoding and decoding
+- cursor encoding and decoding (frontiers-only payload)
 - resolve fingerprint normalization
-- graph snapshot extraction from a `SubscriptionScope`
+- graph snapshot extraction from a `SubscriptionScope` via `allDescendants()`
+- frontier application on resume: nodes present get their saved frontier, nodes absent are skipped, new nodes start from zero
 - transaction merge ordering across multiple sessions
 - `list-replace` translation collapse
 - no-op `CoMap` filtering
