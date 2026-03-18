@@ -109,6 +109,13 @@ export async function writeTodoCrud(db: Db, todoId: string) {
 }
 // #endregion writing-crud-ts
 
+// #region writing-nullable-update-ts
+export function clearNullableTodoFields(db: Db, todoId: string) {
+  db.update(app.todos, todoId, { ownerId: null }); // clears the nullable FK
+  db.update(app.todos, todoId, { description: undefined }); // leaves the field unchanged
+}
+// #endregion writing-nullable-update-ts
+
 // #region writing-durability-tier-ts
 export async function writeTodoWithDurabilityTiers(db: Db) {
   const { id } = await db.insertDurable(
