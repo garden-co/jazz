@@ -165,6 +165,10 @@ describe("usePassphraseAuth", () => {
         },
         {
           "accountIndex": 0,
+          "state": "anonymous",
+        },
+        {
+          "accountIndex": 0,
           "state": "signedIn",
         },
         {

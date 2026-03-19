@@ -126,7 +126,7 @@ export class AuthSecretStorage {
   }
 
   async set(payload: AuthSetPayload) {
-    this.setWithoutNotify(payload);
+    await this.setWithoutNotify(payload);
     this.emitUpdate(payload);
   }
 
