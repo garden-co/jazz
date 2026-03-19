@@ -1,6 +1,6 @@
-import { col, defineApp, type DefinedSchema, type RowOf, type TypedApp } from "jazz-tools";
+import { col, defineApp, type Schema, type RowOf, type App } from "jazz-tools";
 
-const schemaDef = {
+const schema = {
   // #region schema-todo-client-ts
   projects: {
     name: col.string(),
@@ -33,7 +33,7 @@ const schemaDef = {
   // #endregion schema-files-and-blobs-ts
 };
 
-type AppSchema = DefinedSchema<typeof schemaDef>;
-export const app: TypedApp<AppSchema> = defineApp(schemaDef);
+type AppSchema = Schema<typeof schema>;
+export const app: App<AppSchema> = defineApp(schema);
 
 export type Todo = RowOf<typeof app.todos>;

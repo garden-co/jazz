@@ -2,14 +2,14 @@ import { describe, expect, expectTypeOf, it } from "vitest";
 import { col } from "../../src/dsl.js";
 import {
   defineApp,
-  type DefinedSchema,
+  type Schema,
   type Query,
   type RowOf,
   type Table,
-  type TypedApp,
+  type App,
 } from "../../src/typed-app.js";
 
-const schemaDef = {
+const schema = {
   employees: {
     name: col.string(),
     manager: col.ref("employees").optional(),
@@ -29,8 +29,8 @@ const schemaDef = {
   },
 };
 
-type CircularAppSchema = DefinedSchema<typeof schemaDef>;
-const app: TypedApp<CircularAppSchema> = defineApp(schemaDef);
+type CircularAppSchema = Schema<typeof schema>;
+const app: App<CircularAppSchema> = defineApp(schema);
 
 describe("typed app circular schemas", () => {
   it("serializes self and circular include trees", () => {

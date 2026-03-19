@@ -74,9 +74,9 @@ The schema is written directly in **TypeScript** (`schema.ts`). Jazz validates t
 **[`schema.ts`](../schema.ts)** — source of truth
 
 ```typescript
-import { col, defineApp, type DefinedSchema, type TypedApp } from "jazz-tools";
+import { col, defineApp, type Schema, type App } from "jazz-tools";
 
-const schemaDef = {
+const schema = {
   instruments: {
     name: col.string(),
     sound: col.bytes(), // binary blobs are first-class
@@ -90,8 +90,8 @@ const schemaDef = {
   },
 };
 
-type AppSchema = DefinedSchema<typeof schemaDef>;
-export const app: TypedApp<AppSchema> = defineApp(schemaDef);
+type AppSchema = Schema<typeof schema>;
+export const app: App<AppSchema> = defineApp(schema);
 ```
 
 `col.ref()` declares foreign keys. `col.bytes()` maps to `Uint8Array` in TypeScript. The same file now gives us the typed `app` entry point — shown on the next slide.

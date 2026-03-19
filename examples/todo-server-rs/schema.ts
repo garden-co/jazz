@@ -1,6 +1,6 @@
-import { col, defineApp, type DefinedSchema, type TypedApp } from "jazz-tools";
+import { col, defineApp, type Schema, type App } from "jazz-tools";
 
-const schemaDef = {
+const schema = {
   projects: {
     name: col.string(),
   },
@@ -13,5 +13,5 @@ const schemaDef = {
   },
 };
 
-type AppSchema = DefinedSchema<typeof schemaDef>;
-export const app: TypedApp<AppSchema> = defineApp(schemaDef);
+type AppSchema = Schema<typeof schema>;
+export const app: App<AppSchema> = defineApp(schema);

@@ -1,12 +1,12 @@
 import { col } from "../../../dsl.js";
-import { defineApp, type DefinedSchema, type TypedApp } from "../../../typed-app.js";
+import { defineApp, type Schema, type App } from "../../../typed-app.js";
 
-const schemaDef = {
+const schema = {
   todos: {
     title: col.string(),
     done: col.boolean(),
   },
 };
 
-type AppSchema = DefinedSchema<typeof schemaDef>;
-export const app: TypedApp<AppSchema> = defineApp(schemaDef);
+type AppSchema = Schema<typeof schema>;
+export const app: App<AppSchema> = defineApp(schema);

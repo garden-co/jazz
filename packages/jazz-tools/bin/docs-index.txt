@@ -1464,7 +1464,7 @@ Create `schema.ts` at the root of your project. This is the source of truth for 
 
 ```ts
 
-const schemaDef = {
+const schema = {
   projects: {
     name: col.string(),
   },
@@ -1478,7 +1478,7 @@ const schemaDef = {
   },
 };
 
-type AppSchema = DefinedSchema<typeof schemaDef>;
+type AppSchema = Schema<typeof schema>;
 
 ```
 
@@ -1839,7 +1839,7 @@ Create `schema.ts` at the root of your project. This is the source of truth for 
 
 ```ts
 
-const schemaDef = {
+const schema = {
   projects: {
     name: col.string(),
   },
@@ -1852,7 +1852,7 @@ const schemaDef = {
   },
 };
 
-type AppSchema = DefinedSchema<typeof schemaDef>;
+type AppSchema = Schema<typeof schema>;
 
 ```
 
@@ -2202,7 +2202,7 @@ Create `schema.ts` at the root of your project. This is the source of truth for 
 
 ```ts
 
-const schemaDef = {
+const schema = {
   projects: {
     name: col.string(),
   },
@@ -2215,7 +2215,7 @@ const schemaDef = {
   },
 };
 
-type AppSchema = DefinedSchema<typeof schemaDef>;
+type AppSchema = Schema<typeof schema>;
 
 ```
 
@@ -2779,7 +2779,7 @@ Create `schema.ts` at the root of your project. This is the source of truth for 
 
 ```ts
 
-const schemaDef = {
+const schema = {
   projects: {
     name: col.string(),
   },
@@ -2793,7 +2793,7 @@ const schemaDef = {
   },
 };
 
-type AppSchema = DefinedSchema<typeof schemaDef>;
+type AppSchema = Schema<typeof schema>;
 
 ```
 
@@ -2970,7 +2970,7 @@ Create `schema.ts` at the root of your project. This is the source of truth for 
 
 ```ts
 
-const schemaDef = {
+const schema = {
   projects: {
     name: col.string(),
   },
@@ -2983,7 +2983,7 @@ const schemaDef = {
   },
 };
 
-type AppSchema = DefinedSchema<typeof schemaDef>;
+type AppSchema = Schema<typeof schema>;
 
 ```
 
@@ -3700,7 +3700,7 @@ Schema references used by the include examples:
 
     ```ts
 
-const schemaDef = {
+const schema = {
   projects: {
     name: col.string(),
   },
@@ -3713,7 +3713,7 @@ const schemaDef = {
   },
 };
 
-type AppSchema = DefinedSchema<typeof schemaDef>;
+type AppSchema = Schema<typeof schema>;
 
 ```
 
@@ -3899,7 +3899,7 @@ Every Jazz app defines its schema in a root `schema.ts`, including Rust backends
 
     ```ts
 
-const schemaDef = {
+const schema = {
   projects: {
     name: col.string(),
   },
@@ -3912,7 +3912,7 @@ const schemaDef = {
   },
 };
 
-type AppSchema = DefinedSchema<typeof schemaDef>;
+type AppSchema = Schema<typeof schema>;
 
 ```
 
@@ -3920,7 +3920,7 @@ type AppSchema = DefinedSchema<typeof schemaDef>;
 
     ```ts
 
-const schemaDef = {
+const schema = {
   projects: {
     name: col.string(),
   },
@@ -3933,7 +3933,7 @@ const schemaDef = {
   },
 };
 
-type AppSchema = DefinedSchema<typeof schemaDef>;
+type AppSchema = Schema<typeof schema>;
 
 ```
 
@@ -3944,6 +3944,10 @@ type AppSchema = DefinedSchema<typeof schemaDef>;
     ```
 
     The Rust examples shell out to this command at startup, so the schema definition stays unified even when the app itself is written in Rust. See [Setup](/docs/setup) for the end-to-end backend context pattern.
+
+Each top-level property of the `schema` object is a table. In the example above, `projects` and `todos` become tables, and each nested property becomes a column on that table.
+
+The `type AppSchema = Schema<typeof schema>; export const app: App = defineApp(schema);` pattern is there to keep TypeScript hovers short and readable. Without that alias boundary, TypeScript tends to expand the entire schema literal when you hover `app`, `app.todos`, or derived row/query types.
 
 ## Datatypes and References
 
@@ -3959,10 +3963,15 @@ type AppSchema = DefinedSchema<typeof schemaDef>;
 
 Most of the time, schema evolution starts with a normal edit to `schema.ts`. New writes use the new schema immediately.
 
-When older rows are no longer reachable from the current schema graph, Jazz logs a warning with the exact hashes you need next. These warnings can appear in browser logs, backend logs, or be forwarded from upstream servers:
+When older rows are no longer reachable from the current schema graph, Jazz logs a warning with the exact hashes you need next. These warnings can appear in browser logs, backend logs, or be forwarded from upstream servers. A typical warning looks like this, wrapped for readability:
 
 ```text
-[client] Detected 3 rows of todos with differing schema versions. To ensure data visibility and forward/backward compatibility please create a new migration with `npx jazz-tools migrations create aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`
+[client] Detected 3 rows of todos with differing schema versions.
+[client] To ensure data visibility and forward/backward compatibility please create
+         a new migration with:
+         npx jazz-tools migrations create \
+           a01f5c72ec47a3f7d91a6862b4c5779d194f586ff8b432d92aecde954c306e9c \
+           311995e9a17877948f64a2b52dcb0f0dbf5f4dd8f7a34e1e9a7c21e5d8c0b3fa
 ```
 
 That warning is the handoff from day-to-day schema editing to reviewed compatibility work.
