@@ -1,4 +1,4 @@
-#![cfg(feature = "cli")]
+#![cfg(feature = "test")]
 
 //! Authentication integration tests for the Jazz server.
 //!
