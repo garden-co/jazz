@@ -347,7 +347,7 @@ mod integration_tests {
     fn catalogue_sync_body() -> String {
         json!({
             "client_id": "01234567-89ab-cdef-0123-456789abcdef",
-            "payload": {
+            "payloads": [{
                 "ObjectUpdated": {
                     "object_id": "01234567-89ab-cdef-0123-456789abcdef",
                     "metadata": {
@@ -357,7 +357,7 @@ mod integration_tests {
                     "branch_name": "main",
                     "commits": []
                 }
-            }
+            }]
         })
         .to_string()
     }
@@ -445,7 +445,7 @@ mod integration_tests {
 
         let sync_payload = json!({
             "client_id": Uuid::new_v4().to_string(),
-            "payload": {
+            "payloads": [{
                 "ObjectUpdated": {
                     "object_id": object_id,
                     "metadata": {
@@ -463,7 +463,7 @@ mod integration_tests {
                         }
                     ]
                 }
-            }
+            }]
         });
 
         let sync_response = client()
