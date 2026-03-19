@@ -28,7 +28,7 @@ pub struct TestingServerBuilder {
     app_id: Option<AppId>,
     data_dir: Option<PathBuf>,
     schema: Option<Schema>,
-    in_memory: bool,
+    persistent_storage: bool,
 }
 
 impl TestingServerBuilder {
@@ -57,13 +57,8 @@ impl TestingServerBuilder {
         self
     }
 
-    /// Use in-memory storage instead of a persistent on-disk fjall store.
-    ///
-    /// Prefer this in tests that don't need durability — it avoids allocating
-    /// temp directories and opening file descriptors, which matters when many
-    /// tests run in parallel.
-    pub fn with_in_memory_storage(mut self) -> Self {
-        self.in_memory = true;
+    pub fn with_persistent_storage(mut self) -> Self {
+        self.persistent_storage = true;
         self
     }
 
@@ -145,15 +140,14 @@ impl TestingServer {
             app_id,
             data_dir,
             schema,
-            in_memory,
+            persistent_storage,
         } = builder;
 
-        let port = port.unwrap_or_else(get_free_port);
         let app_id = app_id.unwrap_or_else(Self::default_app_id);
-        let (data_dir, owned_data_dir) = if in_memory {
-            (PathBuf::new(), None)
-        } else {
+        let (data_dir, owned_data_dir) = if persistent_storage {
             prepare_data_dir(data_dir)
+        } else {
+            (PathBuf::new(), None)
         };
         let jwks_server = TestingJwksServer::start().await;
 
@@ -167,19 +161,23 @@ impl TestingServer {
         };
 
         let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
-        server_builder = if in_memory {
-            server_builder.with_in_memory_storage()
-        } else {
+        server_builder = if persistent_storage {
+            println!("with_persistent_storage");
             server_builder.with_persistent_storage(data_dir.to_string_lossy().into_owned())
+        } else {
+            println!("with_in_memory_storage");
+            server_builder.with_in_memory_storage()
         };
+
         if let Some(schema) = schema {
             server_builder = server_builder.with_schema(schema);
         }
         let built = server_builder.build().await.expect("build test server");
 
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))
             .await
             .expect("bind test server listener");
+        let port = listener.local_addr().expect("local addr").port();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
             axum::serve(listener, built.app)
@@ -263,6 +261,7 @@ impl TestingServer {
             schema,
             server_url: self.base_url(),
             data_dir,
+            storage: crate::ClientStorage::Memory,
             jwt_token: Some(Self::jwt_for_user(user_id.as_ref())),
             backend_secret: Some(Self::BACKEND_SECRET.to_string()),
             admin_secret: Some(Self::ADMIN_SECRET.to_string()),
@@ -365,11 +364,6 @@ fn prepare_data_dir(data_dir: Option<PathBuf>) -> (PathBuf, Option<OwnedTempDir>
             (temp_dir.path().to_path_buf(), Some(temp_dir))
         }
     }
-}
-
-fn get_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind port 0");
-    listener.local_addr().expect("local addr").port()
 }
 
 async fn jwks_handler() -> Json<JsonValue> {
