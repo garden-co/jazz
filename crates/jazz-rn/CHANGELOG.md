@@ -1,5 +1,11 @@
 # cojson-core-rn
 
+## 2.0.0-alpha.21
+
+### Patch Changes
+
+- 477c43c: Remove Nitro Modules code (`crates/jazz-nitro`, `examples/rn-jazz-nitro`) in favor of uniffi for the React Native bridge.
+
 ## 2.0.0-alpha.20
 
 ### Patch Changes
