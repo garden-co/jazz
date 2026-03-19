@@ -1466,7 +1466,7 @@ pub fn evaluate_in(
         Value::Integer(i) => session_array.iter().any(|v| v.as_i64() == Some(*i as i64)),
         Value::BigInt(i) => session_array.iter().any(|v| v.as_i64() == Some(*i)),
         Value::Uuid(id) => {
-            let id_str = format!("{:?}", id);
+            let id_str = id.to_string();
             session_array.iter().any(|v| v.as_str() == Some(&id_str))
         }
         _ => false,
