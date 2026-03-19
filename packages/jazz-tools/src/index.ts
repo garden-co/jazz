@@ -9,7 +9,6 @@ export {
   getCollectedMigration,
   resetCollectedState,
 } from "./dsl.js";
-export { schemaToSql, lensToSql } from "./sql-gen.js";
 export type {
   Schema,
   Table as SchemaAstTable,
@@ -70,8 +69,8 @@ export type {
   PolicyExprV2,
 } from "./ir.js";
 
-// Codegen
-export { generateClient, schemaToWasm, generateTypes } from "./codegen/index.js";
+// Typed schema app
+export { schemaToWasm } from "./codegen/schema-reader.js";
 export {
   defineSchema,
   defineApp,

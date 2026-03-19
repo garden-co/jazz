@@ -6,7 +6,7 @@ description: Build a local-first React app with Jazz. Schema, provider, reactive
 import AuthMethods from "../../partials/quickstarts/auth-methods.mdx";
 import FluentImmutableCallout from "../../partials/quickstarts/fluent-immutable-callout.mdx";
 import DurabilityTiersTable from "../../partials/quickstarts/durability-tiers-table.mdx";
-import RunCodegen from "../../partials/quickstarts/run-codegen.mdx";
+import SchemaSetup from "../../partials/quickstarts/schema-setup.mdx";
 import ServerAuthConfig from "../../partials/quickstarts/server-auth-config.mdx";
 import QuickstartSchemaTypesSummary from "../../partials/quickstarts/schema-types-summary.mdx";
 import QuickstartWhereOperatorsSummary from "../../partials/quickstarts/where-operators-summary.mdx";
@@ -21,17 +21,17 @@ For full environment and server setup options, see [Setup](/docs/setup).
 
 ## Define your schema
 
-Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
+Create `schema.ts` at the root of your project. This is the source of truth for your data model.
 
-<include cwd lang="ts" title="schema/current.ts">
-  ../examples/docs/todo-client-localfirst-react/schema/current.ts#schema-react
+<include cwd lang="ts" title="schema.ts">
+  ../examples/docs/todo-client-localfirst-react/schema.ts#schema-react
 </include>
 
 <QuickstartSchemaTypesSummary />
 
-### Run codegen
+### Validate schema
 
-<RunCodegen />
+<SchemaSetup />
 
 Deep dive: [Schemas](/docs/schemas).
 
@@ -134,7 +134,7 @@ Outside components (or when you need deltas), use `db.subscribeAll` directly:
 
 ### Relations with include
 
-If your schema has `col.ref()` columns, codegen produces typed include interfaces. Use `.include()` to load related rows in one query.
+If your schema has `col.ref()` columns, Jazz infers typed include interfaces directly from `schema.ts`. Use `.include()` to load related rows in one query.
 
 <include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#includes-react
@@ -212,10 +212,10 @@ Full auth flows and server behavior: [Authentication](/docs/authentication).
 
 ## Permissions
 
-Define row-level policies in `schema/permissions.ts` with `definePermissions(...)`:
+Define row-level policies in `permissions.ts` with `definePermissions(...)`:
 
-<include cwd lang="ts" title="schema/permissions.ts">
-  ../examples/docs/todo-client-localfirst-react/schema/permissions.ts#permissions-basic-react
+<include cwd lang="ts" title="permissions.ts">
+  ../examples/docs/todo-client-localfirst-react/permissions.ts#permissions-basic-react
 </include>
 
 Think about permissions in four checks:

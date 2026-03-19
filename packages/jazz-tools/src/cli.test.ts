@@ -1,10 +1,10 @@
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { build, createMigration, pushMigration } from "./cli.js";
+import { build, createMigration, exportSchema, pushMigration } from "./cli.js";
 
 const dslPath = fileURLToPath(new URL("./dsl.ts", import.meta.url));
 const typedAppPath = fileURLToPath(new URL("./typed-app.ts", import.meta.url));
@@ -209,6 +209,38 @@ describe("cli build", () => {
   });
 });
 
+describe("cli schema export", () => {
+  it("prints the compiled schema representation as JSON", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const writes: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+      chunk: string | Uint8Array,
+    ) => {
+      writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    }) as typeof process.stdout.write);
+
+    try {
+      await exportSchema({ schemaDir: root, format: "json" });
+    } finally {
+      writeSpy.mockRestore();
+      process.stdout.write = originalWrite;
+    }
+
+    const exported = JSON.parse(writes.join(""));
+    expect(exported.projects.columns[0].name).toBe("name");
+    expect(exported.todos.columns.map((column: { name: string }) => column.name)).toEqual([
+      "title",
+      "ownerId",
+    ]);
+    expect(exported.todos.policies?.select?.using?.type).toBe("Cmp");
+  });
+});
+
 describe("cli migrations", () => {
   it("generates a typed migration stub from stored schema hashes", async () => {
     const { root } = await createWorkspace();
@@ -389,7 +421,7 @@ export default defineMigration({
   });
 });
 
-function runBin(args: string[]): ReturnType<typeof spawnSync> {
+function runBin(args: string[]): SpawnSyncReturns<string> {
   return spawnSync(process.execPath, [binPath, ...args], {
     encoding: "utf8",
     env: process.env,
@@ -435,5 +467,25 @@ describe("bin integration", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("Schema file not found");
+  });
+
+  it("routes schema export through the TypeScript CLI", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(
+      join(root, "schema.ts"),
+      rootSchemaWithoutInlinePermissions(distDslPath, distTypedAppPath),
+    );
+    await writeFile(
+      join(root, "permissions.ts"),
+      rootPermissionsSchema("./schema.ts", distPermissionsDslPath),
+    );
+
+    const result = runBin(["schema", "export", "--schema-dir", root, "--format", "json"]);
+
+    expect(result.status).toBe(0);
+    const exported = JSON.parse(String(result.stdout));
+    expect(
+      exported.todos.columns.some((column: { name: string }) => column.name === "ownerId"),
+    ).toBe(true);
   });
 });

@@ -69,57 +69,43 @@ Jazz is a **local-first** sync framework. Every client runs a full database in a
 
 ## 1. The schema
 
-The schema is written in a **TypeScript DSL** (`schema/current.ts`). Running `jazz codegen` reads it and generates two things: a SQL migration and the typed `schema/app.ts` interfaces used throughout the app.
+The schema is written directly in **TypeScript** (`schema.ts`). Jazz validates that file and the app imports the typed `app` export from it directly.
 
-**[`schema/current.ts`](../schema/current.ts)** — source of truth
+**[`schema.ts`](../schema.ts)** — source of truth
 
 ```typescript
-import { table, col } from "jazz-tools";
+import { col, defineApp, type DefinedSchema, type TypedApp } from "jazz-tools";
 
-table("instruments", {
-  name: col.string(),
-  sound: col.bytes(), // binary blobs are first-class
-  display_order: col.int(),
-});
+const schemaDef = {
+  instruments: {
+    name: col.string(),
+    sound: col.bytes(), // binary blobs are first-class
+    display_order: col.int(),
+  },
+  beats: {
+    jamId: col.ref("jams"),
+    instrumentId: col.ref("instruments"),
+    beat_index: col.int(), // 0–15
+    placed_by: col.string(), // session user_id
+  },
+};
 
-table("beats", {
-  jam: col.ref("jams"),
-  instrument: col.ref("instruments"),
-  beat_index: col.int(), // 0–15
-  placed_by: col.string(), // session user_id
-});
+type AppSchema = DefinedSchema<typeof schemaDef>;
+export const app: TypedApp<AppSchema> = defineApp(schemaDef);
 ```
 
-`col.ref()` declares foreign keys. `col.bytes()` maps to `Uint8Array` in TypeScript. The generated `schema/app.ts` provides typed interfaces and query builders — shown on the next slide.
+`col.ref()` declares foreign keys. `col.bytes()` maps to `Uint8Array` in TypeScript. The same file now gives us the typed `app` entry point — shown on the next slide.
 
 ---
 
-## 2. Generated types
+## 2. Typed app export
 
-Codegen produces typed interfaces for every table, plus a typed entry point for all queries:
+Jazz infers the typed query surface directly from `schema.ts`:
 
 ```typescript
-// schema/app.ts — AUTO-GENERATED, do not edit
-export interface Beat {
-  id: string;
-  jam: string;
-  instrument: string;
-  beat_index: number;
-  placed_by: string; // who placed this beat
-}
+import { app, type Beat, type Instrument } from "../schema.js";
 
-export interface Instrument {
-  id: string;
-  name: string;
-  sound: Uint8Array; // binary blobs are first-class
-  display_order: number;
-}
-
-export const app = {
-  instruments: new InstrumentQueryBuilder(),
-  beats: new BeatQueryBuilder(),
-  participants: new ParticipantQueryBuilder(),
-};
+const beatQuery = app.beats.include({ jam: true, instrument: true }).orderBy("beat_index", "asc");
 ```
 
 ---

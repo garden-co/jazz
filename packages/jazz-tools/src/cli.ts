@@ -28,6 +28,11 @@ export interface BuildOptions {
   schemaDir: string;
 }
 
+export interface SchemaExportOptions {
+  schemaDir: string;
+  format: "json";
+}
+
 function parseArgs(): { command: string; options: BuildOptions } {
   const args = process.argv.slice(2);
   const command = args[0] || "";
@@ -70,6 +75,15 @@ export async function build(options: BuildOptions): Promise<void> {
     console.log(`Merged permissions from ${compiled.permissionsFile}.`);
   }
   console.log(`Validated ${tableCount} table${tableCount === 1 ? "" : "s"}.`);
+}
+
+export async function exportSchema(options: SchemaExportOptions): Promise<void> {
+  if (options.format !== "json") {
+    throw new Error(`Unsupported schema export format: ${options.format}`);
+  }
+
+  const compiled = await loadCompiledSchema(options.schemaDir);
+  process.stdout.write(`${JSON.stringify(compiled.wasmSchema, null, 2)}\n`);
 }
 
 export interface MigrationCommandOptions {
@@ -584,6 +598,25 @@ if (isMainModule()) {
       console.error(err.message);
       process.exit(1);
     });
+  } else if (command === "schema") {
+    const subcommand = process.argv[3] ?? "";
+    if (subcommand !== "export") {
+      console.error("Usage: node dist/cli.js schema export [--schema-dir <path>] [--format json]");
+      process.exit(1);
+    }
+
+    const args = process.argv.slice(4);
+    const schemaDir = getFlagValue(args, "--schema-dir") ?? process.cwd();
+    const formatValue = getFlagValue(args, "--format") ?? "json";
+    if (formatValue !== "json") {
+      console.error(`Unsupported schema export format: ${formatValue}`);
+      process.exit(1);
+    }
+
+    exportSchema({ schemaDir, format: "json" }).catch((err) => {
+      console.error(err.message);
+      process.exit(1);
+    });
   } else if (command === "migrations") {
     const subcommand = process.argv[3] ?? "";
     const fromHash = process.argv[4];
@@ -617,12 +650,16 @@ if (isMainModule()) {
     console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
     console.log("\nCommands:");
     console.log("  build                 Validate and load root schema.ts");
+    console.log("  schema export         Print the compiled schema representation as JSON");
     console.log(
       "  migrations create     Generate a typed migration stub from two known schema hashes",
     );
     console.log("  migrations push       Push a reviewed migration edge to the server");
     console.log("\nBuild options:");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
+    console.log("\nSchema export options:");
+    console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
+    console.log("  --format json         Output the compiled schema as JSON");
     console.log("\nMigration options:");
     console.log("  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL)");
     console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");

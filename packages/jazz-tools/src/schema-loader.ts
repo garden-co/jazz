@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from "path";
 import { pathToFileURL } from "url";
 import { register as registerCjs } from "tsx/cjs/api";
 import { register as registerEsm } from "tsx/esm/api";
-import { schemaToWasm } from "./codegen/index.js";
+import { schemaToWasm } from "./codegen/schema-reader.js";
 import { getCollectedSchema, resetCollectedState } from "./dsl.js";
 import type { Column, OperationPolicy, Schema, SqlType, TablePolicies } from "./schema.js";
 import type { ColumnDescriptor, ColumnType, TableSchema, WasmSchema } from "./drivers/types.js";

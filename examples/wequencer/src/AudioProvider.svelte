@@ -17,7 +17,7 @@
 		Panner,
 	} from 'tone';
 
-	import { app } from '../schema/app.js';
+	import { app } from '../schema.js';
 	import { setAudioContext } from './audio-context.js';
 	import { ClockSync } from './clock-sync.svelte.js';
 	import { DEFAULT_BEAT_COUNT, getRandomName } from './constants.js';

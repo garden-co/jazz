@@ -1,6 +1,6 @@
 import { col, table } from "jazz-tools";
 import { definePermissions } from "jazz-tools/permissions";
-import { app } from "../schema/app.js";
+import { app } from "../schema.js";
 
 // #region permissions-schema-ts
 table("projects", {

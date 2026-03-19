@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { JazzClient, type WasmSchema } from "jazz-tools";
 import { pushSchemaCatalogue, startLocalJazzServer } from "jazz-tools/testing";
 import { ADMIN_SECRET, APP_ID, TEST_BRANCH, TEST_ENV, TEST_PORT } from "./test-constants.js";
-import { app } from "./schema/app.ts";
+import { app } from "./schema.ts";
 
 export default async function globalSetup(): Promise<() => Promise<void>> {
   const serverHandlePromise = startLocalJazzServer({
@@ -20,7 +20,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     adminSecret: ADMIN_SECRET,
     env: TEST_ENV,
     userBranch: TEST_BRANCH,
-    schemaDir: join(import.meta.dirname ?? __dirname, "./schema"),
+    schemaDir: join(import.meta.dirname ?? __dirname, "."),
   });
 
   const client = await JazzClient.connect({

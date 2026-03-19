@@ -3,7 +3,7 @@ title: TypeScript Server
 description: Build a server-side TypeScript API with Jazz. Schema, request-scoped queries, streaming, and mutations.
 ---
 
-import RunCodegen from "../../partials/quickstarts/run-codegen.mdx";
+import SchemaSetup from "../../partials/quickstarts/schema-setup.mdx";
 import ServerAuthConfig from "../../partials/quickstarts/server-auth-config.mdx";
 import QuickstartSchemaTypesSummary from "../../partials/quickstarts/schema-types-summary.mdx";
 
@@ -17,17 +17,17 @@ For full environment and server setup options, see [Setup](/docs/setup).
 
 ## Define your schema
 
-Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
+Create `schema.ts` at the root of your project. This is the source of truth for your data model.
 
-<include cwd lang="ts" title="schema/current.ts">
-  ../examples/docs/todo-server-ts/schema/current.ts
+<include cwd lang="ts" title="schema.ts">
+  ../examples/docs/todo-server-ts/schema.ts
 </include>
 
 <QuickstartSchemaTypesSummary />
 
-### Run codegen
+### Validate schema
 
-<RunCodegen />
+<SchemaSetup />
 
 Deep dive: [Schemas](/docs/schemas).
 
@@ -40,7 +40,7 @@ Initialize a Jazz context once at process startup and lazily create a shared `Db
 </include>
 
 - `appId` identifies the app namespace for storage and sync.
-- `app` is your generated schema DSL export (`app.wasmSchema` is loaded for runtime setup).
+- `app` is your typed schema export (`app.wasmSchema` is loaded for runtime setup).
 - `context.db()` gives you a high-level `Db` using the context's configured runtime/auth.
 - `serverUrl` + `backendSecret` enable backend-authenticated handles via `context.asBackend()` and `context.forRequest(req)`.
 - Runtime storage path controls where local server state persists.
@@ -93,10 +93,10 @@ Full auth flows and session resolution: [Authentication](/docs/authentication).
 
 ## Permissions
 
-Define row-level policies in `schema/permissions.ts`:
+Define row-level policies in `permissions.ts`:
 
-<include cwd lang="ts" title="schema/permissions.ts">
-  ../examples/docs/todo-server-ts/schema/permissions.ts
+<include cwd lang="ts" title="permissions.ts">
+  ../examples/docs/todo-server-ts/permissions.ts
 </include>
 
 For advanced policy patterns, see [Permissions](/docs/permissions).

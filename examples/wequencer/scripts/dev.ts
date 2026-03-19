@@ -25,7 +25,7 @@ async function main() {
     serverUrl: server.url,
     appId: APP_ID,
     adminSecret: ADMIN_SECRET,
-    schemaDir: join(ROOT, "schema"),
+    schemaDir: ROOT,
   });
   console.log("Schema pushed.");
 

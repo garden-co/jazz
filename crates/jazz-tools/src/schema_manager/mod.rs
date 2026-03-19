@@ -43,11 +43,9 @@ pub mod catalogue_export;
 pub mod context;
 pub mod diff;
 pub mod encoding;
-pub mod files;
 pub mod lens;
 pub mod manager;
 pub mod rehydrate;
-pub mod sql;
 pub mod transformer;
 pub mod types;
 pub mod writer;
@@ -63,15 +61,9 @@ pub use encoding::{
     CatalogueEncodingError, decode_lens_transform, decode_schema, encode_lens_transform,
     encode_schema,
 };
-pub use files::{
-    FileError, MigrationFileInfo, SchemaDirectory, SchemaFileInfo, migration_sql_filename,
-    migration_ts_filename, parse_migration_filename, parse_versioned_schema_filename,
-    schema_filename,
-};
 pub use lens::{Direction, Lens, LensOp, LensTransform};
 pub use manager::SchemaManager;
 pub use rehydrate::rehydrate_schema_manager_from_manifest;
-pub use sql::{SqlParseError, lens_to_sql, parse_lens, parse_schema, schema_to_sql};
 pub use transformer::{
     LensTransformer, TransformError, TransformResult, translate_column_for_index,
 };
