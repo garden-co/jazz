@@ -82,9 +82,6 @@ lib/
 ios/generated
 android/generated
 
-# React Native Nitro Modules
-nitrogen/
-
 # React Native Uniffi Framework
 JazzRnFramework.xcframework/**
 
