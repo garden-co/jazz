@@ -1,51 +1,74 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
+use crate::object::ObjectId;
 use crate::query_manager::types::{Tuple, TupleDelta, TupleElement};
 
-/// Cheap fingerprint for a tuple's ID list.
-/// Hashes all ObjectIds into a single u64 to avoid allocating a Vec<ObjectId>.
-fn tuple_id_fingerprint(tuple: &Tuple) -> u64 {
-    let mut hasher = std::hash::DefaultHasher::new();
-    for elem in tuple.iter() {
-        elem.id().hash(&mut hasher);
+/// Pre-hashed ID list: hash is computed once at construction, equality falls back to full comparison.
+#[derive(Clone)]
+struct HashedIds {
+    ids: Vec<ObjectId>,
+    hash: u64,
+}
+
+impl HashedIds {
+    fn new(ids: Vec<ObjectId>) -> Self {
+        let mut hasher = std::hash::DefaultHasher::new();
+        ids.hash(&mut hasher);
+        Self {
+            ids,
+            hash: hasher.finish(),
+        }
     }
-    hasher.finish()
+}
+
+impl PartialEq for HashedIds {
+    fn eq(&self, other: &Self) -> bool {
+        self.ids == other.ids
+    }
+}
+
+impl Eq for HashedIds {}
+
+impl Hash for HashedIds {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
 }
 
 pub(crate) fn compute_tuple_delta(old_tuples: &[Tuple], new_tuples: &[Tuple]) -> TupleDelta {
     let mut delta = TupleDelta::new();
-    let old_fps: Vec<u64> = old_tuples.iter().map(tuple_id_fingerprint).collect();
-    let new_fps: Vec<u64> = new_tuples.iter().map(tuple_id_fingerprint).collect();
-    let old_pos_by_fp: HashMap<u64, usize> = old_fps
+    let old_hashed: Vec<HashedIds> = old_tuples.iter().map(|t| HashedIds::new(t.ids())).collect();
+    let new_hashed: Vec<HashedIds> = new_tuples.iter().map(|t| HashedIds::new(t.ids())).collect();
+    let old_pos_by_ids: HashMap<&HashedIds, usize> = old_hashed
         .iter()
         .enumerate()
-        .map(|(idx, &fp)| (fp, idx))
+        .map(|(idx, h)| (h, idx))
         .collect();
-    let new_pos_by_fp: HashMap<u64, usize> = new_fps
+    let new_pos_by_ids: HashMap<&HashedIds, usize> = new_hashed
         .iter()
         .enumerate()
-        .map(|(idx, &fp)| (fp, idx))
+        .map(|(idx, h)| (h, idx))
         .collect();
 
-    for (old, &fp) in old_tuples.iter().zip(old_fps.iter()) {
-        if !new_pos_by_fp.contains_key(&fp) {
+    for (old, h) in old_tuples.iter().zip(old_hashed.iter()) {
+        if !new_pos_by_ids.contains_key(h) {
             delta.removed.push(old.clone());
         }
     }
 
-    for (new, &fp) in new_tuples.iter().zip(new_fps.iter()) {
-        if !old_pos_by_fp.contains_key(&fp) {
+    for (new, h) in new_tuples.iter().zip(new_hashed.iter()) {
+        if !old_pos_by_ids.contains_key(h) {
             delta.added.push(new.clone());
         }
     }
 
-    let new_to_old_idx_mapping: Vec<_> = new_fps
+    let new_to_old_idx_mapping: Vec<_> = new_hashed
         .iter()
         .enumerate()
-        .filter_map(|(new_idx, fp)| {
-            old_pos_by_fp
-                .get(fp)
+        .filter_map(|(new_idx, h)| {
+            old_pos_by_ids
+                .get(h)
                 .copied()
                 .map(|old_idx| (new_idx, old_idx))
         })
@@ -65,8 +88,8 @@ pub(crate) fn compute_tuple_delta(old_tuples: &[Tuple], new_tuples: &[Tuple]) ->
         }
     }
 
-    for (old, &fp) in old_tuples.iter().zip(old_fps.iter()) {
-        if let Some(new_idx) = new_pos_by_fp.get(&fp)
+    for (old, h) in old_tuples.iter().zip(old_hashed.iter()) {
+        if let Some(new_idx) = new_pos_by_ids.get(h)
             && has_tuple_content_changed(old, &new_tuples[*new_idx])
         {
             delta
