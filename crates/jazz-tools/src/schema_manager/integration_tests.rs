@@ -14,8 +14,7 @@ mod tests {
         TableSchema, Value,
     };
     use crate::schema_manager::{
-        AppId, CopyOnWriteWriter, Lens, LensOp, LensTransform, SchemaContext, SchemaManager,
-        generate_lens,
+        AppId, Lens, LensOp, LensTransform, SchemaContext, SchemaManager, generate_lens,
     };
     use crate::storage::MemoryStorage;
 
@@ -97,84 +96,6 @@ mod tests {
             v2_values[v2_descriptor.column_index("email").unwrap()],
             Value::Null
         ); // Added column with default
-    }
-
-    /// Test copy-on-write update across schema versions.
-    #[test]
-    fn copy_on_write_update() {
-        let v1 = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
-            .build();
-
-        let v2 = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text)
-                    .nullable_column("email", ColumnType::Text),
-            )
-            .build();
-
-        let v1_hash = SchemaHash::compute(&v1);
-        let v2_hash = SchemaHash::compute(&v2);
-        let lens = generate_lens(&v1, &v2);
-
-        let mut ctx = SchemaContext::new(v2.clone(), "dev", "main");
-        ctx.add_live_schema(v1.clone(), lens);
-
-        // Build branch -> schema map
-        let mut branch_map = HashMap::new();
-        let v1_branch = format!("dev-{}-main", v1_hash.short());
-        let v2_branch = format!("dev-{}-main", v2_hash.short());
-        branch_map.insert(v1_branch.clone(), v1_hash);
-        branch_map.insert(v2_branch.clone(), v2_hash);
-
-        let mut writer = CopyOnWriteWriter::new(&ctx, "users", branch_map);
-
-        // Create a row in v1 schema
-        let id = ObjectId::new();
-        let v1_table = v1.get(&TableName::new("users")).unwrap();
-        let v1_values = vec![Value::Uuid(id), Value::Text("Alice".to_string())];
-        let v1_data = encode_row(&v1_table.columns, &v1_values).unwrap();
-
-        // Cache the row (simulating loading from storage)
-        writer.cache_row(id, &v1_branch, v1_data, make_commit_id(1));
-
-        // Get write info - should indicate copy-on-write
-        let write_info = writer.get_write_info(id);
-        assert!(write_info.is_copy_on_write);
-        assert_eq!(write_info.source_branch, Some(v1_branch.clone()));
-
-        // Prepare update
-        let result = writer
-            .prepare_update(id, |vals| {
-                // After transform, we have 3 columns
-                assert_eq!(vals.len(), 3);
-                vec![
-                    vals[0].clone(),
-                    Value::Text("Alice Updated".to_string()),
-                    Value::Text("alice@example.com".to_string()),
-                ]
-            })
-            .unwrap();
-
-        assert!(result.was_transformed);
-        assert_eq!(result.source_schema, v1_hash);
-
-        // Verify result
-        let v2_table = v2.get(&TableName::new("users")).unwrap();
-        let final_values = decode_row(&v2_table.columns, &result.data).unwrap();
-
-        assert_eq!(final_values[0], Value::Uuid(id));
-        assert_eq!(final_values[1], Value::Text("Alice Updated".to_string()));
-        assert_eq!(
-            final_values[2],
-            Value::Text("alice@example.com".to_string())
-        );
     }
 
     /// Test column rename through lens.
