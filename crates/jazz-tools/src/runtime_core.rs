@@ -36,7 +36,7 @@ use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{QueryError, QueryUpdate};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{OrderedRowDelta, Schema, TableName, Value};
+use crate::query_manager::types::{OrderedRowDelta, Schema, Value};
 use crate::schema_manager::SchemaManager;
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};

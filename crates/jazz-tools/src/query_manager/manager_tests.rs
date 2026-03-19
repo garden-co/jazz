@@ -4558,23 +4558,6 @@ fn file_storage_schema() -> Schema {
     schema
 }
 
-fn scalar_fk_schema() -> Schema {
-    let mut schema = Schema::new();
-    schema.insert(
-        TableName::new("users"),
-        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
-    );
-    schema.insert(
-        TableName::new("posts"),
-        RowDescriptor::new(vec![
-            ColumnDescriptor::new("title", ColumnType::Text),
-            ColumnDescriptor::new("author_id", ColumnType::Uuid).references("users"),
-        ])
-        .into(),
-    );
-    schema
-}
-
 fn files_with_parts_descriptor() -> RowDescriptor {
     // Sub-row has schema columns only; id is in Value::Row { id, .. }
     let part_descriptor =
