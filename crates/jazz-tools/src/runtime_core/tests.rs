@@ -1,7 +1,9 @@
 use super::*;
 use crate::query_manager::policy::PolicyExpr;
 use crate::query_manager::query::QueryBuilder;
-use crate::query_manager::types::{ColumnType, SchemaBuilder, TablePolicies, TableSchema};
+use crate::query_manager::types::{
+    ColumnType, SchemaBuilder, TableName, TablePolicies, TableSchema,
+};
 use crate::schema_manager::AppId;
 use crate::storage::MemoryStorage;
 use crate::sync_manager::{
@@ -18,6 +20,21 @@ fn test_schema() -> Schema {
             TableSchema::builder("users")
                 .column("id", ColumnType::Uuid)
                 .column("name", ColumnType::Text),
+        )
+        .build()
+}
+
+fn schema_evolution_v1() -> Schema {
+    test_schema()
+}
+
+fn schema_evolution_v2() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("name", ColumnType::Text)
+                .column("email", ColumnType::Text),
         )
         .build()
 }
@@ -58,6 +75,15 @@ fn create_runtime_with_schema(schema: Schema, app_name: &str) -> TestCore {
     create_runtime_with_schema_and_sync_manager(schema, app_name, SyncManager::new())
 }
 
+fn create_runtime_with_storage(schema: Schema, app_name: &str, storage: MemoryStorage) -> TestCore {
+    let app_id = AppId::from_name(app_name);
+    let schema_manager =
+        SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
+    let mut core = RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
+    core.immediate_tick();
+    core
+}
+
 fn create_test_runtime() -> TestCore {
     create_runtime_with_schema(test_schema(), "test-app")
 }
@@ -66,6 +92,15 @@ fn documents_query_by_title(title: &str) -> Query {
     QueryBuilder::new("documents")
         .filter_eq("title", Value::Text(title.into()))
         .build()
+}
+
+fn column_index(schema: &Schema, table: &str, column: &str) -> usize {
+    schema
+        .get(&TableName::new(table))
+        .unwrap_or_else(|| panic!("table '{table}' should exist"))
+        .columns
+        .column_index(column)
+        .unwrap_or_else(|| panic!("column '{column}' should exist on table '{table}'"))
 }
 
 /// Helper to execute a query synchronously via subscribe/tick/unsubscribe.
@@ -1807,6 +1842,110 @@ fn test_sync_edit_fires_callback_synchronously() {
     assert!(
         final_count > initial_count,
         "Callback must fire synchronously after insert when index ready"
+    );
+}
+
+#[test]
+fn rc_query_reads_old_schema_row_after_evolving_to_new_schema() {
+    let v1 = schema_evolution_v1();
+    let v2 = schema_evolution_v2();
+
+    let mut old_runtime = create_runtime_with_schema(v1.clone(), "schema-evolution-test");
+    let user_id = ObjectId::new();
+    let inserted_values = vec![Value::Uuid(user_id), Value::Text("Alice".to_string())];
+    let (inserted_id, _) = old_runtime.insert("users", inserted_values, None).unwrap();
+
+    let storage = old_runtime.into_storage();
+
+    let mut evolved_runtime = create_runtime_with_storage(v2, "schema-evolution-test", storage);
+    evolved_runtime
+        .add_live_schema_and_persist_catalogue(v1)
+        .expect("v1 should be attachable as a live schema for v2");
+    evolved_runtime.immediate_tick();
+
+    let results = execute_runtime_query(&mut evolved_runtime, Query::new("users"), None);
+
+    assert_eq!(
+        results.len(),
+        1,
+        "Expected one row visible after schema evolution"
+    );
+
+    let (queried_id, queried_values) = &results[0];
+    let current_schema = evolved_runtime.current_schema();
+    let id_idx = column_index(current_schema, "users", "id");
+    let name_idx = column_index(current_schema, "users", "name");
+    let email_idx = column_index(current_schema, "users", "email");
+    assert_eq!(*queried_id, inserted_id);
+    assert_eq!(queried_values.len(), 3, "Row should decode in v2 shape");
+    assert_eq!(queried_values[id_idx], Value::Uuid(user_id));
+    assert_eq!(queried_values[name_idx], Value::Text("Alice".to_string()));
+    assert_eq!(
+        queried_values[email_idx],
+        Value::Text(String::new()),
+        "New required column should be backfilled with the lens default",
+    );
+}
+
+#[test]
+fn rc_update_old_schema_row_after_evolution_copies_row_to_current_schema() {
+    let v1 = schema_evolution_v1();
+    let v2 = schema_evolution_v2();
+
+    let mut old_runtime = create_runtime_with_schema(v1.clone(), "schema-evolution-update-test");
+    let user_id = ObjectId::new();
+    let inserted_values = vec![Value::Uuid(user_id), Value::Text("Alice".to_string())];
+    let (inserted_id, _) = old_runtime.insert("users", inserted_values, None).unwrap();
+
+    let storage = old_runtime.into_storage();
+
+    let mut evolved_runtime =
+        create_runtime_with_storage(v2.clone(), "schema-evolution-update-test", storage);
+    evolved_runtime
+        .add_live_schema_and_persist_catalogue(v1.clone())
+        .expect("v1 should be attachable as a live schema for v2");
+    evolved_runtime.immediate_tick();
+
+    evolved_runtime
+        .update(
+            inserted_id,
+            vec![
+                ("name".to_string(), Value::Text("Alice Updated".to_string())),
+                (
+                    "email".to_string(),
+                    Value::Text("alice.updated@example.com".to_string()),
+                ),
+            ],
+            None,
+        )
+        .expect("Updating an old-schema row should succeed via copy-on-write");
+
+    let results = execute_runtime_query(&mut evolved_runtime, Query::new("users"), None);
+    assert_eq!(
+        results.len(),
+        1,
+        "Copy-on-write should preserve a single logical row"
+    );
+
+    let (queried_id, queried_values) = &results[0];
+    let current_schema = evolved_runtime.current_schema();
+    let id_idx = column_index(current_schema, "users", "id");
+    let name_idx = column_index(current_schema, "users", "name");
+    let email_idx = column_index(current_schema, "users", "email");
+    assert_eq!(*queried_id, inserted_id);
+    assert_eq!(
+        queried_values.len(),
+        3,
+        "Updated row should decode in v2 shape"
+    );
+    assert_eq!(queried_values[id_idx], Value::Uuid(user_id));
+    assert_eq!(
+        queried_values[name_idx],
+        Value::Text("Alice Updated".to_string())
+    );
+    assert_eq!(
+        queried_values[email_idx],
+        Value::Text("alice.updated@example.com".to_string()),
     );
 }
 
