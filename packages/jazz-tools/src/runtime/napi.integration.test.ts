@@ -767,6 +767,7 @@ describe("NAPI integration", () => {
       context = createJazzContext({
         appId: `napi-backend-sync-${randomUUID()}`,
         app: { wasmSchema: TEST_SCHEMA },
+        permissions: {},
         driver: { type: "memory" },
         serverUrl: captureServer.baseUrl,
         backendSecret: "napi-backend-secret",
@@ -823,6 +824,7 @@ describe("NAPI integration", () => {
       context = createJazzContext({
         appId: `napi-backend-reconnect-${randomUUID()}`,
         app: { wasmSchema: TEST_SCHEMA },
+        permissions: {},
         driver: { type: "memory" },
         serverUrl: captureServer.baseUrl,
         backendSecret: "napi-backend-secret",
@@ -898,6 +900,7 @@ describe("NAPI integration", () => {
       context = createJazzContext({
         appId,
         app: { wasmSchema: TODO_SERVER_WASM_SCHEMA },
+        permissions: {},
         driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
@@ -1039,6 +1042,7 @@ describe("NAPI integration", () => {
       context = createJazzContext({
         appId,
         app: { wasmSchema: TODO_SERVER_WASM_SCHEMA },
+        permissions: {},
         driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
@@ -1178,6 +1182,7 @@ describe("NAPI integration", () => {
       bobContext = createJazzContext({
         appId,
         app: { wasmSchema: TODO_SERVER_WASM_SCHEMA },
+        permissions: {},
         driver: { type: "memory" },
         serverUrl: server.url,
         jwtToken: signJwt({ sub: "bob", claims: {} }, JWT_SECRET),
@@ -1188,6 +1193,7 @@ describe("NAPI integration", () => {
       carolContext = createJazzContext({
         appId,
         app: { wasmSchema: TODO_SERVER_WASM_SCHEMA },
+        permissions: {},
         driver: { type: "memory" },
         serverUrl: server.url,
         jwtToken: signJwt({ sub: "carol", claims: {} }, JWT_SECRET),
@@ -1198,6 +1204,7 @@ describe("NAPI integration", () => {
       aliceContext = createJazzContext({
         appId,
         app: { wasmSchema: TODO_SERVER_WASM_SCHEMA },
+        permissions: {},
         driver: { type: "memory" },
         serverUrl: server.url,
         jwtToken: signJwt({ sub: "alice", claims: {} }, JWT_SECRET),
@@ -1208,6 +1215,7 @@ describe("NAPI integration", () => {
       readerContext = createJazzContext({
         appId,
         app: { wasmSchema: TODO_SERVER_WASM_SCHEMA },
+        permissions: {},
         driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
@@ -1370,6 +1378,7 @@ describe("NAPI integration", () => {
       writerContext = createJazzContext({
         appId,
         app: { wasmSchema: TEST_SCHEMA },
+        permissions: {},
         driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
@@ -1377,6 +1386,7 @@ describe("NAPI integration", () => {
       readerContext = createJazzContext({
         appId,
         app: { wasmSchema: TEST_SCHEMA },
+        permissions: {},
         driver: { type: "memory" },
         serverUrl: server.url,
         backendSecret,
@@ -1453,6 +1463,7 @@ describe("NAPI integration", () => {
       writerContext = createJazzContext({
         appId,
         app: { wasmSchema: TEST_SCHEMA },
+        permissions: {},
         driver: { type: "persistent", dataPath },
       });
 
@@ -1482,6 +1493,7 @@ describe("NAPI integration", () => {
       reopenedContext = createJazzContext({
         appId,
         app: { wasmSchema: TEST_SCHEMA },
+        permissions: {},
         driver: { type: "persistent", dataPath },
       });
 
@@ -1526,6 +1538,7 @@ describe("NAPI integration", () => {
       context = createJazzContext({
         appId: randomUUID(),
         app: { wasmSchema: TIMESTAMP_SCHEMA },
+        permissions: {},
         driver: { type: "persistent", dataPath },
       });
 
