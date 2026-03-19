@@ -28,14 +28,6 @@ type SharedTableName<TFrom extends SchemaLike, TTo extends SchemaLike> = Extract
   TableName<TFrom>,
   TableName<TTo>
 >;
-type AddedTableName<TFrom extends SchemaLike, TTo extends SchemaLike> = Exclude<
-  TableName<TTo>,
-  TableName<TFrom>
->;
-type RemovedTableName<TFrom extends SchemaLike, TTo extends SchemaLike> = Exclude<
-  TableName<TFrom>,
-  TableName<TTo>
->;
 type ColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Extract<
   keyof NormalizedSchema<TSchema>[TTable],
   string
@@ -107,8 +99,6 @@ export interface MigrationBuilder<TFrom extends SchemaLike, TTo extends SchemaLi
     table: TTable,
     build: (table: MigrationTableEditor<TFrom, TTo, TTable>) => unknown,
   ): void;
-  createTable<TTable extends AddedTableName<TFrom, TTo>>(table: TTable): void;
-  dropTable<TTable extends RemovedTableName<TFrom, TTo>>(table: TTable): void;
 }
 
 class TableMigrationBuilder<
@@ -219,20 +209,6 @@ class MigrationCollector<
     if (lens) {
       this.forward.push(lens);
     }
-  }
-
-  createTable<TTable extends AddedTableName<TFrom, TTo>>(table: TTable): void {
-    this.forward.push({
-      type: "create_table",
-      table: tableDefinitionToAst(table, this.toDefinition[table] as unknown as TableDefinition),
-    });
-  }
-
-  dropTable<TTable extends RemovedTableName<TFrom, TTo>>(table: TTable): void {
-    this.forward.push({
-      type: "drop_table",
-      table: tableDefinitionToAst(table, this.fromDefinition[table] as unknown as TableDefinition),
-    });
   }
 }
 

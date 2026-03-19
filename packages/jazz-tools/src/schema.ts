@@ -278,14 +278,4 @@ export interface TableLens {
   operations: LensOp[];
 }
 
-export interface CreateTableLens {
-  type: "create_table";
-  table: Table;
-}
-
-export interface DropTableLens {
-  type: "drop_table";
-  table: Table;
-}
-
-export type Lens = TableLens | CreateTableLens | DropTableLens;
+export type Lens = TableLens;

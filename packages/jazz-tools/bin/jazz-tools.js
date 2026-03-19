@@ -94,6 +94,25 @@ function parseWrapperArgs(rawArgs) {
   return { args, rustBinOverride };
 }
 
+function shouldRunTypeScriptBuild(schemaDir) {
+  const legacySchemaPath = join(schemaDir, "current.ts");
+  if (existsSync(legacySchemaPath)) {
+    return true;
+  }
+
+  const directRootSchemaPath = join(schemaDir, "schema.ts");
+  if (existsSync(directRootSchemaPath)) {
+    return true;
+  }
+
+  if (schemaDir.endsWith("/schema") || schemaDir.endsWith("\\schema")) {
+    const parentRootSchemaPath = join(dirname(schemaDir), "schema.ts");
+    return existsSync(parentRootSchemaPath);
+  }
+
+  return false;
+}
+
 function exitWithSpawnResult(result, name) {
   if (result.error) {
     fail(`Failed to execute ${name}: ${result.error.message}`);
@@ -160,12 +179,13 @@ if (command === "mcp") {
   if (command === "build" || command === "migrations") {
     const schemaDirArg = parseSchemaDir(args.slice(1));
     const schemaDir = resolve(process.cwd(), schemaDirArg);
-    const currentTsPath = join(schemaDir, "current.ts");
     const tsCliPath = join(here, "..", "dist", "cli.js");
 
     if (command === "build") {
-      if (existsSync(currentTsPath) && existsSync(tsCliPath)) {
-        console.log(`Detected ${schemaDirArg}/current.ts. Running TypeScript schema build.`);
+      if (shouldRunTypeScriptBuild(schemaDir) && existsSync(tsCliPath)) {
+        console.log(
+          `Detected a TypeScript schema near ${schemaDirArg}. Running TypeScript schema build.`,
+        );
         const tsBuildResult = spawnSync(
           process.execPath,
           [tsCliPath, "build", "--schema-dir", schemaDirArg, "--jazz-bin", binaryPath],

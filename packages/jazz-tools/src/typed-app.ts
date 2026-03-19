@@ -733,7 +733,7 @@ export class TypedTableQueryBuilder<
       );
     }
 
-    const currentCondition = currentConditions[0];
+    const currentCondition = currentConditions[0]!;
     const stepConditions = stepBuilt.conditions.filter(
       (condition) => !(condition.op === "eq" && condition.value === currentToken),
     );

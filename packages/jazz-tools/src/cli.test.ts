@@ -7,11 +7,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { build, createMigration, pushMigration } from "./cli.js";
 
 const dslPath = fileURLToPath(new URL("./dsl.ts", import.meta.url));
+const typedAppPath = fileURLToPath(new URL("./typed-app.ts", import.meta.url));
 const migrationsPath = fileURLToPath(new URL("./migrations.ts", import.meta.url));
 const permissionsDslPath = fileURLToPath(new URL("./permissions/index.ts", import.meta.url));
 // Bin integration tests run in a subprocess that loads dist/cli.js, so current.ts must import
 // from the compiled dist to share the same dsl module instance (and thus _collectedSchema state).
 const distDslPath = fileURLToPath(new URL("../dist/dsl.js", import.meta.url));
+const distTypedAppPath = fileURLToPath(new URL("../dist/typed-app.js", import.meta.url));
 const distPermissionsDslPath = fileURLToPath(
   new URL("../dist/permissions/index.js", import.meta.url),
 );
@@ -84,6 +86,69 @@ table("todos", {
 function permissionsSchema(appImportPath: string = "./app.js"): string {
   return `
 import { definePermissions } from ${JSON.stringify(permissionsDslPath)};
+import { app } from ${JSON.stringify(appImportPath)};
+
+export default definePermissions(app, ({ policy, session }) => [
+  policy.todos.allowRead.where({ owner_id: session.user_id }),
+]);
+`;
+}
+
+function rootSchemaWithoutInlinePermissions(
+  dslImportPath: string = dslPath,
+  typedAppImportPath: string = typedAppPath,
+): string {
+  return `
+import { col } from ${JSON.stringify(dslImportPath)};
+import { defineApp, type DefinedSchema, type TypedApp } from ${JSON.stringify(typedAppImportPath)};
+
+const schemaDef = {
+  projects: {
+    name: col.string(),
+  },
+  todos: {
+    title: col.string(),
+    ownerId: col.string(),
+  },
+};
+
+type AppSchema = DefinedSchema<typeof schemaDef>;
+export const app: TypedApp<AppSchema> = defineApp(schemaDef);
+`;
+}
+
+function rootSchemaWithComments(
+  dslImportPath: string = dslPath,
+  typedAppImportPath: string = typedAppPath,
+): string {
+  return `
+import { col } from ${JSON.stringify(dslImportPath)};
+import { defineApp, type DefinedSchema, type TypedApp } from ${JSON.stringify(typedAppImportPath)};
+
+const schemaDef = {
+  projects: {
+    name: col.string(),
+  },
+  todos: {
+    title: col.string(),
+    ownerId: col.string(),
+  },
+  comments: {
+    body: col.string(),
+  },
+};
+
+type AppSchema = DefinedSchema<typeof schemaDef>;
+export const app: TypedApp<AppSchema> = defineApp(schemaDef);
+`;
+}
+
+function rootPermissionsSchema(
+  appImportPath: string = "./schema.ts",
+  importPath: string = permissionsDslPath,
+): string {
+  return `
+import { definePermissions } from ${JSON.stringify(importPath)};
 import { app } from ${JSON.stringify(appImportPath)};
 
 export default definePermissions(app, ({ policy, session }) => [
@@ -247,6 +312,42 @@ describe("cli build basic output", () => {
   });
 });
 
+describe("cli build root schema.ts mode", () => {
+  it("generates schema/current.sql from root schema.ts without app.ts codegen", async () => {
+    const { root, jazzBin } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    await build({ schemaDir: root, jazzBin });
+
+    const sql = await readFile(join(root, "schema", "current.sql"), "utf8");
+    expect(sql).toContain("CREATE TABLE projects");
+    expect(sql).toContain("CREATE TABLE todos");
+    await expect(readFile(join(root, "schema", "app.ts"), "utf8")).rejects.toThrow();
+  });
+
+  it("finds root schema.ts when build is pointed at the default ./schema directory", async () => {
+    const { root, schemaDir, jazzBin } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    await build({ schemaDir, jazzBin });
+
+    const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
+    expect(sql).toContain("CREATE TABLE todos");
+  });
+
+  it("updates schema/current.sql when root schema.ts changes after initial build", async () => {
+    const { root, schemaDir, jazzBin } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await build({ schemaDir, jazzBin });
+
+    await writeFile(join(root, "schema.ts"), rootSchemaWithComments());
+    await build({ schemaDir, jazzBin });
+
+    const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
+    expect(sql).toContain("CREATE TABLE comments");
+  });
+});
+
 describe("cli migrations", () => {
   it("generates a typed migration stub from stored schema hashes", async () => {
     const { root } = await createWorkspace();
@@ -299,7 +400,7 @@ describe("cli migrations", () => {
     expect(generated).toContain('t.add("notes", { default: null });');
   });
 
-  it("generates createTable/dropTable steps for table additions and removals", async () => {
+  it("skips table add/drop steps when inferring a migration stub", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
     const fromHash = "abababababababababababababababababababababababababababababababab";
@@ -309,6 +410,9 @@ describe("cli migrations", () => {
       if (input.endsWith(`/schema/${fromHash}`)) {
         return new Response(
           JSON.stringify({
+            todos: {
+              columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
+            },
             legacy_users: {
               columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
             },
@@ -320,6 +424,12 @@ describe("cli migrations", () => {
       if (input.endsWith(`/schema/${toHash}`)) {
         return new Response(
           JSON.stringify({
+            todos: {
+              columns: [
+                { name: "title", column_type: { type: "Text" }, nullable: false },
+                { name: "notes", column_type: { type: "Text" }, nullable: true },
+              ],
+            },
             users: {
               columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
             },
@@ -341,8 +451,12 @@ describe("cli migrations", () => {
     });
 
     const generated = await readFile(filePath, "utf8");
-    expect(generated).toContain('m.dropTable("legacy_users");');
-    expect(generated).toContain('m.createTable("users");');
+    expect(generated).toContain('m.table("todos", (t) => {');
+    expect(generated).toContain('t.add("notes", { default: null });');
+    expect(generated).not.toContain("createTable");
+    expect(generated).not.toContain("dropTable");
+    expect(generated).not.toContain('"legacy_users"');
+    expect(generated).not.toContain('"users"');
   });
 
   it("pushes a reviewed migration via the admin migrations endpoint", async () => {
@@ -401,58 +515,6 @@ export default defineMigration({
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
-
-  it("pushes reviewed table creation migrations via the admin migrations endpoint", async () => {
-    const { root } = await createWorkspace();
-    const migrationsDir = join(root, "migrations");
-    await mkdir(migrationsDir, { recursive: true });
-
-    const fromHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-    const toHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-    const migrationPath = join(migrationsDir, `20260318-create-${fromHash}-${toHash}.ts`);
-
-    await writeFile(
-      migrationPath,
-      `
-import { col } from ${JSON.stringify(dslPath)};
-import { defineMigration } from ${JSON.stringify(migrationsPath)};
-
-export default defineMigration({
-  fromHash: ${JSON.stringify(fromHash)},
-  toHash: ${JSON.stringify(toHash)},
-  from: {},
-  to: {
-    users: {
-      name: col.string(),
-    },
-  },
-  migrate: (m) => {
-    m.createTable("users");
-  },
-});
-`,
-    );
-
-    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body));
-      expect(body.fromHash).toBe(fromHash);
-      expect(body.toHash).toBe(toHash);
-      expect(body.forwardSql).toContain("CREATE TABLE users (");
-      expect(body.forwardSql).toContain("name TEXT NOT NULL");
-      return new Response(JSON.stringify({ ok: true }), { status: 201 });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await pushMigration({
-      serverUrl: "http://localhost:1625",
-      adminSecret: "admin-secret",
-      migrationsDir,
-      fromHash,
-      toHash,
-    });
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
 });
 
 describe("cli build migration SQL generation", () => {
@@ -483,6 +545,23 @@ describe("cli build migration SQL generation", () => {
 });
 
 describe("cli build permissions generation", () => {
+  it("loads root permissions.ts from app root and creates the stub alongside it", async () => {
+    const { root, jazzBin } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema("./schema.ts"));
+
+    await build({ schemaDir: root, jazzBin });
+
+    const sql = await readFile(join(root, "schema", "current.sql"), "utf8");
+    const permissionsTest = await readFile(join(root, "permissions.test.ts"), "utf8");
+
+    expect(sql).toContain(
+      "CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);",
+    );
+    expect(permissionsTest).toContain("Permissions test starter.");
+    await expect(readFile(join(root, "schema", "app.ts"), "utf8")).rejects.toThrow();
+  });
+
   it("loads permissions.ts, merges policies, and creates permissions.test.ts stub", async () => {
     const { schemaDir, jazzBin } = await createWorkspace();
     await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
@@ -691,6 +770,41 @@ describe("bin integration", () => {
     const rustBin = await createFakeRustBin();
     await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
     await writeFile(join(schemaDir, "permissions.ts"), binPermissionsSchema("./app"));
+
+    runBinBuild(schemaDir, rustBin);
+
+    const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
+    expect(sql).toContain(
+      "CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);",
+    );
+  });
+
+  it("runs the TypeScript build for a root schema.ts when the bin is pointed at ./schema", async () => {
+    const { root, schemaDir } = await createWorkspace();
+    const rustBin = await createFakeRustBin();
+    await writeFile(
+      join(root, "schema.ts"),
+      rootSchemaWithoutInlinePermissions(distDslPath, distTypedAppPath),
+    );
+
+    runBinBuild(schemaDir, rustBin);
+
+    const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
+    expect(sql).toContain("CREATE TABLE todos");
+    await expect(readFile(join(schemaDir, "app.ts"), "utf8")).rejects.toThrow();
+  });
+
+  it("loads root permissions.ts that imports ./schema via the bin entry point", async () => {
+    const { root, schemaDir } = await createWorkspace();
+    const rustBin = await createFakeRustBin();
+    await writeFile(
+      join(root, "schema.ts"),
+      rootSchemaWithoutInlinePermissions(distDslPath, distTypedAppPath),
+    );
+    await writeFile(
+      join(root, "permissions.ts"),
+      rootPermissionsSchema("./schema", distPermissionsDslPath),
+    );
 
     runBinBuild(schemaDir, rustBin);
 
