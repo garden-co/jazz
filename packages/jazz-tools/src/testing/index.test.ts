@@ -238,21 +238,20 @@ describe("startLocalJazzServer", () => {
 });
 
 describe("pushSchemaCatalogue", () => {
-  it("reject if binary fails", async () => {
-    const binaryPath = await createFailingFakeJazzBinary("startup-failed-on-purpose");
+  it("rejects when no root schema.ts can be found", async () => {
+    const root = await createTempRoot("jazz-tools-testing-missing-schema-");
 
     await expect(
       pushSchemaCatalogue({
         serverUrl: "http://127.0.0.1:9999",
         appId: "00000000-0000-0000-0000-000000000001",
         adminSecret: "admin-secret",
-        schemaDir: "/tmp/schema",
-        binaryPath,
+        schemaDir: root,
       }),
-    ).rejects.toThrow(/startup-failed-on-purpose/);
+    ).rejects.toThrow(/schema file not found/i);
   });
 
-  it("pushes schema catalogue via schema directory using pushSchemaCatalogue", async () => {
+  it("publishes the current schema object via schema.ts using pushSchemaCatalogue", async () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret";
 
@@ -263,12 +262,30 @@ describe("pushSchemaCatalogue", () => {
     });
 
     try {
+      const beforeResponse = await fetch(`${server.url}/schemas`, {
+        headers: {
+          "X-Jazz-Admin-Secret": adminSecret,
+        },
+      });
+      expect(beforeResponse.status).toBe(200);
+      const beforeBody = (await beforeResponse.json()) as { hashes?: string[] };
+
       await pushSchemaCatalogue({
         serverUrl: server.url,
         appId: "00000000-0000-0000-0000-000000000001",
         adminSecret: adminSecret,
         schemaDir: join(import.meta.dirname ?? __dirname, "fixtures/basic"),
       });
+
+      const response = await fetch(`${server.url}/schemas`, {
+        headers: {
+          "X-Jazz-Admin-Secret": adminSecret,
+        },
+      });
+      expect(response.status).toBe(200);
+
+      const body = (await response.json()) as { hashes?: string[] };
+      expect(body.hashes?.length).toBeGreaterThan(beforeBody.hashes?.length ?? 0);
     } finally {
       await server.stop();
     }

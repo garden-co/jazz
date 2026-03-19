@@ -2,6 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadCompiledSchema } from "../schema-loader.js";
+import { publishStoredSchema } from "../runtime/schema-fetch.js";
 
 const DEFAULT_APP_ID = "00000000-0000-0000-0000-000000000001";
 const DEFAULT_PORT = 1625;
@@ -350,72 +352,15 @@ export async function startLocalJazzServer(
 }
 
 export async function pushSchemaCatalogue(options: PushSchemaCatalogueOptions): Promise<void> {
-  const binaryPath = options.binaryPath ?? defaultBinaryPath();
-  if (!existsSync(binaryPath)) {
-    throw new Error(
-      `jazz-tools binary not found at ${binaryPath}. Run \`cargo build -p jazz-tools --bin jazz-tools --features cli\` first.`,
+  const compiled = await loadCompiledSchema(options.schemaDir);
+  const result = await publishStoredSchema(options.serverUrl, {
+    adminSecret: options.adminSecret,
+    schema: compiled.wasmSchema,
+  });
+
+  if (options.enableLogs === true) {
+    console.log(
+      `[jazz-schema-push] published ${result.hash} from ${compiled.schemaFile} to ${options.serverUrl}`,
     );
   }
-
-  const args = [
-    "schema:push",
-    options.appId,
-    "--server-url",
-    options.serverUrl,
-    "--admin-secret",
-    options.adminSecret,
-    "--env",
-    options.env ?? "dev",
-    "--user-branch",
-    options.userBranch ?? "main",
-    "--schema-dir",
-    options.schemaDir,
-  ];
-
-  const enableLogs = options.enableLogs === true;
-
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(binaryPath, args, {
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let stdoutText = "";
-    let stderrText = "";
-
-    child.stdout?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf8");
-      stdoutText += text;
-      if (enableLogs) {
-        process.stdout.write(`[jazz-schema-push] ${chunk}`);
-      }
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf8");
-      stderrText += text;
-      if (enableLogs) {
-        process.stderr.write(`[jazz-schema-push] ${chunk}`);
-      }
-    });
-
-    child.once("error", (error) => {
-      reject(
-        formatServerError(
-          `Schema push process failed before completion: ${error.message}`,
-          stderrText || stdoutText,
-        ),
-      );
-    });
-
-    child.once("exit", (code, signal) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-
-      const signalInfo = signal !== null ? ` (signal=${signal})` : "";
-      const message = `Schema push exited with code ${code ?? "null"}${signalInfo}.`;
-      reject(formatServerError(message, stderrText || stdoutText));
-    });
-  });
 }

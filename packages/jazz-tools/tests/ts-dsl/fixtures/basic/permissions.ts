@@ -1,5 +1,5 @@
-import { definePermissions } from "jazz-tools/permissions";
-import { app } from "./app.js";
+import { definePermissions } from "../../../../src/permissions/index.js";
+import { app } from "./schema.js";
 
 export default definePermissions(app, ({ policy }) => {
   policy.todos.allowRead.where({});

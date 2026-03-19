@@ -86,7 +86,7 @@ async function resolvePolicyTestSchemaPaths(schemaDir: string): Promise<{
     const directRootSchema = join(schemaDir, `schema.${extension}`);
     if (await pathExists(directRootSchema)) {
       return {
-        catalogueDir: join(schemaDir, "schema"),
+        catalogueDir: schemaDir,
         appModulePath: directRootSchema,
       };
     }
@@ -98,7 +98,7 @@ async function resolvePolicyTestSchemaPaths(schemaDir: string): Promise<{
       const parentRootSchema = join(appRoot, `schema.${extension}`);
       if (await pathExists(parentRootSchema)) {
         return {
-          catalogueDir: schemaDir,
+          catalogueDir: appRoot,
           appModulePath: parentRootSchema,
         };
       }
