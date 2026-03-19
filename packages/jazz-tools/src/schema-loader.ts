@@ -9,6 +9,7 @@ import { getCollectedSchema, resetCollectedState } from "./dsl.js";
 import type { Column, OperationPolicy, Schema, SqlType, TablePolicies } from "./schema.js";
 import type { ColumnDescriptor, ColumnType, TableSchema, WasmSchema } from "./drivers/types.js";
 import { schemaDefinitionToAst } from "./migrations.js";
+import { mergePermissionsIntoSchema } from "./schema-permissions.js";
 
 registerEsm();
 
@@ -199,34 +200,6 @@ async function loadPermissionsModule(filePath: string): Promise<Record<string, T
     );
   }
   return candidate;
-}
-
-function mergePermissionsIntoSchema(
-  schema: Schema,
-  compiledPermissions: Record<string, TablePolicies>,
-): Schema {
-  const schemaTableNames = new Set(schema.tables.map((table) => table.name));
-  const unknownTables = Object.keys(compiledPermissions).filter(
-    (tableName) => !schemaTableNames.has(tableName),
-  );
-  if (unknownTables.length > 0) {
-    throw new Error(
-      `permissions.ts defines permissions for unknown table(s): ${unknownTables.join(", ")}.`,
-    );
-  }
-
-  return {
-    tables: schema.tables.map((table) => {
-      const external = compiledPermissions[table.name];
-      if (!external) {
-        return table;
-      }
-      return {
-        ...table,
-        policies: external,
-      };
-    }),
-  };
 }
 
 function findInlinePolicyTables(schema: Schema): string[] {

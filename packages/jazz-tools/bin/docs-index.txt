@@ -2807,6 +2807,7 @@ Initialize a Jazz context once at process startup and lazily create a shared `Db
 const context = createJazzContext({
   appId: "todo-server-ts",
   app: schemaApp,
+  permissions,
   driver: { type: "persistent", dataPath: "./data/jazz.db" },
   serverUrl: process.env.JAZZ_SERVER_URL,
   backendSecret: process.env.JAZZ_BACKEND_SECRET,
@@ -4255,6 +4256,7 @@ For React Native/Expo clients, make sure `serverUrl` points to a host your runti
   const context = createJazzContext({
     appId,
     app: schemaApp,
+    permissions,
     driver: { type: "persistent", dataPath: dbPath },
     env: "dev",
     userBranch: "main",
@@ -4279,7 +4281,7 @@ For React Native/Expo clients, make sure `serverUrl` points to a host your runti
 
 Client-side usage enforces permissions for the local user context.
 Backend usage can either use `context.db()` for the configured runtime identity or derive a requester-scoped `Db` directly from the request.
-In TypeScript backends, use `createJazzContext(...)` once at startup, then call `context.forRequest(req)` when you need a bearer-JWT-scoped high-level `Db`.
+In TypeScript backends, create the context once at startup with both `app` and `permissions`, then call `context.forRequest(req)` when you need a bearer-JWT-scoped high-level `Db`.
 
 #### Per-request user-scoped client
 
