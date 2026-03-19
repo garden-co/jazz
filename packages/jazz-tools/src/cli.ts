@@ -17,6 +17,7 @@ import type { Lens, SqlType } from "./schema.js";
 import { loadCompiledSchema } from "./schema-loader.js";
 import {
   encodePublishedMigrationValue,
+  fetchSchemaHashes,
   fetchStoredWasmSchema,
   publishStoredMigration,
   type PublishedTableLens,
@@ -102,6 +103,8 @@ export interface PushMigrationOptions extends MigrationCommandOptions {
   toHash: string;
 }
 
+const SHORT_SCHEMA_HASH_LENGTH = 12;
+
 function getFlagValue(args: string[], flag: string): string | undefined {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -142,12 +145,48 @@ function resolveMigrationOptions(args: string[]): MigrationCommandOptions {
   };
 }
 
-function normalizeFullSchemaHash(hash: string, label: string): string {
+function normalizeSchemaHashInput(hash: string, label: string): string {
   const normalized = hash.trim().toLowerCase();
-  if (!/^[0-9a-f]{64}$/.test(normalized)) {
-    throw new Error(`${label} must be a 64-character lowercase hex schema hash.`);
+  if (!/^[0-9a-f]{12,64}$/.test(normalized)) {
+    throw new Error(`${label} must be a 12-64 character lowercase hex schema hash.`);
   }
   return normalized;
+}
+
+function shortSchemaHash(hash: string): string {
+  return normalizeSchemaHashInput(hash, "schema hash").slice(0, SHORT_SCHEMA_HASH_LENGTH);
+}
+
+function hashMatchesFullSchema(hash: string, fullHash: string): boolean {
+  return fullHash.startsWith(normalizeSchemaHashInput(hash, "schema hash"));
+}
+
+function resolveKnownSchemaHash(
+  hash: string,
+  label: string,
+  knownHashes: readonly string[],
+): string {
+  const normalized = normalizeSchemaHashInput(hash, label);
+
+  if (normalized.length === 64) {
+    if (!knownHashes.includes(normalized)) {
+      throw new Error(`No stored schema found for ${label} ${normalized}.`);
+    }
+    return normalized;
+  }
+
+  const matches = knownHashes.filter((candidate) => candidate.startsWith(normalized));
+  if (matches.length === 0) {
+    throw new Error(`No stored schema found for ${label} prefix ${normalized}.`);
+  }
+  if (matches.length > 1) {
+    throw new Error(
+      `${label} prefix ${normalized} is ambiguous: ${matches
+        .map((candidate) => shortSchemaHash(candidate))
+        .join(", ")}`,
+    );
+  }
+  return matches[0]!;
 }
 
 function columnTypeSignature(columnType: WasmColumnType): string {
@@ -319,8 +358,87 @@ function renderSchemaWitness(schema: WasmSchema): string {
 type TableSuggestion = {
   tableName: string;
   comments: string[];
-  operations: string[];
+  properties: string[];
 };
+
+function renderArrayElementExpression(columnType: WasmColumnType, references?: string): string {
+  return baseBuilderExpression(columnType, references);
+}
+
+function renderAddOperationExpression(column: ColumnDescriptor, defaultExpression: string): string {
+  switch (column.column_type.type) {
+    case "Text":
+      return `col.add.string({ default: ${defaultExpression} })`;
+    case "Boolean":
+      return `col.add.boolean({ default: ${defaultExpression} })`;
+    case "Integer":
+      return `col.add.int({ default: ${defaultExpression} })`;
+    case "Double":
+      return `col.add.float({ default: ${defaultExpression} })`;
+    case "Timestamp":
+      return `col.add.timestamp({ default: ${defaultExpression} })`;
+    case "Bytea":
+      return `col.add.bytes({ default: ${defaultExpression} })`;
+    case "Json":
+      return column.column_type.schema
+        ? `col.add.json({ default: ${defaultExpression}, schema: ${JSON.stringify(column.column_type.schema)} })`
+        : `col.add.json({ default: ${defaultExpression} })`;
+    case "Enum":
+      return `col.add.enum(${column.column_type.variants
+        .map((variant) => JSON.stringify(variant))
+        .join(", ")}, { default: ${defaultExpression} })`;
+    case "Uuid":
+      if (column.references) {
+        return `col.add.ref(${JSON.stringify(column.references)}, { default: ${defaultExpression} })`;
+      }
+      return `col.add.ref("TODO_TABLE", { default: ${defaultExpression} })`;
+    case "Array":
+      return `col.add.array({ of: ${renderArrayElementExpression(column.column_type.element, column.references)}, default: ${defaultExpression} })`;
+    case "BigInt":
+      throw new Error("Migration stub generation does not yet support BIGINT columns.");
+    case "Row":
+      throw new Error("Migration stub generation does not yet support row-valued columns.");
+  }
+}
+
+function renderDropOperationExpression(
+  column: ColumnDescriptor,
+  defaultExpression: string,
+): string {
+  switch (column.column_type.type) {
+    case "Text":
+      return `col.drop.string({ backwardsDefault: ${defaultExpression} })`;
+    case "Boolean":
+      return `col.drop.boolean({ backwardsDefault: ${defaultExpression} })`;
+    case "Integer":
+      return `col.drop.int({ backwardsDefault: ${defaultExpression} })`;
+    case "Double":
+      return `col.drop.float({ backwardsDefault: ${defaultExpression} })`;
+    case "Timestamp":
+      return `col.drop.timestamp({ backwardsDefault: ${defaultExpression} })`;
+    case "Bytea":
+      return `col.drop.bytes({ backwardsDefault: ${defaultExpression} })`;
+    case "Json":
+      return column.column_type.schema
+        ? `col.drop.json({ backwardsDefault: ${defaultExpression}, schema: ${JSON.stringify(column.column_type.schema)} })`
+        : `col.drop.json({ backwardsDefault: ${defaultExpression} })`;
+    case "Enum":
+      return `col.drop.enum(${column.column_type.variants
+        .map((variant) => JSON.stringify(variant))
+        .join(", ")}, { backwardsDefault: ${defaultExpression} })`;
+    case "Uuid":
+      if (column.references) {
+        return `col.drop.ref(${JSON.stringify(column.references)}, { backwardsDefault: ${defaultExpression} })`;
+      }
+      return `col.drop.ref("TODO_TABLE", { backwardsDefault: ${defaultExpression} })`;
+    case "Array":
+      return `col.drop.array({ of: ${renderArrayElementExpression(column.column_type.element, column.references)}, backwardsDefault: ${defaultExpression} })`;
+    case "BigInt":
+      throw new Error("Migration stub generation does not yet support BIGINT columns.");
+    case "Row":
+      throw new Error("Migration stub generation does not yet support row-valued columns.");
+  }
+}
 
 function inferTableSuggestions(
   tableName: string,
@@ -330,7 +448,7 @@ function inferTableSuggestions(
   const fromColumns = new Map(fromTable.columns.map((column) => [column.name, column]));
   const toColumns = new Map(toTable.columns.map((column) => [column.name, column]));
   const comments: string[] = [];
-  const operations: string[] = [];
+  const properties: string[] = [];
 
   const removedColumns = [...fromColumns.keys()].filter((name) => !toColumns.has(name));
   const addedColumns = [...toColumns.keys()].filter((name) => !fromColumns.has(name));
@@ -352,7 +470,9 @@ function inferTableSuggestions(
   for (const columnName of addedColumns) {
     const column = toColumns.get(columnName)!;
     if (column.nullable) {
-      operations.push(`t.add(${JSON.stringify(columnName)}, { default: null });`);
+      properties.push(
+        `${JSON.stringify(columnName)}: ${renderAddOperationExpression(column, "null")},`,
+      );
     } else {
       comments.push(
         `Added required column ${JSON.stringify(columnName)} needs an explicit default.`,
@@ -363,7 +483,9 @@ function inferTableSuggestions(
   for (const columnName of removedColumns) {
     const column = fromColumns.get(columnName)!;
     if (column.nullable) {
-      operations.push(`t.drop(${JSON.stringify(columnName)}, { backwardsDefault: null });`);
+      properties.push(
+        `${JSON.stringify(columnName)}: ${renderDropOperationExpression(column, "null")},`,
+      );
     } else {
       comments.push(
         `Removed required column ${JSON.stringify(columnName)} needs an explicit backwardsDefault.`,
@@ -374,7 +496,7 @@ function inferTableSuggestions(
   return {
     tableName,
     comments,
-    operations,
+    properties,
   };
 }
 
@@ -395,17 +517,17 @@ function renderMigrationBody(
     const toTable = toSchema[tableName]!;
 
     const suggestion = inferTableSuggestions(tableName, fromTable, toTable);
-    lines.push(`m.table(${JSON.stringify(tableName)}, (t) => {`);
+    lines.push(`${JSON.stringify(tableName)}: {`);
     for (const comment of suggestion.comments) {
       lines.push(`  // TODO: ${comment}`);
     }
-    for (const operation of suggestion.operations) {
-      lines.push(`  ${operation}`);
+    for (const property of suggestion.properties) {
+      lines.push(`  ${property}`);
     }
-    if (suggestion.comments.length === 0 && suggestion.operations.length === 0) {
+    if (suggestion.comments.length === 0 && suggestion.properties.length === 0) {
       lines.push("  // TODO: No safe migration steps were inferred automatically.");
     }
-    lines.push("});");
+    lines.push("},");
     lines.push("");
   }
 
@@ -439,7 +561,10 @@ function createDateStamp(now: Date = new Date()): string {
 }
 
 function migrationFilename(migrationsDir: string, fromHash: string, toHash: string): string {
-  return join(migrationsDir, `${createDateStamp()}-unnamed-${fromHash}-${toHash}.ts`);
+  return join(
+    migrationsDir,
+    `${createDateStamp()}-unnamed-${shortSchemaHash(fromHash)}-${shortSchemaHash(toHash)}.ts`,
+  );
 }
 
 function renderMigrationStub(input: {
@@ -452,13 +577,13 @@ function renderMigrationStub(input: {
   return `import { col, defineMigration } from "jazz-tools";
 
 export default defineMigration({
-  fromHash: ${JSON.stringify(input.fromHash)},
-  toHash: ${JSON.stringify(input.toHash)},
-  from: ${renderSchemaWitness(rendered.witnessFrom)},
-  to: ${renderSchemaWitness(rendered.witnessTo)},
-  migrate: (m) => {
+  migrate: {
 ${indentBlock(rendered.body, 4)}
   },
+  fromHash: ${JSON.stringify(shortSchemaHash(input.fromHash))},
+  toHash: ${JSON.stringify(shortSchemaHash(input.toHash))},
+  from: ${renderSchemaWitness(rendered.witnessFrom)},
+  to: ${renderSchemaWitness(rendered.witnessTo)},
 });
 `;
 }
@@ -497,10 +622,16 @@ async function findMigrationFile(
   fromHash: string,
   toHash: string,
 ): Promise<string> {
+  const fromShortHash = shortSchemaHash(fromHash);
+  const toShortHash = shortSchemaHash(toHash);
   const files = await readdir(migrationsDir);
   const matches = files
     .filter((file) => file.endsWith(".ts"))
-    .filter((file) => file.includes(`-${fromHash}-${toHash}.ts`));
+    .filter(
+      (file) =>
+        file.includes(`-${fromShortHash}-${toShortHash}.ts`) ||
+        file.includes(`-${fromHash}-${toHash}.ts`),
+    );
 
   if (matches.length === 0) {
     throw new Error(`No migration file found in ${migrationsDir} for ${fromHash} -> ${toHash}.`);
@@ -516,8 +647,11 @@ async function findMigrationFile(
 }
 
 export async function createMigration(options: CreateMigrationOptions): Promise<string> {
-  const fromHash = normalizeFullSchemaHash(options.fromHash, "fromHash");
-  const toHash = normalizeFullSchemaHash(options.toHash, "toHash");
+  const { hashes } = await fetchSchemaHashes(options.serverUrl, {
+    adminSecret: options.adminSecret,
+  });
+  const fromHash = resolveKnownSchemaHash(options.fromHash, "fromHash", hashes);
+  const toHash = resolveKnownSchemaHash(options.toHash, "toHash", hashes);
 
   await mkdir(options.migrationsDir, { recursive: true });
 
@@ -544,22 +678,30 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
   console.log(`Generated: ${filePath}`);
   console.log("");
   console.log("Next steps:");
-  console.log("1. Fill in migrate().");
+  console.log("1. Fill in migrate.");
   console.log("2. Rename the file by replacing 'unnamed'.");
-  console.log(`3. Run npx jazz-tools@${version} migrations push ${fromHash} ${toHash}`);
+  console.log(
+    `3. Run npx jazz-tools@${version} migrations push ${shortSchemaHash(fromHash)} ${shortSchemaHash(toHash)}`,
+  );
 
   return filePath;
 }
 
 export async function pushMigration(options: PushMigrationOptions): Promise<void> {
-  const fromHash = normalizeFullSchemaHash(options.fromHash, "fromHash");
-  const toHash = normalizeFullSchemaHash(options.toHash, "toHash");
+  const { hashes } = await fetchSchemaHashes(options.serverUrl, {
+    adminSecret: options.adminSecret,
+  });
+  const fromHash = resolveKnownSchemaHash(options.fromHash, "fromHash", hashes);
+  const toHash = resolveKnownSchemaHash(options.toHash, "toHash", hashes);
   const filePath = await findMigrationFile(options.migrationsDir, fromHash, toHash);
   const migration = await loadDefinedMigration(filePath);
 
-  if (migration.fromHash !== fromHash || migration.toHash !== toHash) {
+  if (
+    !hashMatchesFullSchema(migration.fromHash, fromHash) ||
+    !hashMatchesFullSchema(migration.toHash, toHash)
+  ) {
     throw new Error(
-      `Migration ${basename(filePath)} exports ${migration.fromHash} -> ${migration.toHash}, expected ${fromHash} -> ${toHash}.`,
+      `Migration ${basename(filePath)} exports ${migration.fromHash} -> ${migration.toHash}, expected ${shortSchemaHash(fromHash)} -> ${shortSchemaHash(toHash)}.`,
     );
   }
 
@@ -567,7 +709,7 @@ export async function pushMigration(options: PushMigrationOptions): Promise<void
   schemaDefinitionToAst(migration.to as any);
 
   if (migration.forward.length === 0) {
-    throw new Error(`Migration ${basename(filePath)} has no steps. Fill in migrate() before push.`);
+    throw new Error(`Migration ${basename(filePath)} has no steps. Fill in migrate before push.`);
   }
 
   const forward = serializeForwardLenses(migration.forward);
@@ -578,7 +720,9 @@ export async function pushMigration(options: PushMigrationOptions): Promise<void
     forward,
   });
 
-  console.log(`Pushed migration ${fromHash} -> ${toHash} from ${basename(filePath)}.`);
+  console.log(
+    `Pushed migration ${shortSchemaHash(fromHash)} -> ${shortSchemaHash(toHash)} from ${basename(filePath)}.`,
+  );
 }
 
 function isMainModule(): boolean {

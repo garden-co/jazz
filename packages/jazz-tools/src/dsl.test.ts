@@ -24,13 +24,13 @@ describe("enum DSL invariants", () => {
   });
 
   it("rejects duplicate variants in add enum migration", () => {
-    expect(() => col.add().enum("todo", "todo", { default: "todo" })).toThrow(
+    expect(() => col.add.enum("todo", "todo", { default: "todo" })).toThrow(
       "Enum variants must be unique.",
     );
   });
 
   it("rejects empty variants in drop enum migration", () => {
-    expect(() => col.drop().enum("todo", "", { backwardsDefault: "todo" })).toThrow(
+    expect(() => col.drop.enum("todo", "", { backwardsDefault: "todo" })).toThrow(
       "Enum variants cannot be empty strings.",
     );
   });
@@ -39,8 +39,8 @@ describe("enum DSL invariants", () => {
 describe("bytes DSL API", () => {
   it("supports bytes as the primary BYTEA builder name", () => {
     expect(col.bytes()._sqlType).toBe("BYTEA");
-    expect(col.add().bytes({ default: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
-    expect(col.drop().bytes({ backwardsDefault: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
+    expect(col.add.bytes({ default: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
+    expect(col.drop.bytes({ backwardsDefault: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
   });
 });
 
@@ -98,7 +98,7 @@ describe("reserved magic-column namespace", () => {
     resetCollectedState();
     expect(() =>
       migrate("todos", {
-        $canRead: col.add().boolean({ default: false }),
+        $canRead: col.add.boolean({ default: false }),
       }),
     ).toThrow(/reserved for magic columns/i);
   });
@@ -107,7 +107,7 @@ describe("reserved magic-column namespace", () => {
     resetCollectedState();
     expect(() =>
       migrate("todos", {
-        $legacy: col.drop().boolean({ backwardsDefault: false }),
+        $legacy: col.drop.boolean({ backwardsDefault: false }),
       }),
     ).not.toThrow();
 

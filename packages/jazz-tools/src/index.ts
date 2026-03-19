@@ -110,7 +110,7 @@ export type {
   TableMetaOf,
   WhereOf,
 } from "./typed-app.js";
-export type { DefinedMigration, MigrationBuilder, MigrationTableEditor } from "./migrations.js";
+export type { DefinedMigration, MigrationShape, MigrationTableShape } from "./migrations.js";
 
 // Storage drivers
 export * from "./drivers/index.js";

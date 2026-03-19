@@ -247,8 +247,14 @@ describe("cli migrations", () => {
     const migrationsDir = join(root, "migrations");
     const fromHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const toHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
 
     const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
       if (input.endsWith(`/schema/${fromHash}`)) {
         return new Response(
           JSON.stringify({
@@ -282,15 +288,17 @@ describe("cli migrations", () => {
       serverUrl: "http://localhost:1625",
       adminSecret: "admin-secret",
       migrationsDir,
-      fromHash,
-      toHash,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
     });
 
     const generated = await readFile(filePath, "utf8");
+    expect(filePath).toContain(`-unnamed-${fromShortHash}-${toShortHash}.ts`);
     expect(generated).toContain("defineMigration");
-    expect(generated).toContain(`fromHash: "${fromHash}"`);
-    expect(generated).toContain(`toHash: "${toHash}"`);
-    expect(generated).toContain('t.add("notes", { default: null });');
+    expect(generated).toContain(`fromHash: "${fromShortHash}"`);
+    expect(generated).toContain(`toHash: "${toShortHash}"`);
+    expect(generated).toContain("migrate: {");
+    expect(generated).toContain('"notes": col.add.string({ default: null }),');
   });
 
   it("skips table add/drop steps when inferring a migration stub", async () => {
@@ -298,8 +306,14 @@ describe("cli migrations", () => {
     const migrationsDir = join(root, "migrations");
     const fromHash = "abababababababababababababababababababababababababababababababab";
     const toHash = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
 
     const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
       if (input.endsWith(`/schema/${fromHash}`)) {
         return new Response(
           JSON.stringify({
@@ -339,13 +353,13 @@ describe("cli migrations", () => {
       serverUrl: "http://localhost:1625",
       adminSecret: "admin-secret",
       migrationsDir,
-      fromHash,
-      toHash,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
     });
 
     const generated = await readFile(filePath, "utf8");
-    expect(generated).toContain('m.table("todos", (t) => {');
-    expect(generated).toContain('t.add("notes", { default: null });');
+    expect(generated).toContain('"todos": {');
+    expect(generated).toContain('"notes": col.add.string({ default: null }),');
     expect(generated).not.toContain("createTable");
     expect(generated).not.toContain("dropTable");
     expect(generated).not.toContain('"legacy_users"');
@@ -359,7 +373,9 @@ describe("cli migrations", () => {
 
     const fromHash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
     const toHash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
-    const migrationPath = join(migrationsDir, `20260318-rename-${fromHash}-${toHash}.ts`);
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+    const migrationPath = join(migrationsDir, `20260318-rename-${fromShortHash}-${toShortHash}.ts`);
 
     await writeFile(
       migrationPath,
@@ -368,8 +384,13 @@ import { col } from ${JSON.stringify(dslPath)};
 import { defineMigration } from ${JSON.stringify(migrationsPath)};
 
 export default defineMigration({
-  fromHash: ${JSON.stringify(fromHash)},
-  toHash: ${JSON.stringify(toHash)},
+  migrate: {
+    users: {
+      email_address: col.renameFrom("email"),
+    },
+  },
+  fromHash: ${JSON.stringify(fromShortHash)},
+  toHash: ${JSON.stringify(toShortHash)},
   from: {
     users: {
       email: col.string(),
@@ -380,16 +401,15 @@ export default defineMigration({
       email_address: col.string(),
     },
   },
-  migrate: (m) => {
-    m.table("users", (t) => {
-      t.rename("email", "email_address");
-    });
-  },
 });
 `,
     );
 
     const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      if (_input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
       const body = JSON.parse(String(init?.body));
       expect(body.fromHash).toBe(fromHash);
       expect(body.toHash).toBe(toHash);
@@ -413,11 +433,11 @@ export default defineMigration({
       serverUrl: "http://localhost:1625",
       adminSecret: "admin-secret",
       migrationsDir,
-      fromHash,
-      toHash,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
 

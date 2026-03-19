@@ -398,6 +398,10 @@ impl QueryManager {
         warning: &SchemaWarning,
         subscription_id: Option<QuerySubscriptionId>,
     ) {
+        fn short_hash(hash: &impl ToString) -> String {
+            hash.to_string().chars().take(12).collect()
+        }
+
         tracing::warn!(
             sub_id = subscription_id.map(|id| id.0),
             query_id = warning.query_id.0,
@@ -408,8 +412,8 @@ impl QueryManager {
             "Detected {} rows of {} with differing schema versions. To ensure data visibility and forward/backward compatibility please create a new migration with `npx jazz-tools migrations create {} {}`",
             warning.row_count,
             warning.table_name,
-            warning.from_hash,
-            warning.to_hash,
+            short_hash(&warning.from_hash),
+            short_hash(&warning.to_hash),
         );
     }
 

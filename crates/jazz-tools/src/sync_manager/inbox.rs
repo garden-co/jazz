@@ -5,6 +5,10 @@ use crate::query_manager::policy::Operation;
 use crate::storage::Storage;
 use std::collections::HashSet;
 
+fn short_hash(hash: &impl ToString) -> String {
+    hash.to_string().chars().take(12).collect()
+}
+
 fn log_schema_warning(origin: &str, warning: &SchemaWarning) {
     tracing::warn!(
         origin,
@@ -16,8 +20,8 @@ fn log_schema_warning(origin: &str, warning: &SchemaWarning) {
         "Detected {} rows of {} with differing schema versions. To ensure data visibility and forward/backward compatibility please create a new migration with `npx jazz-tools migrations create {} {}`",
         warning.row_count,
         warning.table_name,
-        warning.from_hash,
-        warning.to_hash,
+        short_hash(&warning.from_hash),
+        short_hash(&warning.to_hash),
     );
 }
 

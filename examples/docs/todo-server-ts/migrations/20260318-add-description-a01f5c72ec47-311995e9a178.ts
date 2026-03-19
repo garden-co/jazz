@@ -2,6 +2,11 @@ import { col, defineMigration } from "jazz-tools";
 
 // Example of editing a generated migration stub.
 export default defineMigration({
+  migrate: {
+    todos: {
+      description: col.add.string({ default: "No description" }),
+    },
+  },
   fromHash: "a01f5c72ec47",
   toHash: "311995e9a178",
   from: {
@@ -22,10 +27,5 @@ export default defineMigration({
       projectId: col.ref("projects").optional(),
       owner_id: col.string(),
     },
-  },
-  migrate: (m) => {
-    m.table("todos", (t) => {
-      t.add("description", { default: "No description" });
-    });
   },
 });

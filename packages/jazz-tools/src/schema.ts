@@ -218,21 +218,21 @@ export interface Schema {
 }
 
 // Migration operation types
-export interface AddOp {
+export interface AddOp<TSqlType extends SqlType = SqlType, TDefault = unknown> {
   _type: "add";
-  sqlType: SqlType;
-  default: unknown;
+  sqlType: TSqlType;
+  default: TDefault;
 }
 
-export interface DropOp {
+export interface DropOp<TSqlType extends SqlType = SqlType, TBackwardsDefault = unknown> {
   _type: "drop";
-  sqlType: SqlType;
-  backwardsDefault: unknown;
+  sqlType: TSqlType;
+  backwardsDefault: TBackwardsDefault;
 }
 
-export interface RenameOp {
+export interface RenameOp<TOldName extends string = string> {
   _type: "rename";
-  oldName: string;
+  oldName: TOldName;
 }
 
 export type MigrationOp = AddOp | DropOp | RenameOp;
