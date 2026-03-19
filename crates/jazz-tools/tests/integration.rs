@@ -1,4 +1,4 @@
-#![cfg(feature = "cli")]
+#![cfg(feature = "test")]
 
 //! E2E integration tests for jazz-tools server.
 //!

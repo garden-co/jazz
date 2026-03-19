@@ -1,4 +1,4 @@
-#![cfg(feature = "test-utils")]
+#![cfg(feature = "test")]
 
 mod support;
 
