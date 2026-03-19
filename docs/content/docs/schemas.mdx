@@ -61,8 +61,8 @@ When older rows are no longer reachable from the current schema graph, Jazz logs
 [client] To ensure data visibility and forward/backward compatibility please create
          a new migration with:
          npx jazz-tools migrations create \
-           a01f5c72ec47a3f7d91a6862b4c5779d194f586ff8b432d92aecde954c306e9c \
-           311995e9a17877948f64a2b52dcb0f0dbf5f4dd8f7a34e1e9a7c21e5d8c0b3fa
+           a01f5c72ec47 \
+           311995e9a178
 ```
 
 That warning is the handoff from day-to-day schema editing to reviewed compatibility work.
@@ -75,7 +75,7 @@ That warning is the handoff from day-to-day schema editing to reviewed compatibi
 npx jazz-tools migrations create <fromHash> <toHash>
 ```
 
-The generated file already contains `fromHash`, `toHash`, and minimal typed `from` / `to` witnesses. In most cases, the only manual work is to fill in `migrate()` and replace `unnamed` in the filename with a real migration name.
+The generated file already contains `fromHash`, `toHash`, and minimal typed `from` / `to` witnesses. In most cases, the only manual work is to fill in `migrate` and replace `unnamed` in the filename with a real migration name.
 
 ### Publish a reviewed edge with `migrations push`
 

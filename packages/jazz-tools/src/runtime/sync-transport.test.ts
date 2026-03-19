@@ -500,9 +500,7 @@ describe("sync-transport", () => {
       expect.stringContaining("[client] Detected 3 rows of todos with differing schema versions."),
     );
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "npx jazz-tools migrations create aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      ),
+      expect.stringContaining("npx jazz-tools migrations create aaaaaaaaaaaa bbbbbbbbbbbb"),
     );
     expect(onSyncMessage).toHaveBeenCalledWith(
       JSON.stringify({

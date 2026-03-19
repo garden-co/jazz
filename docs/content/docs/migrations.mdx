@@ -30,11 +30,11 @@ All Jazz apps use the same migration workflow, including Rust backends.
   </Tab>
 </Tabs>
 
-When Jazz encounters rows whose schema hash is no longer reachable from the current app schema, it logs a warning with the exact `migrations create <fromHash> <toHash>` command to run next.
+When Jazz encounters rows whose schema hash is no longer reachable from the current app schema, it logs a warning with the exact short-hash `migrations create <fromHash> <toHash>` command to run next.
 
 ## Generated Stub
 
-`migrations create` writes a copy-pastable file with `fromHash`, `toHash`, and minimal typed `from` / `to` witnesses. You only need to fill in `migrate(...)`, then rename the file.
+`migrations create` writes a copy-pastable file with short `fromHash`, `toHash`, and minimal typed `from` / `to` witnesses. You only need to fill in `migrate`, then rename the file.
 
 <include
   cwd
@@ -46,7 +46,7 @@ When Jazz encounters rows whose schema hash is no longer reachable from the curr
 
 ## Edited Stub
 
-After review, keep the same hashes and adjust the migration logic as needed:
+After review, keep the same hashes and adjust the `migrate` object as needed:
 
 <include
   cwd

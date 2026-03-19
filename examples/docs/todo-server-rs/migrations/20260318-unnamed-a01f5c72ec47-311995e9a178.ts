@@ -2,6 +2,11 @@ import { col, defineMigration } from "jazz-tools";
 
 // Rust apps use the same TypeScript migration files and push them with the same CLI.
 export default defineMigration({
+  migrate: {
+    todos: {
+      description: col.add.string({ default: null }),
+    },
+  },
   fromHash: "a01f5c72ec47",
   toHash: "311995e9a178",
   from: {
@@ -20,10 +25,5 @@ export default defineMigration({
       parent: col.ref("todos").optional(),
       project: col.ref("projects").optional(),
     },
-  },
-  migrate: (m) => {
-    m.table("todos", (t) => {
-      t.add("description", { default: null });
-    });
   },
 });

@@ -776,6 +776,11 @@ fn handle_server_event(
     runtime: &TokioRuntime<FjallStorage>,
     server_id: ServerId,
 ) -> Result<()> {
+    fn short_hash(hash: &impl ToString) -> String {
+        let hash = hash.to_string();
+        hash.chars().take(12).collect()
+    }
+
     match event {
         ServerEvent::Connected {
             connection_id,
@@ -806,8 +811,8 @@ fn handle_server_event(
                     "Detected {} rows of {} with differing schema versions. To ensure data visibility and forward/backward compatibility please create a new migration with `npx jazz-tools migrations create {} {}`",
                     warning.row_count,
                     warning.table_name,
-                    warning.from_hash,
-                    warning.to_hash,
+                    short_hash(&warning.from_hash),
+                    short_hash(&warning.to_hash),
                 );
             }
             let entry = InboxEntry {
