@@ -1,4 +1,4 @@
-#![cfg(all(feature = "cli", feature = "client"))]
+#![cfg(feature = "test")]
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

@@ -1,21 +1,190 @@
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
     AppContext, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query, QueryBuilder, Schema,
     SubscriptionStream, Value,
 };
+use jsonwebtoken::{EncodingKey, Header, encode};
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
-const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(8);
 #[allow(dead_code)]
 const DEFAULT_ROWS_TIMEOUT: Duration = Duration::from_secs(25);
 #[allow(dead_code)]
 const DEFAULT_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const TEST_JWT_SECRET: &str = "test-jwt-secret-for-integration";
+const TEST_JWT_KID: &str = "test-jwks-kid";
 
 /// Convenience shape for query results returned by test helpers.
 pub type QueryRows = Vec<(ObjectId, Vec<Value>)>;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JwtClaims {
+    sub: String,
+    claims: JsonValue,
+    exp: u64,
+}
+
+#[allow(dead_code)]
+enum TestingClientAuth {
+    Admin,
+    User,
+    Claims(JsonValue),
+}
+
+/// Builder-style helper for test clients backed by `TestingServer`.
+///
+/// Supports the three common auth shapes used across the integration suite:
+/// admin-capable clients, normal JWT-only clients, and JWT-only clients with
+/// custom claims.
+pub struct TestingClient<'a> {
+    server: Option<&'a TestingServer>,
+    schema: Option<Schema>,
+    user_id: Option<String>,
+    auth: TestingClientAuth,
+    ready_table: Option<String>,
+    ready_timeout: Option<Duration>,
+}
+
+#[allow(dead_code)]
+impl<'a> TestingClient<'a> {
+    pub fn builder() -> Self {
+        Self {
+            server: None,
+            schema: None,
+            user_id: None,
+            auth: TestingClientAuth::Admin,
+            ready_table: None,
+            ready_timeout: None,
+        }
+    }
+
+    pub fn with_server(mut self, server: &'a TestingServer) -> Self {
+        self.server = Some(server);
+        self
+    }
+
+    pub fn with_schema(mut self, schema: Schema) -> Self {
+        self.schema = Some(schema);
+        self
+    }
+
+    pub fn with_user_id(mut self, user_id: impl Into<String>) -> Self {
+        self.user_id = Some(user_id.into());
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn as_user(mut self) -> Self {
+        self.auth = TestingClientAuth::User;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn with_claims(mut self, claims: JsonValue) -> Self {
+        self.auth = TestingClientAuth::Claims(claims);
+        self
+    }
+
+    pub fn ready_on(mut self, table: impl Into<String>, timeout: Duration) -> Self {
+        self.ready_table = Some(table.into());
+        self.ready_timeout = Some(timeout);
+        self
+    }
+
+    pub async fn connect(self) -> JazzClient {
+        self.connect_with_context().await.1
+    }
+
+    /// Connects the client and also returns the exact `AppContext` used for
+    /// the connection so callers can later reconnect with the same local state.
+    pub async fn connect_with_context(self) -> (AppContext, JazzClient) {
+        let ready_table = self.ready_table.clone();
+        let ready_timeout = self.ready_timeout;
+        let context = self.build_context();
+
+        let client = JazzClient::connect(context.clone())
+            .await
+            .expect("connect test client");
+
+        if let Some(ready_table) = ready_table {
+            wait_for_edge_query_ready(
+                &client,
+                &ready_table,
+                ready_timeout.expect("ready timeout should be set when ready table is set"),
+            )
+            .await;
+        }
+
+        (context, client)
+    }
+
+    /// Builds a fresh test-client context.
+    ///
+    /// Each call allocates a new client data directory. If you need both the
+    /// connected client and the matching context for a later reconnect, prefer
+    /// `connect_with_context`.
+    pub fn build_context(&self) -> AppContext {
+        self.build_context_for_reuse()
+    }
+
+    fn build_context_for_reuse(&self) -> AppContext {
+        let user_id = self
+            .user_id
+            .as_deref()
+            .expect("TestingClient requires `with_user_id(...)` before building");
+        let mut context = self
+            .server
+            .expect("TestingClient requires `with_server(...)` before building")
+            .make_client_context_for_user(
+                self.schema
+                    .clone()
+                    .expect("TestingClient requires `with_schema(...)` before building"),
+                user_id,
+            );
+
+        match &self.auth {
+            TestingClientAuth::Admin => {}
+            TestingClientAuth::User => {
+                context.backend_secret = None;
+                context.admin_secret = None;
+            }
+            TestingClientAuth::Claims(claims) => {
+                context.jwt_token = Some(make_jwt(user_id, claims.clone()));
+                context.backend_secret = None;
+                context.admin_secret = None;
+            }
+        }
+
+        context
+    }
+}
+
+fn make_jwt(sub: &str, claims: JsonValue) -> String {
+    let jwt_claims = JwtClaims {
+        sub: sub.to_string(),
+        claims,
+        exp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock drift")
+            .as_secs()
+            + 3600,
+    };
+
+    let mut header = Header::new(jsonwebtoken::Algorithm::HS256);
+    header.kid = Some(TEST_JWT_KID.to_string());
+
+    encode(
+        &header,
+        &jwt_claims,
+        &EncodingKey::from_secret(TEST_JWT_SECRET.as_bytes()),
+    )
+    .expect("encode jwt")
+}
 
 #[allow(dead_code)]
 /// Polls an async predicate until it returns a value or the timeout expires.
@@ -111,62 +280,6 @@ pub async fn wait_for_edge_query_ready(client: &JazzClient, table: &str, timeout
         |_| Some(()),
     )
     .await;
-}
-
-#[allow(dead_code)]
-/// Connects a test client using the default testing context and waits for the
-/// requested table to become queryable on the edge server.
-///
-/// This keeps the testing server's backend/admin secrets intact, which is
-/// appropriate for general integration tests that are not asserting user policy
-/// enforcement.
-pub async fn connect_admin_client(
-    server: &TestingServer,
-    schema: Schema,
-    user_id: &str,
-    ready_table: &str,
-    ready_timeout: Duration,
-) -> JazzClient {
-    connect_client_with_context(
-        server.make_client_context_for_user(schema, user_id),
-        ready_table,
-        ready_timeout,
-    )
-    .await
-}
-
-#[allow(dead_code)]
-/// Connects a test client using only its JWT session and waits for the
-/// requested table to become queryable on the edge server.
-///
-/// This strips the testing server's backend/admin secrets so policy tests
-/// exercise the same authorization path as a normal user client.
-pub async fn connect_client(
-    server: &TestingServer,
-    schema: Schema,
-    user_id: &str,
-    ready_table: &str,
-    ready_timeout: Duration,
-) -> JazzClient {
-    let mut context = server.make_client_context_for_user(schema, user_id);
-    context.backend_secret = None;
-    context.admin_secret = None;
-
-    connect_client_with_context(context, ready_table, ready_timeout).await
-}
-
-#[allow(dead_code)]
-/// Shared implementation for test client connection helpers.
-async fn connect_client_with_context(
-    context: AppContext,
-    ready_table: &str,
-    ready_timeout: Duration,
-) -> JazzClient {
-    let client = JazzClient::connect(context)
-        .await
-        .expect("connect test client");
-    wait_for_edge_query_ready(&client, ready_table, ready_timeout).await;
-    client
 }
 
 #[allow(dead_code)]

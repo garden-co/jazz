@@ -1,4 +1,4 @@
-#![cfg(feature = "test-utils")]
+#![cfg(feature = "test")]
 
 mod support;
 
@@ -10,8 +10,8 @@ use jazz_tools::{
     Value,
 };
 use support::{
-    collect_stream_deltas, connect_admin_client, has_added, has_any_change, has_removed,
-    has_updated, wait_for_rows, wait_for_subscription_update,
+    TestingClient, collect_stream_deltas, has_added, has_any_change, has_removed, has_updated,
+    wait_for_rows, wait_for_subscription_update,
 };
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -75,22 +75,20 @@ impl ClientPair {
     async fn start() -> Self {
         let server = TestingServer::start().await;
         let schema = subscription_schema();
-        let writer = connect_admin_client(
-            &server,
-            schema.clone(),
-            "subscribe-all-writer",
-            "todos",
-            READY_TIMEOUT,
-        )
-        .await;
-        let subscriber = connect_admin_client(
-            &server,
-            schema,
-            "subscribe-all-subscriber",
-            "todos",
-            READY_TIMEOUT,
-        )
-        .await;
+        let writer = TestingClient::builder()
+            .with_server(&server)
+            .with_schema(schema.clone())
+            .with_user_id("subscribe-all-writer")
+            .ready_on("todos", READY_TIMEOUT)
+            .connect()
+            .await;
+        let subscriber = TestingClient::builder()
+            .with_server(&server)
+            .with_schema(schema)
+            .with_user_id("subscribe-all-subscriber")
+            .ready_on("todos", READY_TIMEOUT)
+            .connect()
+            .await;
 
         Self {
             server,
@@ -345,14 +343,13 @@ async fn subscribe_all_supports_condition_filters() {
 
     let server = TestingServer::start().await;
     let schema = subscription_schema();
-    let writer = connect_admin_client(
-        &server,
-        schema.clone(),
-        "condition-writer",
-        "todos",
-        READY_TIMEOUT,
-    )
-    .await;
+    let writer = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("condition-writer")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
 
     let cases = vec![
         ConditionCase {
@@ -501,14 +498,13 @@ async fn subscribe_all_supports_condition_filters() {
     ];
 
     for case in cases {
-        let subscriber = connect_admin_client(
-            &server,
-            schema.clone(),
-            &format!("condition-subscriber-{}", case.name),
-            "todos",
-            READY_TIMEOUT,
-        )
-        .await;
+        let subscriber = TestingClient::builder()
+            .with_server(&server)
+            .with_schema(schema.clone())
+            .with_user_id(format!("condition-subscriber-{}", case.name))
+            .ready_on("todos", READY_TIMEOUT)
+            .connect()
+            .await;
         let mut stream = subscriber
             .subscribe(case.query.clone())
             .await
