@@ -1,12 +1,7 @@
 import { col } from "../../../../src/dsl.js";
-import {
-  defineApp,
-  type DefinedSchema,
-  type RowOf,
-  type TypedApp,
-} from "../../../../src/typed-app.js";
+import { defineApp, type Schema, type RowOf, type App } from "../../../../src/typed-app.js";
 
-const schemaDef = {
+const schema = {
   users: {
     name: col.string(),
     friendsIds: col.array(col.ref("users")),
@@ -24,8 +19,8 @@ const schemaDef = {
   },
 };
 
-export type AppSchema = DefinedSchema<typeof schemaDef>;
-export const app: TypedApp<AppSchema> = defineApp(schemaDef);
+export type AppSchema = Schema<typeof schema>;
+export const app: App<AppSchema> = defineApp(schema);
 
 export type User = RowOf<typeof app.users>;
 export type Project = RowOf<typeof app.projects>;

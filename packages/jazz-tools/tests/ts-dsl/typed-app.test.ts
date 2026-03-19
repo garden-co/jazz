@@ -3,12 +3,12 @@ import { col } from "../../src/dsl.js";
 import type { QueryBuilder, TableProxy } from "../../src/runtime/db.js";
 import {
   defineApp,
-  type DefinedSchema,
+  type Schema,
   type InsertOf,
   type Query,
   type RowOf,
   type Table,
-  type TypedApp,
+  type App,
   type WhereOf,
 } from "../../src/typed-app.js";
 
@@ -22,7 +22,7 @@ interface TodoTitleRecord {
   title: string;
 }
 
-const schemaDef = {
+const schema = {
   users: {
     name: col.string(),
   },
@@ -37,8 +37,8 @@ const schemaDef = {
     owner: col.ref("users").optional(),
   },
 };
-type AppSchema = DefinedSchema<typeof schemaDef>;
-const app: TypedApp<AppSchema> = defineApp(schemaDef);
+type AppSchema = Schema<typeof schema>;
+const app: App<AppSchema> = defineApp(schema);
 
 describe("typed app prototype", () => {
   it("serializes select/include metadata without codegen", () => {

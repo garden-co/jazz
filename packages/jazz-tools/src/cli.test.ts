@@ -47,9 +47,9 @@ function rootSchemaWithoutInlinePermissions(
 ): string {
   return `
 import { col } from ${JSON.stringify(dslImportPath)};
-import { defineApp, type DefinedSchema, type TypedApp } from ${JSON.stringify(typedAppImportPath)};
+import { defineApp, type Schema, type App } from ${JSON.stringify(typedAppImportPath)};
 
-const schemaDef = {
+const schema = {
   projects: {
     name: col.string(),
   },
@@ -59,8 +59,8 @@ const schemaDef = {
   },
 };
 
-type AppSchema = DefinedSchema<typeof schemaDef>;
-export const app: TypedApp<AppSchema> = defineApp(schemaDef);
+type AppSchema = Schema<typeof schema>;
+export const app: App<AppSchema> = defineApp(schema);
 `;
 }
 

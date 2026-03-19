@@ -10,7 +10,7 @@ export {
   resetCollectedState,
 } from "./dsl.js";
 export type {
-  Schema,
+  Schema as SchemaAst,
   Table as SchemaAstTable,
   Column,
   JsonSqlType,
@@ -79,6 +79,7 @@ export {
 } from "./typed-app.js";
 export { defineMigration } from "./migrations.js";
 export type {
+  Schema,
   TableDefinition,
   SchemaDefinition,
   Simplify,
@@ -102,6 +103,7 @@ export type {
   Query,
   TableHandle,
   QueryHandle,
+  App,
   TypedApp,
   RowOf,
   InsertOf,

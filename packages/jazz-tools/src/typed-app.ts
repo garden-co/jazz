@@ -12,7 +12,7 @@ import {
   assertUserColumnNameAllowed,
 } from "./magic-columns.js";
 import type { QueryBuilder } from "./runtime/db.js";
-import type { Column, Schema, SqlType, TSTypeFromSqlType } from "./schema.js";
+import type { Column, Schema as SchemaAst, SqlType, TSTypeFromSqlType } from "./schema.js";
 
 export type TableDefinition = Record<string, AnyTypedColumnBuilder>;
 export type SchemaDefinition = Record<string, TableDefinition>;
@@ -22,11 +22,13 @@ export type CompactSchema<TSchema extends SchemaDefinition> = Simplify<{
 }>;
 
 declare const definedSchemaBrand: unique symbol;
-export interface DefinedSchema<TSchema extends SchemaDefinition = SchemaDefinition> {
+export interface Schema<TSchema extends SchemaDefinition = SchemaDefinition> {
   readonly [definedSchemaBrand]: CompactSchema<TSchema>;
 }
 
-type SchemaLike = SchemaDefinition | DefinedSchema<any>;
+export type DefinedSchema<TSchema extends SchemaDefinition = SchemaDefinition> = Schema<TSchema>;
+
+type SchemaLike = SchemaDefinition | Schema<any>;
 type InvalidRefTargetEntries<TSchema extends SchemaDefinition> = {
   [TTable in Extract<keyof TSchema, string>]: {
     [TColumn in Extract<
@@ -65,7 +67,7 @@ type ValidateSchemaRefs<TSchema extends SchemaDefinition> = [
     };
 
 type NormalizedSchema<TSchema extends SchemaLike> =
-  TSchema extends DefinedSchema<infer TDefinition>
+  TSchema extends Schema<infer TDefinition>
     ? CompactSchema<TDefinition>
     : TSchema extends SchemaDefinition
       ? CompactSchema<TSchema>
@@ -939,13 +941,15 @@ export type QueryHandle<
 
 export type TableHandle<TTable extends string, TSchema extends SchemaLike> = Table<TTable, TSchema>;
 
-export type TypedApp<TSchema extends SchemaLike> = Simplify<
+export type App<TSchema extends SchemaLike> = Simplify<
   {
     [TTable in TableName<TSchema>]: Table<TTable, TSchema>;
   } & {
     wasmSchema: WasmSchema;
   }
 >;
+
+export type TypedApp<TSchema extends SchemaLike> = App<TSchema>;
 
 export type RowOf<TTable> = TTable extends { readonly _rowType: infer TRow } ? TRow : never;
 export type InsertOf<TTable> = TTable extends { readonly _initType: infer TInit } ? TInit : never;
@@ -972,7 +976,7 @@ function definitionToColumns(definition: TableDefinition): Column[] {
   return columns;
 }
 
-function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchema): Schema {
+function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchema): SchemaAst {
   return {
     tables: Object.entries(definition).map(([tableName, tableDefinition]) => ({
       name: tableName,
@@ -983,19 +987,17 @@ function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchem
 
 export function defineSchema<const TSchema extends SchemaDefinition>(
   definition: TSchema & ValidateSchemaRefs<TSchema>,
-): DefinedSchema<TSchema> {
-  return definition as unknown as DefinedSchema<TSchema>;
+): Schema<TSchema> {
+  return definition as unknown as Schema<TSchema>;
 }
 
-export function defineApp<const TSchema extends DefinedSchema<any>>(
-  definition: TSchema,
-): TypedApp<TSchema>;
+export function defineApp<const TSchema extends Schema<any>>(definition: TSchema): App<TSchema>;
 export function defineApp<const TSchema extends SchemaDefinition>(
   definition: TSchema & ValidateSchemaRefs<TSchema>,
-): TypedApp<DefinedSchema<TSchema>>;
+): App<Schema<TSchema>>;
 export function defineApp(
-  definition: SchemaDefinition | DefinedSchema<any>,
-): TypedApp<DefinedSchema<SchemaDefinition>> {
+  definition: SchemaDefinition | Schema<any>,
+): App<Schema<SchemaDefinition>> {
   const normalizedDefinition = definition as unknown as SchemaDefinition;
   const schema = definitionToSchema(normalizedDefinition);
   const wasmSchema = schemaToWasm(schema);
@@ -1008,7 +1010,7 @@ export function defineApp(
   return {
     ...tables,
     wasmSchema,
-  } as TypedApp<DefinedSchema<SchemaDefinition>>;
+  } as App<Schema<SchemaDefinition>>;
 }
 
 export const permissionIntrospectionColumns = [...PERMISSION_INTROSPECTION_COLUMNS];
