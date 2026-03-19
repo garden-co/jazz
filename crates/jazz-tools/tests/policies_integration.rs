@@ -186,7 +186,6 @@ async fn select_policies_filter_subscription_results_per_client_session() {
     let schema = select_policy_schema();
     let server = TestingServer::builder()
         .with_schema(schema.clone())
-        .with_in_memory_storage()
         .start()
         .await;
     let alice = TestingClient::builder()
@@ -289,7 +288,6 @@ async fn select_policy_excludes_rows_from_join_results() {
     let schema = join_select_policy_schema();
     let server = TestingServer::builder()
         .with_schema(schema.clone())
-        .with_in_memory_storage()
         .start()
         .await;
     let admin = TestingClient::builder()
@@ -375,7 +373,6 @@ async fn in_session_array_policy_gates_visibility_by_membership() {
     let schema = in_session_array_policy_schema();
     let server = TestingServer::builder()
         .with_schema(schema.clone())
-        .with_in_memory_storage()
         .start()
         .await;
     let admin = TestingClient::builder()
@@ -466,7 +463,6 @@ async fn insert_policies_are_enforced_by_server_for_client_sync() {
     let schema = write_policy_schema();
     let server = TestingServer::builder()
         .with_schema(schema.clone())
-        .with_in_memory_storage()
         .start()
         .await;
     let intruder = TestingClient::builder()
@@ -563,7 +559,6 @@ async fn update_policies_block_unauthorized_server_mutations() {
     let schema = write_policy_schema();
     let server = TestingServer::builder()
         .with_schema(schema.clone())
-        .with_in_memory_storage()
         .start()
         .await;
     let alice = TestingClient::builder()
@@ -668,7 +663,6 @@ async fn insert_policy_violation_does_not_leak_to_pristine_subscriber() {
     let schema = write_policy_schema();
     let server = TestingServer::builder()
         .with_schema(schema.clone())
-        .with_in_memory_storage()
         .start()
         .await;
     let mallory = TestingClient::builder()
@@ -767,7 +761,6 @@ async fn update_policy_read_clause_differs_from_write_clause() {
     let schema = write_check_policy_schema();
     let server = TestingServer::builder()
         .with_schema(schema.clone())
-        .with_in_memory_storage()
         .start()
         .await;
     let alice = TestingClient::builder()
@@ -866,7 +859,6 @@ async fn delete_then_reinsert_by_owner_visible_to_others() {
     let schema = write_policy_schema();
     let server = TestingServer::builder()
         .with_schema(schema.clone())
-        .with_in_memory_storage()
         .start()
         .await;
     let alice = TestingClient::builder()
@@ -959,7 +951,6 @@ async fn delete_policies_block_unauthorized_server_mutations() {
     let schema = write_policy_schema();
     let server = TestingServer::builder()
         .with_schema(schema.clone())
-        .with_in_memory_storage()
         .start()
         .await;
     let alice = TestingClient::builder()
