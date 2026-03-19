@@ -364,20 +364,40 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
 /// same final title.
 ///
 /// TODO:
-/// This is currently ignored because the client path still has two burst-load
-/// bugs in [client.rs](/Users/guidodorsi/workspace/jazz2/crates/jazz-tools/src/client.rs):
-/// server-bound object updates are sent via one detached task per payload, so
-/// the runtime's ordered outbox can arrive at the server out of order; and the
-/// subscription callback forwards deltas with `try_send` into a bounded channel,
-/// so the terminal row-bearing delta can be dropped when the subscriber lags.
+/// Keep this test ignored until the client preserves "latest write wins" during
+/// a burst of updates. The assertion is fine; the client path in src/client.rs
+/// still has two burst-load bugs:
+///
+/// 1. Outgoing updates are sent in separate spawned tasks, so a fast sequence of
+///    writes can reach the server in a different order than the writer produced
+///    them.
+/// 2. Incoming subscription updates are pushed with `try_send` into a fixed-size
+///    channel, so a slow subscriber can silently drop updates, including the
+///    final one that should carry the last title.
+///
+/// That means Bob can read the correct final row state from the server, while
+/// Bob's live subscription stream still ends on an older value.
 ///
 /// ```text
-/// alice ──create todo──────────────► server ──► bob subscription (initial add)
-/// alice ──title update ×500────────► server
-///                                       │
-///                          bob EdgeServer query => final title
-///                                       │
-///                          bob last update delta => final title
+/// intended
+/// --------
+/// Alice writes:  title-001 -> title-002 -> ... -> title-500
+/// Server state:  title-001 -> title-002 -> ... -> title-500
+/// Bob stream:    add ...... update ...... last update = title-500
+///
+/// current failure modes
+/// ---------------------
+/// send tasks can race:
+/// Alice writes:  title-001 -> title-002 -> title-003
+/// Server sees:   title-002 -> title-001 -> title-003
+///
+/// subscriber channel can overflow:
+/// Server sends:  add -> update -> update -> ... -> update(final)
+/// Bob channel:   keep   keep     keep         full -> drop(final)
+///
+/// result:
+/// Bob snapshot query    = title-500
+/// Bob last stream delta != title-500
 /// ```
 #[tokio::test]
 #[ignore = "TODO: fix burst update ordering/dropping in crates/jazz-tools/src/client.rs"]

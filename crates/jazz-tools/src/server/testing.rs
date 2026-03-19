@@ -162,10 +162,8 @@ impl TestingServer {
 
         let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
         server_builder = if persistent_storage {
-            println!("with_persistent_storage");
             server_builder.with_persistent_storage(data_dir.to_string_lossy().into_owned())
         } else {
-            println!("with_in_memory_storage");
             server_builder.with_in_memory_storage()
         };
 
