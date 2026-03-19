@@ -259,7 +259,7 @@ function policyTodoByIdQuery(id: string): QueryBuilder<PolicyTodo> {
 
 const BASIC_SCHEMA_DIR = fileURLToPath(new URL("../testing/fixtures/basic", import.meta.url));
 const TODO_SERVER_SCHEMA_DIR = fileURLToPath(
-  new URL("../../../../examples/todo-server-ts/schema", import.meta.url),
+  new URL("../../../../examples/todo-server-ts", import.meta.url),
 );
 
 beforeAll(async () => {

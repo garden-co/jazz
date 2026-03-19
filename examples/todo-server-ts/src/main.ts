@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { createJazzContext, type Db } from "jazz-tools/backend";
-import { app as schemaApp } from "../schema/app.js";
+import { app as schemaApp } from "../schema.js";
 
 // ============================================================================
 // Types
@@ -122,7 +122,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         title: body.title,
         done: false,
         description: body.description?.trim(),
-        owner_id: body.owner_id ?? "anonymous",
+        ownerId: body.owner_id ?? "anonymous",
       });
 
       res.status(201).json(todo);

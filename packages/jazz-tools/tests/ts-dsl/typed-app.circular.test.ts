@@ -136,9 +136,11 @@ describe("typed app circular schemas", () => {
 
     expectTypeOf(employeeGraph.id).toEqualTypeOf<string>();
     expectTypeOf(employeeGraph.name).toEqualTypeOf<string>();
-    expectTypeOf(employeeGraph.manager?.homeTeam?.lead.name).toEqualTypeOf<string | undefined>();
-    expectTypeOf(employeeGraph.homeTeam?.lead.manager?.id).toEqualTypeOf<string | undefined>();
-    expectTypeOf(employeeGraph.homeTeam?.parentTeam?.lead.name).toEqualTypeOf<string | undefined>();
+    expectTypeOf(employeeGraph.manager?.homeTeam?.lead?.name).toEqualTypeOf<string | undefined>();
+    expectTypeOf(employeeGraph.homeTeam?.lead?.manager?.id).toEqualTypeOf<string | undefined>();
+    expectTypeOf(employeeGraph.homeTeam?.parentTeam?.lead?.name).toEqualTypeOf<
+      string | undefined
+    >();
     expectTypeOf(employeeGraph.mentors).toEqualTypeOf<Array<{ id: string; name: string }>>();
     expectTypeOf(employeeGraph.employeesViaMentors).toEqualTypeOf<
       Array<{ id: string; name: string }>

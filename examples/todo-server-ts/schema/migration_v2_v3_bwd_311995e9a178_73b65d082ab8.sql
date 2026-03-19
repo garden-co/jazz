@@ -1,4 +1,0 @@
-ALTER TABLE todos DROP COLUMN owner_id;
-ALTER TABLE todos DROP COLUMN project;
-ALTER TABLE todos DROP COLUMN parent;
-DROP TABLE projects;

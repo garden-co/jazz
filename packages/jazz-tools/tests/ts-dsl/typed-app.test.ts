@@ -112,7 +112,7 @@ describe("typed app prototype", () => {
       string[] | { eq?: string[]; contains?: string } | undefined
     >();
 
-    const projectRecord: ProjectRecord = todoWithProject.project;
+    const projectRecord: ProjectRecord | undefined = todoWithProject.project;
     expectTypeOf(todoWithProject.owner).toEqualTypeOf<string | undefined>();
     const todoTitleRecords: TodoTitleRecord[] = projectWithTitles.todosViaProject;
     const queryContract: QueryBuilder<TodoWithProject> = todoWithProjectQuery;

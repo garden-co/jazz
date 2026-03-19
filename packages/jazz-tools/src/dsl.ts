@@ -547,8 +547,8 @@ export function table<const T extends Record<string, ColumnBuilder>>(
 ): void {
   if (arguments.length > 2) {
     throw new Error(
-      "Inline table permissions are no longer supported in current.ts. " +
-        "Define policies in schema/permissions.ts with definePermissions(...).",
+      "Inline table permissions are no longer supported in schema.ts. " +
+        "Define policies in permissions.ts with definePermissions(...).",
     );
   }
 

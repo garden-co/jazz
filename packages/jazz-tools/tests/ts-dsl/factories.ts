@@ -1,5 +1,5 @@
 import { type Db } from "../../src/runtime/db.js";
-import { app, Project, Todo, User } from "./fixtures/basic/app";
+import { app, type Project, type Todo, type User } from "./fixtures/basic/schema";
 
 export function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

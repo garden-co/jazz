@@ -1,6 +1,6 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, assert, beforeEach, describe, expect, it } from "vitest";
-import { app } from "./fixtures/basic/app";
+import { app } from "./fixtures/basic/schema";
 import { insertProject, insertTodo, insertUser } from "./factories";
 
 describe("TS Update API", () => {

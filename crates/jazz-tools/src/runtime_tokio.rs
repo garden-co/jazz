@@ -211,6 +211,12 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(core.persist_schema())
     }
 
+    /// Publish any schema object to the local catalogue and in-memory schema manager.
+    pub fn publish_schema(&self, schema: Schema) -> Result<ObjectId, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.publish_schema(schema))
+    }
+
     /// Publish a reviewed lens edge to the local catalogue and active schema manager.
     pub fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;

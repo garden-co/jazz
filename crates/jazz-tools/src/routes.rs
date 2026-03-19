@@ -23,8 +23,8 @@ use crate::middleware::auth::{
     derive_local_principal_id, extract_session, parse_local_auth_headers, validate_admin_secret,
     validate_backend_secret, validate_jwt_identity,
 };
-use crate::query_manager::types::SchemaHash;
-use crate::schema_manager::{AppId, Lens, parse_lens};
+use crate::query_manager::types::{ColumnType, Schema, SchemaHash, Value};
+use crate::schema_manager::{AppId, Lens, LensOp, LensTransform};
 use crate::server::{ConnectionState, ServerState};
 use crate::sync_manager::ClientId;
 
@@ -34,6 +34,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/sync", post(sync_handler))
         .route("/schema/:hash", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
+        .route("/admin/schemas", post(publish_schema_handler))
         .route("/admin/migrations", post(publish_migration_handler))
         .route(
             "/admin/introspection/subscriptions",
@@ -83,7 +84,44 @@ struct AdminSubscriptionIntrospectionResponse {
 struct PublishMigrationRequest {
     from_hash: String,
     to_hash: String,
-    forward_sql: String,
+    forward: Vec<PublishTableLens>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublishTableLens {
+    table: String,
+    operations: Vec<PublishLensOp>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum PublishLensOp {
+    Introduce {
+        column: String,
+        column_type: ColumnType,
+        value: Value,
+    },
+    Drop {
+        column: String,
+        column_type: ColumnType,
+        value: Value,
+    },
+    Rename {
+        column: String,
+        value: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct PublishSchemaRequest {
+    schema: Schema,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishSchemaResponse {
+    object_id: String,
+    hash: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -509,6 +547,49 @@ async fn schema_hashes_handler(
     }
 }
 
+/// Publish a schema object into the catalogue.
+///
+/// Requires a valid admin secret.
+async fn publish_schema_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    Json(request): Json<PublishSchemaRequest>,
+) -> impl IntoResponse {
+    let admin_secret = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match validate_admin_secret(admin_secret, &state.auth_config) {
+        Ok(()) => {}
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    }
+
+    let schema_hash = SchemaHash::compute(&request.schema);
+    let object_id = match state.runtime.publish_schema(request.schema) {
+        Ok(object_id) => object_id,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::internal(format!(
+                    "failed to publish schema catalogue: {err}"
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    (
+        StatusCode::CREATED,
+        Json(PublishSchemaResponse {
+            object_id: object_id.to_string(),
+            hash: schema_hash.to_string(),
+        }),
+    )
+        .into_response()
+}
+
 /// Publish a reviewed migration edge into the catalogue.
 ///
 /// Requires a valid admin secret. The source and target schemas must already be
@@ -597,18 +678,40 @@ async fn publish_migration_handler(
         }
     }
 
-    let forward = match parse_lens(&request.forward_sql) {
-        Ok(transform) => transform,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::bad_request(format!(
-                    "invalid forward migration SQL: {err}"
-                ))),
-            )
-                .into_response();
+    let mut forward = LensTransform::new();
+    for table_lens in request.forward {
+        let table_name = table_lens.table;
+        for operation in table_lens.operations {
+            let op = match operation {
+                PublishLensOp::Introduce {
+                    column,
+                    column_type,
+                    value,
+                } => LensOp::AddColumn {
+                    table: table_name.clone(),
+                    column,
+                    column_type,
+                    default: value,
+                },
+                PublishLensOp::Drop {
+                    column,
+                    column_type,
+                    value,
+                } => LensOp::RemoveColumn {
+                    table: table_name.clone(),
+                    column,
+                    column_type,
+                    default: value,
+                },
+                PublishLensOp::Rename { column, value } => LensOp::RenameColumn {
+                    table: table_name.clone(),
+                    old_name: column,
+                    new_name: value,
+                },
+            };
+            forward.push(op, false);
         }
-    };
+    }
 
     let lens = Lens::new(source_hash, target_hash, forward);
     let object_id = match state.runtime.publish_lens(&lens) {
@@ -1013,6 +1116,7 @@ mod tests {
         axum::Router::new()
             .route("/schema/:hash", get(schema_handler))
             .route("/schemas", get(schema_hashes_handler))
+            .route("/admin/schemas", post(publish_schema_handler))
             .route("/admin/migrations", post(publish_migration_handler))
             .route(
                 "/admin/introspection/subscriptions",
@@ -1315,7 +1419,14 @@ mod tests {
         let request_body = serde_json::json!({
             "fromHash": v1_hash.to_string(),
             "toHash": v2_hash.to_string(),
-            "forwardSql": "ALTER TABLE users RENAME COLUMN email TO email_address;"
+            "forward": [{
+                "table": "users",
+                "operations": [{
+                    "type": "rename",
+                    "column": "email",
+                    "value": "email_address"
+                }]
+            }]
         });
 
         let unauthorized = app

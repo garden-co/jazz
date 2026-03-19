@@ -323,6 +323,21 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         id
     }
 
+    /// Publish any known schema object to the catalogue and in-memory schema manager.
+    pub fn publish_schema(&mut self, schema: Schema) -> ObjectId {
+        let schema_hash = crate::query_manager::types::SchemaHash::compute(&schema);
+
+        if self.schema_manager.get_known_schema(&schema_hash).is_none() {
+            self.schema_manager.add_known_schema(schema.clone());
+        }
+
+        let id = self
+            .schema_manager
+            .persist_schema_object(&mut self.storage, &schema);
+        self.immediate_tick();
+        id
+    }
+
     /// Publish a reviewed lens edge to the active schema manager and catalogue.
     pub fn publish_lens(&mut self, lens: &Lens) -> Result<ObjectId, RuntimeError> {
         let id = self
