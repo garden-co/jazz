@@ -1,6 +1,6 @@
 import type { Application, Request, Response } from "express";
 import { createJazzContext } from "jazz-tools/backend";
-import { app as schemaApp } from "../schema/app.js";
+import { app as schemaApp } from "../schema.js";
 
 type AuthenticatedRequest = Request<
   Record<string, string>,

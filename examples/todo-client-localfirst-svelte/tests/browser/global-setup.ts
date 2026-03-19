@@ -29,7 +29,7 @@ export async function setup(): Promise<void> {
     serverUrl: serverHandle.url,
     appId: APP_ID,
     adminSecret: ADMIN_SECRET,
-    schemaDir: join(import.meta.dirname ?? __dirname, "../../schema"),
+    schemaDir: join(import.meta.dirname ?? __dirname, "../.."),
   });
 }
 

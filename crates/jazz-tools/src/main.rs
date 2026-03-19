@@ -38,42 +38,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build schema files and generate lenses
-    Build {
-        /// Path to schema directory
-        #[arg(long, default_value = "./schema")]
-        schema_dir: String,
-
-        /// Generate TypeScript lens stubs instead of SQL lens files
-        #[arg(long)]
-        ts: bool,
-    },
-    /// Push schema catalogue objects to a sync server
-    #[command(name = "schema:push")]
-    SchemaPush {
-        /// Application ID
-        app_id: String,
-
-        /// Sync server URL
-        #[arg(long)]
-        server_url: String,
-
-        /// Secret for admin operations (schema/policy sync)
-        #[arg(long, env = "JAZZ_ADMIN_SECRET")]
-        admin_secret: String,
-
-        /// Environment name
-        #[arg(long, default_value = "dev")]
-        env: String,
-
-        /// User branch name
-        #[arg(long, default_value = "main")]
-        user_branch: String,
-
-        /// Path to schema directory
-        #[arg(long, default_value = "./schema")]
-        schema_dir: String,
-    },
     /// Create a new resource
     Create {
         #[command(subcommand)]
@@ -140,34 +104,6 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Build { schema_dir, ts } => {
-            if let Err(e) = commands::build::run(&schema_dir, ts) {
-                eprintln!("Build error: {}", e);
-                std::process::exit(1);
-            }
-        }
-        Commands::SchemaPush {
-            server_url,
-            app_id,
-            admin_secret,
-            env,
-            user_branch,
-            schema_dir,
-        } => {
-            if let Err(e) = commands::schema_push::run(
-                &server_url,
-                &app_id,
-                &env,
-                &user_branch,
-                &admin_secret,
-                &schema_dir,
-            )
-            .await
-            {
-                eprintln!("Schema push error: {}", e);
-                std::process::exit(1);
-            }
-        }
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {
                 commands::create::app(name);

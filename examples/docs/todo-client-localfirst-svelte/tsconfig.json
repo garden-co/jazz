@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "include": ["src", "schema"]
+  "include": ["src", "schema.ts", "permissions.ts", "session-app.ts"]
 }
