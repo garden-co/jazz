@@ -1,36 +1,38 @@
 ---
 title: Schemas
-description: Define the current schema in TypeScript, then add reviewed migration edges in migrations/.
+description: Define tables and relationships in root schema.ts, then review migration edges as your app evolves.
 ---
 
 import AvailableColumnTypes from "../partials/quickstarts/available-column-types.mdx";
 
-## Current Schema
+## Table Definitions
 
-Every Jazz app uses a root `schema.ts` as the source of truth, including Rust backends.
-`jazz-tools build` validates that file and compiles it into Jazz's internal schema representation.
-Jazz no longer generates `schema/app.ts` or `current.sql`.
+Every Jazz app defines its schema in a root `schema.ts`, including Rust backends.
 
-<Tabs groupId="jazz-app-kind" items={["Browser App", "Rust Backend"]} persist>
-  <Tab value="Browser App">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/schema.ts#schema-todo-client-ts
-    </include>
-  </Tab>
-  <Tab value="Rust Backend">
+<Tabs groupId="jazz-schema-language" items={["TypeScript", "Rust"]} persist>
+  <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-server-rs/schema.ts
     </include>
   </Tab>
+
+  <Tab value="Rust">
+    Rust apps use the same `schema.ts` file. The schema definition language is still TypeScript, and Rust consumes the compiled internal schema representation through the CLI and low-level APIs.
+
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-rs/schema.ts
+    </include>
+
+    In practice, a Rust app runs the schema export command and deserializes the JSON into Jazz's Rust `Schema` type:
+
+    ```bash
+    npx jazz-tools schema export --format json
+    ```
+
+    The Rust examples shell out to this command at startup, so the schema definition stays unified even when the app itself is written in Rust. See [Setup](/docs/setup) for the end-to-end backend context pattern.
+
+  </Tab>
 </Tabs>
-
-## Permissions
-
-If you need row-level policies, add a sibling `permissions.ts` next to `schema.ts`.
-
-<include cwd lang="ts" title="permissions.ts">
-  ../examples/docs/todo-server-ts/permissions.ts
-</include>
 
 ## Datatypes and References
 
@@ -42,30 +44,39 @@ If you need row-level policies, add a sibling `permissions.ts` next to `schema.t
 
 <AvailableColumnTypes />
 
-## CLI Workflow
+## Workflow and Schema Evolution
 
-### Validate the current schema
+### Edit `schema.ts` during development
 
-<include cwd lang="bash">
-  ../examples/docs/todo-client-localfirst-ts/docs/schema-validate.sh#schemas-ts-build-cli
-</include>
+Most of the time, schema evolution starts with a normal edit to `schema.ts`. New writes use the new schema immediately.
 
-### Review and publish migrations
+When older rows are no longer reachable from the current schema graph, Jazz logs a warning with the exact hashes you need next. These warnings can appear in browser logs, backend logs, or be forwarded from upstream servers:
 
-Schema hashes are learned automatically when clients connect. Compatibility edges are reviewed and pushed explicitly.
+```text
+[client] Detected 3 rows of todos with differing schema versions. To ensure data visibility and forward/backward compatibility please create a new migration with `npx jazz-tools migrations create aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`
+```
 
-<Tabs groupId="jazz-migration-cli" items={["TypeScript App", "Rust App"]} persist>
-  <Tab value="TypeScript App">
-    <include cwd lang="bash">
-      ../examples/docs/todo-server-ts/docs/migrations-workflow.sh#migrations-workflow-ts
-    </include>
-  </Tab>
-  <Tab value="Rust App">
-    <include cwd lang="bash">
-      ../examples/docs/todo-server-rs/docs/migrations-workflow.sh#migrations-workflow-rust
-    </include>
-  </Tab>
-</Tabs>
+That warning is the handoff from day-to-day schema editing to reviewed compatibility work.
+
+### Generate a migration edge with `migrations create`
+
+`migrations create` connects to your Jazz server, loads both schema hashes, and writes a prefilled file into `migrations/{dateCreated}-unnamed-{fromHash}-{toHash}.ts`.
+
+```bash
+npx jazz-tools migrations create <fromHash> <toHash>
+```
+
+The generated file already contains `fromHash`, `toHash`, and minimal typed `from` / `to` witnesses. In most cases, the only manual work is to fill in `migrate()` and replace `unnamed` in the filename with a real migration name.
+
+### Publish a reviewed edge with `migrations push`
+
+Publishing is the explicit gate. New schema hashes are still learned automatically when clients connect, but Jazz never auto-pushes migrations.
+
+```bash
+npx jazz-tools migrations push <fromHash> <toHash>
+```
+
+Run this after reviewing the migration file. Once pushed, that edge becomes available to make data visible across those schema hashes.
 
 ## Example Migration Files
 
@@ -99,4 +110,12 @@ Migration files live in `migrations/` and are always TypeScript, even for Rust a
   meta='title="examples/docs/todo-server-ts/migrations/20260318-drop-legacy-priority-311995e9a178-73b65d082ab8.ts"'
 >
   ../examples/docs/todo-server-ts/migrations/20260318-drop-legacy-priority-311995e9a178-73b65d082ab8.ts
+</include>
+
+## Permissions
+
+To define row-level policies, add a sibling `permissions.ts` next to `schema.ts`.
+
+<include cwd lang="ts" title="permissions.ts">
+  ../examples/docs/todo-server-ts/permissions.ts
 </include>
