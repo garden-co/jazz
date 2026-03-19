@@ -11,8 +11,8 @@ import { register as registerEsm } from "tsx/esm/api";
 import { schemaToSql, lensesToSql } from "./sql-gen.js";
 import { getCollectedSchema, getCollectedMigrations, resetCollectedState } from "./dsl.js";
 import { generateClient } from "./codegen/index.js";
-import type { Lens, Schema, TablePolicies, OperationPolicy } from "./schema.js";
-import type { ColumnDescriptor, ColumnType, WasmSchema } from "./drivers/types.js";
+import type { Lens, Schema, SqlType, TablePolicies, OperationPolicy, Column } from "./schema.js";
+import type { ColumnDescriptor, ColumnType, WasmSchema, TableSchema } from "./drivers/types.js";
 import { buildEndpointUrl } from "./runtime/sync-transport.js";
 import { fetchStoredWasmSchema } from "./runtime/schema-fetch.js";
 import { schemaDefinitionToAst } from "./migrations.js";
@@ -59,15 +59,39 @@ function requirePermissionsModule<T>(filePath: string): T {
   }
 }
 
-async function loadSchemaModule(filePath: string): Promise<void> {
+function requireTsModule<T>(filePath: string, namespace: string): T {
+  const loader = registerCjs({ namespace: `${namespace}-${++importCounter}` });
+  try {
+    return loader.require(resolve(filePath), import.meta.url) as T;
+  } finally {
+    loader.unregister();
+  }
+}
+
+async function loadSchemaModule(filePath: string): Promise<Record<string, unknown>> {
   resetCollectedState();
   const url = pathToFileURL(filePath).href + `?v=${++importCounter}`;
-  await import(url);
+  return (await import(url)) as Record<string, unknown>;
 }
 
 async function loadSchema(filePath: string): Promise<Schema> {
-  await loadSchemaModule(filePath);
-  return getCollectedSchema();
+  const loaded = await loadSchemaModule(filePath);
+  const directSchema = schemaFromLoadedModule(loaded);
+  if (directSchema) {
+    return directSchema;
+  }
+
+  resetCollectedState();
+  const required = requireTsModule<Record<string, unknown>>(filePath, "jazz-tools-cli-schema");
+  const requiredSchema = schemaFromLoadedModule(required);
+  if (requiredSchema) {
+    return requiredSchema;
+  }
+
+  throw new Error(
+    `Could not find a schema export in ${basename(filePath)}. ` +
+      "Use side-effect table(...) declarations, or export schema/app/default from schema.ts.",
+  );
 }
 
 async function loadMigrationModule(filePath: string): Promise<Lens[]> {
@@ -77,9 +101,9 @@ async function loadMigrationModule(filePath: string): Promise<Lens[]> {
   return getCollectedMigrations();
 }
 
-async function generateSqlForSchemaFile(tsFile: string, schema: Schema): Promise<void> {
+async function generateSqlFile(sqlFile: string, schema: Schema): Promise<void> {
+  await mkdir(dirname(sqlFile), { recursive: true });
   const sql = schemaToSql(schema);
-  const sqlFile = tsFile.replace(/\.ts$/, ".sql");
   await writeFile(sqlFile, sql);
   console.log(`Generated: ${basename(sqlFile)}`);
 }
@@ -89,6 +113,95 @@ async function generateAppTs(schemaDir: string, schema: Schema): Promise<void> {
   const appTsPath = join(schemaDir, "app.ts");
   await writeFile(appTsPath, output);
   console.log(`Generated: app.ts`);
+}
+
+function columnTypeToSqlType(columnType: ColumnType): SqlType {
+  switch (columnType.type) {
+    case "Text":
+      return "TEXT";
+    case "Boolean":
+      return "BOOLEAN";
+    case "Integer":
+      return "INTEGER";
+    case "Double":
+      return "REAL";
+    case "Timestamp":
+      return "TIMESTAMP";
+    case "Uuid":
+      return "UUID";
+    case "Bytea":
+      return "BYTEA";
+    case "Json":
+      return columnType.schema ? { kind: "JSON", schema: columnType.schema } : { kind: "JSON" };
+    case "Enum":
+      return { kind: "ENUM", variants: [...columnType.variants] };
+    case "Array":
+      return { kind: "ARRAY", element: columnTypeToSqlType(columnType.element) };
+    case "BigInt":
+      throw new Error("Root schema loading does not yet support BIGINT columns.");
+    case "Row":
+      throw new Error("Root schema loading does not yet support row-valued columns.");
+  }
+}
+
+function wasmColumnToAst(column: ColumnDescriptor): Column {
+  return {
+    name: column.name,
+    sqlType: columnTypeToSqlType(column.column_type),
+    nullable: column.nullable,
+    references: column.references,
+  };
+}
+
+function wasmTableToAst(name: string, table: TableSchema): Schema["tables"][number] {
+  return {
+    name,
+    columns: table.columns.map(wasmColumnToAst),
+    policies: table.policies as TablePolicies | undefined,
+  };
+}
+
+function wasmSchemaToAst(wasmSchema: WasmSchema): Schema {
+  return {
+    tables: Object.entries(wasmSchema).map(([tableName, table]) =>
+      wasmTableToAst(tableName, table),
+    ),
+  };
+}
+
+function isTypedAppLike(value: Record<string, unknown>): value is { wasmSchema: WasmSchema } {
+  if (!("wasmSchema" in value)) {
+    return false;
+  }
+
+  const schema = value.wasmSchema;
+  return typeof schema === "object" && schema !== null && !Array.isArray(schema);
+}
+
+function schemaFromLoadedModule(loaded: Record<string, unknown>): Schema | null {
+  const collected = getCollectedSchema();
+  if (collected.tables.length > 0) {
+    return collected;
+  }
+
+  const candidates = [loaded.schema, loaded.schemaDef, loaded.default, loaded.app].filter(
+    (candidate): candidate is Record<string, unknown> =>
+      typeof candidate === "object" && candidate !== null,
+  );
+
+  for (const candidate of candidates) {
+    if (isTypedAppLike(candidate)) {
+      return wasmSchemaToAst(candidate.wasmSchema);
+    }
+
+    try {
+      return schemaDefinitionToAst(candidate as any);
+    } catch {
+      // Try the next supported export shape.
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -284,6 +397,59 @@ describe.skip("permissions", () => {
   console.log(`Generated: permissions.test.ts`);
 }
 
+type SchemaLayout =
+  | {
+      mode: "legacy";
+      schemaFile: string;
+      permissionsDir: string;
+      outputDir: string;
+    }
+  | {
+      mode: "root";
+      schemaFile: string;
+      permissionsDir: string;
+      outputDir: string;
+    };
+
+async function resolveSchemaLayout(schemaDir: string): Promise<SchemaLayout | null> {
+  const legacySchemaFile = join(schemaDir, "current.ts");
+  if (await pathExists(legacySchemaFile)) {
+    return {
+      mode: "legacy",
+      schemaFile: legacySchemaFile,
+      permissionsDir: schemaDir,
+      outputDir: schemaDir,
+    };
+  }
+
+  const directRootSchemaFile = join(schemaDir, "schema.ts");
+  if (await pathExists(directRootSchemaFile)) {
+    return {
+      mode: "root",
+      schemaFile: directRootSchemaFile,
+      permissionsDir: schemaDir,
+      outputDir: join(schemaDir, "schema"),
+    };
+  }
+
+  if (basename(schemaDir) !== "schema") {
+    return null;
+  }
+
+  const appRoot = dirname(schemaDir);
+  const parentRootSchemaFile = join(appRoot, "schema.ts");
+  if (!(await pathExists(parentRootSchemaFile))) {
+    return null;
+  }
+
+  return {
+    mode: "root",
+    schemaFile: parentRootSchemaFile,
+    permissionsDir: appRoot,
+    outputDir: schemaDir,
+  };
+}
+
 type JazzBuildResult = { type: "close"; code: number | null } | { type: "error"; error: Error };
 
 async function runJazzBuild(
@@ -333,53 +499,54 @@ async function runJazzBuild(
 
 export async function build(options: BuildOptions): Promise<void> {
   const { jazzBin, schemaDir } = options;
-
-  let files: string[];
-  try {
-    files = await readdir(schemaDir);
-  } catch {
-    console.error(`Schema directory not found: ${schemaDir}`);
+  const layout = await resolveSchemaLayout(schemaDir);
+  if (!layout) {
+    console.error(
+      `Schema file not found. Expected either ${join(schemaDir, "current.ts")} or ${join(schemaDir, "schema.ts")}.`,
+    );
     process.exit(1);
   }
 
-  const tsFiles = files.filter((f) => f.endsWith(".ts"));
-
-  for (const file of tsFiles.filter((name) => isMigrationTsStub(name))) {
-    await generateSqlForMigrationFile(join(schemaDir, file));
+  if (layout.mode === "legacy") {
+    const files = await readdir(layout.outputDir);
+    const tsFiles = files.filter((f) => f.endsWith(".ts"));
+    for (const file of tsFiles.filter((name) => isMigrationTsStub(name))) {
+      await generateSqlForMigrationFile(join(layout.outputDir, file));
+    }
   }
 
-  const schemaFile = join(schemaDir, "current.ts");
-  if (!(await pathExists(schemaFile))) {
-    console.error(`Schema file not found: ${schemaFile}`);
-    process.exit(1);
-  }
-
-  let schema = await loadSchema(schemaFile);
+  let schema = await loadSchema(layout.schemaFile);
   const tablesWithInlinePolicies = schema.tables
     .filter((table) => table.policies)
     .map((t) => t.name);
   if (tablesWithInlinePolicies.length > 0) {
     throw new Error(
-      "Inline table permissions in current.ts are no longer supported. " +
-        "Move policies to schema/permissions.ts. " +
+      `Inline table permissions in ${basename(layout.schemaFile)} are no longer supported. ` +
+        "Move policies to permissions.ts. " +
         `Tables: ${tablesWithInlinePolicies.join(", ")}.`,
     );
   }
 
-  // Generate app.ts before loading permissions.ts so permissions can import it for typing.
-  await generateAppTs(schemaDir, schema);
+  if (layout.mode === "legacy") {
+    // Generate app.ts before loading permissions.ts so permissions can import it for typing.
+    await generateAppTs(layout.outputDir, schema);
+  }
 
-  const permissionsFile = join(schemaDir, "permissions.ts");
+  const permissionsFile = join(layout.permissionsDir, "permissions.ts");
   if (await pathExists(permissionsFile)) {
     const permissions = await loadPermissionsModule(permissionsFile);
     schema = mergePermissionsIntoSchema(schema, permissions);
   }
 
-  await generateSqlForSchemaFile(schemaFile, schema);
-  await generateAppTs(schemaDir, schema);
-  await ensurePermissionsTestStub(schemaDir);
+  await generateSqlFile(join(layout.outputDir, "current.sql"), schema);
+  if (layout.mode === "legacy") {
+    await generateAppTs(layout.outputDir, schema);
+  }
+  await ensurePermissionsTestStub(layout.permissionsDir);
 
-  await runJazzBuild(jazzBin, schemaDir);
+  if (layout.mode === "legacy") {
+    await runJazzBuild(jazzBin, layout.outputDir);
+  }
 }
 
 export interface MigrationCommandOptions {
@@ -618,25 +785,16 @@ function renderMigrationBody(
   toSchema: WasmSchema,
 ): { body: string; witnessFrom: WasmSchema; witnessTo: WasmSchema } {
   const changedTables = changedTableNames(fromSchema, toSchema);
-  const witnessFrom = pickWitnessSchema(fromSchema, changedTables);
-  const witnessTo = pickWitnessSchema(toSchema, changedTables);
+  const migratableTables = changedTables.filter(
+    (tableName) => fromSchema[tableName] !== undefined && toSchema[tableName] !== undefined,
+  );
+  const witnessFrom = pickWitnessSchema(fromSchema, migratableTables);
+  const witnessTo = pickWitnessSchema(toSchema, migratableTables);
   const lines: string[] = [];
 
-  for (const tableName of changedTables) {
-    const fromTable = fromSchema[tableName];
-    const toTable = toSchema[tableName];
-
-    if (!fromTable) {
-      lines.push(`m.createTable(${JSON.stringify(tableName)});`);
-      lines.push("");
-      continue;
-    }
-
-    if (!toTable) {
-      lines.push(`m.dropTable(${JSON.stringify(tableName)});`);
-      lines.push("");
-      continue;
-    }
+  for (const tableName of migratableTables) {
+    const fromTable = fromSchema[tableName]!;
+    const toTable = toSchema[tableName]!;
 
     const suggestion = inferTableSuggestions(tableName, fromTable, toTable);
     lines.push(`m.table(${JSON.stringify(tableName)}, (t) => {`);
@@ -654,7 +812,11 @@ function renderMigrationBody(
   }
 
   if (lines.length === 0) {
-    lines.push("// TODO: No schema differences were detected.");
+    lines.push(
+      changedTables.length === 0
+        ? "// TODO: No schema differences were detected."
+        : "// TODO: No column-level migration steps were required for the detected schema changes.",
+    );
   }
 
   return {

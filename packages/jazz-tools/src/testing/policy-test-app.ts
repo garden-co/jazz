@@ -1,3 +1,6 @@
+import { access } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { expect } from "vitest";
 import { createJazzContext, Db, Session, type JazzContext } from "../backend/index.js";
 import {
@@ -58,6 +61,55 @@ export class PolicyTestApp {
   }
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolvePolicyTestSchemaPaths(schemaDir: string): Promise<{
+  catalogueDir: string;
+  appModulePath: string;
+}> {
+  const directAppModule = join(schemaDir, "app.js");
+  if (await pathExists(directAppModule)) {
+    return {
+      catalogueDir: schemaDir,
+      appModulePath: directAppModule,
+    };
+  }
+
+  for (const extension of ["ts", "js"]) {
+    const directRootSchema = join(schemaDir, `schema.${extension}`);
+    if (await pathExists(directRootSchema)) {
+      return {
+        catalogueDir: join(schemaDir, "schema"),
+        appModulePath: directRootSchema,
+      };
+    }
+  }
+
+  if (basename(schemaDir) === "schema") {
+    const appRoot = dirname(schemaDir);
+    for (const extension of ["ts", "js"]) {
+      const parentRootSchema = join(appRoot, `schema.${extension}`);
+      if (await pathExists(parentRootSchema)) {
+        return {
+          catalogueDir: schemaDir,
+          appModulePath: parentRootSchema,
+        };
+      }
+    }
+  }
+
+  throw new Error(
+    `Could not find a schema app near ${schemaDir}. Expected app.js, schema.ts, or schema.js.`,
+  );
+}
+
 /**
  * Create a new policy test app.
  * This will start a local Jazz server and push the schema catalogue to it.
@@ -67,6 +119,7 @@ export class PolicyTestApp {
 export async function createPolicyTestApp(schemaDir: string): Promise<PolicyTestApp> {
   const backendSecret = `backend-secret`;
   const adminSecret = `admin-secret`;
+  const resolvedPaths = await resolvePolicyTestSchemaPaths(schemaDir);
   const server = await startLocalJazzServer({
     backendSecret,
     adminSecret,
@@ -76,14 +129,14 @@ export async function createPolicyTestApp(schemaDir: string): Promise<PolicyTest
     serverUrl: server.url,
     appId: server.appId,
     adminSecret,
-    schemaDir,
+    schemaDir: resolvedPaths.catalogueDir,
     env: "test",
     userBranch: "main",
   });
 
-  const app = await import(`${schemaDir}/app.js`);
+  const app = await import(pathToFileURL(resolvedPaths.appModulePath).href);
   if (!app) {
-    throw new Error(`No 'app.ts' found in ${schemaDir}`);
+    throw new Error(`No schema app module found near ${schemaDir}`);
   }
   const jazzContext = createJazzContext({
     appId: server.appId,

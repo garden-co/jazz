@@ -14,3 +14,7 @@ declare module "react-native/Libraries/Network/fetch" {
 declare module "expo/fetch" {
   export const fetch: typeof globalThis.fetch;
 }
+
+declare module "web-streams-polyfill" {
+  export const ReadableStream: typeof globalThis.ReadableStream;
+}

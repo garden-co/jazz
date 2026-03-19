@@ -30,8 +30,6 @@ export type {
   AddOp,
   DropOp,
   RenameOp,
-  CreateTableLens,
-  DropTableLens,
   JsonValue,
   JsonSchema,
   JsonSchemaToTs,
