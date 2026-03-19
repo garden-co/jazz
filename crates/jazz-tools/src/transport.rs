@@ -74,7 +74,7 @@ impl ServerConnection {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-        // Priority 1: Backend impersonation
+        // Priority 1: Backend impersonation (backend_secret + explicit session)
         if let (Some(session), Some(secret)) = (session, &self.auth.backend_secret) {
             if let Ok(secret_value) = HeaderValue::from_str(secret) {
                 headers.insert("X-Jazz-Backend-Secret", secret_value);
@@ -87,7 +87,15 @@ impl ServerConnection {
                 }
             }
         }
-        // Priority 2: Frontend JWT auth
+        // Priority 2: Backend standalone (backend_secret, no JWT — server-to-server, no user session)
+        else if self.auth.jwt_token.is_none()
+            && let Some(secret) = &self.auth.backend_secret
+        {
+            if let Ok(secret_value) = HeaderValue::from_str(secret) {
+                headers.insert("X-Jazz-Backend-Secret", secret_value);
+            }
+        }
+        // Priority 3: Frontend JWT auth
         else if let Some(jwt) = &self.auth.jwt_token {
             let auth_value = format!("Bearer {}", jwt);
             if let Ok(header_value) = HeaderValue::from_str(&auth_value) {

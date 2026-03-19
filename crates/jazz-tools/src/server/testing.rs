@@ -28,6 +28,7 @@ pub struct TestingServerBuilder {
     app_id: Option<AppId>,
     data_dir: Option<PathBuf>,
     schema: Option<Schema>,
+    in_memory: bool,
 }
 
 impl TestingServerBuilder {
@@ -53,6 +54,16 @@ impl TestingServerBuilder {
 
     pub fn with_schema(mut self, schema: Schema) -> Self {
         self.schema = Some(schema);
+        self
+    }
+
+    /// Use in-memory storage instead of a persistent on-disk fjall store.
+    ///
+    /// Prefer this in tests that don't need durability — it avoids allocating
+    /// temp directories and opening file descriptors, which matters when many
+    /// tests run in parallel.
+    pub fn with_in_memory_storage(mut self) -> Self {
+        self.in_memory = true;
         self
     }
 
@@ -134,11 +145,16 @@ impl TestingServer {
             app_id,
             data_dir,
             schema,
+            in_memory,
         } = builder;
 
         let port = port.unwrap_or_else(get_free_port);
         let app_id = app_id.unwrap_or_else(Self::default_app_id);
-        let (data_dir, owned_data_dir) = prepare_data_dir(data_dir);
+        let (data_dir, owned_data_dir) = if in_memory {
+            (PathBuf::new(), None)
+        } else {
+            prepare_data_dir(data_dir)
+        };
         let jwks_server = TestingJwksServer::start().await;
 
         let auth_config = AuthConfig {
@@ -150,9 +166,12 @@ impl TestingServer {
             admin_secret: Some(Self::ADMIN_SECRET.to_string()),
         };
 
-        let mut server_builder = ServerBuilder::new(app_id)
-            .with_auth_config(auth_config)
-            .with_persistent_storage(data_dir.to_string_lossy().into_owned());
+        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
+        server_builder = if in_memory {
+            server_builder.with_in_memory_storage()
+        } else {
+            server_builder.with_persistent_storage(data_dir.to_string_lossy().into_owned())
+        };
         if let Some(schema) = schema {
             server_builder = server_builder.with_schema(schema);
         }

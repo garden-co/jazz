@@ -33,6 +33,7 @@ struct JwtClaims {
 enum TestingClientAuth {
     Admin,
     User,
+    Backend,
     Claims(JsonValue),
 }
 
@@ -81,6 +82,12 @@ impl<'a> TestingClient<'a> {
     #[allow(dead_code)]
     pub fn as_user(mut self) -> Self {
         self.auth = TestingClientAuth::User;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn as_backend(mut self) -> Self {
+        self.auth = TestingClientAuth::Backend;
         self
     }
 
@@ -152,6 +159,11 @@ impl<'a> TestingClient<'a> {
             TestingClientAuth::User => {
                 context.backend_secret = None;
                 context.admin_secret = None;
+            }
+            TestingClientAuth::Backend => {
+                context.jwt_token = None;
+                context.admin_secret = None;
+                // backend_secret is kept — transport sends it alone (no session)
             }
             TestingClientAuth::Claims(claims) => {
                 context.jwt_token = Some(make_jwt(user_id, claims.clone()));
