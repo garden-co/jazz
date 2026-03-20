@@ -2,6 +2,19 @@ import type { WasmSchema } from "../drivers/types.js";
 import type { Row, Runtime } from "../runtime/client.js";
 import { OutboxDestinationKind } from "../runtime/sync-transport.js";
 
+type JazzRnErrorTag =
+  | "InvalidJson"
+  | "InvalidUuid"
+  | "InvalidTier"
+  | "Schema"
+  | "Runtime"
+  | "Internal";
+
+export type JazzRnNormalizedError = Error & {
+  tag: JazzRnErrorTag;
+  cause?: unknown;
+};
+
 export interface JazzRnRuntimeBinding {
   addClient(): string;
   addServer(serverCatalogueStateHash?: string | null): void;
@@ -96,7 +109,7 @@ function swallowMissingObjectMutation(context: string, error: unknown): boolean 
 
 function isJazzRnErrorLike(
   error: unknown,
-): error is { tag: string; inner?: { message?: unknown } } {
+): error is { tag: JazzRnErrorTag; inner?: { message?: unknown } } {
   if (!error || typeof error !== "object") {
     return false;
   }
@@ -123,7 +136,7 @@ function normalizeJazzRnError(error: unknown): Error {
   const normalized = createErrorWithCause(message, error);
   normalized.name = `JazzRn${error.tag}Error`;
   Object.assign(normalized, { tag: error.tag });
-  return normalized as Error;
+  return normalized as JazzRnNormalizedError;
 }
 
 function createErrorWithCause(message: string, cause: unknown): Error {
