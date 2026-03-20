@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import type { ColumnDescriptor, ColumnType } from "jazz-tools";
 import {
   getSupportedWhereOperatorsForColumn,
@@ -147,16 +147,28 @@ function createClauseId(): string {
   return `filter-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function createDraftState(columnName: string, filterableColumns: FilterableColumn[]): DraftState {
+  const selectedColumn = filterableColumns.find((column) => column.name === columnName);
+  const operatorOptions = selectedColumn ? getSupportedWhereOperatorsForColumn(selectedColumn) : [];
+  const operator = operatorOptions[0] ?? "eq";
+
+  return {
+    column: columnName,
+    operator,
+    valueText: operator === "isNull" ? "true" : "",
+  };
+}
+
+function createInitialDraftState(filterableColumns: FilterableColumn[]): DraftState {
+  return createDraftState(filterableColumns[0]?.name ?? "id", filterableColumns);
+}
+
 export function TableFilterBuilder({
   schemaColumns,
   clauses,
   onClausesChange,
 }: TableFilterBuilderProps) {
-  const [isModalOpen, setIsModalOpen] = useState(false);
   const dialogRef = useRef<HTMLDialogElement | null>(null);
-  const canUseModalApi =
-    typeof HTMLDialogElement !== "undefined" &&
-    typeof HTMLDialogElement.prototype.showModal === "function";
   const filterableColumns = useMemo<FilterableColumn[]>(
     () =>
       [
@@ -176,15 +188,7 @@ export function TableFilterBuilder({
     [schemaColumns],
   );
 
-  const initialColumn = filterableColumns[0]?.name ?? "id";
-  const initialOperators = filterableColumns[0]
-    ? getSupportedWhereOperatorsForColumn(filterableColumns[0])
-    : [];
-  const [draft, setDraft] = useState<DraftState>({
-    column: initialColumn,
-    operator: initialOperators[0] ?? "eq",
-    valueText: "",
-  });
+  const [draft, setDraft] = useState<DraftState>(() => createInitialDraftState(filterableColumns));
   const [error, setError] = useState<string | null>(null);
 
   const selectedColumn = filterableColumns.find((column) => column.name === draft.column) ?? null;
@@ -196,23 +200,81 @@ export function TableFilterBuilder({
     .join(" AND ");
   const filterButtonLabel = clauses.length > 0 ? `Filter (${clauses.length})` : "Filter";
 
-  useEffect(() => {
-    if (!canUseModalApi) return;
+  const openDialog = () => {
     const dialog = dialogRef.current;
     if (!dialog) return;
-    if (isModalOpen && !dialog.open) {
+    if (!dialog.open) {
+      setError(null);
       dialog.showModal();
-    } else if (!isModalOpen && dialog.open) {
+    }
+  };
+
+  const closeDialog = () => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    if (dialog.open) {
       dialog.close();
     }
-  }, [isModalOpen, canUseModalApi]);
+    setError(null);
+  };
+
+  const handleAddClause = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!selectedColumn) return;
+    if (!operatorOptions.includes(draft.operator)) return;
+
+    try {
+      const clause = {
+        id: createClauseId(),
+        column: selectedColumn.name,
+        operator: draft.operator,
+        value: parseFilterValue(selectedColumn, draft.operator, draft.valueText),
+      } satisfies TableFilterClause;
+      onClausesChange([...clauses, clause]);
+      setDraft((current) => ({
+        ...current,
+        valueText: current.operator === "isNull" ? "true" : "",
+      }));
+      setError(null);
+    } catch (parseError) {
+      setError(parseError instanceof Error ? parseError.message : "Invalid filter value.");
+    }
+  };
+
+  const handleColumnChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    setDraft(createDraftState(event.target.value, filterableColumns));
+    setError(null);
+  };
+
+  const handleOperatorChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    const nextOperator = event.target.value as FilterOperator;
+    setDraft((current) => ({
+      ...current,
+      operator: nextOperator,
+      valueText: nextOperator === "isNull" ? "true" : current.valueText,
+    }));
+    setError(null);
+  };
+
+  const handleValueChange = (event: ChangeEvent<HTMLInputElement>) => {
+    setDraft((current) => ({ ...current, valueText: event.target.value }));
+    setError(null);
+  };
+
+  const handleNullValueChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    setDraft((current) => ({ ...current, valueText: event.target.value }));
+  };
+
+  const handleRemoveClause = (clauseId: string) => {
+    onClausesChange(clauses.filter((entry) => entry.id !== clauseId));
+  };
 
   return (
     <section className={styles.container}>
       <button
         type="button"
         className={`${styles.button} ${styles.triggerButton}`}
-        onClick={() => setIsModalOpen(true)}
+        onClick={openDialog}
       >
         {filterButtonLabel}
       </button>
@@ -224,56 +286,13 @@ export function TableFilterBuilder({
       <dialog
         ref={dialogRef}
         className={styles.modal}
-        {...(!canUseModalApi ? { open: isModalOpen } : {})}
-        onClose={() => setIsModalOpen(false)}
+        onClose={() => setError(null)}
         aria-label="Filter rows"
       >
-        <form
-          className={styles.form}
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (!selectedColumn) return;
-            if (!operatorOptions.includes(draft.operator)) return;
-
-            try {
-              const clause = {
-                id: createClauseId(),
-                column: selectedColumn.name,
-                operator: draft.operator,
-                value: parseFilterValue(selectedColumn, draft.operator, draft.valueText),
-              } satisfies TableFilterClause;
-              onClausesChange([...clauses, clause]);
-              setDraft((current) => ({
-                ...current,
-                valueText: current.operator === "isNull" ? "true" : "",
-              }));
-              setError(null);
-            } catch (parseError) {
-              setError(parseError instanceof Error ? parseError.message : "Invalid filter value.");
-            }
-          }}
-        >
+        <form className={styles.form} onSubmit={handleAddClause}>
           <label className={styles.field}>
             Column
-            <select
-              className={styles.select}
-              value={draft.column}
-              onChange={(event) => {
-                const nextColumn = filterableColumns.find(
-                  (column) => column.name === event.target.value,
-                );
-                const nextOperators = nextColumn
-                  ? getSupportedWhereOperatorsForColumn(nextColumn)
-                  : [];
-                const nextOperator = nextOperators[0] ?? "eq";
-                setDraft({
-                  column: event.target.value,
-                  operator: nextOperator,
-                  valueText: nextOperator === "isNull" ? "true" : "",
-                });
-                setError(null);
-              }}
-            >
+            <select className={styles.select} value={draft.column} onChange={handleColumnChange}>
               {filterableColumns.map((column) => (
                 <option key={column.name} value={column.name}>
                   {column.name}
@@ -286,15 +305,7 @@ export function TableFilterBuilder({
             <select
               className={styles.select}
               value={draft.operator}
-              onChange={(event) => {
-                const nextOperator = event.target.value as FilterOperator;
-                setDraft((current) => ({
-                  ...current,
-                  operator: nextOperator,
-                  valueText: nextOperator === "isNull" ? "true" : current.valueText,
-                }));
-                setError(null);
-              }}
+              onChange={handleOperatorChange}
             >
               {operatorOptions.map((operator) => (
                 <option key={operator} value={operator}>
@@ -310,10 +321,7 @@ export function TableFilterBuilder({
                 className={styles.input}
                 value={draft.valueText}
                 placeholder={draft.operator === "in" ? "value1,value2" : "value"}
-                onChange={(event) => {
-                  setDraft((current) => ({ ...current, valueText: event.target.value }));
-                  setError(null);
-                }}
+                onChange={handleValueChange}
               />
             </label>
           ) : (
@@ -322,9 +330,7 @@ export function TableFilterBuilder({
               <select
                 className={styles.select}
                 value={draft.valueText || "true"}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, valueText: event.target.value }))
-                }
+                onChange={handleNullValueChange}
               >
                 <option value="true">true</option>
                 <option value="false">false</option>
@@ -334,7 +340,7 @@ export function TableFilterBuilder({
           <button type="submit" className={styles.button} disabled={operatorOptions.length === 0}>
             Add where clause
           </button>
-          <button type="button" className={styles.button} onClick={() => setIsModalOpen(false)}>
+          <button type="button" className={styles.button} onClick={closeDialog}>
             Close
           </button>
         </form>
@@ -351,7 +357,7 @@ export function TableFilterBuilder({
                 <button
                   type="button"
                   className={styles.removeButton}
-                  onClick={() => onClausesChange(clauses.filter((entry) => entry.id !== clause.id))}
+                  onClick={() => handleRemoveClause(clause.id)}
                   aria-label={`Remove filter on ${clause.column}`}
                 >
                   Remove
