@@ -1004,6 +1004,56 @@ fn get_or_load_computes_correct_tips_for_multi_commit_branch() {
 }
 
 #[test]
+fn get_or_load_hydrates_missing_branches_into_cached_object() {
+    let mut io = MemoryStorage::new();
+    let author = ObjectId::new();
+
+    let object_id = {
+        let mut mgr = ObjectManager::new();
+        let oid = mgr.create(&mut io, None);
+        mgr.add_commit(&mut io, oid, "main", vec![], b"main".to_vec(), author, None)
+            .unwrap();
+        mgr.add_commit(
+            &mut io,
+            oid,
+            "dev-other-main",
+            vec![],
+            b"other".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+        oid
+    };
+
+    let mut mgr2 = ObjectManager::new();
+    let loaded_main = mgr2
+        .get_or_load(object_id, &io, &["main".to_string()])
+        .expect("object should load on main branch");
+    assert!(loaded_main.branches.contains_key(&BranchName::new("main")));
+    assert!(
+        !loaded_main
+            .branches
+            .contains_key(&BranchName::new("dev-other-main"))
+    );
+
+    let loaded_with_fallback = mgr2
+        .get_or_load(object_id, &io, &["dev-other-main".to_string()])
+        .expect("object should load on dev-other-main branch");
+    assert!(
+        loaded_with_fallback
+            .branches
+            .contains_key(&BranchName::new("dev-other-main"))
+    );
+    // Main branch was already cached, so it's also returned
+    assert!(
+        loaded_with_fallback
+            .branches
+            .contains_key(&BranchName::new("main"))
+    );
+}
+
+#[test]
 fn frontier_with_three_way_divergence() {
     let mut io = MemoryStorage::new();
     let mut manager = ObjectManager::new();
