@@ -200,3 +200,194 @@ describe("attachDevTools active query subscription bridge", () => {
     expect((await eventPromise).payload.subscriptions).toEqual(nextSubscriptions);
   });
 });
+
+describe("attachDevTools mutation bridge", () => {
+  it("routes client.insertDurable to runtime createDurable", async () => {
+    const fakeWindow = new FakeWindow();
+    (globalThis as { window?: unknown }).window = fakeWindow as unknown;
+
+    const insertedRow = {
+      id: "row-1",
+      values: [{ type: "Text", value: "hello" }],
+    };
+    const createDurable = vi.fn(async () => insertedRow);
+    const fakeClient = {
+      createDurable,
+      updateDurable: vi.fn(async () => undefined),
+      deleteDurable: vi.fn(async () => undefined),
+      unsubscribe: vi.fn(),
+    };
+    const fakeDb = {
+      config: { appId: "devtools-test" },
+      setDevMode: vi.fn(),
+      clients: new Map([["default", fakeClient]]),
+      getActiveQuerySubscriptions: vi.fn(() => []),
+      onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
+    };
+
+    await attachDevTools({ db: fakeDb as any }, {} as any);
+
+    const requestId = "insert-1";
+    const responsePromise = waitForResponse(fakeWindow, requestId);
+    fakeWindow.postMessage({
+      channel: DEVTOOLS_BRIDGE_CHANNEL,
+      kind: "request",
+      requestId,
+      command: DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE,
+      payload: {
+        table: "todos",
+        values: [{ type: "Text", value: "hello" }],
+        tier: "worker",
+      },
+    });
+
+    const response = await responsePromise;
+    expect(response.ok).toBe(true);
+    expect(response.payload).toEqual(insertedRow);
+    expect(createDurable).toHaveBeenCalledWith("todos", insertedRow.values, { tier: "worker" });
+  });
+
+  it("routes client.updateDurable to runtime updateDurable", async () => {
+    const fakeWindow = new FakeWindow();
+    (globalThis as { window?: unknown }).window = fakeWindow as unknown;
+
+    const updateDurable = vi.fn(async () => undefined);
+    const fakeClient = {
+      createDurable: vi.fn(async () => ({ id: "row-1", values: [] })),
+      updateDurable,
+      deleteDurable: vi.fn(async () => undefined),
+      unsubscribe: vi.fn(),
+    };
+    const fakeDb = {
+      config: { appId: "devtools-test" },
+      setDevMode: vi.fn(),
+      clients: new Map([["default", fakeClient]]),
+      getActiveQuerySubscriptions: vi.fn(() => []),
+      onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
+    };
+
+    await attachDevTools({ db: fakeDb as any }, {} as any);
+
+    const requestId = "update-1";
+    const responsePromise = waitForResponse(fakeWindow, requestId);
+    fakeWindow.postMessage({
+      channel: DEVTOOLS_BRIDGE_CHANNEL,
+      kind: "request",
+      requestId,
+      command: DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE,
+      payload: {
+        objectId: "row-1",
+        updates: {
+          title: { type: "Text", value: "updated" },
+        },
+        tier: "edge",
+      },
+    });
+
+    const response = await responsePromise;
+    expect(response.ok).toBe(true);
+    expect(response.payload).toEqual({ updated: true });
+    expect(updateDurable).toHaveBeenCalledWith(
+      "row-1",
+      { title: { type: "Text", value: "updated" } },
+      { tier: "edge" },
+    );
+  });
+
+  it("routes client.deleteDurable to runtime deleteDurable", async () => {
+    const fakeWindow = new FakeWindow();
+    (globalThis as { window?: unknown }).window = fakeWindow as unknown;
+
+    const deleteDurable = vi.fn(async () => undefined);
+    const fakeClient = {
+      createDurable: vi.fn(async () => ({ id: "row-1", values: [] })),
+      updateDurable: vi.fn(async () => undefined),
+      deleteDurable,
+      unsubscribe: vi.fn(),
+    };
+    const fakeDb = {
+      config: { appId: "devtools-test" },
+      setDevMode: vi.fn(),
+      clients: new Map([["default", fakeClient]]),
+      getActiveQuerySubscriptions: vi.fn(() => []),
+      onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
+    };
+
+    await attachDevTools({ db: fakeDb as any }, {} as any);
+
+    const requestId = "delete-1";
+    const responsePromise = waitForResponse(fakeWindow, requestId);
+    fakeWindow.postMessage({
+      channel: DEVTOOLS_BRIDGE_CHANNEL,
+      kind: "request",
+      requestId,
+      command: DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE,
+      payload: {
+        objectId: "row-1",
+        tier: "global",
+      },
+    });
+
+    const response = await responsePromise;
+    expect(response.ok).toBe(true);
+    expect(response.payload).toEqual({ deleted: true });
+    expect(deleteDurable).toHaveBeenCalledWith("row-1", { tier: "global" });
+  });
+
+  it("returns command-specific errors for invalid mutation payloads", async () => {
+    const fakeWindow = new FakeWindow();
+    (globalThis as { window?: unknown }).window = fakeWindow as unknown;
+
+    const fakeClient = {
+      createDurable: vi.fn(async () => ({ id: "row-1", values: [] })),
+      updateDurable: vi.fn(async () => undefined),
+      deleteDurable: vi.fn(async () => undefined),
+      unsubscribe: vi.fn(),
+    };
+    const fakeDb = {
+      config: { appId: "devtools-test" },
+      setDevMode: vi.fn(),
+      clients: new Map([["default", fakeClient]]),
+      getActiveQuerySubscriptions: vi.fn(() => []),
+      onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
+    };
+
+    await attachDevTools({ db: fakeDb as any }, {} as any);
+
+    const invalidCases = [
+      {
+        requestId: "invalid-insert",
+        command: DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE,
+        payload: { table: 123, values: [] },
+        expectedMessage: "Invalid payload for client.insertDurable.",
+      },
+      {
+        requestId: "invalid-update",
+        command: DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE,
+        payload: { objectId: "row-1", updates: null },
+        expectedMessage: "Invalid payload for client.updateDurable.",
+      },
+      {
+        requestId: "invalid-delete",
+        command: DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE,
+        payload: { objectId: 123 },
+        expectedMessage: "Invalid payload for client.deleteDurable.",
+      },
+    ];
+
+    for (const testCase of invalidCases) {
+      const responsePromise = waitForResponse(fakeWindow, testCase.requestId);
+      fakeWindow.postMessage({
+        channel: DEVTOOLS_BRIDGE_CHANNEL,
+        kind: "request",
+        requestId: testCase.requestId,
+        command: testCase.command,
+        payload: testCase.payload,
+      });
+
+      const response = await responsePromise;
+      expect(response.ok).toBe(false);
+      expect(response.error?.message).toBe(testCase.expectedMessage);
+    }
+  });
+});

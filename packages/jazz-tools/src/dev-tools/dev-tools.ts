@@ -4,6 +4,7 @@ import {
   DurabilityTier,
   QueryExecutionOptions,
   QueryInput,
+  Value,
   WasmSchema,
 } from "../index.js";
 import { Db, DbConfig } from "../runtime/db.js";
@@ -312,6 +313,86 @@ function hookRegistration(
           return;
         }
 
+        const resolveCommandClient = async (): Promise<JazzClient> => {
+          const schema = resolveBridgeSchema(db);
+          if (schema) {
+            tryCreateClientForSchema(db, schema);
+          }
+
+          const client = getFirstDbClient(db);
+          if (!client) {
+            throw new Error("No Jazz runtime client is initialized yet.");
+          }
+
+          const ensureBridgeReady = (db as unknown as { ensureBridgeReady?: () => Promise<void> })
+            .ensureBridgeReady;
+          if (typeof ensureBridgeReady === "function") {
+            await ensureBridgeReady.call(db);
+          }
+
+          return client;
+        };
+
+        if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE) {
+          const payload = isRecord(envelope.payload)
+            ? (envelope.payload as Partial<
+                DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE]
+              >)
+            : {};
+          const table = payload.table;
+          const values = payload.values;
+          const tier = payload.tier as DurabilityTier | undefined;
+          if (typeof table !== "string" || !Array.isArray(values)) {
+            throw new Error("Invalid payload for client.insertDurable.");
+          }
+
+          const client = await resolveCommandClient();
+          const row = await client.createDurable(table, values, tier ? { tier } : undefined);
+          respond({ ok: true, payload: row });
+          return;
+        }
+
+        if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE) {
+          const payload = isRecord(envelope.payload)
+            ? (envelope.payload as Partial<
+                DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE]
+              >)
+            : {};
+          const objectId = payload.objectId;
+          const updates = payload.updates;
+          const tier = payload.tier as DurabilityTier | undefined;
+          if (typeof objectId !== "string" || !isRecord(updates)) {
+            throw new Error("Invalid payload for client.updateDurable.");
+          }
+
+          const client = await resolveCommandClient();
+          await client.updateDurable(
+            objectId,
+            updates as Record<string, Value>,
+            tier ? { tier } : undefined,
+          );
+          respond({ ok: true, payload: { updated: true } });
+          return;
+        }
+
+        if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE) {
+          const payload = isRecord(envelope.payload)
+            ? (envelope.payload as Partial<
+                DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE]
+              >)
+            : {};
+          const objectId = payload.objectId;
+          const tier = payload.tier as DurabilityTier | undefined;
+          if (typeof objectId !== "string") {
+            throw new Error("Invalid payload for client.deleteDurable.");
+          }
+
+          const client = await resolveCommandClient();
+          await client.deleteDurable(objectId, tier ? { tier } : undefined);
+          respond({ ok: true, payload: { deleted: true } });
+          return;
+        }
+
         if (
           envelope.command !== DEVTOOLS_COMMANDS.CLIENT_QUERY &&
           envelope.command !== DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE
@@ -345,21 +426,7 @@ function hookRegistration(
           );
         }
 
-        const schema = resolveBridgeSchema(db);
-        if (schema) {
-          tryCreateClientForSchema(db, schema);
-        }
-
-        const client = getFirstDbClient(db);
-        if (!client) {
-          throw new Error("No Jazz runtime client is initialized yet.");
-        }
-
-        const ensureBridgeReady = (db as unknown as { ensureBridgeReady?: () => Promise<void> })
-          .ensureBridgeReady;
-        if (typeof ensureBridgeReady === "function") {
-          await ensureBridgeReady.call(db);
-        }
+        const client = await resolveCommandClient();
 
         if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE) {
           const bridgeSubscriptionId = queryPayload.subscriptionId;
