@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+  <body>
+    <ul id="todos"></ul>
+    <form id="add">
+      <input placeholder="What needs to be done?" />
+      <button>Add</button>
+    </form>
+    <script type="module">
+      import { createDb } from "jazz-tools";
+      import { app } from "./schema/app.js";
+
+      const db = await createDb({
+        appId: "my-todo-app",
+        env: "dev",
+        userBranch: "main",
+      });
+
+      const list = document.getElementById("todos");
+
+      db.subscribeAll(app.todos, ({ all: todos }) => {
+        list.replaceChildren(
+          ...todos.map((todo) => {
+            const li = Object.assign(document.createElement("li"), {
+              textContent: todo.title,
+              onclick: () => db.update(app.todos, todo.id, { done: !todo.done }),
+            });
+            if (todo.done) li.style.textDecoration = "line-through";
+            return li;
+          }),
+        );
+      });
+
+      document.getElementById("add").onsubmit = (e) => {
+        e.preventDefault();
+        const input = e.target.querySelector("input");
+        db.insert(app.todos, { title: input.value, done: false });
+        input.value = "";
+      };
+    </script>
+  </body>
+</html>

@@ -324,6 +324,34 @@ pub async fn where_operator_examples(client: &JazzClient) -> jazz_tools::Result<
     Ok(())
 }
 
+// #region reading-composing-queries-rust
+pub fn composing_queries() {
+    // Store a base query and reuse it for different views.
+    let open_todos = QueryBuilder::new("todos")
+        .filter_eq("done", Value::Boolean(false));
+
+    let by_title = open_todos.clone().order_by("title").limit(20).build();
+    let by_newest = open_todos.clone().order_by_desc("id").build();
+
+    let _ = (by_title, by_newest);
+}
+// #endregion reading-composing-queries-rust
+
+// #region writing-nullable-update-rust
+pub async fn clear_nullable_fields(
+    client: &JazzClient,
+    todo_id: ObjectId,
+) -> jazz_tools::Result<()> {
+    // Set a nullable column to null
+    client
+        .update(todo_id, vec![("ownerId".to_string(), Value::Null)])
+        .await?;
+
+    // Only the specified columns are changed; omitted columns are left as-is.
+    Ok(())
+}
+// #endregion writing-nullable-update-rust
+
 // #region writing-crud-rust
 pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz_tools::Result<()> {
     let values = todo_values("Write docs", "");

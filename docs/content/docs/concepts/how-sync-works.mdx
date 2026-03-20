@@ -1,7 +1,7 @@
 ---
 title: How Sync Works
 description: An overview of how Jazz syncs data between clients, covering query subscriptions, infrastructure tiers, how Jazz behaves offline, and the eventual consistency model.
-reviewedAt: "451d4671"
+reviewedAt: "14cd73f0"
 ---
 
 In a traditional application, clients send queries to remote application servers, which then run the query against your database, and return the data.
@@ -30,15 +30,15 @@ When you register a query subscription with the server, it remembers. Every part
 
 For example, when another client writes a row, or upstream sync delivers new data, the server recognises that you are subscribed to data which has changed and pushes the update to you.
 
-If a new row matches your query, it is automatically pushed to you, and if a row which was previously pushed changes in a way that means it no longer matches your query (e.g. you're subscribed to `done = false`, and someone sets `done = true`), you stop getting updates.
+If a new row matches your query, it is automatically pushed to you. Conversely, if a previously matching row changes so it no longer fits your query (e.g. you subscribe to `done = false` and someone sets `done = true`), you stop receiving updates.
 
 The server watches continuously, efficiently re-evaluating only parts of queries that have changed, and pushing deltas to subscribed clients in real-time. Clients use these deltas to update their local replicas.
 
 ## What happens offline
 
-Reads always come from your local storage. In the browser, Jazz uses a dedicated worker thread reading from data stored locally in OPFS (Origin Private File System). Even without a network connection, your app can read data it already has locally (for example, because it has been synced previously, or because the data was written locally).
+Reads always come from your local storage. In the browser, Jazz uses a dedicated worker thread reading from data stored locally in OPFS (Origin Private File System). When multiple tabs are open, Jazz automatically elects one tab as the storage leader — the others route through it, with automatic failover if the leader tab closes. Even without a network connection, your app can read data it already has locally (for example, because it has been synced previously, or because the data was written locally).
 
-[Writes](/docs/writing/mutations) work the same way: they are stored immediately locally so your UI updates without waiting on a round-trip. Jazz automatically queues those writes to be synced upstream.
+[Writes](/docs/writing/writing-data) work the same way: they are stored immediately locally so your UI updates without waiting on a round-trip. Jazz automatically queues those writes to be synced upstream.
 
 When you reconnect, all queued writes are sent to the sync server, and active query subscriptions are replayed. This means that as soon as you reconnect, your app automatically refreshes with the latest data.
 
@@ -91,6 +91,6 @@ Lower tiers have lower latency, but the write has further to propagate before ot
 
 Every write in Jazz produces a **commit**: an immutable, timestamped record of the change. This allows us to store a full history of every row in your database.
 
-This commit-based model allows us to propagate changes throughout the network in an eventually consistent way, without needing clients to wait for a full round trip. This means that the state of data between tiers can diverge. A client that has just written locally has a different view of the data than the global core until the commit propagates. Another client on a different edge server might have its own unreconciled writes. All of this converges: commits propagate upward, get persisted at a global level, and flow back down to every subscribed client. Under normal circumstances, convergence will take about as long as a network round-trip to the core and back.
+This commit-based model allows us to propagate changes throughout the network in an eventually consistent way, without needing clients to wait for a full round trip. This means that the state of data between tiers can diverge. A client that has just written locally has a different view of the data than the global core until the commit propagates. Another client on a different edge server might have its own unreconciled writes. All of this converges: commits propagate upward, get persisted at a global level, and flow back down to every subscribed client. Under normal circumstances, convergence takes roughly one network round-trip to the global core.
 
 As clients can write concurrently, Jazz uses **last-writer-wins (LWW)** to resolve merge conflicts when they occur. When two clients try to write to the same row concurrently, the commit with the later timestamp wins. There is no manual conflict resolution to implement. Because Jazz tracks all commits, even commits which lose out in the merge are still stored in the row's history, and no data is ever lost.

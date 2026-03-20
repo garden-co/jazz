@@ -1,16 +1,16 @@
 ---
 title: Local-First Data Model
 description: An overview of how Jazz manages versions, history, conflicts, and avoids loading states.
-reviewedAt: "451d4671"
+reviewedAt: "14cd73f0"
 ---
 
 Jazz uses a local-first data model: your app embeds a database on the device and syncs in the background. This page covers how that works, including versioning, conflict resolution, and why there are almost no loading states.
 
 ## How Jazz stores data
 
-As covered in [How Sync Works](/docs/concepts/how-sync-works), traditional apps need to wait for a network round-trip for every read and write. Jazz eliminates that entirely by embedding a subset of the database on your users' devices. [Reads](/docs/reading/queries) are immediate from local storage. [Writes](/docs/writing/mutations) (`insert`, `update`, `delete`) can also be applied locally immediately, with no network round-trip. The sync layer picks up changes in the background and propagates them over the network whenever a client is online.
+As covered in [How Sync Works](/docs/concepts/how-sync-works), traditional apps need to wait for a network round-trip for every read and write. Jazz eliminates that entirely by embedding a subset of the database on your users' devices. [Reads](/docs/reading/queries) are immediate from local storage. [Writes](/docs/writing/writing-data) (`insert`, `update`, `delete`) can also be applied locally immediately, with no network round-trip. The sync layer picks up changes in the background and propagates them over the network whenever a client is online.
 
-This has a practical consequence: there is no difference between "optimistic" and "real" state. The local write _is_ the state, and there is no 'single source of truth'.
+This has a practical consequence: there is no difference between "optimistic" and "real" state. The local write _is_ the state. There is no single source of truth. Instead, every client that has received the same commits converges on the same result.
 
 ### The only loading moment
 
@@ -25,11 +25,11 @@ Devices can't show data they don't have. On the very first load from the server,
 
 Every update or change made to a row in Jazz is recorded as a **commit**, and each commit results in a new, immutable version of the row it affects. Under the hood, each row's history is an append-only log of commits. The full history of each row is available, allowing you to view a row as it looked at any point in history.
 
-Each version records which version it was derived from, forming a chain.
+Each version records its parent, forming a chain.
 
 ## The DAG
 
-When only a single device is creating commits, the chain is simple and linear. However, when multiple peers edit the same row concurrently, the history is no longer a single chain, and instead it can break off into multiple divergent states. Peer A creates version `a3` from `v2`; peer B independently creates version `b3` from the same `v2`. When these peers sync, the database merges the updates, producing a new version with two parents.
+When only a single device is creating commits, the chain is simple and linear. However, when multiple peers edit the same row concurrently, the history is no longer a single chain — it can diverge into multiple states. Peer A creates version `a3` from `v2`; peer B independently creates version `b3` from the same `v2`. When these peers sync, the database merges the updates, producing a new version with two parents.
 
 The result is a [**directed acyclic graph**](https://en.wikipedia.org/wiki/Directed_acyclic_graph) (DAG), similar to Git:
 

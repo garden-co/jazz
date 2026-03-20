@@ -1,7 +1,7 @@
 ---
 title: Server Setup
 description: Hosted and self-hosted database server configuration, app provisioning, and runtime context setup.
-reviewedAt: "451d4671"
+reviewedAt: "14cd73f0"
 ---
 
 import CreateJazzClientReference from "../../partials/create-jazz-client-reference.mdx";
@@ -45,7 +45,7 @@ For auth modes and upgrade/link flow, see [Authentication](/docs/auth/authentica
 
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Vue", "Svelte", "TypeScript"]}
+  items={["React", "Vue", "Svelte", "Expo", "TypeScript"]}
   persist
   updateAnchor
 >
@@ -62,6 +62,11 @@ For auth modes and upgrade/link flow, see [Authentication](/docs/auth/authentica
   <Tab value="Svelte">
     <include cwd lang="svelte" meta='title="App.svelte"'>
       ../examples/docs/todo-client-localfirst-svelte/src/App.svelte#provider-svelte
+    </include>
+  </Tab>
+  <Tab value="Expo">
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-expo/src/setup-snippets.tsx#context-setup-expo-minimal
     </include>
   </Tab>
   <Tab value="TypeScript">
@@ -106,7 +111,7 @@ In TypeScript backends, create the context once with both `app` and `permissions
 
 #### Per-request user-scoped client
 
-Using the `req`, we can run queries against the database as the user, with all permissions policies being applied appropriately.
+Pass `req` to run queries as the authenticated user, with all permission policies applied.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">

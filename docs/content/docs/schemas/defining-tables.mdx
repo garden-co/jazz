@@ -1,16 +1,17 @@
 ---
 title: Defining Tables
 description: Define tables and relationships using the TypeScript DSL or SQL.
-reviewedAt: "451d4671"
-# TODO: By the time of this review, migrations have changed significantly. Will merge, resolve conflicts, and then come back to this, rather than investing time in this now.
+reviewedAt: "14cd73f0"
 ---
 
 ## Table definitions
 
+Tables are defined in `schema/current.ts` using the Jazz DSL. Each `table()` call registers a table with its columns.
+
 <Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
   <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="schema.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/schema/current.ts
+    <include cwd lang="ts" meta='title="schema/current.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/schema/current.ts#schema-todo-client-ts
     </include>
   </Tab>
   <Tab value="SQL">
@@ -22,6 +23,8 @@ reviewedAt: "451d4671"
 
 The TypeScript DSL uses `col.string`, `col.boolean`, `col.ref`, etc. SQL uses the equivalent `TEXT`, `BOOLEAN`, `UUID REFERENCES ...`. Use SQL when your project is Rust-first. See [Column Types](/docs/reference/column-types) for the full list.
 
+Note that `col.ref()` columns must be named with an `Id` or `_id` suffix (e.g. `projectId`, `owner_id`). For `col.array(col.ref())`, use an `Ids` or `_ids` suffix instead. The runtime enforces this convention and will throw if a ref column name does not match.
+
 ## Codegen
 
 <include cwd lang="bash" meta='title="Terminal"'>
@@ -32,4 +35,4 @@ Run this from your project root. It regenerates `schema/current.sql` and typed c
 
 When you change your schema, Jazz generates migration stubs that translate data between versions. See [Migrations](/docs/schemas/migrations) for details.
 
-If you need to clear local browser data after a schema change, see [How do I reset browser storage?](/docs/reference/faq#reset-browser-storage)
+If you need to clear local browser data after a schema change, see [How do I reset browser storage?](/docs/reference/faq#reset-browser-storage).

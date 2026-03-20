@@ -1,7 +1,7 @@
 ---
 title: Queries
 description: One-shot queries, subscriptions, framework hooks, Suspense integration, and read durability options.
-reviewedAt: "451d4671"
+reviewedAt: "14cd73f0"
 ---
 
 ## One-shot queries
@@ -42,9 +42,18 @@ Subscribe to a query to receive updates whenever the underlying data changes.
 
 Queries are immutable and chainable. Each method returns a new query, so you can store a base and reuse it for different views without side effects.
 
-<include cwd lang="ts">
-  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-composing-queries-ts
-</include>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-composing-queries-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-composing-queries-rust
+    </include>
+  </Tab>
+</Tabs>
 
 See [Filters & Sorting](/docs/reading/filters-and-sorting) for the full list of `where` operators, `orderBy`, `limit`, and `offset`.
 
@@ -52,11 +61,11 @@ See [Filters & Sorting](/docs/reading/filters-and-sorting) for the full list of 
 
 Each framework has a reactive binding that re-renders when query results change. See [Framework Patterns](/docs/reference/framework-patterns#query-subscriptions) for side-by-side examples.
 
-| Framework | API | Notes |
-| --- | --- | --- |
-| React/Expo | `useAll(query)` | Returns `T[] \| undefined` |
-| Vue | `useAll(query)` | Returns a `ShallowRef` |
-| Svelte | `new QuerySubscription(query)` | Exposes reactive `.current` |
+| Framework  | API                            | Notes                       |
+| ---------- | ------------------------------ | --------------------------- |
+| React/Expo | `useAll(query)`                | Returns `T[] \| undefined`  |
+| Vue        | `useAll(query)`                | Returns a `ShallowRef`      |
+| Svelte     | `new QuerySubscription(query)` | Exposes reactive `.current` |
 
 ### The `undefined` loading state
 
@@ -81,7 +90,9 @@ Each framework has a reactive binding that re-renders when query results change.
 </Tabs>
 
 <Callout type="info">
-  You're unlikely to see `undefined` in practice unless you're awaiting a more [durable tier](/docs/reference/durability-tiers). Local storage reads are effectively instant and resolve to `[]` if no data exists yet.
+  You're unlikely to see `undefined` in practice unless you're awaiting a more [durable
+  tier](/docs/reference/durability-tiers). Local storage reads are effectively instant and resolve
+  to `[]` if no data exists yet.
 </Callout>
 
 ### Conditional queries

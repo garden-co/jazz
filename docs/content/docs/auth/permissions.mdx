@@ -1,10 +1,12 @@
 ---
 title: Permissions
 description: Jazz's approach to row-level security using relationship-based access controls, and how to build policies of varying complexity.
-reviewedAt: "451d4671"
+reviewedAt: "14cd73f0"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+
+Permissions control who can read, insert, update, and delete rows. Jazz enforces them server-side using row-level policies defined in `schema/permissions.ts`. Clients that fail a policy check have their writes rejected and their reads filtered.
 
 ## Schema policy syntax
 
@@ -32,7 +34,7 @@ Jazz allows you to define policies using either TypeScript or SQL.
   </Tab>
 </Tabs>
 
-You can use an empty policy to explicitly avoid any permissions checks. (`policy.todos.allowRead.where({})` / `USING (TRUE)`).
+Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})` / `USING (TRUE)`).
 
 <Callout type="info">
   You should use the exact file names `schema/current.ts` and `schema/permissions.ts` so that Jazz
@@ -56,22 +58,59 @@ Use the policy helpers `allowRead`, `allowInsert`, `allowUpdate`, and `allowDele
   </Tab>
 </Tabs>
 
+## Explicitly allow an operation (`.always()`)
+
+Use `.always()` when an operation should always be permitted. It is equivalent to
+`.where({})` and compiles to a `TRUE` policy expression.
+
+This helper is available on read, insert, update, and delete policy builders.
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="schema/permissions.ts"'>
+      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-always-ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include cwd lang="sql" meta='title="schema/permissions.sql"'>
+      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-always-sql
+    </include>
+  </Tab>
+</Tabs>
+
+## Explicitly deny an operation (`.never()`)
+
+Use `.never()` when an operation should be impossible. It is equivalent to
+`.where(anyOf([]))` and compiles to a `FALSE` policy expression.
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="schema/permissions.ts"'>
+      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-never-ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include cwd lang="sql" meta='title="schema/permissions.sql"'>
+      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-never-sql
+    </include>
+  </Tab>
+</Tabs>
+
 ## Combining conditions (`allOf` / `anyOf`)
 
 If you need to build more complex conditions, you can combine multiple conditions with `allOf` (all must match) or `anyOf` (any can match).
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="schema/permissions.ts"'>
-      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-combinators-ts
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs" meta='title="schema/permissions.rs"'>
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#permissions-combinators-rust
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts" meta='title="schema/permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-combinators-ts
+</include>
+
+## JWT session claims
+
+When external auth JWTs carry claims, `session.where(...)` lets you check them directly in permissions without mapping them onto row columns first.
+
+<include cwd lang="ts" meta='title="schema/permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
+</include>
 
 ## Inherited access policies (`allowedTo.*`)
 
@@ -114,18 +153,9 @@ The callback form `(todo) => ...` gives you access to the current row, so you ca
 
 If a table references itself (e.g. a comment that can have sub-comments), you can inherit access recursively up to a fixed depth.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="schema/permissions.ts"'>
-      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-recursive-inherits-ts
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs" meta='title="schema/permissions.rs"'>
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#permissions-recursive-inherits-rust
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts" meta='title="schema/permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-recursive-inherits-ts
+</include>
 
 `maxDepth` must be a positive integer.
 
@@ -136,17 +166,8 @@ If a table references itself (e.g. a comment that can have sub-comments), you ca
 
 Every policy is evaluated against the current user's session. On the frontend, this is the authenticated user. In a backend handler, create a scoped session per request so queries run with the right identity.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="handler.ts"'>
-      ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-handler-ts
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs" meta='title="handler.rs"'>
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#backend-request-handler-rust
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts" meta='title="handler.ts"'>
+  ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-handler-ts
+</include>
 
 See [Setup](/docs/reference/server-setup) for context setup details.

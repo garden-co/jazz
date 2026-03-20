@@ -15,3 +15,5 @@ There are a number of column types available which cover most common use cases:
 | `s.json(schema)`      | inferred from schema | `JSON`          |
 
 Any column can be made nullable with `.optional()`.
+
+> **Ref naming convention:** `s.ref()` columns must have a name ending in `Id` or `_id`. For `s.array(s.ref())`, the name must end in `Ids` or `_ids`. The runtime will throw if a ref column does not follow this convention.
