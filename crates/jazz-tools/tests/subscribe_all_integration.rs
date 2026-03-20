@@ -4,10 +4,12 @@ mod support;
 
 use std::time::Duration;
 
+use jazz_tools::query_manager::encoding::decode_row;
+use jazz_tools::query_manager::types::RowDescriptor;
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
-    ColumnType, JazzClient, ObjectId, Query, QueryBuilder, Schema, SchemaBuilder, TableSchema,
-    Value,
+    ColumnType, JazzClient, ObjectId, OrderedRowDelta, Query, QueryBuilder, Schema, SchemaBuilder,
+    TableSchema, Value,
 };
 use support::{
     TestingClient, collect_stream_deltas, has_added, has_any_change, has_removed, has_updated,
@@ -223,6 +225,37 @@ async fn create_file(client: &JazzClient, name: &str, parts: &[ObjectId]) -> Obj
         .0
 }
 
+fn todo_descriptor(schema: &Schema) -> RowDescriptor {
+    schema
+        .get(&"todos".into())
+        .expect("todos table should exist in runtime schema")
+        .columns
+        .clone()
+}
+
+fn last_updated_todo_title(
+    log: &[OrderedRowDelta],
+    descriptor: &RowDescriptor,
+    todo_id: ObjectId,
+) -> Option<String> {
+    let title_index = descriptor.column_index("title")?;
+
+    log.iter().rev().find_map(|delta| {
+        delta.updated.iter().rev().find_map(|change| {
+            if change.id != todo_id {
+                return None;
+            }
+
+            let row = change.row.as_ref()?;
+            let values = decode_row(descriptor, &row.data).ok()?;
+            match values.get(title_index) {
+                Some(Value::Text(title)) => Some(title.clone()),
+                _ => None,
+            }
+        })
+    })
+}
+
 /// Verifies that a subscription emits add, update, and remove deltas as a row
 /// enters, changes within, and leaves the query result set, and that the
 /// materialized query result stays consistent throughout.
@@ -316,6 +349,146 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
     assert!(
         !rows.iter().any(|(id, _)| *id == todo_id),
         "latest query results should no longer include the removed todo"
+    );
+
+    pair.shutdown().await;
+}
+
+/// Verifies that rapid overwrites on a single subscribed row still leave the
+/// subscriber with a last delta that carries the final value.
+///
+/// Alice creates one todo and Bob subscribes before the hot update burst. Alice
+/// then overwrites `title` 500 times in a tight loop. Intermediate deltas may
+/// be coalesced, but once the subscriber's EdgeServer query returns the final
+/// title, the last row-bearing update delta in Bob's stream must decode to that
+/// same final title.
+///
+/// TODO:
+/// Keep this test ignored until the client preserves "latest write wins" during
+/// a burst of updates. The assertion is fine; the client path in src/client.rs
+/// still has two burst-load bugs:
+///
+/// 1. Outgoing updates are sent in separate spawned tasks, so a fast sequence of
+///    writes can reach the server in a different order than the writer produced
+///    them.
+/// 2. Incoming subscription updates are pushed with `try_send` into a fixed-size
+///    channel, so a slow subscriber can silently drop updates, including the
+///    final one that should carry the last title.
+///
+/// That means Bob can read the correct final row state from the server, while
+/// Bob's live subscription stream still ends on an older value.
+///
+/// ```text
+/// intended
+/// --------
+/// Alice writes:  title-001 -> title-002 -> ... -> title-500
+/// Server state:  title-001 -> title-002 -> ... -> title-500
+/// Bob stream:    add ...... update ...... last update = title-500
+///
+/// current failure modes
+/// ---------------------
+/// send tasks can race:
+/// Alice writes:  title-001 -> title-002 -> title-003
+/// Server sees:   title-002 -> title-001 -> title-003
+///
+/// subscriber channel can overflow:
+/// Server sends:  add -> update -> update -> ... -> update(final)
+/// Bob channel:   keep   keep     keep         full -> drop(final)
+///
+/// result:
+/// Bob snapshot query    = title-500
+/// Bob last stream delta != title-500
+/// ```
+#[tokio::test]
+#[ignore = "TODO: fix burst update ordering/dropping in crates/jazz-tools/src/client.rs"]
+async fn subscription_reflects_final_state_after_rapid_bulk_updates() {
+    const RAPID_UPDATES: usize = 500;
+
+    let pair = ClientPair::start().await;
+    let query = QueryBuilder::new("todos").build();
+    let runtime_schema = pair
+        .subscriber
+        .schema()
+        .await
+        .expect("load subscriber runtime schema");
+    let descriptor = todo_descriptor(&runtime_schema);
+
+    let todo_id = create_todo(
+        &pair.writer,
+        TodoSeed {
+            title: "bulk-000",
+            done: false,
+            priority: Some(1),
+            tags: &["burst"],
+            payload: None,
+        },
+    )
+    .await;
+
+    let mut stream = pair
+        .subscriber
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe to bulk-updated todo");
+    let mut log = Vec::new();
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "initial add before rapid updates",
+        |log| has_added(log, todo_id),
+    )
+    .await;
+    log.clear();
+
+    let final_title = format!("bulk-{RAPID_UPDATES:03}");
+    for revision in 1..=RAPID_UPDATES {
+        pair.writer
+            .update(
+                todo_id,
+                vec![(
+                    "title".to_string(),
+                    Value::Text(format!("bulk-{revision:03}")),
+                )],
+            )
+            .await
+            .expect("apply rapid bulk update");
+    }
+
+    let rows = wait_for_rows(
+        &pair.subscriber,
+        query.clone(),
+        format!("subscriber sees final bulk title {final_title}"),
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == todo_id
+                && rows[0].1.first() == Some(&Value::Text(final_title.clone())))
+            .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1[0], Value::Text(final_title.clone()));
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "final row-bearing bulk update delta",
+        |log| {
+            last_updated_todo_title(log, &descriptor, todo_id).as_deref()
+                == Some(final_title.as_str())
+        },
+    )
+    .await;
+    collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
+
+    let latest_delta_title = last_updated_todo_title(&log, &descriptor, todo_id);
+    assert_eq!(
+        latest_delta_title.as_deref(),
+        Some(final_title.as_str()),
+        "last row-bearing update delta should decode to the final rapid-update title"
     );
 
     pair.shutdown().await;
