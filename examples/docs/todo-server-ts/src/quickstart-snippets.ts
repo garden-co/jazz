@@ -1,5 +1,5 @@
 import type { Application, Request, Response } from "express";
-import { createJazzContext, type Value } from "jazz-tools/backend";
+import { createJazzContext } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema/app.js";
 
 type AuthenticatedRequest = Request<
@@ -16,13 +16,14 @@ const context = createJazzContext({
   serverUrl: process.env.JAZZ_SERVER_URL,
   backendSecret: process.env.JAZZ_BACKEND_SECRET,
 });
-const client = context.client();
+const db = context.db();
+void db;
 // #endregion quickstart-server-context-ts
 
 // #region quickstart-server-read-oneshot-ts
 export async function getOpenTodos(req: Request, res: Response): Promise<void> {
   const requester = context.forRequest(req);
-  const rows = await requester.query(
+  const rows = await requester.all(
     schemaApp.todos.where({ done: false }).orderBy("title", "asc").limit(100),
   );
   res.json(rows);
@@ -39,15 +40,15 @@ export async function streamOpenTodos(req: Request, res: Response): Promise<void
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
 
-  const snapshot = await requester.query(query);
+  const snapshot = await requester.all(query);
   res.write(`data: ${JSON.stringify({ type: "snapshot", rows: snapshot })}\n\n`);
 
-  const subscriptionId = requester.subscribe(query, (delta) => {
+  const unsubscribe = requester.subscribeAll(query, (delta) => {
     res.write(`data: ${JSON.stringify({ type: "delta", delta })}\n\n`);
   });
 
   req.on("close", () => {
-    client.unsubscribe(subscriptionId);
+    unsubscribe();
   });
 }
 // #endregion quickstart-server-read-streaming-ts
@@ -66,24 +67,15 @@ export async function createTodo(req: AuthenticatedRequest, res: Response): Prom
     return;
   }
 
-  const values: Value[] = [
-    { type: "Text", value: title },
-    { type: "Boolean", value: false },
-    { type: "Text", value: req.body.description?.trim() ?? "" },
-    { type: "Null" },
-    { type: "Null" },
-    { type: "Text", value: userId },
-  ];
-
   const requester = context.forRequest(req);
-  const id = await requester.create("todos", values);
-
-  res.status(201).json({
-    id,
+  const todo = requester.insert(schemaApp.todos, {
     title,
     done: false,
+    description: req.body.description?.trim() || undefined,
     owner_id: userId,
   });
+
+  res.status(201).json(todo);
 }
 // #endregion quickstart-server-write-ts
 

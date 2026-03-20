@@ -5,19 +5,19 @@ import { app } from "../schema/app.js";
 // #region permissions-schema-ts
 table("projects", {
   name: col.string(),
-  owner_id: col.string(),
+  ownerId: col.string(),
 });
 
 table("todos", {
   title: col.string(),
   done: col.boolean(),
-  project: col.ref("projects").optional(),
-  owner_id: col.string(),
+  projectId: col.ref("projects").optional(),
+  ownerId: col.string(),
 });
 
 table("todoShares", {
-  todo: col.ref("todos"),
-  user_id: col.string(),
+  todoId: col.ref("todos"),
+  userId: col.string(),
   can_read: col.boolean(),
 });
 // #endregion permissions-schema-ts
@@ -32,6 +32,24 @@ definePermissions(app, ({ policy, allOf, session }) => {
   policy.todos.allowDelete.where({ owner_id: session.user_id });
 });
 // #endregion permissions-simple-ts
+
+// #region permissions-always-ts
+definePermissions(app, ({ policy }) => {
+  policy.todos.allowRead.always();
+  policy.todos.allowInsert.always();
+  policy.todos.allowUpdate.always();
+  policy.todos.allowDelete.always();
+});
+// #endregion permissions-always-ts
+
+// #region permissions-never-ts
+definePermissions(app, ({ policy }) => {
+  policy.todos.allowRead.never();
+  policy.todos.allowInsert.never();
+  policy.todos.allowUpdate.never();
+  policy.todos.allowDelete.never();
+});
+// #endregion permissions-never-ts
 
 // #region permissions-allowed-to-ts
 definePermissions(app, ({ policy, anyOf, allOf, allowedTo }) => {
@@ -49,6 +67,14 @@ definePermissions(app, ({ policy, allOf, anyOf, allowedTo, session }) => {
   );
 });
 // #endregion permissions-combinators-ts
+
+// #region permissions-session-claims-ts
+definePermissions(app, ({ policy, anyOf, session }) => {
+  policy.todos.allowRead.where(
+    anyOf([{ owner_id: session.user_id }, session.where({ "claims.role": "manager" })]),
+  );
+});
+// #endregion permissions-session-claims-ts
 
 // #region permissions-recursive-inherits-ts
 definePermissions(app, ({ policy, allowedTo }) => {

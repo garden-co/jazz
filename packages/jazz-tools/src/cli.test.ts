@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,12 @@ import { build } from "./cli.js";
 
 const dslPath = fileURLToPath(new URL("./dsl.ts", import.meta.url));
 const permissionsDslPath = fileURLToPath(new URL("./permissions/index.ts", import.meta.url));
+// Bin integration tests run in a subprocess that loads dist/cli.js, so current.ts must import
+// from the compiled dist to share the same dsl module instance (and thus _collectedSchema state).
+const distDslPath = fileURLToPath(new URL("../dist/dsl.js", import.meta.url));
+const distPermissionsDslPath = fileURLToPath(
+  new URL("../dist/permissions/index.js", import.meta.url),
+);
 
 const tempRoots: string[] = [];
 
@@ -27,6 +34,17 @@ async function createWorkspace(): Promise<{ root: string; schemaDir: string; jaz
   return { root, schemaDir, jazzBin };
 }
 
+async function createFakeRustBin(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "jazz-tools-cli-rust-bin-"));
+  tempRoots.push(root);
+
+  const rustBin = join(root, "fake-jazz-tools");
+  await writeFile(rustBin, "#!/bin/sh\nexit 0\n");
+  await chmod(rustBin, 0o755);
+
+  return rustBin;
+}
+
 function currentSchemaWithoutInlinePermissions(): string {
   return `
 import { table, col } from ${JSON.stringify(dslPath)};
@@ -37,7 +55,7 @@ table("projects", {
 
 table("todos", {
   title: col.string(),
-  owner_id: col.string(),
+  ownerId: col.string(),
 });
 `;
 }
@@ -52,7 +70,7 @@ table("projects", {
 
 table("todos", {
   title: col.string(),
-  owner_id: col.string(),
+  ownerId: col.string(),
 }, {
   permissions: {
     select: { type: "True" },
@@ -61,10 +79,10 @@ table("todos", {
 `;
 }
 
-function permissionsSchema(): string {
+function permissionsSchema(appImportPath: string = "./app.js"): string {
   return `
 import { definePermissions } from ${JSON.stringify(permissionsDslPath)};
-import { app } from "./app";
+import { app } from ${JSON.stringify(appImportPath)};
 
 export default definePermissions(app, ({ policy, session }) => [
   policy.todos.allowRead.where({ owner_id: session.user_id }),
@@ -93,7 +111,7 @@ export const nope = 42;
 function permissionsSchemaNamedExport(): string {
   return `
 import { definePermissions } from ${JSON.stringify(permissionsDslPath)};
-import { app } from "./app";
+import { app } from "./app.js";
 
 export const permissions = definePermissions(app, ({ policy, session }) => [
   policy.todos.allowRead.where({ owner_id: session.user_id }),
@@ -106,6 +124,82 @@ function permissionsSchemaInvalidShape(): string {
 export default {
   todos: 123,
 };
+`;
+}
+
+// Bin integration variants — import from dist/dsl.js to share the module instance with dist/cli.js.
+function binCurrentSchema(): string {
+  return `
+import { table, col } from ${JSON.stringify(distDslPath)};
+
+table("projects", {
+  name: col.string(),
+});
+
+table("todos", {
+  title: col.string(),
+  ownerId: col.string(),
+});
+`;
+}
+
+function binSchemaWithMessagesAndCanvases(): string {
+  return `
+import { table, col } from ${JSON.stringify(distDslPath)};
+
+table("messages", {
+  content: col.string(),
+  isPublic: col.boolean(),
+});
+
+table("canvases", {
+  name: col.string(),
+  isPublic: col.boolean(),
+});
+`;
+}
+
+function binMigrationDropIsPublicFromBothTables(): string {
+  return `
+import { migrate, col } from ${JSON.stringify(distDslPath)};
+
+migrate("messages", {
+  isPublic: col.drop().boolean({ backwardsDefault: false }),
+});
+
+migrate("canvases", {
+  isPublic: col.drop().boolean({ backwardsDefault: false }),
+});
+`;
+}
+
+function binPermissionsSchema(appImportPath: string = "./app.js"): string {
+  return `
+import { definePermissions } from ${JSON.stringify(distPermissionsDslPath)};
+import { app } from ${JSON.stringify(appImportPath)};
+
+export default definePermissions(app, ({ policy, session }) => [
+  policy.todos.allowRead.where({ owner_id: session.user_id }),
+]);
+`;
+}
+
+function currentSchemaWithComments(): string {
+  return `
+import { table, col } from ${JSON.stringify(distDslPath)};
+
+table("projects", {
+  name: col.string(),
+});
+
+table("todos", {
+  title: col.string(),
+  ownerId: col.string(),
+});
+
+table("comments", {
+  body: col.string(),
+});
 `;
 }
 
@@ -138,6 +232,18 @@ migrate("canvases", {
 });
 `;
 }
+
+describe("cli build basic output", () => {
+  it("generates app.ts even when current.sql already exists", async () => {
+    const { schemaDir, jazzBin } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    await writeFile(join(schemaDir, "current.sql"), "-- stale");
+
+    await build({ schemaDir, jazzBin });
+
+    await readFile(join(schemaDir, "app.ts"), "utf8");
+  });
+});
 
 describe("cli build migration SQL generation", () => {
   it("generates DROP COLUMN for every table when migrate() is called on multiple tables", async () => {
@@ -185,6 +291,32 @@ describe("cli build permissions generation", () => {
     expect(appTs).toContain('"type": "SessionRef"');
     expect(appTs).toContain('"column": "owner_id"');
     expect(permissionsTest).toContain("Permissions test starter.");
+  });
+
+  it("loads permissions.ts when it imports app from ./app.ts", async () => {
+    const { schemaDir, jazzBin } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    await writeFile(join(schemaDir, "permissions.ts"), permissionsSchema("./app.ts"));
+
+    await build({ schemaDir, jazzBin });
+
+    const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
+    expect(sql).toContain(
+      "CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);",
+    );
+  });
+
+  it("loads permissions.ts when it imports app from ./app", async () => {
+    const { schemaDir, jazzBin } = await createWorkspace();
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithoutInlinePermissions());
+    await writeFile(join(schemaDir, "permissions.ts"), permissionsSchema("./app"));
+
+    await build({ schemaDir, jazzBin });
+
+    const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
+    expect(sql).toContain(
+      "CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);",
+    );
   });
 
   it("fails when current.ts uses inline table permissions", async () => {
@@ -245,5 +377,116 @@ describe("cli build permissions generation", () => {
     await writeFile(join(schemaDir, "permissions.ts"), permissionsSchemaInvalidShape());
 
     await expect(build({ schemaDir, jazzBin })).rejects.toThrow(/invalid permissions export/i);
+  });
+});
+
+// Integration test: exercises the bin/jazz-tools.js entry point, which applies extra
+// logic on top of build() to decide whether to invoke the TS CLI at all.
+const binPath = fileURLToPath(new URL("../bin/jazz-tools.js", import.meta.url));
+
+function runBinBuild(schemaDir: string, rustBin: string): void {
+  const result = spawnSync(
+    process.execPath,
+    [binPath, "build", "--schema-dir", schemaDir, "--rust-bin", rustBin],
+    {
+      stdio: "inherit",
+    },
+  );
+
+  expect(result.status).toBe(0);
+}
+
+describe("bin integration", () => {
+  it("generates current.sql on first build (no current.sql)", async () => {
+    const { schemaDir } = await createWorkspace();
+    const rustBin = await createFakeRustBin();
+    await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
+
+    runBinBuild(schemaDir, rustBin);
+
+    await readFile(join(schemaDir, "current.sql"), "utf8");
+  });
+
+  it("generates app.ts on first build (no current.sql)", async () => {
+    const { schemaDir } = await createWorkspace();
+    const rustBin = await createFakeRustBin();
+    await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
+
+    runBinBuild(schemaDir, rustBin);
+
+    await readFile(join(schemaDir, "app.ts"), "utf8");
+  });
+
+  it("regenerates current.sql and app.ts when current.sql already exists", async () => {
+    // Regression: bin skips the TS CLI step when current.sql is present,
+    // so neither file is updated on subsequent builds.
+    const { schemaDir } = await createWorkspace();
+    const rustBin = await createFakeRustBin();
+    await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
+    await writeFile(join(schemaDir, "current.sql"), "-- stale");
+
+    runBinBuild(schemaDir, rustBin);
+
+    const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
+    expect(sql).toContain("CREATE TABLE");
+    await readFile(join(schemaDir, "app.ts"), "utf8");
+  });
+
+  // bootstrap → change current.ts → rebuild
+
+  it("updates current.sql when current.ts changes after initial build", async () => {
+    const { schemaDir } = await createWorkspace();
+    const rustBin = await createFakeRustBin();
+    await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
+    runBinBuild(schemaDir, rustBin);
+
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithComments());
+    runBinBuild(schemaDir, rustBin);
+
+    const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
+    expect(sql).toContain("CREATE TABLE comments");
+  });
+
+  it("updates app.ts when current.ts changes after initial build", async () => {
+    const { schemaDir } = await createWorkspace();
+    const rustBin = await createFakeRustBin();
+    await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
+    runBinBuild(schemaDir, rustBin);
+
+    await writeFile(join(schemaDir, "current.ts"), currentSchemaWithComments());
+    runBinBuild(schemaDir, rustBin);
+
+    const appTs = await readFile(join(schemaDir, "app.ts"), "utf8");
+    expect(appTs).toContain("comments");
+  });
+
+  it("generates migration SQL from stub on rebuild when current.sql already exists", async () => {
+    const { schemaDir } = await createWorkspace();
+    const rustBin = await createFakeRustBin();
+    await writeFile(join(schemaDir, "current.ts"), binSchemaWithMessagesAndCanvases());
+    runBinBuild(schemaDir, rustBin);
+
+    await writeFile(
+      join(schemaDir, "migration_v1_v2_aaaaaaaaaaaa_bbbbbbbbbbbb.ts"),
+      binMigrationDropIsPublicFromBothTables(),
+    );
+    runBinBuild(schemaDir, rustBin);
+
+    await readFile(join(schemaDir, "migration_v1_v2_fwd_aaaaaaaaaaaa_bbbbbbbbbbbb.sql"), "utf8");
+    await readFile(join(schemaDir, "migration_v1_v2_bwd_aaaaaaaaaaaa_bbbbbbbbbbbb.sql"), "utf8");
+  });
+
+  it("loads permissions.ts that imports ./app via bin entry point", async () => {
+    const { schemaDir } = await createWorkspace();
+    const rustBin = await createFakeRustBin();
+    await writeFile(join(schemaDir, "current.ts"), binCurrentSchema());
+    await writeFile(join(schemaDir, "permissions.ts"), binPermissionsSchema("./app"));
+
+    runBinBuild(schemaDir, rustBin);
+
+    const sql = await readFile(join(schemaDir, "current.sql"), "utf8");
+    expect(sql).toContain(
+      "CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);",
+    );
   });
 });

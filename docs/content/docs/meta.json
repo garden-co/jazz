@@ -8,6 +8,7 @@
     "schemas",
     "reading-data",
     "writing-data",
+    "files-and-blobs",
     "guides",
     "permissions",
     "migrations",

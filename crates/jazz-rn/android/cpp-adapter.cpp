@@ -30,8 +30,8 @@ Java_com_jazzrn_JazzRnModule_nativeInstallRustCrate(
     auto holderRef = facebook::jni::static_ref_cast<JCallInvokerHolder::javaobject>(holderLocal);
     auto* holderCxx = holderRef->cthis();
     auto jsCallInvoker = holderCxx->getCallInvoker();
-
     auto runtime = reinterpret_cast<jsi::Runtime *>(rtPtr);
+
     return jazzrn::installRustCrate(*runtime, jsCallInvoker);
 }
 

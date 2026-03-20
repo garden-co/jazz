@@ -132,9 +132,13 @@ function renderBody(body: string): string {
   while ((match = fenceRe.exec(body)) !== null) {
     const prose = body.slice(lastIndex, match.index);
     if (prose) segments.push(renderProse(prose.trimEnd()));
-    const lang = match[1].trim();
-    const content = dedent(match[2].trimEnd());
-    segments.push(`\`\`\`${lang}\n${content}\n\`\`\``);
+    const lang = match[1];
+    const content = match[2];
+    if (lang === undefined || content === undefined) {
+      continue;
+    }
+    const renderedContent = dedent(content.trimEnd());
+    segments.push(`\`\`\`${lang.trim()}\n${renderedContent}\n\`\`\``);
     lastIndex = match.index + match[0].length;
   }
   const remaining = body.slice(lastIndex);

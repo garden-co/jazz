@@ -1,6 +1,5 @@
 import { useState } from "react";
 import {
-  createJazzClient,
   getActiveSyntheticAuth,
   JazzProvider,
   SyntheticUserSwitcher,
@@ -12,15 +11,15 @@ function TodoApp() {
 }
 
 // #region auth-anon-react
-const anonymousAuthClient = createJazzClient({
-  appId: "my-app",
-  env: "dev",
-  userBranch: "main",
-});
-
 export function AnonymousAuthApp() {
   return (
-    <JazzProvider client={anonymousAuthClient}>
+    <JazzProvider
+      config={{
+        appId: "my-app",
+        env: "dev",
+        userBranch: "main",
+      }}
+    >
       <TodoApp />
     </JazzProvider>
   );
@@ -28,15 +27,15 @@ export function AnonymousAuthApp() {
 // #endregion auth-anon-react
 
 // #region auth-anon-token-react
-const anonymousAuthWithTokenClient = createJazzClient({
-  appId: "my-app",
-  localAuthMode: "anonymous",
-  localAuthToken: "device-token-123",
-});
-
 export function AnonymousAuthWithTokenApp() {
   return (
-    <JazzProvider client={anonymousAuthWithTokenClient}>
+    <JazzProvider
+      config={{
+        appId: "my-app",
+        localAuthMode: "anonymous",
+        localAuthToken: "device-token-123",
+      }}
+    >
       <TodoApp />
     </JazzProvider>
   );
@@ -46,18 +45,19 @@ export function AnonymousAuthWithTokenApp() {
 // #region auth-demo-react
 const demoAuthAppId = "my-app";
 const demoAuthActive = getActiveSyntheticAuth(demoAuthAppId, { defaultMode: "demo" });
-const demoAuthClient = createJazzClient({
-  appId: demoAuthAppId,
-  serverUrl: "http://127.0.0.1:4200",
-  localAuthMode: demoAuthActive.localAuthMode,
-  localAuthToken: demoAuthActive.localAuthToken,
-});
 
 export function DemoAuthApp() {
   return (
     <>
       <SyntheticUserSwitcher appId={demoAuthAppId} defaultMode="demo" />
-      <JazzProvider client={demoAuthClient}>
+      <JazzProvider
+        config={{
+          appId: demoAuthAppId,
+          serverUrl: "http://127.0.0.1:4200",
+          localAuthMode: demoAuthActive.localAuthMode,
+          localAuthToken: demoAuthActive.localAuthToken,
+        }}
+      >
         <TodoApp />
       </JazzProvider>
     </>
@@ -69,15 +69,6 @@ export function DemoAuthApp() {
 const externalAuthAppId = "my-app";
 const externalAuthServerUrl = "http://127.0.0.1:4200";
 const externalAuthProviderJwt = "<provider-jwt>";
-const externalAuthLocalClient = createJazzClient({
-  appId: externalAuthAppId,
-  serverUrl: externalAuthServerUrl,
-});
-const externalAuthJwtClient = createJazzClient({
-  appId: externalAuthAppId,
-  serverUrl: externalAuthServerUrl,
-  jwtToken: externalAuthProviderJwt,
-});
 
 export function ExternalAuthApp() {
   const [hasJwt, setHasJwt] = useState(false);
@@ -95,7 +86,18 @@ export function ExternalAuthApp() {
   return (
     <JazzProvider
       key={hasJwt ? "jwt" : "local"}
-      client={hasJwt ? externalAuthJwtClient : externalAuthLocalClient}
+      config={
+        hasJwt
+          ? {
+              appId: externalAuthAppId,
+              serverUrl: externalAuthServerUrl,
+              jwtToken: externalAuthProviderJwt,
+            }
+          : {
+              appId: externalAuthAppId,
+              serverUrl: externalAuthServerUrl,
+            }
+      }
     >
       <button onClick={() => onSignedIn()}>Sign in</button>
       <TodoApp />
@@ -105,11 +107,13 @@ export function ExternalAuthApp() {
 // #endregion auth-external-react
 
 // #region auth-offline-react
-const offlineOnlyAuthClient = createJazzClient({ appId: "my-app" });
-
 export function OfflineOnlyAuthApp() {
   return (
-    <JazzProvider client={offlineOnlyAuthClient}>
+    <JazzProvider
+      config={{
+        appId: "my-app",
+      }}
+    >
       <TodoApp />
     </JazzProvider>
   );

@@ -77,6 +77,9 @@ pub enum ServerEvent {
         client_id: String,
         /// Next stream sequence expected from server for this connection.
         next_sync_seq: Option<u64>,
+        /// Canonical digest of the server's catalogue state, when available.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        catalogue_state_hash: Option<String>,
     },
 
     /// Subscription created successfully.
@@ -230,6 +233,7 @@ mod tests {
             connection_id: ConnectionId(42),
             client_id: "test-client-id".to_string(),
             next_sync_seq: None,
+            catalogue_state_hash: Some("digest-123".to_string()),
         };
 
         let frame = event.encode_frame();
@@ -237,7 +241,15 @@ mod tests {
 
         let (decoded, consumed) = ServerEvent::decode_frame(&frame).unwrap();
         assert_eq!(consumed, frame.len());
-        assert!(matches!(decoded, ServerEvent::Connected { .. }));
+        match decoded {
+            ServerEvent::Connected {
+                catalogue_state_hash,
+                ..
+            } => {
+                assert_eq!(catalogue_state_hash.as_deref(), Some("digest-123"));
+            }
+            other => panic!("Expected Connected event, got {:?}", other.variant_name()),
+        }
     }
 
     #[test]

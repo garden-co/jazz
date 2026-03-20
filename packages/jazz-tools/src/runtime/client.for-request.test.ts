@@ -190,7 +190,7 @@ describe("JazzClient.forRequest", () => {
     await scopedClient.query('{"table":"todos"}');
 
     expect(queryCalls.length).toBe(1);
-    expect(queryCalls[0][1]).toBe(
+    expect(queryCalls[0]![1]).toBe(
       JSON.stringify({
         user_id: "user-123",
         claims: { role: "admin" },
@@ -210,7 +210,7 @@ describe("JazzClient.forRequest", () => {
 
     await scopedClient.query('{"table":"todos"}');
 
-    expect(queryCalls[0][1]).toBe(
+    expect(queryCalls[0]![1]).toBe(
       JSON.stringify({
         user_id: "user-456",
         claims: {},
@@ -257,7 +257,7 @@ describe("JazzClient.forRequest", () => {
 
     await scopedClient.query(builder);
 
-    expect(queryCalls[0][0]).toBe(builder._build());
+    expect(queryCalls[0]![0]).toBe(builder._build());
   });
 
   it("translates schema-aware query builders for session-scoped query calls", async () => {
@@ -284,7 +284,7 @@ describe("JazzClient.forRequest", () => {
 
     await scopedClient.query(builder);
 
-    const parsed = JSON.parse(queryCalls[0][0]) as Record<string, unknown>;
+    const parsed = JSON.parse(queryCalls[0]![0]) as Record<string, unknown>;
     expect(parsed.table).toBe("todos");
     expect(parsed).toHaveProperty("relation_ir");
   });
@@ -301,7 +301,7 @@ describe("JazzClient.forRequest", () => {
     client.subscribe(builder, () => {});
 
     expect(createSubscriptionCalls).toHaveLength(1);
-    expect(createSubscriptionCalls[0][0]).toBe(builder._build());
+    expect(createSubscriptionCalls[0]![0]).toBe(builder._build());
     expect(executeSubscriptionCalls).toHaveLength(0);
     await flushMicrotasks();
     expect(executeSubscriptionCalls).toHaveLength(1);
@@ -325,7 +325,7 @@ describe("JazzClient.forRequest", () => {
     client.subscribe(builder, () => {});
 
     expect(createSubscriptionCalls).toHaveLength(1);
-    const parsed = JSON.parse(createSubscriptionCalls[0][0]) as Record<string, unknown>;
+    const parsed = JSON.parse(createSubscriptionCalls[0]![0]) as Record<string, unknown>;
     expect(parsed.table).toBe("todos");
     expect(parsed).toHaveProperty("relation_ir");
   });
@@ -336,7 +336,7 @@ describe("JazzClient.forRequest", () => {
     client.subscribe('{"table":"todos"}', callback);
     await flushMicrotasks();
 
-    const onUpdate = executeSubscriptionCalls[0][1];
+    const onUpdate = executeSubscriptionCalls[0]![1];
     onUpdate(
       JSON.stringify({
         added: [{ row: { id: "row-a", values: [] }, index: 0 }],
@@ -375,7 +375,7 @@ describe("JazzClient.forRequest", () => {
     client.subscribe('{"table":"todos"}', callback);
     await flushMicrotasks();
 
-    const onUpdate = executeSubscriptionCalls[0][1];
+    const onUpdate = executeSubscriptionCalls[0]![1];
     onUpdate(null, [
       {
         kind: 0,
@@ -402,7 +402,7 @@ describe("JazzClient.forRequest", () => {
     client.subscribe('{"table":"todos"}', callback);
     await flushMicrotasks();
 
-    const onUpdate = executeSubscriptionCalls[0][1];
+    const onUpdate = executeSubscriptionCalls[0]![1];
     expect(() =>
       onUpdate(
         JSON.stringify({
@@ -419,13 +419,13 @@ describe("JazzClient.forRequest", () => {
   it("passes query propagation options to runtime query", async () => {
     const { client, queryCalls } = makeClient();
     await client.query('{"table":"todos"}', { propagation: "local-only" });
-    expect(queryCalls[0][3]).toBe(JSON.stringify({ propagation: "local-only" }));
+    expect(queryCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
   });
 
   it("passes query propagation options to runtime createSubscription", () => {
     const { client, createSubscriptionCalls } = makeClient();
     client.subscribe('{"table":"todos"}', () => {}, { propagation: "local-only" });
-    expect(createSubscriptionCalls[0][3]).toBe(JSON.stringify({ propagation: "local-only" }));
+    expect(createSubscriptionCalls[0]![3]).toBe(JSON.stringify({ propagation: "local-only" }));
   });
 
   // =========================================================================
@@ -943,6 +943,155 @@ describe("JazzClient schema order", () => {
         values: [
           { type: "Text", value: "Buy milk" },
           { type: "Boolean", value: false },
+          {
+            type: "Array",
+            value: [
+              {
+                type: "Row",
+                value: {
+                  id: "project-1",
+                  values: [
+                    { type: "Text", value: "Inbox" },
+                    { type: "Text", value: "inbox" },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("keeps magic projection values ahead of included rows during schema alignment", async () => {
+    const runtime: Runtime = {
+      insert: () => mockRow(),
+      update: () => {},
+      delete: () => {},
+      query: async () => [
+        {
+          id: "todo-1",
+          values: [
+            { type: "Text", value: "Buy milk" },
+            { type: "Boolean", value: true },
+            {
+              type: "Array",
+              value: [
+                {
+                  type: "Row",
+                  value: {
+                    id: "project-1",
+                    values: [
+                      { type: "Text", value: "inbox" },
+                      { type: "Text", value: "Inbox" },
+                    ],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      subscribe: () => 0,
+      createSubscription: () => 0,
+      executeSubscription: () => {},
+      unsubscribe: () => {},
+      insertDurable: async () => mockRow(),
+      updateDurable: async () => {},
+      deleteDurable: async () => {},
+      onSyncMessageReceived: () => {},
+      onSyncMessageToSend: () => {},
+      addServer: () => {},
+      removeServer: () => {},
+      addClient: () => "client-1",
+      getSchema: () =>
+        new Map([
+          [
+            "todos",
+            {
+              columns: [
+                {
+                  name: "done",
+                  column_type: { type: "Boolean" as const },
+                  nullable: false,
+                },
+                {
+                  name: "title",
+                  column_type: { type: "Text" as const },
+                  nullable: false,
+                },
+              ],
+            },
+          ],
+          [
+            "projects",
+            {
+              columns: [
+                {
+                  name: "slug",
+                  column_type: { type: "Text" as const },
+                  nullable: false,
+                },
+                {
+                  name: "name",
+                  column_type: { type: "Text" as const },
+                  nullable: false,
+                },
+              ],
+            },
+          ],
+        ]),
+      getSchemaHash: () => "schema-hash",
+    };
+    const client = JazzClient.connectWithRuntime(runtime, {
+      appId: "test-app",
+      schema: {
+        todos: {
+          columns: [
+            {
+              name: "title",
+              column_type: { type: "Text" as const },
+              nullable: false,
+            },
+            {
+              name: "done",
+              column_type: { type: "Boolean" as const },
+              nullable: false,
+            },
+          ],
+        },
+        projects: {
+          columns: [
+            {
+              name: "name",
+              column_type: { type: "Text" as const },
+              nullable: false,
+            },
+            {
+              name: "slug",
+              column_type: { type: "Text" as const },
+              nullable: false,
+            },
+          ],
+        },
+      },
+    });
+
+    const rows = await client.query(
+      JSON.stringify({
+        table: "todos",
+        relation_ir: { TableScan: { table: "todos" } },
+        select_columns: ["title", "$canDelete", "__jazz_include_project"],
+        array_subqueries: [{ table: "projects", nested_arrays: [] }],
+      }),
+    );
+
+    expect(rows).toEqual([
+      {
+        id: "todo-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Boolean", value: true },
           {
             type: "Array",
             value: [

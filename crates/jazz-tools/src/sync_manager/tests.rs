@@ -1,5 +1,5 @@
 use super::*;
-use crate::commit::Commit;
+use crate::commit::{Commit, StoredState};
 use crate::query_manager::policy::Operation;
 use crate::storage::MemoryStorage;
 use smallvec::smallvec;
@@ -308,6 +308,136 @@ fn client_without_query_receives_nothing() {
 
     let outbox = sm.take_outbox();
     assert!(outbox.is_empty());
+}
+
+#[test]
+fn client_receives_existing_catalogue_on_connect() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let object_id = ObjectId::new();
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        crate::metadata::MetadataKey::Type.to_string(),
+        crate::metadata::ObjectType::CatalogueSchema.to_string(),
+    );
+
+    sm.create_object_with_content(&mut io, object_id, metadata, b"schema".to_vec());
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id: synced_object_id,
+                    branch_name,
+                    metadata,
+                    commits,
+                },
+        } => {
+            assert_eq!(*id, client_id);
+            assert_eq!(*synced_object_id, object_id);
+            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(commits.len(), 1);
+            assert!(
+                metadata.is_some(),
+                "catalogue replay should include metadata"
+            );
+        }
+        _ => panic!("Expected catalogue ObjectUpdated to client"),
+    }
+}
+
+#[test]
+fn live_catalogue_updates_broadcast_without_query_scope() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let client_a = ClientId::new();
+    let client_b = ClientId::new();
+    sm.add_client(client_a);
+    sm.add_client(client_b);
+    sm.take_outbox();
+
+    let object_id = ObjectId::new();
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        crate::metadata::MetadataKey::Type.to_string(),
+        crate::metadata::ObjectType::CatalogueLens.to_string(),
+    );
+    sm.create_object_with_content(&mut io, object_id, metadata, b"lens".to_vec());
+
+    sm.forward_update_to_clients(object_id, "main".into());
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 2);
+    assert!(outbox.iter().all(|entry| matches!(
+        entry,
+        OutboxEntry {
+            destination: Destination::Client(_),
+            payload: SyncPayload::ObjectUpdated { object_id: synced_object_id, .. },
+        } if *synced_object_id == object_id
+    )));
+}
+
+#[test]
+fn remotely_received_catalogue_replays_to_later_clients() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let object_id = ObjectId::new();
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        crate::metadata::MetadataKey::Type.to_string(),
+        crate::metadata::ObjectType::CatalogueSchema.to_string(),
+    );
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::ObjectUpdated {
+            object_id,
+            metadata: Some(ObjectMetadata {
+                id: object_id,
+                metadata,
+            }),
+            branch_name: "main".into(),
+            commits: vec![Commit {
+                parents: smallvec![],
+                content: b"schema".to_vec(),
+                timestamp: 1000,
+                author: ObjectId::new(),
+                metadata: None,
+                stored_state: StoredState::Stored,
+                ack_state: Default::default(),
+            }],
+        },
+    });
+    sm.process_inbox(&mut io);
+    sm.take_outbox();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+    assert!(matches!(
+        &outbox[0],
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id: synced_object_id,
+                    metadata: Some(_),
+                    ..
+                },
+        } if *id == client_id && *synced_object_id == object_id
+    ));
 }
 
 #[test]
