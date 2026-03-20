@@ -23,6 +23,12 @@ enum WriteSchemaResolution {
     Unresolved,
 }
 
+pub(super) struct ResolvedSchemaRow {
+    pub branch_name: BranchName,
+    pub commit_id: CommitId,
+    pub content: Vec<u8>,
+}
+
 const SCHEMA_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl QueryManager {
@@ -117,7 +123,67 @@ impl QueryManager {
         normalized
     }
 
-    fn load_row_with_schema_transform(
+    pub(super) fn resolve_latest_row_with_schema_transform(
+        id: ObjectId,
+        obj: &crate::object::Object,
+        branches: &[String],
+        table: &str,
+        branch_schema_map: &std::collections::HashMap<
+            String,
+            crate::query_manager::types::SchemaHash,
+        >,
+        schema_context: &crate::schema_manager::SchemaContext,
+    ) -> Option<ResolvedSchemaRow> {
+        let mut best: Option<(u64, Vec<u8>, CommitId, BranchName)> = None;
+
+        for branch_name in branches {
+            let branch_name = BranchName::new(branch_name);
+            let Some(branch) = obj.branches.get(&branch_name) else {
+                continue;
+            };
+            for &tip_id in &branch.tips {
+                let Some(commit) = branch.commits.get(&tip_id) else {
+                    continue;
+                };
+                if commit.content.is_empty() {
+                    continue;
+                }
+
+                match &best {
+                    None => {
+                        best = Some((
+                            commit.timestamp,
+                            commit.content.clone(),
+                            tip_id,
+                            branch_name,
+                        ));
+                    }
+                    Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
+                        best = Some((
+                            commit.timestamp,
+                            commit.content.clone(),
+                            tip_id,
+                            branch_name,
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let (_, content, commit_id, branch_name) = best?;
+        Self::transform_row_with_schema(
+            id,
+            content,
+            commit_id,
+            branch_name,
+            table,
+            branch_schema_map,
+            schema_context,
+        )
+    }
+
+    pub(super) fn transform_row_with_schema(
         id: ObjectId,
         content: Vec<u8>,
         commit_id: CommitId,
@@ -128,7 +194,7 @@ impl QueryManager {
             crate::query_manager::types::SchemaHash,
         >,
         schema_context: &crate::schema_manager::SchemaContext,
-    ) -> Option<LoadedRow> {
+    ) -> Option<ResolvedSchemaRow> {
         let source_hash = branch_schema_map.get(branch_name.as_str()).copied();
 
         if let Some(source_hash) = source_hash
@@ -137,11 +203,11 @@ impl QueryManager {
             let transformer = LensTransformer::new(schema_context, table);
             match transformer.transform(&content, commit_id, source_hash) {
                 Ok(result) => {
-                    return Some(LoadedRow::new(
-                        result.data,
+                    return Some(ResolvedSchemaRow {
+                        branch_name,
                         commit_id,
-                        [(id, branch_name)].into_iter().collect(),
-                    ));
+                        content: result.data,
+                    });
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -158,11 +224,21 @@ impl QueryManager {
             }
         }
 
-        Some(LoadedRow::new(
-            content,
+        Some(ResolvedSchemaRow {
+            branch_name,
             commit_id,
-            [(id, branch_name)].into_iter().collect(),
-        ))
+            content,
+        })
+    }
+
+    fn branch_has_live_tip(branch: &crate::object::Branch) -> bool {
+        branch.tips.iter().any(|tip_id| {
+            branch
+                .commits
+                .get(tip_id)
+                .map(|commit| !commit.content.is_empty())
+                .unwrap_or(false)
+        })
     }
 
     fn should_sync_policy_context_rows(&self, client_id: ClientId) -> bool {
@@ -210,14 +286,7 @@ impl QueryManager {
                 let Some(branch) = object.branches.get(branch_name) else {
                     continue;
                 };
-                let has_live_tip = branch.tips.iter().any(|tip_id| {
-                    branch
-                        .commits
-                        .get(tip_id)
-                        .map(|commit| !commit.content.is_empty())
-                        .unwrap_or(false)
-                });
-                if has_live_tip {
+                if Self::branch_has_live_tip(branch) {
                     scope.insert((*object_id, *branch_name));
                 }
             }
@@ -295,46 +364,19 @@ impl QueryManager {
             let table = sub.query.table.as_str().to_string();
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
                 let obj = om.get_or_load(id, storage_ref, &branches)?;
-                let mut best: Option<(u64, Vec<u8>, CommitId, BranchName)> = None;
-                for branch_name in &branches {
-                    let branch_name = BranchName::new(branch_name);
-                    if let Some(branch) = obj.branches.get(&branch_name) {
-                        for &tip_id in &branch.tips {
-                            if let Some(commit) = branch.commits.get(&tip_id) {
-                                match &best {
-                                    None => {
-                                        best = Some((
-                                            commit.timestamp,
-                                            commit.content.clone(),
-                                            tip_id,
-                                            branch_name,
-                                        ));
-                                    }
-                                    Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
-                                        best = Some((
-                                            commit.timestamp,
-                                            commit.content.clone(),
-                                            tip_id,
-                                            branch_name,
-                                        ));
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-                let (_, content, commit_id, branch_name) =
-                    best.filter(|(_, content, _, _)| !content.is_empty())?;
-                Self::load_row_with_schema_transform(
+                let resolved = Self::resolve_latest_row_with_schema_transform(
                     id,
-                    content,
-                    commit_id,
-                    branch_name,
+                    obj,
+                    &branches,
                     &table,
                     &branch_schema_map,
                     &subscription_context,
-                )
+                )?;
+                Some(LoadedRow::new(
+                    resolved.content,
+                    resolved.commit_id,
+                    [(id, resolved.branch_name)].into_iter().collect(),
+                ))
             };
 
             let _delta = graph.settle(storage_ref, row_loader);
@@ -461,46 +503,19 @@ impl QueryManager {
             // Row loader for this subscription
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
                 let obj = om.get_or_load(id, storage, branches)?;
-                let mut best: Option<(u64, Vec<u8>, CommitId, BranchName)> = None;
-                for branch_name in branches {
-                    let branch_name = BranchName::new(branch_name);
-                    if let Some(branch) = obj.branches.get(&branch_name) {
-                        for &tip_id in &branch.tips {
-                            if let Some(commit) = branch.commits.get(&tip_id) {
-                                match &best {
-                                    None => {
-                                        best = Some((
-                                            commit.timestamp,
-                                            commit.content.clone(),
-                                            tip_id,
-                                            branch_name,
-                                        ));
-                                    }
-                                    Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
-                                        best = Some((
-                                            commit.timestamp,
-                                            commit.content.clone(),
-                                            tip_id,
-                                            branch_name,
-                                        ));
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-                let (_, content, commit_id, branch_name) =
-                    best.filter(|(_, content, _, _)| !content.is_empty())?;
-                Self::load_row_with_schema_transform(
+                let resolved = Self::resolve_latest_row_with_schema_transform(
                     id,
-                    content,
-                    commit_id,
-                    branch_name,
+                    obj,
+                    branches,
                     &table,
                     &branch_schema_map,
                     &sub.schema_context,
-                )
+                )?;
+                Some(LoadedRow::new(
+                    resolved.content,
+                    resolved.commit_id,
+                    [(id, resolved.branch_name)].into_iter().collect(),
+                ))
             };
 
             let new_scope = {

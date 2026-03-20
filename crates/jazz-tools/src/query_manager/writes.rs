@@ -152,48 +152,7 @@ impl QueryManager {
         current_branch: &str,
         sibling_schema_branches: &[String],
     ) -> Option<(String, String, Vec<u8>, CommitId)> {
-        let load_latest_from = |obj: &crate::object::Object,
-                                branches: &[String]|
-         -> Option<(String, Vec<u8>, CommitId)> {
-            let mut best: Option<(u64, String, Vec<u8>, CommitId)> = None;
-
-            for branch_name in branches {
-                let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) else {
-                    continue;
-                };
-                for &tip_id in &branch.tips {
-                    let Some(commit) = branch.commits.get(&tip_id) else {
-                        continue;
-                    };
-                    if commit.content.is_empty() {
-                        continue;
-                    }
-
-                    match &best {
-                        None => {
-                            best = Some((
-                                commit.timestamp,
-                                branch_name.clone(),
-                                commit.content.clone(),
-                                tip_id,
-                            ));
-                        }
-                        Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
-                            best = Some((
-                                commit.timestamp,
-                                branch_name.clone(),
-                                commit.content.clone(),
-                                tip_id,
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            best.map(|(_, branch_name, content, commit_id)| (branch_name, content, commit_id))
-        };
-
+        let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
         let current_only = vec![current_branch.to_string()];
         let current_obj =
             self.sync_manager
@@ -203,18 +162,42 @@ impl QueryManager {
             .metadata
             .get(MetadataKey::Table.as_str())?
             .clone();
-        if let Some((branch_name, content, commit_id)) =
-            load_latest_from(current_obj, &current_only)
-        {
-            return Some((table, branch_name, content, commit_id));
+        if let Some(resolved) = Self::resolve_latest_row_with_schema_transform(
+            id,
+            current_obj,
+            &current_only,
+            &table,
+            &branch_schema_map,
+            &self.schema_context,
+        ) {
+            return Some((
+                table,
+                resolved.branch_name.as_str().to_string(),
+                resolved.content,
+                resolved.commit_id,
+            ));
         }
 
         let sibling_obj =
             self.sync_manager
                 .object_manager
                 .get_or_load(id, storage, sibling_schema_branches)?;
-        load_latest_from(sibling_obj, sibling_schema_branches)
-            .map(|(branch_name, content, commit_id)| (table, branch_name, content, commit_id))
+        Self::resolve_latest_row_with_schema_transform(
+            id,
+            sibling_obj,
+            sibling_schema_branches,
+            &table,
+            &branch_schema_map,
+            &self.schema_context,
+        )
+        .map(|resolved| {
+            (
+                table,
+                resolved.branch_name.as_str().to_string(),
+                resolved.content,
+                resolved.commit_id,
+            )
+        })
     }
 
     /// Insert a new row into a table.

@@ -927,7 +927,7 @@ impl SchemaManager {
             .into_iter()
             .filter(|branch| branch != &current_branch)
             .collect::<Vec<_>>();
-        let (table, source_branch, source_data, source_commit_id) = self
+        let (table, source_branch, old_current_data, _source_commit_id) = self
             .query_manager
             .load_row_for_schema_update(storage, object_id, &current_branch, &other_schema_branches)
             .ok_or(QueryError::ObjectNotFound(object_id))?;
@@ -940,17 +940,6 @@ impl SchemaManager {
             .ok_or(QueryError::TableNotFound(table_name))?
             .columns
             .clone();
-
-        let old_current_data = match self.branch_schema_map().get(&source_branch).copied() {
-            Some(source_hash) if source_hash != self.context.current_hash => {
-                self.transformer(&table)
-                    .transform(&source_data, source_commit_id, source_hash)
-                    .map_err(|err| QueryError::EncodingError(err.to_string()))?
-                    .data
-            }
-            Some(_) => source_data.clone(),
-            None => return Err(QueryError::ObjectNotFound(object_id)),
-        };
 
         let mut current_values = decode_row(&descriptor, &old_current_data)
             .map_err(|err| QueryError::EncodingError(format!("{err:?}")))?;
