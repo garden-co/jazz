@@ -922,14 +922,10 @@ impl SchemaManager {
         session: Option<&Session>,
     ) -> Result<crate::commit::CommitId, QueryError> {
         let current_branch = self.context.branch_name().as_str().to_string();
-        let other_schema_branches = self
-            .all_branch_strings()
-            .into_iter()
-            .filter(|branch| branch != &current_branch)
-            .collect::<Vec<_>>();
+        let branches = self.all_branch_strings();
         let (table, source_branch, old_current_data, _source_commit_id) = self
             .query_manager
-            .load_row_for_schema_update(storage, object_id, &current_branch, &other_schema_branches)
+            .load_row_for_schema_update(storage, object_id, &branches)
             .ok_or(QueryError::ObjectNotFound(object_id))?;
 
         let table_name = TableName::new(&table);
