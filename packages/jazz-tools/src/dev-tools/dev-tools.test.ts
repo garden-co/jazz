@@ -1,15 +1,21 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { wrap, type Remote } from "comlink";
 import { attachDevTools } from "./dev-tools.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,
-  DEVTOOLS_COMMANDS,
+  DEVTOOLS_CONTROL_MESSAGES,
   DEVTOOLS_EVENTS,
+  type DevtoolsBridgeApi,
+  type DevtoolsControlMessage,
   type DevtoolsEventEnvelope,
-  type DevtoolsResponseEnvelope,
 } from "./protocol.js";
 import type { ActiveQuerySubscriptionTrace } from "../runtime/db.js";
 
-type MessageListener = (event: { source: FakeWindow; data: unknown }) => void;
+type MessageListener = (event: {
+  source: FakeWindow;
+  data: unknown;
+  ports: readonly MessagePort[];
+}) => void;
 
 class FakeWindow {
   private readonly listeners = new Set<MessageListener>();
@@ -26,9 +32,10 @@ class FakeWindow {
     }
   }
 
-  postMessage(data: unknown): void {
+  postMessage(data: unknown, _targetOrigin?: string, transfer?: Transferable[]): void {
+    const ports = (transfer ?? []) as MessagePort[];
     for (const listener of Array.from(this.listeners)) {
-      listener({ source: this, data });
+      listener({ source: this, data, ports });
     }
   }
 }
@@ -43,27 +50,6 @@ afterEach(() => {
     (globalThis as { window?: unknown }).window = originalWindow;
   }
 });
-
-function waitForResponse(
-  fakeWindow: FakeWindow,
-  requestId: string,
-): Promise<DevtoolsResponseEnvelope> {
-  return new Promise((resolve) => {
-    const listener: MessageListener = (event) => {
-      const message = event.data as Partial<DevtoolsResponseEnvelope>;
-      if (
-        message.channel !== DEVTOOLS_BRIDGE_CHANNEL ||
-        message.kind !== "response" ||
-        message.requestId !== requestId
-      ) {
-        return;
-      }
-      fakeWindow.removeEventListener("message", listener);
-      resolve(message as DevtoolsResponseEnvelope);
-    };
-    fakeWindow.addEventListener("message", listener);
-  });
-}
 
 function waitForEvent(
   fakeWindow: FakeWindow,
@@ -90,6 +76,46 @@ function waitForEvent(
     };
     fakeWindow.addEventListener("message", listener);
   });
+}
+
+async function connectBridge(
+  fakeWindow: FakeWindow,
+): Promise<{ bridge: Remote<DevtoolsBridgeApi>; dispose: () => void }> {
+  const channel = new MessageChannel();
+  channel.port1.start?.();
+  channel.port2.start?.();
+
+  await new Promise<void>((resolve) => {
+    const onReadyMessage = (event: MessageEvent) => {
+      const message = event.data as Partial<DevtoolsControlMessage>;
+      if (
+        message.channel !== DEVTOOLS_BRIDGE_CHANNEL ||
+        message.kind !== DEVTOOLS_CONTROL_MESSAGES.COMLINK_READY
+      ) {
+        return;
+      }
+
+      channel.port1.removeEventListener("message", onReadyMessage);
+      resolve();
+    };
+
+    channel.port1.addEventListener("message", onReadyMessage);
+    fakeWindow.postMessage(
+      {
+        channel: DEVTOOLS_BRIDGE_CHANNEL,
+        kind: DEVTOOLS_CONTROL_MESSAGES.COMLINK_CONNECT,
+      },
+      "*",
+      [channel.port2],
+    );
+  });
+
+  return {
+    bridge: wrap<DevtoolsBridgeApi>(channel.port1),
+    dispose() {
+      channel.port1.close();
+    },
+  };
 }
 
 describe("attachDevTools active query subscription bridge", () => {
@@ -163,41 +189,23 @@ describe("attachDevTools active query subscription bridge", () => {
 
     await attachDevTools({ db: fakeDb as any }, {} as any);
 
-    const announceRequestId = "announce-1";
-    const announceResponsePromise = waitForResponse(fakeWindow, announceRequestId);
-    fakeWindow.postMessage({
-      channel: DEVTOOLS_BRIDGE_CHANNEL,
-      kind: "request",
-      requestId: announceRequestId,
-      command: DEVTOOLS_COMMANDS.ANNOUNCE,
-      payload: {},
-    });
-
-    expect((await announceResponsePromise).ok).toBe(true);
-
-    const listRequestId = "list-1";
-    const listResponsePromise = waitForResponse(fakeWindow, listRequestId);
-    fakeWindow.postMessage({
-      channel: DEVTOOLS_BRIDGE_CHANNEL,
-      kind: "request",
-      requestId: listRequestId,
-      command: DEVTOOLS_COMMANDS.CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS,
-      payload: {},
-    });
-
-    expect((await listResponsePromise).payload).toEqual(initialSubscriptions);
+    const { bridge, dispose } = await connectBridge(fakeWindow);
+    expect((await bridge.announce()).ready).toBe(true);
+    expect(await bridge.listActiveQuerySubscriptions()).toEqual(initialSubscriptions);
 
     const eventPromise = waitForEvent(
       fakeWindow,
       DEVTOOLS_EVENTS.CLIENT_ACTIVE_QUERY_SUBSCRIPTIONS_CHANGED,
     );
     currentSubscriptions = nextSubscriptions;
-    if (notifySubscriptionsChange) {
-      // @ts-expect-error
-      notifySubscriptionsChange(nextSubscriptions);
-    }
+    (
+      notifySubscriptionsChange as
+        | ((subscriptions: readonly ActiveQuerySubscriptionTrace[]) => void)
+        | null
+    )?.(nextSubscriptions);
 
     expect((await eventPromise).payload.subscriptions).toEqual(nextSubscriptions);
+    dispose();
   });
 });
 
@@ -227,24 +235,16 @@ describe("attachDevTools mutation bridge", () => {
 
     await attachDevTools({ db: fakeDb as any }, {} as any);
 
-    const requestId = "insert-1";
-    const responsePromise = waitForResponse(fakeWindow, requestId);
-    fakeWindow.postMessage({
-      channel: DEVTOOLS_BRIDGE_CHANNEL,
-      kind: "request",
-      requestId,
-      command: DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE,
-      payload: {
-        table: "todos",
-        values: [{ type: "Text", value: "hello" }],
-        tier: "worker",
-      },
+    const { bridge, dispose } = await connectBridge(fakeWindow);
+    const response = await bridge.insertDurable({
+      table: "todos",
+      values: [{ type: "Text", value: "hello" }],
+      tier: "worker",
     });
 
-    const response = await responsePromise;
-    expect(response.ok).toBe(true);
-    expect(response.payload).toEqual(insertedRow);
+    expect(response).toEqual(insertedRow);
     expect(createDurable).toHaveBeenCalledWith("todos", insertedRow.values, { tier: "worker" });
+    dispose();
   });
 
   it("routes client.updateDurable to runtime updateDurable", async () => {
@@ -268,30 +268,22 @@ describe("attachDevTools mutation bridge", () => {
 
     await attachDevTools({ db: fakeDb as any }, {} as any);
 
-    const requestId = "update-1";
-    const responsePromise = waitForResponse(fakeWindow, requestId);
-    fakeWindow.postMessage({
-      channel: DEVTOOLS_BRIDGE_CHANNEL,
-      kind: "request",
-      requestId,
-      command: DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE,
-      payload: {
-        objectId: "row-1",
-        updates: {
-          title: { type: "Text", value: "updated" },
-        },
-        tier: "edge",
+    const { bridge, dispose } = await connectBridge(fakeWindow);
+    const response = await bridge.updateDurable({
+      objectId: "row-1",
+      updates: {
+        title: { type: "Text", value: "updated" },
       },
+      tier: "edge",
     });
 
-    const response = await responsePromise;
-    expect(response.ok).toBe(true);
-    expect(response.payload).toEqual({ updated: true });
+    expect(response).toEqual({ updated: true });
     expect(updateDurable).toHaveBeenCalledWith(
       "row-1",
       { title: { type: "Text", value: "updated" } },
       { tier: "edge" },
     );
+    dispose();
   });
 
   it("routes client.deleteDurable to runtime deleteDurable", async () => {
@@ -315,23 +307,15 @@ describe("attachDevTools mutation bridge", () => {
 
     await attachDevTools({ db: fakeDb as any }, {} as any);
 
-    const requestId = "delete-1";
-    const responsePromise = waitForResponse(fakeWindow, requestId);
-    fakeWindow.postMessage({
-      channel: DEVTOOLS_BRIDGE_CHANNEL,
-      kind: "request",
-      requestId,
-      command: DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE,
-      payload: {
-        objectId: "row-1",
-        tier: "global",
-      },
+    const { bridge, dispose } = await connectBridge(fakeWindow);
+    const response = await bridge.deleteDurable({
+      objectId: "row-1",
+      tier: "global",
     });
 
-    const response = await responsePromise;
-    expect(response.ok).toBe(true);
-    expect(response.payload).toEqual({ deleted: true });
+    expect(response).toEqual({ deleted: true });
     expect(deleteDurable).toHaveBeenCalledWith("row-1", { tier: "global" });
+    dispose();
   });
 
   it("returns command-specific errors for invalid mutation payloads", async () => {
@@ -354,40 +338,28 @@ describe("attachDevTools mutation bridge", () => {
 
     await attachDevTools({ db: fakeDb as any }, {} as any);
 
-    const invalidCases = [
-      {
-        requestId: "invalid-insert",
-        command: DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE,
-        payload: { table: 123, values: [] },
-        expectedMessage: "Invalid payload for client.insertDurable.",
-      },
-      {
-        requestId: "invalid-update",
-        command: DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE,
-        payload: { objectId: "row-1", updates: null },
-        expectedMessage: "Invalid payload for client.updateDurable.",
-      },
-      {
-        requestId: "invalid-delete",
-        command: DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE,
-        payload: { objectId: 123 },
-        expectedMessage: "Invalid payload for client.deleteDurable.",
-      },
-    ];
+    const { bridge, dispose } = await connectBridge(fakeWindow);
 
-    for (const testCase of invalidCases) {
-      const responsePromise = waitForResponse(fakeWindow, testCase.requestId);
-      fakeWindow.postMessage({
-        channel: DEVTOOLS_BRIDGE_CHANNEL,
-        kind: "request",
-        requestId: testCase.requestId,
-        command: testCase.command,
-        payload: testCase.payload,
-      });
+    await expect(
+      bridge.insertDurable({
+        table: 123 as unknown as string,
+        values: [],
+      } as any),
+    ).rejects.toThrow("Invalid payload for client.insertDurable.");
 
-      const response = await responsePromise;
-      expect(response.ok).toBe(false);
-      expect(response.error?.message).toBe(testCase.expectedMessage);
-    }
+    await expect(
+      bridge.updateDurable({
+        objectId: "row-1",
+        updates: null,
+      } as any),
+    ).rejects.toThrow("Invalid payload for client.updateDurable.");
+
+    await expect(
+      bridge.deleteDurable({
+        objectId: 123 as unknown as string,
+      } as any),
+    ).rejects.toThrow("Invalid payload for client.deleteDurable.");
+
+    dispose();
   });
 });
