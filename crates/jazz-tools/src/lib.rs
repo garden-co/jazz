@@ -149,13 +149,13 @@ pub struct SubscriptionHandle(pub u64);
 /// Stream of row deltas from a subscription.
 #[cfg(feature = "client")]
 pub struct SubscriptionStream {
-    receiver: tokio::sync::mpsc::Receiver<OrderedRowDelta>,
+    receiver: tokio::sync::mpsc::UnboundedReceiver<OrderedRowDelta>,
 }
 
 #[cfg(feature = "client")]
 impl SubscriptionStream {
     /// Create a new subscription stream.
-    pub(crate) fn new(receiver: tokio::sync::mpsc::Receiver<OrderedRowDelta>) -> Self {
+    pub(crate) fn new(receiver: tokio::sync::mpsc::UnboundedReceiver<OrderedRowDelta>) -> Self {
         Self { receiver }
     }
 

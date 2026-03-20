@@ -311,7 +311,7 @@ impl JazzClient {
         // tx is moved directly into the callback so the delta is never dropped due
         // to the race where immediate_tick fires the callback before we can insert
         // tx into a shared map.
-        let (tx, rx) = mpsc::channel::<OrderedRowDelta>(64);
+        let (tx, rx) = mpsc::unbounded_channel::<OrderedRowDelta>();
 
         // Register with runtime using callback pattern
         // The callback bridges runtime updates to the channel
@@ -320,9 +320,9 @@ impl JazzClient {
             .subscribe(
                 query.clone(),
                 move |delta| {
-                    // Route delta to the subscription's channel.
-                    // Note: We use try_send since we're in a sync callback.
-                    let _ = tx.try_send(delta.ordered_delta);
+                    // Route delta to the subscription stream without dropping
+                    // updates when the consumer falls briefly behind.
+                    let _ = tx.send(delta.ordered_delta);
                 },
                 session,
             )

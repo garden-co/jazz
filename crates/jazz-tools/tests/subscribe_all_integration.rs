@@ -8,13 +8,14 @@ use jazz_tools::query_manager::encoding::decode_row;
 use jazz_tools::query_manager::types::RowDescriptor;
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
-    ColumnType, JazzClient, ObjectId, OrderedRowDelta, Query, QueryBuilder, Schema, SchemaBuilder,
-    TableSchema, Value,
+    AppContext, AppId, ClientStorage, ColumnType, JazzClient, ObjectId, OrderedRowDelta, Query,
+    QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
 };
 use support::{
     TestingClient, collect_stream_deltas, has_added, has_any_change, has_removed, has_updated,
-    wait_for_rows, wait_for_subscription_update,
+    wait_for_query, wait_for_rows, wait_for_subscription_update,
 };
+use tempfile::TempDir;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
@@ -256,6 +257,67 @@ fn last_updated_todo_title(
     })
 }
 
+fn last_row_bearing_todo_title(
+    log: &[OrderedRowDelta],
+    descriptor: &RowDescriptor,
+    todo_id: ObjectId,
+) -> Option<String> {
+    let title_index = descriptor.column_index("title")?;
+
+    log.iter().rev().find_map(|delta| {
+        delta
+            .updated
+            .iter()
+            .rev()
+            .find_map(|change| {
+                if change.id != todo_id {
+                    return None;
+                }
+
+                let row = change.row.as_ref()?;
+                let values = decode_row(descriptor, &row.data).ok()?;
+                match values.get(title_index) {
+                    Some(Value::Text(title)) => Some(title.clone()),
+                    _ => None,
+                }
+            })
+            .or_else(|| {
+                delta.added.iter().rev().find_map(|change| {
+                    if change.id != todo_id {
+                        return None;
+                    }
+
+                    let values = decode_row(descriptor, &change.row.data).ok()?;
+                    match values.get(title_index) {
+                        Some(Value::Text(title)) => Some(title.clone()),
+                        _ => None,
+                    }
+                })
+            })
+    })
+}
+
+async fn start_local_client(schema: Schema) -> (TempDir, JazzClient) {
+    let temp_dir = TempDir::new().expect("create local client temp dir");
+    let context = AppContext {
+        app_id: AppId::from_name("subscribe-all-local-overflow"),
+        client_id: None,
+        schema,
+        server_url: String::new(),
+        data_dir: temp_dir.path().to_path_buf(),
+        storage: ClientStorage::Memory,
+        jwt_token: None,
+        backend_secret: None,
+        admin_secret: None,
+    };
+
+    let client = JazzClient::connect(context)
+        .await
+        .expect("connect local test client");
+
+    (temp_dir, client)
+}
+
 /// Verifies that a subscription emits add, update, and remove deltas as a row
 /// enters, changes within, and leaves the query result set, and that the
 /// materialized query result stays consistent throughout.
@@ -365,25 +427,22 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
 ///
 /// TODO:
 /// Keep this test ignored until the client preserves "latest write wins" during
-/// a burst of updates. The assertion is fine; the client path in src/client.rs
-/// still has two burst-load bugs:
+/// a burst of updates. The assertion is fine; the remaining burst-load bug is
+/// in the writer's outbound sync path:
 ///
 /// 1. Outgoing updates are sent in separate spawned tasks, so a fast sequence of
 ///    writes can reach the server in a different order than the writer produced
 ///    them.
-/// 2. Incoming subscription updates are pushed with `try_send` into a fixed-size
-///    channel, so a slow subscriber can silently drop updates, including the
-///    final one that should carry the last title.
 ///
-/// That means Bob can read the correct final row state from the server, while
-/// Bob's live subscription stream still ends on an older value.
+/// The subscriber-side drop case is avoided by using an unbounded local stream,
+/// but that still does not fix out-of-order delivery to the server.
 ///
 /// ```text
 /// intended
 /// --------
 /// Alice writes:  title-001 -> title-002 -> ... -> title-500
 /// Server state:  title-001 -> title-002 -> ... -> title-500
-/// Bob stream:    add ...... update ...... last update = title-500
+/// Bob stream:    add ...... update ...... last row-bearing delta = title-500
 ///
 /// current failure modes
 /// ---------------------
@@ -391,16 +450,12 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
 /// Alice writes:  title-001 -> title-002 -> title-003
 /// Server sees:   title-002 -> title-001 -> title-003
 ///
-/// subscriber channel can overflow:
-/// Server sends:  add -> update -> update -> ... -> update(final)
-/// Bob channel:   keep   keep     keep         full -> drop(final)
-///
 /// result:
 /// Bob snapshot query    = title-500
 /// Bob last stream delta != title-500
 /// ```
 #[tokio::test]
-#[ignore = "TODO: fix burst update ordering/dropping in crates/jazz-tools/src/client.rs"]
+#[ignore = "TODO: fix the sync reliability gaps specs/todo/a_mvp/sync_protocol_reliability_gaps.md"]
 async fn subscription_reflects_final_state_after_rapid_bulk_updates() {
     const RAPID_UPDATES: usize = 500;
 
@@ -720,6 +775,103 @@ async fn subscribe_all_supports_condition_filters() {
 
     writer.shutdown().await.expect("shutdown condition writer");
     server.shutdown().await;
+}
+
+/// Verifies that a rapid burst of local updates still leaves the subscription
+/// stream carrying the final row state.
+///
+/// This test uses a single local client so it isolates the subscription
+/// delivery path from server sync ordering.
+#[tokio::test]
+async fn local_subscription_preserves_final_state_under_rapid_updates() {
+    const RAPID_UPDATES: usize = 100;
+
+    let (_temp_dir, client) = start_local_client(subscription_schema()).await;
+    let query = QueryBuilder::new("todos").build();
+    let runtime_schema = client.schema().await.expect("load local runtime schema");
+    let descriptor = todo_descriptor(&runtime_schema);
+
+    let mut stream = client
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe to local todos");
+    let mut log = Vec::new();
+
+    let todo_id = create_todo(
+        &client,
+        TodoSeed {
+            title: "local-bulk-000",
+            done: false,
+            priority: Some(1),
+            tags: &["burst"],
+            payload: None,
+        },
+    )
+    .await;
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "initial local add before rapid updates",
+        |log| has_added(log, todo_id),
+    )
+    .await;
+    log.clear();
+
+    let final_title = format!("local-bulk-{RAPID_UPDATES:03}");
+    for revision in 1..=RAPID_UPDATES {
+        client
+            .update(
+                todo_id,
+                vec![(
+                    "title".to_string(),
+                    Value::Text(format!("local-bulk-{revision:03}")),
+                )],
+            )
+            .await
+            .expect("apply rapid local update");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    let rows = wait_for_query(
+        &client,
+        query.clone(),
+        None,
+        QUERY_TIMEOUT,
+        format!("local client sees final bulk title {final_title}"),
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == todo_id
+                && rows[0].1.first() == Some(&Value::Text(final_title.clone())))
+            .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1[0], Value::Text(final_title.clone()));
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "local stream carries the final row-bearing delta after rapid updates",
+        |log| {
+            last_row_bearing_todo_title(log, &descriptor, todo_id).as_deref()
+                == Some(final_title.as_str())
+        },
+    )
+    .await;
+    collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
+
+    let latest_delta_title = last_row_bearing_todo_title(&log, &descriptor, todo_id);
+    assert_eq!(
+        latest_delta_title.as_deref(),
+        Some(final_title.as_str()),
+        "last row-bearing local delta should converge to the final title after rapid updates"
+    );
+
+    client.shutdown().await.expect("shutdown local client");
 }
 
 /// Verifies that a `Bytea` column value, including interior zero bytes, survives
