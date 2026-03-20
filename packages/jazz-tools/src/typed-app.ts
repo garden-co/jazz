@@ -15,10 +15,72 @@ import type { QueryBuilder } from "./runtime/db.js";
 import type { Column, Schema as SchemaAst, SqlType, TSTypeFromSqlType } from "./schema.js";
 
 export type TableDefinition = Record<string, AnyTypedColumnBuilder>;
-export type SchemaDefinition = Record<string, TableDefinition>;
+
+export interface TableIndex<TColumns extends TableDefinition = TableDefinition> {
+  readonly name: string;
+  readonly columns: readonly Extract<keyof TColumns, string>[];
+}
+
+// Wrap table columns so we can hang chained modifiers like .index(...) off tables
+// without changing the column-level schema representation the runtime uses today.
+export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
+  public readonly __jazzTableDefinition = true as const;
+
+  constructor(
+    public readonly columns: TColumns,
+    public readonly indexes: readonly TableIndex[] = [],
+  ) {}
+
+  index<
+    const TName extends string,
+    const TColumnsForIndex extends readonly [
+      Extract<keyof TColumns, string>,
+      ...Extract<keyof TColumns, string>[],
+    ],
+  >(name: TName, columns: TColumnsForIndex): DefinedTable<TColumns> {
+    const normalizedName = name.trim();
+    if (!normalizedName) {
+      throw new Error("table.index(...) requires a non-empty index name.");
+    }
+
+    const normalizedColumns = [...columns] as Extract<keyof TColumns, string>[];
+    for (const column of normalizedColumns) {
+      if (!(column in this.columns)) {
+        throw new Error(`table.index(...) references unknown column "${column}".`);
+      }
+    }
+
+    return new DefinedTable(this.columns, [
+      ...this.indexes,
+      {
+        name: normalizedName,
+        columns: normalizedColumns,
+      },
+    ]);
+  }
+}
+
+export function defineTable<const TColumns extends TableDefinition>(
+  columns: TColumns,
+): DefinedTable<TColumns> {
+  return new DefinedTable(columns);
+}
+
+type TableSource<TColumns extends TableDefinition = TableDefinition> =
+  | TColumns
+  | DefinedTable<TColumns>;
+
+type NormalizeTableDefinition<TTable extends TableSource> =
+  TTable extends DefinedTable<infer TColumns>
+    ? Simplify<TColumns>
+    : TTable extends TableDefinition
+      ? Simplify<TTable>
+      : never;
+
+export type SchemaDefinition = Record<string, TableSource<TableDefinition>>;
 export type Simplify<T> = { [K in keyof T]: T[K] } & {};
 export type CompactSchema<TSchema extends SchemaDefinition> = Simplify<{
-  [TTable in keyof TSchema]: Simplify<TSchema[TTable]>;
+  [TTable in keyof TSchema]: NormalizeTableDefinition<TSchema[TTable]>;
 }>;
 
 declare const definedSchemaBrand: unique symbol;
@@ -29,12 +91,13 @@ export interface Schema<TSchema extends SchemaDefinition = SchemaDefinition> {
 export type DefinedSchema<TSchema extends SchemaDefinition = SchemaDefinition> = Schema<TSchema>;
 
 type SchemaLike = SchemaDefinition | Schema<any>;
+type SchemaColumns<TSchema extends SchemaDefinition> = CompactSchema<TSchema>;
 type InvalidRefTargetEntries<TSchema extends SchemaDefinition> = {
-  [TTable in Extract<keyof TSchema, string>]: {
+  [TTable in Extract<keyof SchemaColumns<TSchema>, string>]: {
     [TColumn in Extract<
-      keyof TSchema[TTable],
+      keyof SchemaColumns<TSchema>[TTable],
       string
-    >]: TSchema[TTable][TColumn] extends infer TBuilder extends AnyTypedColumnBuilder
+    >]: SchemaColumns<TSchema>[TTable][TColumn] extends infer TBuilder extends AnyTypedColumnBuilder
       ? ColumnBuilderSqlType<TBuilder> extends
           | "UUID"
           | {
@@ -43,7 +106,7 @@ type InvalidRefTargetEntries<TSchema extends SchemaDefinition> = {
             }
         ? ColumnBuilderReferences<TBuilder> extends infer TRef
           ? TRef extends string
-            ? TRef extends Extract<keyof TSchema, string>
+            ? TRef extends Extract<keyof SchemaColumns<TSchema>, string>
               ? never
               : {
                   table: TTable;
@@ -54,8 +117,8 @@ type InvalidRefTargetEntries<TSchema extends SchemaDefinition> = {
           : never
         : never
       : never;
-  }[Extract<keyof TSchema[TTable], string>];
-}[Extract<keyof TSchema, string>];
+  }[Extract<keyof SchemaColumns<TSchema>[TTable], string>];
+}[Extract<keyof SchemaColumns<TSchema>, string>];
 
 type ValidateSchemaRefs<TSchema extends SchemaDefinition> = [
   InvalidRefTargetEntries<TSchema>,
@@ -967,9 +1030,32 @@ export type WhereOf<TQuery> = TQuery extends { where(input: infer TWhere): unkno
   ? TWhere
   : never;
 
-function definitionToColumns(definition: TableDefinition): Column[] {
+export function unwrapTableDefinition<const TColumns extends TableDefinition>(
+  definition: TColumns | DefinedTable<TColumns>,
+): TColumns {
+  if (definition instanceof DefinedTable) {
+    return definition.columns;
+  }
+
+  if (typeof definition === "object" && definition !== null) {
+    const maybeDefinedTable = definition as {
+      __jazzTableDefinition?: unknown;
+      columns?: TColumns;
+    };
+    if (maybeDefinedTable.__jazzTableDefinition === true && maybeDefinedTable.columns) {
+      return maybeDefinedTable.columns;
+    }
+  }
+
+  return definition;
+}
+
+function definitionToColumns(
+  definition: TableDefinition | DefinedTable<TableDefinition>,
+): Column[] {
+  const columnsDefinition = unwrapTableDefinition(definition);
   const columns: Column[] = [];
-  for (const [columnName, builder] of Object.entries(definition)) {
+  for (const [columnName, builder] of Object.entries(columnsDefinition)) {
     assertUserColumnNameAllowed(columnName);
     columns.push(builder._build(columnName));
   }

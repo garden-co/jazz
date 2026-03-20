@@ -1,8 +1,8 @@
-import { definePermissions } from "jazz-tools/permissions";
+import { schema as s } from "jazz-tools";
 import { app } from "./schema.js";
 
 // #region files-permissions-ts
-export const fileBlobPermissions = definePermissions(app, ({ policy, allowedTo, session }) => {
+export const fileBlobPermissions = s.definePermissions(app, ({ policy, allowedTo, session }) => {
   policy.uploads.allowRead.where({ ownerId: session.user_id });
   policy.uploads.allowInsert.where({ ownerId: session.user_id });
   policy.uploads.allowUpdate.where({ ownerId: session.user_id });

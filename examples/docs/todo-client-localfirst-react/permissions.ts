@@ -1,8 +1,8 @@
-import { definePermissions } from "jazz-tools/permissions";
+import { schema as s } from "jazz-tools";
 import { app } from "./schema.js";
 
 // #region permissions-basic-react
-export default definePermissions(app, ({ policy }) => [
+export default s.definePermissions(app, ({ policy }) => [
   // Everyone can read todos.
   policy.todos.allowRead.where({}),
   // New todos start as incomplete.

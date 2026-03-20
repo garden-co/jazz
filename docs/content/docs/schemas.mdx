@@ -36,12 +36,12 @@ Every Jazz app defines its schema in a root `schema.ts`, including Rust backends
 
 Each top-level property of the `schema` object is a table. In the example above, `projects` and `todos` become tables, and each nested property becomes a column on that table.
 
-The `type AppSchema = Schema<typeof schema>; export const app: App<AppSchema> = defineApp(schema);` pattern is there to keep TypeScript hovers short and readable. Without that alias boundary, TypeScript tends to expand the entire schema literal when you hover `app`, `app.todos`, or derived row/query types.
+The `type AppSchema = s.Schema<typeof schema>; export const app: s.App<AppSchema> = s.defineApp(schema);` pattern is there to keep TypeScript hovers short and readable. Without that alias boundary, TypeScript tends to expand the entire schema literal when you hover `app`, `app.todos`, or derived row/query types.
 
 ## Datatypes and References
 
-- Use `col.string()`, `col.boolean()`, `col.int()`, `col.timestamp()`, and `col.bytes()` for scalar fields.
-- Use `col.ref("tableName")` for foreign keys. Jazz infers typed `.include(...)` relations directly from `schema.ts`.
+- Use `s.string()`, `s.boolean()`, `s.int()`, `s.timestamp()`, and `s.bytes()` for scalar fields.
+- Use `s.ref("tableName")` for foreign keys. Jazz infers typed `.include(...)` relations directly from `schema.ts`.
 - For browser files and large uploaded blobs, define the conventional `files` / `file_parts` tables and store a normal reference to `files` from your app rows. See [Files & Blobs](/docs/files-and-blobs).
 
 ### Available column types

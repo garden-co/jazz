@@ -134,7 +134,7 @@ Outside components (or when you need deltas), use `db.subscribeAll` directly:
 
 ### Relations with include
 
-If your schema has `col.ref()` columns, Jazz infers typed include interfaces directly from `schema.ts`. Use `.include()` to load related rows in one query.
+If your schema has `s.ref()` columns, Jazz infers typed include interfaces directly from `schema.ts`. Use `.include()` to load related rows in one query.
 
 <include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-react/src/docs-snippets.ts#includes-react
@@ -212,7 +212,7 @@ Full auth flows and server behavior: [Authentication](/docs/authentication).
 
 ## Permissions
 
-Define row-level policies in `permissions.ts` with `definePermissions(...)`:
+Define row-level policies in `permissions.ts` with `s.definePermissions(...)`:
 
 <include cwd lang="ts" title="permissions.ts">
   ../examples/docs/todo-client-localfirst-react/permissions.ts#permissions-basic-react

@@ -201,26 +201,26 @@ img {
 <h2 id="1-the-schema">1. The schema</h2>
 <p>The schema is written directly in <strong>TypeScript</strong> (<code>schema.ts</code>). Jazz validates that file and the app imports the typed <code>app</code> export from it directly.</p>
 <p><strong><a href="../schema.ts"><code>schema.ts</code></a></strong> — source of truth</p>
-<pre is="marp-pre" data-auto-scaling="downscale-only"><code class="language-typescript"><span class="hljs-keyword">import</span> { col, defineApp, <span class="hljs-keyword">type</span> <span class="hljs-title class_">Schema</span>, <span class="hljs-keyword">type</span> <span class="hljs-title class_">App</span> } <span class="hljs-keyword">from</span> <span class="hljs-string">&quot;jazz-tools&quot;</span>;
+<pre is="marp-pre" data-auto-scaling="downscale-only"><code class="language-typescript"><span class="hljs-keyword">import</span> { <span class="hljs-attr">schema</span>: s } <span class="hljs-keyword">from</span> <span class="hljs-string">&quot;jazz-tools&quot;</span>;
 
 <span class="hljs-keyword">const</span> schema = {
-  <span class="hljs-attr">instruments</span>: {
-    <span class="hljs-attr">name</span>: col.<span class="hljs-title function_">string</span>(),
-    <span class="hljs-attr">sound</span>: col.<span class="hljs-title function_">bytes</span>(), <span class="hljs-comment">// binary blobs are first-class</span>
-    <span class="hljs-attr">display_order</span>: col.<span class="hljs-title function_">int</span>(),
-  },
-  <span class="hljs-attr">beats</span>: {
-    <span class="hljs-attr">jamId</span>: col.<span class="hljs-title function_">ref</span>(<span class="hljs-string">&quot;jams&quot;</span>),
-    <span class="hljs-attr">instrumentId</span>: col.<span class="hljs-title function_">ref</span>(<span class="hljs-string">&quot;instruments&quot;</span>),
-    <span class="hljs-attr">beat_index</span>: col.<span class="hljs-title function_">int</span>(), <span class="hljs-comment">// 0–15</span>
-    <span class="hljs-attr">placed_by</span>: col.<span class="hljs-title function_">string</span>(), <span class="hljs-comment">// session user_id</span>
-  },
+  <span class="hljs-attr">instruments</span>: s.<span class="hljs-title function_">table</span>({
+    <span class="hljs-attr">name</span>: s.<span class="hljs-title function_">string</span>(),
+    <span class="hljs-attr">sound</span>: s.<span class="hljs-title function_">bytes</span>(), <span class="hljs-comment">// binary blobs are first-class</span>
+    <span class="hljs-attr">display_order</span>: s.<span class="hljs-title function_">int</span>(),
+  }),
+  <span class="hljs-attr">beats</span>: s.<span class="hljs-title function_">table</span>({
+    <span class="hljs-attr">jamId</span>: s.<span class="hljs-title function_">ref</span>(<span class="hljs-string">&quot;jams&quot;</span>),
+    <span class="hljs-attr">instrumentId</span>: s.<span class="hljs-title function_">ref</span>(<span class="hljs-string">&quot;instruments&quot;</span>),
+    <span class="hljs-attr">beat_index</span>: s.<span class="hljs-title function_">int</span>(), <span class="hljs-comment">// 0–15</span>
+    <span class="hljs-attr">placed_by</span>: s.<span class="hljs-title function_">string</span>(), <span class="hljs-comment">// session user_id</span>
+  }),
 };
 
-<span class="hljs-keyword">type</span> <span class="hljs-title class_">AppSchema</span> = <span class="hljs-title class_">Schema</span>&lt;<span class="hljs-keyword">typeof</span> schema&gt;;
-<span class="hljs-keyword">export</span> <span class="hljs-keyword">const</span> <span class="hljs-attr">app</span>: <span class="hljs-title class_">App</span>&lt;<span class="hljs-title class_">AppSchema</span>&gt; = <span class="hljs-title function_">defineApp</span>(schema);
+<span class="hljs-keyword">type</span> <span class="hljs-title class_">AppSchema</span> = s.<span class="hljs-title class_">Schema</span>&lt;<span class="hljs-keyword">typeof</span> schema&gt;;
+<span class="hljs-keyword">export</span> <span class="hljs-keyword">const</span> <span class="hljs-attr">app</span>: s.<span class="hljs-title class_">App</span>&lt;<span class="hljs-title class_">AppSchema</span>&gt; = s.<span class="hljs-title function_">defineApp</span>(schema);
 </code></pre>
-<p><code>col.ref()</code> declares foreign keys. <code>col.bytes()</code> maps to <code>Uint8Array</code> in TypeScript. The same file now gives us the typed <code>app</code> entry point — shown on the next slide.</p>
+<p><code>s.ref()</code> declares foreign keys. <code>s.bytes()</code> maps to <code>Uint8Array</code> in TypeScript. The same file now gives us the typed <code>app</code> entry point — shown on the next slide.</p>
 </section>
 </foreignObject></svg><svg data-marpit-svg="" viewBox="0 0 1280 720"><foreignObject width="1280" height="720"><section id="4" data-paginate="true" data-theme="default" data-style="section {
   font-size: 1.4rem;

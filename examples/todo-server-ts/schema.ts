@@ -1,18 +1,18 @@
-import { col, defineApp, type Schema, type App } from "jazz-tools";
+import { schema as s } from "jazz-tools";
 
 const schema = {
-  projects: {
-    name: col.string(),
-  },
-  todos: {
-    title: col.string(),
-    done: col.boolean(),
-    description: col.string().optional(),
-    parentId: col.ref("todos").optional(),
-    projectId: col.ref("projects").optional(),
-    ownerId: col.string(),
-  },
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
+    ownerId: s.string(),
+  }),
 };
 
-type AppSchema = Schema<typeof schema>;
-export const app: App<AppSchema> = defineApp(schema);
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);

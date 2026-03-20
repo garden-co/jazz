@@ -9,7 +9,7 @@ This page explains how to store images and other binary blobs in Jazz using brow
 `File`, and `ReadableStream` values. These files benefit from the same sync, local-first storage,
 and permission model as the rest of your structured data.
 
-Use plain `col.bytes()` when the binary value is small, naturally belongs on the row itself, and
+Use plain `s.bytes()` when the binary value is small, naturally belongs on the row itself, and
 should always load together with the rest of that row.
 
 ## Add the Conventional Tables

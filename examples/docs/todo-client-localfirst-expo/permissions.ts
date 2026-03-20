@@ -1,8 +1,8 @@
-import { definePermissions } from "jazz-tools/permissions";
+import { schema as s } from "jazz-tools";
 import { app } from "./schema.js";
 
 // #region permissions-basic-expo
-export default definePermissions(app, ({ policy, allOf, session }) => [
+export default s.definePermissions(app, ({ policy, allOf, session }) => [
   // Each user only sees their own rows.
   policy.todos.allowRead.where({ ownerId: session.user_id }),
   // New rows must belong to the current user.

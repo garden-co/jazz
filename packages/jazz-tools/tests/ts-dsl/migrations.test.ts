@@ -1,41 +1,40 @@
 import { describe, expect, it } from "vitest";
-import { col } from "../../src/dsl.js";
-import { defineMigration } from "../../src/migrations.js";
+import { schema as s } from "../../src/index.js";
 
 describe("typed migration object syntax", () => {
   it("serializes add, drop, and rename operations from the migrate object", () => {
-    const migration = defineMigration({
+    const migration = s.defineMigration({
       fromHash: "aaaaaaaaaaaa",
       toHash: "bbbbbbbbbbbb",
       from: {
-        users: {
-          email: col.string(),
-          legacyPriority: col.int().optional(),
-        },
-        todos: {
-          title: col.string(),
-          done: col.boolean(),
-        },
+        users: s.table({
+          email: s.string(),
+          legacyPriority: s.int().optional(),
+        }),
+        todos: s.table({
+          title: s.string(),
+          done: s.boolean(),
+        }),
       },
       to: {
-        users: {
-          emailAddress: col.string(),
-        },
-        todos: {
-          title: col.string(),
-          done: col.boolean(),
-          description: col.string().optional(),
-          ownerId: col.ref("users").optional(),
-        },
+        users: s.table({
+          emailAddress: s.string(),
+        }),
+        todos: s.table({
+          title: s.string(),
+          done: s.boolean(),
+          description: s.string().optional(),
+          ownerId: s.ref("users").optional(),
+        }),
       },
       migrate: {
         users: {
-          emailAddress: col.renameFrom("email"),
-          legacyPriority: col.drop.int({ backwardsDefault: null }),
+          emailAddress: s.renameFrom("email"),
+          legacyPriority: s.drop.int({ backwardsDefault: null }),
         },
         todos: {
-          description: col.add.string({ default: null }),
-          ownerId: col.add.ref("users", { default: null }),
+          description: s.add.string({ default: null }),
+          ownerId: s.add.ref("users", { default: null }),
         },
       },
     });
@@ -79,103 +78,103 @@ describe("typed migration object syntax", () => {
 
   it("typechecks migrate coverage and op shapes", () => {
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
-      defineMigration({
+      s.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          todos: {
-            title: col.string(),
-          },
+          todos: s.table({
+            title: s.string(),
+          }),
         },
         to: {
-          todos: {
-            title: col.string(),
-            description: col.string().optional(),
-          },
+          todos: s.table({
+            title: s.string(),
+            description: s.string().optional(),
+          }),
         },
         migrate: {
           todos: {
-            description: col.add.string({ default: null }),
+            description: s.add.string({ default: null }),
           },
         },
       });
 
-      defineMigration({
+      s.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          todos: {
-            title: col.string(),
-          },
+          todos: s.table({
+            title: s.string(),
+          }),
         },
         to: {
-          todos: {
-            title: col.string(),
-            description: col.string().optional(),
-          },
+          todos: s.table({
+            title: s.string(),
+            description: s.string().optional(),
+          }),
         },
         migrate: {
           todos: {
-            // @ts-expect-error added columns must use col.add.*(...) or col.renameFrom(...)
-            description: col.drop.string({ backwardsDefault: null }),
+            // @ts-expect-error added columns must use s.add.*(...) or s.renameFrom(...)
+            description: s.drop.string({ backwardsDefault: null }),
           },
         },
       });
 
-      defineMigration({
+      s.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          todos: {
-            title: col.string(),
-          },
+          todos: s.table({
+            title: s.string(),
+          }),
         },
         to: {
-          todos: {
-            title: col.string(),
-            description: col.string(),
-          },
+          todos: s.table({
+            title: s.string(),
+            description: s.string(),
+          }),
         },
         migrate: {
           todos: {
             // @ts-expect-error required added columns need a non-null default of the right type
-            description: col.add.string({ default: null }),
+            description: s.add.string({ default: null }),
           },
         },
       });
 
       // @ts-expect-error removed columns must be dropped or renamed from
-      defineMigration({
+      s.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          users: {
-            email: col.string(),
-          },
+          users: s.table({
+            email: s.string(),
+          }),
         },
         to: {
-          users: {},
+          users: s.table({}),
         },
         migrate: {},
       });
 
-      // @ts-expect-error col.renameFrom(...) must point at a removed column with the same type
-      defineMigration({
+      // @ts-expect-error s.renameFrom(...) must point at a removed column with the same type
+      s.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
         from: {
-          users: {
-            email: col.string(),
-          },
+          users: s.table({
+            email: s.string(),
+          }),
         },
         to: {
-          users: {
-            emailAddress: col.int(),
-          },
+          users: s.table({
+            emailAddress: s.int(),
+          }),
         },
         migrate: {
           users: {
-            emailAddress: col.renameFrom("email"),
+            emailAddress: s.renameFrom("email"),
           },
         },
       });

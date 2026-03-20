@@ -17,11 +17,13 @@ import type {
 } from "./schema.js";
 import type {
   CompactSchema,
+  DefinedTable,
   Schema as AppSchema,
   SchemaDefinition,
   Simplify,
   TableDefinition,
 } from "./typed-app.js";
+import { unwrapTableDefinition } from "./typed-app.js";
 
 type SchemaLike = SchemaDefinition | AppSchema<any>;
 
@@ -312,19 +314,35 @@ export interface DefinedMigration<
   readonly forward: Lens[];
 }
 
-function tableDefinitionToAst(tableName: string, definition: TableDefinition): SchemaAstTable {
+function tableDefinitionToAst(
+  tableName: string,
+  definition: TableDefinition | DefinedTable<TableDefinition>,
+): SchemaAstTable {
+  const columnsDefinition = unwrapTableDefinition(definition);
   return {
     name: tableName,
-    columns: Object.entries(definition).map(([columnName, builder]) => {
+    columns: Object.entries(columnsDefinition).map(([columnName, builder]) => {
       assertUserColumnNameAllowed(columnName);
       return builder._build(columnName);
     }),
   };
 }
 
+function normalizeSchemaDefinition(
+  definition: SchemaDefinition | AppSchema<any>,
+): Record<string, TableDefinition> {
+  return Object.fromEntries(
+    Object.entries(definition as SchemaDefinition).map(([tableName, tableDefinition]) => [
+      tableName,
+      unwrapTableDefinition(tableDefinition as TableDefinition | DefinedTable<TableDefinition>),
+    ]),
+  );
+}
+
 function definitionToSchema(definition: SchemaDefinition): SchemaAst {
+  const normalizedDefinition = normalizeSchemaDefinition(definition);
   return {
-    tables: Object.entries(definition).map(([tableName, tableDefinition]) =>
+    tables: Object.entries(normalizedDefinition).map(([tableName, tableDefinition]) =>
       tableDefinitionToAst(tableName, tableDefinition),
     ),
   };
@@ -445,8 +463,12 @@ export function defineMigration<
     migrate?: TMigrate;
   } & ValidateMigrationConfig<TFrom, TTo, TMigrate>,
 ): DefinedMigration<TFrom, TTo> {
-  const fromDefinition = config.from as unknown as NormalizedSchema<TFrom>;
-  const toDefinition = config.to as unknown as NormalizedSchema<TTo>;
+  const fromDefinition = normalizeSchemaDefinition(
+    config.from as SchemaDefinition,
+  ) as NormalizedSchema<TFrom>;
+  const toDefinition = normalizeSchemaDefinition(
+    config.to as SchemaDefinition,
+  ) as NormalizedSchema<TTo>;
 
   return {
     fromHash: config.fromHash,
