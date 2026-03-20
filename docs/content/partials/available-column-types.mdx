@@ -11,3 +11,5 @@
 | `col.enum("a", "b")`      | `"a" \| "b"`         | `ENUM('a','b')` |
 | `col.json()`              | `JsonValue`          | `JSON`          |
 | `col.json(schema)`        | inferred from schema | `JSON`          |
+
+> **Ref naming convention:** `col.ref()` columns must have a name ending in `Id` or `_id`. For `col.array(col.ref())`, the name must end in `Ids` or `_ids`. The runtime will throw if a ref column does not follow this convention.

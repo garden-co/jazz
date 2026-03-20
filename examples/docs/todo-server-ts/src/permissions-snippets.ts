@@ -38,6 +38,24 @@ definePermissions(app, ({ policy, allOf, session }) => {
 });
 // #endregion permissions-simple-ts
 
+// #region permissions-always-ts
+definePermissions(app, ({ policy }) => {
+  policy.todos.allowRead.always();
+  policy.todos.allowInsert.always();
+  policy.todos.allowUpdate.always();
+  policy.todos.allowDelete.always();
+});
+// #endregion permissions-always-ts
+
+// #region permissions-never-ts
+definePermissions(app, ({ policy }) => {
+  policy.todos.allowRead.never();
+  policy.todos.allowInsert.never();
+  policy.todos.allowUpdate.never();
+  policy.todos.allowDelete.never();
+});
+// #endregion permissions-never-ts
+
 // #region permissions-allowed-to-ts
 definePermissions(app, ({ policy, anyOf, allOf, allowedTo }) => {
   // Users can read a todo if it's not done, or if they can read its project
@@ -84,3 +102,11 @@ definePermissions(app, ({ policy, anyOf, session }) => {
   );
 });
 // #endregion permissions-shares-ts
+
+// #region permissions-session-claims-ts
+definePermissions(app, ({ policy, anyOf, session }) => {
+  policy.todos.allowRead.where(
+    anyOf([{ owner_id: session.user_id }, session.where({ "claims.role": "manager" })]),
+  );
+});
+// #endregion permissions-session-claims-ts

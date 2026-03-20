@@ -18,6 +18,12 @@ export function subscribeTodos(db: Db, onCount: (count: number) => void) {
 }
 // #endregion reading-subscriptions-ts
 
+// #region where-subscription-ts
+export function subscribeOpenTodos(db: Db, onChange: (todos: unknown[]) => void) {
+  return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onChange(all));
+}
+// #endregion where-subscription-ts
+
 // #region reading-durability-tier-ts
 export async function readTodosAtEdgeDurability(db: Db) {
   return db.all(app.todos.where({ done: false }), { tier: "edge", localUpdates: "immediate" });
@@ -80,10 +86,10 @@ export async function whereOperatorExamples(db: Db) {
 
   // #region where-null-ts
   // Rows where the optional ref is not set
-  const unlinkedTodos = await db.all(app.todos.where({ parent: { isNull: true } }));
+  const unlinkedTodos = await db.all(app.todos.where({ parentId: { isNull: true } }));
 
   // Rows where it is set
-  const linkedTodos = await db.all(app.todos.where({ parent: { isNull: false } }));
+  const linkedTodos = await db.all(app.todos.where({ parentId: { isNull: false } }));
   // #endregion where-null-ts
 
   // #region where-and-ts
@@ -91,7 +97,7 @@ export async function whereOperatorExamples(db: Db) {
   const doneWithProject = await db.all(
     app.todos.where({
       done: true,
-      project: { isNull: false },
+      projectId: { isNull: false },
     }),
   );
   // #endregion where-and-ts

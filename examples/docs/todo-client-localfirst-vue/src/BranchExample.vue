@@ -1,13 +1,13 @@
 <script setup lang="ts">
-  // #region branch-vue
-  import { createJazzClient, JazzProvider } from "jazz-tools/vue";
+// #region branch-vue
+import { createJazzClient, JazzProvider } from "jazz-tools/vue";
 
-  const client = createJazzClient({
-    appId: "my-app",
-    env: "prod",
-    userBranch: "staging",
-  });
-  // #endregion branch-vue
+const client = createJazzClient({
+  appId: "my-app",
+  env: "prod",
+  userBranch: "staging",
+});
+// #endregion branch-vue
 </script>
 
 <template>

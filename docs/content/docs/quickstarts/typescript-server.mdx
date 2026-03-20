@@ -1,102 +1,173 @@
 ---
 title: TypeScript Server
-description: Build a server-side TypeScript API with Jazz. Schema, request-scoped queries, streaming, and mutations.
+description: Build a server-side to-do API with Jazz and Hono, step by step.
+reviewedAt: "14cd73f0"
 ---
 
-import RunCodegen from "../../partials/quickstarts/run-codegen.mdx";
-import ServerAuthConfig from "../../partials/quickstarts/server-auth-config.mdx";
-import QuickstartSchemaTypesSummary from "../../partials/quickstarts/schema-types-summary.mdx";
+import { Callout } from "fumadocs-ui/components/callout";
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+
+## Create a project
+
+Start with a fresh project. If you already have one, skip to [Install](#install).
+
+```bash title="Terminal"
+mkdir my-jazz-app && cd my-jazz-app
+pnpm init
+```
 
 ## Install
 
-Install dependencies in your server app:
+`jazz-napi` is the native runtime for Jazz on Node.js. It bundles the query engine, storage, and sync layer as a Rust binary via NAPI. `jazz-tools` loads it automatically, but you need to make sure it's available by adding it manually.
 
-`pnpm add jazz-tools jazz-napi express`
-
-For full environment and server setup options, see [Setup](/docs/setup).
+```bash title="Terminal"
+pnpm add jazz-tools jazz-napi hono @hono/node-server
+pnpm add -D typescript tsx
+```
 
 ## Define your schema
 
-Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
+Create a file at `schema/current.ts` describing the structure of your app's data.
 
-<include cwd lang="ts" title="schema/current.ts">
+<include cwd lang="ts" meta='title="schema/current.ts"'>
   ../examples/docs/todo-server-ts/schema/current.ts
 </include>
 
-<QuickstartSchemaTypesSummary />
-
 ### Run codegen
 
-<RunCodegen />
+```bash title="Terminal"
+npx jazz-tools build
+```
 
-Deep dive: [Schemas](/docs/schemas).
+This generates `schema/app.ts`, which exports a typed `app` object with a property for each table (e.g. `app.todos`). Import `app` whenever you need to query or write data.
 
-## Create a server context
+<Callout title="Generated code">
+  Never edit `schema/app.ts` by hand. Edit `schema/current.ts` and re-run `npx jazz-tools build`.
+</Callout>
 
-Initialize a Jazz context once at process startup and lazily create a shared `Db`:
+[Learn more about schemas](/docs/schemas/defining-tables).
 
-<include cwd lang="ts" title="src/quickstart-snippets.ts">
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-context-ts
+### Add permissions
+
+The server rejects all reads and writes unless you define [permissions](/docs/auth/permissions). For this quickstart, allow everything:
+
+```ts title="schema/permissions.ts"
+import { definePermissions } from "jazz-tools/permissions";
+import { app } from "./app.js";
+
+export default definePermissions(app, ({ policy }) => [
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.always(),
+  policy.todos.allowUpdate.always(),
+  policy.todos.allowDelete.always(),
+]);
+```
+
+Re-run codegen so the build picks up the new file:
+
+```bash title="Terminal"
+npx jazz-tools build
+```
+
+## Set up your server
+
+Generate an app ID:
+
+```bash title="Terminal"
+npx jazz-tools create app
+# outputs a UUID like: 019d0ba1-519a-7e01-b0eb-0059ee898e4d
+```
+
+Create `src/index.ts`. This quickstart puts everything in one file; a real app would split across multiple modules.
+
+<include cwd lang="ts" meta='title="src/index.ts"'>
+  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-setup-ts
 </include>
 
-- `appId` identifies the app namespace for storage and sync.
-- `app` is your generated schema DSL export (`app.wasmSchema` is loaded for runtime setup).
-- `context.db()` gives you a high-level `Db` using the context's configured runtime/auth.
-- `serverUrl` + `backendSecret` enable backend-authenticated handles via `context.asBackend()` and `context.forRequest(req)`.
-- Runtime storage path controls where local server state persists.
+Each route handler calls `context.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
 
-For more server context options, see [Setup](/docs/setup#backend-context-setup).
+You can also use `context.db()` to get a database handle that bypasses permission checks.
 
-## Read data in API handlers
+<Accordions type="single">
+  <Accordion title="What does the driver do?">
+    The `persistent` driver stores data on disk using [Fjall](https://github.com/fjall-rs/fjall), a fast Rust key-value store bundled inside `jazz-napi`. The `dataPath` is the directory where Fjall writes its data.
 
-Use `context.forRequest(req)` so each request gets a requester-scoped `Db`.
+    There is also a `memory` driver, which does not persist data. To use it, set a `serverUrl` pointing to an upstream peer that *can* persist the data.
+  </Accordion>
+</Accordions>
 
-### One-shot reads
+## Add a to-do
 
-<include cwd lang="ts" title="src/quickstart-snippets.ts">
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-read-oneshot-ts
-</include>
+Add each of the following snippets to `src/index.ts`, below the setup code.
 
-### Streaming reads (SSE + subscriptions)
+Use `db.insert` to create a new row.
 
-<include cwd lang="ts" title="src/quickstart-snippets.ts">
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-read-streaming-ts
-</include>
-
-Deep dive: [Reading Data](/docs/reading-data).
-
-## Write data behind API routes
-
-Mutations should also use `context.forRequest(req)` so policies evaluate against the requester context while keeping the same high-level `Db` API.
-
-<include cwd lang="ts" title="src/quickstart-snippets.ts">
+<include cwd lang="ts" meta='title="src/index.ts"'>
   ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-write-ts
 </include>
 
-Route wiring example:
+## Update and delete to-dos
 
-<include cwd lang="ts" title="src/quickstart-snippets.ts">
-  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-register-routes-ts
+Use `db.update` and `db.delete` to modify existing rows.
+
+<include cwd lang="ts" meta='title="src/index.ts"'>
+  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-update-ts
 </include>
 
-Mutation API details: [Writing Data](/docs/writing-data).
+Full mutation API: [Writing Data](/docs/writing/writing-data).
 
-## Authentication
+## List to-dos
 
-<ServerAuthConfig />
+Use `db.all` to query rows. The query builder supports filtering, sorting, and pagination.
 
-<include cwd lang="bash">
-  ../examples/docs/todo-server-ts/docs/auth-server-cli.sh#auth-server-cli
+<include cwd lang="ts" meta='title="src/index.ts"'>
+  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-read-ts
 </include>
 
-Full auth flows and session resolution: [Authentication](/docs/authentication).
+Full query API: [Reading Data](/docs/reading/queries).
 
-## Permissions
+## Run it
 
-Define row-level policies in `schema/permissions.ts`:
+Start the server at the bottom of `src/index.ts`:
 
-<include cwd lang="ts" title="schema/permissions.ts">
-  ../examples/docs/todo-server-ts/schema/permissions.ts
+<include cwd lang="ts" meta='title="src/index.ts"'>
+  ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-listen-ts
 </include>
 
-For advanced policy patterns, see [Permissions](/docs/permissions).
+```bash title="Terminal"
+npx tsx src/index.ts
+```
+
+Try it out with a dummy JWT:
+
+```bash title="Terminal"
+# Unsigned test token with sub: "test-user"
+TOKEN="eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0LXVzZXIifQ."
+
+curl -X POST http://localhost:3000/api/todos \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"title": "Buy milk"}'
+
+curl http://localhost:3000/api/todos \
+  -H "Authorization: Bearer $TOKEN"
+
+curl -X PATCH http://localhost:3000/api/todos/<id> \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"done": true}'
+
+curl -X DELETE http://localhost:3000/api/todos/<id> \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+<Callout>
+  `forRequest` extracts the caller's identity from the `Authorization` header. The dummy token above is an unsigned JWT with `{"sub": "test-user"}` — fine for local development. In production, your auth provider issues signed JWTs and the server validates them via JWKS. See [Authentication](/docs/auth/authentication) for how to set that up.
+</Callout>
+
+## Next steps
+
+- [Authentication](/docs/auth/authentication) — identity providers, JWKS, and session resolution
+- [Permissions](/docs/auth/permissions) — row-level access policies
+- [Queries](/docs/reading/queries) — filtering, sorting, pagination, and relations
+- [Server Setup](/docs/reference/server-setup) — hosting, sync, and deployment

@@ -1,7 +1,7 @@
 ---
 title: Writing Data
 description: Insert, update, and delete APIs with local-first execution, framework context hooks, and an intro to durability tiers.
-reviewedAt: "451d4671"
+reviewedAt: "14cd73f0"
 ---
 
 ## Local-first writes
@@ -13,13 +13,19 @@ For browser `Blob`, `File`, or `ReadableStream` uploads, use `db.createFileFromB
 or `db.createFileFromStream(...)` and store the returned file ID on your own row.
 
 See [Files & Blobs](/docs/writing/files-and-blobs) for more details.
+
 </Callout>
 
 ## Getting a `Db` handle
 
-The database handle manages the connection to the local database and sync server. It's available with a context hook within a framework, or returned from the `createDb` call without one.
+Every framework provides a hook to access the database handle. In plain TypeScript, use the `Db` returned by `createDb` directly.
 
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "TypeScript"]} persist updateAnchor>
+<Tabs
+  groupId="jazz-framework"
+  items={["React", "Vue", "Svelte", "TypeScript"]}
+  persist
+  updateAnchor
+>
   <Tab value="React">
     <include cwd lang="tsx">
       ../examples/docs/todo-client-localfirst-react/src/GetDbExample.tsx#writing-get-db-react
@@ -44,17 +50,37 @@ The database handle manages the connection to the local database and sync server
 
 ## Insert, update, delete
 
-You perform mutations using methods available on the database handle. All three operations require a table for the first argument.
+Mutations are methods on the database handle. All three take a table as their first argument.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="app.ts"'>
+    <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-crud-ts
     </include>
   </Tab>
   <Tab value="Rust">
-    <include cwd lang="rs" meta='title="main.rs"'>
+    <include cwd lang="rs">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-crud-rust
+    </include>
+  </Tab>
+</Tabs>
+
+### Partial updates and nullable fields
+
+`update(...)` and `updateDurable(...)` only modify the keys you pass.
+Omitted fields are left unchanged; explicitly passing `undefined` also leaves a field unchanged.
+To clear a nullable column in TypeScript, pass `null`.
+Required fields cannot be set to `null`.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-nullable-update-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-nullable-update-rust
     </include>
   </Tab>
 </Tabs>
@@ -63,20 +89,20 @@ You perform mutations using methods available on the database handle. All three 
 
 When using `insertDurable`, `updateDurable`, or `deleteDurable`, you need to pass a tier as an option. The tier specified controls how far the mutation must propagate before the promise resolves: locally on the client (`worker`), the nearest edge server (`edge`), or the global core (`global`).
 
-| Tier | Resolves when | Default for |
-| --- | --- | --- |
-| `worker` | Persisted to local OPFS | Browser/client |
-| `edge` | Acknowledged by nearest sync server | Backend/server |
-| `global` | Propagated to global core | — |
+| Tier     | Resolves when                       | Default for    |
+| -------- | ----------------------------------- | -------------- |
+| `worker` | Persisted to local OPFS             | Browser/client |
+| `edge`   | Acknowledged by nearest sync server | Backend/server |
+| `global` | Propagated to global core           | —              |
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="app.ts"'>
+    <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-durability-tier-ts
     </include>
   </Tab>
   <Tab value="Rust">
-    <include cwd lang="rs" meta='title="main.rs"'>
+    <include cwd lang="rs">
       ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-durability-tier-rust
     </include>
   </Tab>

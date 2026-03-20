@@ -89,6 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client_id: None,
         schema,
         server_url,
+        storage: ClientStorage::Fjall,
         data_dir: PathBuf::from(data_dir),
         storage: ClientStorage::Fjall,
         jwt_token: None,

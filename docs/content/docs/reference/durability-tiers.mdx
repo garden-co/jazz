@@ -1,7 +1,7 @@
 ---
 title: Durability Tiers
 description: "API reference for read and write durability tiers: the options that control how far data must propagate before an operation confirms."
-reviewedAt: "451d4671"
+reviewedAt: "14cd73f0"
 ---
 
 import DurabilityTiersTable from "../../partials/durability-tiers-table.mdx";
@@ -20,7 +20,7 @@ Options:
 - Browser/client default: `"worker"`
 - Backend/server default: `"edge"`
 
-See [Writing Data](/docs/writing/mutations#write-durability-tiers) for detailed guidance on which tier to use and code examples.
+See [Writing Data](/docs/writing/writing-data#write-durability-tiers) for detailed guidance on which tier to use and code examples.
 
 ## Read tiers
 
@@ -39,8 +39,7 @@ These options apply to:
 - `db.subscribeAll(query, callback, options?)`
 - `useAll(query, options?)` / `useAllSuspense(query, options?)` (React/Expo)
 - `new QuerySubscription(query, options?)` (Svelte)
-
-Vue's `useAll` does not currently accept read options.
+- `useAll(query, options?)` (Vue)
 
 <Tabs
   groupId="jazz-framework"

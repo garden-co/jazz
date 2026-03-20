@@ -1,10 +1,10 @@
 ---
 title: Branches
 description: How Jazz uses branches to isolate data across environments, schema versions, and user-defined contexts.
-reviewedAt: "451d4671"
+reviewedAt: "14cd73f0"
 ---
 
-Every commit in Jazz is written to a **branch**. When you query, Jazz gathers the relevant commits across different branches to return the rows you've requested. Jazz allows you to keep commits isolated to specific branches so that you can make changes in different contexts without them affecting each other. This is useful for keeping development data separate from production, creating drafts, or when you otherwise need to include or exclude certain updates from queries.
+Every commit in Jazz is written to a **branch**. When you query, Jazz gathers relevant commits across branches to return the rows you requested. Branches keep commits isolated, so changes in one context don't affect another. This is useful for keeping development data separate from production, creating drafts, or when you otherwise need to include or exclude certain updates from queries.
 
 Branches work like in Git: a branch is a named, independent line of history for your data.
 
@@ -54,11 +54,12 @@ By default, Jazz uses `env: "dev"` and `userBranch: "main"`. To target a differe
   </Tab>
 </Tabs>
 
-All [reads](/docs/reading/queries) and [writes](/docs/writing/mutations) through this context will operate on the `prod-{schemaHash}-staging` branch. Data on other branches is unaffected.
+All [reads](/docs/reading/queries) and [writes](/docs/writing/writing-data) through this context will operate on the `prod-{schemaHash}-staging` branch. Data on other branches is unaffected.
 
 <Callout type="info">
   As a best practice, set `env` to `"prod"` in production using an environment variable. This avoids
-  cross-pollination of data between development and production.
+  cross-pollination of data between development and production. Note that production mode also
+  disables [anonymous and demo auth](/docs/auth/authentication) by default.
 </Callout>
 
 ## Schema versions are merged automatically

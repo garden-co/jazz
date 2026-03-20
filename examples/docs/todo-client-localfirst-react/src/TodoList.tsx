@@ -1,19 +1,40 @@
 import { useState } from "react";
+// #region reading-reactive-hooks-react
 import { useDb, useAll } from "jazz-tools/react";
 import { app } from "../schema/app.js";
 
 export function TodoList() {
   // #region read-write-react
-  // #region reading-reactive-hooks-react
   const db = useDb();
   const todos = useAll(app.todos) ?? [];
   // #endregion reading-reactive-hooks-react
-
   // #region reading-filtering-react
   const _incompleteTodos = useAll(
     app.todos.where({ done: false }).orderBy("title", "asc").limit(50),
   );
   // #endregion reading-filtering-react
+
+  // #region where-subscription-react
+  const pending = useAll(app.todos.where({ done: false }));
+  // #endregion where-subscription-react
+
+  // #region reading-tier-react
+  const todosAtEdgeDurability = useAll(app.todos, { tier: "edge" });
+  // #endregion reading-tier-react
+
+  // #region reading-loading-state-react
+  const allTodos = useAll(app.todos);
+
+  if (allTodos === undefined) {
+    return <p>Connecting…</p>;
+  }
+  // allTodos is now Todo[] — empty array means no rows, not "still loading"
+  // #endregion reading-loading-state-react
+
+  // #region reading-conditional-query-react
+  const [filter, setFilter] = useState<string | null>(null);
+  const filtered = useAll(filter ? app.todos.where({ title: { contains: filter } }) : undefined);
+  // #endregion reading-conditional-query-react
 
   // #region writing-use-db-react
   function addTodo(todoTitle: string) {

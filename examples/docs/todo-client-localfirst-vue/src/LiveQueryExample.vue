@@ -1,10 +1,10 @@
 <!-- #region reading-loading-state-vue -->
 <script setup lang="ts">
-  import { useAll } from "jazz-tools/vue";
-  import { app } from "../schema/app.js";
+import { useAll } from "jazz-tools/vue";
+import { app } from "../schema/app.js";
 
-  const todos = useAll(app.todos);
-  // undefined = not yet connected; [] = connected, no rows; [...] = rows present
+const todos = useAll(app.todos);
+// undefined = not yet connected; [] = connected, no rows; [...] = rows present
 </script>
 
 <template>

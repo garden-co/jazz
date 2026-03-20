@@ -1,6 +1,12 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
 import type { WasmSchema, QueryBuilder } from "jazz-tools";
-export type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: JsonValue }
+  | JsonValue[];
 
 export type PermissionIntrospectionColumn = "$canRead" | "$canEdit" | "$canDelete";
 export interface PermissionIntrospectionColumns {
@@ -95,17 +101,16 @@ export interface TodoInclude {
 }
 
 export type UserIncludedRelations<I extends UserInclude = {}, R extends boolean = false> = {
-  [K in keyof I]-?:
-    K extends "todosViaOwner"
-      ? NonNullable<I["todosViaOwner"]> extends infer RelationInclude
-        ? RelationInclude extends true
-          ? Todo[]
-          : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
-            ? QueryRow[]
-            : RelationInclude extends TodoInclude
-              ? TodoWithIncludes<RelationInclude, false>[]
-              : never
-        : never
+  [K in keyof I]-?: K extends "todosViaOwner"
+    ? NonNullable<I["todosViaOwner"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? Todo[]
+        : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
+          ? QueryRow[]
+          : RelationInclude extends TodoInclude
+            ? TodoWithIncludes<RelationInclude, false>[]
+            : never
+      : never
     : K extends "todosViaAssignees"
       ? NonNullable<I["todosViaAssignees"]> extends infer RelationInclude
         ? RelationInclude extends true
@@ -116,36 +121,40 @@ export type UserIncludedRelations<I extends UserInclude = {}, R extends boolean 
               ? TodoWithIncludes<RelationInclude, false>[]
               : never
         : never
-    : never;
+      : never;
 };
 
 export type ProjectIncludedRelations<I extends ProjectInclude = {}, R extends boolean = false> = {
-  [K in keyof I]-?:
-    K extends "todosViaProject"
-      ? NonNullable<I["todosViaProject"]> extends infer RelationInclude
-        ? RelationInclude extends true
-          ? Todo[]
-          : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
-            ? QueryRow[]
-            : RelationInclude extends TodoInclude
-              ? TodoWithIncludes<RelationInclude, false>[]
-              : never
-        : never
+  [K in keyof I]-?: K extends "todosViaProject"
+    ? NonNullable<I["todosViaProject"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? Todo[]
+        : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
+          ? QueryRow[]
+          : RelationInclude extends TodoInclude
+            ? TodoWithIncludes<RelationInclude, false>[]
+            : never
+      : never
     : never;
 };
 
 export type TodoIncludedRelations<I extends TodoInclude = {}, R extends boolean = false> = {
-  [K in keyof I]-?:
-    K extends "project"
-      ? NonNullable<I["project"]> extends infer RelationInclude
-        ? RelationInclude extends true
-          ? R extends true ? Project : Project | undefined
-          : RelationInclude extends AnyProjectQueryBuilder<infer QueryRow>
-            ? R extends true ? QueryRow : QueryRow | undefined
-            : RelationInclude extends ProjectInclude
-              ? R extends true ? ProjectWithIncludes<RelationInclude, false> : ProjectWithIncludes<RelationInclude, false> | undefined
-              : never
-        : never
+  [K in keyof I]-?: K extends "project"
+    ? NonNullable<I["project"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? R extends true
+          ? Project
+          : Project | undefined
+        : RelationInclude extends AnyProjectQueryBuilder<infer QueryRow>
+          ? R extends true
+            ? QueryRow
+            : QueryRow | undefined
+          : RelationInclude extends ProjectInclude
+            ? R extends true
+              ? ProjectWithIncludes<RelationInclude, false>
+              : ProjectWithIncludes<RelationInclude, false> | undefined
+            : never
+      : never
     : K extends "owner"
       ? NonNullable<I["owner"]> extends infer RelationInclude
         ? RelationInclude extends true
@@ -156,17 +165,17 @@ export type TodoIncludedRelations<I extends TodoInclude = {}, R extends boolean 
               ? UserWithIncludes<RelationInclude, false> | undefined
               : never
         : never
-    : K extends "assignees"
-      ? NonNullable<I["assignees"]> extends infer RelationInclude
-        ? RelationInclude extends true
-          ? User[]
-          : RelationInclude extends AnyUserQueryBuilder<infer QueryRow>
-            ? QueryRow[]
-            : RelationInclude extends UserInclude
-              ? UserWithIncludes<RelationInclude, false>[]
-              : never
-        : never
-    : never;
+      : K extends "assignees"
+        ? NonNullable<I["assignees"]> extends infer RelationInclude
+          ? RelationInclude extends true
+            ? User[]
+            : RelationInclude extends AnyUserQueryBuilder<infer QueryRow>
+              ? QueryRow[]
+              : RelationInclude extends UserInclude
+                ? UserWithIncludes<RelationInclude, false>[]
+                : never
+          : never
+        : never;
 };
 
 export interface UserRelations {
@@ -184,157 +193,195 @@ export interface TodoRelations {
   assignees: User[];
 }
 
-export type UserWithIncludes<I extends UserInclude = {}, R extends boolean = false> = Omit<User, Extract<keyof I, keyof User>> & UserIncludedRelations<I, R>;
+export type UserWithIncludes<I extends UserInclude = {}, R extends boolean = false> = Omit<
+  User,
+  Extract<keyof I, keyof User>
+> &
+  UserIncludedRelations<I, R>;
 
-export type ProjectWithIncludes<I extends ProjectInclude = {}, R extends boolean = false> = Omit<Project, Extract<keyof I, keyof Project>> & ProjectIncludedRelations<I, R>;
+export type ProjectWithIncludes<I extends ProjectInclude = {}, R extends boolean = false> = Omit<
+  Project,
+  Extract<keyof I, keyof Project>
+> &
+  ProjectIncludedRelations<I, R>;
 
-export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Omit<Todo, Extract<keyof I, keyof Todo>> & TodoIncludedRelations<I, R>;
+export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Omit<
+  Todo,
+  Extract<keyof I, keyof Todo>
+> &
+  TodoIncludedRelations<I, R>;
 
 export type UserSelectableColumn = keyof User | PermissionIntrospectionColumn | "*";
 export type UserOrderableColumn = keyof User | PermissionIntrospectionColumn;
 
-export type UserSelected<S extends UserSelectableColumn = keyof User> = "*" extends S ? User : Pick<User, Extract<S | "id", keyof User>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type UserSelected<S extends UserSelectableColumn = keyof User> = "*" extends S
+  ? User
+  : Pick<User, Extract<S | "id", keyof User>> &
+      Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type UserSelectedWithIncludes<I extends UserInclude = {}, S extends UserSelectableColumn = keyof User, R extends boolean = false> = Omit<UserSelected<S>, Extract<keyof I, keyof UserSelected<S>>> & UserIncludedRelations<I, R>;
+export type UserSelectedWithIncludes<
+  I extends UserInclude = {},
+  S extends UserSelectableColumn = keyof User,
+  R extends boolean = false,
+> = Omit<UserSelected<S>, Extract<keyof I, keyof UserSelected<S>>> & UserIncludedRelations<I, R>;
 
 export type ProjectSelectableColumn = keyof Project | PermissionIntrospectionColumn | "*";
 export type ProjectOrderableColumn = keyof Project | PermissionIntrospectionColumn;
 
-export type ProjectSelected<S extends ProjectSelectableColumn = keyof Project> = "*" extends S ? Project : Pick<Project, Extract<S | "id", keyof Project>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type ProjectSelected<S extends ProjectSelectableColumn = keyof Project> = "*" extends S
+  ? Project
+  : Pick<Project, Extract<S | "id", keyof Project>> &
+      Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type ProjectSelectedWithIncludes<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = keyof Project, R extends boolean = false> = Omit<ProjectSelected<S>, Extract<keyof I, keyof ProjectSelected<S>>> & ProjectIncludedRelations<I, R>;
+export type ProjectSelectedWithIncludes<
+  I extends ProjectInclude = {},
+  S extends ProjectSelectableColumn = keyof Project,
+  R extends boolean = false,
+> = Omit<ProjectSelected<S>, Extract<keyof I, keyof ProjectSelected<S>>> &
+  ProjectIncludedRelations<I, R>;
 
 export type TodoSelectableColumn = keyof Todo | PermissionIntrospectionColumn | "*";
 export type TodoOrderableColumn = keyof Todo | PermissionIntrospectionColumn;
 
-export type TodoSelected<S extends TodoSelectableColumn = keyof Todo> = "*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type TodoSelected<S extends TodoSelectableColumn = keyof Todo> = "*" extends S
+  ? Todo
+  : Pick<Todo, Extract<S | "id", keyof Todo>> &
+      Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false> = Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I, R>;
+export type TodoSelectedWithIncludes<
+  I extends TodoInclude = {},
+  S extends TodoSelectableColumn = keyof Todo,
+  R extends boolean = false,
+> = Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I, R>;
 
 export const wasmSchema: WasmSchema = {
-  "users": {
-    "columns": [
+  users: {
+    columns: [
       {
-        "name": "name",
-        "column_type": {
-          "type": "Text"
+        name: "name",
+        column_type: {
+          type: "Text",
         },
-        "nullable": false
-      }
-    ]
-  },
-  "projects": {
-    "columns": [
-      {
-        "name": "name",
-        "column_type": {
-          "type": "Text"
-        },
-        "nullable": false
-      }
-    ]
-  },
-  "todos": {
-    "columns": [
-      {
-        "name": "title",
-        "column_type": {
-          "type": "Text"
-        },
-        "nullable": false
+        nullable: false,
       },
-      {
-        "name": "done",
-        "column_type": {
-          "type": "Boolean"
-        },
-        "nullable": false
-      },
-      {
-        "name": "tags",
-        "column_type": {
-          "type": "Array",
-          "element": {
-            "type": "Text"
-          }
-        },
-        "nullable": false
-      },
-      {
-        "name": "project",
-        "column_type": {
-          "type": "Uuid"
-        },
-        "nullable": false,
-        "references": "projects"
-      },
-      {
-        "name": "owner",
-        "column_type": {
-          "type": "Uuid"
-        },
-        "nullable": true,
-        "references": "users"
-      },
-      {
-        "name": "assignees",
-        "column_type": {
-          "type": "Array",
-          "element": {
-            "type": "Uuid"
-          }
-        },
-        "nullable": false,
-        "references": "users"
-      }
     ],
-    "policies": {
-      "select": {
-        "using": {
-          "type": "True"
-        }
-      },
-      "insert": {
-        "with_check": {
-          "type": "True"
-        }
-      },
-      "update": {
-        "using": {
-          "type": "Cmp",
-          "column": "done",
-          "op": "Eq",
-          "value": {
-            "type": "Literal",
-            "value": {
-              "type": "Boolean",
-              "value": false
-            }
-          }
+  },
+  projects: {
+    columns: [
+      {
+        name: "name",
+        column_type: {
+          type: "Text",
         },
-        "with_check": {
-          "type": "True"
-        }
+        nullable: false,
       },
-      "delete": {
-        "using": {
-          "type": "Cmp",
-          "column": "done",
-          "op": "Eq",
-          "value": {
-            "type": "Literal",
-            "value": {
-              "type": "Boolean",
-              "value": false
-            }
-          }
-        }
-      }
-    }
-  }
+    ],
+  },
+  todos: {
+    columns: [
+      {
+        name: "title",
+        column_type: {
+          type: "Text",
+        },
+        nullable: false,
+      },
+      {
+        name: "done",
+        column_type: {
+          type: "Boolean",
+        },
+        nullable: false,
+      },
+      {
+        name: "tags",
+        column_type: {
+          type: "Array",
+          element: {
+            type: "Text",
+          },
+        },
+        nullable: false,
+      },
+      {
+        name: "project",
+        column_type: {
+          type: "Uuid",
+        },
+        nullable: false,
+        references: "projects",
+      },
+      {
+        name: "owner",
+        column_type: {
+          type: "Uuid",
+        },
+        nullable: true,
+        references: "users",
+      },
+      {
+        name: "assignees",
+        column_type: {
+          type: "Array",
+          element: {
+            type: "Uuid",
+          },
+        },
+        nullable: false,
+        references: "users",
+      },
+    ],
+    policies: {
+      select: {
+        using: {
+          type: "True",
+        },
+      },
+      insert: {
+        with_check: {
+          type: "True",
+        },
+      },
+      update: {
+        using: {
+          type: "Cmp",
+          column: "done",
+          op: "Eq",
+          value: {
+            type: "Literal",
+            value: {
+              type: "Boolean",
+              value: false,
+            },
+          },
+        },
+        with_check: {
+          type: "True",
+        },
+      },
+      delete: {
+        using: {
+          type: "Cmp",
+          column: "done",
+          op: "Eq",
+          value: {
+            type: "Literal",
+            value: {
+              type: "Boolean",
+              value: false,
+            },
+          },
+        },
+      },
+    },
+  },
 };
 
-export class UserQueryBuilder<I extends UserInclude = {}, S extends UserSelectableColumn = keyof User, R extends boolean = false> implements QueryBuilder<UserSelectedWithIncludes<I, S, R>> {
+export class UserQueryBuilder<
+  I extends UserInclude = {},
+  S extends UserSelectableColumn = keyof User,
+  R extends boolean = false,
+> implements QueryBuilder<UserSelectedWithIncludes<I, S, R>> {
   readonly _table = "users";
   readonly _schema: WasmSchema = wasmSchema;
   readonly _rowType!: UserSelectedWithIncludes<I, S, R>;
@@ -372,7 +419,9 @@ export class UserQueryBuilder<I extends UserInclude = {}, S extends UserSelectab
     return clone;
   }
 
-  select<NewS extends UserSelectableColumn>(...columns: [NewS, ...NewS[]]): UserQueryBuilder<I, NewS, R> {
+  select<NewS extends UserSelectableColumn>(
+    ...columns: [NewS, ...NewS[]]
+  ): UserQueryBuilder<I, NewS, R> {
     const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -390,7 +439,10 @@ export class UserQueryBuilder<I extends UserInclude = {}, S extends UserSelectab
     return clone;
   }
 
-  orderBy(column: UserOrderableColumn, direction: "asc" | "desc" = "asc"): UserQueryBuilder<I, S, R> {
+  orderBy(
+    column: UserOrderableColumn,
+    direction: "asc" | "desc" = "asc",
+  ): UserQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -439,13 +491,15 @@ export class UserQueryBuilder<I extends UserInclude = {}, S extends UserSelectab
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+    if (
+      !stepOutput ||
+      typeof stepOutput !== "object" ||
+      typeof (stepOutput as { _build?: unknown })._build !== "function"
+    ) {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(
-      stepOutput._build(),
-    ) as {
+    const stepBuilt = JSON.parse(stepOutput._build()) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -469,7 +523,9 @@ export class UserQueryBuilder<I extends UserInclude = {}, S extends UserSelectab
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
     }
 
     const currentCondition = currentConditions[0];
@@ -510,7 +566,11 @@ export class UserQueryBuilder<I extends UserInclude = {}, S extends UserSelectab
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends UserInclude = I, CloneS extends UserSelectableColumn = S, CloneR extends boolean = R>(): UserQueryBuilder<CloneI, CloneS, CloneR> {
+  private _clone<
+    CloneI extends UserInclude = I,
+    CloneS extends UserSelectableColumn = S,
+    CloneR extends boolean = R,
+  >(): UserQueryBuilder<CloneI, CloneS, CloneR> {
     const clone = new UserQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
@@ -531,7 +591,11 @@ export class UserQueryBuilder<I extends UserInclude = {}, S extends UserSelectab
   }
 }
 
-export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = keyof Project, R extends boolean = false> implements QueryBuilder<ProjectSelectedWithIncludes<I, S, R>> {
+export class ProjectQueryBuilder<
+  I extends ProjectInclude = {},
+  S extends ProjectSelectableColumn = keyof Project,
+  R extends boolean = false,
+> implements QueryBuilder<ProjectSelectedWithIncludes<I, S, R>> {
   readonly _table = "projects";
   readonly _schema: WasmSchema = wasmSchema;
   readonly _rowType!: ProjectSelectedWithIncludes<I, S, R>;
@@ -569,7 +633,9 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends Projec
     return clone;
   }
 
-  select<NewS extends ProjectSelectableColumn>(...columns: [NewS, ...NewS[]]): ProjectQueryBuilder<I, NewS, R> {
+  select<NewS extends ProjectSelectableColumn>(
+    ...columns: [NewS, ...NewS[]]
+  ): ProjectQueryBuilder<I, NewS, R> {
     const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -587,7 +653,10 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends Projec
     return clone;
   }
 
-  orderBy(column: ProjectOrderableColumn, direction: "asc" | "desc" = "asc"): ProjectQueryBuilder<I, S, R> {
+  orderBy(
+    column: ProjectOrderableColumn,
+    direction: "asc" | "desc" = "asc",
+  ): ProjectQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -636,13 +705,15 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends Projec
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+    if (
+      !stepOutput ||
+      typeof stepOutput !== "object" ||
+      typeof (stepOutput as { _build?: unknown })._build !== "function"
+    ) {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(
-      stepOutput._build(),
-    ) as {
+    const stepBuilt = JSON.parse(stepOutput._build()) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -666,7 +737,9 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends Projec
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
     }
 
     const currentCondition = currentConditions[0];
@@ -707,7 +780,11 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends Projec
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends ProjectInclude = I, CloneS extends ProjectSelectableColumn = S, CloneR extends boolean = R>(): ProjectQueryBuilder<CloneI, CloneS, CloneR> {
+  private _clone<
+    CloneI extends ProjectInclude = I,
+    CloneS extends ProjectSelectableColumn = S,
+    CloneR extends boolean = R,
+  >(): ProjectQueryBuilder<CloneI, CloneS, CloneR> {
     const clone = new ProjectQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };
@@ -728,7 +805,11 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends Projec
   }
 }
 
-export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false> implements QueryBuilder<TodoSelectedWithIncludes<I, S, R>> {
+export class TodoQueryBuilder<
+  I extends TodoInclude = {},
+  S extends TodoSelectableColumn = keyof Todo,
+  R extends boolean = false,
+> implements QueryBuilder<TodoSelectedWithIncludes<I, S, R>> {
   readonly _table = "todos";
   readonly _schema: WasmSchema = wasmSchema;
   readonly _rowType!: TodoSelectedWithIncludes<I, S, R>;
@@ -766,7 +847,9 @@ export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectab
     return clone;
   }
 
-  select<NewS extends TodoSelectableColumn>(...columns: [NewS, ...NewS[]]): TodoQueryBuilder<I, NewS, R> {
+  select<NewS extends TodoSelectableColumn>(
+    ...columns: [NewS, ...NewS[]]
+  ): TodoQueryBuilder<I, NewS, R> {
     const clone = this._clone<I, NewS, R>();
     clone._selectColumns = [...columns] as string[];
     return clone;
@@ -784,7 +867,10 @@ export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectab
     return clone;
   }
 
-  orderBy(column: TodoOrderableColumn, direction: "asc" | "desc" = "asc"): TodoQueryBuilder<I, S, R> {
+  orderBy(
+    column: TodoOrderableColumn,
+    direction: "asc" | "desc" = "asc",
+  ): TodoQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._orderBys.push([column as string, direction]);
     return clone;
@@ -833,13 +919,15 @@ export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectab
 
     const currentToken = "__jazz_gather_current__";
     const stepOutput = options.step({ current: currentToken });
-    if (!stepOutput || typeof stepOutput !== "object" || typeof (stepOutput as { _build?: unknown })._build !== "function") {
+    if (
+      !stepOutput ||
+      typeof stepOutput !== "object" ||
+      typeof (stepOutput as { _build?: unknown })._build !== "function"
+    ) {
       throw new Error("gather(...) step must return a query expression built from app.<table>.");
     }
 
-    const stepBuilt = JSON.parse(
-      stepOutput._build(),
-    ) as {
+    const stepBuilt = JSON.parse(stepOutput._build()) as {
       table?: unknown;
       conditions?: Array<{ column: string; op: string; value: unknown }>;
       hops?: unknown;
@@ -863,7 +951,9 @@ export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectab
       (condition) => condition.op === "eq" && condition.value === currentToken,
     );
     if (currentConditions.length !== 1) {
-      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
     }
 
     const currentCondition = currentConditions[0];
@@ -904,7 +994,11 @@ export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectab
     return JSON.parse(this._build());
   }
 
-  private _clone<CloneI extends TodoInclude = I, CloneS extends TodoSelectableColumn = S, CloneR extends boolean = R>(): TodoQueryBuilder<CloneI, CloneS, CloneR> {
+  private _clone<
+    CloneI extends TodoInclude = I,
+    CloneS extends TodoSelectableColumn = S,
+    CloneR extends boolean = R,
+  >(): TodoQueryBuilder<CloneI, CloneS, CloneR> {
     const clone = new TodoQueryBuilder<CloneI, CloneS, CloneR>();
     clone._conditions = [...this._conditions];
     clone._includes = { ...this._includes };

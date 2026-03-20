@@ -1,9 +1,9 @@
 <script setup lang="ts">
-  import { createJazzClient, JazzProvider } from "jazz-tools/vue";
+import { createJazzClient, JazzProvider } from "jazz-tools/vue";
 
-  const client = createJazzClient({
-    appId: "my-app",
-  });
+const client = createJazzClient({
+  appId: "my-app",
+});
 </script>
 
 <template>

@@ -10,6 +10,7 @@ CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session
 -- #endregion permissions-simple-sql
 
 -- #region permissions-always-sql
+-- Allow all operations on todos (no user-scoped filtering)
 CREATE POLICY todos_select_policy ON todos FOR SELECT USING (TRUE);
 CREATE POLICY todos_insert_policy ON todos FOR INSERT WITH CHECK (TRUE);
 CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (TRUE) WITH CHECK (TRUE);
@@ -17,6 +18,7 @@ CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (TRUE);
 -- #endregion permissions-always-sql
 
 -- #region permissions-never-sql
+-- Deny all operations on todos
 CREATE POLICY todos_select_policy ON todos FOR SELECT USING (FALSE);
 CREATE POLICY todos_insert_policy ON todos FOR INSERT WITH CHECK (FALSE);
 CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (FALSE) WITH CHECK (FALSE);

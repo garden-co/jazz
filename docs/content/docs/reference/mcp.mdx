@@ -1,7 +1,7 @@
 ---
 title: MCP Server
 description: Give your AI assistant direct access to Jazz documentation via the Model Context Protocol.
-reviewedAt: "451d4671"
+reviewedAt: "14cd73f0"
 ---
 
 The `jazz-tools` package ships with a built-in [MCP](https://modelcontextprotocol.io) server that
@@ -11,7 +11,7 @@ leaving the session.
 
 The docs served are always matched to the version of `jazz-tools` you install, so your
 assistant is reading documentation for the exact API you have available. To use a different
-version's docs, add an `@` with any valid version number (e.g. `npx jazz-tools@2.0.0 mcp`).
+version's docs, specify a version in the npx command (e.g. `npx jazz-tools@2.0.0 mcp`).
 
 <Callout type="info">
   Node 22.13 or later is recommended for the best search results. Earlier versions fall back to
@@ -20,7 +20,7 @@ version's docs, add an `@` with any valid version number (e.g. `npx jazz-tools@2
 
 ## Installation
 
-<Tabs items={["Claude Code", "Gemini CLI", "Codex"]} persist>
+<Tabs items={["Claude Code", "Gemini CLI", "Codex", "OpenCode"]} persist>
   <Tab value="Claude Code">
     <include lang="bash" meta='title="Terminal"'>
       ../../partials/mcp/install.sh#claude-code
@@ -34,6 +34,11 @@ version's docs, add an `@` with any valid version number (e.g. `npx jazz-tools@2
   <Tab value="Codex">
     <include lang="bash" meta='title="Terminal"'>
       ../../partials/mcp/install.sh#codex
+    </include>
+  </Tab>
+  <Tab value="OpenCode">
+    <include lang="bash" meta='title="Terminal"'>
+      ../../partials/mcp/install.sh#opencode
     </include>
   </Tab>
 </Tabs>
@@ -74,4 +79,4 @@ get_doc(slug: string)
 ```
 
 Slugs match the URL path under `/docs/` — for example `schemas/defining-tables`, `reading/queries`, or
-`quickstarts/react`. Use `list_pages` to discover available slugs.
+`quickstarts/client`. Use `list_pages` to discover available slugs.

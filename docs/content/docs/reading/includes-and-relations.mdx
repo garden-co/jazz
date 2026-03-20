@@ -1,7 +1,7 @@
 ---
 title: Includes & Relations
 description: Resolve references with include(), pick columns with select(), inspect permissions, and run recursive queries.
-reviewedAt: "451d4671"
+reviewedAt: "14cd73f0"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -9,6 +9,9 @@ import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 ## Includes
 
 Use `include(...)` to load related rows as nested objects in a single query result. Pass `true` to resolve a relation, or a nested object to follow multi-hop references. In Rust, use `join()` with `on()` for equivalent results.
+
+Including a relation adds the resolved object alongside the foreign-key column — it does not replace it. For example, `include({ project: true })` gives you both `projectId` (the FK string) and `project` (the resolved row).
+
 
 <Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
   <Tab value="TypeScript">
@@ -40,7 +43,7 @@ Use `include(...)` to load related rows as nested objects in a single query resu
 
 Jazz is distributed and supports offline edits, so a referenced row won't always be available locally&hairsp;—&hairsp;it might not have synced yet, or another peer might have deleted it.
 
-When you `include` a relation, **rows whose `include` target can't be resolved are filtered out** (inner join semantics). This only applies if you explicitly load references using `include`. Otherwise the row appears in results without referenced data as usual.
+When you `include` a relation, **rows whose `include` target can't be resolved are filtered out** (inner join semantics). This only applies if you explicitly load references using `include`. Otherwise, the row appears in results with only its own columns.
 
 ## Select
 
@@ -61,7 +64,7 @@ Use `select(...)` to narrow a row to `id` plus the columns you pick. You can com
 
 ## Computed Permissions Columns
 
-These columns are computed at query time&hairsp;—&hairsp;they don't exist in the database. To use them, opt in explicitly.
+These columns are computed at query time&hairsp;—&hairsp;they don't exist in the database. They are omitted from `select("*")`, so you opt in explicitly&hairsp;—&hairsp;for example, `select("*", "$canDelete")` returns the normal row columns plus `$canDelete`.
 
 - `$canRead`&hairsp;—&hairsp;whether the current session can read the row. Since read policies already gate which rows appear, this will usually be `true`.
 - `$canEdit`&hairsp;—&hairsp;whether the current session passes the row's `UPDATE USING` policy.
