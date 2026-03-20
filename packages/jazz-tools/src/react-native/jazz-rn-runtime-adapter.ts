@@ -101,7 +101,14 @@ function isJazzRnErrorLike(
     return false;
   }
   const candidate = error as { tag?: unknown; inner?: unknown };
-  return typeof candidate.tag === "string";
+  return (
+    candidate.tag === "InvalidJson" ||
+    candidate.tag === "InvalidUuid" ||
+    candidate.tag === "InvalidTier" ||
+    candidate.tag === "Schema" ||
+    candidate.tag === "Runtime" ||
+    candidate.tag === "Internal"
+  );
 }
 
 function normalizeJazzRnError(error: unknown): Error {

@@ -311,6 +311,59 @@ describe("JazzRnRuntimeAdapter", () => {
     expect((deleteError as Error & { tag?: unknown }).tag).toBe("Runtime");
   });
 
+  it("does not wrap non-Jazz errors", () => {
+    const binding = createBinding({
+      insert: vi.fn(() => {
+        throw new Error("plain failure");
+      }),
+    });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    const error = (() => {
+      try {
+        adapter.insert("todos", []);
+        return null;
+      } catch (caught) {
+        return caught;
+      }
+    })();
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).name).toBe("Error");
+    expect((error as Error).message).toBe("plain failure");
+    expect((error as Error & { tag?: unknown }).tag).toBeUndefined();
+  });
+
+  it("derives error name for non-runtime Jazz tags", () => {
+    const schemaError = {
+      tag: "Schema",
+      inner: {
+        message: "schema mismatch",
+      },
+    };
+    const binding = createBinding({
+      insert: vi.fn(() => {
+        throw schemaError;
+      }),
+    });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    const error = (() => {
+      try {
+        adapter.insert("todos", []);
+        return null;
+      } catch (caught) {
+        return caught;
+      }
+    })();
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).name).toBe("JazzRnSchemaError");
+    expect((error as Error).message).toBe("schema mismatch");
+    expect((error as Error & { tag?: unknown }).tag).toBe("Schema");
+    expect((error as Error & { cause?: unknown }).cause).toBe(schemaError);
+  });
+
   it("no-ops sync hooks after close", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
