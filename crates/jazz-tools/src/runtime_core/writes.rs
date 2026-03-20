@@ -48,8 +48,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     ) -> Result<(), RuntimeError> {
         let _span = debug_span!("delete", %object_id).entered();
         self.schema_manager
-            .query_manager_mut()
-            .delete_with_session(&mut self.storage, object_id, session)
+            .delete(&mut self.storage, object_id, session)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         debug!("deleted");
         self.immediate_tick();
@@ -139,8 +138,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     ) -> Result<oneshot::Receiver<()>, RuntimeError> {
         let handle = self
             .schema_manager
-            .query_manager_mut()
-            .delete_with_session(&mut self.storage, object_id, session)
+            .delete(&mut self.storage, object_id, session)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
 
         let (sender, receiver) = oneshot::channel();

@@ -27,6 +27,7 @@ pub(super) struct ResolvedSchemaRow {
     pub branch_name: BranchName,
     pub commit_id: CommitId,
     pub content: Vec<u8>,
+    pub is_soft_deleted: bool,
 }
 
 const SCHEMA_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -134,7 +135,7 @@ impl QueryManager {
         >,
         schema_context: &crate::schema_manager::SchemaContext,
     ) -> Option<ResolvedSchemaRow> {
-        let mut best: Option<(u64, Vec<u8>, CommitId, BranchName)> = None;
+        let mut best: Option<(u64, Vec<u8>, CommitId, BranchName, bool)> = None;
 
         for branch_name in branches {
             let branch_name = BranchName::new(branch_name);
@@ -145,10 +146,7 @@ impl QueryManager {
                 let Some(commit) = branch.commits.get(&tip_id) else {
                     continue;
                 };
-                if commit.content.is_empty() {
-                    continue;
-                }
-
+                let is_soft_deleted = commit.is_deleted();
                 match &best {
                     None => {
                         best = Some((
@@ -156,14 +154,16 @@ impl QueryManager {
                             commit.content.clone(),
                             tip_id,
                             branch_name,
+                            is_soft_deleted,
                         ));
                     }
-                    Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
+                    Some((best_ts, _, _, _, _)) if commit.timestamp > *best_ts => {
                         best = Some((
                             commit.timestamp,
                             commit.content.clone(),
                             tip_id,
                             branch_name,
+                            is_soft_deleted,
                         ));
                     }
                     _ => {}
@@ -171,23 +171,29 @@ impl QueryManager {
             }
         }
 
-        let (_, content, commit_id, branch_name) = best?;
+        let (_, content, commit_id, branch_name, is_soft_deleted) = best?;
+        if content.is_empty() {
+            return None;
+        }
         Self::transform_row_with_schema(
             id,
             content,
             commit_id,
             branch_name,
+            is_soft_deleted,
             table,
             branch_schema_map,
             schema_context,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn transform_row_with_schema(
         id: ObjectId,
         content: Vec<u8>,
         commit_id: CommitId,
         branch_name: BranchName,
+        is_soft_deleted: bool,
         table: &str,
         branch_schema_map: &std::collections::HashMap<
             String,
@@ -207,6 +213,7 @@ impl QueryManager {
                         branch_name,
                         commit_id,
                         content: result.data,
+                        is_soft_deleted,
                     });
                 }
                 Err(err) => {
@@ -228,6 +235,7 @@ impl QueryManager {
             branch_name,
             commit_id,
             content,
+            is_soft_deleted,
         })
     }
 
@@ -362,6 +370,7 @@ impl QueryManager {
             let branches =
                 Self::resolved_server_query_branches(&query_for_compile, &subscription_context);
             let table = sub.query.table.as_str().to_string();
+            let include_deleted = sub.query.include_deleted;
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
                 let obj = om.get_or_load(id, storage_ref, &branches)?;
                 let resolved = Self::resolve_latest_row_with_schema_transform(
@@ -372,6 +381,9 @@ impl QueryManager {
                     &branch_schema_map,
                     &subscription_context,
                 )?;
+                if resolved.is_soft_deleted && !include_deleted {
+                    return None;
+                }
                 Some(LoadedRow::new(
                     resolved.content,
                     resolved.commit_id,
@@ -498,6 +510,7 @@ impl QueryManager {
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
             let branches = &sub.branches;
             let table = sub.query.table.as_str().to_string();
+            let include_deleted = sub.query.include_deleted;
             let branch_schema_map = Self::branch_schema_map_for_context(&sub.schema_context);
 
             // Row loader for this subscription
@@ -511,6 +524,9 @@ impl QueryManager {
                     &branch_schema_map,
                     &sub.schema_context,
                 )?;
+                if resolved.is_soft_deleted && !include_deleted {
+                    return None;
+                }
                 Some(LoadedRow::new(
                     resolved.content,
                     resolved.commit_id,
