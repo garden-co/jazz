@@ -139,7 +139,12 @@ export function tableNameToInterface(name: string): string {
   // Convert snake_case to words, singularize the last word, then PascalCase
   const parts = name.split("_");
   // Singularize only the last part (table names are typically plural)
-  parts[parts.length - 1] = singularize(parts[parts.length - 1]);
+  const lastIndex = parts.length - 1;
+  const lastPart = parts[lastIndex];
+  if (lastPart === undefined) {
+    return "";
+  }
+  parts[lastIndex] = singularize(lastPart);
 
   return parts.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join("");
 }
@@ -321,7 +326,7 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
     const includedRelationsType = baseInterface + "IncludedRelations";
 
     lines.push(
-      `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}, R extends boolean = false> = Omit<${baseInterface}, Extract<keyof I, keyof ${baseInterface}>> & ${includedRelationsType}<I, R>;`,
+      `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}, R extends boolean = false> = ${baseInterface} & ${includedRelationsType}<I, R>;`,
     );
     lines.push(``);
   }
@@ -349,13 +354,13 @@ function generateSelectionTypes(schema: WasmSchema, relations: Map<string, Relat
     lines.push("");
 
     lines.push(
-      `export type ${baseInterface}Selected<S extends ${selectableColumnType} = keyof ${baseInterface}> = "*" extends S ? ${baseInterface} : Pick<${baseInterface}, Extract<S | "id", keyof ${baseInterface}>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;`,
+      `export type ${baseInterface}Selected<S extends ${selectableColumnType} = keyof ${baseInterface}> = ("*" extends S ? ${baseInterface} : Pick<${baseInterface}, Extract<S | "id", keyof ${baseInterface}>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;`,
     );
     lines.push("");
 
     if (hasRelations) {
       lines.push(
-        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends ${selectableColumnType} = keyof ${baseInterface}, R extends boolean = false> = Omit<${baseInterface}Selected<S>, Extract<keyof I, keyof ${baseInterface}Selected<S>>> & ${includedRelationsType}<I, R>;`,
+        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends ${selectableColumnType} = keyof ${baseInterface}, R extends boolean = false> = ${baseInterface}Selected<S> & ${includedRelationsType}<I, R>;`,
       );
       lines.push("");
     }

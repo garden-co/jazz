@@ -75,7 +75,7 @@ describe("SubscriptionManager", () => {
     );
 
     expect(result.delta[0]).toEqual({ kind: 2, id: "1", index: 0, row: makeRow("1", "item1", 15) });
-    expect(result.all[0].count).toBe(15);
+    expect(result.all[0]!.count).toBe(15);
   });
 
   it("handles move-only updates without row payload", () => {

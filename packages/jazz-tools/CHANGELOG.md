@@ -1,5 +1,35 @@
 # jazz-tools
 
+## 2.0.0-alpha.21
+
+### Patch Changes
+
+- 52b737b: Fix server-side row insert permission evaluation
+- 65adab0: Add utils to simplify testing permissions
+- eb31a76: Fix mixed `select("*", "$canDelete")` projections so permission introspection columns can be combined with wildcard row selection, including nested include projections, and document the supported query shape.
+- 51094d9: Fix catalogue sync so clients receive shared catalogue updates correctly, and skip resending the catalogue on reconnect when the client and server are already aligned.
+- 695862b: Allow TypeScript `update(...)` and `updateDurable(...)` calls to clear nullable fields with `null`.
+
+  Passing `undefined` still leaves a field unchanged, and required fields still reject `null`.
+
+- 47a9aae: Align the Vue and Svelte bindings more closely with React: Vue `useAll` now accepts `QueryOptions` and re-exports `DurabilityTier`/`QueryOptions`, while Svelte query subscriptions now use the shared subscription orchestrator, surface async subscription errors, and export `createExtensionJazzClient` and `attachDevTools` for extension tooling.
+- 62406d3: Use separate fields for foreign key columns and resolved references
+- Updated dependencies [477c43c]
+  - jazz-rn@2.0.0-alpha.21
+  - jazz-wasm@2.0.0-alpha.21
+
+## 2.0.0-alpha.20
+
+### Patch Changes
+
+- 9f4d4d9: Bound oversized index keys by keeping as much real value prefix as fits in the durable key and appending a length plus hash overflow trailer.
+
+  This keeps large indexed string and JSON equality lookups working without exceeding storage key limits, while preserving prefix-based ordering instead of collapsing oversized values to a pure hash ordering. Large `array(ref(...))` values also continue to support exact array equality and per-member reference indexing.
+
+- Updated dependencies [9f4d4d9]
+  - jazz-wasm@2.0.0-alpha.20
+  - jazz-rn@2.0.0-alpha.20
+
 ## 2.0.0-alpha.19
 
 ### Patch Changes

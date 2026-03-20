@@ -28,8 +28,6 @@ use axum::{
     http::{HeaderMap, StatusCode, header::AUTHORIZATION, request::Parts},
 };
 use base64::Engine;
-use jazz_tools::query_manager::session::Session;
-use jazz_tools::schema_manager::AppId;
 use jsonwebtoken::{
     Algorithm, DecodingKey, Validation, decode, decode_header,
     jwk::{Jwk, JwkSet, KeyAlgorithm},
@@ -39,7 +37,9 @@ use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::warn;
 
-use crate::commands::server::ServerState;
+use crate::query_manager::session::Session;
+use crate::schema_manager::AppId;
+use crate::server::ServerState;
 
 const LOCAL_MODE_HEADER: &str = "X-Jazz-Local-Mode";
 const LOCAL_TOKEN_HEADER: &str = "X-Jazz-Local-Token";

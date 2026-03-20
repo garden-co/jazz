@@ -8,13 +8,11 @@
 //! ```
 
 mod commands;
-mod middleware;
 #[cfg(feature = "otel")]
 mod otel;
-mod routes;
 
 use clap::{Parser, Subcommand};
-use middleware::AuthConfig;
+use jazz_tools::middleware::AuthConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NodeEnvMode {
@@ -94,7 +92,7 @@ enum Commands {
         #[arg(short, long, default_value = "./data")]
         data_dir: String,
 
-        /// Use a temporary directory for storage (ephemeral, created on the fly)
+        /// Use in-memory storage instead of Fjall-backed files.
         #[arg(long)]
         in_memory: bool,
 
@@ -186,17 +184,6 @@ async fn main() {
             backend_secret,
             admin_secret,
         } => {
-            let data_dir = if in_memory {
-                let tmp =
-                    std::env::temp_dir().join(format!("jazz-server-{}", uuid::Uuid::new_v4()));
-                std::fs::create_dir_all(&tmp).expect("failed to create temp dir for --in-memory");
-                tmp.into_os_string()
-                    .into_string()
-                    .expect("temp path is valid UTF-8")
-            } else {
-                data_dir
-            };
-
             let node_env_mode = resolve_node_env_mode();
             let allow_anonymous = match node_env_mode {
                 NodeEnvMode::Production => allow_anonymous,
@@ -214,7 +201,9 @@ async fn main() {
                 backend_secret,
                 admin_secret,
             };
-            if let Err(e) = commands::server::run(&app_id, port, &data_dir, auth_config).await {
+            if let Err(e) =
+                commands::server::run(&app_id, port, &data_dir, in_memory, auth_config).await
+            {
                 eprintln!("Server error: {}", e);
                 shutdown_tracing();
                 std::process::exit(1);

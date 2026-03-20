@@ -64,6 +64,17 @@ Use the framework context binding to access the shared `Db` instance and execute
   </Tab>
 </Tabs>
 
+### Partial Updates and Nullable Fields
+
+`update(...)` and `updateDurable(...)` only modify the keys you pass.
+Omitted fields, and fields explicitly set to `undefined`, are left unchanged.
+To clear a nullable column in TypeScript, pass `null`.
+Required fields cannot be set to `null`.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-nullable-update-ts
+</include>
+
 ## Reset Browser Storage
 
 For browser clients, you can delete the local OPFS database for the current namespace:

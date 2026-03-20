@@ -59,7 +59,7 @@ export interface FileStorageDb {
 export interface FileStorageColumnNames {
   name: string;
   mimeType: string;
-  parts: string;
+  partIds: string;
   partSizes: string;
   data: string;
 }
@@ -102,14 +102,14 @@ type LoadedFileRecord = {
   id: string;
   name?: string;
   mimeType: string;
-  parts: string[];
+  partIds: string[];
   partSizes: number[];
 };
 
 const DEFAULT_COLUMNS: FileStorageColumnNames = {
   name: "name",
   mimeType: "mimeType",
-  parts: "parts",
+  partIds: "partIds",
   partSizes: "partSizes",
   data: "data",
 };
@@ -169,7 +169,7 @@ export function createFileStorage<
     partIndex: number,
     readOptions?: FileReadOptions,
   ): Promise<Uint8Array> => {
-    const partId = file.parts[partIndex]!;
+    const partId = file.partIds[partIndex]!;
     const expectedSize = file.partSizes[partIndex]!;
     const queryOptions = toQueryOptions(readOptions);
     const part = await db.one(
@@ -215,7 +215,7 @@ export function createFileStorage<
           return;
         }
 
-        if (nextIndex >= file.parts.length) {
+        if (nextIndex >= file.partIds.length) {
           controller.close();
           return;
         }
@@ -233,7 +233,7 @@ export function createFileStorage<
 
           controller.enqueue(bytes);
 
-          if (nextIndex >= file.parts.length) {
+          if (nextIndex >= file.partIds.length) {
             controller.close();
           }
         } catch (error) {
@@ -265,7 +265,7 @@ export function createFileStorage<
       const chunkSizeBytes = writeOptions.chunkSizeBytes ?? defaultChunkSizeBytes;
       validateChunkSize(chunkSizeBytes);
 
-      const filePartIds: string[] = [];
+      const filepartIds: string[] = [];
       const partSizes: number[] = [];
 
       for await (const chunk of chunkReadableStream(stream, chunkSizeBytes)) {
@@ -285,7 +285,7 @@ export function createFileStorage<
           throw new Error(`Inserted file part row is missing a string "id".`);
         }
 
-        filePartIds.push((part as { id: string }).id);
+        filepartIds.push((part as { id: string }).id);
         partSizes.push(chunk.length);
       }
 
@@ -293,7 +293,7 @@ export function createFileStorage<
         options.files,
         {
           [columns.mimeType]: writeOptions.mimeType ?? DEFAULT_MIME_TYPE,
-          [columns.parts]: filePartIds,
+          [columns.partIds]: filepartIds,
           [columns.partSizes]: partSizes,
           ...(writeOptions.name !== undefined ? { [columns.name]: writeOptions.name } : {}),
         } as FileInit,
@@ -406,12 +406,12 @@ export function createFileStorage<
       throw new Error(`File row is missing a string "id".`);
     }
 
-    const parts = readStringArray(
-      file[names.parts],
+    const partIds = readStringArray(
+      file[names.partIds],
       new IncompleteFileDataError(
         id,
         "invalid-file-record",
-        `File "${id}" is incomplete: invalid "${names.parts}" metadata.`,
+        `File "${id}" is incomplete: invalid "${names.partIds}" metadata.`,
       ),
     );
     const partSizes = readIntegerArray(
@@ -423,11 +423,11 @@ export function createFileStorage<
       ),
     );
 
-    if (parts.length !== partSizes.length) {
+    if (partIds.length !== partSizes.length) {
       throw new IncompleteFileDataError(
         id,
         "invalid-file-record",
-        `File "${id}" is incomplete: "${names.parts}" and "${names.partSizes}" lengths do not match.`,
+        `File "${id}" is incomplete: "${names.partIds}" and "${names.partSizes}" lengths do not match.`,
       );
     }
 
@@ -438,7 +438,7 @@ export function createFileStorage<
         typeof file[names.mimeType] === "string" && (file[names.mimeType] as string).length > 0
           ? (file[names.mimeType] as string)
           : DEFAULT_MIME_TYPE,
-      parts,
+      partIds,
       partSizes,
     };
   }

@@ -25,10 +25,14 @@ function parseArgs(): { command: string; options: BuildOptions } {
   let schemaDir = join(process.cwd(), "schema");
 
   for (let i = 1; i < args.length; i++) {
-    if (args[i] === "--jazz-bin" && args[i + 1]) {
-      jazzBin = args[++i];
-    } else if (args[i] === "--schema-dir" && args[i + 1]) {
-      schemaDir = args[++i];
+    const arg = args[i];
+    const nextArg = args[i + 1];
+    if (arg === "--jazz-bin" && nextArg) {
+      jazzBin = nextArg;
+      i += 1;
+    } else if (arg === "--schema-dir" && nextArg) {
+      schemaDir = nextArg;
+      i += 1;
     }
   }
 
@@ -257,10 +261,10 @@ async function ensurePermissionsTestStub(schemaDir: string): Promise<void> {
  * Permissions test starter.
  *
  * Suggested shape (jazz-tools/testing):
- * - startLocalJazzServer(...) for an isolated server
- * - seedRows(...) to set up synthetic fixtures
- * - scopedClientForClaims(...) for request-scoped user clients
- * - expectAllowed(...) / expectDenied(...) assertions
+ * - createPolicyTestApp(...) for an isolated test app
+ * - testApp.seed(...) to set up synthetic fixtures
+ * - testApp.as(...) for request-scoped user clients
+ * - testApp.expectAllowed(...) / testApp.expectDenied(...) assertions
  */
 import { describe, it } from "vitest";
 
