@@ -84,6 +84,26 @@ describe("TableFilterBuilder", () => {
     });
   });
 
+  it("opens and closes the filter dialog via dialog methods", () => {
+    const onClausesChange = vi.fn();
+    const { container } = render(
+      <TableFilterBuilder
+        schemaColumns={[...schemaColumns]}
+        clauses={[]}
+        onClausesChange={onClausesChange}
+      />,
+    );
+
+    const dialog = container.querySelector("dialog");
+    expect(dialog?.hasAttribute("open")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: /Filter/ }));
+    expect(dialog?.hasAttribute("open")).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(dialog?.hasAttribute("open")).toBe(false);
+  });
+
   it("shows validation errors for invalid values", () => {
     const onClausesChange = vi.fn();
     render(
