@@ -196,7 +196,6 @@ async fn main() {
 
             let auth_config = AuthConfig {
                 jwks_url,
-                jwks_set: None,
                 allow_anonymous,
                 allow_demo,
                 backend_secret,

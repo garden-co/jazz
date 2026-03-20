@@ -9,3 +9,4 @@ crates/jazz-napi/index.d.ts
 crates/jazz-napi/index.js
 benchmarks/**/*.json
 benchmarks/**/*.html
+**/ENV.md

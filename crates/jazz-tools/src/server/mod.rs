@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 
 use crate::middleware::AuthConfig;
+use crate::middleware::auth::JwksCache;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::AppId;
 use crate::storage::Storage;
@@ -32,6 +33,8 @@ pub struct ServerState {
     pub sync_broadcast: broadcast::Sender<(ClientId, SyncPayload)>,
     /// Authentication configuration.
     pub auth_config: AuthConfig,
+    /// JWKS cache with TTL and on-demand refresh for key rotation.
+    pub jwks_cache: Option<JwksCache>,
     /// Persistent external identity mapping store.
     pub external_identity_store: Arc<ExternalIdentityStore>,
     /// In-memory cache: (issuer, subject) -> principal_id.
