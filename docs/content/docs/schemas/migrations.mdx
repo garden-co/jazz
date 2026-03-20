@@ -1,0 +1,152 @@
+---
+title: Migrations
+description: Schema evolution workflow and generated migration stubs.
+reviewedAt: "451d4671"
+# TODO: By the time of this review, migrations have changed significantly. Will merge, resolve conflicts, and then come back to this, rather than investing time in this now.
+---
+
+<Callout type="info" title="You can skip this first">
+  If you are trying to get your first app running, you can skip this page and return later.
+</Callout>
+
+## Why Jazz migrations are different
+
+- Traditional migration systems run a linear sequence and require peers to converge before older versions stop writing.
+- Jazz migration lenses are applied at read/write time, so mixed-version clients can keep operating while data is translated between schema hashes.
+- Schemas still auto-publish on connect. Migrations do not: they are always reviewed and pushed explicitly.
+
+## Workflow
+
+All Jazz apps use the same migration workflow, including Rust backends.
+
+```bash
+# 1) Edit schema.ts during development and watch for Jazz migration warnings.
+
+# 2) Generate a typed migration stub after Jazz reports the old/new hashes.
+npx jazz-tools@alpha migrations create <fromHash> <toHash>
+
+# 3) Fill in migrate, rename the file, then publish the reviewed edge.
+npx jazz-tools@alpha migrations push <fromHash> <toHash>
+```
+
+When Jazz encounters rows whose schema hash is no longer reachable from the current app schema, it logs a warning with the exact `migrations create <fromHash> <toHash>` command to run next.
+
+## Generated stub
+
+`migrations create` writes a copy-pastable file with short `fromHash`, `toHash`, and minimal typed `from` / `to` witnesses. You only need to fill in `migrate`, then rename the file.
+
+```ts title="migrations/20260318-unnamed-a01f5c72ec47-311995e9a178.ts"
+import { col, defineMigration } from "jazz-tools";
+
+export default defineMigration({
+  migrate: {
+    todos: {
+      description: col.add.string({ default: null }),
+    },
+  },
+  fromHash: "a01f5c72ec47",
+  toHash: "311995e9a178",
+  from: {
+    todos: {
+      title: col.string(),
+      done: col.boolean(),
+      parentId: col.ref("todos").optional(),
+      projectId: col.ref("projects").optional(),
+      owner_id: col.string(),
+    },
+  },
+  to: {
+    todos: {
+      title: col.string(),
+      done: col.boolean(),
+      description: col.string().optional(),
+      parentId: col.ref("todos").optional(),
+      projectId: col.ref("projects").optional(),
+      owner_id: col.string(),
+    },
+  },
+});
+```
+
+## Edited stub
+
+After review, keep the same hashes and adjust the `migrate` object as needed:
+
+```ts title="migrations/20260318-add-description-a01f5c72ec47-311995e9a178.ts"
+import { col, defineMigration } from "jazz-tools";
+
+// Example of editing a generated migration stub.
+export default defineMigration({
+  migrate: {
+    todos: {
+      description: col.add.string({ default: "No description" }),
+    },
+  },
+  fromHash: "a01f5c72ec47",
+  toHash: "311995e9a178",
+  from: {
+    todos: {
+      title: col.string(),
+      done: col.boolean(),
+      parentId: col.ref("todos").optional(),
+      projectId: col.ref("projects").optional(),
+      owner_id: col.string(),
+    },
+  },
+  to: {
+    todos: {
+      title: col.string(),
+      done: col.boolean(),
+      description: col.string().optional(),
+      parentId: col.ref("todos").optional(),
+      projectId: col.ref("projects").optional(),
+      owner_id: col.string(),
+    },
+  },
+});
+```
+
+## Backwards defaults
+
+When a newer schema drops a column that older clients still expect, define a backwards default in the migration edge:
+
+```ts title="migrations/20260318-drop-legacy-priority-311995e9a178-73b65d082ab8.ts"
+import { col, defineMigration } from "jazz-tools";
+
+// Example: dropping a column with a backwards default.
+// Clients still on the older schema continue seeing legacy_priority.
+export default defineMigration({
+  migrate: {
+    todos: {
+      legacy_priority: col.drop.int({ backwardsDefault: 0 }),
+    },
+  },
+  fromHash: "311995e9a178",
+  toHash: "73b65d082ab8",
+  from: {
+    todos: {
+      title: col.string(),
+      done: col.boolean(),
+      description: col.string().optional(),
+      parentId: col.ref("todos").optional(),
+      projectId: col.ref("projects").optional(),
+      owner_id: col.string(),
+      legacy_priority: col.int(),
+    },
+  },
+  to: {
+    todos: {
+      title: col.string(),
+      done: col.boolean(),
+      description: col.string().optional(),
+      parentId: col.ref("todos").optional(),
+      projectId: col.ref("projects").optional(),
+      owner_id: col.string(),
+    },
+  },
+});
+```
+
+## Rust apps use the same files
+
+Rust services still author and ship TypeScript migrations. The Rust runtime consumes the compiled internal schema representation through the CLI and low-level APIs; it does not maintain a separate SQL migration format.

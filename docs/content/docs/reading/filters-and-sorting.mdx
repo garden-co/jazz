@@ -1,0 +1,70 @@
+---
+title: Filters, Sorting & Pagination
+description: Filter rows with where(), sort with orderBy(), and paginate with limit/offset.
+reviewedAt: "451d4671"
+---
+
+import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
+
+## Filters
+
+Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;—&hairsp;all conditions are combined with `AND`.
+
+<WhereOperatorsTable />
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-filters-ts
+    </include>
+
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-where-operators-ts
+    </include>
+
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-filters-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Sorting
+
+Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `"desc"`.
+
+<Callout type="warn">
+  Always sort **before** paginating. Unsorted items may not appear on the same page across all
+  queries.
+</Callout>
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-sorting-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-sorting-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Pagination
+
+`limit(n)` caps the number of rows returned; `offset(n)` skips that many rows. Combine with a deterministic `orderBy(...)` so page boundaries are stable.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-pagination-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-pagination-rust
+    </include>
+  </Tab>
+</Tabs>

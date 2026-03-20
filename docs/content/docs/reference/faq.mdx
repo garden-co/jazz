@@ -1,0 +1,53 @@
+---
+title: FAQ
+description: Frequently asked questions about Jazz.
+reviewedAt: "451d4671"
+---
+
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
+
+<Accordions type="multiple">
+
+<Accordion id="reset-browser-storage" title="How do I reset browser storage?">
+
+Call `db.deleteClientStorage()` to delete the local OPFS database for the current namespace:
+
+```ts
+await db.deleteClientStorage();
+```
+
+- Browser worker-backed `Db` only.
+- Must be called from the leader tab; otherwise it throws. Close other tabs first.
+- Deletes OPFS storage only (`${namespace}.opfsbtree` for the active namespace).
+- Does not clear `localStorage` auth/synthetic-user data.
+- Reopens a clean worker runtime, so the same `db` instance remains usable.
+
+This is useful when iterating on your schema during development.
+
+</Accordion>
+
+<Accordion id="undefined-vs-empty-array" title="Why does useAll return undefined?">
+
+`useAll` and `QuerySubscription` return `undefined` until the first server response arrives. After that, the value is an array — empty (`[]`) if no rows match, or populated. See [The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for details.
+
+</Accordion>
+
+<Accordion id="offline-only" title="Can I use Jazz without a server?">
+
+Yes. Skip server auth and set no `serverUrl` — data will be persisted locally only. See [Offline-Only Mode](/docs/auth/authentication#offline-only-mode).
+
+</Accordion>
+
+<Accordion id="anonymous-to-external" title="Can I upgrade from anonymous auth to external auth without losing data?">
+
+Yes. Link the local identity to an external one when the user signs in. See [Upgrading from local auth](/docs/auth/authentication#upgrading-from-local-auth).
+
+</Accordion>
+
+<Accordion id="rust-migrations" title="Do Rust apps need separate migration files?">
+
+No. Rust services author and ship the same TypeScript migration files. The Rust runtime consumes the compiled schema representation through the CLI. See [Rust apps use the same files](/docs/schemas/migrations#rust-apps-use-the-same-files).
+
+</Accordion>
+
+</Accordions>

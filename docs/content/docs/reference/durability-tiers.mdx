@@ -1,0 +1,73 @@
+---
+title: Durability Tiers
+description: "API reference for read and write durability tiers: the options that control how far data must propagate before an operation confirms."
+reviewedAt: "451d4671"
+---
+
+import DurabilityTiersTable from "../../partials/durability-tiers-table.mdx";
+
+<DurabilityTiersTable />
+
+For background on how data flows between tiers, see [How Sync Works](/docs/concepts/how-sync-works#infrastructure-tiers).
+
+## Write tiers
+
+`insert`, `update`, and `delete` apply locally with no durability guarantee. Their `Durable` counterparts return promises that resolve when the requested tier acknowledges.
+
+Options:
+
+- `options.tier`: `"worker"` \| `"edge"` \| `"global"`
+- Browser/client default: `"worker"`
+- Backend/server default: `"edge"`
+
+See [Writing Data](/docs/writing/mutations#write-durability-tiers) for detailed guidance on which tier to use and code examples.
+
+## Read tiers
+
+Read durability controls when the **first result** of a query or subscription is delivered.
+
+| Option         | Values                               | Default        | What it does                                                                                                                                                                                                                     |
+| -------------- | ------------------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tier`         | `"worker"` \| `"edge"` \| `"global"` | Same as writes | How far the first result must come from before the query delivers.                                                                                                                                                               |
+| `localUpdates` | `"immediate"` \| `"deferred"`        | `"immediate"`  | With `"immediate"`, local changes appear in the subscription while still waiting for the tier to confirm. With `"deferred"`, the subscription is held until the tier confirms&hairsp;—&hairsp;you only see the confirmed result. |
+| `propagation`  | `"full"` \| `"local-only"`           | `"full"`       | With `"full"`, the subscription is sent to upstream servers, which push matching data back. With `"local-only"`, only local storage is queried&hairsp;—&hairsp;no server communication.                                          |
+
+These options apply to:
+
+- `db.all(query, options?)`
+- `db.one(query, options?)`
+- `db.subscribeAll(query, callback, options?)`
+- `useAll(query, options?)` / `useAllSuspense(query, options?)` (React/Expo)
+- `new QuerySubscription(query, options?)` (Svelte)
+
+Vue's `useAll` does not currently accept read options.
+
+<Tabs
+  groupId="jazz-framework"
+  items={["React", "Svelte", "TypeScript", "Rust"]}
+  persist
+  updateAnchor
+>
+  <Tab value="React">
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-tier-react
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte" meta='title="App.svelte"'>
+      ../examples/docs/todo-client-localfirst-svelte/src/TodoList.svelte#reading-tier-svelte
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-durability-tier-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs" meta='title="main.rs"'>
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-durability-tier-rust
+    </include>
+  </Tab>
+</Tabs>
+
+For most queries and subscriptions, omitting a tier is the right choice: Jazz delivers results from local storage immediately and streams in remote updates as they arrive. Reserve explicit tiers for cases where eventual consistency is not acceptable.

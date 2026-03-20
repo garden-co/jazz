@@ -1,0 +1,78 @@
+---
+title: Branches
+description: How Jazz uses branches to isolate data across environments, schema versions, and user-defined contexts.
+reviewedAt: "451d4671"
+---
+
+Every commit in Jazz is written to a **branch**. When you query, Jazz gathers the relevant commits across different branches to return the rows you've requested. Jazz allows you to keep commits isolated to specific branches so that you can make changes in different contexts without them affecting each other. This is useful for keeping development data separate from production, creating drafts, or when you otherwise need to include or exclude certain updates from queries.
+
+Branches work like in Git: a branch is a named, independent line of history for your data.
+
+## How branches are composed
+
+A branch name in Jazz has three parts:
+
+| Part            | Set by                         | Example           |
+| --------------- | ------------------------------ | ----------------- |
+| **Environment** | Your app config (`env`)        | `dev`, `prod`     |
+| **Schema hash** | Jazz (automatically)           | `a1b2c3d4`        |
+| **User branch** | Your app config (`userBranch`) | `main`, `staging` |
+
+These are joined into a single identifier: `dev-a1b2c3d4-main`.
+
+The schema hash is derived automatically from your current schema definition.
+
+## Configuring branches
+
+By default, Jazz uses `env: "dev"` and `userBranch: "main"`. To target a different branch, set `env` and/or `userBranch` when creating your database context:
+
+<Tabs
+  groupId="jazz-framework"
+  persist
+  updateAnchor
+  items={["React", "Vue", "Svelte", "TypeScript"]}
+>
+  <Tab value="React">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/branch-snippets.tsx#branch-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/BranchExample.vue#branch-vue
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/BranchExample.svelte#branch-svelte
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/branch-snippets.ts#branch-ts
+    </include>
+  </Tab>
+</Tabs>
+
+All [reads](/docs/reading/queries) and [writes](/docs/writing/mutations) through this context will operate on the `prod-{schemaHash}-staging` branch. Data on other branches is unaffected.
+
+<Callout type="info">
+  As a best practice, set `env` to `"prod"` in production using an environment variable. This avoids
+  cross-pollination of data between development and production.
+</Callout>
+
+## Schema versions are merged automatically
+
+When your schema changes, Jazz creates a new branch with a different schema hash (e.g. `prod-a1b2c3d4-main` for v1 and `prod-e5f6g7h8-main` for v2). At the storage level, data from different schema versions is kept separate.
+
+However, when you query, Jazz automatically fetches data from all known schema versions within your current environment and user branch. It applies [lens transforms](/docs/schemas/migrations) to adapt older data to your current schema with no manual migration step.
+
+## Environments and user branches are fully isolated
+
+Unlike schema versions, different environments and user branches are never merged. A query on `dev-*-main` does not include data from `prod-*-main`, and a query on `*-*-staging` does not include data from `*-*-main`. This is hard isolation: there is no way to combine data across environments or user branches at query time.
+
+<Callout type="info" title="Not to be confused with the DAG">
+  The [DAG](/docs/concepts/local-first-data-model#the-dag) describes how concurrent edits diverge
+  and merge within a single branch. Branches as described on this page are a separate concept —
+  named, isolated lines of history.
+</Callout>

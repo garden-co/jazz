@@ -1,0 +1,103 @@
+---
+title: Includes & Relations
+description: Resolve references with include(), pick columns with select(), inspect permissions, and run recursive queries.
+reviewedAt: "451d4671"
+---
+
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+
+## Includes
+
+Use `include(...)` to load related rows as nested objects in a single query result. Pass `true` to resolve a relation, or a nested object to follow multi-hop references. In Rust, use `join()` with `on()` for equivalent results.
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="schema.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/schema/current.ts#schema-todo-client-ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include cwd lang="sql" meta='title="schema.sql"'>
+      ../examples/docs/todo-server-rs/schema/current.sql
+    </include>
+  </Tab>
+</Tabs>
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-includes-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-includes-rust
+    </include>
+  </Tab>
+</Tabs>
+
+### Missing references
+
+Jazz is distributed and supports offline edits, so a referenced row won't always be available locally&hairsp;—&hairsp;it might not have synced yet, or another peer might have deleted it.
+
+When you `include` a relation, **rows whose `include` target can't be resolved are filtered out** (inner join semantics). This only applies if you explicitly load references using `include`. Otherwise the row appears in results without referenced data as usual.
+
+## Select
+
+Use `select(...)` to narrow a row to `id` plus the columns you pick. You can combine it with `include(...)`, and select within included rows too.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-select-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-select-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Computed Permissions Columns
+
+These columns are computed at query time&hairsp;—&hairsp;they don't exist in the database. To use them, opt in explicitly.
+
+- `$canRead`&hairsp;—&hairsp;whether the current session can read the row. Since read policies already gate which rows appear, this will usually be `true`.
+- `$canEdit`&hairsp;—&hairsp;whether the current session passes the row's `UPDATE USING` policy.
+- `$canDelete`&hairsp;—&hairsp;whether the current session passes the row's `DELETE USING` policy.
+- Without a session, all three return `null`.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-magic-columns-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-magic-columns-rust
+    </include>
+  </Tab>
+</Tabs>
+
+<Accordions type="single">
+<Accordion title="Recursive queries">
+
+If your data has self-referencing relations (e.g. a todo with a `parent` that points to another todo), you can walk the chain with a recursive query. It starts from the rows that match your filter, then follows references one level at a time up to a maximum depth.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-recursive-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-recursive-rust
+    </include>
+  </Tab>
+</Tabs>
+
+</Accordion>
+</Accordions>
