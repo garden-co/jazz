@@ -208,9 +208,13 @@ impl TestingServer {
     }
 
     pub fn jwt_for_user(sub: &str) -> String {
+        Self::jwt_for_user_with_claims(sub, json!({"role": "user"}))
+    }
+
+    pub fn jwt_for_user_with_claims(sub: &str, claims: JsonValue) -> String {
         let claims = JwtClaims {
             sub: sub.to_string(),
-            claims: json!({"role": "user"}),
+            claims,
             exp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("clock drift")
@@ -231,6 +235,10 @@ impl TestingServer {
 
     pub fn app_id(&self) -> AppId {
         self.app_id
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
     }
 
     pub fn base_url(&self) -> String {
@@ -293,14 +301,13 @@ impl TestingServer {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        if let Some(mut task) = self.task.take() {
-            if tokio::time::timeout(Duration::from_millis(500), &mut task)
+        if let Some(mut task) = self.task.take()
+            && tokio::time::timeout(Duration::from_millis(500), &mut task)
                 .await
                 .is_err()
-            {
-                task.abort();
-                let _ = task.await;
-            }
+        {
+            task.abort();
+            let _ = task.await;
         }
         self.state
             .runtime

@@ -577,6 +577,7 @@ if (!nativeBinding) {
 
 module.exports = nativeBinding
 module.exports.NapiRuntime = nativeBinding.NapiRuntime
+module.exports.TestingServer = nativeBinding.TestingServer
 module.exports.currentTimestamp = nativeBinding.currentTimestamp
 module.exports.generateId = nativeBinding.generateId
 module.exports.parseSchema = nativeBinding.parseSchema

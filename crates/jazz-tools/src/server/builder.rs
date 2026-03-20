@@ -110,6 +110,7 @@ impl ServerBuilder {
         Ok(BuiltServer { state, app })
     }
 
+    #[allow(clippy::type_complexity)]
     fn build_runtime(
         &self,
     ) -> Result<

@@ -40,6 +40,18 @@ export declare class NapiRuntime {
   close(): void
 }
 
+export declare class TestingServer {
+  static start(options?: { appId?: string; port?: number; dataDir?: string; persistentStorage?: boolean }): Promise<TestingServer>
+  get appId(): string
+  get url(): string
+  get port(): number
+  get dataDir(): string
+  get backendSecret(): string
+  get adminSecret(): string
+  jwtForUser(userId: string, claims?: Record<string, unknown> | undefined): string
+  stop(): Promise<void>
+}
+
 export declare function currentTimestamp(): number
 
 export declare function generateId(): string
