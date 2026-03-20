@@ -1,6 +1,62 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "./db.js";
+import { createJazzClient } from "./create-jazz-client.js";
+
+const mocks = vi.hoisted(() => {
+  const resolveLocalAuthDefaults = vi.fn();
+  const resolveClientSession = vi.fn();
+  const createDb = vi.fn();
+  const managerCtor = vi.fn();
+  const managerInit = vi.fn();
+  const managerShutdown = vi.fn();
+
+  class MockSubscriptionsOrchestrator {
+    constructor(config: { appId: string }, instanceDb: unknown, sessionArg: Session | null) {
+      managerCtor(config, instanceDb, sessionArg);
+    }
+
+    init = managerInit;
+    shutdown = managerShutdown;
+  }
+
+  return {
+    resolveLocalAuthDefaults,
+    resolveClientSession,
+    createDb,
+    managerCtor,
+    managerInit,
+    managerShutdown,
+    MockSubscriptionsOrchestrator,
+  };
+});
+
+vi.mock("../runtime/local-auth.js", () => ({
+  resolveLocalAuthDefaults: mocks.resolveLocalAuthDefaults,
+}));
+
+vi.mock("../runtime/client-session.js", () => ({
+  resolveClientSession: mocks.resolveClientSession,
+}));
+
+vi.mock("./db.js", async () => {
+  const actual = await vi.importActual<typeof import("./db.js")>("./db.js");
+  return {
+    ...actual,
+    createDb: mocks.createDb,
+  };
+});
+
+vi.mock("../subscriptions-orchestrator.js", async () => {
+  const actual = await vi.importActual<typeof import("../subscriptions-orchestrator.js")>(
+    "../subscriptions-orchestrator.js",
+  );
+
+  return {
+    ...actual,
+    SubscriptionsOrchestrator: mocks.MockSubscriptionsOrchestrator,
+  };
+});
 
 type SetupOptions = {
   resolvedConfig?: DbConfig;
@@ -11,8 +67,6 @@ type SetupOptions = {
 };
 
 async function setupCreateClient(options: SetupOptions = {}) {
-  vi.resetModules();
-
   const resolvedConfig: DbConfig = options.resolvedConfig ?? {
     appId: "rn-create-client-resolved",
     localAuthMode: "anonymous",
@@ -22,84 +76,50 @@ async function setupCreateClient(options: SetupOptions = {}) {
   const dbShutdown = vi.fn(async () => {});
   const db = { shutdown: dbShutdown };
 
-  const resolveLocalAuthDefaults = vi.fn((input: DbConfig) => resolvedConfig);
-  const resolveClientSession = vi.fn(async () => {
+  mocks.resolveLocalAuthDefaults.mockImplementation((input: DbConfig) => resolvedConfig);
+  mocks.resolveClientSession.mockImplementation(async () => {
     if (options.sessionError) {
       throw options.sessionError;
     }
     return options.session ?? null;
   });
 
-  const createDb = vi.fn(async (_config: DbConfig) => {
+  mocks.createDb.mockImplementation(async (_config: DbConfig) => {
     if (options.dbError) {
       throw options.dbError;
     }
     return db;
   });
 
-  const managerCtor = vi.fn();
-  const managerInit = vi.fn(async () => {
+  mocks.managerInit.mockImplementation(async () => {
     if (options.orchestratorInitError) {
       throw options.orchestratorInitError;
     }
   });
-  const managerShutdown = vi.fn(async () => {});
-
-  vi.doMock("../runtime/local-auth.js", () => ({
-    resolveLocalAuthDefaults,
-  }));
-
-  vi.doMock("../runtime/client-session.js", () => ({
-    resolveClientSession,
-  }));
-
-  vi.doMock("./db.js", () => ({
-    createDb,
-  }));
-
-  vi.doMock("../subscriptions-orchestrator.js", async () => {
-    const actual = await vi.importActual<typeof import("../subscriptions-orchestrator.js")>(
-      "../subscriptions-orchestrator.js",
-    );
-
-    class MockSubscriptionsOrchestrator {
-      constructor(config: { appId: string }, instanceDb: unknown, sessionArg: Session | null) {
-        managerCtor(config, instanceDb, sessionArg);
-      }
-
-      init = managerInit;
-      shutdown = managerShutdown;
-    }
-
-    return {
-      ...actual,
-      SubscriptionsOrchestrator: MockSubscriptionsOrchestrator,
-    };
-  });
-
-  const { createJazzClient } = await import("./create-jazz-client.js");
+  mocks.managerShutdown.mockImplementation(async () => {});
 
   return {
     createJazzClient,
-    createDb,
-    resolveLocalAuthDefaults,
-    resolveClientSession,
+    createDb: mocks.createDb,
+    resolveLocalAuthDefaults: mocks.resolveLocalAuthDefaults,
+    resolveClientSession: mocks.resolveClientSession,
     resolvedConfig,
     db,
     dbShutdown,
-    managerCtor,
-    managerInit,
-    managerShutdown,
+    managerCtor: mocks.managerCtor,
+    managerInit: mocks.managerInit,
+    managerShutdown: mocks.managerShutdown,
   };
 }
 
 afterEach(() => {
+  mocks.resolveLocalAuthDefaults.mockReset();
+  mocks.resolveClientSession.mockReset();
+  mocks.createDb.mockReset();
+  mocks.managerCtor.mockReset();
+  mocks.managerInit.mockReset();
+  mocks.managerShutdown.mockReset();
   vi.clearAllMocks();
-  vi.resetModules();
-  vi.doUnmock("../runtime/local-auth.js");
-  vi.doUnmock("../runtime/client-session.js");
-  vi.doUnmock("./db.js");
-  vi.doUnmock("../subscriptions-orchestrator.js");
 });
 
 describe("react-native/create-jazz-client", () => {
