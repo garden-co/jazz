@@ -12,12 +12,14 @@ use std::{collections::HashMap, sync::Arc};
 use blake3::Hasher;
 
 use crate::object::{BranchName, ObjectId};
+use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
     ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName, Value,
 };
+use crate::query_manager::writes::RowBranchWrite;
 use crate::storage::Storage;
 use crate::sync_manager::SyncManager;
 
@@ -908,6 +910,79 @@ impl SchemaManager {
             &aligned_values,
             session,
         )
+    }
+
+    /// Update a row using current-schema column names, performing copy-on-write
+    /// when the latest visible row version still lives on an older schema branch.
+    pub fn update_with_session<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        object_id: ObjectId,
+        values: &[(String, Value)],
+        session: Option<&Session>,
+    ) -> Result<crate::commit::CommitId, QueryError> {
+        let current_branch = self.context.branch_name().as_str().to_string();
+        let other_schema_branches = self
+            .all_branch_strings()
+            .into_iter()
+            .filter(|branch| branch != &current_branch)
+            .collect::<Vec<_>>();
+        let (table, source_branch, source_data, source_commit_id) = self
+            .query_manager
+            .load_row_for_schema_update(storage, object_id, &current_branch, &other_schema_branches)
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
+
+        let table_name = TableName::new(&table);
+        let descriptor = self
+            .context
+            .current_schema
+            .get(&table_name)
+            .ok_or(QueryError::TableNotFound(table_name))?
+            .columns
+            .clone();
+
+        let old_current_data = match self.branch_schema_map().get(&source_branch).copied() {
+            Some(source_hash) if source_hash != self.context.current_hash => {
+                self.transformer(&table)
+                    .transform(&source_data, source_commit_id, source_hash)
+                    .map_err(|err| QueryError::EncodingError(err.to_string()))?
+                    .data
+            }
+            Some(_) => source_data.clone(),
+            None => return Err(QueryError::ObjectNotFound(object_id)),
+        };
+
+        let mut current_values = decode_row(&descriptor, &old_current_data)
+            .map_err(|err| QueryError::EncodingError(format!("{err:?}")))?;
+
+        for (column_name, new_value) in values {
+            let Some(index) = descriptor.column_index(column_name) else {
+                return Err(QueryError::EncodingError(format!(
+                    "column '{column_name}' not found"
+                )));
+            };
+            current_values[index] = new_value.clone();
+        }
+
+        let commit_id = if source_branch == current_branch {
+            self.query_manager
+                .update_with_session(storage, object_id, &current_values, session)?
+        } else {
+            self.query_manager
+                .write_existing_row_on_branch_with_session(
+                    storage,
+                    RowBranchWrite {
+                        table: &table,
+                        branch: &current_branch,
+                        id: object_id,
+                        values: &current_values,
+                        old_data_for_policy: &old_current_data,
+                    },
+                    session,
+                )?
+        };
+
+        Ok(commit_id)
     }
 
     /// Delete a row (soft delete) from current schema's branch.
