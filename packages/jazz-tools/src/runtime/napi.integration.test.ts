@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import {
   createServer as createHttpServer,
@@ -6,18 +6,16 @@ import {
   type Server as HttpServer,
   type ServerResponse,
 } from "node:http";
-import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { NapiRuntime } from "jazz-napi";
+import { NapiRuntime, TestingServer, pushSchemaCatalogue } from "jazz-napi";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { Row } from "./client.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
-import { pushSchemaCatalogue, startLocalJazzServer } from "../testing/local-jazz-server.js";
 
 type SimpleTodo = {
   id: string;
@@ -85,9 +83,6 @@ type SyncCaptureServerHandle = {
   closeLatestStream(): void;
   stop(): Promise<void>;
 };
-
-const JWT_KID = "napi-test-kid";
-const JWT_SECRET = "napi-test-secret";
 
 const TEST_SCHEMA: WasmSchema = {
   todos: {
@@ -290,28 +285,6 @@ async function readRequestBody(request: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function getAvailablePort(): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
-    const server = createNetServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close((error) => {
-          if (error) reject(error);
-          else reject(new Error("failed to allocate an available port"));
-        });
-        return;
-      }
-
-      server.close((error) => {
-        if (error) reject(error);
-        else resolve(address.port);
-      });
-    });
-  });
-}
-
 async function listen(server: HttpServer): Promise<number> {
   return await new Promise<number>((resolve, reject) => {
     server.once("error", reject);
@@ -468,55 +441,6 @@ function base64Url(input: Buffer | string): string {
   return encoded.replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
 
-class JwksServer {
-  private readonly server: HttpServer;
-  readonly url: string;
-
-  private constructor(server: HttpServer, url: string) {
-    this.server = server;
-    this.url = url;
-  }
-
-  static async start(secret: string): Promise<JwksServer> {
-    const server = createHttpServer((request, response) => {
-      if (request.url !== "/jwks") {
-        response.statusCode = 404;
-        response.end("not found");
-        return;
-      }
-
-      response.statusCode = 200;
-      response.setHeader("Content-Type", "application/json");
-      response.end(
-        JSON.stringify({
-          keys: [
-            {
-              kty: "oct",
-              kid: JWT_KID,
-              alg: "HS256",
-              k: base64Url(secret),
-            },
-          ],
-        }),
-      );
-    });
-
-    const port = await getAvailablePort();
-    await new Promise<void>((resolve, reject) => {
-      server.listen(port, "127.0.0.1", (error?: unknown) => {
-        if (error) reject(error);
-        else resolve();
-      });
-    });
-
-    return new JwksServer(server, `http://127.0.0.1:${port}/jwks`);
-  }
-
-  async stop(): Promise<void> {
-    await new Promise<void>((resolve) => this.server.close(() => resolve()));
-  }
-}
-
 function isNestedOutboxCall(call: unknown[]): call is [null, [string, string, string, boolean]] {
   return (
     call[0] === null &&
@@ -563,13 +487,6 @@ function toBase64Url(value: unknown): string {
 
 function makeJwt(payload: Record<string, unknown>): string {
   return `${toBase64Url({ alg: "HS256", typ: "JWT" })}.${toBase64Url(payload)}.signature`;
-}
-
-function signJwt(payload: Record<string, unknown>, secret: string): string {
-  const header = { alg: "HS256", typ: "JWT", kid: JWT_KID };
-  const signedPart = `${toBase64Url(header)}.${toBase64Url(payload)}`;
-  const signature = createHmac("sha256", secret).update(signedPart).digest();
-  return `${signedPart}.${base64Url(signature)}`;
 }
 
 function buildClientQuerySubscriptionPayload(queryJson: string, queryId = 1): string {
@@ -874,16 +791,9 @@ describe("NAPI integration", () => {
   }, 25_000);
 
   it("applies createJazzContext(...).forSession() mutations through high-level Db APIs", async () => {
-    const port = await getAvailablePort();
     const appId = randomUUID();
-    const backendSecret = "napi-session-secret";
-    const adminSecret = "napi-session-admin-secret";
-    const server = await startLocalJazzServer({
-      appId,
-      port,
-      backendSecret,
-      adminSecret,
-    });
+    const server = await TestingServer.start({ appId });
+    const { backendSecret, adminSecret } = server;
     let context: {
       asBackend(): Db;
       forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
@@ -1015,16 +925,9 @@ describe("NAPI integration", () => {
   }, 60_000);
 
   it("extracts JWT request auth and applies createJazzContext(...).forRequest() mutations via Db", async () => {
-    const port = await getAvailablePort();
     const appId = randomUUID();
-    const backendSecret = "napi-request-secret";
-    const adminSecret = "napi-request-admin-secret";
-    const server = await startLocalJazzServer({
-      appId,
-      port,
-      backendSecret,
-      adminSecret,
-    });
+    const server = await TestingServer.start({ appId });
+    const { backendSecret, adminSecret } = server;
     let context: {
       asBackend(): Db;
       forRequest(request: { headers: Record<string, string> }): Db;
@@ -1137,20 +1040,10 @@ describe("NAPI integration", () => {
   }, 60_000);
 
   it("filters session-scoped query reads over backend-authenticated sync", async () => {
-    const port = await getAvailablePort();
     const appId = randomUUID();
-    const backendSecret = "napi-query-backend-secret";
-    const adminSecret = "napi-query-admin-secret";
+    const server = await TestingServer.start({ appId });
+    const { backendSecret, adminSecret } = server;
     const rowTitles = (rows: PolicyTodo[]): string[] => rows.map((row) => row.title).sort();
-
-    const jwks = await JwksServer.start(JWT_SECRET);
-    const server = await startLocalJazzServer({
-      appId,
-      port,
-      jwksUrl: jwks.url,
-      backendSecret,
-      adminSecret,
-    });
     let bobContext: {
       db(): Db;
       shutdown(): Promise<void>;
@@ -1187,7 +1080,7 @@ describe("NAPI integration", () => {
         app: { wasmSchema: TODO_SERVER_WASM_SCHEMA },
         driver: { type: "memory" },
         serverUrl: server.url,
-        jwtToken: signJwt({ sub: "bob", claims: {} }, JWT_SECRET),
+        jwtToken: server.jwtForUser("bob", {}),
         env: "test",
         userBranch: "main",
         tier: "worker",
@@ -1197,7 +1090,7 @@ describe("NAPI integration", () => {
         app: { wasmSchema: TODO_SERVER_WASM_SCHEMA },
         driver: { type: "memory" },
         serverUrl: server.url,
-        jwtToken: signJwt({ sub: "carol", claims: {} }, JWT_SECRET),
+        jwtToken: server.jwtForUser("carol", {}),
         env: "test",
         userBranch: "main",
         tier: "worker",
@@ -1207,7 +1100,7 @@ describe("NAPI integration", () => {
         app: { wasmSchema: TODO_SERVER_WASM_SCHEMA },
         driver: { type: "memory" },
         serverUrl: server.url,
-        jwtToken: signJwt({ sub: "alice", claims: {} }, JWT_SECRET),
+        jwtToken: server.jwtForUser("alice", {}),
         env: "test",
         userBranch: "main",
         tier: "worker",
@@ -1340,21 +1233,13 @@ describe("NAPI integration", () => {
       }
       await settleAsyncSyncWork();
       await server.stop();
-      await jwks.stop();
     }
   }, 60_000);
 
   it("syncs edge create/update/delete flows between real backend NAPI contexts", async () => {
-    const port = await getAvailablePort();
     const appId = randomUUID();
-    const backendSecret = "napi-e2e-backend-secret";
-    const adminSecret = "napi-e2e-admin-secret";
-    const server = await startLocalJazzServer({
-      appId,
-      port,
-      backendSecret,
-      adminSecret,
-    });
+    const server = await TestingServer.start({ appId });
+    const { backendSecret, adminSecret } = server;
     let writerContext: {
       asBackend(): Db;
       shutdown(): Promise<void>;

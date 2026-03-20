@@ -41,7 +41,7 @@ export declare class NapiRuntime {
 }
 
 export declare class TestingServer {
-  static start(options?: { appId?: string; port?: number; dataDir?: string; persistentStorage?: boolean }): Promise<TestingServer>
+  static start(options?: { appId?: string; port?: number; dataDir?: string; persistentStorage?: boolean; adminSecret?: string; backendSecret?: string }): Promise<TestingServer>
   get appId(): string
   get url(): string
   get port(): number
@@ -57,3 +57,6 @@ export declare function currentTimestamp(): number
 export declare function generateId(): string
 
 export declare function parseSchema(json: string): any
+
+/** Push versioned schema and lens catalogue objects to a sync server. */
+export declare function pushSchemaCatalogue(options: { serverUrl: string; appId: string; adminSecret: string; schemaDir: string; env?: string; userBranch?: string }): Promise<void>
