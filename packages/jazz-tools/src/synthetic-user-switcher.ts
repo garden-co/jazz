@@ -25,9 +25,11 @@ export interface SyntheticUserSwitcherHandle {
 }
 
 function activeProfile(store: SyntheticUserStore): SyntheticUserProfile {
-  return (
-    store.profiles.find((profile) => profile.id === store.activeProfileId) ?? store.profiles[0]
-  );
+  const fallbackProfile = store.profiles[0];
+  if (!fallbackProfile) {
+    throw new Error("Synthetic user store must contain at least one profile.");
+  }
+  return store.profiles.find((profile) => profile.id === store.activeProfileId) ?? fallbackProfile;
 }
 
 function shouldReload(reloadOnSwitch: boolean): boolean {
@@ -163,8 +165,10 @@ export function createSyntheticUserSwitcher(
     if (store.profiles.length <= 1) return;
 
     const nextProfiles = store.profiles.filter((profile) => profile.id !== store.activeProfileId);
+    const nextActiveProfile = nextProfiles[0];
+    if (!nextActiveProfile) return;
     const nextStore: SyntheticUserStore = {
-      activeProfileId: nextProfiles[0].id,
+      activeProfileId: nextActiveProfile.id,
       profiles: nextProfiles,
     };
 

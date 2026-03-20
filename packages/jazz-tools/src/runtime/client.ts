@@ -25,6 +25,7 @@ import {
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { resolveClientSessionSync } from "./client-session.js";
 import { translateQuery } from "./query-adapter.js";
+import { isHiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -93,7 +94,7 @@ export interface Runtime {
   unsubscribe(handle: number): void;
   onSyncMessageReceived(payload: Uint8Array | string): void;
   onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
-  addServer(): void;
+  addServer(serverCatalogueStateHash?: string | null): void;
   removeServer(): void;
   addClient(): string;
   getSchema(): any;
@@ -442,10 +443,14 @@ export function sessionFromRequest(request: RequestLike): Session {
   if (parts.length < 2) {
     throw new Error("Invalid JWT format");
   }
+  const payloadPart = parts[1];
+  if (payloadPart === undefined) {
+    throw new Error("Invalid JWT format");
+  }
 
   let payload: unknown;
   try {
-    payload = JSON.parse(decodeBase64Url(parts[1]));
+    payload = JSON.parse(decodeBase64Url(payloadPart));
   } catch {
     throw new Error("Invalid JWT payload");
   }
@@ -837,20 +842,20 @@ export class JazzClient {
       return values;
     }
 
-    const projectedBaseColumnCount =
+    const projectedVisibleColumnCount =
       selectColumns.length > 0
-        ? selectColumns.filter((columnName) =>
-            declaredTable.columns.some((column) => column.name === columnName),
+        ? resolveSelectedColumns(table, this.context.schema, selectColumns).filter(
+            (columnName) => !isHiddenIncludeColumnName(columnName),
           ).length
         : 0;
 
-    if (projectedBaseColumnCount > 0) {
-      if (values.length < projectedBaseColumnCount) {
+    if (projectedVisibleColumnCount > 0) {
+      if (values.length < projectedVisibleColumnCount) {
         return values;
       }
 
-      const projectedValues = values.slice(0, projectedBaseColumnCount);
-      const trailingValues = values.slice(projectedBaseColumnCount);
+      const projectedValues = values.slice(0, projectedVisibleColumnCount);
+      const trailingValues = values.slice(projectedVisibleColumnCount);
       if (arraySubqueries.length === 0) {
         return projectedValues.concat(trailingValues);
       }
@@ -873,6 +878,9 @@ export class JazzClient {
     const valuesByColumn = new Map<string, Value>();
     for (let index = 0; index < runtimeTable.columns.length; index += 1) {
       const column = runtimeTable.columns[index];
+      if (!column) {
+        return values;
+      }
       const value = values[index];
       if (value === undefined) {
         return values;

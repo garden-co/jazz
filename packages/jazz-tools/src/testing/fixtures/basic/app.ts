@@ -163,6 +163,11 @@ export class TodoQueryBuilder<I extends Record<string, never> = {}> implements Q
     }
 
     const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
+    }
     const stepConditions = stepBuilt.conditions.filter(
       (condition) => !(condition.op === "eq" && condition.value === currentToken),
     );
