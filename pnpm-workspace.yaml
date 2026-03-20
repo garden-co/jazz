@@ -3,6 +3,7 @@ packages:
   - packages/*
   - examples/*
   - examples/docs/*
+  - stress-tests/*
   - crates
   - crates/jazz-wasm
   - crates/jazz-napi
