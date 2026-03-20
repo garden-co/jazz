@@ -74,8 +74,8 @@ export async function createPolicyTestApp(schemaDir: string): Promise<PolicyTest
   });
 
   const app = await import(`${schemaDir}/app.js`);
-  if (!app) {
-    throw new Error(`No 'app.ts' found in ${schemaDir}`);
+  if (!app.default && !app.App) {
+    throw new Error(`No default export or 'App' export found in ${schemaDir}/app.js`);
   }
   const jazzContext = createJazzContext({
     appId: server.appId,
