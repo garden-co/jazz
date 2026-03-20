@@ -155,7 +155,7 @@ impl TestServer {
     }
 
     async fn create_app(&self, jwks_endpoint: &str) -> CreateAppResponse {
-        self.create_app_with_config(Some(jwks_endpoint), None, None, None, None)
+        self.create_app_with_config(Some(jwks_endpoint), None, None, None, None, None, None)
             .await
     }
 
@@ -171,6 +171,8 @@ impl TestServer {
             None,
             backend_secret,
             admin_secret,
+            None,
+            None,
         )
         .await
     }
@@ -182,6 +184,8 @@ impl TestServer {
         allow_demo: Option<bool>,
         backend_secret: Option<&str>,
         admin_secret: Option<&str>,
+        jwks_cache_ttl_secs: Option<u64>,
+        jwks_max_stale_secs: Option<u64>,
     ) -> CreateAppResponse {
         let mut payload = json!({
             "app_name": "integration-app",
@@ -200,6 +204,12 @@ impl TestServer {
         }
         if let Some(secret) = admin_secret {
             payload["admin_secret"] = Value::String(secret.to_string());
+        }
+        if let Some(ttl_secs) = jwks_cache_ttl_secs {
+            payload["jwks_cache_ttl_secs"] = Value::Number(ttl_secs.into());
+        }
+        if let Some(max_stale_secs) = jwks_max_stale_secs {
+            payload["jwks_max_stale_secs"] = Value::Number(max_stale_secs.into());
         }
 
         let response = self
@@ -510,9 +520,11 @@ async fn stale_jwks_served_when_endpoint_goes_down_after_ttl_expiry() {
         json!({ "keys": [] }),
     ])
     .await;
-    let server =
-        TestServer::start_with_env(vec![("JAZZ_JWKS_CACHE_TTL_SECS", "1".to_string())]).await;
-    let app = server.create_app(&jwks_server.endpoint()).await;
+    let server = TestServer::start().await;
+    let jwks_endpoint = jwks_server.endpoint();
+    let app = server
+        .create_app_with_config(Some(&jwks_endpoint), None, None, None, None, Some(1), None)
+        .await;
 
     let token = make_jwt("user-stale", "kid-stale", "secret-stale");
 
@@ -546,12 +558,19 @@ async fn stale_jwks_refused_after_max_stale_expires() {
     ])
     .await;
     // TTL=1s, max_stale=1s → total window = 2s.
-    let server = TestServer::start_with_env(vec![
-        ("JAZZ_JWKS_CACHE_TTL_SECS", "1".to_string()),
-        ("JAZZ_JWKS_MAX_STALE_SECS", "1".to_string()),
-    ])
-    .await;
-    let app = server.create_app(&jwks_server.endpoint()).await;
+    let server = TestServer::start().await;
+    let jwks_endpoint = jwks_server.endpoint();
+    let app = server
+        .create_app_with_config(
+            Some(&jwks_endpoint),
+            None,
+            None,
+            None,
+            None,
+            Some(1),
+            Some(1),
+        )
+        .await;
 
     let token = make_jwt("user-expiry", "kid-expiry", "secret-expiry");
 
@@ -604,6 +623,8 @@ async fn local_mode_flags_are_enforced_per_app() {
             Some(true),
             Some("backend-secret-1"),
             Some("admin-secret-1"),
+            None,
+            None,
         )
         .await;
 
