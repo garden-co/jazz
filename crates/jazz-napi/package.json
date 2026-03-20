@@ -1,6 +1,6 @@
 {
   "name": "jazz-napi",
-  "version": "2.0.0-alpha.16",
+  "version": "2.0.0-alpha.20",
   "description": "Native Node.js bindings for Jazz runtime",
   "license": "MIT",
   "repository": {
@@ -19,13 +19,14 @@
   },
   "scripts": {
     "build": "node scripts/build.js",
-    "build:debug": "napi build --platform"
+    "build:debug": "node scripts/build.js --debug"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3"
   },
   "napi": {
     "binaryName": "jazz-napi",
+    "packageName": "@garden-co/jazz-napi",
     "targets": [
       "x86_64-unknown-linux-gnu",
       "x86_64-pc-windows-msvc",

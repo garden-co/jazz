@@ -98,6 +98,8 @@ export type PolicyValue =
       path: string[];
     };
 
+export type PolicyLiteralValue = Extract<PolicyValue, { type: "Literal" }>;
+
 export type PolicyExpr =
   | {
       type: "Cmp";
@@ -106,17 +108,36 @@ export type PolicyExpr =
       value: PolicyValue;
     }
   | {
+      type: "SessionCmp";
+      path: string[];
+      op: PolicyCmpOp;
+      value: PolicyLiteralValue;
+    }
+  | {
       type: "IsNull";
       column: string;
+    }
+  | {
+      type: "SessionIsNull";
+      path: string[];
     }
   | {
       type: "IsNotNull";
       column: string;
     }
   | {
+      type: "SessionIsNotNull";
+      path: string[];
+    }
+  | {
       type: "Contains";
       column: string;
       value: PolicyValue;
+    }
+  | {
+      type: "SessionContains";
+      path: string[];
+      value: PolicyLiteralValue;
     }
   | {
       type: "In";
@@ -127,6 +148,11 @@ export type PolicyExpr =
       type: "InList";
       column: string;
       values: PolicyValue[];
+    }
+  | {
+      type: "SessionInList";
+      path: string[];
+      values: PolicyLiteralValue[];
     }
   | {
       type: "Exists";

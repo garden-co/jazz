@@ -86,13 +86,19 @@ async function exchange(messages: object[]): Promise<Array<Record<string, unknow
     .map((l) => JSON.parse(l));
 }
 
+async function exchangeOne(messages: object[]): Promise<Record<string, unknown>> {
+  const responses = await exchange(messages);
+  expect(responses).toHaveLength(1);
+  return responses[0]!;
+}
+
 // ---------------------------------------------------------------------------
 // Protocol — lifecycle
 // ---------------------------------------------------------------------------
 
 describe("initialize", () => {
   it("responds with protocolVersion, capabilities.tools, and serverInfo", async () => {
-    const [res] = await exchange([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }]);
+    const res = await exchangeOne([{ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }]);
     expect(res.id).toBe(1);
     expect((res.result as any).protocolVersion).toBeDefined();
     expect((res.result as any).capabilities.tools).toBeDefined();
@@ -108,13 +114,13 @@ describe("initialized notification", () => {
     ]);
     // Only the initialize response should be present
     expect(responses).toHaveLength(1);
-    expect(responses[0].id).toBe(1);
+    expect(responses[0]!.id).toBe(1);
   });
 });
 
 describe("ping", () => {
   it("responds with empty result", async () => {
-    const [res] = await exchange([{ jsonrpc: "2.0", id: 2, method: "ping" }]);
+    const res = await exchangeOne([{ jsonrpc: "2.0", id: 2, method: "ping" }]);
     expect(res.id).toBe(2);
     expect(res.result).toEqual({});
   });
@@ -122,7 +128,7 @@ describe("ping", () => {
 
 describe("unknown method", () => {
   it("returns JSON-RPC error -32601", async () => {
-    const [res] = await exchange([{ jsonrpc: "2.0", id: 9, method: "no/such/method" }]);
+    const res = await exchangeOne([{ jsonrpc: "2.0", id: 9, method: "no/such/method" }]);
     expect(res.id).toBe(9);
     expect((res.error as any).code).toBe(-32601);
   });
@@ -155,7 +161,7 @@ describe("malformed JSON", () => {
 
 describe("tools/list", () => {
   it("returns an array of three tools", async () => {
-    const [res] = await exchange([{ jsonrpc: "2.0", id: 3, method: "tools/list" }]);
+    const res = await exchangeOne([{ jsonrpc: "2.0", id: 3, method: "tools/list" }]);
     const tools = (res.result as any).tools as Array<{ name: string }>;
     expect(tools).toHaveLength(3);
     const names = tools.map((t) => t.name);
@@ -165,7 +171,7 @@ describe("tools/list", () => {
   });
 
   it("each tool has a name, description, and inputSchema", async () => {
-    const [res] = await exchange([{ jsonrpc: "2.0", id: 3, method: "tools/list" }]);
+    const res = await exchangeOne([{ jsonrpc: "2.0", id: 3, method: "tools/list" }]);
     const tools = (res.result as any).tools as Array<{
       name: string;
       description: string;
@@ -180,14 +186,14 @@ describe("tools/list", () => {
   });
 
   it("search_docs has required query param", async () => {
-    const [res] = await exchange([{ jsonrpc: "2.0", id: 3, method: "tools/list" }]);
+    const res = await exchangeOne([{ jsonrpc: "2.0", id: 3, method: "tools/list" }]);
     const tools = (res.result as any).tools as Array<any>;
     const searchTool = tools.find((t: any) => t.name === "search_docs");
     expect(searchTool.inputSchema.required).toContain("query");
   });
 
   it("get_doc has required slug param", async () => {
-    const [res] = await exchange([{ jsonrpc: "2.0", id: 3, method: "tools/list" }]);
+    const res = await exchangeOne([{ jsonrpc: "2.0", id: 3, method: "tools/list" }]);
     const tools = (res.result as any).tools as Array<any>;
     const getDocTool = tools.find((t: any) => t.name === "get_doc");
     expect(getDocTool.inputSchema.required).toContain("slug");
@@ -200,7 +206,7 @@ describe("tools/list", () => {
 
 describe("tools/call search_docs", () => {
   it("returns content array with text type and ANSI-formatted output", async () => {
-    const [res] = await exchange([
+    const res = await exchangeOne([
       {
         jsonrpc: "2.0",
         id: 4,
@@ -209,14 +215,14 @@ describe("tools/call search_docs", () => {
       },
     ]);
     const content = (res.result as any).content as Array<{ type: string; text: string }>;
-    expect(content[0].type).toBe("text");
+    expect(content[0]!.type).toBe("text");
     // Title and slug appear in output (may be wrapped in ANSI codes)
-    expect(content[0].text).toContain("Getting Started");
-    expect(content[0].text).toContain("getting-started");
+    expect(content[0]!.text).toContain("Getting Started");
+    expect(content[0]!.text).toContain("getting-started");
   });
 
   it("respects optional limit argument", async () => {
-    const [res] = await exchange([
+    const res = await exchangeOne([
       {
         jsonrpc: "2.0",
         id: 4,
@@ -224,7 +230,7 @@ describe("tools/call search_docs", () => {
         params: { name: "search_docs", arguments: { query: "installation", limit: 1 } },
       },
     ]);
-    const text = (res.result as any).content[0].text as string;
+    const text = (res.result as any).content[0]!.text as string;
     // With limit 1, only one slug should appear
     const slugOccurrences = text.split("getting-started").length - 1;
     expect(slugOccurrences).toBeLessThanOrEqual(1);
@@ -233,7 +239,7 @@ describe("tools/call search_docs", () => {
 
 describe("tools/call get_doc", () => {
   it("returns ANSI-formatted output with title, description, and body", async () => {
-    const [res] = await exchange([
+    const res = await exchangeOne([
       {
         jsonrpc: "2.0",
         id: 5,
@@ -241,14 +247,14 @@ describe("tools/call get_doc", () => {
         params: { name: "get_doc", arguments: { slug: "getting-started" } },
       },
     ]);
-    const text = (res.result as any).content[0].text as string;
+    const text = (res.result as any).content[0]!.text as string;
     expect(text).toContain("Getting Started");
     expect(text).toContain("Learn how to install Jazz.");
     expect(text).toContain("npm install jazz-tools");
   });
 
   it("returns JSON-RPC error when slug param is missing", async () => {
-    const [res] = await exchange([
+    const res = await exchangeOne([
       {
         jsonrpc: "2.0",
         id: 5,
@@ -260,7 +266,7 @@ describe("tools/call get_doc", () => {
   });
 
   it("returns isError result when slug does not exist", async () => {
-    const [res] = await exchange([
+    const res = await exchangeOne([
       {
         jsonrpc: "2.0",
         id: 5,
@@ -272,14 +278,14 @@ describe("tools/call get_doc", () => {
     // so the model can read the message and recover.
     expect(res.error).toBeUndefined();
     expect((res.result as any).isError).toBe(true);
-    const text = (res.result as any).content[0].text as string;
+    const text = (res.result as any).content[0]!.text as string;
     expect(text).toContain("no-such-page");
   });
 });
 
 describe("tools/call list_pages", () => {
   it("returns ANSI-formatted output with title, slug, and description per page", async () => {
-    const [res] = await exchange([
+    const res = await exchangeOne([
       {
         jsonrpc: "2.0",
         id: 6,
@@ -287,7 +293,7 @@ describe("tools/call list_pages", () => {
         params: { name: "list_pages", arguments: {} },
       },
     ]);
-    const text = (res.result as any).content[0].text as string;
+    const text = (res.result as any).content[0]!.text as string;
     expect(text).toContain("Getting Started");
     expect(text).toContain("getting-started");
     expect(text).toContain("Learn how to install Jazz.");
@@ -296,7 +302,7 @@ describe("tools/call list_pages", () => {
 
 describe("tools/call error cases", () => {
   it("unknown tool name returns isError result so the model can recover", async () => {
-    const [res] = await exchange([
+    const res = await exchangeOne([
       {
         jsonrpc: "2.0",
         id: 7,

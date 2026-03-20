@@ -1,0 +1,10 @@
+{
+  "id": "R8",
+  "name": "many_linked_branches_single_object",
+  "seed": 20260308,
+  "branch_count": 1500,
+  "commits_per_branch": 4,
+  "merge_fanin": 8,
+  "payload_bytes": 128,
+  "cache_size_bytes": 16777216
+}

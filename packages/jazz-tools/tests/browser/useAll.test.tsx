@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import type { QueryBuilder, QueryOptions, TableProxy } from "../../src/runtime/db.js";
 import { createJazzClient, type JazzClient } from "../../src/react/create-jazz-client.js";
-import { JazzProvider } from "../../src/react-core/provider.js";
+import { JazzClientProvider as JazzProvider } from "../../src/react-core/provider.js";
 import { useAll } from "../../src/react-core/use-all.js";
 
 const schema: WasmSchema = {

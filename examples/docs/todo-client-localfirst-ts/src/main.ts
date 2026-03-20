@@ -1,5 +1,9 @@
 import { createDb, type DbConfig, type Db } from "jazz-tools";
+import { authSessionExamples } from "./auth-session-snippets.js";
 import { app, Todo } from "../schema/app.js";
+
+// Keep docs-only auth snippets in the compiled example app.
+void authSessionExamples;
 
 function readEnvAppId(): string | undefined {
   return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
@@ -12,7 +16,7 @@ function orderTodosWithDepth(todos: Todo[]): { todo: Todo; depth: number }[] {
   const roots: Todo[] = [];
 
   for (const todo of todos) {
-    const parentId = todo.parent;
+    const parentId = todo.parentId;
     if (parentId && todoIds.has(parentId)) {
       const siblings = childrenByParent.get(parentId) ?? [];
       siblings.push(todo);
@@ -124,7 +128,7 @@ export async function startApp(
     db.insert(app.todos, {
       title: input.value,
       done: false,
-      ...(selectedParentId ? { parent: selectedParentId } : {}),
+      ...(selectedParentId ? { parentId: selectedParentId } : {}),
     });
     input.value = "";
     parentSelect.value = "";

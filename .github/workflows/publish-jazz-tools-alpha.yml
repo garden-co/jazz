@@ -351,6 +351,7 @@ jobs:
                     "jazz-tools-linux-x64",
                     "jazz-tools-windows-x64",
                     "jazz-wasm-pkg",
+                    "jazz-napi-loader",
                     "jazz-napi-binding-darwin-arm64",
                     "jazz-napi-binding-darwin-x64",
                     "jazz-napi-binding-linux-x64-gnu",
@@ -661,6 +662,15 @@ jobs:
           path: crates/jazz-napi/jazz-napi.${{ matrix.platform }}.node
           if-no-files-found: error
 
+      - uses: actions/upload-artifact@v4
+        if: matrix.platform == 'linux-x64-gnu'
+        with:
+          name: jazz-napi-loader
+          path: |
+            crates/jazz-napi/index.js
+            crates/jazz-napi/index.d.ts
+          if-no-files-found: error
+
   build-rn-ios:
     name: Build jazz-rn iOS payload
     runs-on: macos-14
@@ -711,6 +721,7 @@ jobs:
         run: |
           mkdir -p dist/rn-ios
           cp -R crates/jazz-rn/JazzRnFramework.xcframework dist/rn-ios/
+          cp -R crates/jazz-rn/cpp/generated dist/rn-ios/cpp-generated
 
       - uses: actions/upload-artifact@v4
         with:
@@ -865,6 +876,12 @@ jobs:
       - uses: actions/download-artifact@v5
         if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
         with:
+          name: jazz-napi-loader
+          path: crates/jazz-napi
+
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
+        with:
           pattern: jazz-napi-binding-*
           path: crates/jazz-napi/artifacts
           merge-multiple: true
@@ -907,6 +924,15 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
+          name: jazz-napi-loader
+          path: crates/jazz-napi
+
+      - uses: actions/download-artifact@v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
           pattern: jazz-napi-binding-*
           path: crates/jazz-napi/artifacts
           merge-multiple: true
@@ -934,8 +960,11 @@ jobs:
         run: |
           rm -rf crates/jazz-rn/JazzRnFramework.xcframework
           rm -rf crates/jazz-rn/android/src/main/jniLibs
+          rm -rf crates/jazz-rn/cpp/generated
           mkdir -p crates/jazz-rn/android/src/main
+          mkdir -p crates/jazz-rn/cpp
           cp -R dist/rn-ios/JazzRnFramework.xcframework crates/jazz-rn/
+          cp -R dist/rn-ios/cpp-generated crates/jazz-rn/cpp/generated
           cp -R dist/rn-android/jniLibs crates/jazz-rn/android/src/main/
 
       - name: Show release mode
@@ -960,7 +989,6 @@ jobs:
           cd crates/jazz-napi
           pnpm exec napi create-npm-dirs
           pnpm exec napi artifacts -d artifacts --npm-dir npm
-          node -e 'const fs=require("fs");for(const entry of fs.readdirSync("npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const path=`npm/${entry.name}/package.json`;const p=JSON.parse(fs.readFileSync(path,"utf8"));p.name=`@garden-co/${p.name}`;fs.writeFileSync(path,`${JSON.stringify(p,null,2)}\n`);}'
 
       - name: Verify staged jazz-napi platform artifacts
         run: |
@@ -1062,7 +1090,7 @@ jobs:
           tar -tf "${TARBALL}" | grep -q "package/index.js"
           tar -tf "${TARBALL}" | grep -q "package/index.d.ts"
           tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);const optional=p.optionalDependencies||{};for(const [name,version] of Object.entries(optional)){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`optionalDependencies.${name} uses workspace protocol (${version}) in packed manifest`);}}for(const name of ["@garden-co/jazz-napi-linux-x64-gnu","@garden-co/jazz-napi-win32-x64-msvc","@garden-co/jazz-napi-darwin-x64","@garden-co/jazz-napi-darwin-arm64"]){if(!optional[name]){throw new Error(`missing optional dependency ${name} in packed manifest`);}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
-          tar -xOf "${TARBALL}" package/index.js | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const unscoped=[...s.matchAll(/require\("((?!\.\/)jazz-napi-[^"]+)"/g)].map((m)=>m[1]);if(unscoped.length){throw new Error(`packed index.js still references unscoped native packages: ${[...new Set(unscoped)].join(", ")}`);}if(!s.includes("@garden-co")){throw new Error("packed index.js is missing the @garden-co package scope");}console.log("Packed loader uses scoped native package names");});'
+          tar -xOf "${TARBALL}" package/index.js | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const unscoped=[...s.matchAll(/require\((["\x27])((?!\.\/)jazz-napi-[^"\x27)]+)\1\)/g)].map((m)=>m[2]);if(unscoped.length){throw new Error(`packed index.js still references unscoped native packages: ${[...new Set(unscoped)].join(", ")}`);}if(!s.includes("@garden-co")){throw new Error("packed index.js is missing the @garden-co package scope");}console.log("Packed loader uses scoped native package names");});'
 
       - name: Verify packed jazz-tools manifest
         run: |
@@ -1117,6 +1145,16 @@ jobs:
           }
           grep -q '^package/JazzRnFramework.xcframework/Info.plist$' "${LISTING}" || {
             echo "Missing JazzRnFramework.xcframework/Info.plist in packed jazz-rn tarball."
+            exit 1
+          }
+
+          # Ensure generated C++ bindings are present (required by the podspec at compile time).
+          grep -q '^package/cpp/generated/jazz_rn\.hpp$' "${LISTING}" || {
+            echo "Missing cpp/generated/jazz_rn.hpp in packed jazz-rn tarball."
+            exit 1
+          }
+          grep -q '^package/cpp/generated/jazz_rn\.cpp$' "${LISTING}" || {
+            echo "Missing cpp/generated/jazz_rn.cpp in packed jazz-rn tarball."
             exit 1
           }
 

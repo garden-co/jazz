@@ -1,5 +1,5 @@
 import { BrowserRouter } from "react-router";
-import { createJazzClient, JazzProvider } from "jazz-tools/react";
+import { createJazzClient, JazzClientProvider } from "jazz-tools/react";
 import { fetchSchemaHashes, fetchStoredWasmSchema } from "jazz-tools";
 import { useEffect, useState } from "react";
 import { StandaloneProvider } from "./contexts/standalone-context.js";
@@ -195,7 +195,7 @@ export default function App() {
   }
 
   return (
-    <JazzProvider client={client}>
+    <JazzClientProvider client={client}>
       <DevtoolsProvider wasmSchema={wasmSchema} runtime="standalone">
         <StandaloneProvider
           onReset={handleReset}
@@ -215,7 +215,7 @@ export default function App() {
           </BrowserRouter>
         </StandaloneProvider>
       </DevtoolsProvider>
-    </JazzProvider>
+    </JazzClientProvider>
   );
 }
 
