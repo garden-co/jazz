@@ -85,7 +85,7 @@
   },
   "devDependencies": {
     "@sveltejs/package": "^2.0.0",
-    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
@@ -96,7 +96,7 @@
     "svelte": "^5.0.0",
     "typescript": "catalog:default",
     "vite-plugin-top-level-await": "^1.6.0",
-    "vite-plugin-wasm": "^3.5.0",
+    "vite-plugin-wasm": "^3.6.0",
     "vitest": "catalog:default",
     "vue": "^3.5.22",
     "zod": "^4.3.6"
