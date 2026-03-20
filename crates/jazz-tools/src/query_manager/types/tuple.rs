@@ -276,10 +276,7 @@ impl PartialEq for Tuple {
         if self.0.len() != other.0.len() {
             return false;
         }
-        self.0
-            .iter()
-            .zip(other.0.iter())
-            .all(|(a, b)| a.id() == b.id())
+        self.id_iter().eq(other.id_iter())
     }
 }
 
