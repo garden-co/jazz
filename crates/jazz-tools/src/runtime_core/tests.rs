@@ -1950,6 +1950,37 @@ fn rc_update_old_schema_row_after_evolution_copies_row_to_current_schema() {
 }
 
 #[test]
+fn rc_delete_old_schema_row_after_evolution_hides_row_from_queries() {
+    let v1 = schema_evolution_v1();
+    let v2 = schema_evolution_v2();
+
+    let mut old_runtime = create_runtime_with_schema(v1.clone(), "schema-evolution-delete-test");
+    let user_id = ObjectId::new();
+    let inserted_values = vec![Value::Uuid(user_id), Value::Text("Alice".to_string())];
+    let (inserted_id, _) = old_runtime.insert("users", inserted_values, None).unwrap();
+
+    let storage = old_runtime.into_storage();
+
+    let mut evolved_runtime =
+        create_runtime_with_storage(v2.clone(), "schema-evolution-delete-test", storage);
+    evolved_runtime
+        .add_live_schema_and_persist_catalogue(v1.clone())
+        .expect("v1 should be attachable as a live schema for v2");
+    evolved_runtime.immediate_tick();
+
+    evolved_runtime
+        .delete(inserted_id, None)
+        .expect("Deleting an old-schema row should succeed after schema evolution");
+
+    let results = execute_runtime_query(&mut evolved_runtime, Query::new("users"), None);
+    assert_eq!(
+        results.len(),
+        0,
+        "Deleted old-schema row should no longer be visible after schema evolution",
+    );
+}
+
+#[test]
 fn test_persist_schema_then_add_server_sends_catalogue() {
     // Mirror the WASM flow EXACTLY: NO immediate_tick before persist_schema
     let schema = test_schema();

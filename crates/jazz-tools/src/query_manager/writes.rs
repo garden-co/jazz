@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::commit::CommitId;
-use crate::metadata::{DeleteKind, MetadataKey, hard_delete_metadata, soft_delete_metadata};
+use crate::metadata::{MetadataKey, hard_delete_metadata, soft_delete_metadata};
 use crate::object::{BranchName, ObjectId};
 use crate::storage::Storage;
 
@@ -23,6 +23,13 @@ struct PreparedUpdateWrite {
     table_name: TableName,
     descriptor: RowDescriptor,
     new_data: Vec<u8>,
+}
+
+pub struct RowBranchDelete<'a> {
+    pub table: &'a str,
+    pub branch: &'a str,
+    pub id: ObjectId,
+    pub old_data_for_policy: &'a [u8],
 }
 
 impl QueryManager {
@@ -1160,53 +1167,73 @@ impl QueryManager {
         })
     }
 
-    /// Soft delete a row on a specific branch.
-    ///
-    /// Used by SchemaManager for schema-aware deletes.
-    pub fn delete_on_branch<H: Storage>(
+    pub fn delete_existing_row_on_branch_with_session<H: Storage>(
         &mut self,
         storage: &mut H,
-        table: &str,
-        branch: &str,
-        id: ObjectId,
+        delete: RowBranchDelete<'_>,
+        session: Option<&Session>,
     ) -> Result<DeleteHandle, QueryError> {
+        let RowBranchDelete {
+            table,
+            branch,
+            id,
+            old_data_for_policy,
+        } = delete;
         // Check for hard delete first (checks default branch)
         if self.is_hard_deleted(id) {
             return Err(QueryError::RowHardDeleted(id));
         }
 
         let table_name = TableName::new(table);
-
         // Check if already soft-deleted on this branch
         if self.row_is_deleted_on_branch(storage, table, branch, id) {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
 
-        // Get old data from ObjectManager on this branch
-        let (old_data, _) = self
-            .load_row_from_object_on_branch(id, branch)
-            .ok_or(QueryError::ObjectNotFound(id))?;
+        let (descriptor, using_policy) = {
+            let table_schema = self
+                .schema
+                .get(&table_name)
+                .ok_or(QueryError::TableNotFound(table_name))?;
+            (
+                table_schema.columns.clone(),
+                table_schema.policies.effective_delete_using().cloned(),
+            )
+        };
 
-        let table_schema = self
-            .schema
-            .get(&table_name)
-            .ok_or(QueryError::TableNotFound(table_name))?;
-        let descriptor = table_schema.columns.clone();
-        // Get parent commit on this branch
-        let tips = self
+        if let (Some(session), Some(policy)) = (session, using_policy) {
+            let mut visited = HashSet::new();
+            if !self.evaluate_policy_for_content_with_context_for_row(
+                storage,
+                &policy,
+                old_data_for_policy,
+                &descriptor,
+                session,
+                table,
+                branch,
+                id,
+                0,
+                &mut visited,
+            ) {
+                return Err(QueryError::PolicyDenied {
+                    table: table_name,
+                    operation: Operation::Delete,
+                });
+            }
+        }
+
+        // Get old data from ObjectManager on this branch
+        let old_branch_data = self
+            .load_row_from_object_on_branch(id, branch)
+            .map(|(data, _)| data)
+            .filter(|data| !data.is_empty());
+        let parents = self
             .sync_manager
             .object_manager
             .get_tip_ids(id, branch)
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
+            .map(|tips| tips.iter().copied().collect())
+            .unwrap_or_default();
 
-        let parents: Vec<_> = tips.into_iter().collect();
-        let author = id;
-
-        // Create delete metadata
-        let delete_metadata = soft_delete_metadata();
-
-        // Add commit with preserved content + delete: soft metadata
         let delete_commit_id = self
             .sync_manager
             .object_manager
@@ -1215,23 +1242,24 @@ impl QueryManager {
                 id,
                 branch,
                 parents,
-                old_data.clone(),
-                author,
-                Some(delete_metadata),
+                old_data_for_policy.to_vec(),
+                id,
+                Some(soft_delete_metadata()),
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
-        // Update indices on this branch
+        self.sync_manager
+            .forward_update_to_servers(id, branch.into());
+
         Self::update_indices_for_soft_delete_on_branch(
             storage,
             table,
             branch,
             id,
-            &old_data,
+            old_branch_data.as_deref().unwrap_or(old_data_for_policy),
             &descriptor,
         )?;
 
-        // Mark subscriptions dirty
         self.mark_subscriptions_dirty_local(table);
         self.mark_row_deleted_in_subscriptions(table, id);
 
@@ -1529,13 +1557,7 @@ impl QueryManager {
             return false;
         };
         // Hard delete: empty content + delete: hard metadata
-        commit.content.is_empty()
-            && commit
-                .metadata
-                .as_ref()
-                .and_then(|m| m.get(MetadataKey::Delete.as_str()))
-                .map(|v| v == DeleteKind::Hard.as_str())
-                .unwrap_or(false)
+        commit.content.is_empty() && commit.is_deleted()
     }
 
     /// Check if the current tip has `delete: soft` metadata.
@@ -1553,12 +1575,7 @@ impl QueryManager {
             return false;
         };
         // Soft delete: has delete: soft metadata (content is preserved)
-        commit
-            .metadata
-            .as_ref()
-            .and_then(|m| m.get(MetadataKey::Delete.as_str()))
-            .map(|v| v == DeleteKind::Soft.as_str())
-            .unwrap_or(false)
+        commit.is_deleted()
     }
 
     /// Check if an incoming update has hard delete metadata.
@@ -1576,13 +1593,7 @@ impl QueryManager {
             return false;
         };
         // Hard delete: empty content + delete: hard metadata
-        commit.content.is_empty()
-            && commit
-                .metadata
-                .as_ref()
-                .and_then(|m| m.get(MetadataKey::Delete.as_str()))
-                .map(|v| v == DeleteKind::Hard.as_str())
-                .unwrap_or(false)
+        commit.content.is_empty() && commit.is_deleted()
     }
 
     /// Check if a commit has been stored to disk.

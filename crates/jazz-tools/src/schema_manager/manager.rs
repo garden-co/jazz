@@ -19,7 +19,7 @@ use crate::query_manager::session::Session;
 use crate::query_manager::types::{
     ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName, Value,
 };
-use crate::query_manager::writes::RowBranchWrite;
+use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
 use crate::storage::Storage;
 use crate::sync_manager::SyncManager;
 
@@ -970,20 +970,38 @@ impl SchemaManager {
         Ok(commit_id)
     }
 
-    /// Delete a row (soft delete) from current schema's branch.
+    /// Delete a row (soft delete), performing copy-on-write when the latest
+    /// visible row version still lives on an older schema branch.
     pub fn delete<H: Storage>(
         &mut self,
         storage: &mut H,
-        table: &str,
         object_id: ObjectId,
+        session: Option<&Session>,
     ) -> Result<DeleteHandle, QueryError> {
+        let current_branch = self.context.branch_name().as_str().to_string();
+        let branches = self.all_branch_strings();
+        let (table, source_branch, old_current_data, _source_commit_id) = self
+            .query_manager
+            .load_row_for_schema_update(storage, object_id, &branches)
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
+
         let _span = tracing::debug_span!("SM::delete", table, %object_id, schema_hash = %self.context.current_hash).entered();
-        self.query_manager.delete_on_branch(
-            storage,
-            table,
-            self.context.branch_name().as_str(),
-            object_id,
-        )
+        if source_branch == current_branch {
+            self.query_manager
+                .delete_with_session(storage, object_id, session)
+        } else {
+            self.query_manager
+                .delete_existing_row_on_branch_with_session(
+                    storage,
+                    RowBranchDelete {
+                        table: &table,
+                        branch: &current_branch,
+                        id: object_id,
+                        old_data_for_policy: &old_current_data,
+                    },
+                    session,
+                )
+        }
     }
 
     /// Process pending operations (drives SyncManager).
