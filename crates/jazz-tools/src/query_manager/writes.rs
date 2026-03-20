@@ -149,43 +149,18 @@ impl QueryManager {
         &mut self,
         storage: &mut H,
         id: ObjectId,
-        current_branch: &str,
-        sibling_schema_branches: &[String],
+        branches: &[String],
     ) -> Option<(String, String, Vec<u8>, CommitId)> {
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
-        let current_only = vec![current_branch.to_string()];
-        let current_obj =
-            self.sync_manager
-                .object_manager
-                .get_or_load(id, storage, &current_only)?;
-        let table = current_obj
-            .metadata
-            .get(MetadataKey::Table.as_str())?
-            .clone();
-        if let Some(resolved) = Self::resolve_latest_row_with_schema_transform(
-            id,
-            current_obj,
-            &current_only,
-            &table,
-            &branch_schema_map,
-            &self.schema_context,
-        ) {
-            return Some((
-                table,
-                resolved.branch_name.as_str().to_string(),
-                resolved.content,
-                resolved.commit_id,
-            ));
-        }
-
-        let sibling_obj =
-            self.sync_manager
-                .object_manager
-                .get_or_load(id, storage, sibling_schema_branches)?;
+        let obj = self
+            .sync_manager
+            .object_manager
+            .get_or_load(id, storage, branches)?;
+        let table = obj.metadata.get(MetadataKey::Table.as_str())?.clone();
         Self::resolve_latest_row_with_schema_transform(
             id,
-            sibling_obj,
-            sibling_schema_branches,
+            obj,
+            branches,
             &table,
             &branch_schema_map,
             &self.schema_context,
