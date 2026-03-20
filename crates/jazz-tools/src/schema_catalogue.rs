@@ -16,7 +16,6 @@ use crate::schema_manager::{
     parse_migration_filename,
 };
 use crate::storage::MemoryStorage;
-use crate::sync_manager::SyncPayload;
 use crate::sync_manager::{ClientId, Destination, OutboxEntry, ServerId, SyncManager};
 use reqwest::Client;
 use reqwest::header::CONTENT_TYPE;
@@ -53,14 +52,14 @@ impl SyncServerClient {
 
     async fn push_sync(
         &self,
-        payload: SyncPayload,
+        payload: crate::sync_manager::SyncPayload,
         client_id: ClientId,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let request = SyncBatchRequest {
             payloads: vec![payload],
             client_id,
         };
-        let sync_url = format!("{}{}{}", self.base_url, self.route_prefix, "/sync");
+        let sync_url = format!("{}{}/sync", self.base_url, self.route_prefix);
         self.http_client
             .post(sync_url)
             .header(CONTENT_TYPE, "application/json")
@@ -115,7 +114,7 @@ fn build_runtime(
             payload,
         } = entry;
         if let Destination::Server(_) = destination {
-            in_flight_pushes.fetch_add(1, Ordering::SeqCst);
+            in_flight_pushes.fetch_add(1, Ordering::AcqRel);
             let connection = connection.clone();
             let push_errors = push_errors.clone();
             let in_flight_pushes = in_flight_pushes.clone();
@@ -125,7 +124,7 @@ fn build_runtime(
                 {
                     errors.push(error.to_string());
                 }
-                in_flight_pushes.fetch_sub(1, Ordering::SeqCst);
+                in_flight_pushes.fetch_sub(1, Ordering::AcqRel);
             });
         }
     })
@@ -171,7 +170,7 @@ fn collect_forward_migration_files(
 }
 
 async fn wait_for_in_flight_pushes(in_flight_pushes: &Arc<AtomicUsize>) {
-    while in_flight_pushes.load(Ordering::SeqCst) > 0 {
+    while in_flight_pushes.load(Ordering::Acquire) > 0 {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
@@ -297,10 +296,7 @@ pub async fn push(
 
     wait_for_in_flight_pushes(&in_flight_pushes).await;
 
-    let errors = push_errors
-        .lock()
-        .map(|guard| guard.clone())
-        .unwrap_or_default();
+    let errors = push_errors.lock().unwrap().clone();
     if !errors.is_empty() {
         return Err(format!(
             "Schema push encountered {} sync error(s): {}",
