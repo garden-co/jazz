@@ -31,6 +31,11 @@ export const DEVTOOLS_EVENTS = {
   CLIENT_ACTIVE_QUERY_SUBSCRIPTIONS_CHANGED: "client.activeQuerySubscriptions.changed",
 } as const;
 
+export const DEVTOOLS_CONTROL_MESSAGES = {
+  COMLINK_CONNECT: "devtools.comlink.connect",
+  COMLINK_READY: "devtools.comlink.ready",
+} as const;
+
 export type DevtoolsBridgeCommand = (typeof DEVTOOLS_COMMANDS)[keyof typeof DEVTOOLS_COMMANDS];
 
 export type DevtoolsBridgeEvent = (typeof DEVTOOLS_EVENTS)[keyof typeof DEVTOOLS_EVENTS];
@@ -111,6 +116,32 @@ export interface DevtoolsResponsePayloadByCommand {
   [DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE]: DevtoolsClientSubscribeResponsePayload;
   [DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE]: DevtoolsClientUnsubscribeResponsePayload;
   [DEVTOOLS_COMMANDS.CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS]: DevtoolsClientListActiveQuerySubscriptionsResponsePayload;
+}
+
+export interface DevtoolsBridgeApi {
+  handshake(): Promise<DevtoolsResponsePayloadByCommand[typeof DEVTOOLS_COMMANDS.BRIDGE_HANDSHAKE]>;
+  announce(): Promise<DevtoolsResponsePayloadByCommand[typeof DEVTOOLS_COMMANDS.ANNOUNCE]>;
+  query(
+    payload: DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_QUERY],
+  ): Promise<DevtoolsResponsePayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_QUERY]>;
+  insertDurable(
+    payload: DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE],
+  ): Promise<DevtoolsResponsePayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE]>;
+  updateDurable(
+    payload: DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE],
+  ): Promise<DevtoolsResponsePayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE]>;
+  deleteDurable(
+    payload: DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE],
+  ): Promise<DevtoolsResponsePayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE]>;
+  subscribe(
+    payload: DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE],
+  ): Promise<DevtoolsResponsePayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE]>;
+  unsubscribe(
+    payload: DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE],
+  ): Promise<DevtoolsResponsePayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE]>;
+  listActiveQuerySubscriptions(): Promise<
+    DevtoolsResponsePayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS]
+  >;
 }
 
 export type DevtoolsRequestEnvelope =
@@ -211,6 +242,16 @@ export type DevtoolsEventEnvelope<TEvent extends DevtoolsBridgeEvent = DevtoolsB
   event: TEvent;
   payload: DevtoolsEventPayloadByEvent[TEvent];
 };
+
+export type DevtoolsControlMessage =
+  | {
+      channel: typeof DEVTOOLS_BRIDGE_CHANNEL;
+      kind: (typeof DEVTOOLS_CONTROL_MESSAGES)["COMLINK_CONNECT"];
+    }
+  | {
+      channel: typeof DEVTOOLS_BRIDGE_CHANNEL;
+      kind: (typeof DEVTOOLS_CONTROL_MESSAGES)["COMLINK_READY"];
+    };
 
 export interface DevToolsBootstrap {
   wasmSchema: WasmSchema;

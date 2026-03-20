@@ -14,20 +14,20 @@ import {
   WasmModule,
   WasmSchema,
 } from "../index.js";
+import { releaseProxy, type Remote, wrap } from "comlink";
 import { Db, DbConfig } from "../runtime/db.js";
+import { createChromeRuntimePortEndpoint } from "./comlink-endpoint.js";
 import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,
   DEVTOOLS_COMMANDS,
+  DEVTOOLS_CONTROL_MESSAGES,
   DEVTOOLS_EVENTS,
   DEVTOOLS_PORT_NAME,
   DevToolsBootstrap,
-  DevtoolsBridgeCommand,
+  DevtoolsBridgeApi,
   DevtoolsEventEnvelope,
   DevtoolsEventPayloadByEvent,
-  DevtoolsRequestPayloadByCommand,
-  DevtoolsResponsePayloadByCommand,
-  DevtoolsResponseEnvelope,
   isRecord,
   isSerializableDbConfig,
   sanitizeDbConfigForBridge,
@@ -36,12 +36,6 @@ import {
 const REQUEST_TIMEOUT_MS = 15_000;
 const ANNOUNCE_POLL_INTERVAL_MS = 500;
 const ANNOUNCE_REQUEST_TIMEOUT_MS = 2_000;
-
-type PendingRequest = {
-  resolve: (value: unknown) => void;
-  reject: (reason?: unknown) => void;
-  timeoutId: number;
-};
 
 type DevToolsPortListener = () => void;
 type ActiveQuerySubscriptionsListener = (
@@ -53,9 +47,9 @@ const devtoolsPortConnectListeners = new Set<DevToolsPortListener>();
 const activeQuerySubscriptionsListeners = new Set<ActiveQuerySubscriptionsListener>();
 
 let devtoolsPort: any | null = null;
+let devtoolsBridge: Remote<DevtoolsBridgeApi> | null = null;
 let announcedBootstrap: DevToolsBootstrap | null = null;
 let announcePromise: Promise<DevToolsBootstrap> | null = null;
-const pendingRequests = new Map<string, PendingRequest>();
 const pendingSubscriptionCallbacks = new Map<string, SubscriptionCallback>();
 const pendingSubscriptionBridgeIds = new Map<number, string>();
 let nextSubscriptionHandle = 1;
@@ -113,7 +107,14 @@ function isMissingReceivingEndError(error: unknown): boolean {
   return error.message.includes("Receiving end does not exist");
 }
 
-function createBridgeInstallerScript(bridgeChannel: string, portName: string): void {
+function createBridgeInstallerScript(
+  bridgeChannel: string,
+  portName: string,
+  comlinkConnectKind: string,
+  comlinkReadyKind: string,
+  connectTimeoutMs: number,
+  retryIntervalMs: number,
+): void {
   const globalWindow = window as unknown as Record<string, unknown>;
   const globalAny = globalThis as any;
   const chromeApi = globalAny?.chrome;
@@ -127,6 +128,15 @@ function createBridgeInstallerScript(bridgeChannel: string, portName: string): v
   chromeApi.runtime.onConnect.addListener((port: any) => {
     if (port.name !== portName) return;
 
+    let disposed = false;
+    let pagePort: MessagePort | null = null;
+    let connectPromise: Promise<MessagePort> | null = null;
+
+    const waitForRetry = (ms: number) =>
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, ms);
+      });
+
     window.postMessage(
       {
         channel: bridgeChannel,
@@ -136,25 +146,112 @@ function createBridgeInstallerScript(bridgeChannel: string, portName: string): v
       "*",
     );
 
+    const onPagePortMessage = (event: MessageEvent) => {
+      port.postMessage(event.data);
+    };
+
+    const detachPagePort = () => {
+      if (!pagePort) {
+        return;
+      }
+
+      pagePort.removeEventListener("message", onPagePortMessage);
+      pagePort.close();
+      pagePort = null;
+    };
+
+    const ensurePagePort = async (): Promise<MessagePort> => {
+      if (pagePort) {
+        return pagePort;
+      }
+
+      if (connectPromise) {
+        return connectPromise;
+      }
+
+      connectPromise = (async () => {
+        while (!disposed) {
+          const channel = new MessageChannel();
+          const relayPort = channel.port1;
+          const exposedPort = channel.port2;
+
+          const connected = await new Promise<boolean>((resolve) => {
+            let settled = false;
+
+            const cleanup = () => {
+              relayPort.removeEventListener("message", onReadyMessage);
+              clearTimeout(timeoutId);
+            };
+
+            const onReadyMessage = (event: MessageEvent) => {
+              if (settled) return;
+              const data = event.data as Record<string, unknown> | null;
+              if (!data || typeof data !== "object") return;
+              if (data.channel !== bridgeChannel || data.kind !== comlinkReadyKind) return;
+              settled = true;
+              cleanup();
+              resolve(true);
+            };
+
+            const timeoutId = setTimeout(() => {
+              if (settled) return;
+              settled = true;
+              cleanup();
+              relayPort.close();
+              resolve(false);
+            }, connectTimeoutMs);
+
+            relayPort.addEventListener("message", onReadyMessage);
+            relayPort.start?.();
+            window.postMessage(
+              {
+                channel: bridgeChannel,
+                kind: comlinkConnectKind,
+              },
+              "*",
+              [exposedPort],
+            );
+          });
+
+          if (connected) {
+            pagePort = relayPort;
+            pagePort.addEventListener("message", onPagePortMessage);
+            pagePort.start?.();
+            return pagePort;
+          }
+
+          await waitForRetry(retryIntervalMs);
+        }
+
+        throw new Error("DevTools page bridge unavailable.");
+      })().finally(() => {
+        connectPromise = null;
+      });
+
+      return connectPromise;
+    };
+
     const onWindowMessage = (event: MessageEvent) => {
       if (event.source !== window) return;
       const data = event.data;
       if (!data || typeof data !== "object") return;
       const envelope = data as Record<string, unknown>;
       if (envelope.channel !== bridgeChannel) return;
-      if (envelope.kind !== "response" && envelope.kind !== "event") return;
+      if (envelope.kind !== "event") return;
       port.postMessage(data);
     };
 
     const onPortMessage = (message: unknown) => {
-      if (!message || typeof message !== "object") return;
-      const envelope = message as Record<string, unknown>;
-      if (envelope.channel !== bridgeChannel) return;
-      if (envelope.kind !== "request") return;
-      window.postMessage(message, "*");
+      void ensurePagePort()
+        .then((connectedPagePort) => {
+          connectedPagePort.postMessage(message);
+        })
+        .catch(() => undefined);
     };
 
     const dispose = () => {
+      disposed = true;
+      detachPagePort();
       window.postMessage(
         {
           channel: bridgeChannel,
@@ -171,6 +268,7 @@ function createBridgeInstallerScript(bridgeChannel: string, portName: string): v
     window.addEventListener("message", onWindowMessage);
     port.onMessage.addListener(onPortMessage);
     port.onDisconnect.addListener(dispose);
+    void ensurePagePort().catch(() => undefined);
   });
 }
 
@@ -185,7 +283,14 @@ async function installBridgeInInspectedTab(chromeApi: any, tabId: number): Promi
     target: { tabId, allFrames: true },
     world: "ISOLATED",
     func: createBridgeInstallerScript,
-    args: [DEVTOOLS_BRIDGE_CHANNEL, DEVTOOLS_PORT_NAME],
+    args: [
+      DEVTOOLS_BRIDGE_CHANNEL,
+      DEVTOOLS_PORT_NAME,
+      DEVTOOLS_CONTROL_MESSAGES.COMLINK_CONNECT,
+      DEVTOOLS_CONTROL_MESSAGES.COMLINK_READY,
+      ANNOUNCE_REQUEST_TIMEOUT_MS,
+      ANNOUNCE_POLL_INTERVAL_MS,
+    ],
   });
 }
 
@@ -290,29 +395,6 @@ async function ensureDevtoolsPort(): Promise<any> {
       notifyActiveQuerySubscriptionsChanged();
       return;
     }
-
-    const responseEnvelope = message as Partial<DevtoolsResponseEnvelope>;
-    if (
-      responseEnvelope.channel !== DEVTOOLS_BRIDGE_CHANNEL ||
-      responseEnvelope.kind !== "response" ||
-      typeof responseEnvelope.requestId !== "string"
-    ) {
-      return;
-    }
-
-    const pending = pendingRequests.get(responseEnvelope.requestId);
-    if (!pending) return;
-    pendingRequests.delete(responseEnvelope.requestId);
-    window.clearTimeout(pending.timeoutId);
-
-    if (!responseEnvelope.ok) {
-      pending.reject(
-        new Error(responseEnvelope.error?.message ?? "DevTools bridge request failed."),
-      );
-      return;
-    }
-
-    pending.resolve(responseEnvelope.payload);
   };
 
   const onDisconnect = () => {
@@ -320,12 +402,16 @@ async function ensureDevtoolsPort(): Promise<any> {
     const runtimeLastErrorMessage = global?.chrome?.runtime?.lastError?.message;
     const lastErrorMessage =
       typeof runtimeLastErrorMessage === "string" ? ` (${runtimeLastErrorMessage})` : "";
-    const error = new Error(`DevTools bridge disconnected${lastErrorMessage}.`);
-    for (const pending of pendingRequests.values()) {
-      window.clearTimeout(pending.timeoutId);
-      pending.reject(error);
+
+    if (devtoolsBridge) {
+      try {
+        devtoolsBridge[releaseProxy]();
+      } catch {
+        // Ignore proxy cleanup failures during bridge teardown.
+      }
     }
-    pendingRequests.clear();
+
+    devtoolsBridge = null;
     pendingSubscriptionCallbacks.clear();
     pendingSubscriptionBridgeIds.clear();
     nextSubscriptionHandle = 1;
@@ -344,34 +430,42 @@ async function ensureDevtoolsPort(): Promise<any> {
   return devtoolsPort;
 }
 
-async function sendDevtoolsRequest<TCommand extends DevtoolsBridgeCommand>(
-  command: TCommand,
-  payload: DevtoolsRequestPayloadByCommand[TCommand],
-  timeoutMs = REQUEST_TIMEOUT_MS,
-): Promise<DevtoolsResponsePayloadByCommand[TCommand]> {
-  const port = await ensureDevtoolsPort();
-  const requestId = randomId();
-  const envelope = {
-    channel: DEVTOOLS_BRIDGE_CHANNEL,
-    kind: "request",
-    requestId,
-    command,
-    payload,
-  };
-
-  return new Promise<DevtoolsResponsePayloadByCommand[TCommand]>((resolve, reject) => {
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
     const timeoutId = window.setTimeout(() => {
-      pendingRequests.delete(requestId);
-      reject(new Error(`DevTools bridge request timed out (${command}).`));
+      reject(new Error(`DevTools bridge request timed out (${label}).`));
     }, timeoutMs);
 
-    pendingRequests.set(requestId, {
-      resolve: (value: unknown) => resolve(value as DevtoolsResponsePayloadByCommand[TCommand]),
-      reject,
-      timeoutId,
-    });
-    port.postMessage(envelope);
+    promise.then(
+      (value) => {
+        window.clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
   });
+}
+
+async function ensureDevtoolsBridge(): Promise<Remote<DevtoolsBridgeApi>> {
+  if (devtoolsBridge) {
+    return devtoolsBridge;
+  }
+
+  const port = await ensureDevtoolsPort();
+  devtoolsBridge = wrap<DevtoolsBridgeApi>(createChromeRuntimePortEndpoint(port));
+  return devtoolsBridge;
+}
+
+async function callDevtoolsBridge<TResult>(
+  label: string,
+  invoke: (bridge: Remote<DevtoolsBridgeApi>) => Promise<TResult>,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+): Promise<TResult> {
+  const bridge = await ensureDevtoolsBridge();
+  return withTimeout(invoke(bridge), timeoutMs, label);
 }
 
 async function ensureDevtoolsAnnounced(): Promise<DevToolsBootstrap> {
@@ -385,9 +479,9 @@ async function ensureDevtoolsAnnounced(): Promise<DevToolsBootstrap> {
   announcePromise = (async () => {
     while (true) {
       try {
-        const result = await sendDevtoolsRequest(
+        const result = await callDevtoolsBridge(
           DEVTOOLS_COMMANDS.ANNOUNCE,
-          {},
+          (bridge) => bridge.announce(),
           ANNOUNCE_REQUEST_TIMEOUT_MS,
         );
 
@@ -406,7 +500,10 @@ async function ensureDevtoolsAnnounced(): Promise<DevToolsBootstrap> {
           dbConfig: sanitizeDbConfigForBridge(result.dbConfig as DbConfig)!,
         };
         activeQuerySubscriptions = cloneActiveQuerySubscriptions(
-          await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS, {}),
+          await callDevtoolsBridge(
+            DEVTOOLS_COMMANDS.CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS,
+            (bridge) => bridge.listActiveQuerySubscriptions(),
+          ),
         );
         notifyActiveQuerySubscriptionsChanged();
         return announcedBootstrap;
@@ -513,16 +610,20 @@ class DevToolsJazzClient implements JazzClient {
     options?: { tier?: DurabilityTier },
   ): Promise<Row> {
     await ensureDevtoolsAnnounced();
-    return await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE, {
-      table,
-      values,
-      tier: options?.tier,
-    });
+    return await callDevtoolsBridge(DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE, (bridge) =>
+      bridge.insertDurable({
+        table,
+        values,
+        tier: options?.tier,
+      }),
+    );
   }
   async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
     await ensureDevtoolsAnnounced();
     const payload = { query, options, tier: options?.tier };
-    return (await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_QUERY, payload)) as Row[];
+    return (await callDevtoolsBridge(DEVTOOLS_COMMANDS.CLIENT_QUERY, (bridge) =>
+      bridge.query(payload),
+    )) as Row[];
   }
   queryInternal(
     queryJson: string,
@@ -544,21 +645,25 @@ class DevToolsJazzClient implements JazzClient {
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
     await ensureDevtoolsAnnounced();
-    await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE, {
-      objectId,
-      updates,
-      tier: options?.tier,
-    });
+    await callDevtoolsBridge(DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE, (bridge) =>
+      bridge.updateDurable({
+        objectId,
+        updates,
+        tier: options?.tier,
+      }),
+    );
   }
   delete(objectId: string, options?: { tier?: DurabilityTier }): void {
     throw new Error("DevTools client does not support non-durable delete().");
   }
   async deleteDurable(objectId: string, options?: { tier?: DurabilityTier }): Promise<void> {
     await ensureDevtoolsAnnounced();
-    await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE, {
-      objectId,
-      tier: options?.tier,
-    });
+    await callDevtoolsBridge(DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE, (bridge) =>
+      bridge.deleteDurable({
+        objectId,
+        tier: options?.tier,
+      }),
+    );
   }
   subscribe(
     query: string | QueryInput,
@@ -572,12 +677,14 @@ class DevToolsJazzClient implements JazzClient {
 
     void ensureDevtoolsAnnounced()
       .then(() =>
-        sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE, {
-          query,
-          options,
-          tier: options?.tier,
-          subscriptionId: bridgeSubscriptionId,
-        }),
+        callDevtoolsBridge(DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE, (bridge) =>
+          bridge.subscribe({
+            query,
+            options,
+            tier: options?.tier,
+            subscriptionId: bridgeSubscriptionId,
+          }),
+        ),
       )
       .catch(() => {
         pendingSubscriptionCallbacks.delete(bridgeSubscriptionId);
@@ -606,9 +713,11 @@ class DevToolsJazzClient implements JazzClient {
     pendingSubscriptionBridgeIds.delete(subscriptionId);
     pendingSubscriptionCallbacks.delete(bridgeSubscriptionId);
 
-    void sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE, {
-      subscriptionId: bridgeSubscriptionId,
-    }).catch(() => undefined);
+    void callDevtoolsBridge(DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE, (bridge) =>
+      bridge.unsubscribe({
+        subscriptionId: bridgeSubscriptionId,
+      }),
+    ).catch(() => undefined);
   }
   getSchema(): WasmSchema {
     if (announcedBootstrap?.wasmSchema) {
