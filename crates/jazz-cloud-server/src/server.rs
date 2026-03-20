@@ -683,6 +683,10 @@ enum WorkerCommand {
         app_id: AppId,
         response: tokio::sync::oneshot::Sender<Result<Vec<String>, String>>,
     },
+    GetCatalogueStateHash {
+        app_id: AppId,
+        response: tokio::sync::oneshot::Sender<Result<String, String>>,
+    },
 }
 
 impl WorkerCommand {
@@ -695,7 +699,8 @@ impl WorkerCommand {
             | WorkerCommand::SyncAsBackend { app_id, .. }
             | WorkerCommand::SyncAsAdmin { app_id, .. }
             | WorkerCommand::GetCatalogueSchema { app_id, .. }
-            | WorkerCommand::GetSchemaHashes { app_id, .. } => *app_id,
+            | WorkerCommand::GetSchemaHashes { app_id, .. }
+            | WorkerCommand::GetCatalogueStateHash { app_id, .. } => *app_id,
         }
     }
 }
@@ -956,6 +961,20 @@ impl WorkerPool {
         let worker = self.send_command(command)?;
         match response_rx.await {
             Ok(Ok(schema_hashes)) => Ok(schema_hashes),
+            Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
+            Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
+        }
+    }
+
+    async fn get_catalogue_state_hash(&self, app_id: AppId) -> Result<String, WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::GetCatalogueStateHash {
+            app_id,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        match response_rx.await {
+            Ok(Ok(catalogue_state_hash)) => Ok(catalogue_state_hash),
             Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
             Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
         }
@@ -1890,6 +1909,24 @@ async fn run_worker_loop(
                         });
                     if response.send(result).is_err() {
                         warn!(worker, app_id = %app_id, "schema hashes response receiver dropped");
+                    }
+                }
+                WorkerCommand::GetCatalogueStateHash { app_id, response } => {
+                    let result = app_runtimes
+                        .get(&app_id)
+                        .ok_or_else(|| format!("missing runtime for app {app_id}"))
+                        .and_then(|runtime| {
+                            runtime
+                                .runtime
+                                .catalogue_state_hash()
+                                .map_err(|err| err.to_string())
+                        });
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            "catalogue state hash response receiver dropped"
+                        );
                     }
                 }
             }
@@ -3137,6 +3174,20 @@ async fn events_handler(
         }
     }
 
+    let catalogue_state_hash = match state.workers.get_catalogue_state_hash(app_id).await {
+        Ok(hash) => Some(hash),
+        Err(err) => {
+            warn!(
+                app_id = %app_id,
+                worker,
+                client_id = %client_id,
+                ?err,
+                "failed to read catalogue state hash for events handshake"
+            );
+            None
+        }
+    };
+
     let connection_id = app.next_connection_id.fetch_add(1, Ordering::SeqCst);
     {
         let mut connections = app.connections.write().await;
@@ -3176,6 +3227,7 @@ async fn events_handler(
             connection_id: ConnectionId(connection_id),
             client_id: client_id_str,
             next_sync_seq: Some(next_sync_seq),
+            catalogue_state_hash: catalogue_state_hash.clone(),
         };
         yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected));
 

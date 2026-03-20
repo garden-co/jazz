@@ -136,6 +136,17 @@ export const NATIVE_BENCHMARKS = [
       JAZZ_REALISTIC_VARIANT: "ci",
     },
   },
+  {
+    id: "native-criterion:r8_many_branches",
+    suite: "native",
+    label: "Criterion R8 many branches",
+    kind: "criterion",
+    log_path: "logs/criterion_r8_many_branches.log",
+    criterion_filter: "realistic_phase1/many_branches",
+    env: {
+      JAZZ_REALISTIC_VARIANT: "ci",
+    },
+  },
 ];
 
 export const BROWSER_BENCHMARKS = [

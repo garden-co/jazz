@@ -1,5 +1,5 @@
 import * as React from "react";
-import { createJazzClient, getActiveSyntheticAuth, JazzProvider } from "jazz-tools/react-native";
+import { getActiveSyntheticAuth, JazzProvider, type DbConfig } from "jazz-tools/react-native";
 import {
   ActivityIndicator,
   Platform,
@@ -11,8 +11,7 @@ import {
 } from "react-native";
 import { TodoList } from "./src/TodoList";
 
-type JazzProviderClientConfig = NonNullable<Parameters<typeof createJazzClient>[0]>;
-type LocalAuthMode = Extract<JazzProviderClientConfig["localAuthMode"], "anonymous" | "demo">;
+type LocalAuthMode = Extract<DbConfig["localAuthMode"], "anonymous" | "demo">;
 
 const defaultServerUrl = Platform.select({
   // Android emulator cannot reach host via localhost.
@@ -46,9 +45,7 @@ function getStableSyntheticAuth(appId: string) {
   return created;
 }
 
-function defaultConfig(
-  overrides: Partial<JazzProviderClientConfig> = {},
-): JazzProviderClientConfig {
+function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
   const appId = overrides.appId ?? envAppId ?? defaultAppId;
   const syntheticAuth = getStableSyntheticAuth(appId);
   const envMode = parseLocalAuthMode(envLocalMode);
@@ -103,7 +100,7 @@ const defaultFallback = (
 );
 
 type AppProps = {
-  config?: Partial<JazzProviderClientConfig>;
+  config?: Partial<DbConfig>;
   fallback?: React.ReactNode;
 };
 
@@ -111,45 +108,8 @@ type AppProps = {
 export default function App({ config, fallback }: AppProps = {}) {
   const configKey = JSON.stringify(config ?? {});
   const resolvedConfig = React.useMemo(() => defaultConfig(config), [configKey]);
-  const [client, setClient] = React.useState<Awaited<ReturnType<typeof createJazzClient>> | null>(
-    null,
-  );
-  const [error, setError] = React.useState<unknown>(null);
-
-  React.useEffect(() => {
-    let active = true;
-    const pending = createJazzClient(resolvedConfig);
-
-    void pending.then(
-      (resolved) => {
-        if (!active) {
-          void resolved.shutdown();
-          return;
-        }
-        setClient(resolved);
-      },
-      (reason) => {
-        if (!active) return;
-        setError(reason);
-      },
-    );
-
-    return () => {
-      active = false;
-      void pending.then((resolved) => resolved.shutdown()).catch(() => {});
-    };
-  }, [configKey]);
-
-  if (error) {
-    throw error;
-  }
-
-  if (!client) {
-    return <>{fallback ?? defaultFallback}</>;
-  }
-
   return (
-    <JazzProvider client={client}>
+    <JazzProvider config={resolvedConfig} fallback={fallback ?? defaultFallback}>
       <SafeAreaView style={styles.container}>
         <StatusBar barStyle="dark-content" />
         <View style={styles.content}>

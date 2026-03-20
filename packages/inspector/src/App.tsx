@@ -1,5 +1,5 @@
 import { BrowserRouter } from "react-router";
-import { createJazzClient, JazzProvider } from "jazz-tools/react";
+import { createJazzClient, JazzClientProvider } from "jazz-tools/react";
 import { fetchSchemaHashes, fetchStoredWasmSchema } from "jazz-tools";
 import { useEffect, useState } from "react";
 import { StandaloneProvider } from "./contexts/standalone-context.js";
@@ -24,9 +24,10 @@ const STORAGE_KEY = "jazz-inspector-standalone-config";
 type OnboardingStep = "form" | "schema" | null;
 
 export default function App() {
+  const [fragmentConfig] = useState<DbConfigFormValues | null>(() => readFragmentConfig());
   const [storedConfig, setStoredConfig] = useState<StoredConfig | null>(() => readStoredConfig());
   const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>(
-    storedConfig ? null : "form",
+    fragmentConfig || !storedConfig ? "form" : null,
   );
   const [formValues, setFormValues] = useState<DbConfigFormValues | null>(null);
   const [schemaHashes, setSchemaHashes] = useState<string[]>([]);
@@ -154,7 +155,7 @@ export default function App() {
   if (onboardingStep === "form") {
     return (
       <main className={styles.statePage}>
-        <DbConfigForm onSubmit={handleFormSubmit} />
+        <DbConfigForm onSubmit={handleFormSubmit} initialValues={fragmentConfig ?? undefined} />
       </main>
     );
   }
@@ -194,7 +195,7 @@ export default function App() {
   }
 
   return (
-    <JazzProvider client={client}>
+    <JazzClientProvider client={client}>
       <DevtoolsProvider wasmSchema={wasmSchema} runtime="standalone">
         <StandaloneProvider
           onReset={handleReset}
@@ -214,7 +215,7 @@ export default function App() {
           </BrowserRouter>
         </StandaloneProvider>
       </DevtoolsProvider>
-    </JazzProvider>
+    </JazzClientProvider>
   );
 }
 
@@ -245,4 +246,42 @@ function writeStoredConfig(config: StoredConfig): void {
 
 function clearStoredConfig(): void {
   localStorage.removeItem(STORAGE_KEY);
+}
+
+function readFragmentConfig(): DbConfigFormValues | null {
+  const raw = window.location.hash.startsWith("#")
+    ? window.location.hash.slice(1)
+    : window.location.hash;
+  if (!raw) return null;
+
+  const params = new URLSearchParams(raw);
+  const serverUrl = (params.get("url") ?? params.get("serverUrl") ?? "").trim();
+  const appId = (params.get("appid") ?? params.get("appId") ?? "").trim();
+  const adminSecret = (params.get("adminsecret") ?? params.get("adminSecret") ?? "").trim();
+  const env = (params.get("env") ?? "dev").trim() || "dev";
+  const branch = (params.get("branch") ?? "main").trim() || "main";
+  const serverPathPrefix = (
+    params.get("serverPathPrefix") ??
+    params.get("pathPrefix") ??
+    ""
+  ).trim();
+
+  if (!serverUrl || !appId || !adminSecret) {
+    return null;
+  }
+
+  try {
+    new URL(serverUrl);
+  } catch {
+    return null;
+  }
+
+  return {
+    serverUrl,
+    appId,
+    adminSecret,
+    env,
+    branch,
+    serverPathPrefix: serverPathPrefix || undefined,
+  };
 }

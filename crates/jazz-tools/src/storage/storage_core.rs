@@ -234,7 +234,7 @@ pub(super) fn index_insert_core(
     row_id: ObjectId,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
-    let key = index_entry_key(table, column, branch, value, row_id);
+    let key = index_entry_key(table, column, branch, value, row_id)?;
     set(&key, &[0x01])
 }
 
@@ -246,7 +246,11 @@ pub(super) fn index_remove_core(
     row_id: ObjectId,
     mut delete: impl FnMut(&str) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
-    let key = index_entry_key(table, column, branch, value, row_id);
+    let key = match index_entry_key(table, column, branch, value, row_id) {
+        Ok(key) => key,
+        Err(StorageError::IndexKeyTooLarge { .. }) => return Ok(()),
+        Err(error) => return Err(error),
+    };
     delete(&key)
 }
 
@@ -261,7 +265,9 @@ pub(super) fn index_lookup_core(
     if super::is_double_zero(value) {
         let mut result = HashSet::new();
         for zero in &[Value::Double(0.0), Value::Double(-0.0)] {
-            let prefix = index_value_prefix(table, column, branch, zero);
+            let Ok(prefix) = index_value_prefix(table, column, branch, zero) else {
+                continue;
+            };
             if let Ok(keys) = scan_prefix_keys(&prefix) {
                 for key in &keys {
                     if let Some(id) = parse_uuid_from_index_key(key) {
@@ -273,7 +279,9 @@ pub(super) fn index_lookup_core(
         return result.into_iter().collect();
     }
 
-    let prefix = index_value_prefix(table, column, branch, value);
+    let Ok(prefix) = index_value_prefix(table, column, branch, value) else {
+        return Vec::new();
+    };
     scan_prefix_keys(&prefix)
         .map(|keys| {
             keys.iter()

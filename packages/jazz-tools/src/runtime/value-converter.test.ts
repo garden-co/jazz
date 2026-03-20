@@ -253,6 +253,13 @@ describe("toUpdateRecord", () => {
     });
   });
 
+  it("throws when null is used to unset a required field", () => {
+    const data = { title: null };
+    expect(() => toUpdateRecord(data, schema, "todos")).toThrow(
+      "Cannot set required field 'title' to null",
+    );
+  });
+
   it("throws for unknown column", () => {
     const data = { nonexistent: "value" };
     expect(() => toUpdateRecord(data, schema, "todos")).toThrow('Unknown column "nonexistent"');

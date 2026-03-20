@@ -76,9 +76,11 @@ function normalizeStore(input: unknown): SyntheticUserStore | null {
   }
 
   if (profiles.length === 0) return null;
+  const fallbackProfile = profiles[0];
+  if (!fallbackProfile) return null;
   const activeProfileId = profiles.some((p) => p.id === maybeStore.activeProfileId)
     ? (maybeStore.activeProfileId as string)
-    : profiles[0].id;
+    : fallbackProfile.id;
 
   return {
     activeProfileId,
@@ -152,8 +154,12 @@ export function getActiveSyntheticAuth(
   options: SyntheticUserStorageOptions = {},
 ): ActiveSyntheticAuth {
   const store = loadSyntheticUserStore(appId, options);
+  const fallbackProfile = store.profiles[0];
+  if (!fallbackProfile) {
+    throw new Error("Synthetic user store must contain at least one profile.");
+  }
   const profile =
-    store.profiles.find((entry) => entry.id === store.activeProfileId) ?? store.profiles[0];
+    store.profiles.find((entry) => entry.id === store.activeProfileId) ?? fallbackProfile;
   return {
     localAuthMode: profile.mode,
     localAuthToken: profile.token,

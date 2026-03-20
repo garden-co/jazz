@@ -133,7 +133,7 @@ Behavior:
 All affected tests and docs must be updated in the same change:
 
 1. runtime core durability/settlement tests
-2. wasm/napi/nitro tier parse and API tests
+2. wasm/napi/rn tier parse and API tests
 3. browser worker-bridge and subscription behavior tests
 4. backend context defaults tests
 5. quickstarts and API docs pages

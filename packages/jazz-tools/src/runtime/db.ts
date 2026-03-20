@@ -29,6 +29,12 @@ import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
 import { toValueArray, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
+import {
+  createConventionalFileStorage,
+  type ConventionalFileApp,
+  type FileReadOptions,
+  type FileWriteOptions,
+} from "./file-storage.js";
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { TabLeaderElection, type LeaderRole, type LeaderSnapshot } from "./tab-leader-election.js";
@@ -215,6 +221,14 @@ export interface TableProxy<T, Init> {
   /** @internal Phantom brand — enables TypeScript to infer Init from usage */
   readonly _initType: Init;
 }
+
+type UpdateValue<RowValue, InitValue> = undefined extends RowValue
+  ? InitValue | null
+  : InitValue | undefined;
+
+type UpdateData<T, Init> = {
+  [K in keyof Init]?: K extends keyof T ? UpdateValue<T[K], Init[K]> : Init[K] | undefined;
+};
 
 interface BroadcastChannelLike {
   postMessage(data: unknown): void;
@@ -1015,7 +1029,7 @@ export class Db {
   /**
    * Update an existing row without waiting for durability.
    */
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
+  update<T, Init>(table: TableProxy<T, Init>, id: string, data: UpdateData<T, Init>): void {
     const client = this.getClient(table._schema);
     const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
     client.update(id, updates);
@@ -1027,7 +1041,7 @@ export class Db {
   async updateDurable<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
-    data: Partial<Init>,
+    data: UpdateData<T, Init>,
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
     const client = this.getClient(table._schema);
@@ -1161,6 +1175,55 @@ export class Db {
   }
 
   /**
+   * Create a conventional `files` row by chunking a browser Blob into `file_parts`.
+   *
+   * Expects `app.files` and `app.file_parts` to follow the built-in file-storage conventions.
+   */
+  async createFileFromBlob<FileRow extends { id: string }, FileInit, FilePartRow, FilePartInit>(
+    app: ConventionalFileApp<FileRow, FileInit, FilePartRow, FilePartInit>,
+    blob: Blob,
+    options?: FileWriteOptions,
+  ): Promise<FileRow> {
+    return createConventionalFileStorage(this, app).fromBlob(blob, options);
+  }
+
+  /**
+   * Create a conventional `files` row by chunking a browser ReadableStream into `file_parts`.
+   *
+   * Expects `app.files` and `app.file_parts` to follow the built-in file-storage conventions.
+   */
+  async createFileFromStream<FileRow extends { id: string }, FileInit, FilePartRow, FilePartInit>(
+    app: ConventionalFileApp<FileRow, FileInit, FilePartRow, FilePartInit>,
+    stream: ReadableStream<unknown>,
+    options?: FileWriteOptions,
+  ): Promise<FileRow> {
+    return createConventionalFileStorage(this, app).fromStream(stream, options);
+  }
+
+  /**
+   * Load a conventional file as a browser ReadableStream by querying the file row first
+   * and then reading each referenced `file_parts` row sequentially.
+   */
+  async loadFileAsStream<FileRow extends { id: string }, FileInit, FilePartRow, FilePartInit>(
+    app: ConventionalFileApp<FileRow, FileInit, FilePartRow, FilePartInit>,
+    fileOrId: string | FileRow,
+    options?: FileReadOptions,
+  ): Promise<ReadableStream<Uint8Array>> {
+    return createConventionalFileStorage(this, app).toStream(fileOrId, options);
+  }
+
+  /**
+   * Load a conventional file as a Blob using the same sequential part-query path as `loadFileAsStream`.
+   */
+  async loadFileAsBlob<FileRow extends { id: string }, FileInit, FilePartRow, FilePartInit>(
+    app: ConventionalFileApp<FileRow, FileInit, FilePartRow, FilePartInit>,
+    fileOrId: string | FileRow,
+    options?: FileReadOptions,
+  ): Promise<Blob> {
+    return createConventionalFileStorage(this, app).toBlob(fileOrId, options);
+  }
+
+  /**
    * Subscribe to a query and receive updates when results change.
    *
    * The callback receives a SubscriptionDelta with:
@@ -1207,13 +1270,7 @@ export class Db {
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T => {
-      return transformRows<T>(
-        [row],
-        outputSchema,
-        outputTable,
-        outputIncludes,
-        builtQuery.select,
-      )[0];
+      return transformRow<T>(row, outputSchema, outputTable, outputIncludes, builtQuery.select);
     };
 
     const subId = client.subscribeInternal(
@@ -1363,6 +1420,142 @@ export class Db {
   }
 }
 
+class ClientBackedDb extends Db {
+  constructor(
+    config: DbConfig,
+    private readonly runtimeClient: JazzClient,
+    private readonly session?: Session,
+  ) {
+    super(config, null);
+  }
+
+  override insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
+    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const values = toValueArray(data as Record<string, unknown>, inputSchema, table._table);
+    const row = this.runtimeClient.createInternal(table._table, values, this.session);
+    return transformRow(row, table._schema, table._table);
+  }
+
+  override async insertDurable<T, Init>(
+    table: TableProxy<T, Init>,
+    data: Init,
+    options: { tier: DurabilityTier },
+  ): Promise<T> {
+    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const values = toValueArray(data as Record<string, unknown>, inputSchema, table._table);
+    const row = await this.runtimeClient.createDurableInternal(
+      table._table,
+      values,
+      this.session,
+      options,
+    );
+    return transformRow(row, table._schema, table._table);
+  }
+
+  override update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: UpdateData<T, Init>,
+  ): void {
+    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
+    this.runtimeClient.updateInternal(id, updates, this.session);
+  }
+
+  override async updateDurable<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: UpdateData<T, Init>,
+    options?: { tier?: DurabilityTier },
+  ): Promise<void> {
+    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
+    const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
+    await this.runtimeClient.updateDurableInternal(id, updates, this.session, options);
+  }
+
+  override delete<T, Init>(_table: TableProxy<T, Init>, id: string): void {
+    this.runtimeClient.deleteInternal(id, this.session);
+  }
+
+  override async deleteDurable<T, Init>(
+    _table: TableProxy<T, Init>,
+    id: string,
+    options?: { tier?: DurabilityTier },
+  ): Promise<void> {
+    await this.runtimeClient.deleteDurableInternal(id, this.session, options);
+  }
+
+  override async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    const builderJson = query._build();
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
+    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
+    const outputTable =
+      builtQuery.hops.length > 0
+        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
+        : query._table;
+    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    const rows = await this.runtimeClient.queryInternal(
+      translateQuery(builderJson, planningSchema),
+      this.session,
+      options,
+    );
+    const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
+    return transformRows<T>(rows, outputSchema, outputTable, outputIncludes, builtQuery.select);
+  }
+
+  override async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
+    const results = await this.all(query, options);
+    return results[0] ?? null;
+  }
+
+  override subscribeAll<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    callback: (delta: SubscriptionDelta<T>) => void,
+    options?: QueryOptions,
+    _session?: Session,
+  ): () => void {
+    const manager = new SubscriptionManager<T>();
+    const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
+    const builderJson = query._build();
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
+    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
+    const outputTable =
+      builtQuery.hops.length > 0
+        ? resolveHopOutputTable(planningSchema, builtQuery.table, builtQuery.hops)
+        : query._table;
+    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    const outputIncludes = builtQuery.hops.length > 0 ? {} : builtQuery.includes;
+    const wasmQuery = translateQuery(builderJson, planningSchema);
+
+    const transform = (row: WasmRow): T =>
+      transformRow<T>(row, outputSchema, outputTable, outputIncludes, builtQuery.select);
+
+    const subId = this.runtimeClient.subscribeInternal(
+      wasmQuery,
+      (delta) => {
+        const typedDelta = manager.handleDelta(delta, transform);
+        callback(typedDelta);
+      },
+      this.session,
+      options,
+    );
+
+    return () => {
+      this.runtimeClient.unsubscribe(subId);
+      manager.clear();
+    };
+  }
+
+  override async shutdown(): Promise<void> {
+    // The owning JazzContext owns the runtime lifecycle.
+  }
+}
+
 /**
  * Check if running in a browser environment with Worker support.
  */
@@ -1403,4 +1596,8 @@ export async function createDb(config: DbConfig): Promise<Db> {
     return Db.createWithWorker(resolvedConfig);
   }
   return Db.create(resolvedConfig);
+}
+
+export function createDbFromClient(config: DbConfig, client: JazzClient, session?: Session): Db {
+  return new ClientBackedDb(resolveLocalAuthDefaults(config), client, session);
 }

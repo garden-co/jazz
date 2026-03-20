@@ -19,7 +19,7 @@ Internal specs to revisit:
 
 - [durability_tier_api_unification.md](durability_tier_api_unification.md)
 - [scheduled_wal_flush.md](scheduled_wal_flush.md)
-- [multi_tab_leader_election.md](multi_tab_leader_election.md)
+- [Browser Adapters](../../status-quo/browser_adapters.md)
 - [benchmarks_and_performance.md](benchmarks_and_performance.md)
 
 Read next:
@@ -42,7 +42,7 @@ We should explicitly check:
 Internal specs to revisit:
 
 - [scheduled_wal_flush.md](scheduled_wal_flush.md)
-- [multi_tab_leader_election.md](multi_tab_leader_election.md)
+- [Browser Adapters](../../status-quo/browser_adapters.md)
 - [browser_e2e_test_suite.md](browser_e2e_test_suite.md)
 - [noop_main_thread_storage.md](noop_main_thread_storage.md)
 
@@ -60,7 +60,7 @@ We should avoid naming an isolation level unless we can reproduce the claim with
 Internal specs to revisit:
 
 - [../b_launch/globally_consistent_transactions.md](../b_launch/globally_consistent_transactions.md)
-- [three_tier_query_settlement_test.md](three_tier_query_settlement_test.md)
+- [Query/Sync Integration](../../status-quo/query_sync_integration.md)
 - [durability_tier_api_unification.md](durability_tier_api_unification.md)
 - [supported_use_cases.md](supported_use_cases.md)
 
@@ -84,11 +84,11 @@ For Jazz, this may matter more than formal ANSI labels. We should decide and doc
 
 Internal specs to revisit:
 
-- [multi_tab_leader_election.md](multi_tab_leader_election.md)
+- [Browser Adapters](../../status-quo/browser_adapters.md)
 - [efficient_resubscribe.md](efficient_resubscribe.md)
 - [query_subscription_disconnect_cleanup.md](query_subscription_disconnect_cleanup.md)
 - [lightweight_subscription_delta_protocol_design.md](lightweight_subscription_delta_protocol_design.md)
-- [three_tier_query_settlement_test.md](three_tier_query_settlement_test.md)
+- [Query/Sync Integration](../../status-quo/query_sync_integration.md)
 
 Read next:
 
@@ -129,7 +129,7 @@ Questions:
 
 Internal specs to revisit:
 
-- [multi_tab_leader_election.md](multi_tab_leader_election.md)
+- [Browser Adapters](../../status-quo/browser_adapters.md)
 - [efficient_resubscribe.md](efficient_resubscribe.md)
 - [query_subscription_disconnect_cleanup.md](query_subscription_disconnect_cleanup.md)
 - [server_error_event_streaming.md](server_error_event_streaming.md)
@@ -169,7 +169,7 @@ Internal specs to revisit:
 
 - [cross_schema_evolution_e2e_test.md](cross_schema_evolution_e2e_test.md)
 - [type_change_lens_generation.md](type_change_lens_generation.md)
-- [enum_column_type_native_end_to_end_design.md](enum_column_type_native_end_to_end_design.md)
+- [Schema Files](../../status-quo/schema_files.md)
 - [self_referential_inherits.md](self_referential_inherits.md)
 
 ### 9. Backpressure, storage limits, and explicit degradation modes
@@ -184,7 +184,7 @@ Internal specs to revisit:
 
 - [storage_limits_and_eviction.md](storage_limits_and_eviction.md)
 - [noop_main_thread_storage.md](noop_main_thread_storage.md)
-- [multi_tab_leader_election.md](multi_tab_leader_election.md)
+- [Browser Adapters](../../status-quo/browser_adapters.md)
 - [benchmarks_and_performance.md](benchmarks_and_performance.md)
 
 ## Reference set to keep handy

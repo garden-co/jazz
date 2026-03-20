@@ -187,13 +187,22 @@ reading it with `useAllSuspense(query)`.
 - **Behavior:** `include(...)` loads related rows and returns nested objects in one query result.
 - **Parameters (TypeScript):** `include({ relationName: true | nestedInclude | queryBuilder })`.
 - **Nested includes:** pass nested objects to load multi-hop relations.
+- **Missing forward references:** included forward relations may be `undefined` at runtime, even when the FK column is non-nullable. Jazz cannot guarantee referential integrity at read time: a referenced row may be deleted, not synced locally yet, or hidden by permissions.
+- **Required forward includes (TypeScript):** call `requireIncludes()` after `include(...)` to drop rows whose included references cannot be resolved.
+- **Nullable scalar FKs:** `requireIncludes()` does not drop a row just because a nullable FK is `null`; in that case the included relation remains `undefined`.
+- **Reverse relations:** `requireIncludes()` does not force reverse includes to be non-empty and does not filter on them.
+- **Forward array refs:** without `requireIncludes()`, missing referenced members are skipped from the included array. With `requireIncludes()`, the row is dropped if any referenced member is unavailable.
+
+For chunked files stored in the conventional `files` / `file_parts` tables, prefer
+`db.loadFileAsBlob(...)` or `db.loadFileAsStream(...)` over eager `include(...)` loading of
+parts. See [Files & Blobs](/docs/files-and-blobs).
 
 Schema references used by the include examples:
 
 <Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
   <Tab value="TypeScript">
     <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/schema/current.ts
+      ../examples/docs/todo-client-localfirst-ts/schema/current.ts#schema-todo-client-ts
     </include>
   </Tab>
   <Tab value="SQL">
@@ -235,6 +244,8 @@ Schema references used by the include examples:
 
 Permission introspection columns are computed for the current session and are omitted from
 `select("*")`, so you opt into them explicitly.
+
+For example, `select("*", "$canDelete")` returns the normal row columns plus `$canDelete`.
 
 - `$canRead` reflects whether the current session can read the row. Since read policies already
   gate which rows appear, returned rows will usually show `$canRead: true`.

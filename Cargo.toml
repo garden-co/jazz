@@ -6,13 +6,10 @@ members = [
   "crates/jazz-wasm",
   "crates/jazz-napi",
   "crates/jazz-rn/rust",
-  "crates/jazz-nitro",
   "crates/wasm-tracing",
   "examples/todo-server-rs",
   "examples/docs/todo-server-rs",
   "crates/opfs-btree",
 ]
-exclude = ["patched-crates/fjall-android-lock-workaround"]
-
 [patch.crates-io]
-fjall = { path = "patched-crates/fjall-android-lock-workaround" }
+fjall = { git = "https://github.com/garden-co/fjall.git", branch = "fjall-android-support" }
