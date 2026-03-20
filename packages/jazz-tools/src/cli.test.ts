@@ -7,14 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { build, createMigration, exportSchema, pushMigration } from "./cli.js";
 
 const dslPath = fileURLToPath(new URL("./dsl.ts", import.meta.url));
-const typedAppPath = fileURLToPath(new URL("./typed-app.ts", import.meta.url));
-const migrationsPath = fileURLToPath(new URL("./migrations.ts", import.meta.url));
-const permissionsDslPath = fileURLToPath(new URL("./permissions/index.ts", import.meta.url));
-const distDslPath = fileURLToPath(new URL("../dist/dsl.js", import.meta.url));
-const distTypedAppPath = fileURLToPath(new URL("../dist/typed-app.js", import.meta.url));
-const distPermissionsDslPath = fileURLToPath(
-  new URL("../dist/permissions/index.js", import.meta.url),
-);
+const indexPath = fileURLToPath(new URL("./index.ts", import.meta.url));
+const distIndexPath = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 const binPath = fileURLToPath(new URL("../bin/jazz-tools.js", import.meta.url));
 
 const tempRoots: string[] = [];
@@ -29,6 +23,7 @@ async function createWorkspace(): Promise<{ root: string; schemaDir: string }> {
   tempRoots.push(root);
   const schemaDir = join(root, "schema");
   await mkdir(schemaDir, { recursive: true });
+  await writeFile(join(root, "package.json"), '{ "type": "module" }\n');
   return { root, schemaDir };
 }
 
@@ -41,26 +36,22 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
-function rootSchemaWithoutInlinePermissions(
-  dslImportPath: string = dslPath,
-  typedAppImportPath: string = typedAppPath,
-): string {
+function rootSchemaWithoutInlinePermissions(indexImportPath: string = indexPath): string {
   return `
-import { col } from ${JSON.stringify(dslImportPath)};
-import { defineApp, type Schema, type App } from ${JSON.stringify(typedAppImportPath)};
+import { schema as s } from ${JSON.stringify(indexImportPath)};
 
 const schema = {
-  projects: {
-    name: col.string(),
-  },
-  todos: {
-    title: col.string(),
-    ownerId: col.string(),
-  },
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    ownerId: s.string(),
+  }),
 };
 
-type AppSchema = Schema<typeof schema>;
-export const app: App<AppSchema> = defineApp(schema);
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
 `;
 }
 
@@ -80,13 +71,13 @@ table("todos", {
 
 function rootPermissionsSchema(
   appImportPath: string = "./schema.ts",
-  importPath: string = permissionsDslPath,
+  importPath: string = indexPath,
 ): string {
   return `
-import { definePermissions } from ${JSON.stringify(importPath)};
+import { schema as s } from ${JSON.stringify(importPath)};
 import { app } from ${JSON.stringify(appImportPath)};
 
-export default definePermissions(app, ({ policy, session }) => [
+export default s.definePermissions(app, ({ policy, session }) => [
   policy.todos.allowRead.where({ ownerId: session.user_id }),
 ]);
 `;
@@ -112,13 +103,13 @@ export default {
 
 function permissionsSchemaNamedExport(
   appImportPath: string = "./schema.ts",
-  importPath: string = permissionsDslPath,
+  importPath: string = indexPath,
 ): string {
   return `
-import { definePermissions } from ${JSON.stringify(importPath)};
+import { schema as s } from ${JSON.stringify(importPath)};
 import { app } from ${JSON.stringify(appImportPath)};
 
-export const permissions = definePermissions(app, ({ policy, session }) => [
+export const permissions = s.definePermissions(app, ({ policy, session }) => [
   policy.todos.allowRead.where({ ownerId: session.user_id }),
 ]);
 `;
@@ -294,11 +285,11 @@ describe("cli migrations", () => {
 
     const generated = await readFile(filePath, "utf8");
     expect(filePath).toContain(`-unnamed-${fromShortHash}-${toShortHash}.ts`);
-    expect(generated).toContain("defineMigration");
+    expect(generated).toContain("s.defineMigration");
     expect(generated).toContain(`fromHash: "${fromShortHash}"`);
     expect(generated).toContain(`toHash: "${toShortHash}"`);
     expect(generated).toContain("migrate: {");
-    expect(generated).toContain('"notes": col.add.string({ default: null }),');
+    expect(generated).toContain('"notes": s.add.string({ default: null }),');
   });
 
   it("skips table add/drop steps when inferring a migration stub", async () => {
@@ -359,7 +350,7 @@ describe("cli migrations", () => {
 
     const generated = await readFile(filePath, "utf8");
     expect(generated).toContain('"todos": {');
-    expect(generated).toContain('"notes": col.add.string({ default: null }),');
+    expect(generated).toContain('"notes": s.add.string({ default: null }),');
     expect(generated).not.toContain("createTable");
     expect(generated).not.toContain("dropTable");
     expect(generated).not.toContain('"legacy_users"');
@@ -380,26 +371,25 @@ describe("cli migrations", () => {
     await writeFile(
       migrationPath,
       `
-import { col } from ${JSON.stringify(dslPath)};
-import { defineMigration } from ${JSON.stringify(migrationsPath)};
+import { schema as s } from ${JSON.stringify(indexPath)};
 
-export default defineMigration({
+export default s.defineMigration({
   migrate: {
     users: {
-      email_address: col.renameFrom("email"),
+      email_address: s.renameFrom("email"),
     },
   },
   fromHash: ${JSON.stringify(fromShortHash)},
   toHash: ${JSON.stringify(toShortHash)},
   from: {
-    users: {
-      email: col.string(),
-    },
+    users: s.table({
+      email: s.string(),
+    }),
   },
   to: {
-    users: {
-      email_address: col.string(),
-    },
+    users: s.table({
+      email_address: s.string(),
+    }),
   },
 });
 `,
@@ -451,10 +441,7 @@ function runBin(args: string[]): SpawnSyncReturns<string> {
 describe("bin integration", () => {
   it("routes build through the TypeScript CLI for a root schema.ts project", async () => {
     const { root } = await createWorkspace();
-    await writeFile(
-      join(root, "schema.ts"),
-      rootSchemaWithoutInlinePermissions(distDslPath, distTypedAppPath),
-    );
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
 
     const result = runBin(["build", "--schema-dir", root]);
 
@@ -465,13 +452,10 @@ describe("bin integration", () => {
 
   it("loads root permissions.ts through the bin entry point", async () => {
     const { root } = await createWorkspace();
-    await writeFile(
-      join(root, "schema.ts"),
-      rootSchemaWithoutInlinePermissions(distDslPath, distTypedAppPath),
-    );
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
     await writeFile(
       join(root, "permissions.ts"),
-      rootPermissionsSchema("./schema.ts", distPermissionsDslPath),
+      rootPermissionsSchema("./schema.ts", distIndexPath),
     );
 
     const result = runBin(["build", "--schema-dir", root]);
@@ -491,13 +475,10 @@ describe("bin integration", () => {
 
   it("routes schema export through the TypeScript CLI", async () => {
     const { root } = await createWorkspace();
-    await writeFile(
-      join(root, "schema.ts"),
-      rootSchemaWithoutInlinePermissions(distDslPath, distTypedAppPath),
-    );
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
     await writeFile(
       join(root, "permissions.ts"),
-      rootPermissionsSchema("./schema.ts", distPermissionsDslPath),
+      rootPermissionsSchema("./schema.ts", distIndexPath),
     );
 
     const result = runBin(["schema", "export", "--schema-dir", root, "--format", "json"]);

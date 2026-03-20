@@ -243,28 +243,28 @@ function indentBlock(text: string, indent: number): string {
 function baseBuilderExpression(columnType: WasmColumnType, references?: string): string {
   switch (columnType.type) {
     case "Text":
-      return "col.string()";
+      return "s.string()";
     case "Boolean":
-      return "col.boolean()";
+      return "s.boolean()";
     case "Integer":
-      return "col.int()";
+      return "s.int()";
     case "Double":
-      return "col.float()";
+      return "s.float()";
     case "Timestamp":
-      return "col.timestamp()";
+      return "s.timestamp()";
     case "Bytea":
-      return "col.bytes()";
+      return "s.bytes()";
     case "Json":
-      return columnType.schema ? `col.json(${JSON.stringify(columnType.schema)})` : "col.json()";
+      return columnType.schema ? `s.json(${JSON.stringify(columnType.schema)})` : "s.json()";
     case "Enum":
-      return `col.enum(${columnType.variants.map((variant) => JSON.stringify(variant)).join(", ")})`;
+      return `s.enum(${columnType.variants.map((variant) => JSON.stringify(variant)).join(", ")})`;
     case "Uuid":
       if (!references) {
         throw new Error("Migration stub generation does not yet support bare UUID columns.");
       }
-      return `col.ref(${JSON.stringify(references)})`;
+      return `s.ref(${JSON.stringify(references)})`;
     case "Array":
-      return `col.array(${baseBuilderExpression(columnType.element, references)})`;
+      return `s.array(${baseBuilderExpression(columnType.element, references)})`;
     case "BigInt":
       throw new Error("Migration stub generation does not yet support BIGINT columns.");
     case "Row":
@@ -345,7 +345,7 @@ function renderSchemaWitness(schema: WasmSchema): string {
       const columnLines = tableSchema.columns.map(
         (column) => `${JSON.stringify(column.name)}: ${builderExpressionForColumn(column)},`,
       );
-      return `${JSON.stringify(tableName)}: {\n${indentBlock(columnLines.join("\n"), 2)}\n}`;
+      return `${JSON.stringify(tableName)}: s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n})`;
     });
 
   if (tableEntries.length === 0) {
@@ -368,32 +368,32 @@ function renderArrayElementExpression(columnType: WasmColumnType, references?: s
 function renderAddOperationExpression(column: ColumnDescriptor, defaultExpression: string): string {
   switch (column.column_type.type) {
     case "Text":
-      return `col.add.string({ default: ${defaultExpression} })`;
+      return `s.add.string({ default: ${defaultExpression} })`;
     case "Boolean":
-      return `col.add.boolean({ default: ${defaultExpression} })`;
+      return `s.add.boolean({ default: ${defaultExpression} })`;
     case "Integer":
-      return `col.add.int({ default: ${defaultExpression} })`;
+      return `s.add.int({ default: ${defaultExpression} })`;
     case "Double":
-      return `col.add.float({ default: ${defaultExpression} })`;
+      return `s.add.float({ default: ${defaultExpression} })`;
     case "Timestamp":
-      return `col.add.timestamp({ default: ${defaultExpression} })`;
+      return `s.add.timestamp({ default: ${defaultExpression} })`;
     case "Bytea":
-      return `col.add.bytes({ default: ${defaultExpression} })`;
+      return `s.add.bytes({ default: ${defaultExpression} })`;
     case "Json":
       return column.column_type.schema
-        ? `col.add.json({ default: ${defaultExpression}, schema: ${JSON.stringify(column.column_type.schema)} })`
-        : `col.add.json({ default: ${defaultExpression} })`;
+        ? `s.add.json({ default: ${defaultExpression}, schema: ${JSON.stringify(column.column_type.schema)} })`
+        : `s.add.json({ default: ${defaultExpression} })`;
     case "Enum":
-      return `col.add.enum(${column.column_type.variants
+      return `s.add.enum(${column.column_type.variants
         .map((variant) => JSON.stringify(variant))
         .join(", ")}, { default: ${defaultExpression} })`;
     case "Uuid":
       if (column.references) {
-        return `col.add.ref(${JSON.stringify(column.references)}, { default: ${defaultExpression} })`;
+        return `s.add.ref(${JSON.stringify(column.references)}, { default: ${defaultExpression} })`;
       }
-      return `col.add.ref("TODO_TABLE", { default: ${defaultExpression} })`;
+      return `s.add.ref("TODO_TABLE", { default: ${defaultExpression} })`;
     case "Array":
-      return `col.add.array({ of: ${renderArrayElementExpression(column.column_type.element, column.references)}, default: ${defaultExpression} })`;
+      return `s.add.array({ of: ${renderArrayElementExpression(column.column_type.element, column.references)}, default: ${defaultExpression} })`;
     case "BigInt":
       throw new Error("Migration stub generation does not yet support BIGINT columns.");
     case "Row":
@@ -407,32 +407,32 @@ function renderDropOperationExpression(
 ): string {
   switch (column.column_type.type) {
     case "Text":
-      return `col.drop.string({ backwardsDefault: ${defaultExpression} })`;
+      return `s.drop.string({ backwardsDefault: ${defaultExpression} })`;
     case "Boolean":
-      return `col.drop.boolean({ backwardsDefault: ${defaultExpression} })`;
+      return `s.drop.boolean({ backwardsDefault: ${defaultExpression} })`;
     case "Integer":
-      return `col.drop.int({ backwardsDefault: ${defaultExpression} })`;
+      return `s.drop.int({ backwardsDefault: ${defaultExpression} })`;
     case "Double":
-      return `col.drop.float({ backwardsDefault: ${defaultExpression} })`;
+      return `s.drop.float({ backwardsDefault: ${defaultExpression} })`;
     case "Timestamp":
-      return `col.drop.timestamp({ backwardsDefault: ${defaultExpression} })`;
+      return `s.drop.timestamp({ backwardsDefault: ${defaultExpression} })`;
     case "Bytea":
-      return `col.drop.bytes({ backwardsDefault: ${defaultExpression} })`;
+      return `s.drop.bytes({ backwardsDefault: ${defaultExpression} })`;
     case "Json":
       return column.column_type.schema
-        ? `col.drop.json({ backwardsDefault: ${defaultExpression}, schema: ${JSON.stringify(column.column_type.schema)} })`
-        : `col.drop.json({ backwardsDefault: ${defaultExpression} })`;
+        ? `s.drop.json({ backwardsDefault: ${defaultExpression}, schema: ${JSON.stringify(column.column_type.schema)} })`
+        : `s.drop.json({ backwardsDefault: ${defaultExpression} })`;
     case "Enum":
-      return `col.drop.enum(${column.column_type.variants
+      return `s.drop.enum(${column.column_type.variants
         .map((variant) => JSON.stringify(variant))
         .join(", ")}, { backwardsDefault: ${defaultExpression} })`;
     case "Uuid":
       if (column.references) {
-        return `col.drop.ref(${JSON.stringify(column.references)}, { backwardsDefault: ${defaultExpression} })`;
+        return `s.drop.ref(${JSON.stringify(column.references)}, { backwardsDefault: ${defaultExpression} })`;
       }
-      return `col.drop.ref("TODO_TABLE", { backwardsDefault: ${defaultExpression} })`;
+      return `s.drop.ref("TODO_TABLE", { backwardsDefault: ${defaultExpression} })`;
     case "Array":
-      return `col.drop.array({ of: ${renderArrayElementExpression(column.column_type.element, column.references)}, backwardsDefault: ${defaultExpression} })`;
+      return `s.drop.array({ of: ${renderArrayElementExpression(column.column_type.element, column.references)}, backwardsDefault: ${defaultExpression} })`;
     case "BigInt":
       throw new Error("Migration stub generation does not yet support BIGINT columns.");
     case "Row":
@@ -574,9 +574,9 @@ function renderMigrationStub(input: {
   toSchema: WasmSchema;
 }): string {
   const rendered = renderMigrationBody(input.fromSchema, input.toSchema);
-  return `import { col, defineMigration } from "jazz-tools";
+  return `import { schema as s } from "jazz-tools";
 
-export default defineMigration({
+export default s.defineMigration({
   migrate: {
 ${indentBlock(rendered.body, 4)}
   },

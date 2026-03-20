@@ -1,16 +1,7 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
-import { col } from "../../src/dsl.js";
+import { schema as s } from "../../src/index.js";
 import type { QueryBuilder, TableProxy } from "../../src/runtime/db.js";
-import {
-  defineApp,
-  type Schema,
-  type InsertOf,
-  type Query,
-  type RowOf,
-  type Table,
-  type App,
-  type WhereOf,
-} from "../../src/typed-app.js";
+import type { Query, Table } from "../../src/typed-app.js";
 
 interface ProjectRecord {
   id: string;
@@ -23,22 +14,24 @@ interface TodoTitleRecord {
 }
 
 const schema = {
-  users: {
-    name: col.string(),
-  },
-  projects: {
-    name: col.string(),
-  },
-  todos: {
-    title: col.string(),
-    done: col.boolean(),
-    tags: col.array(col.string()),
-    project: col.ref("projects"),
-    owner: col.ref("users").optional(),
-  },
+  users: s.table({
+    name: s.string(),
+  }),
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s
+    .table({
+      title: s.string(),
+      done: s.boolean(),
+      tags: s.array(s.string()),
+      project: s.ref("projects"),
+      owner: s.ref("users").optional(),
+    })
+    .index("by_done", ["done"]),
 };
-type AppSchema = Schema<typeof schema>;
-const app: App<AppSchema> = defineApp(schema);
+type AppSchema = s.Schema<typeof schema>;
+const app: s.App<AppSchema> = s.defineApp(schema);
 
 describe("typed app prototype", () => {
   it("serializes select/include metadata without codegen", () => {
@@ -79,11 +72,11 @@ describe("typed app prototype", () => {
       todosViaProject: app.todos.select("title"),
     });
 
-    type TodoRow = RowOf<typeof app.todos>;
-    type TodoInsert = InsertOf<typeof app.todos>;
-    type TodoWhere = WhereOf<typeof app.todos>;
-    type TodoWithProject = RowOf<typeof todoWithProjectQuery>;
-    type ProjectWithTitles = RowOf<typeof projectWithTitlesQuery>;
+    type TodoRow = s.RowOf<typeof app.todos>;
+    type TodoInsert = s.InsertOf<typeof app.todos>;
+    type TodoWhere = s.WhereOf<typeof app.todos>;
+    type TodoWithProject = s.RowOf<typeof todoWithProjectQuery>;
+    type ProjectWithTitles = s.RowOf<typeof projectWithTitlesQuery>;
     const todoRow = {} as TodoRow;
     const todoInsert = {} as TodoInsert;
     const todoWithProject = {} as TodoWithProject;
@@ -145,28 +138,28 @@ describe("typed app prototype", () => {
       app.users.include({ todosViaProject: true });
 
       const invalidScalarRefSchema = {
-        users: {
-          name: col.string(),
-        },
-        todos: {
-          owner: col.ref("accounts"),
-        },
+        users: s.table({
+          name: s.string(),
+        }),
+        todos: s.table({
+          owner: s.ref("accounts"),
+        }),
       };
 
       // @ts-expect-error invalid ref target table name
-      defineApp(invalidScalarRefSchema);
+      s.defineApp(invalidScalarRefSchema);
 
       const invalidArrayRefSchema = {
-        users: {
-          name: col.string(),
-        },
-        groups: {
-          members: col.array(col.ref("accounts")),
-        },
+        users: s.table({
+          name: s.string(),
+        }),
+        groups: s.table({
+          members: s.array(s.ref("accounts")),
+        }),
       };
 
       // @ts-expect-error invalid ref target table name inside array ref
-      defineApp(invalidArrayRefSchema);
+      s.defineApp(invalidArrayRefSchema);
     }
   });
 });

@@ -1,36 +1,29 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
-import { col } from "../../src/dsl.js";
-import {
-  defineApp,
-  type Schema,
-  type Query,
-  type RowOf,
-  type Table,
-  type App,
-} from "../../src/typed-app.js";
+import { schema as s } from "../../src/index.js";
+import type { Query, Table } from "../../src/typed-app.js";
 
 const schema = {
-  employees: {
-    name: col.string(),
-    manager: col.ref("employees").optional(),
-    mentors: col.array(col.ref("employees")),
-    homeTeam: col.ref("teams").optional(),
-  },
-  teams: {
-    name: col.string(),
-    lead: col.ref("employees"),
-    parentTeam: col.ref("teams").optional(),
-    flagshipProject: col.ref("projects").optional(),
-  },
-  projects: {
-    name: col.string(),
-    team: col.ref("teams"),
-    approver: col.ref("employees").optional(),
-  },
+  employees: s.table({
+    name: s.string(),
+    manager: s.ref("employees").optional(),
+    mentors: s.array(s.ref("employees")),
+    homeTeam: s.ref("teams").optional(),
+  }),
+  teams: s.table({
+    name: s.string(),
+    lead: s.ref("employees"),
+    parentTeam: s.ref("teams").optional(),
+    flagshipProject: s.ref("projects").optional(),
+  }),
+  projects: s.table({
+    name: s.string(),
+    team: s.ref("teams"),
+    approver: s.ref("employees").optional(),
+  }),
 };
 
-type CircularAppSchema = Schema<typeof schema>;
-const app: App<CircularAppSchema> = defineApp(schema);
+type CircularAppSchema = s.Schema<typeof schema>;
+const app: s.App<CircularAppSchema> = s.defineApp(schema);
 
 describe("typed app circular schemas", () => {
   it("serializes self and circular include trees", () => {
@@ -131,7 +124,7 @@ describe("typed app circular schemas", () => {
       },
     });
 
-    type EmployeeGraph = RowOf<typeof employeeGraphQuery>;
+    type EmployeeGraph = s.RowOf<typeof employeeGraphQuery>;
     const employeeGraph = {} as EmployeeGraph;
 
     expectTypeOf(employeeGraph.id).toEqualTypeOf<string>();

@@ -548,7 +548,7 @@ This page explains how to store images and other binary blobs in Jazz using brow
 `File`, and `ReadableStream` values. These files benefit from the same sync, local-first storage,
 and permission model as the rest of your structured data.
 
-Use plain `col.bytes()` when the binary value is small, naturally belongs on the row itself, and
+Use plain `s.bytes()` when the binary value is small, naturally belongs on the row itself, and
 should always load together with the rest of that row.
 
 ## Add the Conventional Tables
@@ -557,20 +557,20 @@ should always load together with the rest of that row.
 `db.loadFileAsStream` currently expect these exact table and column names on `app`:
 
 ```ts
-  file_parts: {
-    data: col.bytes(),
-  },
-  files: {
-    name: col.string().optional(),
-    mimeType: col.string(),
-    partIds: col.array(col.ref("file_parts")),
-    partSizes: col.array(col.int()),
-  },
-  uploads: {
-    ownerId: col.string(),
-    label: col.string(),
-    fileId: col.ref("files"),
-  },
+  file_parts: s.table({
+    data: s.bytes(),
+  }),
+  files: s.table({
+    name: s.string().optional(),
+    mimeType: s.string(),
+    partIds: s.array(s.ref("file_parts")),
+    partSizes: s.array(s.int()),
+  }),
+  uploads: s.table({
+    ownerId: s.string(),
+    label: s.string(),
+    fileId: s.ref("files"),
+  }),
 ```
 
 `file_parts.data` stores the raw chunk bytes. `files.partIds` keeps the ordered chunk ids, and
@@ -1094,29 +1094,29 @@ When Jazz encounters rows whose schema hash is no longer reachable from the curr
 
   migrate: {
     todos: {
-      description: col.add.string({ default: null }),
+      description: s.add.string({ default: null }),
     },
   },
   fromHash: "a01f5c72ec47",
   toHash: "311995e9a178",
   from: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-    },
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
   },
   to: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      description: col.string().optional(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-    },
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
   },
 });
 
@@ -1132,29 +1132,29 @@ After review, keep the same hashes and adjust the `migrate` object as needed:
 
   migrate: {
     todos: {
-      description: col.add.string({ default: "No description" }),
+      description: s.add.string({ default: "No description" }),
     },
   },
   fromHash: "a01f5c72ec47",
   toHash: "311995e9a178",
   from: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-    },
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
   },
   to: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      description: col.string().optional(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-    },
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
   },
 });
 
@@ -1171,31 +1171,31 @@ When a newer schema drops a column that older clients still expect, define a bac
 
   migrate: {
     todos: {
-      legacy_priority: col.drop.int({ backwardsDefault: 0 }),
+      legacy_priority: s.drop.int({ backwardsDefault: 0 }),
     },
   },
   fromHash: "311995e9a178",
   toHash: "73b65d082ab8",
   from: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      description: col.string().optional(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-      legacy_priority: col.int(),
-    },
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+      legacy_priority: s.int(),
+    }),
   },
   to: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      description: col.string().optional(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-    },
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
   },
 });
 
@@ -1216,23 +1216,23 @@ Define policies in a root `permissions.ts` next to `schema.ts`. This applies to 
 Assuming the following schema:
 
 ```ts
-table("projects", {
-  name: col.string(),
-  ownerId: col.string(),
-});
-
-table("todos", {
-  title: col.string(),
-  done: col.boolean(),
-  projectId: col.ref("projects").optional(),
-  ownerId: col.string(),
-});
-
-table("todoShares", {
-  todoId: col.ref("todos"),
-  userId: col.string(),
-  can_read: col.boolean(),
-});
+const schema = {
+  projects: s.table({
+    name: s.string(),
+    ownerId: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    projectId: s.ref("projects").optional(),
+    owner_id: s.string(),
+  }),
+  todoShares: s.table({
+    todoId: s.ref("todos"),
+    userId: s.string(),
+    can_read: s.boolean(),
+  }),
+};
 ```
 
 Define permissions in `permissions.ts`:
@@ -1252,7 +1252,7 @@ Apps that do not need user-scoped filtering can still define explicit allow-all 
 ## Simple Policies
 
 ```ts
-definePermissions(app, ({ policy, allOf, session }) => {
+s.definePermissions(app, ({ policy, allOf, session }) => {
   policy.todos.allowRead.where({ owner_id: session.user_id });
   policy.todos.allowInsert.where({ owner_id: session.user_id });
   policy.todos.allowUpdate
@@ -1267,7 +1267,7 @@ definePermissions(app, ({ policy, allOf, session }) => {
 Use `.always()` when an operation should always be permitted. It is equivalent to `.where({})`.
 
 ```ts
-definePermissions(app, ({ policy }) => {
+s.definePermissions(app, ({ policy }) => {
   policy.todos.allowRead.always();
   policy.todos.allowInsert.always();
   policy.todos.allowUpdate.always();
@@ -1280,7 +1280,7 @@ definePermissions(app, ({ policy }) => {
 Use `.never()` when an operation should be impossible. It is equivalent to `.where(anyOf([]))`.
 
 ```ts
-definePermissions(app, ({ policy }) => {
+s.definePermissions(app, ({ policy }) => {
   policy.todos.allowRead.never();
   policy.todos.allowInsert.never();
   policy.todos.allowUpdate.never();
@@ -1291,7 +1291,7 @@ definePermissions(app, ({ policy }) => {
 ## Combining Conditions (`allOf` / `anyOf`)
 
     ```ts
-definePermissions(app, ({ policy, allOf, anyOf, allowedTo, session }) => {
+s.definePermissions(app, ({ policy, allOf, anyOf, allowedTo, session }) => {
   policy.todos.allowRead.where(
     anyOf([{ owner_id: session.user_id }, allOf([{ done: false }, allowedTo.read("project")])]),
   );
@@ -1317,7 +1317,7 @@ pub fn combinator_policy() -> TablePolicies {
 When external auth JWTs carry claims, `session.where(...)` lets you check them directly in permissions without mapping them onto row columns first.
 
 ```ts
-definePermissions(app, ({ policy, anyOf, session }) => {
+s.definePermissions(app, ({ policy, anyOf, session }) => {
   policy.todos.allowRead.where(
     anyOf([{ owner_id: session.user_id }, session.where({ "claims.role": "manager" })]),
   );
@@ -1329,7 +1329,7 @@ definePermissions(app, ({ policy, anyOf, session }) => {
 `allowedTo.read/insert/update/delete(...)` lets one table inherit access from another through relationships.
 
 ```ts
-definePermissions(app, ({ policy, anyOf, allOf, allowedTo }) => {
+s.definePermissions(app, ({ policy, anyOf, allOf, allowedTo }) => {
   policy.todos.allowRead.where(anyOf([{ done: false }, allowedTo.read("project")]));
   policy.todos.allowUpdate
     .whereOld(allOf([allowedTo.update("project"), { done: false }]))
@@ -1342,7 +1342,7 @@ definePermissions(app, ({ policy, anyOf, allOf, allowedTo }) => {
 Use depth-bounded inherited access when foreign keys can form recursive chains.
 
     ```ts
-definePermissions(app, ({ policy, allowedTo }) => {
+s.definePermissions(app, ({ policy, allowedTo }) => {
   policy.todos.allowRead.where(allowedTo.read("parent"));
   policy.todos.allowUpdate
     .whereOld(allowedTo.update("parent", { maxDepth: 5 }))
@@ -1463,20 +1463,20 @@ Create `schema.ts` at the root of your project. This is the source of truth for 
 ```ts
 
 const schema = {
-  projects: {
-    name: col.string(),
-  },
-  todos: {
-    title: col.string(),
-    done: col.boolean(),
-    description: col.string().optional(),
-    ownerId: col.string(),
-    parentId: col.ref("todos").optional(),
-    projectId: col.ref("projects").optional(),
-  },
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    ownerId: s.string(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
+  }),
 };
 
-type AppSchema = Schema<typeof schema>;
+type AppSchema = s.Schema<typeof schema>;
 
 ```
 
@@ -1630,7 +1630,7 @@ Outside components (or when you need deltas), use `db.subscribeAll` directly:
 
 ### Relations with include
 
-If your schema has `col.ref()` columns, Jazz infers typed include interfaces directly from `schema.ts`. Use `.include()` to load related rows in one query.
+If your schema has `s.ref()` columns, Jazz infers typed include interfaces directly from `schema.ts`. Use `.include()` to load related rows in one query.
 
 ```ts
 
@@ -1794,7 +1794,7 @@ Full auth flows and server behavior: [Authentication](/docs/authentication).
 
 ## Permissions
 
-Define row-level policies in `permissions.ts` with `definePermissions(...)`:
+Define row-level policies in `permissions.ts` with `s.definePermissions(...)`:
 
 ```ts
 
@@ -1838,19 +1838,19 @@ Create `schema.ts` at the root of your project. This is the source of truth for 
 ```ts
 
 const schema = {
-  projects: {
-    name: col.string(),
-  },
-  todos: {
-    title: col.string(),
-    done: col.boolean(),
-    description: col.string().optional(),
-    parentId: col.ref("todos").optional(),
-    projectId: col.ref("projects").optional(),
-  },
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
+  }),
 };
 
-type AppSchema = Schema<typeof schema>;
+type AppSchema = s.Schema<typeof schema>;
 
 ```
 
@@ -1991,7 +1991,7 @@ Outside components (or when you need deltas), use `db.subscribeAll` directly:
 
 ### Relations with include
 
-If your schema has `col.ref()` columns, Jazz infers typed include interfaces directly from `schema.ts`. Use `.include()` to load related rows in one query.
+If your schema has `s.ref()` columns, Jazz infers typed include interfaces directly from `schema.ts`. Use `.include()` to load related rows in one query.
 
 ```ts
 
@@ -2158,7 +2158,7 @@ Full auth flows and server behavior: [Authentication](/docs/authentication).
 
 ## Permissions
 
-Define row-level policies in `permissions.ts` with `definePermissions(...)`:
+Define row-level policies in `permissions.ts` with `s.definePermissions(...)`:
 
 ```ts
 
@@ -2201,19 +2201,19 @@ Create `schema.ts` at the root of your project. This is the source of truth for 
 ```ts
 
 const schema = {
-  projects: {
-    name: col.string(),
-  },
-  todos: {
-    title: col.string(),
-    done: col.boolean(),
-    description: col.string().optional(),
-    parentId: col.ref("todos").optional(),
-    projectId: col.ref("projects").optional(),
-  },
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
+  }),
 };
 
-type AppSchema = Schema<typeof schema>;
+type AppSchema = s.Schema<typeof schema>;
 
 ```
 
@@ -2420,7 +2420,7 @@ Outside components (or when you need deltas), use `db.subscribeAll` directly:
 
 ### Relations with include
 
-If your schema has `col.ref()` columns, Jazz infers typed include interfaces directly from `schema.ts`. Use `.include()` to load related rows in one query.
+If your schema has `s.ref()` columns, Jazz infers typed include interfaces directly from `schema.ts`. Use `.include()` to load related rows in one query.
 
 ```ts
 
@@ -2643,7 +2643,7 @@ Full auth flows and server behavior: [Authentication](/docs/authentication).
 
 ## Permissions
 
-Define row-level policies in `permissions.ts` with `definePermissions(...)`:
+Define row-level policies in `permissions.ts` with `s.definePermissions(...)`:
 
 ```ts
 
@@ -2684,17 +2684,17 @@ For full environment and server setup options, see [Setup](/docs/setup).
 Create `schema.ts` at the root of your project. This is the source of truth for your data model.
 
 ```ts
-  projects: {
-    name: col.string(),
-  },
-  todos: {
-    title: col.string(),
-    done: col.boolean(),
-    description: col.string().optional(),
-    ownerId: col.string().optional(),
-    parentId: col.ref("todos").optional(),
-    projectId: col.ref("projects").optional(),
-  },
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    ownerId: s.string().optional(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
+  }),
 ```
 
 ### Validate schema
@@ -2778,20 +2778,20 @@ Create `schema.ts` at the root of your project. This is the source of truth for 
 ```ts
 
 const schema = {
-  projects: {
-    name: col.string(),
-  },
-  todos: {
-    title: col.string(),
-    done: col.boolean(),
-    description: col.string().optional(),
-    parentId: col.ref("todos").optional(),
-    projectId: col.ref("projects").optional(),
-    owner_id: col.string(),
-  },
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
+    owner_id: s.string(),
+  }),
 };
 
-type AppSchema = Schema<typeof schema>;
+type AppSchema = s.Schema<typeof schema>;
 
 ```
 
@@ -2970,19 +2970,19 @@ Create `schema.ts` at the root of your project. This is the source of truth for 
 ```ts
 
 const schema = {
-  projects: {
-    name: col.string(),
-  },
-  todos: {
-    title: col.string(),
-    done: col.boolean(),
-    description: col.string().optional(),
-    parentId: col.ref("todos").optional(),
-    projectId: col.ref("projects").optional(),
-  },
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
+  }),
 };
 
-type AppSchema = Schema<typeof schema>;
+type AppSchema = s.Schema<typeof schema>;
 
 ```
 
@@ -3137,7 +3137,7 @@ Outside components (or when you need deltas), use `db.subscribeAll` directly:
 
 ### Relations with include
 
-If your schema has `col.ref()` columns, Jazz infers typed include interfaces directly from `schema.ts`. Use `.include()` to load related rows in one query.
+If your schema has `s.ref()` columns, Jazz infers typed include interfaces directly from `schema.ts`. Use `.include()` to load related rows in one query.
 
 ```ts
 
@@ -3346,7 +3346,7 @@ Full auth flows and server behavior: [Authentication](/docs/authentication).
 
 ## Permissions
 
-Define row-level policies in `permissions.ts` with `definePermissions(...)`:
+Define row-level policies in `permissions.ts` with `s.definePermissions(...)`:
 
 ```ts
 
@@ -3684,35 +3684,35 @@ parts. See [Files & Blobs](/docs/files-and-blobs).
 Schema references used by the include examples:
 
     ```ts
-  projects: {
-    name: col.string(),
-  },
-  todos: {
-    title: col.string(),
-    done: col.boolean(),
-    description: col.string().optional(),
-    ownerId: col.string().optional(),
-    parentId: col.ref("todos").optional(),
-    projectId: col.ref("projects").optional(),
-  },
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    ownerId: s.string().optional(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
+  }),
 ```
 
     ```ts
 
 const schema = {
-  projects: {
-    name: col.string(),
-  },
-  todos: {
-    title: col.string(),
-    done: col.boolean(),
-    description: col.string().optional(),
-    parent: col.ref("todos").optional(),
-    project: col.ref("projects").optional(),
-  },
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    parent: s.ref("todos").optional(),
+    project: s.ref("projects").optional(),
+  }),
 };
 
-type AppSchema = Schema<typeof schema>;
+type AppSchema = s.Schema<typeof schema>;
 
 ```
 
@@ -3899,19 +3899,19 @@ Every Jazz app defines its schema in a root `schema.ts`, including Rust backends
     ```ts
 
 const schema = {
-  projects: {
-    name: col.string(),
-  },
-  todos: {
-    title: col.string(),
-    done: col.boolean(),
-    description: col.string().optional(),
-    parent: col.ref("todos").optional(),
-    project: col.ref("projects").optional(),
-  },
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    parent: s.ref("todos").optional(),
+    project: s.ref("projects").optional(),
+  }),
 };
 
-type AppSchema = Schema<typeof schema>;
+type AppSchema = s.Schema<typeof schema>;
 
 ```
 
@@ -3920,19 +3920,19 @@ type AppSchema = Schema<typeof schema>;
     ```ts
 
 const schema = {
-  projects: {
-    name: col.string(),
-  },
-  todos: {
-    title: col.string(),
-    done: col.boolean(),
-    description: col.string().optional(),
-    parent: col.ref("todos").optional(),
-    project: col.ref("projects").optional(),
-  },
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    parent: s.ref("todos").optional(),
+    project: s.ref("projects").optional(),
+  }),
 };
 
-type AppSchema = Schema<typeof schema>;
+type AppSchema = s.Schema<typeof schema>;
 
 ```
 
@@ -3946,12 +3946,12 @@ type AppSchema = Schema<typeof schema>;
 
 Each top-level property of the `schema` object is a table. In the example above, `projects` and `todos` become tables, and each nested property becomes a column on that table.
 
-The `type AppSchema = Schema<typeof schema>; export const app: App = defineApp(schema);` pattern is there to keep TypeScript hovers short and readable. Without that alias boundary, TypeScript tends to expand the entire schema literal when you hover `app`, `app.todos`, or derived row/query types.
+The `type AppSchema = s.Schema<typeof schema>; export const app: s.App = s.defineApp(schema);` pattern is there to keep TypeScript hovers short and readable. Without that alias boundary, TypeScript tends to expand the entire schema literal when you hover `app`, `app.todos`, or derived row/query types.
 
 ## Datatypes and References
 
-- Use `col.string()`, `col.boolean()`, `col.int()`, `col.timestamp()`, and `col.bytes()` for scalar fields.
-- Use `col.ref("tableName")` for foreign keys. Jazz infers typed `.include(...)` relations directly from `schema.ts`.
+- Use `s.string()`, `s.boolean()`, `s.int()`, `s.timestamp()`, and `s.bytes()` for scalar fields.
+- Use `s.ref("tableName")` for foreign keys. Jazz infers typed `.include(...)` relations directly from `schema.ts`.
 - For browser files and large uploaded blobs, define the conventional `files` / `file_parts` tables and store a normal reference to `files` from your app rows. See [Files & Blobs](/docs/files-and-blobs).
 
 ### Available column types
@@ -4005,29 +4005,29 @@ Migration files live in `migrations/` and are always TypeScript, even for Rust a
 
   migrate: {
     todos: {
-      description: col.add.string({ default: null }),
+      description: s.add.string({ default: null }),
     },
   },
   fromHash: "a01f5c72ec47",
   toHash: "311995e9a178",
   from: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-    },
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
   },
   to: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      description: col.string().optional(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-    },
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
   },
 });
 
@@ -4041,29 +4041,29 @@ Migration files live in `migrations/` and are always TypeScript, even for Rust a
 
   migrate: {
     todos: {
-      description: col.add.string({ default: "No description" }),
+      description: s.add.string({ default: "No description" }),
     },
   },
   fromHash: "a01f5c72ec47",
   toHash: "311995e9a178",
   from: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-    },
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
   },
   to: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      description: col.string().optional(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-    },
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
   },
 });
 
@@ -4078,31 +4078,31 @@ Migration files live in `migrations/` and are always TypeScript, even for Rust a
 
   migrate: {
     todos: {
-      legacy_priority: col.drop.int({ backwardsDefault: 0 }),
+      legacy_priority: s.drop.int({ backwardsDefault: 0 }),
     },
   },
   fromHash: "311995e9a178",
   toHash: "73b65d082ab8",
   from: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      description: col.string().optional(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-      legacy_priority: col.int(),
-    },
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+      legacy_priority: s.int(),
+    }),
   },
   to: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      description: col.string().optional(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-    },
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
   },
 });
 

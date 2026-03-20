@@ -1,39 +1,39 @@
-import { col, defineApp, type Schema, type RowOf, type App } from "jazz-tools";
+import { schema as s } from "jazz-tools";
 
 const schema = {
   // #region schema-todo-client-ts
-  projects: {
-    name: col.string(),
-  },
-  todos: {
-    title: col.string(),
-    done: col.boolean(),
-    description: col.string().optional(),
-    ownerId: col.string().optional(),
-    parentId: col.ref("todos").optional(),
-    projectId: col.ref("projects").optional(),
-  },
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    ownerId: s.string().optional(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
+  }),
   // #endregion schema-todo-client-ts
 
   // #region schema-files-and-blobs-ts
-  file_parts: {
-    data: col.bytes(),
-  },
-  files: {
-    name: col.string().optional(),
-    mimeType: col.string(),
-    partIds: col.array(col.ref("file_parts")),
-    partSizes: col.array(col.int()),
-  },
-  uploads: {
-    ownerId: col.string(),
-    label: col.string(),
-    fileId: col.ref("files"),
-  },
+  file_parts: s.table({
+    data: s.bytes(),
+  }),
+  files: s.table({
+    name: s.string().optional(),
+    mimeType: s.string(),
+    partIds: s.array(s.ref("file_parts")),
+    partSizes: s.array(s.int()),
+  }),
+  uploads: s.table({
+    ownerId: s.string(),
+    label: s.string(),
+    fileId: s.ref("files"),
+  }),
   // #endregion schema-files-and-blobs-ts
 };
 
-type AppSchema = Schema<typeof schema>;
-export const app: App<AppSchema> = defineApp(schema);
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
 
-export type Todo = RowOf<typeof app.todos>;
+export type Todo = s.RowOf<typeof app.todos>;

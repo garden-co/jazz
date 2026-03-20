@@ -1,25 +1,25 @@
-import { col, defineApp, type Schema, type RowOf, type App } from "jazz-tools";
+import { schema as s } from "jazz-tools";
 
 const schema = {
-  files: {
-    name: col.string(),
-    mimeType: col.string(),
-    partIds: col.array(col.ref("file_parts")),
-    partSizes: col.array(col.int()),
-  },
-  file_parts: {
-    data: col.bytes(),
-  },
-  uploads: {
-    size: col.int(),
-    lastModified: col.timestamp(),
-    fileId: col.ref("files"),
-    ownerId: col.string(),
-  },
+  files: s.table({
+    name: s.string(),
+    mimeType: s.string(),
+    partIds: s.array(s.ref("file_parts")),
+    partSizes: s.array(s.int()),
+  }),
+  file_parts: s.table({
+    data: s.bytes(),
+  }),
+  uploads: s.table({
+    size: s.int(),
+    lastModified: s.timestamp(),
+    fileId: s.ref("files"),
+    ownerId: s.string(),
+  }),
 };
 
-type AppSchema = Schema<typeof schema>;
-export const app: App<AppSchema> = defineApp(schema);
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
 
 const uploadWithPartsQuery = app.uploads
   .include({
@@ -29,5 +29,5 @@ const uploadWithPartsQuery = app.uploads
   })
   .requireIncludes();
 
-export type File = RowOf<typeof app.files>;
-export type UploadWithIncludes = RowOf<typeof uploadWithPartsQuery>;
+export type File = s.RowOf<typeof app.files>;
+export type UploadWithIncludes = s.RowOf<typeof uploadWithPartsQuery>;

@@ -1,7 +1,7 @@
-import { definePermissions } from "jazz-tools/permissions";
+import { schema as s } from "jazz-tools";
 import { app } from "./schema.js";
 
-export default definePermissions(app, ({ policy, session }) => [
+export default s.definePermissions(app, ({ policy, session }) => [
   policy.todos.allowRead.where({}),
   policy.todos.allowInsert.where({ ownerId: session.user_id }),
   policy.todos.allowUpdate

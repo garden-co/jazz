@@ -1,34 +1,34 @@
-import { col, defineApp, type Schema, type RowOf, type App } from "jazz-tools";
+import { schema as s } from "jazz-tools";
 
 const schema = {
-  instruments: {
-    name: col.string(),
-    sound: col.bytes(),
-    display_order: col.int(),
-  },
-  jams: {
-    created_at: col.timestamp(),
-    transport_start: col.timestamp().optional(),
-    bpm: col.int(),
-    beat_count: col.int(),
-  },
-  beats: {
-    jamId: col.ref("jams"),
-    instrumentId: col.ref("instruments"),
-    beat_index: col.int(),
-    placed_by: col.string(),
-  },
-  participants: {
-    jamId: col.ref("jams"),
-    userId: col.string(),
-    display_name: col.string(),
-  },
+  instruments: s.table({
+    name: s.string(),
+    sound: s.bytes(),
+    display_order: s.int(),
+  }),
+  jams: s.table({
+    created_at: s.timestamp(),
+    transport_start: s.timestamp().optional(),
+    bpm: s.int(),
+    beat_count: s.int(),
+  }),
+  beats: s.table({
+    jamId: s.ref("jams"),
+    instrumentId: s.ref("instruments"),
+    beat_index: s.int(),
+    placed_by: s.string(),
+  }),
+  participants: s.table({
+    jamId: s.ref("jams"),
+    userId: s.string(),
+    display_name: s.string(),
+  }),
 };
 
-type AppSchema = Schema<typeof schema>;
-export const app: App<AppSchema> = defineApp(schema);
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
 
-export type Instrument = RowOf<typeof app.instruments>;
-export type Jam = RowOf<typeof app.jams>;
-export type Beat = RowOf<typeof app.beats>;
-export type Participant = RowOf<typeof app.participants>;
+export type Instrument = s.RowOf<typeof app.instruments>;
+export type Jam = s.RowOf<typeof app.jams>;
+export type Beat = s.RowOf<typeof app.beats>;
+export type Participant = s.RowOf<typeof app.participants>;
