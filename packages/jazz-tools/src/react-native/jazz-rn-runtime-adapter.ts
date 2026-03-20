@@ -2,7 +2,7 @@ import type { WasmSchema } from "../drivers/types.js";
 import type { Row, Runtime } from "../runtime/client.js";
 import { OutboxDestinationKind } from "../runtime/sync-transport.js";
 
-type JazzRnErrorTag =
+export type JazzRnErrorTag =
   | "InvalidJson"
   | "InvalidUuid"
   | "InvalidTier"
@@ -109,19 +109,12 @@ function swallowMissingObjectMutation(context: string, error: unknown): boolean 
 
 function isJazzRnErrorLike(
   error: unknown,
-): error is { tag: JazzRnErrorTag; inner?: { message?: unknown } } {
+): error is { tag: string; inner?: { message?: unknown } } {
   if (!error || typeof error !== "object") {
     return false;
   }
   const candidate = error as { tag?: unknown; inner?: unknown };
-  return (
-    candidate.tag === "InvalidJson" ||
-    candidate.tag === "InvalidUuid" ||
-    candidate.tag === "InvalidTier" ||
-    candidate.tag === "Schema" ||
-    candidate.tag === "Runtime" ||
-    candidate.tag === "Internal"
-  );
+  return typeof candidate.tag === "string";
 }
 
 function normalizeJazzRnError(error: unknown): Error {
@@ -133,10 +126,11 @@ function normalizeJazzRnError(error: unknown): Error {
     typeof error.inner?.message === "string" && error.inner.message.length > 0
       ? error.inner.message
       : String(error);
+  const tag = error.tag as JazzRnErrorTag;
   const normalized = createErrorWithCause(message, error);
-  normalized.name = `JazzRn${error.tag}Error`;
+  normalized.name = `JazzRn${tag}Error`;
   Object.defineProperty(normalized, "tag", {
-    value: error.tag,
+    value: tag,
     enumerable: false,
     configurable: true,
     writable: true,
