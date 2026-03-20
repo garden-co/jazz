@@ -1,0 +1,35 @@
+---
+title: Defining Tables
+description: Define tables and relationships using the TypeScript DSL or SQL.
+reviewedAt: "451d4671"
+# TODO: By the time of this review, migrations have changed significantly. Will merge, resolve conflicts, and then come back to this, rather than investing time in this now.
+---
+
+## Table definitions
+
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="schema.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/schema/current.ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include cwd lang="sql" meta='title="schema.sql"'>
+      ../examples/docs/todo-server-rs/schema/current.sql
+    </include>
+  </Tab>
+</Tabs>
+
+The TypeScript DSL uses `col.string`, `col.boolean`, `col.ref`, etc. SQL uses the equivalent `TEXT`, `BOOLEAN`, `UUID REFERENCES ...`. Use SQL when your project is Rust-first. See [Column Types](/docs/reference/column-types) for the full list.
+
+## Codegen
+
+<include cwd lang="bash" meta='title="Terminal"'>
+  ../examples/docs/todo-client-localfirst-ts/docs/schema-codegen.sh#schemas-ts-codegen-cli
+</include>
+
+Run this from your project root. It regenerates `schema/current.sql` and typed client bindings (e.g. `schema/app.ts`) from `schema/current.ts`.
+
+When you change your schema, Jazz generates migration stubs that translate data between versions. See [Migrations](/docs/schemas/migrations) for details.
+
+If you need to clear local browser data after a schema change, see [How do I reset browser storage?](/docs/reference/faq#reset-browser-storage)

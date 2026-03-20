@@ -19,9 +19,11 @@ export interface Todo {
   title: string;
   done: boolean;
   description?: string;
-  ownerId?: string;
-  parentId?: string;
-  projectId?: string;
+  owner_id?: string;
+  priority?: number;
+  created_at?: Date;
+  parent?: string;
+  project?: string;
 }
 
 export interface FilePart {
@@ -33,15 +35,15 @@ export interface File {
   id: string;
   name?: string;
   mimeType: string;
-  partIds: string[];
+  parts: string[];
   partSizes: number[];
 }
 
 export interface Upload {
   id: string;
-  ownerId: string;
+  owner_id: string;
   label: string;
-  fileId: string;
+  file: string;
 }
 
 export interface ProjectInit {
@@ -52,9 +54,11 @@ export interface TodoInit {
   title: string;
   done: boolean;
   description?: string;
-  ownerId?: string;
-  parentId?: string;
-  projectId?: string;
+  owner_id?: string;
+  priority?: number;
+  created_at?: Date;
+  parent?: string;
+  project?: string;
 }
 
 export interface FilePartInit {
@@ -64,14 +68,14 @@ export interface FilePartInit {
 export interface FileInit {
   name?: string;
   mimeType: string;
-  partIds: string[];
+  parts: string[];
   partSizes: number[];
 }
 
 export interface UploadInit {
-  ownerId: string;
+  owner_id: string;
   label: string;
-  fileId: string;
+  file: string;
 }
 
 export interface ProjectWhereInput {
@@ -87,9 +91,11 @@ export interface TodoWhereInput {
   title?: string | { eq?: string; ne?: string; contains?: string };
   done?: boolean;
   description?: string | { eq?: string; ne?: string; contains?: string };
-  ownerId?: string | { eq?: string; ne?: string; contains?: string };
-  parentId?: string | { eq?: string; ne?: string; isNull?: boolean };
-  projectId?: string | { eq?: string; ne?: string; isNull?: boolean };
+  owner_id?: string | { eq?: string; ne?: string; contains?: string };
+  priority?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  parent?: string | { eq?: string; ne?: string; isNull?: boolean };
+  project?: string | { eq?: string; ne?: string; isNull?: boolean };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -107,7 +113,7 @@ export interface FileWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   name?: string | { eq?: string; ne?: string; contains?: string };
   mimeType?: string | { eq?: string; ne?: string; contains?: string };
-  partIds?: string[] | { eq?: string[]; contains?: string };
+  parts?: string[] | { eq?: string[]; contains?: string };
   partSizes?: number[] | { eq?: number[]; contains?: number };
   $canRead?: boolean;
   $canEdit?: boolean;
@@ -116,9 +122,9 @@ export interface FileWhereInput {
 
 export interface UploadWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
-  ownerId?: string | { eq?: string; ne?: string; contains?: string };
+  owner_id?: string | { eq?: string; ne?: string; contains?: string };
   label?: string | { eq?: string; ne?: string; contains?: string };
-  fileId?: string | { eq?: string; ne?: string };
+  file?: string | { eq?: string; ne?: string };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -281,50 +287,50 @@ export interface UploadRelations {
   file: File | undefined;
 }
 
-export type ProjectWithIncludes<I extends ProjectInclude = {}, R extends boolean = false> = Project & ProjectIncludedRelations<I, R>;
+export type ProjectWithIncludes<I extends ProjectInclude = {}, R extends boolean = false> = Omit<Project, Extract<keyof I, keyof Project>> & ProjectIncludedRelations<I, R>;
 
-export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Todo & TodoIncludedRelations<I, R>;
+export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Omit<Todo, Extract<keyof I, keyof Todo>> & TodoIncludedRelations<I, R>;
 
-export type FilePartWithIncludes<I extends FilePartInclude = {}, R extends boolean = false> = FilePart & FilePartIncludedRelations<I, R>;
+export type FilePartWithIncludes<I extends FilePartInclude = {}, R extends boolean = false> = Omit<FilePart, Extract<keyof I, keyof FilePart>> & FilePartIncludedRelations<I, R>;
 
-export type FileWithIncludes<I extends FileInclude = {}, R extends boolean = false> = File & FileIncludedRelations<I, R>;
+export type FileWithIncludes<I extends FileInclude = {}, R extends boolean = false> = Omit<File, Extract<keyof I, keyof File>> & FileIncludedRelations<I, R>;
 
-export type UploadWithIncludes<I extends UploadInclude = {}, R extends boolean = false> = Upload & UploadIncludedRelations<I, R>;
+export type UploadWithIncludes<I extends UploadInclude = {}, R extends boolean = false> = Omit<Upload, Extract<keyof I, keyof Upload>> & UploadIncludedRelations<I, R>;
 
 export type ProjectSelectableColumn = keyof Project | PermissionIntrospectionColumn | "*";
 export type ProjectOrderableColumn = keyof Project | PermissionIntrospectionColumn;
 
 export type ProjectSelected<S extends ProjectSelectableColumn = keyof Project> = ("*" extends S ? Project : Pick<Project, Extract<S | "id", keyof Project>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type ProjectSelectedWithIncludes<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = keyof Project, R extends boolean = false> = ProjectSelected<S> & ProjectIncludedRelations<I, R>;
+export type ProjectSelectedWithIncludes<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = keyof Project, R extends boolean = false> = Omit<ProjectSelected<S>, Extract<keyof I, keyof ProjectSelected<S>>> & ProjectIncludedRelations<I, R>;
 
 export type TodoSelectableColumn = keyof Todo | PermissionIntrospectionColumn | "*";
 export type TodoOrderableColumn = keyof Todo | PermissionIntrospectionColumn;
 
 export type TodoSelected<S extends TodoSelectableColumn = keyof Todo> = ("*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false> = TodoSelected<S> & TodoIncludedRelations<I, R>;
+export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false> = Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I, R>;
 
 export type FilePartSelectableColumn = keyof FilePart | PermissionIntrospectionColumn | "*";
 export type FilePartOrderableColumn = keyof FilePart | PermissionIntrospectionColumn;
 
 export type FilePartSelected<S extends FilePartSelectableColumn = keyof FilePart> = ("*" extends S ? FilePart : Pick<FilePart, Extract<S | "id", keyof FilePart>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type FilePartSelectedWithIncludes<I extends FilePartInclude = {}, S extends FilePartSelectableColumn = keyof FilePart, R extends boolean = false> = FilePartSelected<S> & FilePartIncludedRelations<I, R>;
+export type FilePartSelectedWithIncludes<I extends FilePartInclude = {}, S extends FilePartSelectableColumn = keyof FilePart, R extends boolean = false> = Omit<FilePartSelected<S>, Extract<keyof I, keyof FilePartSelected<S>>> & FilePartIncludedRelations<I, R>;
 
 export type FileSelectableColumn = keyof File | PermissionIntrospectionColumn | "*";
 export type FileOrderableColumn = keyof File | PermissionIntrospectionColumn;
 
 export type FileSelected<S extends FileSelectableColumn = keyof File> = ("*" extends S ? File : Pick<File, Extract<S | "id", keyof File>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type FileSelectedWithIncludes<I extends FileInclude = {}, S extends FileSelectableColumn = keyof File, R extends boolean = false> = FileSelected<S> & FileIncludedRelations<I, R>;
+export type FileSelectedWithIncludes<I extends FileInclude = {}, S extends FileSelectableColumn = keyof File, R extends boolean = false> = Omit<FileSelected<S>, Extract<keyof I, keyof FileSelected<S>>> & FileIncludedRelations<I, R>;
 
 export type UploadSelectableColumn = keyof Upload | PermissionIntrospectionColumn | "*";
 export type UploadOrderableColumn = keyof Upload | PermissionIntrospectionColumn;
 
 export type UploadSelected<S extends UploadSelectableColumn = keyof Upload> = ("*" extends S ? Upload : Pick<Upload, Extract<S | "id", keyof Upload>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type UploadSelectedWithIncludes<I extends UploadInclude = {}, S extends UploadSelectableColumn = keyof Upload, R extends boolean = false> = UploadSelected<S> & UploadIncludedRelations<I, R>;
+export type UploadSelectedWithIncludes<I extends UploadInclude = {}, S extends UploadSelectableColumn = keyof Upload, R extends boolean = false> = Omit<UploadSelected<S>, Extract<keyof I, keyof UploadSelected<S>>> & UploadIncludedRelations<I, R>;
 
 export const wasmSchema: WasmSchema = {
   "projects": {
@@ -362,14 +368,28 @@ export const wasmSchema: WasmSchema = {
         "nullable": true
       },
       {
-        "name": "ownerId",
+        "name": "owner_id",
         "column_type": {
           "type": "Text"
         },
         "nullable": true
       },
       {
-        "name": "parentId",
+        "name": "priority",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      },
+      {
+        "name": "parent",
         "column_type": {
           "type": "Uuid"
         },
@@ -377,7 +397,7 @@ export const wasmSchema: WasmSchema = {
         "references": "todos"
       },
       {
-        "name": "projectId",
+        "name": "project",
         "column_type": {
           "type": "Uuid"
         },
@@ -439,7 +459,7 @@ export const wasmSchema: WasmSchema = {
         "nullable": false
       },
       {
-        "name": "partIds",
+        "name": "parts",
         "column_type": {
           "type": "Array",
           "element": {
@@ -464,7 +484,7 @@ export const wasmSchema: WasmSchema = {
   "uploads": {
     "columns": [
       {
-        "name": "ownerId",
+        "name": "owner_id",
         "column_type": {
           "type": "Text"
         },
@@ -478,7 +498,7 @@ export const wasmSchema: WasmSchema = {
         "nullable": false
       },
       {
-        "name": "fileId",
+        "name": "file",
         "column_type": {
           "type": "Uuid"
         },

@@ -1,0 +1,13 @@
+| DSL                       | TypeScript type      | SQL type        |
+| ------------------------- | -------------------- | --------------- |
+| `col.string()`            | `string`             | `TEXT`          |
+| `col.boolean()`           | `boolean`            | `BOOLEAN`       |
+| `col.int()`               | `number`             | `INTEGER`       |
+| `col.float()`             | `number`             | `REAL`          |
+| `col.timestamp()`         | `Date \| number`     | `TIMESTAMP`     |
+| `col.bytes()`             | `Uint8Array`         | `BYTEA`         |
+| `col.ref("table")`        | `string` (row ID)    | `UUID` (FK)     |
+| `col.array(col.string())` | `string[]`           | `TEXT[]`        |
+| `col.enum("a", "b")`      | `"a" \| "b"`         | `ENUM('a','b')` |
+| `col.json()`              | `JsonValue`          | `JSON`          |
+| `col.json(schema)`        | inferred from schema | `JSON`          |

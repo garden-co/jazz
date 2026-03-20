@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { createJazzClient, JazzProvider } from "jazz-tools/vue";
+  import { createJazzClient, JazzProvider } from "jazz-tools/vue";
 
-const client = createJazzClient({
-  appId: "my-app",
-  localAuthMode: "anonymous",
-  localAuthToken: "device-token-123",
-});
+  const client = createJazzClient({
+    appId: "my-app",
+    localAuthMode: "anonymous",
+    localAuthToken: "device-token-123",
+  });
 </script>
 
 <template>

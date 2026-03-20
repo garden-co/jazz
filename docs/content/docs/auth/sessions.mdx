@@ -1,0 +1,121 @@
+---
+title: Sessions
+description: Reading the current session and scoping queries and inserts to the logged-in user.
+reviewedAt: "451d4671"
+---
+
+After [setting up authentication](/docs/auth/authentication), you can read the current session to scope queries and inserts to the logged-in user.
+
+## Get the session and user ID
+
+<Tabs
+  groupId="jazz-framework"
+  persist
+  updateAnchor
+  items={["React", "Vue", "Svelte", "TypeScript"]}
+>
+  <Tab value="React">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-hook
+    </include>
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-user-id
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-hook
+    </include>
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-user-id
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-hook
+    </include>
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-user-id
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-hook
+    </include>
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-user-id
+    </include>
+  </Tab>
+</Tabs>
+
+## Read rows for the current user
+
+Use the session's user ID with [`.where()`](/docs/reading/filters-and-sorting) to scope [queries](/docs/reading/queries) to the current user.
+
+<Tabs
+  groupId="jazz-framework"
+  persist
+  updateAnchor
+  items={["React", "Vue", "Svelte", "TypeScript"]}
+>
+  <Tab value="React">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-query
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-query
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-query
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-query
+    </include>
+  </Tab>
+</Tabs>
+
+## Insert a user-owned row
+
+[Insert](/docs/writing/mutations) a row with the session's user ID to associate it with the current user.
+
+<Tabs
+  groupId="jazz-framework"
+  persist
+  updateAnchor
+  items={["React", "Vue", "Svelte", "TypeScript"]}
+>
+  <Tab value="React">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/AuthSessionExamples.tsx#auth-session-react-insert
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/AuthSessionExamples.vue#auth-session-vue-insert
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthSessionExamples.svelte#auth-session-svelte-insert
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/auth-session-snippets.ts#auth-session-ts-insert
+    </include>
+  </Tab>
+</Tabs>
+
+Use whatever column fits your schema&hairsp;—&hairsp;`owner_id`, `author_id`, `assignee_id`, etc.&hairsp;—&hairsp;the column names have no special significance.
+
+<Callout type="info">
+  Client-side filters are useful for UX, but they don't enforce access control on their own. Use
+  [Permissions](/docs/auth/permissions) to define row-level policies that control which sessions can
+  read or mutate a row.
+</Callout>

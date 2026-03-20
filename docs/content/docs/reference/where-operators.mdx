@@ -1,0 +1,122 @@
+---
+title: WHERE Operators
+description: Full reference for filter operators available in Jazz query builders, with examples for each column kind.
+reviewedAt: "451d4671"
+---
+
+import WhereOperatorsTable from "../../partials/where-operators-table.mdx";
+
+## Operator reference by column type
+
+<WhereOperatorsTable />
+
+## Examples
+
+### Equality and inequality
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-eq-ne-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-eq-ne-rust
+    </include>
+  </Tab>
+</Tabs>
+
+### Numeric comparisons
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-numeric-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-numeric-rust
+    </include>
+  </Tab>
+</Tabs>
+
+### String contains
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-contains-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-contains-rust
+    </include>
+  </Tab>
+</Tabs>
+
+### Null checks on optional references
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-null-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-null-rust
+    </include>
+  </Tab>
+</Tabs>
+
+### Multiple conditions (AND)
+
+All predicates passed to `where(...)` / chained `filter_*` calls are AND-combined:
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-and-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-and-rust
+    </include>
+  </Tab>
+</Tabs>
+
+### Combining with ordering and limits
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#where-order-limit-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-order-limit-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Live subscriptions with WHERE
+
+`useAll` and query subscriptions accept the same query builders as `db.all`. The subscription stays active and updates whenever any row enters or exits the filter:
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#where-subscription-react
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#where-subscription-rust
+    </include>
+  </Tab>
+</Tabs>

@@ -19,8 +19,10 @@ export interface Todo {
   title: string;
   done: boolean;
   description?: string;
-  parentId?: string;
-  projectId?: string;
+  priority?: number;
+  created_at?: Date;
+  parent?: string;
+  project?: string;
 }
 
 export interface ProjectInit {
@@ -31,8 +33,10 @@ export interface TodoInit {
   title: string;
   done: boolean;
   description?: string;
-  parentId?: string;
-  projectId?: string;
+  priority?: number;
+  created_at?: Date;
+  parent?: string;
+  project?: string;
 }
 
 export interface ProjectWhereInput {
@@ -48,8 +52,10 @@ export interface TodoWhereInput {
   title?: string | { eq?: string; ne?: string; contains?: string };
   done?: boolean;
   description?: string | { eq?: string; ne?: string; contains?: string };
-  parentId?: string | { eq?: string; ne?: string; isNull?: boolean };
-  projectId?: string | { eq?: string; ne?: string; isNull?: boolean };
+  priority?: number | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  created_at?: Date | number | { eq?: Date | number; gt?: Date | number; gte?: Date | number; lt?: Date | number; lte?: Date | number };
+  parent?: string | { eq?: string; ne?: string; isNull?: boolean };
+  project?: string | { eq?: string; ne?: string; isNull?: boolean };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -128,23 +134,23 @@ export interface TodoRelations {
   project: Project | undefined;
 }
 
-export type ProjectWithIncludes<I extends ProjectInclude = {}, R extends boolean = false> = Project & ProjectIncludedRelations<I, R>;
+export type ProjectWithIncludes<I extends ProjectInclude = {}, R extends boolean = false> = Omit<Project, Extract<keyof I, keyof Project>> & ProjectIncludedRelations<I, R>;
 
-export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Todo & TodoIncludedRelations<I, R>;
+export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Omit<Todo, Extract<keyof I, keyof Todo>> & TodoIncludedRelations<I, R>;
 
 export type ProjectSelectableColumn = keyof Project | PermissionIntrospectionColumn | "*";
 export type ProjectOrderableColumn = keyof Project | PermissionIntrospectionColumn;
 
 export type ProjectSelected<S extends ProjectSelectableColumn = keyof Project> = ("*" extends S ? Project : Pick<Project, Extract<S | "id", keyof Project>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type ProjectSelectedWithIncludes<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = keyof Project, R extends boolean = false> = ProjectSelected<S> & ProjectIncludedRelations<I, R>;
+export type ProjectSelectedWithIncludes<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = keyof Project, R extends boolean = false> = Omit<ProjectSelected<S>, Extract<keyof I, keyof ProjectSelected<S>>> & ProjectIncludedRelations<I, R>;
 
 export type TodoSelectableColumn = keyof Todo | PermissionIntrospectionColumn | "*";
 export type TodoOrderableColumn = keyof Todo | PermissionIntrospectionColumn;
 
 export type TodoSelected<S extends TodoSelectableColumn = keyof Todo> = ("*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
-export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false> = TodoSelected<S> & TodoIncludedRelations<I, R>;
+export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false> = Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I, R>;
 
 export const wasmSchema: WasmSchema = {
   "projects": {
@@ -182,7 +188,21 @@ export const wasmSchema: WasmSchema = {
         "nullable": true
       },
       {
-        "name": "parentId",
+        "name": "priority",
+        "column_type": {
+          "type": "Integer"
+        },
+        "nullable": true
+      },
+      {
+        "name": "created_at",
+        "column_type": {
+          "type": "Timestamp"
+        },
+        "nullable": true
+      },
+      {
+        "name": "parent",
         "column_type": {
           "type": "Uuid"
         },
@@ -190,7 +210,7 @@ export const wasmSchema: WasmSchema = {
         "references": "todos"
       },
       {
-        "name": "projectId",
+        "name": "project",
         "column_type": {
           "type": "Uuid"
         },

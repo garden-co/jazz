@@ -1,0 +1,7 @@
+Jazz data propagates through tiers, from fast local confirmation to broader reach.
+
+| Tier       | Where               | When to use                                                  |
+| ---------- | ------------------- | ------------------------------------------------------------ |
+| `"worker"` | On the device       | Default. Instant writes, no network needed.                  |
+| `"edge"`   | Nearest sync server | Confirm data has left the device before continuing.          |
+| `"global"` | Central server      | Ensure all clients can see the data, regardless of location. |
