@@ -4,7 +4,7 @@ import { OutboxDestinationKind } from "../runtime/sync-transport.js";
 
 export interface JazzRnRuntimeBinding {
   addClient(): string;
-  addServer(): void;
+  addServer(serverCatalogueStateHash?: string | null): void;
   batchedTick(): void;
   close(): void;
   delete_(objectId: string): void;
@@ -283,7 +283,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
     });
   }
 
-  addServer(): void {
+  addServer(_serverCatalogueStateHash?: string | null): void {
     if (this.closed) return;
     this.binding.addServer();
   }

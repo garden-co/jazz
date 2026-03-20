@@ -2,69 +2,46 @@
 /* eslint-disable */
 export declare class NapiRuntime {
   /** Create a new NapiRuntime with Fjall-backed persistent storage. */
-  constructor(
-    schemaJson: string,
-    appId: string,
-    jazzEnv: string,
-    userBranch: string,
-    dataPath: string,
-    tier?: string | undefined | null,
-  );
+  constructor(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, dataPath: string, tier?: string | undefined | null)
   /** Create a new NapiRuntime with in-memory storage (no local persistence). */
-  static inMemory(
-    schemaJson: string,
-    appId: string,
-    jazzEnv: string,
-    userBranch: string,
-    tier?: string | undefined | null,
-  ): NapiRuntime;
-  insert(table: string, values: any): any;
-  update(objectId: string, values: any): void;
-  delete(objectId: string): void;
-  query(
-    queryJson: string,
-    sessionJson?: string | undefined | null,
-    tier?: string | undefined | null,
-    optionsJson?: string | undefined | null,
-  ): Promise<any>;
-  subscribe(
-    queryJson: string,
-    onUpdate: (...args: any[]) => any,
-    sessionJson?: string | undefined | null,
-    tier?: string | undefined | null,
-    optionsJson?: string | undefined | null,
-  ): number;
-  unsubscribe(handle: number): void;
+  static inMemory(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, tier?: string | undefined | null): NapiRuntime
+  insert(table: string, values: any): any
+  insertWithSession(table: string, values: any, sessionJson?: string | undefined | null): any
+  update(objectId: string, values: any): void
+  updateWithSession(objectId: string, values: any, sessionJson?: string | undefined | null): void
+  delete(objectId: string): void
+  deleteWithSession(objectId: string, sessionJson?: string | undefined | null): void
+  query(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): Promise<any>
+  subscribe(queryJson: string, onUpdate: (...args: any[]) => any, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
+  unsubscribe(handle: number): void
   /** Phase 1 of 2-phase subscribe: allocate a handle and store query params. */
-  createSubscription(
-    queryJson: string,
-    sessionJson?: string | undefined | null,
-    tier?: string | undefined | null,
-    optionsJson?: string | undefined | null,
-  ): number;
+  createSubscription(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
   /** Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick. */
-  executeSubscription(handle: number, onUpdate: (...args: any[]) => any): void;
-  insertDurable(table: string, values: any, tier: string): Promise<any>;
-  updateDurable(objectId: string, values: any, tier: string): Promise<void>;
-  deleteDurable(objectId: string, tier: string): Promise<void>;
-  onSyncMessageReceived(messageJson: string): void;
+  executeSubscription(handle: number, onUpdate: (...args: any[]) => any): void
+  insertDurable(table: string, values: any, tier: string): Promise<any>
+  insertDurableWithSession(table: string, values: any, sessionJson: string | undefined | null, tier: string): Promise<any>
+  updateDurable(objectId: string, values: any, tier: string): Promise<void>
+  updateDurableWithSession(objectId: string, values: any, sessionJson: string | undefined | null, tier: string): Promise<void>
+  deleteDurable(objectId: string, tier: string): Promise<void>
+  deleteDurableWithSession(objectId: string, sessionJson: string | undefined | null, tier: string): Promise<void>
+  onSyncMessageReceived(messageJson: string): void
   /** Called by JS when a sync message arrives from a client (not a server). */
-  onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void;
-  onSyncMessageToSend(callback: (...args: any[]) => any): void;
-  addServer(): void;
-  removeServer(): void;
-  addClient(): string;
+  onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void
+  onSyncMessageToSend(callback: (...args: any[]) => any): void
+  addServer(serverCatalogueStateHash?: string | null): void
+  removeServer(): void
+  addClient(): string
   /** Set a client's role ("user", "admin", or "peer"). */
-  setClientRole(clientId: string, role: string): void;
-  getSchema(): any;
-  getSchemaHash(): string;
-  flush(): void;
+  setClientRole(clientId: string, role: string): void
+  getSchema(): any
+  getSchemaHash(): string
+  flush(): void
   /** Flush and close the underlying storage, releasing filesystem locks. */
-  close(): void;
+  close(): void
 }
 
-export declare function currentTimestamp(): number;
+export declare function currentTimestamp(): number
 
-export declare function generateId(): string;
+export declare function generateId(): string
 
-export declare function parseSchema(json: string): any;
+export declare function parseSchema(json: string): any

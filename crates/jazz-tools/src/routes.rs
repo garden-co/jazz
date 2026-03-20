@@ -11,22 +11,22 @@ use axum::{
     routing::{get, post},
 };
 use bytes::Bytes;
-use jazz_tools::jazz_transport::{
-    ConnectionId, ErrorResponse, ServerEvent, SyncBatchRequest, SyncBatchResponse,
-    SyncPayloadResult,
-};
-use jazz_tools::sync_manager::ClientId;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::commands::server::{ConnectionState, ServerState};
+use crate::jazz_transport::{
+    ConnectionId, ErrorResponse, ServerEvent, SyncBatchRequest, SyncBatchResponse,
+    SyncPayloadResult,
+};
 use crate::middleware::auth::{
     derive_local_principal_id, extract_session, parse_local_auth_headers, validate_admin_secret,
     validate_backend_secret, validate_jwt_identity,
 };
-use jazz_tools::query_manager::types::SchemaHash;
-use jazz_tools::schema_manager::AppId;
+use crate::query_manager::types::SchemaHash;
+use crate::schema_manager::AppId;
+use crate::server::{ConnectionState, ServerState};
+use crate::sync_manager::ClientId;
 
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
@@ -74,7 +74,7 @@ struct AdminSubscriptionIntrospectionParams {
 struct AdminSubscriptionIntrospectionResponse {
     app_id: String,
     generated_at: u64,
-    queries: Vec<jazz_tools::query_manager::manager::ServerSubscriptionTelemetryGroup>,
+    queries: Vec<crate::query_manager::manager::ServerSubscriptionTelemetryGroup>,
 }
 
 #[derive(Debug, Serialize)]
@@ -192,6 +192,7 @@ async fn events_handler(
 
     // Capture client_id string for stream
     let client_id_str = client_id.to_string();
+    let catalogue_state_hash = state.runtime.catalogue_state_hash().ok();
 
     // Create stream that emits length-prefixed binary frames
     let stream = async_stream::stream! {
@@ -200,6 +201,7 @@ async fn events_handler(
             connection_id: ConnectionId(connection_id),
             client_id: client_id_str.clone(),
             next_sync_seq: None,
+            catalogue_state_hash: catalogue_state_hash.clone(),
         };
         yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected));
 
@@ -269,7 +271,7 @@ async fn sync_handler(
     headers: HeaderMap,
     Json(request): Json<SyncBatchRequest>,
 ) -> impl IntoResponse {
-    use jazz_tools::sync_manager::{InboxEntry, Source};
+    use crate::sync_manager::{InboxEntry, Source};
 
     tracing::debug!(
         client_id = %request.client_id,
@@ -792,28 +794,21 @@ async fn health_handler() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
-    use axum::body;
-    use axum::routing::get;
-    use jazz_tools::query_manager::query::QueryBuilder;
-    use jazz_tools::query_manager::types::{
+    use crate::query_manager::query::QueryBuilder;
+    use crate::query_manager::types::{
         ColumnType, SchemaBuilder, TableSchema, Value as QueryValue,
     };
-    use jazz_tools::runtime_tokio::TokioRuntime;
-    use jazz_tools::schema_manager::{AppId, SchemaManager};
-    use jazz_tools::storage::FjallStorage;
-    use jazz_tools::sync_manager::{
-        ClientId, DurabilityTier, InboxEntry, QueryId, QueryPropagation, Source, SyncManager,
-        SyncPayload,
+    use crate::sync_manager::{
+        ClientId, InboxEntry, QueryId, QueryPropagation, Source, SyncPayload,
     };
+    use axum::body;
+    use axum::routing::get;
     use serde_json::Value;
-    use tempfile::TempDir;
-    use tokio::sync::{RwLock, broadcast};
     use tower::ServiceExt;
 
-    use crate::commands::server::{ExternalIdentityStore, ServerState};
     use crate::middleware::AuthConfig;
+    use crate::server::{ServerBuilder, ServerState};
 
     fn test_auth_config() -> AuthConfig {
         AuthConfig {
@@ -829,17 +824,7 @@ mod tests {
     /// Spin up the full router backed by an in-process runtime.
     /// `backend_secret` is wired into `AuthConfig` so tests can authenticate
     /// via the `X-Jazz-Backend-Secret` header without needing JWT setup.
-    fn make_sync_test_app(backend_secret: &str) -> (axum::Router, TempDir) {
-        let data_dir = TempDir::new().expect("temp dir");
-        let db_path = data_dir.path().join("groove.fjall");
-        let storage = FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
-
-        let sync_manager = SyncManager::new()
-            .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
-        let schema_manager =
-            SchemaManager::new_server(sync_manager, AppId::from_name("test-app"), "prod");
-        let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
-
+    async fn make_sync_test_app(backend_secret: &str) -> axum::Router {
         let auth_config = AuthConfig {
             backend_secret: Some(backend_secret.to_string()),
             admin_secret: None,
@@ -849,59 +834,26 @@ mod tests {
             jwks_set: None,
         };
 
-        let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(16);
-
-        let state = Arc::new(ServerState {
-            runtime,
-            app_id: AppId::from_name("test-app"),
-            connections: RwLock::new(HashMap::new()),
-            next_connection_id: std::sync::atomic::AtomicU64::new(1),
-            sync_broadcast: sync_tx,
-            auth_config,
-            external_identity_store: Arc::new(
-                ExternalIdentityStore::new(data_dir.path().to_str().unwrap()).unwrap(),
-            ),
-            external_identities: RwLock::new(HashMap::new()),
-        });
-
-        (create_router(state), data_dir)
+        ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(auth_config)
+            .with_in_memory_storage()
+            .build()
+            .await
+            .expect("build sync test app")
+            .app
     }
 
-    fn make_state_with_schema(
-        schema: jazz_tools::query_manager::types::Schema,
-    ) -> (TempDir, Arc<ServerState>) {
-        let data_dir = TempDir::new().expect("temp dir");
-        let db_path = data_dir.path().join("groove.fjall");
-        let storage = FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
-
-        let sync_manager = SyncManager::new()
-            .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
-        let schema_manager = SchemaManager::new(
-            sync_manager,
-            schema,
-            AppId::from_name("test-app"),
-            "prod",
-            "main",
-        )
-        .expect("schema manager");
-        let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
-
-        let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(16);
-
-        let state = Arc::new(ServerState {
-            runtime,
-            app_id: AppId::from_name("test-app"),
-            connections: RwLock::new(HashMap::new()),
-            next_connection_id: std::sync::atomic::AtomicU64::new(1),
-            sync_broadcast: sync_tx,
-            auth_config: test_auth_config(),
-            external_identity_store: Arc::new(
-                ExternalIdentityStore::new(data_dir.path().to_str().unwrap()).unwrap(),
-            ),
-            external_identities: RwLock::new(HashMap::new()),
-        });
-
-        (data_dir, state)
+    async fn make_state_with_schema(
+        schema: crate::query_manager::types::Schema,
+    ) -> Arc<ServerState> {
+        ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(test_auth_config())
+            .with_in_memory_storage()
+            .with_schema(schema)
+            .build()
+            .await
+            .expect("build state with schema")
+            .state
     }
 
     fn make_test_router(state: Arc<ServerState>) -> axum::Router {
@@ -949,7 +901,7 @@ mod tests {
         //                          apply p2 → ok
         //    ◄────────────────── {results:[ok,ok]}
 
-        let (app, _dir) = make_sync_test_app("test-backend-secret");
+        let app = make_sync_test_app("test-backend-secret").await;
         let client_id = ClientId::new();
 
         let body = serde_json::json!({
@@ -989,7 +941,7 @@ mod tests {
     #[tokio::test]
     async fn sync_batch_requires_auth() {
         // No auth headers → 401 before any payloads are applied
-        let (app, _dir) = make_sync_test_app("test-backend-secret");
+        let app = make_sync_test_app("test-backend-secret").await;
 
         let body = serde_json::json!({
             "payloads": [object_updated_payload("00000000-0000-0000-0000-000000000001")],
@@ -1016,7 +968,7 @@ mod tests {
     async fn sync_batch_returns_one_result_per_payload() {
         // bob sends 60 position updates in one tick — server must return
         // exactly 60 results, one per payload, in order
-        let (app, _dir) = make_sync_test_app("test-backend-secret");
+        let app = make_sync_test_app("test-backend-secret").await;
         let client_id = ClientId::new();
 
         let payloads: Vec<Value> = (0..60)
@@ -1057,39 +1009,20 @@ mod tests {
 
     #[tokio::test]
     async fn schema_handler_requires_admin_secret() {
-        let data_dir = TempDir::new().expect("temp dir");
-        let db_path = data_dir.path().join("groove.fjall");
-        let storage = FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open test storage");
-
-        let sync_manager = SyncManager::new()
-            .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
-        let schema_manager =
-            SchemaManager::new_server(sync_manager, AppId::from_name("test-app"), "prod");
-        let runtime = TokioRuntime::new(schema_manager, storage, |_entry| {});
-
-        let auth_config = AuthConfig {
-            backend_secret: None,
-            admin_secret: Some("admin-secret".to_string()),
-            allow_anonymous: true,
-            allow_demo: true,
-            jwks_url: None,
-            jwks_set: None,
-        };
-
-        let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(16);
-
-        let state = Arc::new(ServerState {
-            runtime,
-            app_id: AppId::from_name("test-app"),
-            connections: RwLock::new(HashMap::new()),
-            next_connection_id: std::sync::atomic::AtomicU64::new(1),
-            sync_broadcast: sync_tx,
-            auth_config,
-            external_identity_store: Arc::new(
-                ExternalIdentityStore::new(data_dir.path().to_str().unwrap()).unwrap(),
-            ),
-            external_identities: RwLock::new(HashMap::new()),
-        });
+        let state = ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(AuthConfig {
+                backend_secret: None,
+                admin_secret: Some("admin-secret".to_string()),
+                allow_anonymous: true,
+                allow_demo: true,
+                jwks_url: None,
+                jwks_set: None,
+            })
+            .with_in_memory_storage()
+            .build()
+            .await
+            .expect("build server state")
+            .state;
 
         let app = axum::Router::new()
             .route("/schema/:hash", get(schema_handler))
@@ -1146,7 +1079,7 @@ mod tests {
             )
             .build();
         let schema_hash = SchemaHash::compute(&schema);
-        let (_data_dir, state) = make_state_with_schema(schema);
+        let state = make_state_with_schema(schema).await;
 
         let app = make_test_router(state);
 
@@ -1207,7 +1140,7 @@ mod tests {
                     .column("name", ColumnType::Text),
             )
             .build();
-        let (_data_dir, state) = make_state_with_schema(schema);
+        let state = make_state_with_schema(schema).await;
         let app = make_test_router(state.clone());
 
         let without_secret = app
@@ -1282,7 +1215,7 @@ mod tests {
                     .column("name", ColumnType::Text),
             )
             .build();
-        let (_data_dir, state) = make_state_with_schema(schema);
+        let state = make_state_with_schema(schema).await;
 
         let repeated_query = QueryBuilder::new("users").build();
         let filtered_query = QueryBuilder::new("users")

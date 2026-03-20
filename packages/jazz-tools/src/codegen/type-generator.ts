@@ -139,7 +139,12 @@ export function tableNameToInterface(name: string): string {
   // Convert snake_case to words, singularize the last word, then PascalCase
   const parts = name.split("_");
   // Singularize only the last part (table names are typically plural)
-  parts[parts.length - 1] = singularize(parts[parts.length - 1]);
+  const lastIndex = parts.length - 1;
+  const lastPart = parts[lastIndex];
+  if (lastPart === undefined) {
+    return "";
+  }
+  parts[lastIndex] = singularize(lastPart);
 
   return parts.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join("");
 }
@@ -165,10 +170,20 @@ function maybeUndefined(type: string, nullable: boolean): string {
   return nullable ? `${type} | undefined` : type;
 }
 
-function relationResultType(baseType: string, rel: Relation): string {
-  return rel.isArray
-    ? maybeUndefined(`${baseType}[]`, rel.nullable)
-    : maybeUndefined(baseType, rel.nullable);
+function relationResultType(baseType: string, rel: Relation, requiredFlag?: string): string {
+  if (rel.isArray) {
+    return maybeUndefined(`${baseType}[]`, rel.nullable);
+  }
+
+  if (rel.type !== "forward") {
+    return maybeUndefined(baseType, rel.nullable);
+  }
+
+  if (rel.nullable || !requiredFlag) {
+    return maybeUndefined(baseType, true);
+  }
+
+  return `${requiredFlag} extends true ? ${baseType} : ${baseType} | undefined`;
 }
 
 /**
@@ -221,7 +236,7 @@ function generateRelationsTypes(relations: Map<string, Relation[]>): string[] {
     lines.push(`export interface ${interfaceName} {`);
     for (const rel of rels) {
       const targetInterface = tableNameToInterface(rel.toTable);
-      const type = rel.isArray ? `${targetInterface}[]` : targetInterface;
+      const type = relationResultType(targetInterface, rel);
       lines.push(`  ${rel.name}: ${type};`);
     }
     lines.push(`}`);
@@ -241,7 +256,7 @@ function generateIncludedRelationsTypes(relations: Map<string, Relation[]>): str
     const includeInterface = baseInterface + "Include";
 
     lines.push(
-      `export type ${baseInterface}IncludedRelations<I extends ${includeInterface} = {}> = {`,
+      `export type ${baseInterface}IncludedRelations<I extends ${includeInterface} = {}, R extends boolean = false> = {`,
     );
     lines.push(`  [K in keyof I]-?:`);
 
@@ -249,9 +264,13 @@ function generateIncludedRelationsTypes(relations: Map<string, Relation[]>): str
       const targetInterface = tableNameToInterface(rel.toTable);
       const targetInclude = targetInterface + "Include";
       const targetWithIncludes = targetInterface + "WithIncludes";
-      const trueType = relationResultType(targetInterface, rel);
-      const queryBuilderSelectedType = relationResultType(`QueryRow`, rel);
-      const nestedIncludeType = relationResultType(`${targetWithIncludes}<RelationInclude>`, rel);
+      const trueType = relationResultType(targetInterface, rel, "R");
+      const queryBuilderSelectedType = relationResultType(`QueryRow`, rel, "R");
+      const nestedIncludeType = relationResultType(
+        `${targetWithIncludes}<RelationInclude, false>`,
+        rel,
+        "R",
+      );
       const prefix = index === 0 ? "    " : "    : ";
 
       lines.push(`${prefix}K extends "${rel.name}"`);
@@ -307,7 +326,7 @@ function generateWithIncludesTypes(relations: Map<string, Relation[]>): string[]
     const includedRelationsType = baseInterface + "IncludedRelations";
 
     lines.push(
-      `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}> = Omit<${baseInterface}, Extract<keyof I, keyof ${baseInterface}>> & ${includedRelationsType}<I>;`,
+      `export type ${baseInterface}WithIncludes<I extends ${includeInterface} = {}, R extends boolean = false> = ${baseInterface} & ${includedRelationsType}<I, R>;`,
     );
     lines.push(``);
   }
@@ -335,13 +354,13 @@ function generateSelectionTypes(schema: WasmSchema, relations: Map<string, Relat
     lines.push("");
 
     lines.push(
-      `export type ${baseInterface}Selected<S extends ${selectableColumnType} = keyof ${baseInterface}> = "*" extends S ? ${baseInterface} : Pick<${baseInterface}, Extract<S | "id", keyof ${baseInterface}>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;`,
+      `export type ${baseInterface}Selected<S extends ${selectableColumnType} = keyof ${baseInterface}> = ("*" extends S ? ${baseInterface} : Pick<${baseInterface}, Extract<S | "id", keyof ${baseInterface}>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;`,
     );
     lines.push("");
 
     if (hasRelations) {
       lines.push(
-        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends ${selectableColumnType} = keyof ${baseInterface}> = Omit<${baseInterface}Selected<S>, Extract<keyof I, keyof ${baseInterface}Selected<S>>> & ${includedRelationsType}<I>;`,
+        `export type ${baseInterface}SelectedWithIncludes<I extends ${includeInterface} = {}, S extends ${selectableColumnType} = keyof ${baseInterface}, R extends boolean = false> = ${baseInterface}Selected<S> & ${includedRelationsType}<I, R>;`,
       );
       lines.push("");
     }

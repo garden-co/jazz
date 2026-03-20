@@ -878,13 +878,13 @@ function buildSocialSchema(style: SocialPolicyStyle): WasmSchema {
           policy.exists(
             policy.people
               .where({ principalId: profile.principalId })
-              .hopTo("friendshipsViaPersonAId")
+              .hopTo("friendshipsViaPersonA")
               .where({ personBPrincipal: sessionPersonId }),
           ),
           policy.exists(
             policy.people
               .where({ principalId: profile.principalId })
-              .hopTo("friendshipsViaPersonBId")
+              .hopTo("friendshipsViaPersonB")
               .where({ personAPrincipal: sessionPersonId }),
           ),
         ]),

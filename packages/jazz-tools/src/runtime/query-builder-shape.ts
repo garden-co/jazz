@@ -1,3 +1,5 @@
+const INTERNAL_REQUIRE_INCLUDES_KEY = "__jazz_requireIncludes";
+
 export interface BuiltCondition {
   column: string;
   op: string;
@@ -16,6 +18,7 @@ export interface NormalizedIncludeEntry {
   table?: string;
   conditions: BuiltCondition[];
   includes: NormalizedIncludeSpec;
+  requireIncludes: boolean;
   select: string[];
   orderBy: Array<[string, "asc" | "desc"]>;
   limit?: number;
@@ -32,6 +35,7 @@ export interface NormalizedBuiltQuery {
   table: string;
   conditions: BuiltCondition[];
   includes: NormalizedIncludeSpec;
+  requireIncludes: boolean;
   select: string[];
   orderBy: Array<[string, "asc" | "desc"]>;
   limit?: number;
@@ -44,6 +48,7 @@ type BuiltQueryShape = {
   table?: unknown;
   conditions?: unknown;
   includes?: unknown;
+  __jazz_requireIncludes?: unknown;
   select?: unknown;
   orderBy?: unknown;
   limit?: unknown;
@@ -88,8 +93,7 @@ function normalizeSelect(value: unknown): string[] {
     return [];
   }
 
-  const select = value.filter((column): column is string => typeof column === "string");
-  return select.includes("*") ? [] : select;
+  return value.filter((column): column is string => typeof column === "string");
 }
 
 function normalizeGather(value: unknown): BuiltGather | undefined {
@@ -120,10 +124,17 @@ function createEmptyIncludeEntry(): NormalizedIncludeEntry {
   return {
     conditions: [],
     includes: {},
+    requireIncludes: false,
     select: [],
     orderBy: [],
     hops: [],
   };
+}
+
+function normalizeShorthandIncludeEntries(raw: Record<string, unknown>): NormalizedIncludeSpec {
+  const nested = { ...raw };
+  delete nested[INTERNAL_REQUIRE_INCLUDES_KEY];
+  return normalizeIncludeEntries(nested);
 }
 
 function isBuiltQueryShape(value: Record<string, unknown>): value is BuiltQueryShape {
@@ -149,6 +160,7 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
       table: normalized.table || undefined,
       conditions: normalized.conditions,
       includes: normalized.includes,
+      requireIncludes: normalized.requireIncludes,
       select: normalized.select,
       orderBy: normalized.orderBy,
       limit: normalized.limit,
@@ -163,6 +175,7 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
       table: typeof raw.table === "string" ? raw.table : undefined,
       conditions: normalizeConditions(raw.conditions),
       includes: normalizeIncludeEntries(raw.includes),
+      requireIncludes: raw[INTERNAL_REQUIRE_INCLUDES_KEY] === true,
       select: normalizeSelect(raw.select),
       orderBy: normalizeOrderBy(raw.orderBy),
       limit: typeof raw.limit === "number" ? raw.limit : undefined,
@@ -175,7 +188,8 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
   }
 
   const entry = createEmptyIncludeEntry();
-  entry.includes = normalizeIncludeEntries(raw);
+  entry.requireIncludes = raw[INTERNAL_REQUIRE_INCLUDES_KEY] === true;
+  entry.includes = normalizeShorthandIncludeEntries(raw);
   return entry;
 }
 
@@ -205,6 +219,7 @@ export function normalizeBuiltQuery(raw: unknown, fallbackTable: string): Normal
     table: typeof value.table === "string" && value.table.length > 0 ? value.table : fallbackTable,
     conditions: normalizeConditions(value.conditions),
     includes: normalizeIncludeEntries(value.includes),
+    requireIncludes: value[INTERNAL_REQUIRE_INCLUDES_KEY] === true,
     select: normalizeSelect(value.select),
     orderBy: normalizeOrderBy(value.orderBy),
     limit: typeof value.limit === "number" ? value.limit : undefined,

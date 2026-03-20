@@ -89,9 +89,10 @@ function resolveAbsoluteWasmUrlFromInitError(error: unknown): string | null {
 
   const message = error instanceof Error ? error.message : String(error ?? "");
   const match = message.match(/(\/[^"'\s]+\.wasm)/);
-  if (!match) return null;
+  const wasmPath = match?.[1];
+  if (!wasmPath) return null;
 
-  return new URL(match[1], origin).href;
+  return new URL(wasmPath, origin).href;
 }
 
 async function runWithRootRelativeFetchSupport<T>(operation: () => Promise<T>): Promise<T> {

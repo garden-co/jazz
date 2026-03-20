@@ -1,13 +1,15 @@
 import type { ReactNode } from "react";
-import type { Db } from "./db.js";
+import type { Db, DbConfig } from "./db.js";
 import {
   JazzProvider as CoreJazzProvider,
   useDb as useCoreDb,
   useJazzClient as useCoreJazzClient,
   useSession,
 } from "../react-core/provider.js";
-import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
+import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import type { Session } from "../runtime/context.js";
+
+export { JazzClientProvider, type JazzClientProviderProps } from "../react-core/provider.js";
 
 interface JazzClientContextValue {
   db: Db;
@@ -16,15 +18,18 @@ interface JazzClientContextValue {
   shutdown: CreatedJazzClient["shutdown"];
 }
 
-type JazzProviderClientProps = {
-  client: CreatedJazzClient | Promise<CreatedJazzClient>;
+export type JazzProviderProps = {
+  config: DbConfig;
+  fallback?: ReactNode;
   children: ReactNode;
 };
 
-export type JazzProviderProps = JazzProviderClientProps;
-
-export function JazzProvider({ client, children }: JazzProviderProps) {
-  return <CoreJazzProvider client={client}>{children}</CoreJazzProvider>;
+export function JazzProvider({ config, fallback, children }: JazzProviderProps) {
+  return (
+    <CoreJazzProvider config={config} fallback={fallback} createJazzClient={createJazzClient}>
+      {children}
+    </CoreJazzProvider>
+  );
 }
 
 export function useJazzClient(): JazzClientContextValue {

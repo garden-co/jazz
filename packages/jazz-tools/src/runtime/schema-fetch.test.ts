@@ -28,8 +28,8 @@ describe("schema-fetch", () => {
 
     expect(result.schema.users).toBeDefined();
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe(`http://localhost:1625/apps/app-123/schema/${hash}`);
-    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+    expect(fetchMock.mock.calls[0]![0]).toBe(`http://localhost:1625/apps/app-123/schema/${hash}`);
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({
       method: "GET",
       headers: {
         "X-Jazz-Admin-Secret": "admin-secret",
@@ -75,8 +75,8 @@ describe("schema-fetch", () => {
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:1625/apps/app-123/schemas");
-    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+    expect(fetchMock.mock.calls[0]![0]).toBe("http://localhost:1625/apps/app-123/schemas");
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({
       method: "GET",
       headers: {
         "X-Jazz-Admin-Secret": "admin-secret",
@@ -98,7 +98,7 @@ describe("schema-fetch", () => {
       schemaHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     });
 
-    expect(fetchMock.mock.calls[0][0]).toBe(
+    expect(fetchMock.mock.calls[0]![0]).toBe(
       "http://localhost:1625/schema/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     );
   });
@@ -134,10 +134,10 @@ describe("schema-fetch", () => {
     expect(result.appId).toBe("app-123");
     expect(result.queries).toHaveLength(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe(
+    expect(fetchMock.mock.calls[0]![0]).toBe(
       "http://localhost:1625/apps/app-123/admin/introspection/subscriptions?appId=test-app",
     );
-    expect(fetchMock.mock.calls[0][1]).toMatchObject({
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({
       method: "GET",
       headers: {
         "X-Jazz-Admin-Secret": "admin-secret",

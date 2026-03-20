@@ -36,9 +36,7 @@
       "react": "19.2.4",
       "react-dom": "19.2.4"
     },
-    "patchedDependencies": {
-      "uniffi-bindgen-react-native@0.29.3-1": "patches/uniffi-bindgen-react-native@0.29.3-1.patch"
-    }
+    "patchedDependencies": {}
   },
   "onlyBuiltDependencies": [
     "wasm-pack"

@@ -10,7 +10,7 @@ import AvailableColumnTypes from "../partials/quickstarts/available-column-types
 <Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
   <Tab value="TypeScript">
     <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/schema/current.ts
+      ../examples/docs/todo-client-localfirst-ts/schema/current.ts#schema-todo-client-ts
     </include>
   </Tab>
   <Tab value="SQL">
@@ -25,6 +25,10 @@ import AvailableColumnTypes from "../partials/quickstarts/available-column-types
 - TypeScript DSL defaults to `col.string`, `col.boolean`, and `col.ref` for relationships.
 - SQL keeps the same model via `TEXT`, `BOOLEAN`, and `UUID REFERENCES ...`.
 - Use SQL as the alternate path when your project is Rust-first.
+
+For browser files and large uploaded blobs, define the conventional `files` / `file_parts`
+tables and store a normal reference to `files` from your app rows. See
+[Files & Blobs](/docs/files-and-blobs).
 
 ### Available column types
 

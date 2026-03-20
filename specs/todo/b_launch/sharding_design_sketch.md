@@ -2,7 +2,7 @@
 
 Full design for distributing data across storage shards. Nothing here is implemented yet.
 
-> Status quo: [specs/status-quo/sharding_design_sketch.md](../status-quo/sharding_design_sketch.md)
+> Status quo: no sharding implementation exists yet.
 
 ## Architecture: Smart Shards with Local Indices
 
