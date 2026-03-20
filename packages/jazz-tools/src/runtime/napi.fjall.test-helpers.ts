@@ -2,11 +2,12 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeAll } from "vitest";
+import { NapiRuntime } from "jazz-napi";
+import { afterEach } from "vitest";
+import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { Value, WasmSchema } from "../drivers/types.js";
 import { JazzClient, type Row } from "./client.js";
 import type { QueryBuilder } from "./db.js";
-import { createPersistentNapiRuntime, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 
 export type Todo = {
   id: string;
@@ -110,10 +111,6 @@ export function createNapiFjallTestEnv(): {
   const stores: PersistentStore[] = [];
   const clients: PersistentClientHandle[] = [];
 
-  beforeAll(async () => {
-    await loadNapiModule();
-  });
-
   afterEach(async () => {
     for (const client of clients.splice(0).reverse()) {
       try {
@@ -152,12 +149,14 @@ export function createNapiFjallTestEnv(): {
   }
 
   async function openPersistentClient(store: PersistentStore): Promise<PersistentClientHandle> {
-    const runtime = await createPersistentNapiRuntime(TEST_SCHEMA, store.dataPath, {
-      appId: store.appId,
-      env: "test",
-      userBranch: "main",
-      tier: "worker",
-    });
+    const runtime = new NapiRuntime(
+      serializeRuntimeSchema(TEST_SCHEMA),
+      store.appId,
+      "test",
+      "main",
+      store.dataPath,
+      "worker",
+    );
 
     const client = JazzClient.connectWithRuntime(runtime, {
       appId: store.appId,

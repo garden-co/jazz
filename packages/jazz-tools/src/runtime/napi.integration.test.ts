@@ -10,14 +10,14 @@ import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { NapiRuntime } from "jazz-napi";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { Row } from "./client.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { pushSchemaCatalogue, startLocalJazzServer } from "../testing/local-jazz-server.js";
-import { createNapiRuntime, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 
 type SimpleTodo = {
   id: string;
@@ -261,10 +261,6 @@ const BASIC_SCHEMA_DIR = fileURLToPath(new URL("../testing/fixtures/basic", impo
 const TODO_SERVER_SCHEMA_DIR = fileURLToPath(
   new URL("../../../../examples/todo-server-ts/schema", import.meta.url),
 );
-
-beforeAll(async () => {
-  await loadNapiModule();
-});
 
 function encodeFrames(events: unknown[]): Uint8Array {
   const encoder = new TextEncoder();
@@ -593,7 +589,6 @@ async function createTempDir(prefix: string): Promise<string> {
 
 describe("NAPI integration", () => {
   it("supports oversized indexed persistent mutations from JS callers", async () => {
-    const { NapiRuntime } = await loadNapiModule();
     const dataPath = await createTempDir("jazz-napi-large-index-");
     const runtime = new NapiRuntime(
       serializeRuntimeSchema(TEST_SCHEMA),
@@ -655,9 +650,15 @@ describe("NAPI integration", () => {
   }, 20_000);
 
   it("emits the real nested onSyncMessageToSend callback shape from the compiled addon", async () => {
-    const runtime = await createNapiRuntime(TEST_SCHEMA, {
-      appId: `napi-contract-${randomUUID()}`,
-      tier: "worker",
+    const runtime = NapiRuntime.inMemory(
+      serializeRuntimeSchema(TEST_SCHEMA),
+      `napi-contract-${randomUUID()}`,
+      "test",
+      "main",
+      "worker",
+    );
+    onTestFinished(() => {
+      runtime.close();
     });
     const queryJson = translateQuery(allTodosQuery._build(), TEST_SCHEMA);
     const rawCalls: unknown[][] = [];
@@ -698,9 +699,15 @@ describe("NAPI integration", () => {
   }, 20_000);
 
   it("routes client-originated subscriptions back through the real nested client callback shape", async () => {
-    const runtime = await createNapiRuntime(TEST_SCHEMA, {
-      appId: `napi-client-contract-${randomUUID()}`,
-      tier: "edge",
+    const runtime = NapiRuntime.inMemory(
+      serializeRuntimeSchema(TEST_SCHEMA),
+      `napi-client-contract-${randomUUID()}`,
+      "test",
+      "main",
+      "edge",
+    );
+    onTestFinished(() => {
+      runtime.close();
     });
     const queryJson = translateQuery(allTodosQuery._build(), TEST_SCHEMA);
     const rawCalls: unknown[][] = [];

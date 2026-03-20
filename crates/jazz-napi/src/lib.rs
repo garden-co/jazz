@@ -20,6 +20,8 @@ use std::time::Duration;
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
+use serde::Deserialize;
+use serde_json::{Value as JsonValue, json};
 
 use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema, current_timestamp_ms,
@@ -37,6 +39,7 @@ use jazz_tools::runtime_core::{
     SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
+use jazz_tools::server::TestingServer as JazzTestingServer;
 use jazz_tools::storage::{FjallStorage, MemoryStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
@@ -137,6 +140,17 @@ fn parse_subscription_inputs(
     Ok((query, session, durability, propagation))
 }
 
+fn parse_testing_server_start_options(
+    options: Option<JsonValue>,
+) -> napi::Result<TestingServerStartOptions> {
+    match options {
+        None | Some(JsonValue::Null) => Ok(TestingServerStartOptions::default()),
+        Some(value) => serde_json::from_value(value).map_err(|error| {
+            napi::Error::from_reason(format!("Invalid TestingServer options: {error}"))
+        }),
+    }
+}
+
 fn make_subscription_callback(
     tsfn: ThreadsafeFunction<serde_json::Value>,
     declared_schema: Option<Schema>,
@@ -159,6 +173,15 @@ fn make_subscription_callback(
 // ============================================================================
 
 type NapiCoreType = RuntimeCore<Box<dyn Storage + Send>, NapiScheduler, NapiSyncSender>;
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TestingServerStartOptions {
+    app_id: Option<String>,
+    port: Option<u16>,
+    data_dir: Option<String>,
+    persistent_storage: Option<bool>,
+}
 
 /// Scheduler that schedules `batched_tick()` on the Node.js event loop via a
 /// ThreadsafeFunction wrapping a noop JS function. The TSFN callback closure
@@ -1115,6 +1138,126 @@ impl NapiRuntime {
         core.storage()
             .close()
             .map_err(|e| napi::Error::from_reason(format!("Failed to close storage: {:?}", e)))?;
+        Ok(())
+    }
+}
+
+// ============================================================================
+// TestingServer
+// ============================================================================
+
+#[napi]
+pub struct TestingServer {
+    inner: Mutex<Option<JazzTestingServer>>,
+    app_id: String,
+    url: String,
+    port: u16,
+    data_dir: String,
+    backend_secret: String,
+    admin_secret: String,
+}
+
+#[napi]
+impl TestingServer {
+    #[napi(factory, ts_return_type = "Promise<TestingServer>")]
+    pub async fn start(
+        #[napi(
+            ts_arg_type = "{ appId?: string; port?: number; dataDir?: string; persistentStorage?: boolean }"
+        )]
+        options: Option<JsonValue>,
+    ) -> napi::Result<Self> {
+        let options = parse_testing_server_start_options(options)?;
+
+        let mut builder = JazzTestingServer::builder();
+
+        if let Some(app_id) = options.app_id.as_deref() {
+            let app_id = AppId::from_string(app_id).unwrap_or_else(|_| AppId::from_name(app_id));
+            builder = builder.with_app_id(app_id);
+        }
+
+        if let Some(port) = options.port {
+            builder = builder.with_port(port);
+        }
+
+        if let Some(data_dir) = options.data_dir {
+            builder = builder.with_data_dir(data_dir);
+        }
+
+        if options.persistent_storage.unwrap_or(false) {
+            builder = builder.with_persistent_storage();
+        }
+
+        let server = builder.start().await;
+        let app_id = server.app_id().to_string();
+        let url = server.base_url();
+        let port = server.port();
+        let data_dir = server.data_dir().to_string_lossy().into_owned();
+
+        Ok(Self {
+            inner: Mutex::new(Some(server)),
+            app_id,
+            url,
+            port,
+            data_dir,
+            backend_secret: JazzTestingServer::BACKEND_SECRET.to_string(),
+            admin_secret: JazzTestingServer::ADMIN_SECRET.to_string(),
+        })
+    }
+
+    #[napi(getter, js_name = "appId")]
+    pub fn app_id(&self) -> String {
+        self.app_id.clone()
+    }
+
+    #[napi(getter)]
+    pub fn url(&self) -> String {
+        self.url.clone()
+    }
+
+    #[napi(getter)]
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    #[napi(getter, js_name = "dataDir")]
+    pub fn data_dir(&self) -> String {
+        self.data_dir.clone()
+    }
+
+    #[napi(getter, js_name = "backendSecret")]
+    pub fn backend_secret(&self) -> String {
+        self.backend_secret.clone()
+    }
+
+    #[napi(getter, js_name = "adminSecret")]
+    pub fn admin_secret(&self) -> String {
+        self.admin_secret.clone()
+    }
+
+    #[napi(js_name = "jwtForUser")]
+    pub fn jwt_for_user(
+        &self,
+        user_id: String,
+        #[napi(ts_arg_type = "Record<string, unknown> | undefined")] claims: Option<JsonValue>,
+    ) -> napi::Result<String> {
+        let claims = claims.unwrap_or_else(|| json!({ "role": "user" }));
+        Ok(JazzTestingServer::jwt_for_user_with_claims(
+            &user_id, claims,
+        ))
+    }
+
+    #[napi]
+    pub async fn stop(&self) -> napi::Result<()> {
+        let server = self
+            .inner
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?
+            .take();
+
+        if let Some(server) = server {
+            server.shutdown().await;
+        }
+
         Ok(())
     }
 }
