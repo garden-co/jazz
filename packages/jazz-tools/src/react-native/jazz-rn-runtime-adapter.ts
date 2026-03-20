@@ -2,6 +2,19 @@ import type { WasmSchema } from "../drivers/types.js";
 import type { Row, Runtime } from "../runtime/client.js";
 import { OutboxDestinationKind } from "../runtime/sync-transport.js";
 
+export type JazzRnErrorTag =
+  | "InvalidJson"
+  | "InvalidUuid"
+  | "InvalidTier"
+  | "Schema"
+  | "Runtime"
+  | "Internal";
+
+export type JazzRnNormalizedError = Error & {
+  tag: JazzRnErrorTag;
+  cause?: unknown;
+};
+
 export interface JazzRnRuntimeBinding {
   addClient(): string;
   addServer(serverCatalogueStateHash?: string | null): void;
@@ -94,6 +107,52 @@ function swallowMissingObjectMutation(context: string, error: unknown): boolean 
   return true;
 }
 
+function isJazzRnErrorLike(
+  error: unknown,
+): error is { tag: string; inner?: { message?: unknown } } {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { tag?: unknown; inner?: unknown };
+  return typeof candidate.tag === "string";
+}
+
+function normalizeJazzRnError(error: unknown): Error {
+  if (!isJazzRnErrorLike(error)) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+
+  const message =
+    typeof error.inner?.message === "string" && error.inner.message.length > 0
+      ? error.inner.message
+      : String(error);
+  const tag = error.tag as JazzRnErrorTag;
+  const normalized = createErrorWithCause(message, error);
+  normalized.name = `JazzRn${tag}Error`;
+  Object.defineProperty(normalized, "tag", {
+    value: tag,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+  return normalized as JazzRnNormalizedError;
+}
+
+function createErrorWithCause(message: string, cause: unknown): Error {
+  try {
+    return new Error(message, { cause });
+  } catch {
+    const fallback = new Error(message) as Error & { cause?: unknown };
+    Object.defineProperty(fallback, "cause", {
+      value: cause,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+    return fallback;
+  }
+}
+
 function assertSyncMessageArgs(
   destinationKind: unknown,
   destinationId: unknown,
@@ -139,8 +198,12 @@ export class JazzRnRuntimeAdapter implements Runtime {
   }
 
   insert(table: string, values: any): Row {
-    const rowJson = this.binding.insert(table, JSON.stringify(values));
-    return JSON.parse(rowJson) as Row;
+    try {
+      const rowJson = this.binding.insert(table, JSON.stringify(values));
+      return JSON.parse(rowJson) as Row;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
   }
 
   update(object_id: string, values: any): void {
@@ -148,7 +211,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
       this.binding.update(object_id, JSON.stringify(values));
     } catch (error) {
       if (swallowMissingObjectMutation("update", error)) return;
-      throw error;
+      throw normalizeJazzRnError(error);
     }
   }
 
@@ -157,7 +220,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
       this.binding.delete_(object_id);
     } catch (error) {
       if (swallowMissingObjectMutation("delete", error)) return;
-      throw error;
+      throw normalizeJazzRnError(error);
     }
   }
 
@@ -166,8 +229,12 @@ export class JazzRnRuntimeAdapter implements Runtime {
     session_json?: string | null,
     tier?: string | null,
   ): Promise<any> {
-    const rowsJson = this.binding.query(query_json, session_json ?? undefined, tier ?? undefined);
-    return JSON.parse(rowsJson);
+    try {
+      const rowsJson = this.binding.query(query_json, session_json ?? undefined, tier ?? undefined);
+      return JSON.parse(rowsJson);
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
   }
 
   createSubscription(
