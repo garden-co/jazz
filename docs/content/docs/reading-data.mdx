@@ -245,6 +245,8 @@ Schema references used by the include examples:
 Permission introspection columns are computed for the current session and are omitted from
 `select("*")`, so you opt into them explicitly.
 
+For example, `select("*", "$canDelete")` returns the normal row columns plus `$canDelete`.
+
 - `$canRead` reflects whether the current session can read the row. Since read policies already
   gate which rows appear, returned rows will usually show `$canRead: true`.
 - `$canEdit` reflects whether the current session passes the row's `UPDATE USING` policy.

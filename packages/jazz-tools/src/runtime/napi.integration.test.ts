@@ -592,7 +592,7 @@ async function createTempDir(prefix: string): Promise<string> {
 }
 
 describe("NAPI integration", () => {
-  it("surfaces oversized indexed persistent mutation errors to JS callers", async () => {
+  it("supports oversized indexed persistent mutations from JS callers", async () => {
     const { NapiRuntime } = await loadNapiModule();
     const dataPath = await createTempDir("jazz-napi-large-index-");
     const runtime = new NapiRuntime(
@@ -609,32 +609,45 @@ describe("NAPI integration", () => {
     };
 
     const oversizedTitle = "x".repeat(40_000);
+    const updatedOversizedTitle = "y".repeat(45_000);
     const queryJson = translateQuery(allTodosQuery._build(), TEST_SCHEMA);
 
     try {
-      expect(() =>
-        runtime.insert("todos", [
-          { type: "Text", value: oversizedTitle },
-          { type: "Boolean", value: false },
-        ]),
-      ).toThrow(/indexed value too large/i);
-
       const insertedRow = runtime.insert("todos", [
+        { type: "Text", value: oversizedTitle },
+        { type: "Boolean", value: false },
+      ]);
+
+      let rows = await runtime.query(queryJson);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ id: insertedRow.id });
+      expect(rows[0]?.values[0]).toEqual({ type: "Text", value: oversizedTitle });
+      expect(rows[0]?.values[1]).toEqual({ type: "Boolean", value: false });
+
+      const secondRow = runtime.insert("todos", [
         { type: "Text", value: "kept title" },
         { type: "Boolean", value: false },
       ]);
 
-      expect(() =>
-        runtime.update(insertedRow.id, {
-          title: { type: "Text", value: oversizedTitle },
-        }),
-      ).toThrow(/indexed value too large/i);
+      runtime.update(secondRow.id, {
+        title: { type: "Text", value: updatedOversizedTitle },
+      });
 
-      const rows = await runtime.query(queryJson);
-      expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ id: insertedRow.id });
-      expect(rows[0]?.values[0]).toEqual({ type: "Text", value: "kept title" });
-      expect(rows[0]?.values[1]).toEqual({ type: "Boolean", value: false });
+      rows = await runtime.query(queryJson);
+      expect(rows).toHaveLength(2);
+
+      const insertedOversized = rows.find((row) => row.id === insertedRow.id);
+      expect(insertedOversized).toBeDefined();
+      expect(insertedOversized?.values[0]).toEqual({ type: "Text", value: oversizedTitle });
+      expect(insertedOversized?.values[1]).toEqual({ type: "Boolean", value: false });
+
+      const updatedOversized = rows.find((row) => row.id === secondRow.id);
+      expect(updatedOversized).toBeDefined();
+      expect(updatedOversized?.values[0]).toEqual({
+        type: "Text",
+        value: updatedOversizedTitle,
+      });
+      expect(updatedOversized?.values[1]).toEqual({ type: "Boolean", value: false });
     } finally {
       runtime.close();
       await rm(dataPath, { recursive: true, force: true });

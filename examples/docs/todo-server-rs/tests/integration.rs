@@ -17,7 +17,8 @@ use futures_util::StreamExt as _;
 use futures_util::stream::Stream;
 use http_body_util::BodyExt;
 use jazz_tools::{
-    AppContext, AppId, ColumnType, DurabilityTier, JazzClient, SchemaBuilder, TableSchema,
+    AppContext, AppId, ClientStorage, ColumnType, DurabilityTier, JazzClient, SchemaBuilder,
+    TableSchema,
 };
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -82,6 +83,7 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
         schema: test_schema(),
         server_url: String::new(),
         data_dir,
+        storage: ClientStorage::Fjall,
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
@@ -446,6 +448,7 @@ async fn test_local_persistence() {
             schema: test_schema(),
             server_url: String::new(),
             data_dir: data_path.clone(),
+            storage: ClientStorage::Fjall,
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
@@ -481,6 +484,7 @@ async fn test_local_persistence() {
             schema: test_schema(),
             server_url: String::new(),
             data_dir: data_path,
+            storage: ClientStorage::Fjall,
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
@@ -743,6 +747,7 @@ async fn test_server_resync() {
             schema: test_schema(),
             server_url: server.base_url(),
             data_dir: data_path.clone(),
+            storage: ClientStorage::Fjall,
             jwt_token: Some(make_test_jwt("client1-user")),
             backend_secret: None,
             admin_secret: Some(TEST_ADMIN_SECRET.to_string()),
@@ -786,6 +791,7 @@ async fn test_server_resync() {
             schema: test_schema(),
             server_url: server.base_url(),
             data_dir: data_path,
+            storage: ClientStorage::Fjall,
             jwt_token: Some(make_test_jwt("client2-user")),
             backend_secret: None,
             admin_secret: None, // Intentionally no admin - server already has schema

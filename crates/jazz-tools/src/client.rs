@@ -13,7 +13,7 @@ use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
 use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::SchemaManager;
-use crate::storage::{FjallStorage, Storage, StorageError};
+use crate::storage::{FjallStorage, MemoryStorage, Storage, StorageError};
 use crate::sync_manager::{
     ClientId, Destination, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
@@ -22,16 +22,21 @@ use futures::StreamExt;
 use tokio::sync::{RwLock, mpsc, oneshot};
 
 use crate::transport::{AuthConfig, ServerConnection};
-use crate::{AppContext, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionStream};
+use crate::{
+    AppContext, ClientStorage, JazzError, ObjectId, Result, SubscriptionHandle, SubscriptionStream,
+};
+
+type DynStorage = Box<dyn Storage + Send>;
+type ClientRuntime = TokioRuntime<DynStorage>;
 
 /// Jazz client for building applications.
 ///
-/// Combines local persistence with server sync.
+/// Combines local storage with server sync.
 pub struct JazzClient {
     /// Schema as declared by the client/app code.
     declared_schema: Schema,
     /// Handle to the local runtime.
-    runtime: TokioRuntime<FjallStorage>,
+    runtime: ClientRuntime,
     /// Connection to the server (shared for event processor).
     server_connection: Option<Arc<ServerConnection>>,
     /// Active subscriptions (metadata).
@@ -51,34 +56,15 @@ impl JazzClient {
     /// Connect to Jazz with the given configuration.
     ///
     /// This will:
-    /// 1. Open local Fjall storage
+    /// 1. Open local storage
     /// 2. Initialize the runtime
     /// 3. Connect to the server (if URL provided)
     /// 4. Start syncing
     pub async fn connect(context: AppContext) -> Result<Self> {
         let declared_schema = context.schema.clone();
-        // Create data directory if needed
-        std::fs::create_dir_all(&context.data_dir)?;
-
-        // Load or generate persistent client_id
-        let client_id_path = context.data_dir.join("client_id");
-        let client_id = if client_id_path.exists() {
-            let id_str = std::fs::read_to_string(&client_id_path)?;
-            ClientId::parse(id_str.trim()).unwrap_or_else(|| {
-                // File corrupted - generate new ID and overwrite
-                let id = context.client_id.unwrap_or_default();
-                let _ = std::fs::write(&client_id_path, id.to_string());
-                id
-            })
-        } else if let Some(id) = context.client_id {
-            // Use explicitly provided client_id and persist it
-            std::fs::write(&client_id_path, id.to_string())?;
-            id
-        } else {
-            // Generate new client_id and persist it
-            let id = ClientId::new();
-            std::fs::write(&client_id_path, id.to_string())?;
-            id
+        let client_id = match context.storage {
+            ClientStorage::Fjall => load_or_create_persistent_client_id(&context)?,
+            ClientStorage::Memory => context.client_id.unwrap_or_default(),
         };
 
         // Create managers
@@ -106,49 +92,9 @@ impl JazzClient {
             None
         };
 
-        // Create persistent storage.
-        //
-        // Fjall lock release can lag slightly after a close() in the same process.
-        // Retry briefly on lock errors so immediate reopen flows remain reliable.
-        let db_path = context.data_dir.join("jazz.fjall");
-        let storage = {
-            const MAX_ATTEMPTS: usize = 100;
-            const RETRY_DELAY_MS: u64 = 25;
-
-            let mut opened = None;
-            let mut last_err = None;
-
-            for attempt in 0..MAX_ATTEMPTS {
-                match FjallStorage::open(&db_path, 64 * 1024 * 1024) {
-                    Ok(storage) => {
-                        opened = Some(storage);
-                        break;
-                    }
-                    Err(err) => {
-                        let is_lock_error = matches!(
-                            &err,
-                            StorageError::IoError(msg)
-                                if msg.contains("lock")
-                                    || msg.contains("Lock")
-                                    || msg.contains("busy")
-                        );
-                        if !is_lock_error || attempt + 1 == MAX_ATTEMPTS {
-                            last_err = Some(err);
-                            break;
-                        }
-                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-                    }
-                }
-            }
-
-            if let Some(storage) = opened {
-                storage
-            } else {
-                let err = last_err.unwrap_or_else(|| {
-                    StorageError::IoError("fjall open failed without error details".to_string())
-                });
-                return Err(JazzError::Storage(format!("{:?}", err)));
-            }
+        let storage: DynStorage = match context.storage {
+            ClientStorage::Fjall => Box::new(open_fjall_storage(&context.data_dir).await?),
+            ClientStorage::Memory => Box::new(MemoryStorage::new()),
         };
 
         // Clone server connection for sync callback
@@ -181,13 +127,6 @@ impl JazzClient {
         runtime
             .persist_schema()
             .map_err(|e| JazzError::Storage(e.to_string()))?;
-
-        // Register server with sync manager if connected
-        if server_connection.is_some()
-            && let Err(e) = runtime.add_server(server_id)
-        {
-            tracing::warn!("Failed to register server with sync manager: {}", e);
-        }
 
         // Spawn binary stream listener if connected to server
         let (initial_stream_ready_tx, initial_stream_ready_rx) = if server_connection.is_some() {
@@ -251,12 +190,19 @@ impl JazzClient {
                                             match serde_json::from_slice::<ServerEvent>(json) {
                                                 Ok(event) => {
                                                     if matches!(
-                                                        event,
+                                                        &event,
                                                         ServerEvent::Connected { .. }
                                                     ) && let Some(tx) =
                                                         initial_stream_ready_tx.take()
                                                     {
-                                                        let _ = tx.send(());
+                                                        let catalogue_state_hash = match &event {
+                                                            ServerEvent::Connected {
+                                                                catalogue_state_hash,
+                                                                ..
+                                                            } => catalogue_state_hash.clone(),
+                                                            _ => None,
+                                                        };
+                                                        let _ = tx.send(catalogue_state_hash);
                                                     }
                                                     if let Err(e) = handle_server_event(
                                                         event,
@@ -302,19 +248,35 @@ impl JazzClient {
             None
         };
 
-        if let Some(initial_stream_ready_rx) = initial_stream_ready_rx {
-            tokio::time::timeout(Duration::from_secs(10), initial_stream_ready_rx)
-                .await
-                .map_err(|_| {
-                    JazzError::Connection(
-                        "timed out waiting for server event stream to connect".to_string(),
-                    )
-                })?
-                .map_err(|_| {
-                    JazzError::Connection(
-                        "server event stream ended before sending Connected".to_string(),
-                    )
-                })?;
+        let initial_server_catalogue_state_hash =
+            if let Some(initial_stream_ready_rx) = initial_stream_ready_rx {
+                tokio::time::timeout(Duration::from_secs(10), initial_stream_ready_rx)
+                    .await
+                    .map_err(|_| {
+                        JazzError::Connection(
+                            "timed out waiting for server event stream to connect".to_string(),
+                        )
+                    })?
+                    .map_err(|_| {
+                        JazzError::Connection(
+                            "server event stream ended before sending Connected".to_string(),
+                        )
+                    })?
+            } else {
+                None
+            };
+
+        // Register server with sync manager if connected.
+        //
+        // The initial Connected event carries the server's catalogue digest, so
+        // we wait for it before deciding whether catalogue replay can be skipped.
+        if server_connection.is_some()
+            && let Err(e) = runtime.add_server_with_catalogue_state_hash(
+                server_id,
+                initial_server_catalogue_state_hash.as_deref(),
+            )
+        {
+            tracing::warn!("Failed to register server with sync manager: {}", e);
         }
 
         Ok(Self {
@@ -349,7 +311,7 @@ impl JazzClient {
         // tx is moved directly into the callback so the delta is never dropped due
         // to the race where immediate_tick fires the callback before we can insert
         // tx into a shared map.
-        let (tx, rx) = mpsc::channel::<OrderedRowDelta>(64);
+        let (tx, rx) = mpsc::unbounded_channel::<OrderedRowDelta>();
 
         // Register with runtime using callback pattern
         // The callback bridges runtime updates to the channel
@@ -358,9 +320,9 @@ impl JazzClient {
             .subscribe(
                 query.clone(),
                 move |delta| {
-                    // Route delta to the subscription's channel.
-                    // Note: We use try_send since we're in a sync callback.
-                    let _ = tx.try_send(delta.ordered_delta);
+                    // Route delta to the subscription stream without dropping
+                    // updates when the consumer falls briefly behind.
+                    let _ = tx.send(delta.ordered_delta);
                 },
                 session,
             )
@@ -478,7 +440,11 @@ impl JazzClient {
 
         // Flush storage state to disk for persistence
         self.runtime
-            .with_storage(|storage| storage.flush())
+            .with_storage(|storage| {
+                storage.flush();
+                storage.close()
+            })
+            .map_err(|e| JazzError::Storage(e.to_string()))?
             .map_err(|e| JazzError::Storage(e.to_string()))?;
 
         Ok(())
@@ -757,7 +723,7 @@ fn test_send_delay_for_object_updated(payload: &SyncPayload) -> Option<Duration>
 /// Handle incoming server events.
 fn handle_server_event(
     event: ServerEvent,
-    runtime: &TokioRuntime<FjallStorage>,
+    runtime: &ClientRuntime,
     server_id: ServerId,
 ) -> Result<()> {
     match event {
@@ -765,6 +731,7 @@ fn handle_server_event(
             connection_id,
             client_id,
             next_sync_seq,
+            ..
         } => {
             tracing::info!(
                 "Stream connected with id: {:?}, client_id: {}",
@@ -806,5 +773,69 @@ fn handle_server_event(
             tracing::trace!("Heartbeat received");
             Ok(())
         }
+    }
+}
+
+fn load_or_create_persistent_client_id(context: &AppContext) -> Result<ClientId> {
+    std::fs::create_dir_all(&context.data_dir)?;
+
+    let client_id_path = context.data_dir.join("client_id");
+    let client_id = if client_id_path.exists() {
+        let id_str = std::fs::read_to_string(&client_id_path)?;
+        ClientId::parse(id_str.trim()).unwrap_or_else(|| {
+            let id = context.client_id.unwrap_or_default();
+            let _ = std::fs::write(&client_id_path, id.to_string());
+            id
+        })
+    } else if let Some(id) = context.client_id {
+        std::fs::write(&client_id_path, id.to_string())?;
+        id
+    } else {
+        let id = ClientId::new();
+        std::fs::write(&client_id_path, id.to_string())?;
+        id
+    };
+
+    Ok(client_id)
+}
+
+async fn open_fjall_storage(data_dir: &std::path::Path) -> Result<FjallStorage> {
+    const MAX_ATTEMPTS: usize = 100;
+    const RETRY_DELAY_MS: u64 = 25;
+
+    std::fs::create_dir_all(data_dir)?;
+
+    let db_path = data_dir.join("jazz.fjall");
+    let mut opened = None;
+    let mut last_err = None;
+
+    for attempt in 0..MAX_ATTEMPTS {
+        match FjallStorage::open(&db_path, 64 * 1024 * 1024) {
+            Ok(storage) => {
+                opened = Some(storage);
+                break;
+            }
+            Err(err) => {
+                let is_lock_error = matches!(
+                    &err,
+                    StorageError::IoError(msg)
+                        if msg.contains("lock") || msg.contains("Lock") || msg.contains("busy")
+                );
+                if !is_lock_error || attempt + 1 == MAX_ATTEMPTS {
+                    last_err = Some(err);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+            }
+        }
+    }
+
+    if let Some(storage) = opened {
+        Ok(storage)
+    } else {
+        let err = last_err.unwrap_or_else(|| {
+            StorageError::IoError("fjall open failed without error details".to_string())
+        });
+        Err(JazzError::Storage(format!("{:?}", err)))
     }
 }

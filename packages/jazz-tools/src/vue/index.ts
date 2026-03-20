@@ -22,6 +22,7 @@ export {
   SyntheticUserSwitcher,
   type SyntheticUserSwitcherProps,
 } from "./synthetic-user-switcher.js";
+export type { DurabilityTier, QueryOptions } from "../runtime/index.js";
 export {
   createSyntheticUserProfile,
   getActiveSyntheticAuth,

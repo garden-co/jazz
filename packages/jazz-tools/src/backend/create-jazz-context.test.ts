@@ -180,24 +180,24 @@ describe("backend/create-jazz-context", () => {
 
     expect(db).toEqual({
       kind: "db",
-      client: mocks.clients[0],
+      client: mocks.clients[0]!,
     });
     expect(backendDb).toEqual({
       kind: "db",
-      client: mocks.clients[0],
+      client: mocks.clients[0]!,
     });
     expect(requestDb).toEqual({
       kind: "scoped-db",
-      client: mocks.clients[0],
+      client: mocks.clients[0]!,
       session: { user_id: "u1", claims: {} },
     });
     expect(sessionDb).toEqual({
       kind: "scoped-db",
-      client: mocks.clients[0],
+      client: mocks.clients[0]!,
       session,
     });
     expect(mocks.clients).toHaveLength(1);
-    expect(mocks.clients[0].asBackend).toHaveBeenCalledTimes(3);
+    expect(mocks.clients[0]!.asBackend).toHaveBeenCalledTimes(3);
     expect(mocks.createDbFromClient).toHaveBeenCalledTimes(4);
   });
 
@@ -216,7 +216,7 @@ describe("backend/create-jazz-context", () => {
 
     expect(() => context.forRequest(req)).not.toThrow();
     expect(() => context.forSession(session)).not.toThrow();
-    expect(mocks.clients[0].asBackend).not.toHaveBeenCalled();
+    expect(mocks.clients[0]!.asBackend).not.toHaveBeenCalled();
   });
 
   it("BC-U04: throws when no schema source is available", () => {
@@ -253,7 +253,7 @@ describe("backend/create-jazz-context", () => {
     context.flush();
 
     expect(mocks.runtimeInstances).toHaveLength(1);
-    expect(mocks.runtimeInstances[0].flush).toHaveBeenCalledTimes(1);
+    expect(mocks.runtimeInstances[0]!.flush).toHaveBeenCalledTimes(1);
   });
 
   it("BC-U07: shutdown releases client and allows re-init", async () => {
@@ -267,7 +267,7 @@ describe("backend/create-jazz-context", () => {
     expect(mocks.clients).toHaveLength(1);
 
     await context.shutdown();
-    expect(mocks.clients[0].shutdown).toHaveBeenCalledTimes(1);
+    expect(mocks.clients[0]!.shutdown).toHaveBeenCalledTimes(1);
 
     context.db();
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(2);

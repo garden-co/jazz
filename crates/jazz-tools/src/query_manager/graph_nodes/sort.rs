@@ -2,6 +2,7 @@ use ahash::AHashSet;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
+use crate::object::ObjectId;
 use crate::query_manager::encoding::compare_column;
 use crate::query_manager::types::{RowDescriptor, Tuple, TupleDelta, TupleDescriptor};
 
@@ -30,6 +31,67 @@ pub enum SortTarget {
     /// This is needed because object ID is not part of row payload columns,
     /// but query semantics allow `ORDER BY id|_id` (including desc and mixed keys).
     RowId,
+}
+
+/// Threshold: when adding more than this many tuples, use bulk append + sort
+/// instead of individual binary-search inserts.
+const BULK_ADD_THRESHOLD: usize = 16;
+
+/// Compare two tuples by sort keys without borrowing self.
+///
+/// Extracted as a free function so it can be used inside `sort_unstable_by`
+/// without conflicting borrows on `SortNode` fields.
+fn compare_tuples_with(
+    sort_keys: &[SortKey],
+    descriptor: &RowDescriptor,
+    a: &Tuple,
+    b: &Tuple,
+) -> Ordering {
+    let a_content = a.get(0).and_then(|e| e.content());
+    let b_content = b.get(0).and_then(|e| e.content());
+
+    for key in sort_keys {
+        let ord = match key.target {
+            SortTarget::Column(col_index) => match (a_content, b_content) {
+                (Some(a_data), Some(b_data)) => {
+                    compare_column(descriptor, a_data, col_index, b_data, col_index)
+                        .unwrap_or(Ordering::Equal)
+                }
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            },
+            SortTarget::RowId => compare_all_ids(a, b),
+        };
+
+        let ord = match key.direction {
+            SortDirection::Ascending => ord,
+            SortDirection::Descending => ord.reverse(),
+        };
+
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+
+    // Stable tie-breaker for deterministic ordering.
+    compare_all_ids(a, b)
+}
+
+/// Compare tuples by all element IDs lexicographically, without allocating.
+///
+/// This is the zero-alloc equivalent of `a.ids().cmp(&b.ids())`. It must compare
+/// *all* element IDs (not just the first) to produce a deterministic total ordering
+/// for joined tuples where multiple rows share the same first_id.
+#[inline]
+fn compare_all_ids(a: &Tuple, b: &Tuple) -> Ordering {
+    for (ea, eb) in a.iter().zip(b.iter()) {
+        let ord = ea.id().cmp(&eb.id());
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    a.len().cmp(&b.len())
 }
 
 /// Sort node for ordering rows.
@@ -68,51 +130,13 @@ impl SortNode {
         &self.output_tuple_descriptor
     }
 
-    /// Compare two tuples by sort keys (assumes single-element tuples).
-    fn compare_tuples(&self, a: &Tuple, b: &Tuple) -> Ordering {
-        // For single-table queries, compare first element's content
-        let a_content = a.get(0).and_then(|e| e.content());
-        let b_content = b.get(0).and_then(|e| e.content());
-
-        for key in &self.sort_keys {
-            let ord = match key.target {
-                SortTarget::Column(col_index) => match (a_content, b_content) {
-                    (Some(a_data), Some(b_data)) => {
-                        compare_column(&self.descriptor, a_data, col_index, b_data, col_index)
-                            .unwrap_or(Ordering::Equal)
-                    }
-                    // Unmaterialized tuples sort to the end
-                    (Some(_), None) => Ordering::Less,
-                    (None, Some(_)) => Ordering::Greater,
-                    (None, None) => Ordering::Equal,
-                },
-                SortTarget::RowId => a.ids().cmp(&b.ids()),
-            };
-
-            let ord = match key.direction {
-                SortDirection::Ascending => ord,
-                SortDirection::Descending => ord.reverse(),
-            };
-
-            if ord != Ordering::Equal {
-                return ord;
-            }
-        }
-
-        // Stable tie-breaker for deterministic ordering.
-        a.ids().cmp(&b.ids())
-    }
-
     /// Find the insertion position for a tuple (binary search).
     fn find_tuple_position(&self, tuple: &Tuple) -> usize {
+        let sort_keys = &self.sort_keys;
+        let descriptor = &self.descriptor;
         self.sorted_tuples
-            .binary_search_by(|t| self.compare_tuples(t, tuple))
+            .binary_search_by(|t| compare_tuples_with(sort_keys, descriptor, t, tuple))
             .unwrap_or_else(|pos| pos)
-    }
-
-    /// Sync current_tuples HashSet from sorted_tuples Vec.
-    fn sync_hashset(&mut self) {
-        self.current_tuples = self.sorted_tuples.iter().cloned().collect();
     }
 
     /// Full current ordering after sort has been applied.
@@ -127,62 +151,91 @@ impl RowNode for SortNode {
     }
 
     fn process(&mut self, input: TupleDelta) -> TupleDelta {
-        // Track which tuple IDs are added/removed
-        let mut added_ids: AHashSet<_> = input.added.iter().map(|t| t.ids()).collect();
-        let mut removed_ids: AHashSet<_> = input.removed.iter().map(|t| t.ids()).collect();
-        let updated_old_ids: AHashSet<_> = input.updated.iter().map(|(old, _)| old.ids()).collect();
+        // Use full tuple IDs (all elements) for identity tracking.
+        // `ids()` allocates a Vec<ObjectId> per call, but this only happens once per
+        // changed tuple — not in the sort comparison hot path — so the cost is O(k).
+        // Using first_id() here would be incorrect for joined tuples where multiple
+        // rows share the same first element ID.
+        let removed_id_set: AHashSet<Vec<ObjectId>> = input
+            .removed
+            .iter()
+            .chain(input.updated.iter().map(|(old, _)| old))
+            .map(|t| t.ids())
+            .collect();
 
-        // Handle removals - find and remove
-        for tuple in &input.removed {
-            if let Some(pos) = self.sorted_tuples.iter().position(|t| t == tuple) {
-                self.sorted_tuples.remove(pos);
+        let added_id_set: AHashSet<Vec<ObjectId>> = input.added.iter().map(|t| t.ids()).collect();
+
+        // --- Phase 1: Removals (single retain pass instead of k linear scans) ---
+        if !removed_id_set.is_empty() {
+            // Incremental hashset: remove entries before modifying the vec.
+            for tuple in &input.removed {
+                self.current_tuples.remove(tuple);
+            }
+            for (old, _) in &input.updated {
+                self.current_tuples.remove(old);
+            }
+            // Tuple PartialEq is ID-based, so retain uses the same identity semantics.
+            self.sorted_tuples
+                .retain(|t| !removed_id_set.contains(&t.ids()));
+        }
+
+        // --- Phase 2: Additions ---
+        let new_count = input.added.len() + input.updated.len();
+        let use_bulk = self.sorted_tuples.is_empty() || new_count > BULK_ADD_THRESHOLD;
+
+        if new_count > 0 {
+            if use_bulk {
+                // Bulk path: append all, then sort once — O(n log n) instead of O(n²) memmoves.
+                for tuple in input
+                    .added
+                    .iter()
+                    .chain(input.updated.iter().map(|(_, new)| new))
+                {
+                    self.current_tuples.insert(tuple.clone());
+                    self.sorted_tuples.push(tuple.clone());
+                }
+                let sort_keys = &self.sort_keys;
+                let descriptor = &self.descriptor;
+                self.sorted_tuples
+                    .sort_unstable_by(|a, b| compare_tuples_with(sort_keys, descriptor, a, b));
+            } else {
+                // Incremental path: binary search + insert for small batches.
+                for tuple in input
+                    .added
+                    .iter()
+                    .chain(input.updated.iter().map(|(_, new)| new))
+                {
+                    self.current_tuples.insert(tuple.clone());
+                    let pos = self.find_tuple_position(tuple);
+                    self.sorted_tuples.insert(pos, tuple.clone());
+                }
             }
         }
 
-        // Handle additions - insert in sorted position
-        for tuple in &input.added {
-            let pos = self.find_tuple_position(tuple);
-            self.sorted_tuples.insert(pos, tuple.clone());
-        }
-
-        // Handle updates - remove old position, insert at new position
-        for (old_tuple, new_tuple) in &input.updated {
-            if let Some(pos) = self.sorted_tuples.iter().position(|t| t == old_tuple) {
-                self.sorted_tuples.remove(pos);
-            }
-            let pos = self.find_tuple_position(new_tuple);
-            self.sorted_tuples.insert(pos, new_tuple.clone());
-        }
-
-        // Sync the HashSet
-        self.sync_hashset();
-
-        // Build result with tuples in sorted order
+        // --- Phase 3: Build result delta ---
         let mut result = TupleDelta::new();
 
-        // Added tuples in sorted order
-        for tuple in &self.sorted_tuples {
-            if added_ids.remove(&tuple.ids()) {
-                result.added.push(tuple.clone());
+        // Added tuples in sorted order (scan sorted_tuples, match against full IDs).
+        if !added_id_set.is_empty() {
+            let mut remaining = added_id_set;
+            for tuple in &self.sorted_tuples {
+                if remaining.is_empty() {
+                    break;
+                }
+                if remaining.remove(&tuple.ids()) {
+                    result.added.push(tuple.clone());
+                }
             }
         }
 
-        // Removed tuples (order doesn't matter as much)
-        for tuple in input.removed {
-            if removed_ids.remove(&tuple.ids()) {
-                result.removed.push(tuple);
-            }
-        }
+        // Removed: move from input (no clone).
+        result.removed = input.removed;
 
-        // Updated tuples (find in sorted)
-        for (old_tuple, _) in &input.updated {
-            if updated_old_ids.contains(&old_tuple.ids())
-                && let Some(new_tuple) = self
-                    .sorted_tuples
-                    .iter()
-                    .find(|t| t.ids() == old_tuple.ids())
-            {
-                result.updated.push((old_tuple.clone(), new_tuple.clone()));
+        // Updated: old from input (moved), new found by tuple equality in sorted_tuples.
+        for (old_tuple, _) in input.updated {
+            // Tuple equality is ID-based, so find() matches on all element IDs.
+            if let Some(new_tuple) = self.sorted_tuples.iter().find(|t| *t == &old_tuple) {
+                result.updated.push((old_tuple, new_tuple.clone()));
             }
         }
 

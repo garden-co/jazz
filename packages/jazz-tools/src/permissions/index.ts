@@ -2,6 +2,7 @@ import type {
   OperationPolicy,
   PolicyCmpOp,
   PolicyExpr,
+  PolicyLiteralValue,
   PolicyValue,
   TablePolicies,
 } from "../schema.js";
@@ -51,6 +52,14 @@ interface SessionRefValue {
   readonly path: string[];
 }
 
+interface SessionWhereCondition {
+  readonly __jazzPermissionKind: "session-where";
+  readonly where: Record<string, unknown>;
+}
+
+type SessionWhereBuilder = SessionRefValue &
+  ((input: Record<string, unknown>) => SessionWhereCondition);
+
 interface RecursiveDepthOptions {
   maxDepth?: number;
 }
@@ -77,7 +86,12 @@ interface CompoundCondition {
   readonly conditions: Condition[];
 }
 
-type Condition = PolicyExpr | CompoundCondition | ExistsCondition | ExistsRelationCondition;
+type Condition =
+  | PolicyExpr
+  | CompoundCondition
+  | ExistsCondition
+  | ExistsRelationCondition
+  | SessionWhereCondition;
 
 interface RelationJoinSpec {
   table: string;
@@ -285,6 +299,11 @@ class PermissionRelationBuilder implements PermissionRelation {
       );
     }
     const currentFilter = currentFilters[0];
+    if (!currentFilter) {
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
+    }
     const stepFilters = stepState.filters.filter((filter) => filter !== currentFilter);
     const stepJoin = stepState.joins[0];
 
@@ -386,7 +405,11 @@ export type WhereInputOrCallback<WhereInput, Row> =
   | WhereInput
   | ((row: RowContext<Row>) => WhereInput | Condition);
 
-export type SessionContext = Record<string, SessionRefValue>;
+export type SessionContext = Record<string, SessionRefValue> & {
+  readonly user_id: SessionRefValue;
+  readonly userId: SessionRefValue;
+  where: SessionWhereBuilder;
+};
 
 export interface AllowedToContext {
   read(fkColumn: string, options?: RecursiveDepthOptions): PolicyExpr;
@@ -423,6 +446,8 @@ interface ActionBuilder<WhereInput, Row> {
   where(
     input: Condition | PermissionWhereInput<WhereInput> | ((row: RowContext<Row>) => unknown),
   ): Rule;
+  always(): Rule;
+  never(): Rule;
 }
 
 interface TableRelationBuilder<WhereInput, Row> extends TableJoinTarget, PermissionRelation {
@@ -496,6 +521,14 @@ class UpdateRuleBuilder<WhereInput, Row> {
     };
     this.registerRule?.(rule);
     return rule;
+  }
+
+  never(): Rule {
+    return this.where(neverCondition());
+  }
+
+  always(): Rule {
+    return this.where(alwaysCondition());
   }
 
   whereOld(
@@ -629,13 +662,19 @@ function buildTablePolicyBuilder(
   };
   const read: ActionBuilder<unknown, unknown> = {
     where: (input) => registerRule({ table, action: "read", using: resolveWhereInput(input) }),
+    always: () => read.where(alwaysCondition()),
+    never: () => read.where(neverCondition()),
   };
   const insert: ActionBuilder<unknown, unknown> = {
     where: (input) =>
       registerRule({ table, action: "insert", withCheck: resolveWhereInput(input) }),
+    always: () => insert.where(alwaysCondition()),
+    never: () => insert.where(neverCondition()),
   };
   const del: ActionBuilder<unknown, unknown> = {
     where: (input) => registerRule({ table, action: "delete", using: resolveWhereInput(input) }),
+    always: () => del.where(alwaysCondition()),
+    never: () => del.where(neverCondition()),
   };
   const updateFactory = (): UpdateRuleBuilder<unknown, unknown> =>
     new UpdateRuleBuilder(table, collectRule);
@@ -981,7 +1020,7 @@ function andRelPredicates(predicates: RelPredicateExpr[]): RelPredicateExpr {
     return "True";
   }
   if (predicates.length === 1) {
-    return predicates[0];
+    return predicates[0]!;
   }
   return { And: predicates };
 }
@@ -1034,7 +1073,7 @@ function applyRelationTail(options: {
   let hasHopJoin = false;
 
   for (let i = 0; i < options.joins.length; i += 1) {
-    const join = options.joins[i];
+    const join = options.joins[i]!;
     const rightScope = options.joinAlias(join, i);
     relation = {
       Join: {
@@ -1127,9 +1166,16 @@ function createSessionContext(): SessionContext {
     __jazzPermissionKind: "session-ref",
     path: normalizeSessionPath(path),
   });
+  const whereBuilder = ((input: Record<string, unknown>): SessionWhereCondition => ({
+    __jazzPermissionKind: "session-where",
+    where: normalizeWhereObject(input),
+  })) as SessionWhereBuilder;
   return new Proxy({} as SessionContext, {
     get(_target, prop, _receiver) {
       if (typeof prop === "string") {
+        if (prop === "where") {
+          return whereBuilder;
+        }
         return claimRef(prop);
       }
       return undefined;
@@ -1261,6 +1307,9 @@ function resolveWhereInput(input: unknown): Condition {
     const result = input(createRowContext());
     return resolveWhereInput(result);
   }
+  if (isSessionWhereCondition(input)) {
+    return input;
+  }
   if (isExistsCondition(input)) {
     return input;
   }
@@ -1289,6 +1338,17 @@ function whereObjectToCondition(
       continue;
     }
     exprs.push(...columnFilterToExprs(column, raw, options));
+  }
+  return andExpr(exprs);
+}
+
+function sessionWhereObjectToCondition(where: Record<string, unknown>): PolicyExpr {
+  const exprs: PolicyExpr[] = [];
+  for (const [path, raw] of Object.entries(where)) {
+    if (raw === undefined) {
+      continue;
+    }
+    exprs.push(...sessionPathFilterToExprs(path, raw));
   }
   return andExpr(exprs);
 }
@@ -1387,6 +1447,101 @@ function columnFilterToExprs(
   return [cmpExpr(column, "Eq", raw, options)];
 }
 
+function sessionPathFilterToExprs(path: string, raw: unknown): PolicyExpr[] {
+  const sessionPath = normalizeSessionPath(path);
+  if (sessionPath.length === 0) {
+    throw new Error("session.where(...) requires non-empty session path keys.");
+  }
+
+  if (raw === null) {
+    return [{ type: "SessionIsNull", path: sessionPath }];
+  }
+  if (
+    !isPlainObject(raw) ||
+    isSessionRefValue(raw) ||
+    isRowRefValue(raw) ||
+    isRecursiveCurrentValue(raw) ||
+    isExistsCondition(raw) ||
+    isExistsRelationCondition(raw) ||
+    isCompoundCondition(raw) ||
+    isPolicyExpr(raw)
+  ) {
+    return [sessionCmpExpr(sessionPath, "Eq", raw, path)];
+  }
+
+  const exprs: PolicyExpr[] = [];
+  for (const [op, value] of Object.entries(raw)) {
+    if (value === undefined) {
+      continue;
+    }
+    switch (op) {
+      case "eq":
+        if (value === null) {
+          exprs.push({ type: "SessionIsNull", path: sessionPath });
+        } else {
+          exprs.push(sessionCmpExpr(sessionPath, "Eq", value, path));
+        }
+        break;
+      case "ne":
+        if (value === null) {
+          exprs.push({ type: "SessionIsNotNull", path: sessionPath });
+        } else {
+          exprs.push(sessionCmpExpr(sessionPath, "Ne", value, path));
+        }
+        break;
+      case "gt":
+        exprs.push(sessionCmpExpr(sessionPath, "Gt", value, path));
+        break;
+      case "gte":
+        exprs.push(sessionCmpExpr(sessionPath, "Ge", value, path));
+        break;
+      case "lt":
+        exprs.push(sessionCmpExpr(sessionPath, "Lt", value, path));
+        break;
+      case "lte":
+        exprs.push(sessionCmpExpr(sessionPath, "Le", value, path));
+        break;
+      case "isNull":
+        if (typeof value !== "boolean") {
+          throw new Error(`session.where("${path}.isNull") expects a boolean value.`);
+        }
+        exprs.push(
+          value
+            ? { type: "SessionIsNull", path: sessionPath }
+            : { type: "SessionIsNotNull", path: sessionPath },
+        );
+        break;
+      case "contains":
+        exprs.push({
+          type: "SessionContains",
+          path: sessionPath,
+          value: toPolicyLiteralValue(value, `session.where("${path}.contains")`),
+        });
+        break;
+      case "in":
+        if (!Array.isArray(value)) {
+          throw new Error(`session.where("${path}.in") expects an array of literal values.`);
+        }
+        if (value.length === 0) {
+          exprs.push({ type: "False" });
+          break;
+        }
+        exprs.push({
+          type: "SessionInList",
+          path: sessionPath,
+          values: value.map((entry) => toPolicyLiteralValue(entry, `session.where("${path}.in")`)),
+        });
+        break;
+      default:
+        throw new Error(
+          `Unsupported session.where operator "${op}" in permissions DSL. Nested object claim syntax is not supported; use dotted path keys instead.`,
+        );
+    }
+  }
+
+  return exprs.length === 0 ? [{ type: "True" }] : exprs;
+}
+
 function cmpExpr(
   column: string,
   op: PolicyCmpOp,
@@ -1398,6 +1553,20 @@ function cmpExpr(
     column,
     op,
     value: toPolicyValue(value, options),
+  };
+}
+
+function sessionCmpExpr(
+  path: string[],
+  op: PolicyCmpOp,
+  value: unknown,
+  originalPath: string,
+): PolicyExpr {
+  return {
+    type: "SessionCmp",
+    path,
+    op,
+    value: toPolicyLiteralValue(value, `session.where("${originalPath}")`),
   };
 }
 
@@ -1417,12 +1586,55 @@ function toPolicyValue(value: unknown, options: { allowRowRefs: boolean }): Poli
   return { type: "Literal", value };
 }
 
+function toPolicyLiteralValue(value: unknown, context: string): PolicyLiteralValue {
+  assertSessionWhereLiteralValue(value, context);
+  return { type: "Literal", value };
+}
+
+function assertSessionWhereLiteralValue(value: unknown, context: string): void {
+  if (isSessionRefValue(value)) {
+    throw new Error(
+      `${context} only accepts literal values; session references are not supported.`,
+    );
+  }
+  if (isRowRefValue(value)) {
+    throw new Error(`${context} only accepts literal values; row references are not supported.`);
+  }
+  if (isRecursiveCurrentValue(value)) {
+    throw new Error(
+      `${context} only accepts literal values; recursive current refs are not supported.`,
+    );
+  }
+  if (
+    isExistsCondition(value) ||
+    isExistsRelationCondition(value) ||
+    isCompoundCondition(value) ||
+    isPolicyExpr(value)
+  ) {
+    throw new Error(
+      `${context} only accepts literal values; relation and policy expressions are not supported.`,
+    );
+  }
+  if (typeof value === "function" || value === undefined) {
+    throw new Error(`${context} only accepts literal values.`);
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      assertSessionWhereLiteralValue(entry, context);
+    }
+    return;
+  }
+  if (isPlainObject(value)) {
+    throw new Error(`${context} only accepts literal values; nested objects are not supported.`);
+  }
+}
+
 function andExpr(exprs: PolicyExpr[]): PolicyExpr {
   if (exprs.length === 0) {
     return { type: "True" };
   }
   if (exprs.length === 1) {
-    return exprs[0];
+    return exprs[0]!;
   }
   return { type: "And", exprs };
 }
@@ -1433,6 +1645,14 @@ export function anyOf(conditions: readonly unknown[]): Condition {
 
 export function allOf(conditions: readonly unknown[]): Condition {
   return compoundCondition("And", conditions);
+}
+
+function alwaysCondition(): Condition {
+  return allOf([]);
+}
+
+function neverCondition(): Condition {
+  return anyOf([]);
 }
 
 function compoundCondition(op: "And" | "Or", inputs: readonly unknown[]): CompoundCondition {
@@ -1458,7 +1678,7 @@ function compileRules(
     if (!compiled[rule.table]) {
       compiled[rule.table] = emptyTablePolicies();
     }
-    const tablePolicies = compiled[rule.table];
+    const tablePolicies = compiled[rule.table]!;
     switch (rule.action) {
       case "read":
         tablePolicies.select = mergeOperationPolicy(tablePolicies.select, {
@@ -1543,6 +1763,9 @@ function compileCondition(
   if (isPolicyExpr(condition)) {
     assertInheritsColumns(condition, table, fkReferencesByTable);
     return condition;
+  }
+  if (isSessionWhereCondition(condition)) {
+    return sessionWhereObjectToCondition(condition.where);
   }
   if (isExistsRelationCondition(condition)) {
     return {
@@ -1666,6 +1889,14 @@ function isSessionRefValue(input: unknown): input is SessionRefValue {
   );
 }
 
+function isSessionWhereCondition(input: unknown): input is SessionWhereCondition {
+  return (
+    isPlainObject(input) &&
+    input.__jazzPermissionKind === "session-where" &&
+    isPlainObject(input.where)
+  );
+}
+
 function isRowRefValue(input: unknown): input is RowRefValue {
   return (
     isPlainObject(input) &&
@@ -1698,6 +1929,10 @@ function isCompoundCondition(input: unknown): input is CompoundCondition {
     (input.op === "And" || input.op === "Or") &&
     Array.isArray(input.conditions)
   );
+}
+
+function isRecursiveCurrentValue(input: unknown): input is RecursiveCurrentValue {
+  return isPlainObject(input) && input.__jazzPermissionKind === "recursive-current";
 }
 
 function isUpdateRuleBuilder(input: unknown): input is UpdateRuleBuilder<unknown, unknown> {

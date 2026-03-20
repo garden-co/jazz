@@ -28,7 +28,7 @@ export declare class NapiRuntime {
   /** Called by JS when a sync message arrives from a client (not a server). */
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void
   onSyncMessageToSend(callback: (...args: any[]) => any): void
-  addServer(): void
+  addServer(serverCatalogueStateHash?: string | undefined | null): void
   removeServer(): void
   addClient(): string
   /** Set a client's role ("user", "admin", or "peer"). */

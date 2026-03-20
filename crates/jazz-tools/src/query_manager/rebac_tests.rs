@@ -2,7 +2,9 @@
 //!
 //! Tests for the async permission evaluation system using policy graphs.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use smallvec::smallvec;
 
@@ -25,8 +27,8 @@ use crate::query_manager::relation_ir::{
 };
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TablePolicies, TableSchema,
-    Value,
+    ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName,
+    TablePolicies, TableSchema, Value,
 };
 
 /// Helper to create QueryManager with schema on default branch.
@@ -468,6 +470,500 @@ fn rebac_insert_denied_by_simple_policy() {
 }
 
 #[test]
+fn rebac_insert_denied_by_simple_policy_in_server_mode_known_schema() {
+    let schema = rebac_test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let branch = ComposedBranchName::new("dev", schema_hash, "main")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+
+    // Server mode: QueryManager has no current schema; only known_schemas is populated.
+    let sync_manager = SyncManager::new();
+    let mut qm = QueryManager::new(sync_manager);
+    let mut known_schemas = HashMap::new();
+    known_schemas.insert(schema_hash, schema);
+    qm.set_known_schemas(Arc::new(known_schemas));
+
+    let mut storage = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    qm.sync_manager_mut().add_client(client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+
+    let metadata = document_metadata();
+    let obj_id = qm
+        .sync_manager_mut()
+        .object_manager
+        .create(&mut storage, Some(metadata.clone()));
+
+    let mut scope = HashSet::new();
+    scope.insert((obj_id, branch.clone().into()));
+    qm.sync_manager_mut()
+        .set_client_query_scope(client_id, QueryId(1), scope, None);
+    qm.sync_manager_mut().take_outbox();
+
+    let commit = Commit {
+        parents: smallvec![],
+        content: encode_document("bob", "Should Be Denied", None),
+        timestamp: 1000,
+        author: ObjectId::new(),
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: Some(ObjectMetadata {
+                id: obj_id,
+                metadata,
+            }),
+            branch_name: branch.clone().into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let denied = outbox.iter().any(|entry| {
+        matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::PermissionDenied { .. }),
+            ) if *id == client_id
+        )
+    });
+    assert!(
+        denied,
+        "Insert should be denied by policy in server mode using known_schemas"
+    );
+
+    let tips = qm
+        .sync_manager_mut()
+        .object_manager
+        .get_tip_ids(obj_id, &branch);
+    assert!(
+        tips.is_err() || !tips.unwrap().contains(&commit.id()),
+        "Denied insert should not be applied on the branch"
+    );
+}
+
+#[test]
+fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
+    let schema = rebac_test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let branch = ComposedBranchName::new("dev", schema_hash, "main")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+
+    // Server mode: no current schema, schema available via known_schemas.
+    let sync_manager = SyncManager::new();
+    let mut qm = QueryManager::new(sync_manager);
+    let mut known_schemas = HashMap::new();
+    known_schemas.insert(schema_hash, schema);
+    qm.set_known_schemas(Arc::new(known_schemas));
+
+    let mut storage = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    qm.sync_manager_mut().add_client(client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+
+    // New row object: metadata exists only in payload, not in ObjectManager.
+    let obj_id = ObjectId::new();
+    let metadata = document_metadata();
+    let commit = Commit {
+        parents: smallvec![],
+        content: encode_document("bob", "Should Be Denied", None),
+        timestamp: 1000,
+        author: ObjectId::new(),
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: Some(ObjectMetadata {
+                id: obj_id,
+                metadata,
+            }),
+            branch_name: branch.clone().into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let denied = outbox.iter().any(|entry| {
+        matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::PermissionDenied { .. }),
+            ) if *id == client_id
+        )
+    });
+    assert!(
+        denied,
+        "Insert should be denied for new objects using payload metadata in server mode"
+    );
+
+    let tips = qm
+        .sync_manager_mut()
+        .object_manager
+        .get_tip_ids(obj_id, &branch);
+    assert!(
+        tips.is_err() || !tips.unwrap().contains(&commit.id()),
+        "Denied insert should not be applied on the branch"
+    );
+}
+
+#[test]
+fn rebac_insert_waits_for_schema_then_denies_for_composed_branch() {
+    let schema = rebac_test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let branch = ComposedBranchName::new("dev", schema_hash, "main")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+
+    // Server mode starts without a fixed current schema and may learn schemas later.
+    let sync_manager = SyncManager::new();
+    let mut qm = QueryManager::new(sync_manager);
+    let mut storage = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    qm.sync_manager_mut().add_client(client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+
+    let obj_id = ObjectId::new();
+    let metadata = document_metadata();
+    let commit = Commit {
+        parents: smallvec![],
+        content: encode_document("bob", "Should Be Denied", None),
+        timestamp: 1000,
+        author: ObjectId::new(),
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: Some(ObjectMetadata {
+                id: obj_id,
+                metadata: metadata.clone(),
+            }),
+            branch_name: branch.clone().into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    // First pass should defer until the schema becomes available instead of allowing or denying.
+    qm.process(&mut storage);
+
+    assert!(
+        qm.sync_manager_mut().take_outbox().is_empty(),
+        "Composed-branch writes should wait for schema activation before emitting a result"
+    );
+
+    let pending = qm.sync_manager_mut().take_pending_permission_checks();
+    assert_eq!(
+        pending.len(),
+        1,
+        "Write should remain pending until the matching schema arrives"
+    );
+    qm.sync_manager_mut()
+        .requeue_pending_permission_checks(pending);
+
+    let tips = qm
+        .sync_manager_mut()
+        .object_manager
+        .get_tip_ids(obj_id, &branch);
+    assert!(
+        tips.is_err() || !tips.unwrap().contains(&commit.id()),
+        "Deferred insert must not be applied before the schema is known"
+    );
+
+    let mut known_schemas = HashMap::new();
+    known_schemas.insert(schema_hash, schema);
+    qm.set_known_schemas(Arc::new(known_schemas));
+
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let denied = outbox.iter().any(|entry| {
+        matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::PermissionDenied { .. }),
+            ) if *id == client_id
+        )
+    });
+    assert!(
+        denied,
+        "Once the schema is available, the deferred insert should be denied by policy"
+    );
+}
+
+#[test]
+fn rebac_insert_denied_when_schema_never_arrives_before_timeout() {
+    let schema = rebac_test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let branch = ComposedBranchName::new("dev", schema_hash, "main")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+
+    let sync_manager = SyncManager::new();
+    let mut qm = QueryManager::new(sync_manager);
+    let mut storage = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    qm.sync_manager_mut().add_client(client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+
+    let obj_id = ObjectId::new();
+    let metadata = document_metadata();
+    let commit = Commit {
+        parents: smallvec![],
+        content: encode_document("bob", "Should Time Out", None),
+        timestamp: 1000,
+        author: ObjectId::new(),
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: Some(ObjectMetadata {
+                id: obj_id,
+                metadata: metadata.clone(),
+            }),
+            branch_name: branch.clone().into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    qm.process(&mut storage);
+
+    assert!(
+        qm.sync_manager_mut().take_outbox().is_empty(),
+        "First pass should defer while waiting for schema activation"
+    );
+
+    let mut pending = qm.sync_manager_mut().take_pending_permission_checks();
+    assert_eq!(pending.len(), 1, "Deferred write should remain pending");
+    pending[0].schema_wait_started_at = Some(Instant::now() - Duration::from_secs(11));
+    qm.sync_manager_mut()
+        .requeue_pending_permission_checks(pending);
+
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let error = outbox
+        .iter()
+        .find(|entry| matches!(entry.destination, Destination::Client(id) if id == client_id))
+        .expect("Timed-out schema wait should return an error to the client");
+
+    match &error.payload {
+        SyncPayload::Error(SyncError::PermissionDenied { reason, .. }) => {
+            assert!(
+                reason.contains("after waiting 10s"),
+                "Timed-out schema wait should mention the 10s timeout: {reason}"
+            );
+        }
+        other => panic!("Expected PermissionDenied error, got {:?}", other),
+    }
+
+    let tips = qm
+        .sync_manager_mut()
+        .object_manager
+        .get_tip_ids(obj_id, &branch);
+    assert!(
+        tips.is_err() || !tips.unwrap().contains(&commit.id()),
+        "Timed-out insert should not be applied on the branch"
+    );
+}
+
+#[test]
+fn rebac_insert_denied_when_schema_unresolved_for_branch() {
+    let schema = rebac_test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+
+    // Server mode: no current schema, only known_schemas.
+    let sync_manager = SyncManager::new();
+    let mut qm = QueryManager::new(sync_manager);
+    let mut known_schemas = HashMap::new();
+    known_schemas.insert(schema_hash, schema);
+    qm.set_known_schemas(Arc::new(known_schemas));
+
+    let mut storage = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    qm.sync_manager_mut().add_client(client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+
+    let obj_id = ObjectId::new();
+    let metadata = document_metadata();
+    let commit = Commit {
+        parents: smallvec![],
+        content: encode_document("bob", "Should Be Denied", None),
+        timestamp: 1000,
+        author: ObjectId::new(),
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    // Plain "main" branch without schema hash context can fail schema resolution.
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: Some(ObjectMetadata {
+                id: obj_id,
+                metadata,
+            }),
+            branch_name: "main".into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let denied = outbox.iter().any(|entry| {
+        matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::PermissionDenied { .. }),
+            ) if *id == client_id
+        )
+    });
+    assert!(
+        denied,
+        "Insert should be denied when schema cannot be resolved for the write branch"
+    );
+
+    let tips = qm
+        .sync_manager_mut()
+        .object_manager
+        .get_tip_ids(obj_id, "main");
+    assert!(
+        tips.is_err() || !tips.unwrap().contains(&commit.id()),
+        "Denied insert should not be applied on unresolved branch writes"
+    );
+}
+
+#[test]
+fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
+    let restrictive = rebac_test_schema();
+    let restrictive_hash = SchemaHash::compute(&restrictive);
+
+    // Permissive local schema (no insert policy) that should NOT be used for server writes
+    // on unrelated branches.
+    let mut permissive = Schema::new();
+    permissive.insert(
+        TableName::new("documents"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("owner_id", ColumnType::Text),
+            ColumnDescriptor::new("title", ColumnType::Text),
+            ColumnDescriptor::new("folder_id", ColumnType::Uuid).nullable(),
+        ])
+        .into(),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, permissive);
+    let mut known_schemas = HashMap::new();
+    known_schemas.insert(restrictive_hash, restrictive);
+    qm.set_known_schemas(Arc::new(known_schemas));
+
+    let mut storage = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    qm.sync_manager_mut().add_client(client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+
+    let obj_id = ObjectId::new();
+    let metadata = document_metadata();
+    let commit = Commit {
+        parents: smallvec![],
+        content: encode_document("bob", "Should Be Denied", None),
+        timestamp: 1000,
+        author: ObjectId::new(),
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    // Simulate write on an unresolved branch. Prior behavior could fall back to stale
+    // self.schema (permissive) and incorrectly allow this insert.
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: Some(ObjectMetadata {
+                id: obj_id,
+                metadata,
+            }),
+            branch_name: "main".into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let denied = outbox.iter().any(|entry| {
+        matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::PermissionDenied { .. }),
+            ) if *id == client_id
+        )
+    });
+    assert!(
+        denied,
+        "Insert should be denied instead of using stale self.schema on unresolved branches"
+    );
+
+    let tips = qm
+        .sync_manager_mut()
+        .object_manager
+        .get_tip_ids(obj_id, "main");
+    assert!(
+        tips.is_err() || !tips.unwrap().contains(&commit.id()),
+        "Denied insert should not be applied when stale self.schema fallback is unsafe"
+    );
+}
+
+#[test]
 fn rebac_table_without_policy_allows_all_writes() {
     // Schema with no policies
     let mut schema = Schema::new();
@@ -604,6 +1100,74 @@ fn rebac_non_row_object_allowed() {
     assert!(
         tips.contains(&commit.id()),
         "Non-row objects should be allowed without policy check"
+    );
+}
+
+#[test]
+fn rebac_non_row_object_allowed_in_server_mode() {
+    let schema = rebac_test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let branch = ComposedBranchName::new("dev", schema_hash, "main")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+
+    // Server mode: schema is available through known_schemas only.
+    let sync_manager = SyncManager::new();
+    let mut qm = QueryManager::new(sync_manager);
+    let mut known_schemas = HashMap::new();
+    known_schemas.insert(schema_hash, schema);
+    qm.set_known_schemas(Arc::new(known_schemas));
+
+    let mut storage = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    qm.sync_manager_mut().add_client(client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+
+    // Non-row object: no table metadata.
+    let obj_id = qm
+        .sync_manager_mut()
+        .object_manager
+        .create(&mut storage, None);
+
+    let mut scope = HashSet::new();
+    scope.insert((obj_id, branch.clone().into()));
+    qm.sync_manager_mut()
+        .set_client_query_scope(client_id, QueryId(1), scope, None);
+    qm.sync_manager_mut().take_outbox();
+
+    let commit = Commit {
+        parents: smallvec![],
+        content: b"some data".to_vec(),
+        timestamp: 1000,
+        author: ObjectId::new(),
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: branch.clone().into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    qm.process(&mut storage);
+
+    let tips = qm
+        .sync_manager_mut()
+        .object_manager
+        .get_tip_ids(obj_id, &branch)
+        .unwrap();
+    assert!(
+        tips.contains(&commit.id()),
+        "Non-row objects should remain writable in server mode"
     );
 }
 

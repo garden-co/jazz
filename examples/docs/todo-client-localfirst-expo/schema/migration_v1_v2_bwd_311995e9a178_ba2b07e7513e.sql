@@ -1,2 +1,3 @@
+
 ALTER TABLE todos DROP COLUMN project;
 ALTER TABLE todos DROP COLUMN parent;

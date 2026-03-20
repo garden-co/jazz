@@ -79,13 +79,20 @@ export type PolicyValue =
   | { type: "Literal"; value: Value }
   | { type: "SessionRef"; path: string[] };
 
+export type PolicyLiteralValue = Value;
+
 export type PolicyExpr =
   | { type: "Cmp"; column: string; op: PolicyCmpOp; value: PolicyValue }
+  | { type: "SessionCmp"; path: string[]; op: PolicyCmpOp; value: PolicyLiteralValue }
   | { type: "IsNull"; column: string }
+  | { type: "SessionIsNull"; path: string[] }
   | { type: "IsNotNull"; column: string }
+  | { type: "SessionIsNotNull"; path: string[] }
   | { type: "Contains"; column: string; value: PolicyValue }
+  | { type: "SessionContains"; path: string[]; value: PolicyLiteralValue }
   | { type: "In"; column: string; session_path: string[] }
   | { type: "InList"; column: string; values: PolicyValue[] }
+  | { type: "SessionInList"; path: string[]; values: PolicyLiteralValue[] }
   | { type: "Exists"; table: string; condition: PolicyExpr }
   | { type: "ExistsRel"; rel: unknown }
   | { type: "Inherits"; operation: PolicyOperation; via_column: string; max_depth?: number }

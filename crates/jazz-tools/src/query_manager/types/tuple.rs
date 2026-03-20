@@ -134,7 +134,12 @@ impl Tuple {
 
     /// Get all IDs in the tuple.
     pub fn ids(&self) -> Vec<ObjectId> {
-        self.0.iter().map(|e| e.id()).collect()
+        self.id_iter().collect()
+    }
+
+    /// Iterate over the IDs that define tuple identity.
+    pub fn id_iter(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.0.iter().map(TupleElement::id)
     }
 
     /// Get the first ID (convenience for single-table queries).
@@ -260,8 +265,8 @@ impl Tuple {
 // for set membership, while updates track content changes separately.
 impl Hash for Tuple {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        for element in &self.0 {
-            element.id().hash(state);
+        for id in self.id_iter() {
+            id.hash(state);
         }
     }
 }
@@ -271,10 +276,7 @@ impl PartialEq for Tuple {
         if self.0.len() != other.0.len() {
             return false;
         }
-        self.0
-            .iter()
-            .zip(other.0.iter())
-            .all(|(a, b)| a.id() == b.id())
+        self.id_iter().eq(other.id_iter())
     }
 }
 
