@@ -153,7 +153,6 @@ impl TestingServer {
 
         let auth_config = AuthConfig {
             jwks_url: Some(jwks_server.endpoint()),
-            jwks_set: None,
             allow_anonymous: true,
             allow_demo: true,
             backend_secret: Some(Self::BACKEND_SECRET.to_string()),
