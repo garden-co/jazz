@@ -18,10 +18,10 @@ import { releaseProxy, type Remote, wrap } from "comlink";
 import { Db, DbConfig } from "../runtime/db.js";
 import { createChromeRuntimePortEndpoint } from "./comlink-endpoint.js";
 import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
+import { createDevtoolsPortRelayConfig, installDevtoolsPortRelay } from "./relay-installer.js";
 import {
   DEVTOOLS_BRIDGE_CHANNEL,
   DEVTOOLS_COMMANDS,
-  DEVTOOLS_CONTROL_MESSAGES,
   DEVTOOLS_EVENTS,
   DEVTOOLS_PORT_NAME,
   DevToolsBootstrap,
@@ -107,171 +107,6 @@ function isMissingReceivingEndError(error: unknown): boolean {
   return error.message.includes("Receiving end does not exist");
 }
 
-function createBridgeInstallerScript(
-  bridgeChannel: string,
-  portName: string,
-  comlinkConnectKind: string,
-  comlinkReadyKind: string,
-  connectTimeoutMs: number,
-  retryIntervalMs: number,
-): void {
-  const globalWindow = window as unknown as Record<string, unknown>;
-  const globalAny = globalThis as any;
-  const chromeApi = globalAny?.chrome;
-  if (!chromeApi?.runtime || typeof chromeApi.runtime.onConnect?.addListener !== "function") {
-    return;
-  }
-  const installMarker = "__jazzDevtoolsBridgeInstalledV1";
-  if (globalWindow[installMarker]) return;
-  globalWindow[installMarker] = true;
-
-  chromeApi.runtime.onConnect.addListener((port: any) => {
-    if (port.name !== portName) return;
-
-    let disposed = false;
-    let pagePort: MessagePort | null = null;
-    let connectPromise: Promise<MessagePort> | null = null;
-
-    const waitForRetry = (ms: number) =>
-      new Promise<void>((resolve) => {
-        setTimeout(resolve, ms);
-      });
-
-    window.postMessage(
-      {
-        channel: bridgeChannel,
-        kind: "event",
-        event: DEVTOOLS_EVENTS.CONNECTED,
-      },
-      "*",
-    );
-
-    const onPagePortMessage = (event: MessageEvent) => {
-      port.postMessage(event.data);
-    };
-
-    const detachPagePort = () => {
-      if (!pagePort) {
-        return;
-      }
-
-      pagePort.removeEventListener("message", onPagePortMessage);
-      pagePort.close();
-      pagePort = null;
-    };
-
-    const ensurePagePort = async (): Promise<MessagePort> => {
-      if (pagePort) {
-        return pagePort;
-      }
-
-      if (connectPromise) {
-        return connectPromise;
-      }
-
-      connectPromise = (async () => {
-        while (!disposed) {
-          const channel = new MessageChannel();
-          const relayPort = channel.port1;
-          const exposedPort = channel.port2;
-
-          const connected = await new Promise<boolean>((resolve) => {
-            let settled = false;
-
-            const cleanup = () => {
-              relayPort.removeEventListener("message", onReadyMessage);
-              clearTimeout(timeoutId);
-            };
-
-            const onReadyMessage = (event: MessageEvent) => {
-              if (settled) return;
-              const data = event.data as Record<string, unknown> | null;
-              if (!data || typeof data !== "object") return;
-              if (data.channel !== bridgeChannel || data.kind !== comlinkReadyKind) return;
-              settled = true;
-              cleanup();
-              resolve(true);
-            };
-
-            const timeoutId = setTimeout(() => {
-              if (settled) return;
-              settled = true;
-              cleanup();
-              relayPort.close();
-              resolve(false);
-            }, connectTimeoutMs);
-
-            relayPort.addEventListener("message", onReadyMessage);
-            relayPort.start?.();
-            window.postMessage(
-              {
-                channel: bridgeChannel,
-                kind: comlinkConnectKind,
-              },
-              "*",
-              [exposedPort],
-            );
-          });
-
-          if (connected) {
-            pagePort = relayPort;
-            pagePort.addEventListener("message", onPagePortMessage);
-            pagePort.start?.();
-            return pagePort;
-          }
-
-          await waitForRetry(retryIntervalMs);
-        }
-
-        throw new Error("DevTools page bridge unavailable.");
-      })().finally(() => {
-        connectPromise = null;
-      });
-
-      return connectPromise;
-    };
-
-    const onWindowMessage = (event: MessageEvent) => {
-      if (event.source !== window) return;
-      const data = event.data;
-      if (!data || typeof data !== "object") return;
-      const envelope = data as Record<string, unknown>;
-      if (envelope.channel !== bridgeChannel) return;
-      if (envelope.kind !== "event") return;
-      port.postMessage(data);
-    };
-
-    const onPortMessage = (message: unknown) => {
-      void ensurePagePort()
-        .then((connectedPagePort) => {
-          connectedPagePort.postMessage(message);
-        })
-        .catch(() => undefined);
-    };
-
-    const dispose = () => {
-      disposed = true;
-      detachPagePort();
-      window.postMessage(
-        {
-          channel: bridgeChannel,
-          kind: "event",
-          event: DEVTOOLS_EVENTS.DISCONNECTED,
-        },
-        "*",
-      );
-      window.removeEventListener("message", onWindowMessage);
-      port.onMessage.removeListener(onPortMessage);
-      port.onDisconnect.removeListener(dispose);
-    };
-
-    window.addEventListener("message", onWindowMessage);
-    port.onMessage.addListener(onPortMessage);
-    port.onDisconnect.addListener(dispose);
-    void ensurePagePort().catch(() => undefined);
-  });
-}
-
 async function installBridgeInInspectedTab(chromeApi: any, tabId: number): Promise<void> {
   if (!chromeApi?.scripting || typeof chromeApi.scripting.executeScript !== "function") {
     throw new Error(
@@ -282,14 +117,12 @@ async function installBridgeInInspectedTab(chromeApi: any, tabId: number): Promi
   await chromeApi.scripting.executeScript({
     target: { tabId, allFrames: true },
     world: "ISOLATED",
-    func: createBridgeInstallerScript,
+    func: installDevtoolsPortRelay,
     args: [
-      DEVTOOLS_BRIDGE_CHANNEL,
-      DEVTOOLS_PORT_NAME,
-      DEVTOOLS_CONTROL_MESSAGES.COMLINK_CONNECT,
-      DEVTOOLS_CONTROL_MESSAGES.COMLINK_READY,
-      ANNOUNCE_REQUEST_TIMEOUT_MS,
-      ANNOUNCE_POLL_INTERVAL_MS,
+      createDevtoolsPortRelayConfig({
+        connectTimeoutMs: ANNOUNCE_REQUEST_TIMEOUT_MS,
+        retryIntervalMs: ANNOUNCE_POLL_INTERVAL_MS,
+      }),
     ],
   });
 }

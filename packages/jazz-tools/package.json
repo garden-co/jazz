@@ -35,6 +35,10 @@
       "react-native": "./dist/react-native/react-core.js",
       "default": "./dist/react-core/index.js"
     },
+    "./dev-tools/relay-installer": {
+      "types": "./dist/dev-tools/relay-installer.d.ts",
+      "default": "./dist/dev-tools/relay-installer.js"
+    },
     "./permissions": {
       "types": "./dist/permissions/index.d.ts",
       "default": "./dist/permissions/index.js"
