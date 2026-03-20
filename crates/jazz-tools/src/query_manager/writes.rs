@@ -11,7 +11,212 @@ use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::session::Session;
 use super::types::{ColumnType, LoadedRow, RowDescriptor, TableName, Value};
 
+pub struct RowBranchWrite<'a> {
+    pub table: &'a str,
+    pub branch: &'a str,
+    pub id: ObjectId,
+    pub values: &'a [Value],
+    pub old_data_for_policy: &'a [u8],
+}
+
+struct PreparedUpdateWrite {
+    table_name: TableName,
+    descriptor: RowDescriptor,
+    new_data: Vec<u8>,
+}
+
 impl QueryManager {
+    fn prepare_update_write<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        write: RowBranchWrite<'_>,
+        session: Option<&Session>,
+    ) -> Result<PreparedUpdateWrite, QueryError> {
+        let RowBranchWrite {
+            table,
+            branch,
+            id,
+            values,
+            old_data_for_policy,
+        } = write;
+        let table_name = TableName::new(table);
+        let (descriptor, using_policy, check_policy) = {
+            let table_schema = self
+                .schema
+                .get(&table_name)
+                .ok_or(QueryError::TableNotFound(table_name))?;
+            (
+                table_schema.columns.clone(),
+                table_schema.policies.update.using.clone(),
+                table_schema.policies.update.with_check.clone(),
+            )
+        };
+
+        if values.len() != descriptor.columns.len() {
+            return Err(QueryError::ColumnCountMismatch {
+                expected: descriptor.columns.len(),
+                actual: values.len(),
+            });
+        }
+
+        self.validate_json_for_values(&descriptor, values)?;
+        Self::validate_write_index_values_on_branch(table, branch, values, &descriptor)?;
+
+        let new_data = encode_row(&descriptor, values)
+            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+
+        if let (Some(session), Some(policy)) = (session, &using_policy) {
+            let mut visited = HashSet::new();
+            if !self.evaluate_policy_for_content_with_context_for_row(
+                storage,
+                policy,
+                old_data_for_policy,
+                &descriptor,
+                session,
+                table,
+                branch,
+                id,
+                0,
+                &mut visited,
+            ) {
+                return Err(QueryError::PolicyDenied {
+                    table: table_name,
+                    operation: Operation::Update,
+                });
+            }
+        }
+
+        if let (Some(session), Some(policy)) = (session, check_policy) {
+            let mut visited = HashSet::new();
+            if !self.evaluate_policy_for_content_with_context_for_row(
+                storage,
+                &policy,
+                &new_data,
+                &descriptor,
+                session,
+                table,
+                branch,
+                id,
+                0,
+                &mut visited,
+            ) {
+                return Err(QueryError::PolicyDenied {
+                    table: table_name,
+                    operation: Operation::Update,
+                });
+            }
+        }
+
+        Ok(PreparedUpdateWrite {
+            table_name,
+            descriptor,
+            new_data,
+        })
+    }
+
+    fn commit_prepared_update_write<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        branch: &str,
+        id: ObjectId,
+        new_data: &[u8],
+    ) -> Result<CommitId, QueryError> {
+        let parents = self
+            .sync_manager
+            .object_manager
+            .get_tip_ids(id, branch)
+            .map(|tips| tips.iter().copied().collect())
+            .unwrap_or_default();
+
+        let commit_id = self
+            .sync_manager
+            .object_manager
+            .add_commit(storage, id, branch, parents, new_data.to_vec(), id, None)
+            .map_err(|_| QueryError::ObjectNotFound(id))?;
+
+        self.sync_manager
+            .forward_update_to_servers(id, branch.into());
+
+        Ok(commit_id)
+    }
+
+    /// Load a row for schema-aware updates.
+    ///
+    /// If the row exists on the current schema branch, use that version.
+    /// Otherwise, fall back to the newest visible version across sibling
+    /// schema-version branches for the same logical user branch.
+    pub fn load_row_for_schema_update<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        id: ObjectId,
+        current_branch: &str,
+        sibling_schema_branches: &[String],
+    ) -> Option<(String, String, Vec<u8>, CommitId)> {
+        let load_latest_from = |obj: &crate::object::Object,
+                                branches: &[String]|
+         -> Option<(String, Vec<u8>, CommitId)> {
+            let mut best: Option<(u64, String, Vec<u8>, CommitId)> = None;
+
+            for branch_name in branches {
+                let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) else {
+                    continue;
+                };
+                for &tip_id in &branch.tips {
+                    let Some(commit) = branch.commits.get(&tip_id) else {
+                        continue;
+                    };
+                    if commit.content.is_empty() {
+                        continue;
+                    }
+
+                    match &best {
+                        None => {
+                            best = Some((
+                                commit.timestamp,
+                                branch_name.clone(),
+                                commit.content.clone(),
+                                tip_id,
+                            ));
+                        }
+                        Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
+                            best = Some((
+                                commit.timestamp,
+                                branch_name.clone(),
+                                commit.content.clone(),
+                                tip_id,
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            best.map(|(_, branch_name, content, commit_id)| (branch_name, content, commit_id))
+        };
+
+        let current_only = vec![current_branch.to_string()];
+        let current_obj =
+            self.sync_manager
+                .object_manager
+                .get_or_load(id, storage, &current_only)?;
+        let table = current_obj
+            .metadata
+            .get(MetadataKey::Table.as_str())?
+            .clone();
+        if let Some((branch_name, content, commit_id)) =
+            load_latest_from(current_obj, &current_only)
+        {
+            return Some((table, branch_name, content, commit_id));
+        }
+
+        let sibling_obj =
+            self.sync_manager
+                .object_manager
+                .get_or_load(id, storage, sibling_schema_branches)?;
+        load_latest_from(sibling_obj, sibling_schema_branches)
+            .map(|(branch_name, content, commit_id)| (table, branch_name, content, commit_id))
+    }
+
     /// Insert a new row into a table.
     ///
     /// Returns an `InsertResult` that can be polled to check durability.
@@ -756,135 +961,102 @@ impl QueryManager {
             .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
 
-        let table_name = TableName::new(&table);
-
         // Get old data from ObjectManager
         let (old_data, _commit_id) = self
             .load_row_from_object(id)
             .ok_or(QueryError::ObjectNotFound(id))?;
-
-        let (descriptor, using_policy, check_policy) = {
-            let table_schema = self
-                .schema
-                .get(&table_name)
-                .ok_or(QueryError::TableNotFound(table_name))?;
-            (
-                table_schema.columns.clone(),
-                table_schema.policies.update.using.clone(),
-                table_schema.policies.update.with_check.clone(),
-            )
-        };
-
-        if values.len() != descriptor.columns.len() {
-            return Err(QueryError::ColumnCountMismatch {
-                expected: descriptor.columns.len(),
-                actual: values.len(),
-            });
-        }
-
-        self.validate_json_for_values(&descriptor, values)?;
-        Self::validate_write_index_values_on_branch(
-            &table,
-            self.current_branch().as_str(),
-            values,
-            &descriptor,
-        )?;
-
-        // Encode new data (used by WITH CHECK and commit write).
-        let new_data = encode_row(&descriptor, values)
-            .map_err(|e| QueryError::EncodingError(e.to_string()))?;
-
-        // Check UPDATE USING policy against old row
-        if let (Some(session), Some(policy)) = (session, &using_policy) {
-            let mut visited = HashSet::new();
-            if !self.evaluate_policy_for_content_with_context_for_row(
-                storage,
-                policy,
-                &old_data,
-                &descriptor,
-                session,
-                &table,
-                self.current_branch().as_str(),
-                id,
-                0,
-                &mut visited,
-            ) {
-                return Err(QueryError::PolicyDenied {
-                    table: table_name,
-                    operation: Operation::Update,
-                });
-            }
-        }
-
-        // Check UPDATE WITH CHECK policy against new values
-        if let (Some(session), Some(policy)) = (session, check_policy) {
-            let mut visited = HashSet::new();
-            if !self.evaluate_policy_for_content_with_context_for_row(
-                storage,
-                &policy,
-                &new_data,
-                &descriptor,
-                session,
-                &table,
-                self.current_branch().as_str(),
-                id,
-                0,
-                &mut visited,
-            ) {
-                return Err(QueryError::PolicyDenied {
-                    table: table_name,
-                    operation: Operation::Update,
-                });
-            }
-        }
-
-        // Get parent commit
-        let tips = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, self.current_branch())
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
-
-        let parents: Vec<_> = tips.into_iter().collect();
-        let author = id;
-
-        // Add commit with new data
-        let commit_id = self
-            .sync_manager
-            .object_manager
-            .add_commit(
-                storage,
-                id,
-                self.current_branch(),
-                parents,
-                new_data.clone(),
-                author,
-                None,
-            )
-            .map_err(|_| QueryError::ObjectNotFound(id))?;
-
-        // Forward update to all connected servers
         let branch = self.current_branch();
-        tracing::trace!(%id, ?commit_id, "forward update to servers");
-        self.sync_manager
-            .forward_update_to_servers(id, branch.into());
+        let prepared = self.prepare_update_write(
+            storage,
+            RowBranchWrite {
+                table: &table,
+                branch: branch.as_str(),
+                id,
+                values,
+                old_data_for_policy: &old_data,
+            },
+            session,
+        )?;
+        let commit_id =
+            self.commit_prepared_update_write(storage, branch.as_str(), id, &prepared.new_data)?;
 
         // Update indices and persist modified nodes
         self.update_indices_for_update(
             storage,
-            &table_name.0,
+            &prepared.table_name.0,
             id,
             &old_data,
-            &new_data,
-            &descriptor,
+            &prepared.new_data,
+            &prepared.descriptor,
         )?;
-        tracing::trace!(%id, table = %table_name.0, "index_update complete");
+        tracing::trace!(%id, table = %prepared.table_name.0, "index_update complete");
 
         // Mark subscriptions dirty and notify about content update
-        self.mark_subscriptions_dirty_local(&table_name.0);
-        self.mark_row_updated_in_subscriptions(&table_name.0, id);
-        tracing::trace!(table = %table_name.0, "mark_subscriptions_dirty");
+        self.mark_subscriptions_dirty_local(&prepared.table_name.0);
+        self.mark_row_updated_in_subscriptions(&prepared.table_name.0, id);
+        tracing::trace!(table = %prepared.table_name.0, "mark_subscriptions_dirty");
+
+        Ok(commit_id)
+    }
+
+    /// Write new row content for an existing object onto a specific branch.
+    ///
+    /// Used for schema-aware copy-on-write updates where the row currently
+    /// lives on an older schema branch and must be written onto the current
+    /// branch without creating a new object id.
+    pub fn write_existing_row_on_branch_with_session<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        write: RowBranchWrite<'_>,
+        session: Option<&Session>,
+    ) -> Result<CommitId, QueryError> {
+        let RowBranchWrite {
+            table,
+            branch,
+            id,
+            values: _values,
+            old_data_for_policy: _old_data_for_policy,
+        } = write;
+        let prepared = self.prepare_update_write(storage, write, session)?;
+
+        let existing_branch_data = self
+            .load_row_from_object_on_branch(id, branch)
+            .map(|(data, _)| data)
+            .filter(|data| !data.is_empty());
+        let was_soft_deleted = self.row_is_deleted_on_branch(storage, table, branch, id);
+        let commit_id =
+            self.commit_prepared_update_write(storage, branch, id, &prepared.new_data)?;
+
+        match existing_branch_data {
+            Some(old_data) => Self::update_indices_for_update_on_branch(
+                storage,
+                table,
+                branch,
+                id,
+                &old_data,
+                &prepared.new_data,
+                &prepared.descriptor,
+            )?,
+            None if was_soft_deleted => Self::update_indices_for_undelete_on_branch(
+                storage,
+                table,
+                branch,
+                id,
+                &prepared.new_data,
+                &prepared.descriptor,
+            )?,
+            None => Self::update_indices_for_insert_on_branch(
+                storage,
+                table,
+                branch,
+                id,
+                &prepared.new_data,
+                &prepared.descriptor,
+            )?,
+        }
+
+        self.mark_subscriptions_dirty_local(table);
+        self.mark_row_updated_in_subscriptions(table, id);
 
         Ok(commit_id)
     }
