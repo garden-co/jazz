@@ -120,10 +120,25 @@ function normalizeJazzRnError(error: unknown): Error {
     typeof error.inner?.message === "string" && error.inner.message.length > 0
       ? error.inner.message
       : String(error);
-  const normalized = new Error(message, { cause: error });
+  const normalized = createErrorWithCause(message, error);
   normalized.name = `JazzRn${error.tag}Error`;
   Object.assign(normalized, { tag: error.tag });
   return normalized as Error;
+}
+
+function createErrorWithCause(message: string, cause: unknown): Error {
+  try {
+    return new Error(message, { cause });
+  } catch {
+    const fallback = new Error(message) as Error & { cause?: unknown };
+    Object.defineProperty(fallback, "cause", {
+      value: cause,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+    return fallback;
+  }
 }
 
 function assertSyncMessageArgs(
