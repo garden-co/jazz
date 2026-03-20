@@ -138,14 +138,14 @@ export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = fal
 export type ProjectSelectableColumn = keyof Project | PermissionIntrospectionColumn | "*";
 export type ProjectOrderableColumn = keyof Project | PermissionIntrospectionColumn;
 
-export type ProjectSelected<S extends ProjectSelectableColumn = keyof Project> = "*" extends S ? Project : Pick<Project, Extract<S | "id", keyof Project>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type ProjectSelected<S extends ProjectSelectableColumn = keyof Project> = ("*" extends S ? Project : Pick<Project, Extract<S | "id", keyof Project>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type ProjectSelectedWithIncludes<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = keyof Project, R extends boolean = false> = ProjectSelected<S> & ProjectIncludedRelations<I, R>;
 
 export type TodoSelectableColumn = keyof Todo | PermissionIntrospectionColumn | "*";
 export type TodoOrderableColumn = keyof Todo | PermissionIntrospectionColumn;
 
-export type TodoSelected<S extends TodoSelectableColumn = keyof Todo> = "*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type TodoSelected<S extends TodoSelectableColumn = keyof Todo> = ("*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false> = TodoSelected<S> & TodoIncludedRelations<I, R>;
 
@@ -449,6 +449,9 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends Projec
     }
 
     const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
     const stepConditions = stepBuilt.conditions.filter(
       (condition) => !(condition.op === "eq" && condition.value === currentToken),
     );
@@ -646,6 +649,9 @@ export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectab
     }
 
     const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
     const stepConditions = stepBuilt.conditions.filter(
       (condition) => !(condition.op === "eq" && condition.value === currentToken),
     );
