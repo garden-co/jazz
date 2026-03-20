@@ -77,6 +77,10 @@ export async function readTodoPermissionIntrospection(db: Db) {
   );
 }
 
+export async function readTodosWithDeletePermission(db: Db) {
+  return db.all(app.todos.select("*", "$canDelete").orderBy("title", "asc"));
+}
+
 export async function readEditableTodos(db: Db) {
   return db.all(app.todos.where({ $canEdit: true }).select("title", "$canEdit"));
 }
@@ -108,6 +112,13 @@ export async function writeTodoCrud(db: Db, todoId: string) {
   db.delete(app.todos, todoId);
 }
 // #endregion writing-crud-ts
+
+// #region writing-nullable-update-ts
+export function clearNullableTodoFields(db: Db, todoId: string) {
+  db.update(app.todos, todoId, { ownerId: null }); // clears the nullable FK
+  db.update(app.todos, todoId, { description: undefined }); // leaves the field unchanged
+}
+// #endregion writing-nullable-update-ts
 
 // #region writing-durability-tier-ts
 export async function writeTodoWithDurabilityTiers(db: Db) {

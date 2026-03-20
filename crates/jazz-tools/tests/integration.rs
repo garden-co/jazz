@@ -1,4 +1,4 @@
-#![cfg(feature = "cli")]
+#![cfg(feature = "test")]
 
 //! E2E integration tests for jazz-tools server.
 //!
@@ -21,12 +21,14 @@ struct TestServer {
     port: u16,
     #[allow(dead_code)]
     data_dir: TempDir,
+    configured_data_dir: PathBuf,
 }
 
 impl TestServer {
     /// Start a test server on the given port.
     async fn start(port: u16) -> Self {
         let data_dir = TempDir::new().expect("create temp dir");
+        let configured_data_dir = data_dir.path().to_path_buf();
 
         // Use a deterministic UUID app ID for testing
         let app_id = "00000000-0000-0000-0000-000000000001";
@@ -40,7 +42,7 @@ impl TestServer {
                 "--port",
                 &port.to_string(),
                 "--data-dir",
-                data_dir.path().to_str().unwrap(),
+                configured_data_dir.to_str().unwrap(),
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -56,11 +58,51 @@ impl TestServer {
             process,
             port,
             data_dir,
+            configured_data_dir,
         };
 
         // Wait for server to be ready
         server.wait_ready().await;
 
+        server
+    }
+
+    /// Start a test server with the CLI `--in-memory` flag enabled.
+    async fn start_in_memory(port: u16) -> Self {
+        let data_dir = TempDir::new().expect("create temp dir");
+        let configured_data_dir = data_dir.path().join("should-not-exist");
+
+        let app_id = "00000000-0000-0000-0000-000000000001";
+        let jazz_binary = Self::find_jazz_binary();
+
+        let process = Command::new(&jazz_binary)
+            .args([
+                "server",
+                app_id,
+                "--port",
+                &port.to_string(),
+                "--data-dir",
+                configured_data_dir.to_str().unwrap(),
+                "--in-memory",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to spawn jazz-tools server at {:?}: {}",
+                    jazz_binary, e
+                )
+            });
+
+        let server = Self {
+            process,
+            port,
+            data_dir,
+            configured_data_dir,
+        };
+
+        server.wait_ready().await;
         server
     }
 
@@ -163,6 +205,25 @@ async fn test_server_health_check() {
 }
 
 #[tokio::test]
+async fn test_server_health_check_in_memory_does_not_create_data_dir() {
+    let port = get_free_port();
+    let server = TestServer::start_in_memory(port).await;
+
+    let client = Client::new();
+    let resp = client
+        .get(format!("{}/health", server.base_url()))
+        .send()
+        .await
+        .expect("health check");
+
+    assert!(resp.status().is_success());
+    assert!(
+        !server.configured_data_dir.exists(),
+        "--in-memory should not create the configured data directory"
+    );
+}
+
+#[tokio::test]
 async fn test_stream_connection_receives_connected_event() {
     let port = get_free_port();
     let server = TestServer::start(port).await;
@@ -194,10 +255,15 @@ async fn test_stream_connection_receives_connected_event() {
         ServerEvent::Connected {
             connection_id,
             client_id,
+            catalogue_state_hash,
             ..
         } => {
             assert!(connection_id.0 > 0);
             assert!(!client_id.is_empty());
+            assert!(
+                catalogue_state_hash.is_some(),
+                "Connected event should advertise the server catalogue digest"
+            );
         }
         other => panic!("Expected Connected event, got {:?}", other.variant_name()),
     }

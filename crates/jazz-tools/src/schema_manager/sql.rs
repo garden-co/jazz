@@ -552,6 +552,16 @@ impl Parser {
         Ok(PolicyValue::Literal(self.parse_value()?))
     }
 
+    fn parse_policy_literal_value(&mut self) -> Result<Value, SqlParseError> {
+        if self.peek() == Some(&Token::At) {
+            return Err(SqlParseError::Expected(
+                "literal value, session references are not allowed here".to_string(),
+            ));
+        }
+
+        self.parse_value()
+    }
+
     fn parse_policy_in_list(&mut self) -> Result<Vec<PolicyValue>, SqlParseError> {
         self.expect(&Token::LParen)?;
         if self.peek() == Some(&Token::RParen) {
@@ -564,6 +574,24 @@ impl Parser {
         while self.peek() == Some(&Token::Comma) {
             self.advance();
             values.push(self.parse_policy_value()?);
+        }
+
+        self.expect(&Token::RParen)?;
+        Ok(values)
+    }
+
+    fn parse_policy_literal_in_list(&mut self) -> Result<Vec<Value>, SqlParseError> {
+        self.expect(&Token::LParen)?;
+        if self.peek() == Some(&Token::RParen) {
+            return Err(SqlParseError::Expected(
+                "at least one literal value in IN (...) policy list".to_string(),
+            ));
+        }
+
+        let mut values = vec![self.parse_policy_literal_value()?];
+        while self.peek() == Some(&Token::Comma) {
+            self.advance();
+            values.push(self.parse_policy_literal_value()?);
         }
 
         self.expect(&Token::RParen)?;
@@ -661,6 +689,90 @@ impl Parser {
                     table,
                     condition: Box::new(condition),
                 })
+            }
+            Some(Token::At) => {
+                let path = self.parse_session_path()?;
+
+                match self.peek() {
+                    Some(Token::Eq) => {
+                        self.advance();
+                        Ok(PolicyExpr::SessionCmp {
+                            path,
+                            op: CmpOp::Eq,
+                            value: self.parse_policy_literal_value()?,
+                        })
+                    }
+                    Some(Token::Ne) => {
+                        self.advance();
+                        Ok(PolicyExpr::SessionCmp {
+                            path,
+                            op: CmpOp::Ne,
+                            value: self.parse_policy_literal_value()?,
+                        })
+                    }
+                    Some(Token::Lt) => {
+                        self.advance();
+                        Ok(PolicyExpr::SessionCmp {
+                            path,
+                            op: CmpOp::Lt,
+                            value: self.parse_policy_literal_value()?,
+                        })
+                    }
+                    Some(Token::Le) => {
+                        self.advance();
+                        Ok(PolicyExpr::SessionCmp {
+                            path,
+                            op: CmpOp::Le,
+                            value: self.parse_policy_literal_value()?,
+                        })
+                    }
+                    Some(Token::Gt) => {
+                        self.advance();
+                        Ok(PolicyExpr::SessionCmp {
+                            path,
+                            op: CmpOp::Gt,
+                            value: self.parse_policy_literal_value()?,
+                        })
+                    }
+                    Some(Token::Ge) => {
+                        self.advance();
+                        Ok(PolicyExpr::SessionCmp {
+                            path,
+                            op: CmpOp::Ge,
+                            value: self.parse_policy_literal_value()?,
+                        })
+                    }
+                    Some(Token::Contains) => {
+                        self.advance();
+                        Ok(PolicyExpr::SessionContains {
+                            path,
+                            value: self.parse_policy_literal_value()?,
+                        })
+                    }
+                    Some(Token::In) => {
+                        self.advance();
+                        Ok(PolicyExpr::SessionInList {
+                            path,
+                            values: self.parse_policy_literal_in_list()?,
+                        })
+                    }
+                    Some(Token::Is) => {
+                        self.advance();
+                        if self.peek() == Some(&Token::Not) {
+                            self.advance();
+                            self.expect(&Token::Null)?;
+                            Ok(PolicyExpr::SessionIsNotNull { path })
+                        } else {
+                            self.expect(&Token::Null)?;
+                            Ok(PolicyExpr::SessionIsNull { path })
+                        }
+                    }
+                    Some(t) => Err(SqlParseError::Expected(format!(
+                        "policy operator after session path, got {:?}",
+                        t
+                    ))),
+                    None => Err(SqlParseError::UnexpectedEnd),
+                }
             }
             Some(Token::Ident(_)) => {
                 let column = self.expect_ident()?;
@@ -1147,11 +1259,16 @@ pub fn parse_schema(sql: &str) -> Result<Schema, SqlParseError> {
                 Ok(())
             }
             PolicyExpr::Not(inner) => validate_policy_expr_for_bytea(descriptor, inner),
-            PolicyExpr::IsNull { .. }
+            PolicyExpr::SessionCmp { .. }
+            | PolicyExpr::IsNull { .. }
+            | PolicyExpr::SessionIsNull { .. }
             | PolicyExpr::IsNotNull { .. }
+            | PolicyExpr::SessionIsNotNull { .. }
             | PolicyExpr::Contains { .. }
+            | PolicyExpr::SessionContains { .. }
             | PolicyExpr::In { .. }
             | PolicyExpr::InList { .. }
+            | PolicyExpr::SessionInList { .. }
             | PolicyExpr::Exists { .. }
             | PolicyExpr::ExistsRel { .. }
             | PolicyExpr::Inherits { .. }
@@ -1437,13 +1554,34 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
                 policy_value_to_sql(value)
             )
         }
+        PolicyExpr::SessionCmp { path, op, value } => {
+            format!(
+                "@session.{} {} {}",
+                session_path_to_sql(path),
+                cmp_op_to_sql(op),
+                value_to_sql(value)
+            )
+        }
         PolicyExpr::IsNull { column } => format!("{} IS NULL", quote_identifier(column)),
+        PolicyExpr::SessionIsNull { path } => {
+            format!("@session.{} IS NULL", session_path_to_sql(path))
+        }
         PolicyExpr::IsNotNull { column } => format!("{} IS NOT NULL", quote_identifier(column)),
+        PolicyExpr::SessionIsNotNull { path } => {
+            format!("@session.{} IS NOT NULL", session_path_to_sql(path))
+        }
         PolicyExpr::Contains { column, value } => {
             format!(
                 "{} CONTAINS {}",
                 quote_identifier(column),
                 policy_value_to_sql(value)
+            )
+        }
+        PolicyExpr::SessionContains { path, value } => {
+            format!(
+                "@session.{} CONTAINS {}",
+                session_path_to_sql(path),
+                value_to_sql(value)
             )
         }
         PolicyExpr::In {
@@ -1460,6 +1598,15 @@ fn policy_expr_to_sql(expr: &PolicyExpr) -> String {
             values
                 .iter()
                 .map(policy_value_to_sql)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        PolicyExpr::SessionInList { path, values } => format!(
+            "@session.{} IN ({})",
+            session_path_to_sql(path),
+            values
+                .iter()
+                .map(value_to_sql)
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -1926,6 +2073,86 @@ mod tests {
                             PolicyValue::SessionRef(vec!["user_id".into()])
                         ]
         ));
+    }
+
+    const SESSION_LEFT_POLICY_SQL: &str = r#"
+        CREATE TABLE todos (
+            owner_id TEXT NOT NULL
+        );
+
+        CREATE POLICY todos_select_policy ON todos FOR SELECT
+            USING (
+                (@session.claims.role = 'manager')
+                AND (@session.claims.plan IN ('pro', 'enterprise'))
+                AND (@session.claims.teamIds CONTAINS 'team_a')
+                AND (@session.claims.deleted_at IS NULL)
+                AND (@session.userId IS NOT NULL)
+            );
+    "#;
+
+    #[test]
+    fn parse_create_policy_with_session_left_predicates() {
+        let schema = parse_schema(SESSION_LEFT_POLICY_SQL).unwrap();
+        let using = schema
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .policies
+            .select
+            .using
+            .as_ref()
+            .expect("missing select policy");
+
+        assert_eq!(
+            using,
+            &PolicyExpr::And(vec![
+                PolicyExpr::SessionCmp {
+                    path: vec!["claims".into(), "role".into()],
+                    op: CmpOp::Eq,
+                    value: Value::Text("manager".into()),
+                },
+                PolicyExpr::SessionInList {
+                    path: vec!["claims".into(), "plan".into()],
+                    values: vec![Value::Text("pro".into()), Value::Text("enterprise".into())],
+                },
+                PolicyExpr::SessionContains {
+                    path: vec!["claims".into(), "teamIds".into()],
+                    value: Value::Text("team_a".into()),
+                },
+                PolicyExpr::SessionIsNull {
+                    path: vec!["claims".into(), "deleted_at".into()],
+                },
+                PolicyExpr::SessionIsNotNull {
+                    path: vec!["userId".into()],
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn policy_expr_to_sql_formats_session_left_predicates() {
+        let expr = PolicyExpr::And(vec![
+            PolicyExpr::SessionCmp {
+                path: vec!["claims".into(), "role".into()],
+                op: CmpOp::Eq,
+                value: Value::Text("manager".into()),
+            },
+            PolicyExpr::SessionInList {
+                path: vec!["claims".into(), "plan".into()],
+                values: vec![Value::Text("pro".into()), Value::Text("enterprise".into())],
+            },
+            PolicyExpr::SessionContains {
+                path: vec!["claims".into(), "teamIds".into()],
+                value: Value::Text("team_a".into()),
+            },
+            PolicyExpr::SessionIsNull {
+                path: vec!["claims".into(), "deleted_at".into()],
+            },
+        ]);
+
+        assert_eq!(
+            policy_expr_to_sql(&expr),
+            "(@session.claims.role = 'manager') AND (@session.claims.plan IN ('pro', 'enterprise')) AND (@session.claims.teamIds CONTAINS 'team_a') AND (@session.claims.deleted_at IS NULL)"
+        );
     }
 
     #[test]
@@ -2908,5 +3135,35 @@ mod tests {
             .unwrap();
 
         assert_eq!(original_using, reparsed_using);
+    }
+
+    #[test]
+    fn policy_session_left_round_trip() {
+        let schema = parse_schema(SESSION_LEFT_POLICY_SQL).unwrap();
+        let regenerated = schema_to_sql(&schema);
+        let reparsed = parse_schema(&regenerated).unwrap();
+
+        let original_using = schema
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .policies
+            .select
+            .using
+            .as_ref()
+            .unwrap();
+        let reparsed_using = reparsed
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .policies
+            .select
+            .using
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(original_using, reparsed_using);
+        assert!(regenerated.contains("@session.claims.role = 'manager'"));
+        assert!(regenerated.contains("@session.claims.plan IN ('pro', 'enterprise')"));
+        assert!(regenerated.contains("@session.claims.teamIds CONTAINS 'team_a'"));
+        assert!(regenerated.contains("@session.claims.deleted_at IS NULL"));
     }
 }

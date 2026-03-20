@@ -172,12 +172,12 @@ describe("schemaToSql", () => {
     });
     const schema = getCollectedSchema();
 
-    const owner = schema.tables[0].columns.find((c) => c.name === "ownerId")!;
+    const owner = schema.tables[0]!.columns.find((c) => c.name === "ownerId")!;
     expect(owner.sqlType).toBe("UUID");
     expect(owner.references).toBe("users");
     expect(owner.nullable).toBe(false);
 
-    const parent = schema.tables[0].columns.find((c) => c.name === "parentId")!;
+    const parent = schema.tables[0]!.columns.find((c) => c.name === "parentId")!;
     expect(parent.sqlType).toBe("UUID");
     expect(parent.references).toBe("todos");
     expect(parent.nullable).toBe(true);
@@ -190,7 +190,7 @@ describe("schemaToSql", () => {
     });
     const schema = getCollectedSchema();
 
-    const parts = schema.tables[0].columns.find((c) => c.name === "partIds")!;
+    const parts = schema.tables[0]!.columns.find((c) => c.name === "partIds")!;
     expect(parts.sqlType).toEqual({ kind: "ARRAY", element: "UUID" });
     expect(parts.references).toBe("file_parts");
     expect(parts.nullable).toBe(false);
@@ -306,6 +306,51 @@ CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (ownerId = @session.
     const sql = schemaToSql(schema);
     expect(sql).toContain(
       "CREATE POLICY todos_select_policy ON todos FOR SELECT USING ((ownerId CONTAINS 'ali') AND (status IN ('active', 'trial')));",
+    );
+  });
+
+  it("generates session-left policy expressions", () => {
+    resetCollectedState();
+    table("todos", {
+      owner_id: col.string(),
+    });
+    const schema = getCollectedSchema();
+    schema.tables[0]!.policies = {
+      select: {
+        using: {
+          type: "And",
+          exprs: [
+            {
+              type: "SessionCmp",
+              path: ["claims", "role"],
+              op: "Eq",
+              value: { type: "Literal", value: "manager" },
+            },
+            {
+              type: "SessionInList",
+              path: ["claims", "plan"],
+              values: [
+                { type: "Literal", value: "pro" },
+                { type: "Literal", value: "enterprise" },
+              ],
+            },
+            {
+              type: "SessionContains",
+              path: ["claims", "teamIds"],
+              value: { type: "Literal", value: "team_a" },
+            },
+            {
+              type: "SessionIsNull",
+              path: ["claims", "deleted_at"],
+            },
+          ],
+        },
+      },
+    };
+
+    const sql = schemaToSql(schema);
+    expect(sql).toContain(
+      "CREATE POLICY todos_select_policy ON todos FOR SELECT USING ((@session.claims.role = 'manager') AND (@session.claims.plan IN ('pro', 'enterprise')) AND (@session.claims.teamIds CONTAINS 'team_a') AND (@session.claims.deleted_at IS NULL));",
     );
   });
 });

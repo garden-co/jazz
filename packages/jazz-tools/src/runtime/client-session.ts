@@ -55,7 +55,7 @@ function utf8Encode(value: string): Uint8Array {
   const encoded = encodeURIComponent(value);
   const bytes: number[] = [];
   for (let i = 0; i < encoded.length; i += 1) {
-    const char = encoded[i];
+    const char = encoded[i]!;
     if (char === "%") {
       bytes.push(Number.parseInt(encoded.slice(i + 1, i + 3), 16));
       i += 2;
@@ -105,8 +105,10 @@ function parseJwtPayload(jwtToken: string): JwtPayload | null {
 
   const parts = token.split(".");
   if (parts.length < 2) return null;
+  const payloadPart = parts[1];
+  if (payloadPart === undefined) return null;
 
-  const payloadJson = decodeBase64ToUtf8(base64UrlToBase64(parts[1]));
+  const payloadJson = decodeBase64ToUtf8(base64UrlToBase64(payloadPart));
   if (!payloadJson) return null;
 
   try {
@@ -179,17 +181,17 @@ function sha256PureJs(input: string): Uint8Array {
     for (let i = 0; i < 16; i += 1) {
       const index = offset + i * 4;
       w[i] =
-        ((padded[index] << 24) |
-          (padded[index + 1] << 16) |
-          (padded[index + 2] << 8) |
-          padded[index + 3]) >>>
+        ((padded[index]! << 24) |
+          (padded[index + 1]! << 16) |
+          (padded[index + 2]! << 8) |
+          padded[index + 3]!) >>>
         0;
     }
 
     for (let i = 16; i < 64; i += 1) {
-      const s0 = rightRotate(w[i - 15], 7) ^ rightRotate(w[i - 15], 18) ^ (w[i - 15] >>> 3);
-      const s1 = rightRotate(w[i - 2], 17) ^ rightRotate(w[i - 2], 19) ^ (w[i - 2] >>> 10);
-      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+      const s0 = rightRotate(w[i - 15]!, 7) ^ rightRotate(w[i - 15]!, 18) ^ (w[i - 15]! >>> 3);
+      const s1 = rightRotate(w[i - 2]!, 17) ^ rightRotate(w[i - 2]!, 19) ^ (w[i - 2]! >>> 10);
+      w[i] = (w[i - 16]! + s0 + w[i - 7]! + s1) >>> 0;
     }
 
     let a = h0;
@@ -204,7 +206,7 @@ function sha256PureJs(input: string): Uint8Array {
     for (let i = 0; i < 64; i += 1) {
       const sum1 = rightRotate(e, 6) ^ rightRotate(e, 11) ^ rightRotate(e, 25);
       const choice = (e & f) ^ (~e & g);
-      const temp1 = (h + sum1 + choice + SHA256_K[i] + w[i]) >>> 0;
+      const temp1 = (h + sum1 + choice + SHA256_K[i]! + w[i]!) >>> 0;
       const sum0 = rightRotate(a, 2) ^ rightRotate(a, 13) ^ rightRotate(a, 22);
       const majority = (a & b) ^ (a & c) ^ (b & c);
       const temp2 = (sum0 + majority) >>> 0;
@@ -232,7 +234,7 @@ function sha256PureJs(input: string): Uint8Array {
   const digest = new Uint8Array(32);
   const words = [h0, h1, h2, h3, h4, h5, h6, h7];
   for (let i = 0; i < words.length; i += 1) {
-    const value = words[i];
+    const value = words[i]!;
     const base = i * 4;
     digest[base] = (value >>> 24) & 0xff;
     digest[base + 1] = (value >>> 16) & 0xff;

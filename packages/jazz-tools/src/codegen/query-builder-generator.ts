@@ -333,6 +333,11 @@ function generateQueryBuilderClass(
   lines.push(`    }`);
   lines.push(``);
   lines.push(`    const currentCondition = currentConditions[0];`);
+  lines.push(`    if (currentCondition === undefined) {`);
+  lines.push(
+    `      throw new Error("gather(...) step must include exactly one where condition bound to current.");`,
+  );
+  lines.push(`    }`);
   lines.push(`    const stepConditions = stepBuilt.conditions.filter(`);
   lines.push(`      (condition) => !(condition.op === "eq" && condition.value === currentToken),`);
   lines.push(`    );`);

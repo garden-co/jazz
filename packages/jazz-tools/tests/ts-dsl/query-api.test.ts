@@ -1,29 +1,7 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, describe, it, expect, assert, expectTypeOf } from "vitest";
-import { app, Project, Todo, TodoInit, User } from "./fixtures/basic/app";
-
-function uniqueDbName(label: string): string {
-  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function insertUser(db: Db, name = "Test User") {
-  return db.insert(app.users, { name, friendsIds: [] });
-}
-
-function insertProject(db: Db, name = "Test Project") {
-  return db.insert(app.projects, { name });
-}
-
-function insertTodo(db: Db, data: Partial<TodoInit>) {
-  return db.insert(app.todos, {
-    title: data.title ?? "Test Todo",
-    done: data.done ?? false,
-    tags: data.tags ?? [],
-    projectId: data.projectId ?? insertProject(db).id,
-    ownerId: data.ownerId ?? undefined,
-    assigneesIds: data.assigneesIds ?? [],
-  });
-}
+import { app, Project, Todo, User } from "./fixtures/basic/app";
+import { insertProject, insertTodo, insertUser, uniqueDbName } from "./factories";
 
 function makeFriends(db: Db, user1: User, user2: User) {
   const user1Friends = [...user1.friendsIds, user2.id];
@@ -71,9 +49,9 @@ describe("TS Query API", () => {
       const results = await db.all(app.projects.where({ id: { eq: id } }));
       expect(results.length).toBe(1);
 
-      expectTypeOf(results[0]).branded.toEqualTypeOf<Project>();
-      expect(results[0].id).toBe(id);
-      expect(results[0].name).toBe("Project A");
+      expectTypeOf(results[0]!).branded.toEqualTypeOf<Project>();
+      expect(results[0]!.id).toBe(id);
+      expect(results[0]!.name).toBe("Project A");
     });
 
     describe("query by array column", () => {
@@ -99,7 +77,7 @@ describe("TS Query API", () => {
 
         const todosWithTags = await db.all(app.todos.where({ tags: { eq: ["tag1"] } }));
         expect(todosWithTags.length).toBe(1);
-        expect(todosWithTags[0].id).toEqual(id1);
+        expect(todosWithTags[0]!.id).toEqual(id1);
       });
 
       it("using contains", async () => {
@@ -152,7 +130,7 @@ describe("TS Query API", () => {
       );
 
       expect(results.length).toBe(1);
-      const todo = results[0];
+      const todo = results[0]!;
       expect(todo.title).toBe("Write tests");
       expectTypeOf(todo.ownerId).toEqualTypeOf<string | undefined>();
       expect(todo.ownerId).toBe(ownerId);
@@ -227,14 +205,14 @@ describe("TS Query API", () => {
       });
 
       const baseline = await db.all(app.todos.where({ id: { eq: todoId } }));
-      expect(baseline[0].title).toBe("Hello world");
+      expect(baseline[0]!.title).toBe("Hello world");
 
       const withInclude = await db.all(
         app.todos.where({ id: { eq: todoId } }).include({ project: true }),
       );
 
       expect(withInclude.length).toBe(1);
-      expect(withInclude[0].title).toBe("Hello world");
+      expect(withInclude[0]!.title).toBe("Hello world");
     });
   });
 
@@ -674,6 +652,23 @@ describe("TS Query API", () => {
           $canDelete: true,
         },
       ]);
+
+      const fullRowWithDeletePermission = await db.one(
+        app.todos.select("*", "$canDelete").where({ id: { eq: editableId } }),
+      );
+
+      assert(fullRowWithDeletePermission, "Result is not defined");
+      expectTypeOf(fullRowWithDeletePermission.$canDelete).toEqualTypeOf<boolean | null>();
+      expect(fullRowWithDeletePermission).toEqual({
+        id: editableId,
+        title: "Draft docs",
+        done: false,
+        tags: ["dev"],
+        projectId,
+        ownerId: undefined,
+        assigneesIds: [],
+        $canDelete: true,
+      });
     });
 
     it("include builders can project nested relation columns", async () => {
@@ -714,9 +709,9 @@ describe("TS Query API", () => {
       });
       expectTypeOf(result.name).toEqualTypeOf<string>();
       expectTypeOf(result.todosViaProject).branded.toEqualTypeOf<{ id: string; title: string }[]>();
-      expect("done" in result.todosViaProject[0]).toBe(false);
-      expect("tags" in result.todosViaProject[0]).toBe(false);
-      expect("project" in result.todosViaProject[0]).toBe(false);
+      expect("done" in result.todosViaProject[0]!).toBe(false);
+      expect("tags" in result.todosViaProject[0]!).toBe(false);
+      expect("project" in result.todosViaProject[0]!).toBe(false);
     });
 
     it("subscribeAll preserves projected root columns with includes", async () => {
@@ -786,8 +781,8 @@ describe("TS Query API", () => {
           },
         },
       ]);
-      expect("done" in delta.all[0]).toBe(false);
-      expect("tags" in delta.all[0]).toBe(false);
+      expect("done" in delta.all[0]!).toBe(false);
+      expect("tags" in delta.all[0]!).toBe(false);
     });
   });
 });

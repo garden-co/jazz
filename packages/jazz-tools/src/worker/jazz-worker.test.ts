@@ -38,7 +38,7 @@ describe("ServerPayloadBatcher", () => {
     await Promise.resolve(); // yield to microtask queue
 
     expect(sendBatch).toHaveBeenCalledTimes(1);
-    expect(sendBatch.mock.calls[0][0]).toHaveLength(60);
+    expect(sendBatch.mock.calls[0]![0]).toHaveLength(60);
   });
 
   it("preserves payload order in the flushed batch", async () => {
@@ -82,14 +82,14 @@ describe("ServerPayloadBatcher", () => {
     await Promise.resolve();
 
     expect(sendBatch).toHaveBeenCalledTimes(1);
-    expect(sendBatch.mock.calls[0][0]).toHaveLength(2);
+    expect(sendBatch.mock.calls[0]![0]).toHaveLength(2);
 
     batcher.enqueue(playerPayload(3));
 
     await Promise.resolve();
 
     expect(sendBatch).toHaveBeenCalledTimes(2);
-    expect(sendBatch.mock.calls[1][0]).toHaveLength(1);
+    expect(sendBatch.mock.calls[1]![0]).toHaveLength(1);
   });
 
   it("does not flush when queue is empty", async () => {

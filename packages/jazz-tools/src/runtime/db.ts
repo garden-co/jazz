@@ -222,6 +222,14 @@ export interface TableProxy<T, Init> {
   readonly _initType: Init;
 }
 
+type UpdateValue<RowValue, InitValue> = undefined extends RowValue
+  ? InitValue | null
+  : InitValue | undefined;
+
+type UpdateData<T, Init> = {
+  [K in keyof Init]?: K extends keyof T ? UpdateValue<T[K], Init[K]> : Init[K] | undefined;
+};
+
 interface BroadcastChannelLike {
   postMessage(data: unknown): void;
   addEventListener(type: "message", listener: (event: MessageEvent) => void): void;
@@ -1021,7 +1029,7 @@ export class Db {
   /**
    * Update an existing row without waiting for durability.
    */
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
+  update<T, Init>(table: TableProxy<T, Init>, id: string, data: UpdateData<T, Init>): void {
     const client = this.getClient(table._schema);
     const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
     client.update(id, updates);
@@ -1033,7 +1041,7 @@ export class Db {
   async updateDurable<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
-    data: Partial<Init>,
+    data: UpdateData<T, Init>,
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
     const client = this.getClient(table._schema);
@@ -1262,13 +1270,7 @@ export class Db {
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T => {
-      return transformRows<T>(
-        [row],
-        outputSchema,
-        outputTable,
-        outputIncludes,
-        builtQuery.select,
-      )[0];
+      return transformRow<T>(row, outputSchema, outputTable, outputIncludes, builtQuery.select);
     };
 
     const subId = client.subscribeInternal(
@@ -1452,7 +1454,11 @@ class ClientBackedDb extends Db {
     return transformRow(row, table._schema, table._table);
   }
 
-  override update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
+  override update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: UpdateData<T, Init>,
+  ): void {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
@@ -1462,7 +1468,7 @@ class ClientBackedDb extends Db {
   override async updateDurable<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
-    data: Partial<Init>,
+    data: UpdateData<T, Init>,
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
@@ -1527,7 +1533,7 @@ class ClientBackedDb extends Db {
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T =>
-      transformRows<T>([row], outputSchema, outputTable, outputIncludes, builtQuery.select)[0];
+      transformRow<T>(row, outputSchema, outputTable, outputIncludes, builtQuery.select);
 
     const subId = this.runtimeClient.subscribeInternal(
       wasmQuery,
