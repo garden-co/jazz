@@ -74,6 +74,22 @@ fn write_policy_schema() -> Schema {
         .build()
 }
 
+/// Schema with an UPDATE policy where `using = True` (anyone can target any row)
+/// and `with_check = owner_policy` (only the owner may commit the new value).
+/// This lets tests verify that the two clauses are evaluated independently.
+fn write_check_policy_schema() -> Schema {
+    let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("documents")
+                .column("owner_id", ColumnType::Text)
+                .column("title", ColumnType::Text)
+                .policies(TablePolicies::new().with_update(Some(PolicyExpr::True), owner_policy)),
+        )
+        .build()
+}
+
 fn in_session_array_policy_schema() -> Schema {
     SchemaBuilder::new()
         .table(
@@ -621,6 +637,293 @@ async fn update_policies_block_unauthorized_server_mutations() {
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
+    observer.shutdown().await.expect("shutdown observer");
+    server.shutdown().await;
+}
+
+/// Verifies that a row rejected by the INSERT policy is invisible to a
+/// subscriber that connects **after** the rejected insert has been processed.
+///
+/// Mallory forges a document claiming alice's `owner_id`. Alice then creates
+/// a legitimate document, which serves as the causal barrier: once alice can
+/// see her own row at EdgeServer tier, the inbox has processed (and dropped)
+/// mallory's earlier insert. A fresh subscriber that connects after the barrier
+/// must find only alice's legitimate row in its initial query result.
+///
+/// ```text
+/// mallory ──insert owner="alice"──► server ──✗ rejected (INSERT policy)
+///
+/// alice ──insert "legitimate"────► server ──► committed
+///   └── EdgeServer query barrier ──────────────────────► (server settled)
+///
+/// fresh subscriber (connects after) ──query──► [alice's row only]
+/// ```
+#[tokio::test]
+async fn insert_policy_violation_does_not_leak_to_pristine_subscriber() {
+    let schema = write_policy_schema();
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+    let mallory = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("mallory")
+        .as_user()
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice")
+        .as_user()
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+    let query = QueryBuilder::new("documents").build();
+
+    // Mallory tries to insert a row claiming alice's ownership.
+    let forged_id = mallory
+        .create("documents", document_values("alice", "forged"))
+        .await
+        .expect("optimistic local create")
+        .0;
+
+    // Alice's legitimate insert is the causal barrier: her /sync request is
+    // sent after mallory's, so once the server has committed alice's row the
+    // inbox has already processed (and rejected) mallory's earlier request.
+    let legit_id = create_document(&alice, "alice", "legitimate").await;
+    wait_for_rows(
+        &alice,
+        query.clone(),
+        "barrier: alice sees own committed row",
+        |rows| rows.iter().any(|(id, _)| *id == legit_id).then_some(()),
+    )
+    .await;
+
+    // Connect the fresh subscriber only after the server has settled.
+    let fresh_subscriber = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("observer")
+        .as_user()
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    // The fresh subscriber's initial query must contain alice's row but not
+    // the forged row that was silently dropped by the INSERT policy.
+    let rows = wait_for_rows(
+        &fresh_subscriber,
+        query,
+        "fresh subscriber initial results",
+        |rows| rows.iter().any(|(id, _)| *id == legit_id).then_some(rows),
+    )
+    .await;
+    assert!(
+        rows.iter().all(|(id, _)| *id != forged_id),
+        "forged row must not appear in pristine subscriber's initial sync result"
+    );
+
+    mallory.shutdown().await.expect("shutdown mallory");
+    alice.shutdown().await.expect("shutdown alice");
+    fresh_subscriber
+        .shutdown()
+        .await
+        .expect("shutdown fresh_subscriber");
+    server.shutdown().await;
+}
+
+/// Verifies that the UPDATE `using` clause and `with_check` clause are
+/// evaluated independently: a `using = True` policy lets every client target
+/// any row, but a `with_check = owner_policy` still rejects writes from
+/// non-owners.
+///
+/// Bob can read alice's row because there is no SELECT policy and `using = True`
+/// means he can attempt to update it. But the server rejects his write because
+/// the committed row state (`owner_id = "alice"`) fails the `with_check` when
+/// evaluated against bob's session (`user_id = "bob"`). An EdgeServer-tier
+/// query then confirms the original value persisted and the observer's stream
+/// received no update delta.
+///
+/// ```text
+/// alice ──insert "original"──────────► server ──► observer (add ✓)
+///
+/// bob (using=True → can target row) ──update title="hacked"──► server
+///   └── with_check: owner_id="alice" ≠ bob ──✗ rejected
+///
+/// observer ──EdgeServer query──► "original" (unchanged)
+/// observer stream → no update delta
+/// ```
+#[tokio::test]
+async fn update_policy_read_clause_differs_from_write_clause() {
+    let schema = write_check_policy_schema();
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice")
+        .as_user()
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("bob")
+        .as_user()
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+    let observer = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("observer")
+        .as_user()
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+    let query = QueryBuilder::new("documents").build();
+
+    let mut observer_stream = observer
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe observer");
+    let mut observer_log = Vec::new();
+
+    let doc_id = create_document(&alice, "alice", "original").await;
+    wait_for_subscription_update(
+        &mut observer_stream,
+        &mut observer_log,
+        QUERY_TIMEOUT,
+        "observer sees initial row",
+        |log| has_added(log, doc_id),
+    )
+    .await;
+
+    // Bob can read alice's row — no SELECT restriction and using=True passes.
+    wait_for_rows(&bob, query.clone(), "bob sees alice's row", |rows| {
+        rows.iter()
+            .find(|(id, values)| *id == doc_id && *values == document_values("alice", "original"))
+            .map(|_| ())
+    })
+    .await;
+
+    // Bob's update is applied optimistically on his local client but the
+    // with_check policy fails on the server: owner_id="alice" ≠ bob's user_id.
+    bob.update(
+        doc_id,
+        vec![("title".to_string(), Value::Text("hacked".to_string()))],
+    )
+    .await
+    .expect("optimistic local update");
+
+    // EdgeServer query is the causal barrier.
+    let rows_after = observer
+        .query(query.clone(), Some(DurabilityTier::EdgeServer))
+        .await
+        .expect("EdgeServer query after unauthorized update");
+    assert!(
+        rows_after
+            .iter()
+            .any(|(id, values)| *id == doc_id && *values == document_values("alice", "original")),
+        "update rejected by with_check must not persist at EdgeServer: rows={rows_after:?}"
+    );
+    collect_stream_deltas(&mut observer_stream, &mut observer_log, NO_DELTA_WINDOW).await;
+    assert!(
+        !has_updated(&observer_log, doc_id),
+        "update rejected by with_check must not be broadcast: log={observer_log:?}"
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    observer.shutdown().await.expect("shutdown observer");
+    server.shutdown().await;
+}
+
+/// Verifies that after an owner deletes her row and then re-creates it, the
+/// re-created row appears in the observer's stream as a fresh **add** delta
+/// (new `ObjectId`), not as an **update** delta on the old one.
+///
+/// ```text
+/// alice ──insert doc1──► observer stream (add ✓)
+/// alice ──delete doc1──► observer stream (remove ✓)
+/// alice ──insert doc2──► observer stream (add ✓, NOT update)
+/// ```
+#[tokio::test]
+async fn delete_then_reinsert_by_owner_visible_to_others() {
+    let schema = write_policy_schema();
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice")
+        .as_user()
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+    let observer = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("observer")
+        .as_user()
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+    let query = QueryBuilder::new("documents").build();
+
+    let mut observer_stream = observer
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe observer");
+    let mut observer_log = Vec::new();
+
+    let doc1_id = create_document(&alice, "alice", "first").await;
+    wait_for_subscription_update(
+        &mut observer_stream,
+        &mut observer_log,
+        QUERY_TIMEOUT,
+        "observer sees first document added",
+        |log| has_added(log, doc1_id),
+    )
+    .await;
+
+    alice.delete(doc1_id).await.expect("delete first document");
+    wait_for_subscription_update(
+        &mut observer_stream,
+        &mut observer_log,
+        QUERY_TIMEOUT,
+        "observer sees first document removed",
+        |log| has_removed(log, doc1_id),
+    )
+    .await;
+
+    // Alice re-creates a document with equivalent content — a new ObjectId is
+    // assigned, so the observer must see an add delta, not an update.
+    let doc2_id = create_document(&alice, "alice", "first").await;
+    wait_for_subscription_update(
+        &mut observer_stream,
+        &mut observer_log,
+        QUERY_TIMEOUT,
+        "observer sees re-created document as add delta",
+        |log| has_added(log, doc2_id),
+    )
+    .await;
+
+    assert_ne!(doc1_id, doc2_id, "re-created row must have a new ObjectId");
+    assert!(
+        !has_updated(&observer_log, doc2_id),
+        "re-created row must arrive as add, not update: log={observer_log:?}"
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
     observer.shutdown().await.expect("shutdown observer");
     server.shutdown().await;
 }

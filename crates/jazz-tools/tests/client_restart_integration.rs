@@ -8,8 +8,8 @@ use axum::{Json, Router, routing::get};
 use base64::Engine;
 use jazz_tools::storage::{FjallStorage, Storage};
 use jazz_tools::{
-    AppContext, AppId, ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder,
-    TableSchema, Value,
+    AppContext, AppId, ClientId, ClientStorage, ColumnType, DurabilityTier, JazzClient,
+    QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
@@ -202,6 +202,7 @@ fn make_context(
         schema: test_schema(),
         server_url,
         data_dir,
+        storage: ClientStorage::Fjall,
         jwt_token: Some(jwt_token),
         backend_secret: Some(BACKEND_SECRET.to_string()),
         admin_secret: Some(ADMIN_SECRET.to_string()),
@@ -383,4 +384,73 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
 
     client.shutdown().await.expect("shutdown client");
     drop(restarted);
+}
+
+#[tokio::test]
+async fn memory_storage_client_does_not_persist_local_state_to_disk() {
+    let data_dir = TempDir::new().expect("temp client dir");
+    let context = AppContext {
+        app_id: AppId::from_string(APP_ID_STR).expect("parse app id"),
+        client_id: Some(ClientId::new()),
+        schema: test_schema(),
+        server_url: String::new(),
+        data_dir: data_dir.path().to_path_buf(),
+        storage: ClientStorage::Memory,
+        jwt_token: None,
+        backend_secret: None,
+        admin_secret: None,
+    };
+
+    let client = JazzClient::connect(context.clone())
+        .await
+        .expect("connect memory client");
+
+    client
+        .create(
+            "todos",
+            vec![
+                Value::Text("only-in-memory".to_string()),
+                Value::Boolean(false),
+            ],
+        )
+        .await
+        .expect("create todo");
+
+    let initial_rows = client
+        .query(QueryBuilder::new("todos").build(), None)
+        .await
+        .expect("query rows before restart");
+    assert_eq!(
+        initial_rows.len(),
+        1,
+        "memory client should serve local rows"
+    );
+
+    client.shutdown().await.expect("shutdown memory client");
+
+    assert!(
+        !data_dir.path().join("jazz.fjall").exists(),
+        "memory storage should not create a Fjall database on disk"
+    );
+    assert!(
+        !data_dir.path().join("client_id").exists(),
+        "memory storage should not persist a client_id file"
+    );
+
+    let restarted = JazzClient::connect(context)
+        .await
+        .expect("reconnect memory client");
+    let rows_after_restart = restarted
+        .query(QueryBuilder::new("todos").build(), None)
+        .await
+        .expect("query rows after restart");
+    assert_eq!(
+        rows_after_restart.len(),
+        0,
+        "memory storage should not retain rows across reconnects"
+    );
+    restarted
+        .shutdown()
+        .await
+        .expect("shutdown restarted memory client");
 }
