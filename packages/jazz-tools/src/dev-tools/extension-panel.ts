@@ -398,8 +398,6 @@ async function ensureDevtoolsPort(): Promise<any> {
   };
 
   const onDisconnect = () => {
-    const global = globalThis as any;
-
     if (devtoolsBridge) {
       try {
         devtoolsBridge[releaseProxy]();
