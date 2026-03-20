@@ -4,6 +4,30 @@ import { useAll, useDb, useSession } from "jazz-tools/react-native";
 import { app } from "../schema/app";
 
 const BATCH_SIZE = 500;
+const PROJECT_COUNT = 20;
+
+const PROJECT_NAMES = [
+  "Backend",
+  "Frontend",
+  "Mobile",
+  "Infra",
+  "Design",
+  "QA",
+  "DevOps",
+  "Security",
+  "Analytics",
+  "Platform",
+  "Core",
+  "SDK",
+  "API",
+  "Dashboard",
+  "Onboarding",
+  "Billing",
+  "Search",
+  "Notifications",
+  "Integrations",
+  "Docs",
+];
 
 const ADJECTIVES = [
   "Quick",
@@ -125,8 +149,16 @@ export function StressTest() {
     setProgress({ inserted: 0, total });
     setLogs([]);
 
-    log(`Starting generation of ${total} todos...`);
+    log(`Starting generation of ${total} todos (+ ${PROJECT_COUNT} projects)...`);
     const startTime = performance.now();
+
+    // Generate projects first so we can assign them to todos
+    const projectIds: string[] = [];
+    for (let i = 0; i < PROJECT_COUNT; i++) {
+      const row = db.insert(app.projects, { name: PROJECT_NAMES[i % PROJECT_NAMES.length] });
+      projectIds.push(row.id);
+    }
+    log(`Created ${PROJECT_COUNT} projects`);
 
     let inserted = 0;
     const batches = Math.ceil(total / BATCH_SIZE);
@@ -147,6 +179,8 @@ export function StressTest() {
           done: i % 7 === 0,
           description: generateDescription(i),
           owner_id: sessionUserId,
+          // Assign ~70% of todos to a project
+          project_id: i % 10 < 7 ? projectIds[i % projectIds.length] : undefined,
         });
         inserted++;
       }
