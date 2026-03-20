@@ -135,7 +135,12 @@ function normalizeJazzRnError(error: unknown): Error {
       : String(error);
   const normalized = createErrorWithCause(message, error);
   normalized.name = `JazzRn${error.tag}Error`;
-  Object.assign(normalized, { tag: error.tag });
+  Object.defineProperty(normalized, "tag", {
+    value: error.tag,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
   return normalized as JazzRnNormalizedError;
 }
 
