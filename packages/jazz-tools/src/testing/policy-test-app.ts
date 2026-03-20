@@ -1,10 +1,6 @@
 import { expect } from "vitest";
+import { TestingServer, pushSchemaCatalogue } from "jazz-napi";
 import { createJazzContext, Db, Session, type JazzContext } from "../backend/index.js";
-import {
-  pushSchemaCatalogue,
-  startLocalJazzServer,
-  type LocalJazzServerHandle,
-} from "./local-jazz-server.js";
 
 /**
  * A test app for permissions tests. Simplifies setting up a test app and provides methods
@@ -14,7 +10,7 @@ export class PolicyTestApp {
   constructor(
     private readonly app: any,
     private readonly jazzContext: JazzContext,
-    private readonly server: LocalJazzServerHandle,
+    private readonly server: TestingServer,
   ) {}
 
   /**
@@ -65,12 +61,8 @@ export class PolicyTestApp {
  * @param schemaDir - The directory containing the Jazz schema and permissions
  */
 export async function createPolicyTestApp(schemaDir: string): Promise<PolicyTestApp> {
-  const backendSecret = `backend-secret`;
-  const adminSecret = `admin-secret`;
-  const server = await startLocalJazzServer({
-    backendSecret,
-    adminSecret,
-  });
+  const server = await TestingServer.start();
+  const { backendSecret, adminSecret } = server;
 
   await pushSchemaCatalogue({
     serverUrl: server.url,

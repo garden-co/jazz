@@ -181,6 +181,19 @@ struct TestingServerStartOptions {
     port: Option<u16>,
     data_dir: Option<String>,
     persistent_storage: Option<bool>,
+    admin_secret: Option<String>,
+    backend_secret: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PushSchemaCatalogueOptions {
+    server_url: String,
+    app_id: String,
+    admin_secret: String,
+    schema_dir: String,
+    env: Option<String>,
+    user_branch: Option<String>,
 }
 
 /// Scheduler that schedules `batched_tick()` on the Node.js event loop via a
@@ -1162,7 +1175,7 @@ impl TestingServer {
     #[napi(factory, ts_return_type = "Promise<TestingServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId?: string; port?: number; dataDir?: string; persistentStorage?: boolean }"
+            ts_arg_type = "{ appId?: string; port?: number; dataDir?: string; persistentStorage?: boolean; adminSecret?: string; backendSecret?: string }"
         )]
         options: Option<JsonValue>,
     ) -> napi::Result<Self> {
@@ -1187,11 +1200,21 @@ impl TestingServer {
             builder = builder.with_persistent_storage();
         }
 
+        if let Some(admin_secret) = options.admin_secret {
+            builder = builder.with_admin_secret(admin_secret);
+        }
+
+        if let Some(backend_secret) = options.backend_secret {
+            builder = builder.with_backend_secret(backend_secret);
+        }
+
         let server = builder.start().await;
         let app_id = server.app_id().to_string();
         let url = server.base_url();
         let port = server.port();
         let data_dir = server.data_dir().to_string_lossy().into_owned();
+        let admin_secret = server.admin_secret().to_string();
+        let backend_secret = server.backend_secret().to_string();
 
         Ok(Self {
             inner: Mutex::new(Some(server)),
@@ -1199,8 +1222,8 @@ impl TestingServer {
             url,
             port,
             data_dir,
-            backend_secret: JazzTestingServer::BACKEND_SECRET.to_string(),
-            admin_secret: JazzTestingServer::ADMIN_SECRET.to_string(),
+            backend_secret,
+            admin_secret,
         })
     }
 
@@ -1265,6 +1288,30 @@ impl TestingServer {
 // ============================================================================
 // Module-level utility functions
 // ============================================================================
+
+/// Push versioned schema and lens catalogue objects to a sync server.
+#[napi(js_name = "pushSchemaCatalogue", ts_return_type = "Promise<void>")]
+pub async fn push_schema_catalogue(
+    #[napi(
+        ts_arg_type = "{ serverUrl: string; appId: string; adminSecret: string; schemaDir: string; env?: string; userBranch?: string }"
+    )]
+    options: JsonValue,
+) -> napi::Result<()> {
+    let opts: PushSchemaCatalogueOptions = serde_json::from_value(options).map_err(|e| {
+        napi::Error::from_reason(format!("Invalid pushSchemaCatalogue options: {e}"))
+    })?;
+
+    jazz_tools::schema_catalogue::push(
+        &opts.server_url,
+        &opts.app_id,
+        opts.env.as_deref().unwrap_or("dev"),
+        opts.user_branch.as_deref().unwrap_or("main"),
+        &opts.admin_secret,
+        &opts.schema_dir,
+    )
+    .await
+    .map_err(|e| napi::Error::from_reason(format!("pushSchemaCatalogue failed: {e}")))
+}
 
 #[napi(js_name = "generateId")]
 pub fn generate_id() -> String {
