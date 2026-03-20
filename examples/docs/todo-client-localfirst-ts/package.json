@@ -16,9 +16,9 @@
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
     "typescript": "catalog:default",
-    "vite": "^8.0.1",
+    "vite": "catalog:default",
     "vite-plugin-top-level-await": "^1.6.0",
-    "vite-plugin-wasm": "^3.6.0",
+    "vite-plugin-wasm": "catalog:default",
     "vitest": "catalog:default"
   }
 }
