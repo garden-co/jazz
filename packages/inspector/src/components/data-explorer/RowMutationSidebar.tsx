@@ -1,5 +1,5 @@
 import type { ColumnDescriptor } from "jazz-tools";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   buildMutationFormFields,
   formatMutationFieldValue,
@@ -49,6 +49,31 @@ function getInitialFieldState(
   };
 }
 
+function getFieldState(
+  fields: Record<string, FieldState>,
+  rowValues: Record<string, unknown>,
+  mode: MutationFormMode,
+  column: ColumnDescriptor,
+): FieldState {
+  return fields[column.name] ?? getInitialFieldState(rowValues[column.name], mode, column);
+}
+
+function createInitialFields(
+  rowValues: Record<string, unknown> | null,
+  mode: MutationFormMode,
+  schemaColumns: ColumnDescriptor[],
+): Record<string, FieldState> {
+  if (!rowValues) {
+    return {};
+  }
+
+  const nextFields: Record<string, FieldState> = {};
+  for (const column of schemaColumns) {
+    nextFields[column.name] = getInitialFieldState(rowValues[column.name], mode, column);
+  }
+  return nextFields;
+}
+
 export function RowMutationSidebar({
   mode,
   tableName,
@@ -58,34 +83,33 @@ export function RowMutationSidebar({
   onCancel,
   onSave,
 }: RowMutationSidebarProps) {
-  const [fields, setFields] = useState<Record<string, FieldState>>({});
+  const [fields, setFields] = useState<Record<string, FieldState>>(() =>
+    createInitialFields(rowValues, mode, schemaColumns),
+  );
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
   const formFields = useMemo(() => buildMutationFormFields(schemaColumns), [schemaColumns]);
 
-  useEffect(() => {
-    if (!rowValues) {
-      setFields({});
-      setErrors({});
-      setSaveError(null);
-      setIsSaving(false);
-      return;
-    }
-    const nextFields: Record<string, FieldState> = {};
-    for (const column of schemaColumns) {
-      nextFields[column.name] = getInitialFieldState(rowValues[column.name], mode, column);
-    }
-    setFields(nextFields);
-    setErrors({});
-    setSaveError(null);
-    setIsSaving(false);
-  }, [rowValues, mode, schemaColumns]);
-
   if (!rowValues) {
     return null;
   }
+
+  const clearFieldError = (columnName: string) => {
+    setErrors((current) => ({ ...current, [columnName]: "" }));
+  };
+
+  const updateFieldState = (
+    column: ColumnDescriptor,
+    update: (currentField: FieldState) => FieldState,
+  ) => {
+    setFields((current) => ({
+      ...current,
+      [column.name]: update(getFieldState(current, rowValues, mode, column)),
+    }));
+    clearFieldError(column.name);
+  };
 
   return (
     <aside className={styles.sidebar} aria-label={`${modeLabel(mode)} panel`}>
@@ -99,8 +123,7 @@ export function RowMutationSidebar({
           for (const field of formFields) {
             const { column, readOnlyReason } = field;
             if (readOnlyReason) continue;
-            const fieldState =
-              fields[column.name] ?? getInitialFieldState(rowValues[column.name], mode, column);
+            const fieldState = getFieldState(fields, rowValues, mode, column);
 
             if (fieldState.isNull) {
               if (!column.nullable) {
@@ -151,8 +174,7 @@ export function RowMutationSidebar({
           </label>
 
           {formFields.map(({ column, readOnlyReason }) => {
-            const fieldState =
-              fields[column.name] ?? getInitialFieldState(rowValues[column.name], mode, column);
+            const fieldState = getFieldState(fields, rowValues, mode, column);
             const fieldError = errors[column.name];
             const isReadOnly = readOnlyReason !== null;
             const value = fieldState.text;
@@ -166,14 +188,12 @@ export function RowMutationSidebar({
                       className={styles.select}
                       value={value}
                       disabled={fieldState.isNull}
-                      onChange={(event) => {
-                        const nextValue = event.target.value;
-                        setFields((current) => ({
-                          ...current,
-                          [column.name]: { ...fieldState, text: nextValue },
-                        }));
-                        setErrors((current) => ({ ...current, [column.name]: "" }));
-                      }}
+                      onChange={(event) =>
+                        updateFieldState(column, (currentField) => ({
+                          ...currentField,
+                          text: event.target.value,
+                        }))
+                      }
                     >
                       {value.length === 0 ? <option value="">Select value</option> : null}
                       {value.length > 0 && !column.column_type.variants.includes(value) ? (
@@ -190,14 +210,12 @@ export function RowMutationSidebar({
                       className={styles.select}
                       value={value}
                       disabled={fieldState.isNull}
-                      onChange={(event) => {
-                        const nextValue = event.target.value;
-                        setFields((current) => ({
-                          ...current,
-                          [column.name]: { ...fieldState, text: nextValue },
-                        }));
-                        setErrors((current) => ({ ...current, [column.name]: "" }));
-                      }}
+                      onChange={(event) =>
+                        updateFieldState(column, (currentField) => ({
+                          ...currentField,
+                          text: event.target.value,
+                        }))
+                      }
                     >
                       <option value="">Select value</option>
                       <option value="true">true</option>
@@ -211,14 +229,12 @@ export function RowMutationSidebar({
                       value={value}
                       readOnly={isReadOnly}
                       disabled={fieldState.isNull}
-                      onChange={(event) => {
-                        const nextValue = event.target.value;
-                        setFields((current) => ({
-                          ...current,
-                          [column.name]: { ...fieldState, text: nextValue },
-                        }));
-                        setErrors((current) => ({ ...current, [column.name]: "" }));
-                      }}
+                      onChange={(event) =>
+                        updateFieldState(column, (currentField) => ({
+                          ...currentField,
+                          text: event.target.value,
+                        }))
+                      }
                     />
                   ) : (
                     <input
@@ -226,14 +242,12 @@ export function RowMutationSidebar({
                       value={value}
                       readOnly={isReadOnly}
                       disabled={fieldState.isNull}
-                      onChange={(event) => {
-                        const nextValue = event.target.value;
-                        setFields((current) => ({
-                          ...current,
-                          [column.name]: { ...fieldState, text: nextValue },
-                        }));
-                        setErrors((current) => ({ ...current, [column.name]: "" }));
-                      }}
+                      onChange={(event) =>
+                        updateFieldState(column, (currentField) => ({
+                          ...currentField,
+                          text: event.target.value,
+                        }))
+                      }
                     />
                   )}
                 </label>
@@ -243,14 +257,12 @@ export function RowMutationSidebar({
                     <input
                       type="checkbox"
                       checked={fieldState.isNull}
-                      onChange={(event) => {
-                        const checked = event.target.checked;
-                        setFields((current) => ({
-                          ...current,
-                          [column.name]: { ...fieldState, isNull: checked },
-                        }));
-                        setErrors((current) => ({ ...current, [column.name]: "" }));
-                      }}
+                      onChange={(event) =>
+                        updateFieldState(column, (currentField) => ({
+                          ...currentField,
+                          isNull: event.target.checked,
+                        }))
+                      }
                     />
                     Set NULL
                   </label>

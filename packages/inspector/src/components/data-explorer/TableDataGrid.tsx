@@ -331,6 +331,7 @@ export function TableDataGrid() {
             }}
           >
             <RowMutationSidebar
+              key={`${mutationState.mode}:${mutationState.rowId ?? "new"}`}
               mode={mutationState.mode}
               tableName={table}
               schemaColumns={schemaColumns}
