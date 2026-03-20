@@ -399,9 +399,6 @@ async function ensureDevtoolsPort(): Promise<any> {
 
   const onDisconnect = () => {
     const global = globalThis as any;
-    const runtimeLastErrorMessage = global?.chrome?.runtime?.lastError?.message;
-    const lastErrorMessage =
-      typeof runtimeLastErrorMessage === "string" ? ` (${runtimeLastErrorMessage})` : "";
 
     if (devtoolsBridge) {
       try {
@@ -595,13 +592,13 @@ class DevToolsJazzClient implements JazzClient {
     this.fallbackSchema = schema;
   }
 
-  forSession(session: Session): SessionClient {
+  forSession(_session: Session): SessionClient {
     throw new Error("Method not implemented.");
   }
-  forRequest(request: RequestLike): SessionClient {
+  forRequest(_request: RequestLike): SessionClient {
     throw new Error("Method not implemented.");
   }
-  create(table: string, values: Value[]): Row {
+  create(_table: string, _values: Value[]): Row {
     throw new Error("DevTools client does not support non-durable create().");
   }
   async createDurable(
@@ -626,16 +623,16 @@ class DevToolsJazzClient implements JazzClient {
     )) as Row[];
   }
   queryInternal(
-    queryJson: string,
-    session?: Session,
-    options?: QueryExecutionOptions,
+    _queryJson: string,
+    _session?: Session,
+    _options?: QueryExecutionOptions,
   ): Promise<Row[]> {
     throw new Error("Method not implemented.");
   }
   update(
-    objectId: string,
-    updates: Record<string, Value>,
-    options?: { tier?: DurabilityTier },
+    _objectId: string,
+    _updates: Record<string, Value>,
+    _options?: { tier?: DurabilityTier },
   ): void {
     throw new Error("DevTools client does not support non-durable update().");
   }
@@ -653,7 +650,7 @@ class DevToolsJazzClient implements JazzClient {
       }),
     );
   }
-  delete(objectId: string, options?: { tier?: DurabilityTier }): void {
+  delete(_objectId: string, _options?: { tier?: DurabilityTier }): void {
     throw new Error("DevTools client does not support non-durable delete().");
   }
   async deleteDurable(objectId: string, options?: { tier?: DurabilityTier }): Promise<void> {
@@ -731,7 +728,7 @@ class DevToolsJazzClient implements JazzClient {
   getServerUrl(): string | undefined {
     throw new Error("Method not implemented.");
   }
-  getRequestUrl(path: string): string {
+  getRequestUrl(_path: string): string {
     throw new Error("Method not implemented.");
   }
   getSchemaContext(): { env: string; schema_hash: string; user_branch: string } {

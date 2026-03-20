@@ -14,7 +14,6 @@ import {
   DEVTOOLS_CONTROL_MESSAGES,
   DEVTOOLS_EVENTS,
   DevtoolsBridgeApi,
-  DevtoolsRequestPayloadByCommand,
   isRecord,
   isSerializableDbConfig,
   sanitizeDbConfigForBridge,
