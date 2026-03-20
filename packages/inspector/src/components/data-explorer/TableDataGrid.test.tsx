@@ -171,6 +171,18 @@ describe("TableDataGrid", () => {
     );
   });
 
+  it("preserves unsaved edits when the current row live-updates", () => {
+    const { rerender } = render(<TableDataGrid />);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0] as Element);
+    fireEvent.change(screen.getByLabelText("title"), { target: { value: "local draft" } });
+
+    currentRows = [{ ...currentRows[0], title: "server pushed update" }, currentRows[1]!];
+    rerender(<TableDataGrid />);
+
+    expect((screen.getByLabelText("title") as HTMLInputElement).value).toBe("local draft");
+  });
+
   it("opens insert sidebar and inserts a new row", () => {
     render(<TableDataGrid />);
 
