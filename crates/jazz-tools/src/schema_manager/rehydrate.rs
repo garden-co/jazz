@@ -54,6 +54,17 @@ fn lens_metadata_for_rehydrate(
     metadata
 }
 
+fn permissions_metadata_for_rehydrate(app_id: AppId, schema_hash: &str) -> HashMap<String, String> {
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        MetadataKey::Type.to_string(),
+        ObjectType::CataloguePermissions.to_string(),
+    );
+    metadata.insert(MetadataKey::AppId.to_string(), app_id.uuid().to_string());
+    metadata.insert(MetadataKey::SchemaHash.to_string(), schema_hash.to_string());
+    metadata
+}
+
 /// Rehydrate server schema state from persisted catalogue manifest operations.
 ///
 /// This lets a restarted server recover known schemas/lenses before any client
@@ -75,10 +86,12 @@ pub fn rehydrate_schema_manager_from_manifest<S: Storage + ?Sized>(
 
     let CatalogueManifest {
         schema_seen,
+        permissions_seen,
         lens_seen,
     } = manifest;
 
     let mut schema_count = 0usize;
+    let mut permissions_count = 0usize;
     let mut lens_count = 0usize;
 
     for (object_id, schema_hash) in schema_seen {
@@ -102,6 +115,30 @@ pub fn rehydrate_schema_manager_from_manifest<S: Storage + ?Sized>(
             );
         } else {
             schema_count += 1;
+        }
+    }
+
+    for (object_id, schema_hash) in permissions_seen {
+        let Some(content) = latest_catalogue_content(storage, object_id)? else {
+            warn!(
+                app_id = %app_id,
+                object_id = %object_id,
+                "catalogue permissions in manifest missing main branch content"
+            );
+            continue;
+        };
+
+        let metadata = permissions_metadata_for_rehydrate(app_id, &schema_hash.to_string());
+        if let Err(error) = schema_manager.process_catalogue_update(object_id, &metadata, &content)
+        {
+            warn!(
+                app_id = %app_id,
+                object_id = %object_id,
+                ?error,
+                "failed to process permissions catalogue entry from manifest"
+            );
+        } else {
+            permissions_count += 1;
         }
     }
 
@@ -136,6 +173,7 @@ pub fn rehydrate_schema_manager_from_manifest<S: Storage + ?Sized>(
     info!(
         app_id = %app_id,
         schema_count,
+        permissions_count,
         lens_count,
         "rehydrated schema manager from catalogue manifest"
     );

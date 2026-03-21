@@ -12,6 +12,7 @@ impl SyncManager {
             Some(kind)
                 if kind == crate::metadata::ObjectType::CatalogueSchema.as_str()
                     || kind == crate::metadata::ObjectType::CatalogueLens.as_str()
+                    || kind == crate::metadata::ObjectType::CataloguePermissions.as_str()
         )
     }
 

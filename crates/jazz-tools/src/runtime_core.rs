@@ -36,7 +36,9 @@ use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{QueryError, QueryUpdate};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{OrderedRowDelta, Schema, TableName, Value};
+use crate::query_manager::types::{
+    OrderedRowDelta, Schema, SchemaHash, TableName, TablePolicies, Value,
+};
 use crate::schema_manager::{Lens, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};
@@ -334,6 +336,20 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let id = self
             .schema_manager
             .persist_schema_object(&mut self.storage, &schema);
+        self.immediate_tick();
+        id
+    }
+
+    pub fn publish_permissions_bundle(
+        &mut self,
+        schema_hash: SchemaHash,
+        permissions: HashMap<TableName, TablePolicies>,
+    ) -> Option<ObjectId> {
+        let id = self.schema_manager.publish_permissions_bundle(
+            &mut self.storage,
+            schema_hash,
+            permissions,
+        );
         self.immediate_tick();
         id
     }

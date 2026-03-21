@@ -19,6 +19,13 @@ function validatePermissionTables(
   }
 }
 
+export function validatePermissionsAgainstSchema(
+  schemaTableNames: readonly string[],
+  compiledPermissions: CompiledPermissionsMap,
+): void {
+  validatePermissionTables(schemaTableNames, compiledPermissions);
+}
+
 export function mergePermissionsIntoSchema(
   schema: Schema,
   compiledPermissions: CompiledPermissionsMap,

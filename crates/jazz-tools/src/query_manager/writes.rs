@@ -497,37 +497,6 @@ impl QueryManager {
         true
     }
 
-    /// Check whether this row can be accessed via an explicit
-    /// `INHERITS ... REFERENCING <source> VIA <column>` policy clause.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn evaluate_referencing_inherited_access<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        target_table: TableName,
-        target_row_id: ObjectId,
-        operation: Operation,
-        source_table: &str,
-        via_column: &str,
-        max_depth: Option<usize>,
-        session: &Session,
-        branch: &str,
-    ) -> bool {
-        let mut visited = HashSet::new();
-        self.evaluate_referencing_inherited_access_recursive(
-            storage,
-            target_table,
-            target_row_id,
-            operation,
-            source_table,
-            via_column,
-            max_depth,
-            session,
-            branch,
-            0,
-            &mut visited,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn evaluate_referencing_inherited_access_recursive<H: Storage>(
         &mut self,

@@ -16,14 +16,18 @@ use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, Quer
 use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName, Value,
+    ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::storage::Storage;
 use crate::sync_manager::SyncManager;
+use uuid::Uuid;
 
 use super::auto_lens::generate_lens;
 use super::context::{QuerySchemaContext, SchemaContext, SchemaError};
-use super::encoding::{decode_lens_transform, decode_schema, encode_lens_transform, encode_schema};
+use super::encoding::{
+    decode_lens_transform, decode_permissions, decode_schema, encode_lens_transform,
+    encode_permissions, encode_schema,
+};
 use super::lens::Lens;
 use super::types::AppId;
 
@@ -70,6 +74,9 @@ pub struct SchemaManager {
     context: SchemaContext,
     query_manager: QueryManager,
     app_id: AppId,
+    current_permissions_hash: Option<SchemaHash>,
+    current_permissions: Option<HashMap<TableName, TablePolicies>>,
+    pending_permissions: Option<(SchemaHash, HashMap<TableName, TablePolicies>)>,
     /// Schemas known to this manager (for server mode).
     /// Server adds schemas here when received via catalogue sync.
     /// These are stored without requiring a lens path to current.
@@ -95,7 +102,9 @@ impl SchemaManager {
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
         let declared_current_schema = schema.clone();
+        let current_permissions = extract_schema_permissions(&schema);
         let schema = normalize_schema(schema);
+        let structural_schema = strip_schema_policies(&schema);
 
         let context = SchemaContext::new(schema.clone(), env, user_branch);
         let current_hash = SchemaHash::compute(&schema);
@@ -106,13 +115,16 @@ impl SchemaManager {
 
         // Initialize known_schemas with current schema
         let mut known_schemas = HashMap::new();
-        known_schemas.insert(current_hash, schema);
+        known_schemas.insert(current_hash, structural_schema);
 
         Ok(Self {
             declared_current_schema: Some(declared_current_schema),
             context,
             query_manager,
             app_id,
+            current_permissions_hash: Some(current_hash),
+            current_permissions: Some(current_permissions),
+            pending_permissions: None,
             known_schemas: Arc::new(known_schemas),
             known_schemas_dirty: true,
         })
@@ -143,6 +155,9 @@ impl SchemaManager {
             context: SchemaContext::empty(),
             query_manager,
             app_id,
+            current_permissions_hash: None,
+            current_permissions: None,
+            pending_permissions: None,
             known_schemas: Arc::new(HashMap::new()),
             known_schemas_dirty: false,
         }
@@ -162,6 +177,7 @@ impl SchemaManager {
     ///
     /// Also creates indices for all env/user_branch combinations if known.
     pub fn add_known_schema(&mut self, schema: Schema) {
+        let schema = strip_schema_policies(&normalize_schema(schema));
         let hash = SchemaHash::compute(&schema);
 
         // Skip if already known
@@ -177,6 +193,8 @@ impl SchemaManager {
             self.context.add_pending_schema(schema.clone());
             self.activate_pending_and_sync_to_query_manager();
         }
+
+        self.try_apply_pending_permissions();
     }
 
     /// Get a known schema by hash.
@@ -248,6 +266,7 @@ impl SchemaManager {
     ///
     /// Automatically updates QueryManager indices and marks subscriptions for recompile.
     pub fn add_live_schema(&mut self, old_schema: Schema) -> Result<&Lens, SchemaError> {
+        let old_schema = strip_schema_policies(&normalize_schema(old_schema));
         let lens = generate_lens(&old_schema, &self.context.current_schema);
 
         if lens.is_draft() {
@@ -287,6 +306,7 @@ impl SchemaManager {
         old_schema: Schema,
         lens: Lens,
     ) -> Result<(), SchemaError> {
+        let old_schema = strip_schema_policies(&normalize_schema(old_schema));
         if lens.is_draft() {
             return Err(SchemaError::DraftLensInPath {
                 source: lens.source_hash,
@@ -414,6 +434,16 @@ impl SchemaManager {
             hash_len_prefixed(&mut hasher, &encoded);
         }
 
+        if let (Some(schema_hash), Some(permissions)) = (
+            self.current_permissions_hash,
+            self.current_permissions.as_ref(),
+        ) {
+            hasher.update(b"permissions");
+            hasher.update(schema_hash.as_bytes());
+            let encoded = encode_permissions(permissions);
+            hash_len_prefixed(&mut hasher, &encoded);
+        }
+
         hasher.finalize().to_hex().to_string()
     }
 
@@ -511,12 +541,14 @@ impl SchemaManager {
     pub fn persist_schema<H: Storage>(&mut self, storage: &mut H) -> ObjectId {
         let schema_hash = self.context.current_hash;
         let object_id = schema_hash.to_object_id();
-        let content = encode_schema(&self.context.current_schema);
+        let content = encode_schema(&strip_schema_policies(&self.context.current_schema));
 
         let metadata = self.schema_metadata(&schema_hash);
         self.query_manager
             .sync_manager_mut()
             .create_object_with_content(storage, object_id, metadata, content);
+
+        self.persist_current_permissions(storage);
 
         object_id
     }
@@ -529,9 +561,10 @@ impl SchemaManager {
         storage: &mut H,
         schema: &Schema,
     ) -> ObjectId {
-        let schema_hash = SchemaHash::compute(schema);
+        let schema = strip_schema_policies(schema);
+        let schema_hash = SchemaHash::compute(&schema);
         let object_id = schema_hash.to_object_id();
-        let content = encode_schema(schema);
+        let content = encode_schema(&schema);
 
         let metadata = self.schema_metadata(&schema_hash);
         self.query_manager
@@ -558,6 +591,34 @@ impl SchemaManager {
             .create_object_with_content(storage, object_id, metadata, content);
 
         object_id
+    }
+
+    pub fn persist_current_permissions<H: Storage>(&mut self, storage: &mut H) -> Option<ObjectId> {
+        let schema_hash = self.current_permissions_hash?;
+        let permissions = self.current_permissions.as_ref()?;
+        let object_id = self.permissions_object_id();
+        let content = encode_permissions(permissions);
+        let metadata = self.permissions_metadata(&schema_hash);
+        self.query_manager
+            .sync_manager_mut()
+            .create_object_with_content(storage, object_id, metadata, content);
+        Some(object_id)
+    }
+
+    pub fn publish_permissions_bundle<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        schema_hash: SchemaHash,
+        permissions: HashMap<TableName, TablePolicies>,
+    ) -> Option<ObjectId> {
+        self.current_permissions_hash = Some(schema_hash);
+        self.current_permissions = Some(permissions.clone());
+        if self.apply_permissions_bundle(schema_hash, permissions.clone()) {
+            self.pending_permissions = None;
+        } else {
+            self.pending_permissions = Some((schema_hash, permissions));
+        }
+        self.persist_current_permissions(storage)
     }
 
     /// Register a reviewed lens in memory, activate any newly reachable schemas,
@@ -598,6 +659,8 @@ impl SchemaManager {
         for lens in lenses {
             self.persist_lens(storage, &lens);
         }
+
+        self.persist_current_permissions(storage);
     }
 
     /// Build metadata for a schema catalogue object.
@@ -606,6 +669,30 @@ impl SchemaManager {
         metadata.insert(
             crate::metadata::MetadataKey::Type.to_string(),
             crate::metadata::ObjectType::CatalogueSchema.to_string(),
+        );
+        metadata.insert(
+            crate::metadata::MetadataKey::AppId.to_string(),
+            self.app_id.uuid().to_string(),
+        );
+        metadata.insert(
+            crate::metadata::MetadataKey::SchemaHash.to_string(),
+            schema_hash.to_string(),
+        );
+        metadata
+    }
+
+    fn permissions_object_id(&self) -> ObjectId {
+        ObjectId::from_uuid(Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            format!("jazz-catalogue-permissions:{}", self.app_id.uuid()).as_bytes(),
+        ))
+    }
+
+    fn permissions_metadata(&self, schema_hash: &SchemaHash) -> HashMap<String, String> {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            crate::metadata::MetadataKey::Type.to_string(),
+            crate::metadata::ObjectType::CataloguePermissions.to_string(),
         );
         metadata.insert(
             crate::metadata::MetadataKey::AppId.to_string(),
@@ -661,6 +748,9 @@ impl SchemaManager {
             t if t == crate::metadata::ObjectType::CatalogueSchema.as_str() => {
                 self.process_catalogue_schema(metadata, content)
             }
+            t if t == crate::metadata::ObjectType::CataloguePermissions.as_str() => {
+                self.process_catalogue_permissions(metadata, content)
+            }
             t if t == crate::metadata::ObjectType::CatalogueLens.as_str() => {
                 self.process_catalogue_lens(metadata, content)
             }
@@ -707,6 +797,40 @@ impl SchemaManager {
 
             // Try to activate in case we already have the lens path
             self.activate_pending_and_sync_to_query_manager();
+        }
+
+        self.try_apply_pending_permissions();
+
+        Ok(())
+    }
+
+    fn process_catalogue_permissions(
+        &mut self,
+        metadata: &HashMap<String, String>,
+        content: &[u8],
+    ) -> Result<(), SchemaError> {
+        let app_id_str = metadata
+            .get(crate::metadata::MetadataKey::AppId.as_str())
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        if app_id_str != self.app_id.uuid().to_string() {
+            return Ok(());
+        }
+
+        let schema_hash = metadata
+            .get(crate::metadata::MetadataKey::SchemaHash.as_str())
+            .ok_or_else(|| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))
+            .and_then(|value| parse_schema_hash(value))?;
+        let permissions = decode_permissions(content)
+            .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
+
+        self.current_permissions_hash = Some(schema_hash);
+        self.current_permissions = Some(permissions.clone());
+        if self.apply_permissions_bundle(schema_hash, permissions) {
+            self.pending_permissions = None;
+        } else {
+            self.pending_permissions =
+                Some((schema_hash, self.current_permissions.clone().unwrap()));
         }
 
         Ok(())
@@ -775,6 +899,42 @@ impl SchemaManager {
         self.activate_pending_and_sync_to_query_manager();
 
         Ok(())
+    }
+
+    fn schema_for_permissions_hash(&self, schema_hash: SchemaHash) -> Option<Schema> {
+        if self.context.is_initialized() && self.context.current_hash == schema_hash {
+            return Some(strip_schema_policies(&self.context.current_schema));
+        }
+
+        self.context
+            .get_schema(&schema_hash)
+            .map(strip_schema_policies)
+            .or_else(|| self.known_schemas.get(&schema_hash).cloned())
+    }
+
+    fn apply_permissions_bundle(
+        &mut self,
+        schema_hash: SchemaHash,
+        permissions: HashMap<TableName, TablePolicies>,
+    ) -> bool {
+        let Some(schema) = self.schema_for_permissions_hash(schema_hash) else {
+            return false;
+        };
+
+        let authorization_schema = merge_permissions_into_schema(&schema, &permissions);
+        self.query_manager
+            .set_authorization_schema(authorization_schema);
+        true
+    }
+
+    fn try_apply_pending_permissions(&mut self) {
+        let Some((schema_hash, permissions)) = self.pending_permissions.clone() else {
+            return;
+        };
+
+        if self.apply_permissions_bundle(schema_hash, permissions) {
+            self.pending_permissions = None;
+        }
     }
 
     /// Try to activate pending schemas that now have lens paths.
@@ -996,6 +1156,42 @@ fn reorder_values_by_column_name(
     }
 
     Some(reordered_values)
+}
+
+fn extract_schema_permissions(schema: &Schema) -> HashMap<TableName, TablePolicies> {
+    schema
+        .iter()
+        .map(|(table_name, table_schema)| (*table_name, table_schema.policies.clone()))
+        .collect()
+}
+
+fn merge_permissions_into_schema(
+    schema: &Schema,
+    permissions: &HashMap<TableName, TablePolicies>,
+) -> Schema {
+    schema
+        .iter()
+        .map(|(table_name, table_schema)| {
+            let mut merged = table_schema.clone();
+            if let Some(table_policies) = permissions.get(table_name) {
+                merged.policies = table_policies.clone();
+            } else {
+                merged.policies = TablePolicies::default();
+            }
+            (*table_name, merged)
+        })
+        .collect()
+}
+
+fn strip_schema_policies(schema: &Schema) -> Schema {
+    schema
+        .iter()
+        .map(|(table_name, table_schema)| {
+            let mut structural = table_schema.clone();
+            structural.policies = TablePolicies::default();
+            (*table_name, structural)
+        })
+        .collect()
 }
 
 fn normalize_schema(mut schema: Schema) -> Schema {

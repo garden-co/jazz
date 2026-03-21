@@ -161,6 +161,15 @@ impl QueryManager {
         schema_context: &crate::schema_manager::SchemaContext,
         session: Option<Session>,
     ) -> Result<QuerySubscriptionId, QueryError> {
+        let compile_schema: Schema = schema
+            .iter()
+            .map(|(table_name, table_schema)| {
+                let mut structural = table_schema.clone();
+                structural.policies = crate::query_manager::types::TablePolicies::default();
+                (*table_name, structural)
+            })
+            .collect();
+
         // Determine branches from query or context
         let branches: Vec<String> = if !query.branches.is_empty() {
             query.branches.clone()
@@ -173,7 +182,7 @@ impl QueryManager {
         };
 
         // Compile query graph with explicit schema context
-        let graph = Self::compile_graph(&query, schema, session.clone(), schema_context)
+        let graph = Self::compile_graph(&query, &compile_schema, session.clone(), schema_context)
             .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
