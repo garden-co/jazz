@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -167,19 +167,21 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<Vec<u8>> {
         let branch_schema_map = Self::branch_schema_map_for_context(auth_context);
-        let source_hash = branch_schema_map.get(branch_name.as_str()).copied();
+        let source_hash = match branch_schema_map.get(branch_name.as_str()).copied() {
+            Some(source_hash) => source_hash,
+            None if ComposedBranchName::parse(&branch_name).is_some() => return None,
+            None => return Some(content.to_vec()),
+        };
 
-        if let Some(source_hash) = source_hash
-            && source_hash != auth_context.current_hash
-        {
-            let transformer = LensTransformer::new(auth_context, table);
-            return transformer
-                .transform(content, commit_id, source_hash)
-                .ok()
-                .map(|result| result.data);
+        if source_hash == auth_context.current_hash {
+            return Some(content.to_vec());
         }
 
-        Some(content.to_vec())
+        let transformer = LensTransformer::new(auth_context, table);
+        transformer
+            .transform(content, commit_id, source_hash)
+            .ok()
+            .map(|result| result.data)
     }
 
     fn load_row_for_authorization_context(
@@ -270,12 +272,78 @@ impl QueryManager {
         )
     }
 
+    fn provenance_row_matches_current_select_policy(
+        &mut self,
+        storage: &dyn Storage,
+        object_id: ObjectId,
+        branch_name: BranchName,
+        session: Option<&Session>,
+        auth_schema: &Schema,
+        auth_context: &crate::schema_manager::SchemaContext,
+    ) -> bool {
+        let branches = vec![branch_name.as_str().to_string()];
+        let Some((table, tip_content)) = ({
+            let Some(object) = self
+                .sync_manager
+                .object_manager
+                .get_or_load(object_id, storage, &branches)
+            else {
+                return false;
+            };
+            let Some(table) = object.metadata.get(MetadataKey::Table.as_str()).cloned() else {
+                return false;
+            };
+            let Some(branch) = object.branches.get(&branch_name) else {
+                return false;
+            };
+            let Some(tip_commit) = branch
+                .tips
+                .iter()
+                .filter_map(|tip_id| branch.commits.get(tip_id))
+                .max_by_key(|commit| commit.timestamp)
+            else {
+                return false;
+            };
+            if tip_commit.content.is_empty() {
+                return false;
+            }
+            Some((table, tip_commit.content.clone()))
+        }) else {
+            return false;
+        };
+
+        let table_name = TableName::new(&table);
+        let Some(select_policy) = auth_schema
+            .get(&table_name)
+            .and_then(|table_schema| table_schema.policies.select.using.as_ref())
+        else {
+            return auth_schema.contains_key(&table_name);
+        };
+        let Some(session) = session else {
+            return false;
+        };
+
+        self.evaluate_authorization_policy(
+            storage,
+            AuthorizationPolicyRequest {
+                object_id,
+                branch_name,
+                table_name,
+                policy: select_policy,
+                content: &tip_content,
+                session,
+                auth_schema,
+                auth_context,
+                operation: Operation::Select,
+            },
+        )
+    }
+
     fn authorized_scope_from_graph(
         &mut self,
         storage: &dyn Storage,
         graph: &super::graph::QueryGraph,
         schema_context: &crate::schema_manager::SchemaContext,
-        table: &str,
         session: Option<&Session>,
     ) -> HashSet<(ObjectId, BranchName)> {
         let Some((auth_schema, auth_context)) =
@@ -283,41 +351,39 @@ impl QueryManager {
         else {
             return HashSet::new();
         };
-        let table_name = TableName::new(table);
-        let Some(select_policy) = auth_schema
-            .get(&table_name)
-            .and_then(|table_schema| table_schema.policies.select.using.as_ref())
-        else {
+
+        if auth_schema
+            .values()
+            .all(|table_schema| table_schema.policies.select.using.is_none())
+        {
             return graph.sync_scope_object_ids();
-        };
-        let Some(session) = session else {
-            return HashSet::new();
-        };
+        }
+
+        let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
 
         graph
-            .current_output_rows_with_provenance()
+            .current_output_tuples()
             .into_iter()
-            .filter_map(|(row, provenance)| {
-                let branch_name = provenance
+            .filter_map(|tuple| {
+                tuple
+                    .provenance()
                     .iter()
-                    .find(|(object_id, _)| *object_id == row.id)
-                    .map(|(_, branch)| *branch)?;
-
-                self.evaluate_authorization_policy(
-                    storage,
-                    AuthorizationPolicyRequest {
-                        object_id: row.id,
-                        branch_name,
-                        table_name,
-                        policy: select_policy,
-                        content: &row.data,
-                        session,
-                        auth_schema: &auth_schema,
-                        auth_context: &auth_context,
-                        operation: Operation::Select,
-                    },
-                )
-                .then_some(provenance)
+                    .copied()
+                    .all(|(object_id, branch_name)| {
+                        *authorization_cache
+                            .entry((object_id, branch_name))
+                            .or_insert_with(|| {
+                                self.provenance_row_matches_current_select_policy(
+                                    storage,
+                                    object_id,
+                                    branch_name,
+                                    session,
+                                    &auth_schema,
+                                    &auth_context,
+                                )
+                            })
+                    })
+                    .then(|| tuple.provenance().clone())
             })
             .flatten()
             .collect()
@@ -616,7 +682,6 @@ impl QueryManager {
                 storage_ref,
                 &graph,
                 &subscription_context,
-                sub.query.table.as_str(),
                 session_for_policy.as_ref(),
             );
             // Trusted clients (Peer/Admin) also need policy context rows.
@@ -824,7 +889,6 @@ impl QueryManager {
                     storage,
                     &sub.graph,
                     &sub.schema_context,
-                    sub.query.table.as_str(),
                     sub.session.as_ref(),
                 );
                 if trusted_clients.contains(&client_id) {

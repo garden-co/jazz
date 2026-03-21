@@ -6663,6 +6663,131 @@ fn join_query_applies_policy_filter_on_joined_table() {
     );
 }
 
+#[test]
+fn server_join_query_uses_current_permissions_for_joined_provenance() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use crate::query_manager::types::{ComposedBranchName, SchemaHash};
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+
+    let authorization_schema = join_policy_schema();
+    let structural_schema: Schema = authorization_schema
+        .iter()
+        .map(|(table_name, table_schema)| {
+            let mut structural = table_schema.clone();
+            structural.policies = TablePolicies::default();
+            (*table_name, structural)
+        })
+        .collect();
+    let schema_hash = SchemaHash::compute(&structural_schema);
+    let branch = ComposedBranchName::new("dev", schema_hash, "main")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+
+    let sync_manager = SyncManager::new();
+    let mut server_qm = QueryManager::new(sync_manager);
+    let mut known_schemas = HashMap::new();
+    known_schemas.insert(schema_hash, structural_schema);
+    server_qm.set_known_schemas(Arc::new(known_schemas));
+    server_qm.set_authorization_schema(authorization_schema);
+
+    let mut storage = MemoryStorage::new();
+    let author = ObjectId::new();
+
+    let mut user_metadata = HashMap::new();
+    user_metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    let user_id = server_qm
+        .sync_manager_mut()
+        .object_manager
+        .create(&mut storage, Some(user_metadata));
+    server_qm
+        .sync_manager_mut()
+        .object_manager
+        .add_commit(
+            &mut storage,
+            user_id,
+            &branch,
+            vec![],
+            encode_row(
+                &RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+                &[Value::Text("bob".into())],
+            )
+            .unwrap(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let mut post_metadata = HashMap::new();
+    post_metadata.insert(MetadataKey::Table.to_string(), "posts".to_string());
+    let post_id = server_qm
+        .sync_manager_mut()
+        .object_manager
+        .create(&mut storage, Some(post_metadata));
+    server_qm
+        .sync_manager_mut()
+        .object_manager
+        .add_commit(
+            &mut storage,
+            post_id,
+            &branch,
+            vec![],
+            encode_row(
+                &RowDescriptor::new(vec![
+                    ColumnDescriptor::new("owner_name", ColumnType::Text),
+                    ColumnDescriptor::new("title", ColumnType::Text),
+                ]),
+                &[
+                    Value::Text("bob".into()),
+                    Value::Text("Bob private post".into()),
+                ],
+            )
+            .unwrap(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let client_id = ClientId::new();
+    server_qm.sync_manager_mut().add_client(client_id);
+    let session = PolicySession::new("alice");
+    server_qm
+        .sync_manager_mut()
+        .set_client_session(client_id, session.clone());
+
+    let query = QueryBuilder::new("users")
+        .branch(&branch)
+        .join("posts")
+        .on("users.name", "posts.owner_name")
+        .build();
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: Some(session),
+            propagation: crate::sync_manager::QueryPropagation::Full,
+        },
+    });
+
+    server_qm.process(&mut storage);
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let object_updates: Vec<_> = outbox
+        .iter()
+        .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == client_id))
+        .filter(|entry| matches!(entry.payload, SyncPayload::ObjectUpdated { .. }))
+        .collect();
+
+    assert!(
+        object_updates.is_empty(),
+        "Joined rows should be filtered when current permissions deny any contributing provenance row"
+    );
+}
+
 // ========================================================================
 // Branch-aware query tests
 // ========================================================================
