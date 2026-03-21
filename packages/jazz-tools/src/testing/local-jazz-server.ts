@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { TablePolicies } from "../drivers/types.js";
 import { loadCompiledSchema } from "../schema-loader.js";
 import { publishStoredSchema } from "../runtime/schema-fetch.js";
 
@@ -356,6 +357,7 @@ export async function pushSchemaCatalogue(options: PushSchemaCatalogueOptions): 
   const result = await publishStoredSchema(options.serverUrl, {
     adminSecret: options.adminSecret,
     schema: compiled.wasmSchema,
+    permissions: compiled.permissions as Record<string, TablePolicies>,
   });
 
   if (options.enableLogs === true) {

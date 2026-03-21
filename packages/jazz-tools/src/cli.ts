@@ -73,7 +73,7 @@ export async function build(options: BuildOptions): Promise<void> {
   const tableCount = compiled.schema.tables.length;
   console.log(`Loaded schema from ${compiled.schemaFile}.`);
   if (compiled.permissionsFile) {
-    console.log(`Merged permissions from ${compiled.permissionsFile}.`);
+    console.log(`Loaded permissions from ${compiled.permissionsFile}.`);
   }
   console.log(`Validated ${tableCount} table${tableCount === 1 ? "" : "s"}.`);
 }

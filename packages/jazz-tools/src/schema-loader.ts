@@ -9,7 +9,8 @@ import { getCollectedSchema, resetCollectedState } from "./dsl.js";
 import type { Column, OperationPolicy, Schema, SqlType, TablePolicies } from "./schema.js";
 import type { ColumnDescriptor, ColumnType, TableSchema, WasmSchema } from "./drivers/types.js";
 import { schemaDefinitionToAst } from "./migrations.js";
-import { mergePermissionsIntoSchema } from "./schema-permissions.js";
+import type { CompiledPermissionsMap } from "./schema-permissions.js";
+import { validatePermissionsAgainstSchema } from "./schema-permissions.js";
 
 registerEsm();
 
@@ -19,6 +20,7 @@ export interface LoadedSchemaProject {
   rootDir: string;
   schemaFile: string;
   permissionsFile?: string;
+  permissions?: CompiledPermissionsMap;
   schema: Schema;
   wasmSchema: WasmSchema;
 }
@@ -252,15 +254,20 @@ export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchem
   }
 
   const permissionsFile = join(resolved.rootDir, "permissions.ts");
+  let permissions: CompiledPermissionsMap | undefined;
   if (await pathExists(permissionsFile)) {
-    const permissions = await loadPermissionsModule(permissionsFile);
-    schema = mergePermissionsIntoSchema(schema, permissions);
+    permissions = await loadPermissionsModule(permissionsFile);
+    validatePermissionsAgainstSchema(
+      schema.tables.map((table) => table.name),
+      permissions,
+    );
   }
 
   return {
     rootDir: resolved.rootDir,
     schemaFile: resolved.schemaFile,
     permissionsFile: (await pathExists(permissionsFile)) ? permissionsFile : undefined,
+    permissions,
     schema,
     wasmSchema: schemaToWasm(schema),
   };

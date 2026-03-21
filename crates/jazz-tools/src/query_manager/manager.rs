@@ -23,7 +23,7 @@ use super::query::Query;
 use super::session::Session;
 use super::types::{
     ComposedBranchName, LoadedRow, OrderedRowDelta, RowDelta, RowDescriptor, Schema, SchemaHash,
-    TableName, TableSchema, Value, build_ordered_delta_with_post_ids,
+    TableName, TablePolicies, TableSchema, Value, build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -335,6 +335,7 @@ pub struct CatalogueUpdate {
 pub struct QueryManager {
     pub(super) sync_manager: SyncManager,
     pub(super) schema: Arc<Schema>,
+    pub(super) authorization_schema: Option<Arc<Schema>>,
 
     /// Pending catalogue updates (schemas/lenses received via sync).
     /// SchemaManager should call take_pending_catalogue_updates() to process these.
@@ -456,6 +457,7 @@ impl QueryManager {
         Self {
             sync_manager,
             schema: Arc::new(Schema::new()),
+            authorization_schema: None,
             pending_catalogue_updates: Vec::new(),
             subscriptions: HashMap::new(),
             next_subscription_id: 0,
@@ -478,6 +480,7 @@ impl QueryManager {
         self.schema_context
             .set_current(schema.clone(), env, user_branch);
         self.schema = Arc::new(schema.clone());
+        self.authorization_schema = Some(Arc::new(schema.clone()));
 
         // Update branch -> schema hash map
         let branch = self.schema_context.branch_name();
@@ -485,6 +488,11 @@ impl QueryManager {
             branch.as_str().to_string(),
             self.schema_context.current_hash,
         );
+    }
+
+    pub fn set_authorization_schema(&mut self, schema: Schema) {
+        self.authorization_schema = Some(Arc::new(schema));
+        self.mark_subscriptions_for_recompile();
     }
 
     /// Add a live schema (one we can read from but don't write to).
@@ -635,10 +643,20 @@ impl QueryManager {
             if sub.needs_recompile {
                 let query_for_compile =
                     Self::query_for_server_compile(&sub.query, &sub.schema_context);
+                let compile_schema: Schema = sub
+                    .schema_context
+                    .current_schema
+                    .iter()
+                    .map(|(table_name, table_schema)| {
+                        let mut structural = table_schema.clone();
+                        structural.policies = TablePolicies::default();
+                        (*table_name, structural)
+                    })
+                    .collect();
                 // Recompile the graph
                 match Self::compile_graph(
                     &query_for_compile,
-                    &sub.schema_context.current_schema,
+                    &compile_schema,
                     sub.session.clone(),
                     &sub.schema_context,
                 ) {
@@ -1068,6 +1086,14 @@ impl QueryManager {
                     schema_hash,
                 }
             }
+            t if t == ObjectType::CataloguePermissions.as_str() => {
+                let schema_hash_hex = metadata.get(MetadataKey::SchemaHash.as_str())?;
+                let schema_hash = Self::parse_schema_hash_hex(schema_hash_hex)?;
+                CatalogueManifestOp::PermissionsSeen {
+                    object_id,
+                    schema_hash,
+                }
+            }
             t if t == ObjectType::CatalogueLens.as_str() => {
                 let source_hex = metadata.get(MetadataKey::SourceHash.as_str())?;
                 let target_hex = metadata.get(MetadataKey::TargetHash.as_str())?;
@@ -1094,7 +1120,8 @@ impl QueryManager {
         // Check if this is a catalogue object (schema or lens)
         if let Some(type_str) = update.metadata.get(MetadataKey::Type.as_str())
             && (type_str == ObjectType::CatalogueSchema.as_str()
-                || type_str == ObjectType::CatalogueLens.as_str())
+                || type_str == ObjectType::CatalogueLens.as_str()
+                || type_str == ObjectType::CataloguePermissions.as_str())
         {
             if let Some((app_id, op)) =
                 Self::catalogue_manifest_append(&update.metadata, update.object_id)

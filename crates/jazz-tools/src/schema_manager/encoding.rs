@@ -17,8 +17,9 @@ use crate::query_manager::types::{
 use super::lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = 3;
-const LENS_VERSION: u8 = 1;
+const SCHEMA_VERSION: u8 = 4;
+const LENS_VERSION: u8 = 2;
+const PERMISSIONS_VERSION: u8 = 1;
 
 /// Encoding errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,7 +105,9 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
         // v2 schemas include policies, but no legacy inherit-policy byte.
         2 => decode_schema_v2(data),
         // v3 schemas include policies and a legacy inherit-policy byte.
-        SCHEMA_VERSION => decode_schema_v3(data),
+        3 => decode_schema_v3(data),
+        // v4 schemas are structural-only.
+        SCHEMA_VERSION => decode_schema_v4(data),
         _ => Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
             expected: SCHEMA_VERSION,
@@ -115,7 +118,6 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
 fn encode_table_entry(buf: &mut Vec<u8>, name: &TableName, schema: &TableSchema) {
     write_string(buf, name.as_str());
     encode_row_descriptor(buf, &schema.columns);
-    encode_table_policies(buf, &schema.policies);
 }
 
 fn decode_table_entry(
@@ -124,13 +126,12 @@ fn decode_table_entry(
 ) -> Result<(TableName, TableSchema), CatalogueEncodingError> {
     let name = read_string(data, offset, "table_name")?;
     let descriptor = decode_row_descriptor(data, offset)?;
-    let policies = decode_table_policies(data, offset)?;
 
     Ok((
         TableName::new(name),
         TableSchema {
             columns: descriptor,
-            policies,
+            policies: TablePolicies::default(),
         },
     ))
 }
@@ -141,13 +142,13 @@ fn decode_table_entry_v2(
 ) -> Result<(TableName, TableSchema), CatalogueEncodingError> {
     let name = read_string(data, offset, "table_name")?;
     let descriptor = decode_row_descriptor_v2(data, offset)?;
-    let policies = decode_table_policies(data, offset)?;
+    decode_table_policies(data, offset)?;
 
     Ok((
         TableName::new(name),
         TableSchema {
             columns: descriptor,
-            policies,
+            policies: TablePolicies::default(),
         },
     ))
 }
@@ -195,6 +196,19 @@ fn decode_schema_v2(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
 }
 
 fn decode_schema_v3(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
+    let mut offset = 1;
+    let table_count = read_u32(data, &mut offset)?;
+
+    let mut schema = HashMap::new();
+    for _ in 0..table_count {
+        let (name, table_schema) = decode_table_entry(data, &mut offset)?;
+        schema.insert(name, table_schema);
+    }
+
+    Ok(schema)
+}
+
+fn decode_schema_v4(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
     let mut offset = 1;
     let table_count = read_u32(data, &mut offset)?;
 
@@ -464,30 +478,14 @@ pub fn decode_lens_transform(data: &[u8]) -> Result<LensTransform, CatalogueEnco
     }
 
     let version = data[0];
-    if version != LENS_VERSION {
-        return Err(CatalogueEncodingError::UnsupportedVersion {
+    match version {
+        1 => decode_lens_transform_v1(data),
+        LENS_VERSION => decode_lens_transform_v2(data),
+        _ => Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
             expected: LENS_VERSION,
-        });
+        }),
     }
-
-    let mut offset = 1;
-
-    // Ops
-    let op_count = read_u32(data, &mut offset)?;
-    let mut ops = Vec::with_capacity(op_count as usize);
-    for _ in 0..op_count {
-        ops.push(decode_lens_op(data, &mut offset)?);
-    }
-
-    // Draft indices
-    let draft_count = read_u32(data, &mut offset)?;
-    let mut draft_ops = Vec::with_capacity(draft_count as usize);
-    for _ in 0..draft_count {
-        draft_ops.push(read_u32(data, &mut offset)? as usize);
-    }
-
-    Ok(LensTransform { ops, draft_ops })
 }
 
 /// LensOp type tags.
@@ -600,9 +598,98 @@ fn decode_lens_op(data: &[u8], offset: &mut usize) -> Result<LensOp, CatalogueEn
     }
 }
 
+fn decode_lens_transform_v1(data: &[u8]) -> Result<LensTransform, CatalogueEncodingError> {
+    let mut offset = 1;
+
+    let op_count = read_u32(data, &mut offset)?;
+    let mut ops = Vec::with_capacity(op_count as usize);
+    for _ in 0..op_count {
+        ops.push(decode_lens_op_v1(data, &mut offset)?);
+    }
+
+    let draft_count = read_u32(data, &mut offset)?;
+    let mut draft_ops = Vec::with_capacity(draft_count as usize);
+    for _ in 0..draft_count {
+        draft_ops.push(read_u32(data, &mut offset)? as usize);
+    }
+
+    Ok(LensTransform { ops, draft_ops })
+}
+
+fn decode_lens_transform_v2(data: &[u8]) -> Result<LensTransform, CatalogueEncodingError> {
+    let mut offset = 1;
+
+    let op_count = read_u32(data, &mut offset)?;
+    let mut ops = Vec::with_capacity(op_count as usize);
+    for _ in 0..op_count {
+        ops.push(decode_lens_op(data, &mut offset)?);
+    }
+
+    let draft_count = read_u32(data, &mut offset)?;
+    let mut draft_ops = Vec::with_capacity(draft_count as usize);
+    for _ in 0..draft_count {
+        draft_ops.push(read_u32(data, &mut offset)? as usize);
+    }
+
+    Ok(LensTransform { ops, draft_ops })
+}
+
+fn decode_lens_op_v1(data: &[u8], offset: &mut usize) -> Result<LensOp, CatalogueEncodingError> {
+    let tag = read_u8(data, offset)?;
+    match tag {
+        OP_ADD_COLUMN => {
+            let table = read_string(data, offset, "table")?;
+            let column = read_string(data, offset, "column")?;
+            let column_type = decode_column_type(data, offset)?;
+            let default = decode_value(data, offset)?;
+            Ok(LensOp::AddColumn {
+                table,
+                column,
+                column_type,
+                default,
+            })
+        }
+        OP_REMOVE_COLUMN => {
+            let table = read_string(data, offset, "table")?;
+            let column = read_string(data, offset, "column")?;
+            let column_type = decode_column_type(data, offset)?;
+            let default = decode_value(data, offset)?;
+            Ok(LensOp::RemoveColumn {
+                table,
+                column,
+                column_type,
+                default,
+            })
+        }
+        OP_RENAME_COLUMN => {
+            let table = read_string(data, offset, "table")?;
+            let old_name = read_string(data, offset, "old_name")?;
+            let new_name = read_string(data, offset, "new_name")?;
+            Ok(LensOp::RenameColumn {
+                table,
+                old_name,
+                new_name,
+            })
+        }
+        OP_ADD_TABLE => {
+            let table = read_string(data, offset, "table")?;
+            let schema = decode_table_schema_v1(data, offset)?;
+            Ok(LensOp::AddTable { table, schema })
+        }
+        OP_REMOVE_TABLE => {
+            let table = read_string(data, offset, "table")?;
+            let schema = decode_table_schema_v1(data, offset)?;
+            Ok(LensOp::RemoveTable { table, schema })
+        }
+        _ => Err(CatalogueEncodingError::InvalidTypeTag {
+            tag,
+            context: "lens_op",
+        }),
+    }
+}
+
 fn encode_table_schema(buf: &mut Vec<u8>, schema: &TableSchema) {
     encode_row_descriptor(buf, &schema.columns);
-    encode_table_policies(buf, &schema.policies);
 }
 
 fn decode_table_schema(
@@ -610,10 +697,21 @@ fn decode_table_schema(
     offset: &mut usize,
 ) -> Result<TableSchema, CatalogueEncodingError> {
     let descriptor = decode_row_descriptor(data, offset)?;
-    let policies = decode_table_policies(data, offset)?;
     Ok(TableSchema {
         columns: descriptor,
-        policies,
+        policies: TablePolicies::default(),
+    })
+}
+
+fn decode_table_schema_v1(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<TableSchema, CatalogueEncodingError> {
+    let descriptor = decode_row_descriptor(data, offset)?;
+    decode_table_policies(data, offset)?;
+    Ok(TableSchema {
+        columns: descriptor,
+        policies: TablePolicies::default(),
     })
 }
 
@@ -663,6 +761,53 @@ fn decode_table_policies(
         update: decode_operation_policy(data, offset)?,
         delete: decode_operation_policy(data, offset)?,
     })
+}
+
+pub fn encode_permissions(permissions: &HashMap<TableName, TablePolicies>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.push(PERMISSIONS_VERSION);
+
+    let mut entries: Vec<_> = permissions.iter().collect();
+    entries.sort_by_key(|(name, _)| name.as_str());
+    write_u32(&mut buf, entries.len() as u32);
+
+    for (table_name, policies) in entries {
+        write_string(&mut buf, table_name.as_str());
+        encode_table_policies(&mut buf, policies);
+    }
+
+    buf
+}
+
+pub fn decode_permissions(
+    data: &[u8],
+) -> Result<HashMap<TableName, TablePolicies>, CatalogueEncodingError> {
+    if data.is_empty() {
+        return Err(CatalogueEncodingError::TruncatedData {
+            expected: 1,
+            actual: 0,
+        });
+    }
+
+    let version = data[0];
+    if version != PERMISSIONS_VERSION {
+        return Err(CatalogueEncodingError::UnsupportedVersion {
+            found: version,
+            expected: PERMISSIONS_VERSION,
+        });
+    }
+
+    let mut offset = 1;
+    let table_count = read_u32(data, &mut offset)?;
+    let mut permissions = HashMap::new();
+
+    for _ in 0..table_count {
+        let table_name = TableName::new(read_string(data, &mut offset, "table_name")?);
+        let policies = decode_table_policies(data, &mut offset)?;
+        permissions.insert(table_name, policies);
+    }
+
+    Ok(permissions)
 }
 
 fn encode_operation_policy(
@@ -1591,7 +1736,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_roundtrip_with_policies_preserves_hash() {
+    fn schema_roundtrip_strips_policies_but_preserves_hash() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("todos")
@@ -1617,70 +1762,25 @@ mod tests {
 
         let decoded_todos = decoded.get(&TableName::new("todos")).unwrap();
         assert!(
-            decoded_todos.policies.select.using.is_some(),
-            "Policy should survive roundtrip"
+            decoded_todos.policies == TablePolicies::default(),
+            "Stored schema encoding should be structural-only"
         );
     }
 
     #[test]
-    fn schema_roundtrip_with_contains_and_in_list_policy() {
-        let schema = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("todos")
-                    .column("id", ColumnType::Uuid)
-                    .column("owner_id", ColumnType::Text)
-                    .column("status", ColumnType::Text)
-                    .policies(TablePolicies::new().with_select(PolicyExpr::And(vec![
-                        PolicyExpr::Contains {
-                            column: "owner_id".to_string(),
-                            value: PolicyValue::Literal(Value::Text("ali".to_string())),
-                        },
-                        PolicyExpr::InList {
-                            column: "status".to_string(),
-                            values: vec![
-                                PolicyValue::Literal(Value::Text("active".to_string())),
-                                PolicyValue::SessionRef(vec!["user_id".to_string()]),
-                            ],
-                        },
-                    ]))),
-            )
-            .build();
-
-        let encoded = encode_schema(&schema);
-        let decoded = decode_schema(&encoded).expect("schema should decode");
-        let using = decoded
-            .get(&TableName::new("todos"))
-            .expect("todos table should exist")
-            .policies
-            .select
-            .using
-            .as_ref()
-            .expect("select policy should exist");
-        assert!(matches!(
-            using,
-            PolicyExpr::And(exprs) if matches!(
-                (&exprs[0], &exprs[1]),
-                (
-                    PolicyExpr::Contains {
-                        column,
-                        value: PolicyValue::Literal(Value::Text(v)),
-                    },
-                    PolicyExpr::InList { column: in_column, values },
-                ) if column == "owner_id"
-                    && v == "ali"
-                    && in_column == "status"
-                    && values
-                        == &vec![
-                            PolicyValue::Literal(Value::Text("active".to_string())),
-                            PolicyValue::SessionRef(vec!["user_id".to_string()]),
-                        ]
-            )
-        ));
-    }
-
-    #[test]
-    fn schema_roundtrip_with_session_left_policy() {
+    fn permissions_roundtrip_preserves_complex_policies() {
         let expected = PolicyExpr::And(vec![
+            PolicyExpr::Contains {
+                column: "owner_id".to_string(),
+                value: PolicyValue::Literal(Value::Text("ali".to_string())),
+            },
+            PolicyExpr::InList {
+                column: "status".to_string(),
+                values: vec![
+                    PolicyValue::Literal(Value::Text("active".to_string())),
+                    PolicyValue::SessionRef(vec!["user_id".to_string()]),
+                ],
+            },
             PolicyExpr::SessionCmp {
                 path: vec!["claims".to_string(), "role".to_string()],
                 op: CmpOp::Eq,
@@ -1704,27 +1804,93 @@ mod tests {
                 path: vec!["userId".to_string()],
             },
         ]);
+        let permissions = HashMap::from([(
+            TableName::new("todos"),
+            TablePolicies::new().with_select(expected.clone()),
+        )]);
+
+        let encoded = encode_permissions(&permissions);
+        let decoded = decode_permissions(&encoded).expect("permissions should decode");
+
+        assert_eq!(
+            decoded.get(&TableName::new("todos")),
+            permissions.get(&TableName::new("todos"))
+        );
+    }
+
+    #[test]
+    fn decode_v2_schema_discards_policies() {
+        fn encode_schema_v2_with_policies(schema: &Schema) -> Vec<u8> {
+            let mut buf = Vec::new();
+            buf.push(2);
+
+            let mut tables: Vec<_> = schema.iter().collect();
+            tables.sort_by_key(|(name, _)| name.as_str());
+            write_u32(&mut buf, tables.len() as u32);
+
+            for (name, table_schema) in tables {
+                write_string(&mut buf, name.as_str());
+
+                let mut columns: Vec<_> = table_schema.columns.columns.iter().collect();
+                columns.sort_by_key(|c| c.name.as_str());
+                write_u32(&mut buf, columns.len() as u32);
+                for col in columns {
+                    write_string(&mut buf, col.name.as_str());
+                    encode_column_type(&mut buf, &col.column_type);
+                    buf.push(if col.nullable { 1 } else { 0 });
+                    match &col.references {
+                        Some(table) => {
+                            buf.push(1);
+                            write_string(&mut buf, table.as_str());
+                        }
+                        None => buf.push(0),
+                    }
+                }
+
+                encode_table_policies(&mut buf, &table_schema.policies);
+            }
+
+            buf
+        }
+
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("todos")
                     .column("id", ColumnType::Uuid)
-                    .column("owner_id", ColumnType::Text)
-                    .policies(TablePolicies::new().with_select(expected.clone())),
+                    .column("owner_id", ColumnType::Uuid)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::eq_session(
+                        "owner_id",
+                        vec!["user_id".to_string()],
+                    ))),
             )
             .build();
 
-        let encoded = encode_schema(&schema);
-        let decoded = decode_schema(&encoded).expect("schema should decode");
-        let using = decoded
-            .get(&TableName::new("todos"))
-            .expect("todos table should exist")
-            .policies
-            .select
-            .using
-            .as_ref()
-            .expect("select policy should exist");
+        let decoded = decode_schema(&encode_schema_v2_with_policies(&schema)).unwrap();
+        assert_eq!(
+            decoded.get(&TableName::new("todos")).unwrap().policies,
+            TablePolicies::default()
+        );
+    }
 
-        assert_eq!(using, &expected);
+    #[test]
+    fn lens_roundtrip_strips_table_policies() {
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::AddTable {
+                table: "todos".to_string(),
+                schema: TableSchema::builder("todos")
+                    .column("id", ColumnType::Uuid)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True))
+                    .build(),
+            },
+            false,
+        );
+
+        let decoded = decode_lens_transform(&encode_lens_transform(&transform)).unwrap();
+        let LensOp::AddTable { schema, .. } = &decoded.ops[0] else {
+            panic!("expected add-table op");
+        };
+        assert_eq!(schema.policies, TablePolicies::default());
     }
 
     #[test]

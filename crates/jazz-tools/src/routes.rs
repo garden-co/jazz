@@ -23,7 +23,9 @@ use crate::middleware::auth::{
     derive_local_principal_id, extract_session, parse_local_auth_headers, validate_admin_secret,
     validate_backend_secret, validate_jwt_identity,
 };
-use crate::query_manager::types::{ColumnType, Schema, SchemaHash, Value};
+use crate::query_manager::types::{
+    ColumnType, Schema, SchemaHash, TableName, TablePolicies, Value,
+};
 use crate::schema_manager::{AppId, Lens, LensOp, LensTransform};
 use crate::server::{ConnectionState, ServerState};
 use crate::sync_manager::ClientId;
@@ -115,6 +117,7 @@ enum PublishLensOp {
 #[derive(Debug, Deserialize)]
 struct PublishSchemaRequest {
     schema: Schema,
+    permissions: Option<std::collections::HashMap<TableName, TablePolicies>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -579,6 +582,20 @@ async fn publish_schema_handler(
                 .into_response();
         }
     };
+
+    if let Some(permissions) = request.permissions
+        && let Err(err) = state
+            .runtime
+            .publish_permissions_bundle(schema_hash, permissions)
+    {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(format!(
+                "failed to publish permissions catalogue: {err}"
+            ))),
+        )
+            .into_response();
+    }
 
     (
         StatusCode::CREATED,

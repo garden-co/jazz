@@ -1,4 +1,9 @@
-import type { ColumnType, Value as WasmValue, WasmSchema } from "../drivers/types.js";
+import type {
+  ColumnType,
+  TablePolicies,
+  Value as WasmValue,
+  WasmSchema,
+} from "../drivers/types.js";
 import { buildEndpointUrl } from "./sync-transport.js";
 
 export interface FetchStoredWasmSchemaOptions {
@@ -66,6 +71,7 @@ export interface PublishStoredSchemaOptions {
   adminSecret: string;
   pathPrefix?: string;
   schema: WasmSchema;
+  permissions?: Record<string, TablePolicies>;
 }
 
 export async function publishStoredSchema(
@@ -80,6 +86,7 @@ export async function publishStoredSchema(
     },
     body: JSON.stringify({
       schema: options.schema,
+      permissions: options.permissions,
     }),
   });
 

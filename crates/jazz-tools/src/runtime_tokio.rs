@@ -217,6 +217,18 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(core.publish_schema(schema))
     }
 
+    pub fn publish_permissions_bundle(
+        &self,
+        schema_hash: crate::query_manager::types::SchemaHash,
+        permissions: std::collections::HashMap<
+            crate::query_manager::types::TableName,
+            crate::query_manager::types::TablePolicies,
+        >,
+    ) -> Result<Option<ObjectId>, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.publish_permissions_bundle(schema_hash, permissions))
+    }
+
     /// Publish a reviewed lens edge to the local catalogue and active schema manager.
     pub fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;

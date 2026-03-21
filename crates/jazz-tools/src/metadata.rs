@@ -51,6 +51,7 @@ impl fmt::Display for MetadataKey {
 pub enum ObjectType {
     CatalogueSchema,
     CatalogueLens,
+    CataloguePermissions,
     Index,
 }
 
@@ -59,6 +60,7 @@ impl ObjectType {
         match self {
             Self::CatalogueSchema => "catalogue_schema",
             Self::CatalogueLens => "catalogue_lens",
+            Self::CataloguePermissions => "catalogue_permissions",
             Self::Index => "index",
         }
     }

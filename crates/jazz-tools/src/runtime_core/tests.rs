@@ -1854,6 +1854,17 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
             false
         }
     });
+    let permissions_msg = messages.iter().find(|m| {
+        if let SyncPayload::ObjectUpdated { metadata, .. } = &m.payload {
+            metadata
+                .as_ref()
+                .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
+                .map(|t| t == crate::metadata::ObjectType::CataloguePermissions.as_str())
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    });
 
     assert!(
         catalogue_msg.is_some(),
@@ -1864,6 +1875,10 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
             .map(|m| format!("{:?}", m.payload))
             .collect::<Vec<_>>()
             .join(", ")
+    );
+    assert!(
+        permissions_msg.is_some(),
+        "Catalogue permissions object should be in outbox after add_server + batched_tick."
     );
 }
 

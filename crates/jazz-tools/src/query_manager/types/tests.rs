@@ -520,6 +520,35 @@ fn schema_hash_different_schemas() {
 }
 
 #[test]
+fn schema_hash_ignores_policies() {
+    let schema_without_policies = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("owner_id", ColumnType::Uuid),
+        )
+        .build();
+
+    let schema_with_policies = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("owner_id", ColumnType::Uuid)
+                .policies(TablePolicies::new().with_select(PolicyExpr::eq_session(
+                    "owner_id",
+                    vec!["user_id".to_string()],
+                ))),
+        )
+        .build();
+
+    assert_eq!(
+        SchemaHash::compute(&schema_without_policies),
+        SchemaHash::compute(&schema_with_policies),
+        "Policy-only changes should not affect schema identity",
+    );
+}
+
+#[test]
 fn schema_hash_short() {
     let schema = SchemaBuilder::new()
         .table(TableSchema::builder("users").column("id", ColumnType::Uuid))

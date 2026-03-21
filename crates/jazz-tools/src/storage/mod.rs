@@ -102,6 +102,10 @@ pub enum CatalogueManifestOp {
         object_id: ObjectId,
         schema_hash: SchemaHash,
     },
+    PermissionsSeen {
+        object_id: ObjectId,
+        schema_hash: SchemaHash,
+    },
     LensSeen {
         object_id: ObjectId,
         source_hash: SchemaHash,
@@ -112,7 +116,9 @@ pub enum CatalogueManifestOp {
 impl CatalogueManifestOp {
     pub fn object_id(&self) -> ObjectId {
         match self {
-            Self::SchemaSeen { object_id, .. } | Self::LensSeen { object_id, .. } => *object_id,
+            Self::SchemaSeen { object_id, .. }
+            | Self::PermissionsSeen { object_id, .. }
+            | Self::LensSeen { object_id, .. } => *object_id,
         }
     }
 }
@@ -121,6 +127,7 @@ impl CatalogueManifestOp {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CatalogueManifest {
     pub schema_seen: HashMap<ObjectId, SchemaHash>,
+    pub permissions_seen: HashMap<ObjectId, SchemaHash>,
     pub lens_seen: HashMap<ObjectId, CatalogueLensSeen>,
 }
 
@@ -132,6 +139,12 @@ impl CatalogueManifest {
                 schema_hash,
             } => {
                 self.schema_seen.insert(*object_id, *schema_hash);
+            }
+            CatalogueManifestOp::PermissionsSeen {
+                object_id,
+                schema_hash,
+            } => {
+                self.permissions_seen.insert(*object_id, *schema_hash);
             }
             CatalogueManifestOp::LensSeen {
                 object_id,

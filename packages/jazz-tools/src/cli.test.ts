@@ -228,7 +228,7 @@ describe("cli schema export", () => {
       "title",
       "ownerId",
     ]);
-    expect(exported.todos.policies?.select?.using?.type).toBe("Cmp");
+    expect(exported.todos.policies).toBeUndefined();
   });
 });
 
