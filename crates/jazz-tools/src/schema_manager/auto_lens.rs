@@ -128,7 +128,7 @@ fn generate_column_ops(
             continue;
         }
         let col = new_cols.get(added).unwrap();
-        let default = default_for_type(&col.column_type, col.nullable);
+        let default = lens_default_for_column(col);
         ops.push((
             LensOp::AddColumn {
                 table: table.to_string(),
@@ -147,7 +147,7 @@ fn generate_column_ops(
             continue;
         }
         let col = old_cols.get(removed).unwrap();
-        let default = default_for_type(&col.column_type, col.nullable);
+        let default = lens_default_for_column(col);
         ops.push((
             LensOp::RemoveColumn {
                 table: table.to_string(),
@@ -174,8 +174,16 @@ fn generate_column_ops(
     ops
 }
 
-/// Generate a reasonable default value for a column type.
-fn default_for_type(column_type: &ColumnType, nullable: bool) -> Value {
+/// Prefer an explicit schema default, then fall back to a heuristic.
+fn lens_default_for_column(column: &crate::query_manager::types::ColumnDescriptor) -> Value {
+    column
+        .default
+        .clone()
+        .unwrap_or_else(|| heuristic_default_for_type(&column.column_type, column.nullable))
+}
+
+/// Generate a reasonable heuristic default value for a column type.
+fn heuristic_default_for_type(column_type: &ColumnType, nullable: bool) -> Value {
     if nullable {
         return Value::Null;
     }
@@ -210,6 +218,7 @@ fn needs_default_review(value: &Value, nullable: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object::ObjectId;
     use crate::query_manager::types::{SchemaBuilder, TableSchema};
 
     #[test]
@@ -328,6 +337,34 @@ mod tests {
     }
 
     #[test]
+    fn auto_lens_add_column_prefers_explicit_schema_default() {
+        let default_org_id = ObjectId::new();
+        let old = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+
+        let new = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column_with_default("org_id", ColumnType::Uuid, Value::Uuid(default_org_id)),
+            )
+            .build();
+
+        let lens = generate_lens(&old, &new);
+
+        if let LensOp::AddColumn { default, .. } = &lens.forward.ops[0] {
+            assert_eq!(*default, Value::Uuid(default_org_id));
+        } else {
+            panic!("Expected AddColumn op");
+        }
+        assert!(
+            !lens.is_draft(),
+            "an explicit schema default should avoid the UUID draft fallback"
+        );
+    }
+
+    #[test]
     fn auto_lens_remove_column() {
         let old = SchemaBuilder::new()
             .table(
@@ -348,6 +385,29 @@ mod tests {
             matches!(&lens.forward.ops[0], LensOp::RemoveColumn { column, .. } if column == "deprecated")
         );
         assert!(!lens.is_draft());
+    }
+
+    #[test]
+    fn auto_lens_remove_column_prefers_explicit_schema_default() {
+        let old = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column_with_default("role", ColumnType::Text, Value::Text("member".into())),
+            )
+            .build();
+
+        let new = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+
+        let lens = generate_lens(&old, &new);
+
+        if let LensOp::RemoveColumn { default, .. } = &lens.forward.ops[0] {
+            assert_eq!(*default, Value::Text("member".into()));
+        } else {
+            panic!("Expected RemoveColumn op");
+        }
     }
 
     #[test]
