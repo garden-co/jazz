@@ -234,3 +234,49 @@ This lets users backfill old rows one way while using a different default for ne
 3. Should we support default-only migration SQL (`ALTER COLUMN SET/DROP DEFAULT`)?
 
 - Not in MVP. Treat it as metadata-only first; add a dedicated lens op later if operationally necessary.
+
+## Implementation Tasks
+
+Recommended execution order: start in Rust so schema defaults become real schema metadata first, then expose that through the runtime boundary, and then add the TypeScript DSL and typed insert behavior on top.
+
+- [ ] Rust schema core:
+      Add `default: Option<Value>` to `ColumnDescriptor`, add a builder/helper for setting it, and ensure old serialized schemas still deserialize with `default: None`.
+
+- [ ] Rust schema hashing:
+      Update schema hashing so column defaults affect `SchemaHash`, and add tests proving a default-only change produces a new hash.
+
+- [ ] Rust SQL parser and writer:
+      Stop discarding `DEFAULT` in `CREATE TABLE`, reuse default coercion logic for schema columns, emit schema defaults from `column_descriptor_to_sql()`, and add round-trip tests.
+
+- [ ] Rust schema serialization and boundaries:
+      Verify `ColumnDescriptor.default` flows through WASM, NAPI, and catalogue export, and add serde/catalogue tests for explicit defaults and absent defaults.
+
+- [ ] Rust auto-lens and diffing:
+      Update `auto_lens.rs` and `diff.rs` so explicit schema defaults are used for generated `AddColumn` and `RemoveColumn` defaults before falling back to the current heuristics.
+
+- [ ] Rust schema-evolution tests:
+      Add or update transformer/context/integration tests so a defaulted added column materializes with the schema default, and explicit defaults prevent draft lenses when they make the migration fully defined.
+
+- [ ] TypeScript shared schema/value boundary:
+      Add `default?: Value` to `packages/jazz-tools/src/drivers/types.ts` and implement a dedicated schema-default-to-`Value` conversion path in `schema-reader.ts`.
+
+- [ ] TypeScript schema IR:
+      Add `default?: unknown` to `packages/jazz-tools/src/schema.ts` and thread it through built columns.
+
+- [ ] TypeScript DSL builders:
+      Add `.default(...)` to schema-context builders (`ScalarBuilder`, `EnumBuilder`, `JsonBuilder`, `RefBuilder`, `ArrayBuilder`), preserve `.optional()` chaining, and add DSL typing/runtime tests.
+
+- [ ] TypeScript codegen:
+      Update generated `Init` interfaces so defaulted columns are optional while row/result interfaces remain unchanged, and add codegen assertions for that behavior.
+
+- [ ] TypeScript insert conversion:
+      Update `packages/jazz-tools/src/runtime/value-converter.ts` so omitted or `undefined` fields use schema defaults, nullable non-defaulted fields become `Null`, and missing required non-defaulted fields throw a clear error.
+
+- [ ] TypeScript unit tests:
+      Add focused tests for scalar, enum, array, bytea, json, timestamp, and nullable `null` defaults in `schemaToWasm()` and `value-converter`.
+
+- [ ] End-to-end tests:
+      Add integration coverage showing `db.insert()` can omit a defaulted non-nullable field and still persist the defaulted value, plus a cross-schema evolution test covering defaulted added columns.
+
+- [ ] Documentation cleanup:
+      Update schema docs/examples so schema defaults and migration/lens defaults are clearly distinguished, including which one affects future inserts versus schema-evolution transforms.
