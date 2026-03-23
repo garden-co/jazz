@@ -125,7 +125,7 @@ Demo auth lets you create multiple users and test multi-user flows. Data persist
 Pass a JWT from your auth provider using the `jwtToken` option. Jazz validates it against your JWKS endpoint.
 
 <Callout type="info" title="JWT? JWKS?">
-  JWTs, or JSON Web Tokens, are small JSON payloads signed by an authority&hairsp;—&hairsp;normally this is your authentication provider. Often this JSON payload includes details about your identity, but it can also include various other pieces of information known as 'claims'. Jazz can read the signed payload and use it in your permissions policies. To validate the signature and protect against spoofing, Jazz retrieves the certificate's public key from the JWKS endpoint you specify.
+  JWTs, or JSON Web Tokens, are small JSON payloads signed by an authority&hairsp;—&hairsp;normally this is your authentication provider. Often this JSON payload includes details about your identity, but it can also include various other pieces of information known as 'claims'. Jazz can read the signed payload and use it in your permissions policies. To validate the signature and protect against spoofing, Jazz retrieves the signing key from the JWKS endpoint you specify.
 
 For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web-tokens) are a great starting point.
 
@@ -158,6 +158,36 @@ For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web
     </include>
   </Tab>
 </Tabs>
+
+### Server configuration
+
+| Flag                | Purpose                                                                                   | Development | Production                                                          |
+| ------------------- | ----------------------------------------------------------------------------------------- | ----------- | ------------------------------------------------------------------- |
+| `--port`            | Port to listen on (defaults to 1625)                                                      | Optional    | Optional                                                            |
+| `--data-dir`        | Directory for persistent storage                                                          | Required    | Required                                                            |
+| `--in-memory`       | Use in-memory storage instead of Fjall-backed files. Data is lost when the process exits. | Optional    | Optional                                                            |
+| `--jwks-url <url>`  | JWKS endpoint for JWT signature verification                                              | Optional    | Optional, but required if using JWT auth to validate JWT signatures |
+| `--backend-secret`  | Secret for backend session impersonation                                                  | Optional    | Optional                                                            |
+| `--admin-secret`    | Secret for admin operations (schema/policy sync)                                          | Optional    | Optional                                                            |
+| `--allow-anonymous` | Allow anonymous auth                                                                      | Enabled     | Disabled                                                            |
+| `--allow-demo`      | Allow demo auth                                                                           | Enabled     | Disabled                                                            |
+
+Production mode activates when `NODE_ENV=production`.
+
+<include cwd lang="bash" meta='title="Terminal"'>
+  ../examples/docs/todo-server-ts/docs/auth-server-cli.sh#auth-server-cli
+</include>
+
+### Session resolution
+
+When the server receives a request, it tries each auth method in priority order and uses the first match:
+
+1. **Backend impersonation** &hairsp;—&hairsp; the request includes `X-Jazz-Backend-Secret` and `X-Jazz-Session` headers. A trusted backend service (e.g. a cron job or webhook handler) can act as any user by providing the shared secret and a base64-encoded session identifying the user to impersonate.
+2. **External JWT** &hairsp;—&hairsp; the request includes an `Authorization: Bearer <jwt>` header. The token is validated against the JWKS endpoint configured with `--jwks-url`.
+3. **Local auth** &hairsp;—&hairsp; the request includes `X-Jazz-Local-Mode` and `X-Jazz-Local-Token` headers. Used by anonymous and demo auth in development.
+4. **No session** &hairsp;—&hairsp; none of the above matched.
+
+Backend impersonation always takes precedence, so a backend service can reliably impersonate users even if the request also carries a JWT.
 
 ### Upgrading from local auth
 
@@ -193,41 +223,6 @@ You might allow anonymous auth in production so users can try your app before si
 
 Once linked, JWT logins use the same user identity as the original local account.
 
-<Accordions type="single">
-<Accordion title="Server configuration">
-
-| Flag                | Purpose                                          | Development | Production                                                          |
-| ------------------- | ------------------------------------------------ | ----------- | ------------------------------------------------------------------- |
-| `--port`            | Port to listen on (defaults to 1625)             | Optional    | Optional                                                            |
-| `--data-dir`        | Directory for persistent storage                 | Required    | Required                                                            |
-| `--in-memory`       | Use in-memory storage instead of Fjall-backed files. Data is lost when the process exits. | Optional    | Optional                                                            |
-| `--jwks-url <url>`  | JWKS endpoint for JWT signature verification     | Optional    | Optional, but required if using JWT auth to validate JWT signatures |
-| `--backend-secret`  | Secret for backend session impersonation         | Optional    | Optional                                                            |
-| `--admin-secret`    | Secret for admin operations (schema/policy sync) | Optional    | Optional                                                            |
-| `--allow-anonymous` | Allow anonymous auth                             | Enabled     | Disabled                                                            |
-| `--allow-demo`      | Allow demo auth                                  | Enabled     | Disabled                                                            |
-
-Production mode activates when `NODE_ENV=production`.
-
-<include cwd lang="bash" meta='title="Terminal"'>
-  ../examples/docs/todo-server-ts/docs/auth-server-cli.sh#auth-server-cli
-</include>
-
-</Accordion>
-<Accordion title="Session resolution">
-
-When the server receives a request, it tries each auth method in priority order and uses the first match:
-
-1. **Backend impersonation** &hairsp;—&hairsp; the request includes `X-Jazz-Backend-Secret` and `X-Jazz-Session` headers. A trusted backend service (e.g. a cron job or webhook handler) can act as any user by providing the shared secret and a base64-encoded session identifying the user to impersonate.
-2. **External JWT** &hairsp;—&hairsp; the request includes an `Authorization: Bearer <jwt>` header. The token is validated against the JWKS endpoint configured with `--jwks-url`.
-3. **Local auth** &hairsp;—&hairsp; the request includes `X-Jazz-Local-Mode` and `X-Jazz-Local-Token` headers. Used by anonymous and demo auth in development.
-4. **No session** &hairsp;—&hairsp; none of the above matched.
-
-Backend impersonation always takes precedence, so a backend service can reliably impersonate users even if the request also carries a JWT.
-
-</Accordion>
-</Accordions>
-
 ## Offline-only mode
 
 If you're building an app that never syncs, you can skip server auth entirely. Data will be persisted locally only.
@@ -259,3 +254,8 @@ If you're building an app that never syncs, you can skip server auth entirely. D
     </include>
   </Tab>
 </Tabs>
+
+## Next steps
+
+- [Sessions](/docs/auth/sessions)&hairsp;—&hairsp;read the current user and scope queries to their identity
+- [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;define row-level access policies

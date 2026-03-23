@@ -11,13 +11,13 @@ table("projects", {
 table("todos", {
   title: col.string(),
   done: col.boolean(),
-  parent: col.ref("todos").optional(),
-  project: col.ref("projects").optional(),
+  parentId: col.ref("todos").optional(),
+  projectId: col.ref("projects").optional(),
   owner_id: col.string(),
 });
 
 table("todoShares", {
-  todo: col.ref("todos"),
+  todoId: col.ref("todos"),
   user_id: col.string(),
   can_read: col.boolean(),
 });
@@ -94,7 +94,7 @@ definePermissions(app, ({ policy, anyOf, session }) => {
     anyOf([
       { owner_id: session.user_id },
       policy.todoShares.exists.where({
-        todo: todo.id,
+        todoId: todo.id,
         user_id: session.user_id,
         can_read: true,
       }),

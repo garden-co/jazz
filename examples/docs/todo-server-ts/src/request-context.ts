@@ -42,7 +42,7 @@ export async function listTodosWithInheritedPolicy(
   try {
     const rows = await context
       .forRequest(req, schemaApp)
-      .all(schemaApp.todos.where({ project: req.params.projectId }));
+      .all(schemaApp.todos.where({ projectId: req.params.projectId }));
     res.json(rows);
   } catch {
     sendQueryError(res);

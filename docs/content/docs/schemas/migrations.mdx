@@ -10,142 +10,37 @@ reviewedAt: "14cd73f0"
 
 ## Why Jazz migrations are different
 
-- Traditional migration systems run a linear sequence and require peers to converge before older versions stop writing.
-- Jazz migration lenses are applied at read/write time, so mixed-version clients can keep operating while data is translated between schema hashes.
-- Schemas still auto-publish on connect. Migrations do not: they are always reviewed and pushed explicitly.
+Traditional migration systems run a linear sequence and require peers to converge before older versions stop writing. Jazz migration lenses are applied at read/write time, so mixed-version clients can keep operating while data is translated between schema hashes.
 
 ## Workflow
 
-All Jazz apps use the same migration workflow, including Rust backends.
+Edit your schema, then run `npx jazz-tools@alpha build` to generate migration stubs automatically:
 
-```bash
-# 1) Edit schema.ts during development and watch for Jazz migration warnings.
+<include cwd lang="bash">
+  ../examples/docs/todo-server-ts/docs/migrations-workflow.sh#migrations-workflow-ts
+</include>
 
-# 2) Generate a typed migration stub after Jazz reports the old/new hashes.
-npx jazz-tools@alpha migrations create <fromHash> <toHash>
-
-# 3) Fill in migrate, rename the file, then publish the reviewed edge.
-npx jazz-tools@alpha migrations push <fromHash> <toHash>
-```
-
-When Jazz encounters rows whose schema hash is no longer reachable from the current app schema, it logs a warning with the exact `migrations create <fromHash> <toHash>` command to run next.
+Review the generated files, adjust any defaults, then commit.
 
 ## Generated stub
 
-`migrations create` writes a copy-pastable file with short `fromHash`, `toHash`, and minimal typed `from` / `to` witnesses. You only need to fill in `migrate`, then rename the file.
+`npx jazz-tools@alpha build` generates a complete migration file per schema change, with the `migrate` section auto-populated&hairsp;—&hairsp;adds, drops, possible renames, and sensible defaults (nullable columns get `null`, non-nullable columns get type-appropriate defaults like `""` or `0`).
 
-```ts title="migrations/20260318-unnamed-a01f5c72ec47-311995e9a178.ts"
-import { col, defineMigration } from "jazz-tools";
+Here's a generated stub for adding a `description` column:
 
-export default defineMigration({
-  migrate: {
-    todos: {
-      description: col.add.string({ default: null }),
-    },
-  },
-  fromHash: "a01f5c72ec47",
-  toHash: "311995e9a178",
-  from: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-    },
-  },
-  to: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      description: col.string().optional(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-    },
-  },
-});
-```
-
-## Edited stub
-
-After review, keep the same hashes and adjust the `migrate` object as needed:
-
-```ts title="migrations/20260318-add-description-a01f5c72ec47-311995e9a178.ts"
-import { col, defineMigration } from "jazz-tools";
-
-// Example of editing a generated migration stub.
-export default defineMigration({
-  migrate: {
-    todos: {
-      description: col.add.string({ default: "No description" }),
-    },
-  },
-  fromHash: "a01f5c72ec47",
-  toHash: "311995e9a178",
-  from: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-    },
-  },
-  to: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      description: col.string().optional(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-    },
-  },
-});
-```
+<include cwd lang="ts" meta='title="migration_v1_v2_generated_stub.ts"'>
+  ../examples/docs/todo-server-ts/schema/migration_v1_v2_generated_stub_example.ts#migration-generated-stub-example
+</include>
 
 ## Backwards defaults
 
-When a newer schema drops a column that older clients still expect, define a backwards default in the migration edge:
+When a newer schema drops a column that older clients still expect, define a backwards default so the lens can supply a value for those clients:
 
-```ts title="migrations/20260318-drop-legacy-priority-311995e9a178-73b65d082ab8.ts"
-import { col, defineMigration } from "jazz-tools";
+<include cwd lang="ts" meta='title="migration_v1_v2_backwards_default_example.ts"'>
+  ../examples/docs/todo-server-ts/schema/migration_v1_v2_backwards_default_example.ts#backwards-default-example
+</include>
 
-// Example: dropping a column with a backwards default.
-// Clients still on the older schema continue seeing legacy_priority.
-export default defineMigration({
-  migrate: {
-    todos: {
-      legacy_priority: col.drop.int({ backwardsDefault: 0 }),
-    },
-  },
-  fromHash: "311995e9a178",
-  toHash: "73b65d082ab8",
-  from: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      description: col.string().optional(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-      legacy_priority: col.int(),
-    },
-  },
-  to: {
-    todos: {
-      title: col.string(),
-      done: col.boolean(),
-      description: col.string().optional(),
-      parentId: col.ref("todos").optional(),
-      projectId: col.ref("projects").optional(),
-      owner_id: col.string(),
-    },
-  },
-});
-```
+## Next steps
 
-## Rust apps use the same files
-
-Rust services still author and ship TypeScript migrations. The Rust runtime consumes the compiled internal schema representation through the CLI and low-level APIs; it does not maintain a separate SQL migration format.
+- [Defining Tables](/docs/schemas/defining-tables)&hairsp;—&hairsp;table and column definitions
+- [Column Types](/docs/reference/column-types)&hairsp;—&hairsp;full list of available column types

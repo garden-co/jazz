@@ -20,8 +20,8 @@ export interface Todo {
   done: boolean;
   description?: string;
   ownerId: string;
-  parentId?: string;
   projectId?: string;
+  parentId?: string;
 }
 
 export interface ProjectInit {
@@ -33,8 +33,8 @@ export interface TodoInit {
   done: boolean;
   description?: string;
   ownerId: string;
-  parentId?: string;
   projectId?: string;
+  parentId?: string;
 }
 
 export interface ProjectWhereInput {
@@ -51,8 +51,8 @@ export interface TodoWhereInput {
   done?: boolean;
   description?: string | { eq?: string; ne?: string; contains?: string };
   ownerId?: string | { eq?: string; ne?: string; contains?: string };
-  parentId?: string | { eq?: string; ne?: string; isNull?: boolean };
   projectId?: string | { eq?: string; ne?: string; isNull?: boolean };
+  parentId?: string | { eq?: string; ne?: string; isNull?: boolean };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -66,9 +66,9 @@ export interface ProjectInclude {
 }
 
 export interface TodoInclude {
+  project?: true | ProjectInclude | AnyProjectQueryBuilder<any>;
   parent?: true | TodoInclude | AnyTodoQueryBuilder<any>;
   todosViaParent?: true | TodoInclude | AnyTodoQueryBuilder<any>;
-  project?: true | ProjectInclude | AnyProjectQueryBuilder<any>;
 }
 
 export type ProjectIncludedRelations<I extends ProjectInclude = {}, R extends boolean = false> = {
@@ -88,7 +88,17 @@ export type ProjectIncludedRelations<I extends ProjectInclude = {}, R extends bo
 
 export type TodoIncludedRelations<I extends TodoInclude = {}, R extends boolean = false> = {
   [K in keyof I]-?:
-    K extends "parent"
+    K extends "project"
+      ? NonNullable<I["project"]> extends infer RelationInclude
+        ? RelationInclude extends true
+          ? Project | undefined
+          : RelationInclude extends AnyProjectQueryBuilder<infer QueryRow>
+            ? QueryRow | undefined
+            : RelationInclude extends ProjectInclude
+              ? ProjectWithIncludes<RelationInclude, false> | undefined
+              : never
+        : never
+    : K extends "parent"
       ? NonNullable<I["parent"]> extends infer RelationInclude
         ? RelationInclude extends true
           ? Todo | undefined
@@ -108,16 +118,6 @@ export type TodoIncludedRelations<I extends TodoInclude = {}, R extends boolean 
               ? TodoWithIncludes<RelationInclude, false>[]
               : never
         : never
-    : K extends "project"
-      ? NonNullable<I["project"]> extends infer RelationInclude
-        ? RelationInclude extends true
-          ? Project | undefined
-          : RelationInclude extends AnyProjectQueryBuilder<infer QueryRow>
-            ? QueryRow | undefined
-            : RelationInclude extends ProjectInclude
-              ? ProjectWithIncludes<RelationInclude, false> | undefined
-              : never
-        : never
     : never;
 };
 
@@ -126,9 +126,9 @@ export interface ProjectRelations {
 }
 
 export interface TodoRelations {
+  project: Project | undefined;
   parent: Todo | undefined;
   todosViaParent: Todo[];
-  project: Project | undefined;
 }
 
 export type ProjectWithIncludes<I extends ProjectInclude = {}, R extends boolean = false> = Project & ProjectIncludedRelations<I, R>;
@@ -192,20 +192,20 @@ export const wasmSchema: WasmSchema = {
         "nullable": false
       },
       {
-        "name": "parentId",
-        "column_type": {
-          "type": "Uuid"
-        },
-        "nullable": true,
-        "references": "todos"
-      },
-      {
         "name": "projectId",
         "column_type": {
           "type": "Uuid"
         },
         "nullable": true,
         "references": "projects"
+      },
+      {
+        "name": "parentId",
+        "column_type": {
+          "type": "Uuid"
+        },
+        "nullable": true,
+        "references": "todos"
       }
     ],
     "policies": {
@@ -584,7 +584,7 @@ export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectab
     return clone;
   }
 
-  hopTo(relation: "parent" | "todosViaParent" | "project"): TodoQueryBuilder<I, S, R> {
+  hopTo(relation: "project" | "parent" | "todosViaParent"): TodoQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;

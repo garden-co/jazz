@@ -18,6 +18,7 @@ export interface PermissionIntrospectionColumns {
 export interface User {
   id: string;
   name: string;
+  friendsIds: string[];
 }
 
 export interface Project {
@@ -30,13 +31,14 @@ export interface Todo {
   title: string;
   done: boolean;
   tags: string[];
-  project: string;
-  owner?: string;
-  assignees: string[];
+  projectId: string;
+  ownerId?: string;
+  assigneesIds: string[];
 }
 
 export interface UserInit {
   name: string;
+  friendsIds: string[];
 }
 
 export interface ProjectInit {
@@ -47,14 +49,15 @@ export interface TodoInit {
   title: string;
   done: boolean;
   tags: string[];
-  project: string;
-  owner?: string;
-  assignees: string[];
+  projectId: string;
+  ownerId?: string;
+  assigneesIds: string[];
 }
 
 export interface UserWhereInput {
   id?: string | { eq?: string; ne?: string; in?: string[] };
   name?: string | { eq?: string; ne?: string; contains?: string };
+  friendsIds?: string[] | { eq?: string[]; contains?: string };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -73,9 +76,9 @@ export interface TodoWhereInput {
   title?: string | { eq?: string; ne?: string; contains?: string };
   done?: boolean;
   tags?: string[] | { eq?: string[]; contains?: string };
-  project?: string | { eq?: string; ne?: string };
-  owner?: string | { eq?: string; ne?: string; isNull?: boolean };
-  assignees?: string[] | { eq?: string[]; contains?: string };
+  projectId?: string | { eq?: string; ne?: string };
+  ownerId?: string | { eq?: string; ne?: string; isNull?: boolean };
+  assigneesIds?: string[] | { eq?: string[]; contains?: string };
   $canRead?: boolean;
   $canEdit?: boolean;
   $canDelete?: boolean;
@@ -86,6 +89,8 @@ type AnyProjectQueryBuilder<T = any> = { readonly _table: "projects" } & QueryBu
 type AnyTodoQueryBuilder<T = any> = { readonly _table: "todos" } & QueryBuilder<T>;
 
 export interface UserInclude {
+  friends?: true | UserInclude | AnyUserQueryBuilder<any>;
+  usersViaFriends?: true | UserInclude | AnyUserQueryBuilder<any>;
   todosViaOwner?: true | TodoInclude | AnyTodoQueryBuilder<any>;
   todosViaAssignees?: true | TodoInclude | AnyTodoQueryBuilder<any>;
 }
@@ -101,27 +106,47 @@ export interface TodoInclude {
 }
 
 export type UserIncludedRelations<I extends UserInclude = {}, R extends boolean = false> = {
-  [K in keyof I]-?: K extends "todosViaOwner"
-    ? NonNullable<I["todosViaOwner"]> extends infer RelationInclude
+  [K in keyof I]-?: K extends "friends"
+    ? NonNullable<I["friends"]> extends infer RelationInclude
       ? RelationInclude extends true
-        ? Todo[]
-        : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
+        ? User[]
+        : RelationInclude extends AnyUserQueryBuilder<infer QueryRow>
           ? QueryRow[]
-          : RelationInclude extends TodoInclude
-            ? TodoWithIncludes<RelationInclude, false>[]
+          : RelationInclude extends UserInclude
+            ? UserWithIncludes<RelationInclude, false>[]
             : never
       : never
-    : K extends "todosViaAssignees"
-      ? NonNullable<I["todosViaAssignees"]> extends infer RelationInclude
+    : K extends "usersViaFriends"
+      ? NonNullable<I["usersViaFriends"]> extends infer RelationInclude
         ? RelationInclude extends true
-          ? Todo[]
-          : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
+          ? User[]
+          : RelationInclude extends AnyUserQueryBuilder<infer QueryRow>
             ? QueryRow[]
-            : RelationInclude extends TodoInclude
-              ? TodoWithIncludes<RelationInclude, false>[]
+            : RelationInclude extends UserInclude
+              ? UserWithIncludes<RelationInclude, false>[]
               : never
         : never
-      : never;
+      : K extends "todosViaOwner"
+        ? NonNullable<I["todosViaOwner"]> extends infer RelationInclude
+          ? RelationInclude extends true
+            ? Todo[]
+            : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
+              ? QueryRow[]
+              : RelationInclude extends TodoInclude
+                ? TodoWithIncludes<RelationInclude, false>[]
+                : never
+          : never
+        : K extends "todosViaAssignees"
+          ? NonNullable<I["todosViaAssignees"]> extends infer RelationInclude
+            ? RelationInclude extends true
+              ? Todo[]
+              : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
+                ? QueryRow[]
+                : RelationInclude extends TodoInclude
+                  ? TodoWithIncludes<RelationInclude, false>[]
+                  : never
+            : never
+          : never;
 };
 
 export type ProjectIncludedRelations<I extends ProjectInclude = {}, R extends boolean = false> = {
@@ -179,6 +204,8 @@ export type TodoIncludedRelations<I extends TodoInclude = {}, R extends boolean 
 };
 
 export interface UserRelations {
+  friends: User[];
+  usersViaFriends: User[];
   todosViaOwner: Todo[];
   todosViaAssignees: Todo[];
 }
@@ -193,66 +220,58 @@ export interface TodoRelations {
   assignees: User[];
 }
 
-export type UserWithIncludes<I extends UserInclude = {}, R extends boolean = false> = Omit<
-  User,
-  Extract<keyof I, keyof User>
-> &
+export type UserWithIncludes<I extends UserInclude = {}, R extends boolean = false> = User &
   UserIncludedRelations<I, R>;
 
-export type ProjectWithIncludes<I extends ProjectInclude = {}, R extends boolean = false> = Omit<
-  Project,
-  Extract<keyof I, keyof Project>
-> &
-  ProjectIncludedRelations<I, R>;
+export type ProjectWithIncludes<
+  I extends ProjectInclude = {},
+  R extends boolean = false,
+> = Project & ProjectIncludedRelations<I, R>;
 
-export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Omit<
-  Todo,
-  Extract<keyof I, keyof Todo>
-> &
+export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Todo &
   TodoIncludedRelations<I, R>;
 
 export type UserSelectableColumn = keyof User | PermissionIntrospectionColumn | "*";
 export type UserOrderableColumn = keyof User | PermissionIntrospectionColumn;
 
-export type UserSelected<S extends UserSelectableColumn = keyof User> = "*" extends S
+export type UserSelected<S extends UserSelectableColumn = keyof User> = ("*" extends S
   ? User
-  : Pick<User, Extract<S | "id", keyof User>> &
-      Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+  : Pick<User, Extract<S | "id", keyof User>>) &
+  Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type UserSelectedWithIncludes<
   I extends UserInclude = {},
   S extends UserSelectableColumn = keyof User,
   R extends boolean = false,
-> = Omit<UserSelected<S>, Extract<keyof I, keyof UserSelected<S>>> & UserIncludedRelations<I, R>;
+> = UserSelected<S> & UserIncludedRelations<I, R>;
 
 export type ProjectSelectableColumn = keyof Project | PermissionIntrospectionColumn | "*";
 export type ProjectOrderableColumn = keyof Project | PermissionIntrospectionColumn;
 
-export type ProjectSelected<S extends ProjectSelectableColumn = keyof Project> = "*" extends S
+export type ProjectSelected<S extends ProjectSelectableColumn = keyof Project> = ("*" extends S
   ? Project
-  : Pick<Project, Extract<S | "id", keyof Project>> &
-      Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+  : Pick<Project, Extract<S | "id", keyof Project>>) &
+  Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type ProjectSelectedWithIncludes<
   I extends ProjectInclude = {},
   S extends ProjectSelectableColumn = keyof Project,
   R extends boolean = false,
-> = Omit<ProjectSelected<S>, Extract<keyof I, keyof ProjectSelected<S>>> &
-  ProjectIncludedRelations<I, R>;
+> = ProjectSelected<S> & ProjectIncludedRelations<I, R>;
 
 export type TodoSelectableColumn = keyof Todo | PermissionIntrospectionColumn | "*";
 export type TodoOrderableColumn = keyof Todo | PermissionIntrospectionColumn;
 
-export type TodoSelected<S extends TodoSelectableColumn = keyof Todo> = "*" extends S
+export type TodoSelected<S extends TodoSelectableColumn = keyof Todo> = ("*" extends S
   ? Todo
-  : Pick<Todo, Extract<S | "id", keyof Todo>> &
-      Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+  : Pick<Todo, Extract<S | "id", keyof Todo>>) &
+  Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type TodoSelectedWithIncludes<
   I extends TodoInclude = {},
   S extends TodoSelectableColumn = keyof Todo,
   R extends boolean = false,
-> = Omit<TodoSelected<S>, Extract<keyof I, keyof TodoSelected<S>>> & TodoIncludedRelations<I, R>;
+> = TodoSelected<S> & TodoIncludedRelations<I, R>;
 
 export const wasmSchema: WasmSchema = {
   users: {
@@ -263,6 +282,17 @@ export const wasmSchema: WasmSchema = {
           type: "Text",
         },
         nullable: false,
+      },
+      {
+        name: "friendsIds",
+        column_type: {
+          type: "Array",
+          element: {
+            type: "Uuid",
+          },
+        },
+        nullable: false,
+        references: "users",
       },
     ],
   },
@@ -304,7 +334,7 @@ export const wasmSchema: WasmSchema = {
         nullable: false,
       },
       {
-        name: "project",
+        name: "projectId",
         column_type: {
           type: "Uuid",
         },
@@ -312,7 +342,7 @@ export const wasmSchema: WasmSchema = {
         references: "projects",
       },
       {
-        name: "owner",
+        name: "ownerId",
         column_type: {
           type: "Uuid",
         },
@@ -320,7 +350,7 @@ export const wasmSchema: WasmSchema = {
         references: "users",
       },
       {
-        name: "assignees",
+        name: "assigneesIds",
         column_type: {
           type: "Array",
           element: {
@@ -460,7 +490,9 @@ export class UserQueryBuilder<
     return clone;
   }
 
-  hopTo(relation: "todosViaOwner" | "todosViaAssignees"): UserQueryBuilder<I, S, R> {
+  hopTo(
+    relation: "friends" | "usersViaFriends" | "todosViaOwner" | "todosViaAssignees",
+  ): UserQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -529,6 +561,11 @@ export class UserQueryBuilder<
     }
 
     const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
+    }
     const stepConditions = stepBuilt.conditions.filter(
       (condition) => !(condition.op === "eq" && condition.value === currentToken),
     );
@@ -743,6 +780,11 @@ export class ProjectQueryBuilder<
     }
 
     const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
+    }
     const stepConditions = stepBuilt.conditions.filter(
       (condition) => !(condition.op === "eq" && condition.value === currentToken),
     );
@@ -957,6 +999,11 @@ export class TodoQueryBuilder<
     }
 
     const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
+    }
     const stepConditions = stepBuilt.conditions.filter(
       (condition) => !(condition.op === "eq" && condition.value === currentToken),
     );

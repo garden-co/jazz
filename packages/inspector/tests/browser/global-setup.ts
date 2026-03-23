@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { JazzClient, type WasmSchema } from "jazz-tools";
+import { JazzClient } from "jazz-tools";
 import { TestingServer, pushSchemaCatalogue } from "jazz-tools/testing";
 import { ADMIN_SECRET, APP_ID, TEST_BRANCH, TEST_ENV, TEST_PORT } from "./test-constants.js";
 import { app } from "./schema/app.ts";

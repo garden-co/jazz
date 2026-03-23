@@ -437,6 +437,7 @@ function summarizeBenchmark(benchmark, status, durationMs, extra = {}) {
 }
 
 function stripAnsi(value) {
+  // eslint-disable-next-line no-control-regex
   return String(value ?? "").replace(/\x1B\[[0-9;]*m/g, "");
 }
 
@@ -445,7 +446,7 @@ async function runNativeBenchmark(benchmark, args) {
     const outputFile = path.resolve(args.outDir, benchmark.output_path);
     const profilePath =
       benchmark.profile_path ?? `benchmarks/realistic/profiles/${args.profile}.json`;
-    const env = { ...process.env, ...(benchmark.env ?? {}) };
+    const env = { ...process.env, ...benchmark.env };
     const baseCommand = [
       "cargo",
       "run",
@@ -649,7 +650,7 @@ async function runNativeBenchmark(benchmark, args) {
   const result = await runCommand({
     command,
     cwd: process.cwd(),
-    env: { ...process.env, ...(benchmark.env ?? {}) },
+    env: { ...process.env, ...benchmark.env },
     timeoutSeconds: args.timeoutSeconds,
     logFile,
     streamStdoutToConsole: true,
@@ -697,7 +698,7 @@ async function runBrowserBenchmark(benchmark, args) {
     );
     const env = {
       ...process.env,
-      ...(benchmark.env ?? {}),
+      ...benchmark.env,
       JAZZ_REALISTIC_BROWSER_SCENARIOS: benchmark.scenario_id,
       JAZZ_REALISTIC_BROWSER_RUN_ID: `${fileSafeId(benchmark.id)}-attempt-${attemptIndex}`,
     };
@@ -889,7 +890,7 @@ async function main() {
       generated_at: generatedAt,
       profile: args.profile,
       scenarios,
-      benchmark_statuses: results.map(({ scenario, ...rest }) => rest),
+      benchmark_statuses: results.map(({ scenario: _scenario, ...rest }) => rest),
     });
   }
 

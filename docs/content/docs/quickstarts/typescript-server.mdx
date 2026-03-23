@@ -18,7 +18,7 @@ pnpm init
 
 ## Install
 
-`jazz-napi` is the native runtime for Jazz on Node.js. It bundles the query engine, storage, and sync layer as a Rust binary via NAPI. `jazz-tools` loads it automatically, but you need to make sure it's available by adding it manually.
+`jazz-napi` is the native runtime for Jazz on Node.js. It bundles the query engine, storage, and sync layer as a Rust binary via NAPI. `jazz-tools` detects it automatically at runtime, but it must be listed as an explicit dependency.
 
 ```bash title="Terminal"
 pnpm add jazz-tools jazz-napi hono @hono/node-server
@@ -36,13 +36,14 @@ Create a file at `schema/current.ts` describing the structure of your app's data
 ### Run codegen
 
 ```bash title="Terminal"
-npx jazz-tools build
+npx jazz-tools@alpha build
 ```
 
 This generates `schema/app.ts`, which exports a typed `app` object with a property for each table (e.g. `app.todos`). Import `app` whenever you need to query or write data.
 
-<Callout title="Generated code">
-  Never edit `schema/app.ts` by hand. Edit `schema/current.ts` and re-run `npx jazz-tools build`.
+<Callout type="info" title="Generated code">
+  Never edit `schema/app.ts` by hand. Edit `schema/current.ts` and re-run `npx jazz-tools@alpha
+  build`.
 </Callout>
 
 [Learn more about schemas](/docs/schemas/defining-tables).
@@ -66,7 +67,7 @@ export default definePermissions(app, ({ policy }) => [
 Re-run codegen so the build picks up the new file:
 
 ```bash title="Terminal"
-npx jazz-tools build
+npx jazz-tools@alpha build
 ```
 
 ## Set up your server
@@ -74,7 +75,7 @@ npx jazz-tools build
 Generate an app ID:
 
 ```bash title="Terminal"
-npx jazz-tools create app
+npx jazz-tools@alpha create app
 # outputs a UUID like: 019d0ba1-519a-7e01-b0eb-0059ee898e4d
 ```
 
@@ -93,6 +94,7 @@ You can also use `context.db()` to get a database handle that bypasses permissio
     The `persistent` driver stores data on disk using [Fjall](https://github.com/fjall-rs/fjall), a fast Rust key-value store bundled inside `jazz-napi`. The `dataPath` is the directory where Fjall writes its data.
 
     There is also a `memory` driver, which does not persist data. To use it, set a `serverUrl` pointing to an upstream peer that *can* persist the data.
+
   </Accordion>
 </Accordions>
 
@@ -161,13 +163,13 @@ curl -X DELETE http://localhost:3000/api/todos/<id> \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-<Callout>
-  `forRequest` extracts the caller's identity from the `Authorization` header. The dummy token above is an unsigned JWT with `{"sub": "test-user"}` — fine for local development. In production, your auth provider issues signed JWTs and the server validates them via JWKS. See [Authentication](/docs/auth/authentication) for how to set that up.
+<Callout type="info">
+  `forRequest` extracts the caller's identity from the `Authorization` header. The dummy token above is an unsigned JWT with `{"sub": "test-user"}`&hairsp;—&hairsp;fine for local development. In production, your auth provider issues signed JWTs and the server validates them via JWKS. See [Authentication](/docs/auth/authentication) for how to set that up.
 </Callout>
 
 ## Next steps
 
-- [Authentication](/docs/auth/authentication) — identity providers, JWKS, and session resolution
-- [Permissions](/docs/auth/permissions) — row-level access policies
-- [Queries](/docs/reading/queries) — filtering, sorting, pagination, and relations
-- [Server Setup](/docs/reference/server-setup) — hosting, sync, and deployment
+- [Authentication](/docs/auth/authentication)&hairsp;—&hairsp;identity providers, JWKS, and session resolution
+- [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;row-level access policies
+- [Queries](/docs/reading/queries)&hairsp;—&hairsp;filtering, sorting, pagination, and relations
+- [Server Setup](/docs/reference/server-setup)&hairsp;—&hairsp;hosting, sync, and deployment

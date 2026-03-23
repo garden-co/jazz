@@ -1,8 +1,9 @@
+// #region backwards-default-example
 import { migrate, col } from "jazz-tools";
 
-// Example: dropping a column with a backwards default.
-// Clients still on v1 continue seeing legacy_priority.
+// Clients still on v1 continue seeing priority.
 // For rows written by v2 clients, the lens supplies this default value.
 migrate("todos", {
-  legacy_priority: col.drop().int({ backwardsDefault: 0 }),
+  priority: col.drop().int({ backwardsDefault: 0 }),
 });
+// #endregion backwards-default-example

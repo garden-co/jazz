@@ -21,6 +21,7 @@ api.post("/api/todos", async (c) => {
   const todo = db.insert(schema.todos, {
     title,
     done: false,
+    owner_id: "system",
   });
 
   return c.json(todo, 201);

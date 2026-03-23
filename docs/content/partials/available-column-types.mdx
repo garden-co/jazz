@@ -12,4 +12,6 @@
 | `col.json()`              | `JsonValue`          | `JSON`          |
 | `col.json(schema)`        | inferred from schema | `JSON`          |
 
+> **JSON columns are atomic.** The entire value is replaced on every write — you cannot update individual keys. Use `col.json()` for untyped JSON, or `col.json(schema)` with a [Zod](https://zod.dev)-compatible schema for typed validation. For structured data that needs per-field updates, use separate columns or a related table instead.
+
 > **Ref naming convention:** `col.ref()` columns must have a name ending in `Id` or `_id`. For `col.array(col.ref())`, the name must end in `Ids` or `_ids`. The runtime will throw if a ref column does not follow this convention.
