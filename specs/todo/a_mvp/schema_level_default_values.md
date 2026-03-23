@@ -269,26 +269,17 @@ Recommended execution order: start in Rust so schema defaults become real schema
 - [x] Rust auto-lens and diffing:
       Update `auto_lens.rs` and `diff.rs` so explicit schema defaults are used for generated `AddColumn` and `RemoveColumn` defaults before falling back to the current heuristics.
 
-- [ ] Rust schema-evolution tests:
-      Add or update transformer/context/integration tests so a defaulted added column materializes with the schema default, and explicit defaults prevent draft lenses when they make the migration fully defined.
-
-- [ ] TypeScript shared schema/value boundary:
+- [x] TypeScript shared schema/value boundary:
       Add `default?: Value` to `packages/jazz-tools/src/drivers/types.ts` and implement a dedicated schema-default-to-`Value` conversion path in `schema-reader.ts`.
 
-- [ ] TypeScript schema IR:
+- [x] TypeScript schema IR:
       Add `default?: unknown` to `packages/jazz-tools/src/schema.ts` and thread it through built columns.
 
-- [ ] TypeScript DSL builders:
+- [x] TypeScript DSL builders:
       Add `.default(...)` to schema-context builders (`ScalarBuilder`, `EnumBuilder`, `JsonBuilder`, `RefBuilder`, `ArrayBuilder`), preserve `.optional()` chaining, and add DSL typing/runtime tests.
 
 - [ ] TypeScript codegen:
       Update generated `Init` interfaces so defaulted columns are optional while row/result interfaces remain unchanged, and add codegen assertions for that behavior.
-
-- [ ] TypeScript runtime bridge:
-      Change `db.insert()` and the runtime bridge to call the new omission-preserving Rust insert path instead of materializing a fully populated `Value[]` in TypeScript.
-
-- [ ] TypeScript unit tests:
-      Add focused tests for scalar, enum, array, bytea, json, timestamp, and nullable `null` defaults in `schemaToWasm()` plus bridge tests for omitted-vs-null insert semantics.
 
 - [ ] End-to-end tests:
       Add integration coverage showing `db.insert()` can omit a defaulted non-nullable field and still persist the defaulted value, plus a cross-schema evolution test covering defaulted added columns.

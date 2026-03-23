@@ -71,6 +71,7 @@ export interface ColumnDescriptor {
   name: string;
   column_type: ColumnType;
   nullable: boolean;
+  default?: Value;
   references?: string;
 }
 
