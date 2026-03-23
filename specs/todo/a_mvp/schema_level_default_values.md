@@ -239,7 +239,7 @@ This lets users backfill old rows one way while using a different default for ne
 
 Recommended execution order: start in Rust so schema defaults become real schema metadata first, then expose that through the runtime boundary, and then add the TypeScript DSL and typed insert behavior on top.
 
-- [ ] Rust schema core:
+- [x] Rust schema core:
       Add `default: Option<Value>` to `ColumnDescriptor`, add a builder/helper for setting it, and ensure old serialized schemas still deserialize with `default: None`.
 
 - [ ] Rust schema hashing:

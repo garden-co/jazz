@@ -218,6 +218,9 @@ pub struct ColumnDescriptor {
     pub nullable: bool,
     /// Optional foreign key reference to another table.
     pub references: Option<TableName>,
+    /// Optional schema-level default used for omitted values on insert.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<Value>,
 }
 
 impl ColumnDescriptor {
@@ -227,6 +230,7 @@ impl ColumnDescriptor {
             column_type,
             nullable: false,
             references: None,
+            default: None,
         }
     }
 
@@ -242,6 +246,11 @@ impl ColumnDescriptor {
 
     pub fn references(mut self, table: impl Into<TableName>) -> Self {
         self.references = Some(table.into());
+        self
+    }
+
+    pub fn default(mut self, value: Value) -> Self {
+        self.default = Some(value);
         self
     }
 }
