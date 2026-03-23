@@ -1,0 +1,81 @@
+<template>
+  <div v-if="visible" class="popover" :style="{ left: x + 'px', top: y + 'px' }">
+    <p class="popover-label">Add stop here?</p>
+    <div class="popover-actions">
+      <button class="popover-btn confirm" @click="$emit('confirm')">Add</button>
+      <button class="popover-btn dismiss" @click="$emit('dismiss')">Cancel</button>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+defineProps<{
+  x: number;
+  y: number;
+  visible: boolean;
+}>();
+
+defineEmits<{
+  confirm: [];
+  dismiss: [];
+}>();
+</script>
+
+<style scoped>
+.popover {
+  position: absolute;
+  z-index: 15;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+  font-family: var(--font-body);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-popover);
+  transform: translate(-50%, -100%) translateY(-12px);
+}
+
+.popover-label {
+  margin: 0 0 10px;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.popover-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.popover-btn {
+  padding: 5px 14px;
+  border: none;
+  border-radius: var(--radius-md);
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--duration-fast);
+}
+
+.popover-btn.confirm {
+  background: var(--accent-primary);
+  color: var(--text-inverse);
+}
+
+.popover-btn.confirm:hover {
+  opacity: 0.9;
+}
+
+.popover-btn.dismiss {
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+}
+
+.popover-btn.dismiss:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary);
+}
+</style>
