@@ -10,7 +10,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createDb, Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
+import { getTestingServerInfo } from "./testing-server.js";
 
 interface DebugLensEdgeState {
   sourceHash: string;
@@ -197,15 +197,15 @@ describe("Worker Bridge with OPFS", () => {
   }
 
   async function createSyncedDb(label: string, localAuthToken: string): Promise<Db> {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
     return track(
       await createDb({
-        appId: APP_ID,
+        appId,
         driver: { type: "persistent", dbName: uniqueDbName(label) },
         serverUrl,
         localAuthMode: "anonymous",
         localAuthToken,
-        adminSecret: ADMIN_SECRET,
+        adminSecret,
       }),
     );
   }
