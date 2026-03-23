@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { app } from "./fixtures/basic/app";
 import { insertUser, uniqueDbName } from "./factories";
 
-describe("TS Insert API", () => {
+describe("TS Delete API", () => {
   let db: Db;
 
   beforeEach(async () => {
@@ -17,53 +17,37 @@ describe("TS Insert API", () => {
     await db.shutdown();
   });
 
-  it("returns the inserted row", async () => {
+  it("deletes rows synchronously without returning a promise", async () => {
     const project = db.insert(app.projects, { name: "Test Project" });
     const owner = insertUser(db);
-
-    expect(project).toEqual({
-      id: expect.any(String),
-      name: "Test Project",
-    });
-
     const todo = db.insert(app.todos, {
       title: "Test Todo",
-      done: true,
+      done: false,
       tags: ["tag1", "tag2"],
       projectId: project.id,
       ownerId: owner.id,
       assigneesIds: [],
     });
 
-    expect(todo).toEqual({
-      id: expect.any(String),
-      title: "Test Todo",
-      done: true,
-      tags: ["tag1", "tag2"],
-      projectId: project.id,
-      ownerId: owner.id,
-      assigneesIds: [],
-    });
+    const result = db.delete(app.todos, todo.id);
+    expect(result).toBeUndefined();
+
+    const rows = await db.all(app.todos.where({ id: { eq: todo.id } }));
+    expect(rows).toEqual([]);
   });
 
-  it("can wait for row to be persisted up to a specific durability tier", async () => {
+  it("can wait for deletes to be persisted up to a specific durability tier", async () => {
     const project = await db.insertDurable(
       app.projects,
       { name: "Test Project" },
       { tier: "worker" },
     );
-
-    expect(project).toEqual({
-      id: expect.any(String),
-      name: "Test Project",
-    });
     const owner = insertUser(db);
-
     const todo = await db.insertDurable(
       app.todos,
       {
         title: "Test Todo",
-        done: true,
+        done: false,
         tags: ["tag1", "tag2"],
         projectId: project.id,
         ownerId: owner.id,
@@ -72,14 +56,12 @@ describe("TS Insert API", () => {
       { tier: "worker" },
     );
 
-    expect(todo).toEqual({
-      id: expect.any(String),
-      title: "Test Todo",
-      done: true,
-      tags: ["tag1", "tag2"],
-      projectId: project.id,
-      ownerId: owner.id,
-      assigneesIds: [],
-    });
+    const pending = db.deleteDurable(app.todos, todo.id, { tier: "worker" });
+    expect(pending).toBeInstanceOf(Promise);
+
+    await pending;
+
+    const rows = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "worker" });
+    expect(rows).toEqual([]);
   });
 });
