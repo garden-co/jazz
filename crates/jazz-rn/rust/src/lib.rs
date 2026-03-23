@@ -96,7 +96,7 @@ where
     }
 }
 
-fn convert_values(values_json: &str) -> Result<Vec<Value>, JazzRnError> {
+fn convert_insert_values(values_json: &str) -> Result<HashMap<String, Value>, JazzRnError> {
     serde_json::from_str(values_json).map_err(json_err)
 }
 
@@ -387,11 +387,13 @@ impl RnRuntime {
 
     pub fn insert(&self, table: String, values_json: String) -> Result<String, JazzRnError> {
         with_panic_boundary("insert", || {
-            let values = convert_values(&values_json)?;
+            let named_values = convert_insert_values(&values_json)?;
             let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
-            let (id, row_values) = core.insert(&table, values, None).map_err(runtime_err)?;
+            let (id, row_values) = core
+                .insert(&table, named_values, None)
+                .map_err(runtime_err)?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,
                 core.current_schema(),

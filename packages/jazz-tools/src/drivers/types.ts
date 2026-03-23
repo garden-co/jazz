@@ -17,6 +17,8 @@ export type Value =
   | { type: "Row"; value: { id?: string; values: Value[] } }
   | { type: "Null" };
 
+export type InsertValues = Record<string, Value>;
+
 export interface WasmRow {
   id: string;
   values: Value[];

@@ -3,6 +3,7 @@
 mod support;
 
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz_tools::server::TestingServer;
@@ -65,10 +66,10 @@ async fn fresh_client_resolves_object_with_deep_update_history() {
     let (todo_id, _) = writer
         .create(
             "todos",
-            vec![
-                Value::Text("revision-000".to_string()),
-                Value::Boolean(false),
-            ],
+            HashMap::from([
+                ("title".to_string(), Value::Text("revision-000".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("create deep-history todo");
@@ -152,10 +153,13 @@ async fn jazz_tools_cli_two_clients_sync_values() {
     client_a
         .create(
             "todos",
-            vec![
-                Value::Text("shared-through-server".to_string()),
-                Value::Boolean(false),
-            ],
+            HashMap::from([
+                (
+                    "title".to_string(),
+                    Value::Text("shared-through-server".to_string()),
+                ),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("create from client a");
@@ -227,10 +231,13 @@ async fn jazz_tools_cli_two_different_users_sync_values() {
     client_alice
         .create(
             "todos",
-            vec![
-                Value::Text("shared-across-users".to_string()),
-                Value::Boolean(false),
-            ],
+            HashMap::from([
+                (
+                    "title".to_string(),
+                    Value::Text("shared-across-users".to_string()),
+                ),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("alice creates todo");
@@ -275,7 +282,10 @@ async fn jazz_tools_cli_two_different_users_sync_values() {
     client_bob
         .create(
             "todos",
-            vec![Value::Text("from-bob".to_string()), Value::Boolean(false)],
+            HashMap::from([
+                ("title".to_string(), Value::Text("from-bob".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("bob creates todo");

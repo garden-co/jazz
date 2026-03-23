@@ -2,6 +2,7 @@
 
 mod support;
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz_tools::query_manager::policy::PolicyExpr;
@@ -104,11 +105,11 @@ fn in_session_array_policy_schema() -> Schema {
         .build()
 }
 
-fn document_values(owner_id: &str, title: &str) -> Vec<Value> {
-    vec![
-        Value::Text(owner_id.to_string()),
-        Value::Text(title.to_string()),
-    ]
+fn document_values(owner_id: &str, title: &str) -> HashMap<String, Value> {
+    HashMap::from([
+        ("owner_id".to_string(), Value::Text(owner_id.to_string())),
+        ("title".to_string(), Value::Text(title.to_string())),
+    ])
 }
 
 async fn create_document(client: &JazzClient, owner_id: &str, title: &str) -> ObjectId {
@@ -121,7 +122,10 @@ async fn create_document(client: &JazzClient, owner_id: &str, title: &str) -> Ob
 
 async fn create_org(client: &JazzClient, name: &str) -> ObjectId {
     client
-        .create("orgs", vec![Value::Text(name.to_string())])
+        .create(
+            "orgs",
+            HashMap::from([("name".to_string(), Value::Text(name.to_string()))]),
+        )
         .await
         .expect("create org")
         .0
@@ -131,7 +135,10 @@ async fn create_team(client: &JazzClient, name: &str, org_id: ObjectId) -> Objec
     client
         .create(
             "teams",
-            vec![Value::Text(name.to_string()), Value::Uuid(org_id)],
+            HashMap::from([
+                ("name".to_string(), Value::Text(name.to_string())),
+                ("org_id".to_string(), Value::Uuid(org_id)),
+            ]),
         )
         .await
         .expect("create team")
@@ -146,15 +153,21 @@ async fn create_team_membership(
     client
         .create(
             "team_memberships",
-            vec![Value::Text(owner_id.to_string()), Value::Uuid(team_id)],
+            HashMap::from([
+                ("owner_id".to_string(), Value::Text(owner_id.to_string())),
+                ("team_id".to_string(), Value::Uuid(team_id)),
+            ]),
         )
         .await
         .expect("create team membership")
         .0
 }
 
-fn team_document_values(team_id: ObjectId, title: &str) -> Vec<Value> {
-    vec![Value::Uuid(team_id), Value::Text(title.to_string())]
+fn team_document_values(team_id: ObjectId, title: &str) -> HashMap<String, Value> {
+    HashMap::from([
+        ("team_id".to_string(), Value::Uuid(team_id)),
+        ("title".to_string(), Value::Text(title.to_string())),
+    ])
 }
 
 async fn create_team_document(client: &JazzClient, team_id: ObjectId, title: &str) -> ObjectId {

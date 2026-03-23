@@ -27,7 +27,7 @@ import {
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
-import { toValueArray, toUpdateRecord } from "./value-converter.js";
+import { toInsertRecord, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import {
   createConventionalFileStorage,
@@ -996,7 +996,7 @@ export class Db {
     const client = this.getClient(table._schema);
     // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
     // If the bridge fails to initialize, the insert will be lost on restart.
-    const values = toValueArray(data as Record<string, unknown>, table._schema, table._table);
+    const values = toInsertRecord(data as Record<string, unknown>, table._schema, table._table);
     const row = client.create(table._table, values);
     return transformRow(row, table._schema, table._table);
   }
@@ -1021,7 +1021,7 @@ export class Db {
       table._table,
     );
     await this.ensureBridgeReady();
-    const values = toValueArray(data as Record<string, unknown>, inputSchema, table._table);
+    const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
     const row = await client.createDurable(table._table, values, options);
     return transformRow(row, table._schema, table._table);
   }
@@ -1432,7 +1432,7 @@ class ClientBackedDb extends Db {
   override insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
-    const values = toValueArray(data as Record<string, unknown>, inputSchema, table._table);
+    const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
     const row = this.runtimeClient.createInternal(table._table, values, this.session);
     return transformRow(row, table._schema, table._table);
   }
@@ -1444,7 +1444,7 @@ class ClientBackedDb extends Db {
   ): Promise<T> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
-    const values = toValueArray(data as Record<string, unknown>, inputSchema, table._table);
+    const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
     const row = await this.runtimeClient.createDurableInternal(
       table._table,
       values,

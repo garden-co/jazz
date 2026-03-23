@@ -1,5 +1,6 @@
 #![cfg(feature = "test")]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -318,10 +319,13 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     client
         .create(
             "todos",
-            vec![
-                Value::Text("before-restart".to_string()),
-                Value::Boolean(false),
-            ],
+            HashMap::from([
+                (
+                    "title".to_string(),
+                    Value::Text("before-restart".to_string()),
+                ),
+                ("done".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("create before restart");
@@ -361,10 +365,13 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     client
         .create(
             "todos",
-            vec![
-                Value::Text("after-restart".to_string()),
-                Value::Boolean(false),
-            ],
+            HashMap::from([
+                (
+                    "title".to_string(),
+                    Value::Text("after-restart".to_string()),
+                ),
+                ("done".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("create after restart");
@@ -408,10 +415,13 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk() {
     client
         .create(
             "todos",
-            vec![
-                Value::Text("only-in-memory".to_string()),
-                Value::Boolean(false),
-            ],
+            HashMap::from([
+                (
+                    "title".to_string(),
+                    Value::Text("only-in-memory".to_string()),
+                ),
+                ("done".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("create todo");

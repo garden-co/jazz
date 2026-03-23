@@ -46,12 +46,8 @@ use jazz_tools::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
 
-fn convert_values(values: Vec<Value>) -> Vec<Value> {
-    values
-}
-
-fn convert_updates(partial: HashMap<String, Value>) -> Vec<(String, Value)> {
-    partial.into_iter().collect()
+fn convert_updates(values: HashMap<String, Value>) -> Vec<(String, Value)> {
+    values.into_iter().collect()
 }
 
 fn parse_read_durability_options(
@@ -449,18 +445,17 @@ impl NapiRuntime {
     pub fn insert(
         &self,
         table: String,
-        #[napi(ts_arg_type = "any")] values: serde_json::Value,
+        #[napi(ts_arg_type = "Record<string, unknown>")] values: serde_json::Value,
     ) -> napi::Result<serde_json::Value> {
-        let js_values: Vec<Value> = serde_json::from_value(values)
+        let js_values: HashMap<String, Value> = serde_json::from_value(values)
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
-        let groove_values = convert_values(js_values);
 
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let (object_id, row_values) = core
-            .insert(&table, groove_values, None)
+            .insert(&table, js_values, None)
             .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))?;
         let row_values = align_row_values_to_declared_schema(
             &self.declared_schema,
@@ -479,12 +474,11 @@ impl NapiRuntime {
     pub fn insert_with_session(
         &self,
         table: String,
-        #[napi(ts_arg_type = "any")] values: serde_json::Value,
+        #[napi(ts_arg_type = "Record<string, unknown>")] values: serde_json::Value,
         session_json: Option<String>,
     ) -> napi::Result<serde_json::Value> {
-        let js_values: Vec<Value> = serde_json::from_value(values)
+        let js_values: HashMap<String, Value> = serde_json::from_value(values)
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
-        let groove_values = convert_values(js_values);
         let session = parse_session_json(session_json)?;
 
         let mut core = self
@@ -492,7 +486,7 @@ impl NapiRuntime {
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let (object_id, row_values) = core
-            .insert(&table, groove_values, session.as_ref())
+            .insert(&table, js_values, session.as_ref())
             .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
         let row_values = align_row_values_to_declared_schema(
             &self.declared_schema,
@@ -779,14 +773,13 @@ impl NapiRuntime {
     pub async fn insert_durable(
         &self,
         table: String,
-        #[napi(ts_arg_type = "any")] values: serde_json::Value,
+        #[napi(ts_arg_type = "Record<string, unknown>")] values: serde_json::Value,
         tier: String,
     ) -> napi::Result<serde_json::Value> {
         let persistence_tier = parse_tier(&tier)?;
 
-        let js_values: Vec<Value> = serde_json::from_value(values)
+        let js_values: HashMap<String, Value> = serde_json::from_value(values)
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
-        let groove_values = convert_values(js_values);
 
         let ((object_id, row_values), receiver) = {
             let mut core = self
@@ -794,7 +787,7 @@ impl NapiRuntime {
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             let ((object_id, row_values), receiver) = core
-                .insert_persisted(&table, groove_values, None, persistence_tier)
+                .insert_persisted(&table, js_values, None, persistence_tier)
                 .map_err(|e| napi::Error::from_reason(format!("Insert failed: {e}")))?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,
@@ -816,14 +809,13 @@ impl NapiRuntime {
     pub async fn insert_durable_with_session(
         &self,
         table: String,
-        #[napi(ts_arg_type = "any")] values: serde_json::Value,
+        #[napi(ts_arg_type = "Record<string, unknown>")] values: serde_json::Value,
         session_json: Option<String>,
         tier: String,
     ) -> napi::Result<serde_json::Value> {
         let persistence_tier = parse_tier(&tier)?;
-        let js_values: Vec<Value> = serde_json::from_value(values)
+        let js_values: HashMap<String, Value> = serde_json::from_value(values)
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
-        let groove_values = convert_values(js_values);
         let session = parse_session_json(session_json)?;
 
         let ((object_id, row_values), receiver) = {
@@ -832,7 +824,7 @@ impl NapiRuntime {
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             let ((object_id, row_values), receiver) = core
-                .insert_persisted(&table, groove_values, session.as_ref(), persistence_tier)
+                .insert_persisted(&table, js_values, session.as_ref(), persistence_tier)
                 .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,

@@ -1,5 +1,6 @@
 import {
   ActiveQuerySubscriptionTrace,
+  InsertValues,
   JazzClient,
   DurabilityTier,
   QueryExecutionOptions,
@@ -504,12 +505,12 @@ class DevToolsJazzClient implements JazzClient {
   forRequest(request: RequestLike): SessionClient {
     throw new Error("Method not implemented.");
   }
-  create(table: string, values: Value[]): Row {
+  create(table: string, values: InsertValues): Row {
     throw new Error("DevTools client does not support non-durable create().");
   }
   async createDurable(
     table: string,
-    values: Value[],
+    values: InsertValues,
     options?: { tier?: DurabilityTier },
   ): Promise<Row> {
     await ensureDevtoolsAnnounced();
