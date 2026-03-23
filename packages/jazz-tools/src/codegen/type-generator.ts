@@ -432,7 +432,7 @@ export function generateTypes(schema: WasmSchema): string {
     const interfaceName = tableNameToInterface(tableName) + "Init";
     lines.push(`export interface ${interfaceName} {`);
     for (const col of table.columns) {
-      const opt = col.nullable ? "?" : "";
+      const opt = col.nullable || col.default !== undefined ? "?" : "";
       lines.push(`  ${col.name}${opt}: ${wasmTypeToTs(col.column_type, jsonTypeBySchemaKey)};`);
     }
     lines.push("}");

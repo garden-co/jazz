@@ -469,6 +469,29 @@ describe("generateTypes", () => {
     expect(output).toContain("  description?: string;");
   });
 
+  it("makes defaulted columns optional in Init without changing row interfaces", () => {
+    table("todos", {
+      title: col.string(),
+      done: col.boolean().default(false),
+      archivedAt: col.timestamp().optional().default(null),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    const rowMatch = output.match(/export interface Todo \{([^}]+)\}/);
+    expect(rowMatch).toBeTruthy();
+    expect(rowMatch![1]).toContain("title: string;");
+    expect(rowMatch![1]).toContain("done: boolean;");
+    expect(rowMatch![1]).toContain("archivedAt?: Date;");
+
+    const initMatch = output.match(/export interface TodoInit \{([^}]+)\}/);
+    expect(initMatch).toBeTruthy();
+    expect(initMatch![1]).toContain("title: string;");
+    expect(initMatch![1]).toContain("done?: boolean;");
+    expect(initMatch![1]).toContain("archivedAt?: Date;");
+  });
+
   it("converts snake_case to PascalCase", () => {
     table("user_profiles", { display_name: col.string() });
     const schema = getCollectedSchema();

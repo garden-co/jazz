@@ -278,7 +278,7 @@ Recommended execution order: start in Rust so schema defaults become real schema
 - [x] TypeScript DSL builders:
       Add `.default(...)` to schema-context builders (`ScalarBuilder`, `EnumBuilder`, `JsonBuilder`, `RefBuilder`, `ArrayBuilder`), preserve `.optional()` chaining, and add DSL typing/runtime tests.
 
-- [ ] TypeScript codegen:
+- [x] TypeScript codegen:
       Update generated `Init` interfaces so defaulted columns are optional while row/result interfaces remain unchanged, and add codegen assertions for that behavior.
 
 - [ ] End-to-end tests:
