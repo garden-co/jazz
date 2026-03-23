@@ -762,6 +762,40 @@ importers:
         specifier: workspace:*
         version: link:../../crates/jazz-napi
 
+  stress-tests/stress-test-expo:
+    dependencies:
+      expo:
+        specifier: ^54.0.0
+        version: 54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)
+      jazz-rn:
+        specifier: workspace:*
+        version: link:../../crates/jazz-rn
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../../packages/jazz-tools
+      metro-runtime:
+        specifier: 0.83.3
+        version: 0.83.3
+      react:
+        specifier: 19.2.4
+        version: 19.2.4
+      react-native:
+        specifier: 0.81.5
+        version: 0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4)
+    devDependencies:
+      '@babel/plugin-transform-flow-strip-types':
+        specifier: ^7.27.1
+        version: 7.27.1(@babel/core@7.29.0)
+      '@types/react':
+        specifier: ^19.0.0
+        version: 19.2.14
+      babel-preset-expo:
+        specifier: ~54.0.10
+        version: 54.0.10(@babel/core@7.29.0)(@babel/runtime@7.28.6)(expo@54.0.33(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@5.9.3))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4))(react-refresh@0.17.0)
+      typescript:
+        specifier: catalog:default
+        version: 5.9.3
+
 packages:
 
   '@0no-co/graphql.web@1.2.0':
@@ -19415,7 +19449,7 @@ snapshots:
       invariant: 2.2.4
       jest-environment-node: 29.7.0
       memoize-one: 5.2.1
-      metro-runtime: 0.83.5
+      metro-runtime: 0.83.3
       metro-source-map: 0.83.5
       nullthrows: 1.1.1
       pretty-format: 29.7.0
