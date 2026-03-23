@@ -10,7 +10,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createDb, Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import { getTestingServerInfo } from "./testing-server.js";
 import {
   TestCleanup,
   createSyncedDb,
