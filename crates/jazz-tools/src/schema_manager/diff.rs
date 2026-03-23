@@ -241,14 +241,15 @@ fn diff_table(
             continue;
         }
         let new_col = new_cols[*new_col_name];
+        let default = lens_default_for_column(new_col);
         transform.push(
             LensOp::AddColumn {
                 table: table_name.to_string(),
                 column: new_col_name.to_string(),
                 column_type: new_col.column_type.clone(),
-                default: lens_default_for_column(new_col),
+                default: default.clone(),
             },
-            false,
+            needs_default_review(&default, new_col.nullable),
         );
     }
 }
@@ -284,6 +285,13 @@ fn heuristic_default_for_type(ct: &ColumnType, nullable: bool) -> Value {
         ColumnType::Array { element: _ } => Value::Array(vec![]),
         ColumnType::Row { columns: _ } => Value::Null,
     }
+}
+
+/// Check if a default value needs human review.
+fn needs_default_review(value: &Value, nullable: bool) -> bool {
+    // Null for non-nullable columns needs review
+    // Null for nullable columns is fine (it's a valid default)
+    matches!(value, Value::Null) && !nullable
 }
 
 #[cfg(test)]
@@ -593,6 +601,10 @@ mod tests {
             }
             _ => panic!("Expected AddColumn"),
         }
+        assert!(
+            !result.transform.has_drafts(),
+            "an explicit schema default should avoid the UUID draft fallback"
+        );
     }
 
     #[test]
@@ -616,6 +628,30 @@ mod tests {
             }
             _ => panic!("Expected RemoveColumn"),
         }
+    }
+
+    #[test]
+    fn diff_add_non_nullable_uuid_is_draft_without_explicit_default() {
+        let old = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+        let new = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("org_id", ColumnType::Uuid),
+            )
+            .build();
+
+        let result = diff_schemas(&old, &new);
+
+        match &result.transform.ops[0] {
+            LensOp::AddColumn { default, .. } => {
+                assert_eq!(*default, Value::Null);
+            }
+            _ => panic!("Expected AddColumn"),
+        }
+        assert!(result.transform.has_drafts());
     }
 
     #[test]
