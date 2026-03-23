@@ -25,7 +25,7 @@
     "@vitest/browser-playwright": "catalog:default",
     "typescript": "catalog:default",
     "vite": "catalog:default",
-    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-top-level-await": "catalog:default",
     "vite-plugin-wasm": "catalog:default",
     "vitest": "catalog:default"
   }
