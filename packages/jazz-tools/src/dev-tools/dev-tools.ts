@@ -1,5 +1,5 @@
+import * as Comlink from "comlink";
 import {
-  ActiveQuerySubscriptionTrace,
   JazzClient,
   DurabilityTier,
   QueryExecutionOptions,
@@ -9,12 +9,9 @@ import {
 } from "../index.js";
 import { Db, DbConfig } from "../runtime/db.js";
 import {
-  DEVTOOLS_BRIDGE_CHANNEL,
-  DEVTOOLS_COMMANDS,
-  DEVTOOLS_EVENTS,
-  DevtoolsRequestEnvelope,
-  DevtoolsRequestPayloadByCommand,
-  DevtoolsResponseEnvelope,
+  DEVTOOLS_MC_CHANNEL,
+  type DevtoolsEvent,
+  type DevtoolsRuntimeAPI,
   isRecord,
   isSerializableDbConfig,
   sanitizeDbConfigForBridge,
@@ -29,6 +26,7 @@ type RuntimeBridgeState = {
   listeners: Set<DevToolsStateListener>;
   activeSubscriptions: Map<string, { client: JazzClient; runtimeSubscriptionId: number }>;
   activeQuerySubscriptionsUnsubscribe: (() => void) | null;
+  messagePort: MessagePort | null;
 };
 
 export interface DevToolsAttachment {
@@ -79,52 +77,6 @@ function clearRuntimeBridgeSubscriptions(db: Db): void {
   state.activeSubscriptions.clear();
 }
 
-function emitActiveQuerySubscriptionsChanged(
-  subscriptions: readonly ActiveQuerySubscriptionTrace[],
-): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  window.postMessage(
-    {
-      channel: DEVTOOLS_BRIDGE_CHANNEL,
-      kind: "event",
-      event: DEVTOOLS_EVENTS.CLIENT_ACTIVE_QUERY_SUBSCRIPTIONS_CHANGED,
-      payload: {
-        subscriptions: subscriptions.map((subscription) => ({
-          ...subscription,
-          branches: [...subscription.branches],
-        })),
-      },
-    },
-    "*",
-  );
-}
-
-function ensureActiveQuerySubscriptionBridge(db: Db): void {
-  const state = runtimeBridgeStateByDb.get(db);
-  if (!state || state.activeQuerySubscriptionsUnsubscribe) {
-    return;
-  }
-
-  state.activeQuerySubscriptionsUnsubscribe = db.onActiveQuerySubscriptionsChange(
-    (subscriptions) => {
-      emitActiveQuerySubscriptionsChanged(subscriptions);
-    },
-  );
-}
-
-function clearActiveQuerySubscriptionBridge(db: Db): void {
-  const state = runtimeBridgeStateByDb.get(db);
-  if (!state?.activeQuerySubscriptionsUnsubscribe) {
-    return;
-  }
-
-  state.activeQuerySubscriptionsUnsubscribe();
-  state.activeQuerySubscriptionsUnsubscribe = null;
-}
-
 function getFirstDbClient(db: Db): JazzClient | null {
   const maybeClients = (db as unknown as { clients?: unknown }).clients;
   if (!(maybeClients instanceof Map)) return null;
@@ -134,18 +86,14 @@ function getFirstDbClient(db: Db): JazzClient | null {
 
 function tryGetSchemaFromDb(db: Db): WasmSchema | null {
   const firstClient = getFirstDbClient(db);
-  if (!firstClient) {
-    return null;
-  }
+  if (!firstClient) return null;
   return firstClient.getSchema();
 }
 
 function tryCreateClientForSchema(db: Db, schema: WasmSchema): JazzClient | null {
   const maybeGetClient = (db as unknown as { getClient?: (schemaArg: WasmSchema) => JazzClient })
     .getClient;
-  if (typeof maybeGetClient !== "function") {
-    return null;
-  }
+  if (typeof maybeGetClient !== "function") return null;
   try {
     return maybeGetClient.call(db, schema);
   } catch {
@@ -155,39 +103,125 @@ function tryCreateClientForSchema(db: Db, schema: WasmSchema): JazzClient | null
 
 function resolveBridgeSchema(db: Db): WasmSchema | null {
   const state = runtimeBridgeStateByDb.get(db);
-  const stateSchema = state?.wasmSchema ?? null;
-  if (stateSchema) {
-    return stateSchema;
-  }
-
-  const dbSchema = tryGetSchemaFromDb(db);
-  if (dbSchema) {
-    return dbSchema;
-  }
-
-  return null;
+  return state?.wasmSchema ?? tryGetSchemaFromDb(db) ?? null;
 }
 
 function resolveBridgeDbConfig(db: Db): DbConfig | null {
   const state = runtimeBridgeStateByDb.get(db);
   const stateConfig = sanitizeDbConfigForBridge(state?.dbConfig ?? null);
-  if (stateConfig) {
-    return stateConfig;
-  }
-
+  if (stateConfig) return stateConfig;
   const rawConfig = (db as unknown as { config?: unknown }).config;
-  if (!isSerializableDbConfig(rawConfig)) {
-    return null;
-  }
+  if (!isSerializableDbConfig(rawConfig)) return null;
   return sanitizeDbConfigForBridge(rawConfig);
+}
+
+async function resolveCommandClient(db: Db): Promise<JazzClient> {
+  const schema = resolveBridgeSchema(db);
+  if (schema) tryCreateClientForSchema(db, schema);
+  const client = getFirstDbClient(db);
+  if (!client) throw new Error("No Jazz runtime client is initialized yet.");
+  const ensureBridgeReady = (db as unknown as { ensureBridgeReady?: () => Promise<void> })
+    .ensureBridgeReady;
+  if (typeof ensureBridgeReady === "function") await ensureBridgeReady.call(db);
+  return client;
+}
+
+function sendEvent(port: MessagePort, event: DevtoolsEvent): void {
+  port.postMessage(event);
+}
+
+function createRuntimeAPI(
+  db: Db,
+  state: RuntimeBridgeState,
+  port: MessagePort,
+): DevtoolsRuntimeAPI {
+  return {
+    async announce() {
+      let schema = resolveBridgeSchema(db);
+      if (!schema && state.wasmSchema) schema = state.wasmSchema;
+      const dbConfig = resolveBridgeDbConfig(db);
+
+      if (schema && dbConfig) {
+        updateRuntimeBridgeSchema(db, schema);
+        updateRuntimeBridgeConfig(db, dbConfig);
+        tryCreateClientForSchema(db, schema);
+        const runtimeReady = Boolean(getFirstDbClient(db));
+
+        // Set up active query subscription push on first announce
+        if (!state.activeQuerySubscriptionsUnsubscribe) {
+          state.activeQuerySubscriptionsUnsubscribe = db.onActiveQuerySubscriptionsChange(
+            (subscriptions) => {
+              sendEvent(port, {
+                type: "active-query-subscriptions-changed",
+                subscriptions: subscriptions.map((s) => ({ ...s, branches: [...s.branches] })),
+              });
+            },
+          );
+        }
+
+        setRuntimeBridgeConnected(db, true);
+        return { ready: runtimeReady, wasmSchema: schema, dbConfig };
+      }
+      return { ready: false };
+    },
+
+    async query(query, options) {
+      const client = await resolveCommandClient(db);
+      return await client.query(query, options);
+    },
+
+    async insertDurable(table, values, tier) {
+      const client = await resolveCommandClient(db);
+      return await client.createDurable(table, values, tier ? { tier } : undefined);
+    },
+
+    async updateDurable(objectId, updates, tier) {
+      const client = await resolveCommandClient(db);
+      await client.updateDurable(objectId, updates, tier ? { tier } : undefined);
+    },
+
+    async deleteDurable(objectId, tier) {
+      const client = await resolveCommandClient(db);
+      await client.deleteDurable(objectId, tier ? { tier } : undefined);
+    },
+
+    async subscribe(query, subscriptionId, options) {
+      const client = await resolveCommandClient(db);
+
+      // Clean up prior subscription with the same ID
+      const prior = state.activeSubscriptions.get(subscriptionId);
+      if (prior) {
+        prior.client.unsubscribe(prior.runtimeSubscriptionId);
+        state.activeSubscriptions.delete(subscriptionId);
+      }
+
+      const runtimeSubscriptionId = client.subscribe(
+        query,
+        (delta) => {
+          sendEvent(port, { type: "subscription-delta", subscriptionId, delta });
+        },
+        options,
+      );
+      state.activeSubscriptions.set(subscriptionId, { client, runtimeSubscriptionId });
+    },
+
+    async unsubscribe(subscriptionId) {
+      const activeSubscription = state.activeSubscriptions.get(subscriptionId);
+      if (activeSubscription) {
+        activeSubscription.client.unsubscribe(activeSubscription.runtimeSubscriptionId);
+        state.activeSubscriptions.delete(subscriptionId);
+      }
+    },
+
+    async listActiveQuerySubscriptions() {
+      return db.getActiveQuerySubscriptions();
+    },
+  };
 }
 
 function hookRegistration(
   db: Db,
-  options?: {
-    wasmSchema?: WasmSchema;
-    dbConfig?: DbConfig;
-  },
+  options?: { wasmSchema?: WasmSchema; dbConfig?: DbConfig },
 ): DevToolsAttachment {
   let state = runtimeBridgeStateByDb.get(db);
   if (!state) {
@@ -198,283 +232,55 @@ function hookRegistration(
       listeners: new Set(),
       activeSubscriptions: new Map(),
       activeQuerySubscriptionsUnsubscribe: null,
+      messagePort: null,
     };
     runtimeBridgeStateByDb.set(db, state);
   } else {
-    if (options?.wasmSchema) {
-      state.wasmSchema = options.wasmSchema;
-    }
-    if (options?.dbConfig) {
-      state.dbConfig = sanitizeDbConfigForBridge(options.dbConfig);
-    }
+    if (options?.wasmSchema) state.wasmSchema = options.wasmSchema;
+    if (options?.dbConfig) state.dbConfig = sanitizeDbConfigForBridge(options.dbConfig);
   }
 
   if (!registeredRuntimeBridgeDbs.has(db) && typeof window !== "undefined") {
     registeredRuntimeBridgeDbs.add(db);
 
-    window.addEventListener("message", async (event) => {
+    const teardownComlink = () => {
+      clearRuntimeBridgeSubscriptions(db);
+      if (state!.activeQuerySubscriptionsUnsubscribe) {
+        state!.activeQuerySubscriptionsUnsubscribe();
+        state!.activeQuerySubscriptionsUnsubscribe = null;
+      }
+      if (state!.messagePort) {
+        state!.messagePort.close();
+        state!.messagePort = null;
+      }
+      setRuntimeBridgeConnected(db, false);
+    };
+
+    const setupComlink = () => {
+      // Clean up previous connection
+      teardownComlink();
+
+      const channel = new MessageChannel();
+      state!.messagePort = channel.port1;
+
+      const api = createRuntimeAPI(db, state!, channel.port1);
+      Comlink.expose(api, channel.port1);
+
+      window.postMessage({ channel: DEVTOOLS_MC_CHANNEL }, "*", [channel.port2]);
+    };
+
+    // Listen for content script requesting a new connection
+    window.addEventListener("message", (event) => {
       if (event.source !== window) return;
-      const rawMessage = event.data;
-      if (!isRecord(rawMessage)) return;
-      if (rawMessage.channel !== DEVTOOLS_BRIDGE_CHANNEL) return;
-
-      if (rawMessage.kind === "event") {
-        const eventEnvelope = rawMessage as Partial<{ event: string }>;
-        if (eventEnvelope.event === DEVTOOLS_EVENTS.CONNECTED) {
-          setRuntimeBridgeConnected(db, true);
-        }
-        if (eventEnvelope.event === DEVTOOLS_EVENTS.DISCONNECTED) {
-          clearRuntimeBridgeSubscriptions(db);
-          clearActiveQuerySubscriptionBridge(db);
-          setRuntimeBridgeConnected(db, false);
-        }
-        return;
-      }
-
-      const envelope = rawMessage as Partial<DevtoolsRequestEnvelope>;
-      if (
-        envelope.kind !== "request" ||
-        typeof envelope.requestId !== "string" ||
-        typeof envelope.command !== "string"
-      ) {
-        return;
-      }
-      const requestId = envelope.requestId;
-
-      const respond = (
-        response: Omit<DevtoolsResponseEnvelope, "channel" | "kind" | "requestId">,
-      ) => {
-        window.postMessage(
-          {
-            channel: DEVTOOLS_BRIDGE_CHANNEL,
-            kind: "response",
-            requestId,
-            ...response,
-          } satisfies DevtoolsResponseEnvelope,
-          "*",
-        );
-      };
-
-      try {
-        if (envelope.command === DEVTOOLS_COMMANDS.BRIDGE_HANDSHAKE) {
-          respond({ ok: true, payload: { ready: true } });
-          return;
-        }
-
-        if (envelope.command === DEVTOOLS_COMMANDS.ANNOUNCE) {
-          let schema = resolveBridgeSchema(db);
-          if (!schema && state?.wasmSchema) {
-            schema = state.wasmSchema;
-          }
-          const dbConfig = resolveBridgeDbConfig(db);
-
-          if (schema && dbConfig) {
-            updateRuntimeBridgeSchema(db, schema);
-            updateRuntimeBridgeConfig(db, dbConfig);
-            tryCreateClientForSchema(db, schema);
-            const runtimeReady = Boolean(getFirstDbClient(db));
-            respond({
-              ok: true,
-              payload: { ready: runtimeReady, wasmSchema: schema, dbConfig },
-            });
-          } else {
-            respond({ ok: true, payload: { ready: false } });
-          }
-          ensureActiveQuerySubscriptionBridge(db);
-          setRuntimeBridgeConnected(db, true);
-          return;
-        }
-
-        if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS) {
-          ensureActiveQuerySubscriptionBridge(db);
-          respond({
-            ok: true,
-            payload: db.getActiveQuerySubscriptions(),
-          });
-          return;
-        }
-
-        if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE) {
-          const payload = isRecord(envelope.payload)
-            ? (envelope.payload as DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE])
-            : ({} as Partial<
-                DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE]
-              >);
-          const bridgeSubscriptionId = payload.subscriptionId;
-          if (typeof bridgeSubscriptionId !== "string") {
-            throw new Error("Invalid payload for client.unsubscribe.");
-          }
-          const activeSubscription = state?.activeSubscriptions.get(bridgeSubscriptionId);
-          if (activeSubscription) {
-            activeSubscription.client.unsubscribe(activeSubscription.runtimeSubscriptionId);
-            state?.activeSubscriptions.delete(bridgeSubscriptionId);
-          }
-          respond({ ok: true, payload: { unsubscribed: true } });
-          return;
-        }
-
-        const resolveCommandClient = async (): Promise<JazzClient> => {
-          const schema = resolveBridgeSchema(db);
-          if (schema) {
-            tryCreateClientForSchema(db, schema);
-          }
-
-          const client = getFirstDbClient(db);
-          if (!client) {
-            throw new Error("No Jazz runtime client is initialized yet.");
-          }
-
-          const ensureBridgeReady = (db as unknown as { ensureBridgeReady?: () => Promise<void> })
-            .ensureBridgeReady;
-          if (typeof ensureBridgeReady === "function") {
-            await ensureBridgeReady.call(db);
-          }
-
-          return client;
-        };
-
-        if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE) {
-          const payload = isRecord(envelope.payload)
-            ? (envelope.payload as Partial<
-                DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE]
-              >)
-            : {};
-          const table = payload.table;
-          const values = payload.values;
-          const tier = payload.tier as DurabilityTier | undefined;
-          if (typeof table !== "string" || !Array.isArray(values)) {
-            throw new Error("Invalid payload for client.insertDurable.");
-          }
-
-          const client = await resolveCommandClient();
-          const row = await client.createDurable(table, values, tier ? { tier } : undefined);
-          respond({ ok: true, payload: row });
-          return;
-        }
-
-        if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE) {
-          const payload = isRecord(envelope.payload)
-            ? (envelope.payload as Partial<
-                DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE]
-              >)
-            : {};
-          const objectId = payload.objectId;
-          const updates = payload.updates;
-          const tier = payload.tier as DurabilityTier | undefined;
-          if (typeof objectId !== "string" || !isRecord(updates)) {
-            throw new Error("Invalid payload for client.updateDurable.");
-          }
-
-          const client = await resolveCommandClient();
-          await client.updateDurable(
-            objectId,
-            updates as Record<string, Value>,
-            tier ? { tier } : undefined,
-          );
-          respond({ ok: true, payload: { updated: true } });
-          return;
-        }
-
-        if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE) {
-          const payload = isRecord(envelope.payload)
-            ? (envelope.payload as Partial<
-                DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE]
-              >)
-            : {};
-          const objectId = payload.objectId;
-          const tier = payload.tier as DurabilityTier | undefined;
-          if (typeof objectId !== "string") {
-            throw new Error("Invalid payload for client.deleteDurable.");
-          }
-
-          const client = await resolveCommandClient();
-          await client.deleteDurable(objectId, tier ? { tier } : undefined);
-          respond({ ok: true, payload: { deleted: true } });
-          return;
-        }
-
-        if (
-          envelope.command !== DEVTOOLS_COMMANDS.CLIENT_QUERY &&
-          envelope.command !== DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE
-        ) {
-          respond({
-            ok: false,
-            error: { message: `Unsupported devtools command: ${envelope.command}` },
-          });
-          return;
-        }
-
-        const queryPayload = isRecord(envelope.payload)
-          ? (envelope.payload as Partial<
-              DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_QUERY] &
-                DevtoolsRequestPayloadByCommand[typeof DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE]
-            >)
-          : {};
-        const query = queryPayload.query;
-        const tier = queryPayload.tier as DurabilityTier | undefined;
-        const options = isRecord(queryPayload.options)
-          ? (queryPayload.options as QueryExecutionOptions)
-          : tier
-            ? { tier }
-            : undefined;
-
-        if (typeof query !== "string" && !isRecord(query)) {
-          throw new Error(
-            envelope.command === DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE
-              ? "Invalid payload for client.subscribe."
-              : "Invalid payload for client.query.",
-          );
-        }
-
-        const client = await resolveCommandClient();
-
-        if (envelope.command === DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE) {
-          const bridgeSubscriptionId = queryPayload.subscriptionId;
-          if (typeof bridgeSubscriptionId !== "string") {
-            throw new Error("Invalid payload for client.subscribe.");
-          }
-
-          const priorSubscription = state?.activeSubscriptions.get(bridgeSubscriptionId);
-          if (priorSubscription) {
-            priorSubscription.client.unsubscribe(priorSubscription.runtimeSubscriptionId);
-            state?.activeSubscriptions.delete(bridgeSubscriptionId);
-          }
-
-          const runtimeSubscriptionId = client.subscribe(
-            query as string | QueryInput,
-            (delta) => {
-              window.postMessage(
-                {
-                  channel: DEVTOOLS_BRIDGE_CHANNEL,
-                  kind: "event",
-                  event: DEVTOOLS_EVENTS.CLIENT_SUBSCRIPTION_DELTA,
-                  payload: {
-                    subscriptionId: bridgeSubscriptionId,
-                    delta,
-                  },
-                },
-                "*",
-              );
-            },
-            options,
-          );
-
-          state?.activeSubscriptions.set(bridgeSubscriptionId, {
-            client,
-            runtimeSubscriptionId,
-          });
-          respond({ ok: true, payload: { subscribed: true } });
-          return;
-        }
-
-        const rows = await client.query(query as string | QueryInput, options);
-        respond({ ok: true, payload: rows });
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : "Unknown devtools bridge error";
-        respond({ ok: false, error: { message: errorMessage } });
+      const data = event.data;
+      if (!isRecord(data)) return;
+      if (data.channel === DEVTOOLS_MC_CHANNEL && data.kind === "request-port") {
+        setupComlink();
       }
     });
+
+    // Initial setup
+    setupComlink();
   }
 
   return {
@@ -483,9 +289,7 @@ function hookRegistration(
     },
     onConnectionChange(listener) {
       const runtimeState = runtimeBridgeStateByDb.get(db);
-      if (!runtimeState) {
-        return () => undefined;
-      }
+      if (!runtimeState) return () => undefined;
       runtimeState.listeners.add(listener);
       listener(runtimeState.connected);
       return () => {
@@ -500,9 +304,7 @@ function hookRegistration(
 }
 
 function resolveDb(input: Db | { db: Db }): Db {
-  if (input instanceof Db) {
-    return input;
-  }
+  if (input instanceof Db) return input;
   return input.db;
 }
 
