@@ -18,6 +18,7 @@ import type {
   MigrationOp,
   TableMigration,
   ScalarSqlType,
+  ArraySqlType,
   TSTypeFromSqlType,
 } from "./schema.js";
 import { assertUserColumnNameAllowed } from "./magic-columns.js";
@@ -84,10 +85,17 @@ function jsonColumn(schema?: JsonSchemaSource): JsonBuilder {
 // Column Builder (for schema context)
 // ============================================================================
 
-interface ColumnBuilder {
-  optional(): this;
+type MaybeOptional<T, Optional extends boolean> = Optional extends true ? T | null : T;
+
+interface ColumnBuilder<
+  TSqlType extends SqlType = SqlType,
+  TValue = TSTypeFromSqlType<TSqlType>,
+  Optional extends boolean = boolean,
+> {
+  optional(): ColumnBuilder<TSqlType, TValue, true>;
+  default(value: MaybeOptional<TValue, Optional>): this;
   _build(name: string): Column;
-  _sqlType: SqlType;
+  _sqlType: TSqlType;
   _references: string | undefined;
 }
 
@@ -121,13 +129,22 @@ function validateReferenceColumnName(name: string, builder: ColumnBuilder): void
   }
 }
 
-class ScalarBuilder implements ColumnBuilder {
+class ScalarBuilder<
+  T extends ScalarSqlType,
+  Optional extends boolean = false,
+> implements ColumnBuilder<T, TSTypeFromSqlType<T>, Optional> {
   private _nullable = false;
+  private _default: MaybeOptional<TSTypeFromSqlType<T>, Optional> | undefined;
 
-  constructor(public _sqlType: ScalarSqlType) {}
+  constructor(public _sqlType: T) {}
 
-  optional(): this {
+  optional(): ScalarBuilder<T, true> {
     this._nullable = true;
+    return this as unknown as ScalarBuilder<T, true>;
+  }
+
+  default(value: MaybeOptional<TSTypeFromSqlType<T>, Optional>): this {
+    this._default = value;
     return this;
   }
 
@@ -136,6 +153,7 @@ class ScalarBuilder implements ColumnBuilder {
       name,
       sqlType: this._sqlType,
       nullable: this._nullable,
+      ...(this._default === undefined ? {} : { default: this._default }),
     };
   }
 
@@ -144,16 +162,25 @@ class ScalarBuilder implements ColumnBuilder {
   }
 }
 
-class EnumBuilder implements ColumnBuilder {
+class EnumBuilder<
+  Variant extends string = string,
+  Optional extends boolean = false,
+> implements ColumnBuilder<EnumSqlType, Variant, Optional> {
   private _nullable = false;
+  private _default: MaybeOptional<Variant, Optional> | undefined;
   public _sqlType: EnumSqlType;
 
   constructor(...variants: string[]) {
     this._sqlType = { kind: "ENUM", variants: normalizeEnumVariants(variants) };
   }
 
-  optional(): this {
+  optional(): EnumBuilder<Variant, true> {
     this._nullable = true;
+    return this as unknown as EnumBuilder<Variant, true>;
+  }
+
+  default(value: MaybeOptional<Variant, Optional>): this {
+    this._default = value;
     return this;
   }
 
@@ -162,6 +189,7 @@ class EnumBuilder implements ColumnBuilder {
       name,
       sqlType: this._sqlType,
       nullable: this._nullable,
+      ...(this._default === undefined ? {} : { default: this._default }),
     };
   }
 
@@ -170,8 +198,13 @@ class EnumBuilder implements ColumnBuilder {
   }
 }
 
-class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
+class JsonBuilder<Output = JsonValue, Optional extends boolean = false> implements ColumnBuilder<
+  JsonSqlType<Output>,
+  Output,
+  Optional
+> {
   private _nullable = false;
+  private _default: MaybeOptional<Output, Optional> | undefined;
   public _sqlType: JsonSqlType<Output>;
 
   constructor(schema?: JsonSchemaSource<Output>) {
@@ -180,8 +213,13 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
       : { kind: "JSON" };
   }
 
-  optional(): this {
+  optional(): JsonBuilder<Output, true> {
     this._nullable = true;
+    return this as unknown as JsonBuilder<Output, true>;
+  }
+
+  default(value: MaybeOptional<Output, Optional>): this {
+    this._default = value;
     return this;
   }
 
@@ -190,6 +228,7 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
       name,
       sqlType: this._sqlType,
       nullable: this._nullable,
+      ...(this._default === undefined ? {} : { default: this._default }),
     };
   }
 
@@ -202,13 +241,23 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
 // Ref Builder (for foreign key references in schema context)
 // ============================================================================
 
-class RefBuilder implements ColumnBuilder {
+class RefBuilder<Optional extends boolean = false> implements ColumnBuilder<
+  "UUID",
+  string,
+  Optional
+> {
   private _nullable = false;
+  private _default: MaybeOptional<string, Optional> | undefined;
 
   constructor(private _targetTable: string) {}
 
-  optional(): this {
+  optional(): RefBuilder<true> {
     this._nullable = true;
+    return this as unknown as RefBuilder<true>;
+  }
+
+  default(value: MaybeOptional<string, Optional>): this {
+    this._default = value;
     return this;
   }
 
@@ -217,11 +266,12 @@ class RefBuilder implements ColumnBuilder {
       name,
       sqlType: this._sqlType,
       nullable: this._nullable,
+      ...(this._default === undefined ? {} : { default: this._default }),
       references: this._references,
     };
   }
 
-  get _sqlType(): SqlType {
+  get _sqlType(): "UUID" {
     return "UUID";
   }
 
@@ -230,13 +280,25 @@ class RefBuilder implements ColumnBuilder {
   }
 }
 
-class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
+type BuilderValue<T extends ColumnBuilder> =
+  T extends ColumnBuilder<SqlType, infer TValue, boolean> ? TValue : never;
+
+class ArrayBuilder<
+  T extends ColumnBuilder,
+  Optional extends boolean = false,
+> implements ColumnBuilder<ArraySqlType, BuilderValue<T>[], Optional> {
   private _nullable = false;
+  private _default: MaybeOptional<BuilderValue<T>[], Optional> | undefined;
 
   constructor(public _element: T) {}
 
-  optional(): this {
+  optional(): ArrayBuilder<T, true> {
     this._nullable = true;
+    return this as unknown as ArrayBuilder<T, true>;
+  }
+
+  default(value: MaybeOptional<BuilderValue<T>[], Optional>): this {
+    this._default = value;
     return this;
   }
 
@@ -245,11 +307,12 @@ class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
       name,
       sqlType: this._sqlType,
       nullable: this._nullable,
+      ...(this._default === undefined ? {} : { default: this._default }),
       references: this._references,
     };
   }
 
-  get _sqlType(): SqlType {
+  get _sqlType(): ArraySqlType {
     return { kind: "ARRAY" as const, element: this._element._sqlType };
   }
 
@@ -261,8 +324,6 @@ class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
 // ============================================================================
 // Add Builder (for migration context)
 // ============================================================================
-
-type MaybeOptional<T, Optional extends boolean> = Optional extends true ? T | null : T;
 
 class AddBuilder<Optional extends boolean = false> {
   string(opts: { default: MaybeOptional<string, Optional> }): AddOp {
@@ -400,7 +461,8 @@ export const col = {
   float: () => new ScalarBuilder("REAL"),
   bytes: () => new ScalarBuilder("BYTEA"),
   json: jsonColumn,
-  enum: (...variants: string[]) => new EnumBuilder(...variants),
+  enum: <const Variants extends readonly [string, ...string[]]>(...variants: Variants) =>
+    new EnumBuilder<Variants[number]>(...variants),
   ref: (targetTable: string) => new RefBuilder(targetTable),
   array: <T extends ColumnBuilder>(element: T) => new ArrayBuilder(element),
 

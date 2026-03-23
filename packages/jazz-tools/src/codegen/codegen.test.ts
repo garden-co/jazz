@@ -4,6 +4,7 @@ import { schemaToWasm } from "./schema-reader.js";
 import { generateTypes } from "./type-generator.js";
 import { generateClient, analyzeRelations } from "./index.js";
 import type { WasmSchema } from "../drivers/types.js";
+import type { Schema as DslSchema } from "../schema.js";
 import { z } from "zod/v4";
 
 describe("schemaToWasm", () => {
@@ -232,6 +233,46 @@ describe("schemaToWasm", () => {
     expect(Object.keys(wasm)).toEqual(["users", "todos"]);
     expect(wasm.users!.columns).toHaveLength(1);
     expect(wasm.todos!.columns).toHaveLength(2);
+  });
+
+  it("serializes schema defaults when present on columns", () => {
+    const schema = {
+      tables: [
+        {
+          name: "todos",
+          columns: [
+            {
+              name: "done",
+              sqlType: "BOOLEAN",
+              nullable: false,
+              default: false,
+            },
+            {
+              name: "priority",
+              sqlType: "INTEGER",
+              nullable: true,
+              default: null,
+            },
+          ],
+        },
+      ],
+    } as unknown as DslSchema;
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.todos!.columns).toEqual([
+      {
+        name: "done",
+        column_type: { type: "Boolean" },
+        nullable: false,
+        default: { type: "Boolean", value: false },
+      },
+      {
+        name: "priority",
+        column_type: { type: "Integer" },
+        nullable: true,
+        default: { type: "Null" },
+      },
+    ]);
   });
 
   it("carries table permissions into wasm schema", () => {
