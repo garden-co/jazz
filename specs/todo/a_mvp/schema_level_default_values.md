@@ -7,9 +7,9 @@ Make default values a first-class part of Jazz 2 table schemas, so a single defa
 - TypeScript schema definitions.
 - Generated `CREATE TABLE` SQL.
 - Auto-generated lens defaults when a column is added or removed across schema versions.
-- Typed insert APIs when a caller omits a field.
+- Insert APIs when a caller omits a field.
 
-Today, defaults exist only in the migration DSL (`col.add(... { default })` / `col.drop(... { backwardsDefault })`). Base table schemas do not carry defaults, `CREATE TABLE ... DEFAULT ...` is parsed but discarded, and TS inserts map omitted fields to `Null`.
+Today, defaults exist only in the migration DSL (`col.add(... { default })` / `col.drop(... { backwardsDefault })`). Base table schemas do not carry defaults, `CREATE TABLE ... DEFAULT ...` is parsed but discarded, and the current insert flow materializes missing TS fields as `Null` before Rust can distinguish omission from an explicit null.
 
 ## User-facing API
 
@@ -94,16 +94,15 @@ export interface TodoInit {
 }
 ```
 
-### Insert conversion
+### Runtime bridge
 
-Update `packages/jazz-tools/src/runtime/value-converter.ts`:
+Update the TS runtime bridge so `db.insert(table, { ... })` preserves omission information and delegates default materialization to Rust.
 
-- When a column is omitted or `undefined`:
-  - use `col.default` if present
-  - else use `Null` for nullable columns
-  - else throw a clear `"Missing required field 'x'"` error before calling into the runtime
+The TS side should not eagerly turn a missing field into `Null` for inserts. It should pass named values to a schema-aware Rust insert path that can distinguish:
 
-This is the MVP write-path behavior for the main TS API (`db.insert(table, { ... })`).
+- omitted / `undefined`
+- explicit `null`
+- explicit concrete value
 
 ## Rust Changes
 
@@ -158,6 +157,19 @@ This preserves current behavior while making schema defaults authoritative when 
 
 `LensOp::AddColumn { default, .. }` already injects a value during row transformation. No semantic change is needed there; the change is where the default comes from.
 
+### Insert path
+
+Add a schema-aware insert path in Rust above `QueryManager::insert(table, &[Value])`.
+
+This path should:
+
+- accept omission-preserving named/partial input
+- materialize schema defaults for omitted or `undefined` fields
+- allow explicit `null` only for nullable columns
+- reject missing required non-defaulted fields before row encoding
+
+The low-level positional `QueryManager::insert(table, &[Value])` can remain exact-value oriented. Default application should happen one layer above it, where the schema and field-presence information are both available.
+
 ### SchemaManager / runtime
 
 Rust still needs to carry defaults in the active schema for:
@@ -166,10 +178,9 @@ Rust still needs to carry defaults in the active schema for:
 - catalogue export
 - lens generation
 - `CREATE TABLE` round-trip
+- schema-aware inserts
 
-MVP does not change the low-level positional Rust insert APIs. Schema-default application for omitted fields happens in the TS typed insert path.
-
-If we later want defaults enforced uniformly for direct WASM/NAPI or Rust callers, we should add a named/partial insert boundary instead of overloading the positional `Vec<Value>` API.
+MVP should apply defaults in Rust so the behavior is shared across WASM, NAPI, and any future Rust-native callers that use the schema-aware insert path.
 
 ## Default changes on existing columns
 
@@ -178,7 +189,7 @@ Changing a default on an existing column affects future inserts, not existing ro
 MVP behavior:
 
 - The schema hash changes.
-- Generated TS init types and insert behavior use the new default.
+- Generated TS init types and Rust insert behavior use the new default.
 - No row-transform lens op is required, because stored rows are unchanged.
 
 This means default-only schema changes are metadata-only in MVP. A later follow-up can add dedicated default-alter SQL/lens ops if we need migration SQL parity.
@@ -202,11 +213,7 @@ This lets users backfill old rows one way while using a different default for ne
 - DSL tests for `.default(...)` typing and builder output.
 - `schemaToWasm()` tests for scalar, enum, array, bytea, json, timestamp, and nullable `null` defaults.
 - `type-generator` tests verifying defaulted columns become optional in `Init` but not in row types.
-- `value-converter` tests for:
-  - omitted field uses schema default
-  - `undefined` uses schema default
-  - explicit `null` bypasses default on nullable column
-  - missing required non-defaulted field throws
+- TS runtime bridge tests verifying omitted fields remain omitted across the TS -> Rust insert boundary, while explicit `null` remains explicit.
 
 ### Rust
 
@@ -215,6 +222,11 @@ This lets users backfill old rows one way while using a different default for ne
 - schema hash tests verifying default changes alter the hash.
 - auto-lens tests verifying explicit schema defaults override heuristic defaults.
 - transformer/integration tests verifying old rows pick up the explicit schema default when a new column is added.
+- runtime/schema-manager insert tests for:
+  - omitted field uses schema default
+  - `undefined` uses schema default
+  - explicit `null` bypasses the default and is validated against nullability
+  - missing required non-defaulted field throws
 
 ### End-to-end
 
@@ -229,7 +241,7 @@ This lets users backfill old rows one way while using a different default for ne
 
 2. Do we want raw positional insert APIs to support defaults too?
 
-- No in MVP. Keep schema-default application in the typed/named TS path and add a separate named Rust boundary later if needed.
+- No. Apply defaults in the schema-aware Rust insert path, not in `QueryManager::insert(table, &[Value])`. If we ever need low-level positional defaults, that should be a separate API rather than implicit behavior on `Vec<Value>`.
 
 3. Should we support default-only migration SQL (`ALTER COLUMN SET/DROP DEFAULT`)?
 
@@ -237,7 +249,7 @@ This lets users backfill old rows one way while using a different default for ne
 
 ## Implementation Tasks
 
-Recommended execution order: start in Rust so schema defaults become real schema metadata first, then expose that through the runtime boundary, and then add the TypeScript DSL and typed insert behavior on top.
+Recommended execution order: start in Rust so schema defaults become real schema metadata first, then add the schema-aware Rust insert path, then expose that through the runtime boundary, and then add the TypeScript DSL and typed API changes on top.
 
 - [x] Rust schema core:
       Add `default: Option<Value>` to `ColumnDescriptor`, add a builder/helper for setting it, and ensure old serialized schemas still deserialize with `default: None`.
@@ -250,6 +262,9 @@ Recommended execution order: start in Rust so schema defaults become real schema
 
 - [ ] Rust schema serialization and boundaries:
       Verify `ColumnDescriptor.default` flows through WASM, NAPI, and catalogue export, and add serde/catalogue tests for explicit defaults and absent defaults.
+
+- [ ] Rust schema-aware insert path:
+      Add an omission-preserving insert path above `QueryManager::insert(table, &[Value])` that materializes defaults, validates explicit nulls, and errors on missing required non-defaulted fields.
 
 - [ ] Rust auto-lens and diffing:
       Update `auto_lens.rs` and `diff.rs` so explicit schema defaults are used for generated `AddColumn` and `RemoveColumn` defaults before falling back to the current heuristics.
@@ -269,11 +284,11 @@ Recommended execution order: start in Rust so schema defaults become real schema
 - [ ] TypeScript codegen:
       Update generated `Init` interfaces so defaulted columns are optional while row/result interfaces remain unchanged, and add codegen assertions for that behavior.
 
-- [ ] TypeScript insert conversion:
-      Update `packages/jazz-tools/src/runtime/value-converter.ts` so omitted or `undefined` fields use schema defaults, nullable non-defaulted fields become `Null`, and missing required non-defaulted fields throw a clear error.
+- [ ] TypeScript runtime bridge:
+      Change `db.insert()` and the runtime bridge to call the new omission-preserving Rust insert path instead of materializing a fully populated `Value[]` in TypeScript.
 
 - [ ] TypeScript unit tests:
-      Add focused tests for scalar, enum, array, bytea, json, timestamp, and nullable `null` defaults in `schemaToWasm()` and `value-converter`.
+      Add focused tests for scalar, enum, array, bytea, json, timestamp, and nullable `null` defaults in `schemaToWasm()` plus bridge tests for omitted-vs-null insert semantics.
 
 - [ ] End-to-end tests:
       Add integration coverage showing `db.insert()` can omit a defaulted non-nullable field and still persist the defaulted value, plus a cross-schema evolution test covering defaulted added columns.
