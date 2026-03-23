@@ -1,3 +1,4 @@
+import * as Comlink from "comlink";
 import {
   ActiveQuerySubscriptionTrace,
   JazzClient,
@@ -17,31 +18,17 @@ import {
 import { Db, DbConfig } from "../runtime/db.js";
 import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
 import {
-  DEVTOOLS_BRIDGE_CHANNEL,
-  DEVTOOLS_COMMANDS,
-  DEVTOOLS_EVENTS,
+  DEVTOOLS_MC_CHANNEL,
   DEVTOOLS_PORT_NAME,
-  DevToolsBootstrap,
-  DevtoolsBridgeCommand,
-  DevtoolsEventEnvelope,
-  DevtoolsEventPayloadByEvent,
-  DevtoolsRequestPayloadByCommand,
-  DevtoolsResponsePayloadByCommand,
-  DevtoolsResponseEnvelope,
+  type DevToolsBootstrap,
+  type DevtoolsEvent,
+  type DevtoolsRuntimeAPI,
   isRecord,
   isSerializableDbConfig,
   sanitizeDbConfigForBridge,
 } from "./protocol.js";
 
-const REQUEST_TIMEOUT_MS = 15_000;
 const ANNOUNCE_POLL_INTERVAL_MS = 500;
-const ANNOUNCE_REQUEST_TIMEOUT_MS = 2_000;
-
-type PendingRequest = {
-  resolve: (value: unknown) => void;
-  reject: (reason?: unknown) => void;
-  timeoutId: number;
-};
 
 type DevToolsPortListener = () => void;
 type ActiveQuerySubscriptionsListener = (
@@ -53,9 +40,9 @@ const devtoolsPortConnectListeners = new Set<DevToolsPortListener>();
 const activeQuerySubscriptionsListeners = new Set<ActiveQuerySubscriptionsListener>();
 
 let devtoolsPort: any | null = null;
+let runtimeProxy: Comlink.Remote<DevtoolsRuntimeAPI> | null = null;
 let announcedBootstrap: DevToolsBootstrap | null = null;
 let announcePromise: Promise<DevToolsBootstrap> | null = null;
-const pendingRequests = new Map<string, PendingRequest>();
 const pendingSubscriptionCallbacks = new Map<string, SubscriptionCallback>();
 const pendingSubscriptionBridgeIds = new Map<number, string>();
 let nextSubscriptionHandle = 1;
@@ -64,17 +51,7 @@ let activeQuerySubscriptions: ActiveQuerySubscriptionTrace[] = [];
 function cloneActiveQuerySubscriptions(
   subscriptions: readonly ActiveQuerySubscriptionTrace[],
 ): ActiveQuerySubscriptionTrace[] {
-  return subscriptions.map((subscription) => ({
-    ...subscription,
-    branches: [...subscription.branches],
-  }));
-}
-
-function randomId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return subscriptions.map((s) => ({ ...s, branches: [...s.branches] }));
 }
 
 function wait(ms: number): Promise<void> {
@@ -84,22 +61,16 @@ function wait(ms: number): Promise<void> {
 }
 
 function notifyDevtoolsPortConnected(): void {
-  for (const listener of devtoolsPortConnectListeners) {
-    listener();
-  }
+  for (const listener of devtoolsPortConnectListeners) listener();
 }
 
 function notifyDevtoolsPortDisconnected(): void {
-  for (const listener of devtoolsPortDisconnectListeners) {
-    listener();
-  }
+  for (const listener of devtoolsPortDisconnectListeners) listener();
 }
 
 function notifyActiveQuerySubscriptionsChanged(): void {
   const snapshot = cloneActiveQuerySubscriptions(activeQuerySubscriptions);
-  for (const listener of activeQuerySubscriptionsListeners) {
-    listener(snapshot);
-  }
+  for (const listener of activeQuerySubscriptionsListeners) listener(snapshot);
 }
 
 function getRuntimeLastErrorMessage(): string | null {
@@ -113,64 +84,98 @@ function isMissingReceivingEndError(error: unknown): boolean {
   return error.message.includes("Receiving end does not exist");
 }
 
-function createBridgeInstallerScript(bridgeChannel: string, portName: string): void {
+function chromePortEndpoint(port: any): Comlink.Endpoint {
+  const listeners = new Map<EventListenerOrEventListenerObject, (data: unknown) => void>();
+  return {
+    postMessage: (msg: unknown) => port.postMessage(msg),
+    addEventListener: (_type: string, handler: EventListenerOrEventListenerObject) => {
+      const wrapper = (data: unknown) => {
+        if (typeof handler === "function") {
+          handler({ data } as MessageEvent);
+        }
+      };
+      listeners.set(handler, wrapper);
+      port.onMessage.addListener(wrapper);
+    },
+    removeEventListener: (_type: string, handler: EventListenerOrEventListenerObject) => {
+      const wrapper = listeners.get(handler);
+      if (wrapper) {
+        port.onMessage.removeListener(wrapper);
+        listeners.delete(handler);
+      }
+    },
+  };
+}
+
+function handleDevtoolsEvent(event: DevtoolsEvent): void {
+  if (event.type === "subscription-delta") {
+    const callback = pendingSubscriptionCallbacks.get(event.subscriptionId);
+    if (callback && Array.isArray(event.delta)) {
+      callback(event.delta as Parameters<SubscriptionCallback>[0]);
+    }
+    return;
+  }
+
+  if (event.type === "active-query-subscriptions-changed") {
+    if (Array.isArray(event.subscriptions)) {
+      activeQuerySubscriptions = cloneActiveQuerySubscriptions(event.subscriptions);
+      notifyActiveQuerySubscriptionsChanged();
+    }
+    return;
+  }
+}
+
+function isDevtoolsEvent(data: unknown): data is DevtoolsEvent {
+  if (!isRecord(data)) return false;
+  return data.type === "subscription-delta" || data.type === "active-query-subscriptions-changed";
+}
+
+function createBridgeInstallerScript(mcChannel: string, portName: string): void {
   const globalWindow = window as unknown as Record<string, unknown>;
   const globalAny = globalThis as any;
   const chromeApi = globalAny?.chrome;
-  if (!chromeApi?.runtime || typeof chromeApi.runtime.onConnect?.addListener !== "function") {
-    return;
-  }
-  const installMarker = "__jazzDevtoolsBridgeInstalledV1";
+  if (!chromeApi?.runtime || typeof chromeApi.runtime.onConnect?.addListener !== "function") return;
+  const installMarker = "__jazzDevtoolsBridgeInstalledV2";
   if (globalWindow[installMarker]) return;
   globalWindow[installMarker] = true;
 
-  chromeApi.runtime.onConnect.addListener((port: any) => {
-    if (port.name !== portName) return;
+  chromeApi.runtime.onConnect.addListener((chromePort: any) => {
+    if (chromePort.name !== portName) return;
 
-    window.postMessage(
-      {
-        channel: bridgeChannel,
-        kind: "event",
-        event: DEVTOOLS_EVENTS.CONNECTED,
-      },
-      "*",
-    );
+    let messagePort: MessagePort | null = null;
 
     const onWindowMessage = (event: MessageEvent) => {
       if (event.source !== window) return;
       const data = event.data;
       if (!data || typeof data !== "object") return;
-      const envelope = data as Record<string, unknown>;
-      if (envelope.channel !== bridgeChannel) return;
-      if (envelope.kind !== "response" && envelope.kind !== "event") return;
-      port.postMessage(data);
-    };
+      if (data.channel !== mcChannel) return;
+      if (!event.ports || event.ports.length === 0) return;
 
-    const onPortMessage = (message: unknown) => {
-      if (!message || typeof message !== "object") return;
-      const envelope = message as Record<string, unknown>;
-      if (envelope.channel !== bridgeChannel) return;
-      if (envelope.kind !== "request") return;
-      window.postMessage(message, "*");
-    };
+      messagePort = event.ports[0]!;
 
-    const dispose = () => {
-      window.postMessage(
-        {
-          channel: bridgeChannel,
-          kind: "event",
-          event: DEVTOOLS_EVENTS.DISCONNECTED,
-        },
-        "*",
-      );
-      window.removeEventListener("message", onWindowMessage);
-      port.onMessage.removeListener(onPortMessage);
-      port.onDisconnect.removeListener(dispose);
+      // Relay: MessagePort -> Chrome port
+      messagePort.onmessage = (msgEvent: MessageEvent) => {
+        chromePort.postMessage(msgEvent.data);
+      };
+
+      // Relay: Chrome port -> MessagePort
+      chromePort.onMessage.addListener((message: unknown) => {
+        messagePort?.postMessage(message);
+      });
     };
 
     window.addEventListener("message", onWindowMessage);
-    port.onMessage.addListener(onPortMessage);
-    port.onDisconnect.addListener(dispose);
+
+    // Request a fresh MessageChannel port from the runtime
+    window.postMessage({ channel: mcChannel, kind: "request-port" }, "*");
+
+    chromePort.onDisconnect.addListener(() => {
+      window.removeEventListener("message", onWindowMessage);
+      if (messagePort) {
+        messagePort.close();
+        messagePort = null;
+      }
+    });
   });
 }
 
@@ -185,7 +190,7 @@ async function installBridgeInInspectedTab(chromeApi: any, tabId: number): Promi
     target: { tabId, allFrames: true },
     world: "ISOLATED",
     func: createBridgeInstallerScript,
-    args: [DEVTOOLS_BRIDGE_CHANNEL, DEVTOOLS_PORT_NAME],
+    args: [DEVTOOLS_MC_CHANNEL, DEVTOOLS_PORT_NAME],
   });
 }
 
@@ -215,19 +220,15 @@ async function connectValidatedPort(chromeApi: any, tabId: number): Promise<any>
   return port;
 }
 
-async function ensureDevtoolsPort(): Promise<any> {
-  if (devtoolsPort) {
-    return devtoolsPort;
-  }
+async function ensureDevtoolsProxy(): Promise<Comlink.Remote<DevtoolsRuntimeAPI>> {
+  if (runtimeProxy) return runtimeProxy;
 
   const global = globalThis as any;
   const chromeApi = global?.chrome;
 
   if (
-    !chromeApi ||
-    !chromeApi.devtools ||
-    !chromeApi.devtools.inspectedWindow ||
-    !chromeApi.tabs ||
+    !chromeApi?.devtools?.inspectedWindow ||
+    !chromeApi?.tabs ||
     typeof chromeApi.tabs.connect !== "function"
   ) {
     throw new Error("Chrome DevTools API is not available.");
@@ -237,162 +238,50 @@ async function ensureDevtoolsPort(): Promise<any> {
   try {
     devtoolsPort = await connectValidatedPort(chromeApi, tabId);
   } catch (error) {
-    if (!isMissingReceivingEndError(error)) {
-      throw error;
-    }
+    if (!isMissingReceivingEndError(error)) throw error;
     await installBridgeInInspectedTab(chromeApi, tabId);
     devtoolsPort = await connectValidatedPort(chromeApi, tabId);
   }
 
-  const onMessage = (message: unknown) => {
-    if (!message || typeof message !== "object") return;
-
-    const eventEnvelope = message as Partial<DevtoolsEventEnvelope>;
-    if (
-      eventEnvelope.channel === DEVTOOLS_BRIDGE_CHANNEL &&
-      eventEnvelope.kind === "event" &&
-      eventEnvelope.event === DEVTOOLS_EVENTS.CLIENT_SUBSCRIPTION_DELTA
-    ) {
-      const payload = eventEnvelope.payload as
-        | DevtoolsEventPayloadByEvent[typeof DEVTOOLS_EVENTS.CLIENT_SUBSCRIPTION_DELTA]
-        | undefined;
-      if (!payload) {
-        return;
-      }
-      const bridgeSubscriptionId = payload.subscriptionId;
-      if (typeof bridgeSubscriptionId !== "string") {
-        return;
-      }
-      const callback = pendingSubscriptionCallbacks.get(bridgeSubscriptionId);
-      if (!callback) {
-        return;
-      }
-      const delta = payload.delta;
-      if (!Array.isArray(delta)) {
-        return;
-      }
-      callback(delta as Parameters<SubscriptionCallback>[0]);
-      return;
+  // Listen for event messages on the raw port
+  devtoolsPort.onMessage.addListener((message: unknown) => {
+    if (isDevtoolsEvent(message)) {
+      handleDevtoolsEvent(message);
     }
+    // Comlink messages are handled separately via chromePortEndpoint
+  });
 
-    if (
-      eventEnvelope.channel === DEVTOOLS_BRIDGE_CHANNEL &&
-      eventEnvelope.kind === "event" &&
-      eventEnvelope.event === DEVTOOLS_EVENTS.CLIENT_ACTIVE_QUERY_SUBSCRIPTIONS_CHANGED
-    ) {
-      const payload = eventEnvelope.payload as
-        | DevtoolsEventPayloadByEvent[typeof DEVTOOLS_EVENTS.CLIENT_ACTIVE_QUERY_SUBSCRIPTIONS_CHANGED]
-        | undefined;
-      if (!payload || !Array.isArray(payload.subscriptions)) {
-        return;
-      }
-      activeQuerySubscriptions = cloneActiveQuerySubscriptions(payload.subscriptions);
-      notifyActiveQuerySubscriptionsChanged();
-      return;
-    }
+  runtimeProxy = Comlink.wrap<DevtoolsRuntimeAPI>(chromePortEndpoint(devtoolsPort));
 
-    const responseEnvelope = message as Partial<DevtoolsResponseEnvelope>;
-    if (
-      responseEnvelope.channel !== DEVTOOLS_BRIDGE_CHANNEL ||
-      responseEnvelope.kind !== "response" ||
-      typeof responseEnvelope.requestId !== "string"
-    ) {
-      return;
-    }
-
-    const pending = pendingRequests.get(responseEnvelope.requestId);
-    if (!pending) return;
-    pendingRequests.delete(responseEnvelope.requestId);
-    window.clearTimeout(pending.timeoutId);
-
-    if (!responseEnvelope.ok) {
-      pending.reject(
-        new Error(responseEnvelope.error?.message ?? "DevTools bridge request failed."),
-      );
-      return;
-    }
-
-    pending.resolve(responseEnvelope.payload);
-  };
-
-  const onDisconnect = () => {
-    const global = globalThis as any;
-    const runtimeLastErrorMessage = global?.chrome?.runtime?.lastError?.message;
-    const lastErrorMessage =
-      typeof runtimeLastErrorMessage === "string" ? ` (${runtimeLastErrorMessage})` : "";
-    const error = new Error(`DevTools bridge disconnected${lastErrorMessage}.`);
-    for (const pending of pendingRequests.values()) {
-      window.clearTimeout(pending.timeoutId);
-      pending.reject(error);
-    }
-    pendingRequests.clear();
+  devtoolsPort.onDisconnect.addListener(() => {
     pendingSubscriptionCallbacks.clear();
     pendingSubscriptionBridgeIds.clear();
     nextSubscriptionHandle = 1;
     activeQuerySubscriptions = [];
+    runtimeProxy = null;
     devtoolsPort = null;
     announcedBootstrap = null;
     announcePromise = null;
     notifyActiveQuerySubscriptionsChanged();
     notifyDevtoolsPortDisconnected();
-  };
-
-  devtoolsPort.onMessage.addListener(onMessage);
-  devtoolsPort.onDisconnect.addListener(onDisconnect);
-  notifyDevtoolsPortConnected();
-
-  return devtoolsPort;
-}
-
-async function sendDevtoolsRequest<TCommand extends DevtoolsBridgeCommand>(
-  command: TCommand,
-  payload: DevtoolsRequestPayloadByCommand[TCommand],
-  timeoutMs = REQUEST_TIMEOUT_MS,
-): Promise<DevtoolsResponsePayloadByCommand[TCommand]> {
-  const port = await ensureDevtoolsPort();
-  const requestId = randomId();
-  const envelope = {
-    channel: DEVTOOLS_BRIDGE_CHANNEL,
-    kind: "request",
-    requestId,
-    command,
-    payload,
-  };
-
-  return new Promise<DevtoolsResponsePayloadByCommand[TCommand]>((resolve, reject) => {
-    const timeoutId = window.setTimeout(() => {
-      pendingRequests.delete(requestId);
-      reject(new Error(`DevTools bridge request timed out (${command}).`));
-    }, timeoutMs);
-
-    pendingRequests.set(requestId, {
-      resolve: (value: unknown) => resolve(value as DevtoolsResponsePayloadByCommand[TCommand]),
-      reject,
-      timeoutId,
-    });
-    port.postMessage(envelope);
   });
+
+  notifyDevtoolsPortConnected();
+  return runtimeProxy;
 }
 
 async function ensureDevtoolsAnnounced(): Promise<DevToolsBootstrap> {
-  if (announcedBootstrap) {
-    return announcedBootstrap;
-  }
-  if (announcePromise) {
-    return announcePromise;
-  }
+  if (announcedBootstrap) return announcedBootstrap;
+  if (announcePromise) return announcePromise;
 
   announcePromise = (async () => {
     while (true) {
       try {
-        const result = await sendDevtoolsRequest(
-          DEVTOOLS_COMMANDS.ANNOUNCE,
-          {},
-          ANNOUNCE_REQUEST_TIMEOUT_MS,
-        );
+        const proxy = await ensureDevtoolsProxy();
+        const result = await proxy.announce();
 
         if (
-          !isRecord(result) ||
+          !result ||
           result.ready !== true ||
           !isRecord(result.wasmSchema) ||
           !isSerializableDbConfig(result.dbConfig)
@@ -405,10 +294,12 @@ async function ensureDevtoolsAnnounced(): Promise<DevToolsBootstrap> {
           wasmSchema: result.wasmSchema as WasmSchema,
           dbConfig: sanitizeDbConfigForBridge(result.dbConfig as DbConfig)!,
         };
+
         activeQuerySubscriptions = cloneActiveQuerySubscriptions(
-          await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS, {}),
+          await proxy.listActiveQuerySubscriptions(),
         );
         notifyActiveQuerySubscriptionsChanged();
+
         return announcedBootstrap;
       } catch {
         await wait(ANNOUNCE_POLL_INTERVAL_MS);
@@ -513,16 +404,13 @@ class DevToolsJazzClient implements JazzClient {
     options?: { tier?: DurabilityTier },
   ): Promise<Row> {
     await ensureDevtoolsAnnounced();
-    return await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE, {
-      table,
-      values,
-      tier: options?.tier,
-    });
+    const proxy = await ensureDevtoolsProxy();
+    return await proxy.insertDurable(table, values, options?.tier);
   }
   async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
     await ensureDevtoolsAnnounced();
-    const payload = { query, options, tier: options?.tier };
-    return (await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_QUERY, payload)) as Row[];
+    const proxy = await ensureDevtoolsProxy();
+    return (await proxy.query(query, options)) as Row[];
   }
   queryInternal(
     queryJson: string,
@@ -544,21 +432,16 @@ class DevToolsJazzClient implements JazzClient {
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
     await ensureDevtoolsAnnounced();
-    await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE, {
-      objectId,
-      updates,
-      tier: options?.tier,
-    });
+    const proxy = await ensureDevtoolsProxy();
+    await proxy.updateDurable(objectId, updates, options?.tier);
   }
   delete(objectId: string, options?: { tier?: DurabilityTier }): void {
     throw new Error("DevTools client does not support non-durable delete().");
   }
   async deleteDurable(objectId: string, options?: { tier?: DurabilityTier }): Promise<void> {
     await ensureDevtoolsAnnounced();
-    await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE, {
-      objectId,
-      tier: options?.tier,
-    });
+    const proxy = await ensureDevtoolsProxy();
+    await proxy.deleteDurable(objectId, options?.tier);
   }
   subscribe(
     query: string | QueryInput,
@@ -566,19 +449,13 @@ class DevToolsJazzClient implements JazzClient {
     options?: QueryExecutionOptions,
   ): number {
     const handle = nextSubscriptionHandle++;
-    const bridgeSubscriptionId = randomId();
+    const bridgeSubscriptionId = `sub-${handle}-${Date.now()}`;
     pendingSubscriptionCallbacks.set(bridgeSubscriptionId, callback);
     pendingSubscriptionBridgeIds.set(handle, bridgeSubscriptionId);
 
     void ensureDevtoolsAnnounced()
-      .then(() =>
-        sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE, {
-          query,
-          options,
-          tier: options?.tier,
-          subscriptionId: bridgeSubscriptionId,
-        }),
-      )
+      .then(() => ensureDevtoolsProxy())
+      .then((proxy) => proxy.subscribe(query, bridgeSubscriptionId, options))
       .catch(() => {
         pendingSubscriptionCallbacks.delete(bridgeSubscriptionId);
         pendingSubscriptionBridgeIds.delete(handle);
@@ -592,28 +469,21 @@ class DevToolsJazzClient implements JazzClient {
     session?: Session,
     options?: QueryExecutionOptions,
   ): number {
-    if (session) {
+    if (session)
       throw new Error("DevTools subscribe does not support session-scoped subscriptions.");
-    }
     return this.subscribe(query, callback, options);
   }
   unsubscribe(subscriptionId: number): void {
     const bridgeSubscriptionId = pendingSubscriptionBridgeIds.get(subscriptionId);
-    if (!bridgeSubscriptionId) {
-      return;
-    }
-
+    if (!bridgeSubscriptionId) return;
     pendingSubscriptionBridgeIds.delete(subscriptionId);
     pendingSubscriptionCallbacks.delete(bridgeSubscriptionId);
-
-    void sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE, {
-      subscriptionId: bridgeSubscriptionId,
-    }).catch(() => undefined);
+    void ensureDevtoolsProxy()
+      .then((proxy) => proxy.unsubscribe(bridgeSubscriptionId))
+      .catch(() => undefined);
   }
   getSchema(): WasmSchema {
-    if (announcedBootstrap?.wasmSchema) {
-      return announcedBootstrap.wasmSchema;
-    }
+    if (announcedBootstrap?.wasmSchema) return announcedBootstrap.wasmSchema;
     return this.fallbackSchema;
   }
   getRuntime(): Runtime {

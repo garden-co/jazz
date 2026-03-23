@@ -1,34 +1,30 @@
+import * as Comlink from "comlink";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { attachDevTools } from "./dev-tools.js";
-import {
-  DEVTOOLS_BRIDGE_CHANNEL,
-  DEVTOOLS_COMMANDS,
-  DEVTOOLS_EVENTS,
-  type DevtoolsEventEnvelope,
-  type DevtoolsResponseEnvelope,
-} from "./protocol.js";
+import { DEVTOOLS_MC_CHANNEL, type DevtoolsEvent, type DevtoolsRuntimeAPI } from "./protocol.js";
 import type { ActiveQuerySubscriptionTrace } from "../runtime/db.js";
 
-type MessageListener = (event: { source: FakeWindow; data: unknown }) => void;
+type MessageListener = (event: {
+  source: typeof window;
+  data: unknown;
+  ports?: MessagePort[];
+}) => void;
 
 class FakeWindow {
   private readonly listeners = new Set<MessageListener>();
 
   addEventListener(type: string, listener: MessageListener): void {
-    if (type === "message") {
-      this.listeners.add(listener);
-    }
+    if (type === "message") this.listeners.add(listener);
   }
 
   removeEventListener(type: string, listener: MessageListener): void {
-    if (type === "message") {
-      this.listeners.delete(listener);
-    }
+    if (type === "message") this.listeners.delete(listener);
   }
 
-  postMessage(data: unknown): void {
+  postMessage(data: unknown, _origin?: string, transfer?: Transferable[]): void {
+    const ports = (transfer ?? []).filter((t): t is MessagePort => t instanceof MessagePort);
     for (const listener of Array.from(this.listeners)) {
-      listener({ source: this, data });
+      listener({ source: this as unknown as typeof window, data, ports });
     }
   }
 }
@@ -44,63 +40,43 @@ afterEach(() => {
   }
 });
 
-function waitForResponse(
-  fakeWindow: FakeWindow,
-  requestId: string,
-): Promise<DevtoolsResponseEnvelope> {
+function captureRuntimePort(fakeWindow: FakeWindow): Promise<MessagePort> {
   return new Promise((resolve) => {
     const listener: MessageListener = (event) => {
-      const message = event.data as Partial<DevtoolsResponseEnvelope>;
       if (
-        message.channel !== DEVTOOLS_BRIDGE_CHANNEL ||
-        message.kind !== "response" ||
-        message.requestId !== requestId
+        event.data &&
+        typeof event.data === "object" &&
+        (event.data as Record<string, unknown>).channel === DEVTOOLS_MC_CHANNEL &&
+        event.ports &&
+        event.ports.length > 0
       ) {
-        return;
+        fakeWindow.removeEventListener("message", listener);
+        resolve(event.ports[0]!);
       }
-      fakeWindow.removeEventListener("message", listener);
-      resolve(message as DevtoolsResponseEnvelope);
     };
     fakeWindow.addEventListener("message", listener);
   });
 }
 
-function waitForEvent(
-  fakeWindow: FakeWindow,
-  eventName: string,
-): Promise<
-  DevtoolsEventEnvelope<typeof DEVTOOLS_EVENTS.CLIENT_ACTIVE_QUERY_SUBSCRIPTIONS_CHANGED>
-> {
-  return new Promise((resolve) => {
-    const listener: MessageListener = (event) => {
-      const message = event.data as Partial<DevtoolsEventEnvelope>;
-      if (
-        message.channel !== DEVTOOLS_BRIDGE_CHANNEL ||
-        message.kind !== "event" ||
-        message.event !== eventName
-      ) {
-        return;
-      }
-      fakeWindow.removeEventListener("message", listener);
-      resolve(
-        message as DevtoolsEventEnvelope<
-          typeof DEVTOOLS_EVENTS.CLIENT_ACTIVE_QUERY_SUBSCRIPTIONS_CHANGED
-        >,
-      );
-    };
-    fakeWindow.addEventListener("message", listener);
+function collectEvents(port: MessagePort): DevtoolsEvent[] {
+  const events: DevtoolsEvent[] = [];
+  port.addEventListener("message", (event) => {
+    const data = event.data;
+    if (data && typeof data === "object" && "type" in data) {
+      events.push(data as DevtoolsEvent);
+    }
   });
+  port.start();
+  return events;
 }
 
-describe("attachDevTools active query subscription bridge", () => {
+describe("attachDevTools with Comlink", () => {
   it("enables db devMode when attaching", async () => {
     const fakeWindow = new FakeWindow();
     (globalThis as { window?: unknown }).window = fakeWindow as unknown;
 
     const fakeDb = {
-      config: {
-        appId: "devtools-test",
-      },
+      config: { appId: "devtools-test" },
       setDevMode: vi.fn(function (this: { config: { devMode?: boolean } }, enabled: boolean) {
         this.config.devMode = enabled;
       }),
@@ -110,11 +86,235 @@ describe("attachDevTools active query subscription bridge", () => {
     };
 
     await attachDevTools({ db: fakeDb as any }, {} as any);
-
     expect(fakeDb.setDevMode).toHaveBeenCalledWith(true);
   });
 
-  it("returns snapshots and pushes updates", async () => {
+  it("exposes runtime API via Comlink on MessageChannel", async () => {
+    const fakeWindow = new FakeWindow();
+    (globalThis as { window?: unknown }).window = fakeWindow as unknown;
+
+    const fakeDb = {
+      config: { appId: "devtools-test" },
+      setDevMode: vi.fn(),
+      clients: new Map([["default", { getSchema: () => ({ tables: [] }) }]]),
+      getActiveQuerySubscriptions: vi.fn(() => []),
+      onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
+    };
+
+    const portPromise = captureRuntimePort(fakeWindow);
+    await attachDevTools({ db: fakeDb as any }, { tables: [] } as any);
+    const port = await portPromise;
+
+    const proxy = Comlink.wrap<DevtoolsRuntimeAPI>(port);
+    const result = await proxy.announce();
+
+    expect(result.ready).toBe(true);
+    expect(result.dbConfig).toEqual(expect.objectContaining({ appId: "devtools-test" }));
+
+    proxy[Comlink.releaseProxy]();
+    port.close();
+  });
+});
+
+describe("attachDevTools mutation bridge", () => {
+  it("routes insertDurable through Comlink", async () => {
+    const fakeWindow = new FakeWindow();
+    (globalThis as { window?: unknown }).window = fakeWindow as unknown;
+
+    const insertedRow = { id: "row-1", values: [{ type: "Text", value: "hello" }] };
+    const createDurable = vi.fn(async () => insertedRow);
+    const fakeClient = {
+      createDurable,
+      updateDurable: vi.fn(async () => undefined),
+      deleteDurable: vi.fn(async () => undefined),
+      unsubscribe: vi.fn(),
+      getSchema: () => ({ tables: [] }),
+    };
+    const fakeDb = {
+      config: { appId: "devtools-test" },
+      setDevMode: vi.fn(),
+      clients: new Map([["default", fakeClient]]),
+      getActiveQuerySubscriptions: vi.fn(() => []),
+      onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
+    };
+
+    const portPromise = captureRuntimePort(fakeWindow);
+    await attachDevTools({ db: fakeDb as any }, {} as any);
+    const port = await portPromise;
+
+    const proxy = Comlink.wrap<DevtoolsRuntimeAPI>(port);
+    const row = await proxy.insertDurable("todos", [{ type: "Text", value: "hello" }], "worker");
+
+    expect(row).toEqual(insertedRow);
+    expect(createDurable).toHaveBeenCalledWith("todos", insertedRow.values, { tier: "worker" });
+
+    proxy[Comlink.releaseProxy]();
+    port.close();
+  });
+
+  it("routes updateDurable through Comlink", async () => {
+    const fakeWindow = new FakeWindow();
+    (globalThis as { window?: unknown }).window = fakeWindow as unknown;
+
+    const updateDurable = vi.fn(async () => undefined);
+    const fakeClient = {
+      createDurable: vi.fn(async () => ({ id: "row-1", values: [] })),
+      updateDurable,
+      deleteDurable: vi.fn(async () => undefined),
+      unsubscribe: vi.fn(),
+      getSchema: () => ({ tables: [] }),
+    };
+    const fakeDb = {
+      config: { appId: "devtools-test" },
+      setDevMode: vi.fn(),
+      clients: new Map([["default", fakeClient]]),
+      getActiveQuerySubscriptions: vi.fn(() => []),
+      onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
+    };
+
+    const portPromise = captureRuntimePort(fakeWindow);
+    await attachDevTools({ db: fakeDb as any }, {} as any);
+    const port = await portPromise;
+
+    const proxy = Comlink.wrap<DevtoolsRuntimeAPI>(port);
+    await proxy.updateDurable(
+      "row-1",
+      { title: { type: "Text", value: "updated" } as any },
+      "edge",
+    );
+
+    expect(updateDurable).toHaveBeenCalledWith(
+      "row-1",
+      { title: { type: "Text", value: "updated" } },
+      { tier: "edge" },
+    );
+
+    proxy[Comlink.releaseProxy]();
+    port.close();
+  });
+
+  it("routes deleteDurable through Comlink", async () => {
+    const fakeWindow = new FakeWindow();
+    (globalThis as { window?: unknown }).window = fakeWindow as unknown;
+
+    const deleteDurable = vi.fn(async () => undefined);
+    const fakeClient = {
+      createDurable: vi.fn(async () => ({ id: "row-1", values: [] })),
+      updateDurable: vi.fn(async () => undefined),
+      deleteDurable,
+      unsubscribe: vi.fn(),
+      getSchema: () => ({ tables: [] }),
+    };
+    const fakeDb = {
+      config: { appId: "devtools-test" },
+      setDevMode: vi.fn(),
+      clients: new Map([["default", fakeClient]]),
+      getActiveQuerySubscriptions: vi.fn(() => []),
+      onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
+    };
+
+    const portPromise = captureRuntimePort(fakeWindow);
+    await attachDevTools({ db: fakeDb as any }, {} as any);
+    const port = await portPromise;
+
+    const proxy = Comlink.wrap<DevtoolsRuntimeAPI>(port);
+    await proxy.deleteDurable("row-1", "global");
+
+    expect(deleteDurable).toHaveBeenCalledWith("row-1", { tier: "global" });
+
+    proxy[Comlink.releaseProxy]();
+    port.close();
+  });
+
+  it("propagates errors from runtime methods", async () => {
+    const fakeWindow = new FakeWindow();
+    (globalThis as { window?: unknown }).window = fakeWindow as unknown;
+
+    const fakeClient = {
+      createDurable: vi.fn(async () => {
+        throw new Error("insert failed");
+      }),
+      updateDurable: vi.fn(async () => undefined),
+      deleteDurable: vi.fn(async () => undefined),
+      unsubscribe: vi.fn(),
+      getSchema: () => ({ tables: [] }),
+    };
+    const fakeDb = {
+      config: { appId: "devtools-test" },
+      setDevMode: vi.fn(),
+      clients: new Map([["default", fakeClient]]),
+      getActiveQuerySubscriptions: vi.fn(() => []),
+      onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
+    };
+
+    const portPromise = captureRuntimePort(fakeWindow);
+    await attachDevTools({ db: fakeDb as any }, {} as any);
+    const port = await portPromise;
+
+    const proxy = Comlink.wrap<DevtoolsRuntimeAPI>(port);
+    await expect(proxy.insertDurable("todos", [], undefined)).rejects.toThrow();
+
+    proxy[Comlink.releaseProxy]();
+    port.close();
+  });
+});
+
+describe("attachDevTools subscription bridge", () => {
+  it("pushes subscription deltas as event messages", async () => {
+    const fakeWindow = new FakeWindow();
+    (globalThis as { window?: unknown }).window = fakeWindow as unknown;
+
+    let subscribeCallback: ((delta: unknown) => void) | null = null;
+    const fakeClient = {
+      subscribe: vi.fn((_query: unknown, callback: (delta: unknown) => void) => {
+        subscribeCallback = callback;
+        return 42;
+      }),
+      unsubscribe: vi.fn(),
+      getSchema: () => ({ tables: [] }),
+    };
+    const fakeDb = {
+      config: { appId: "devtools-test" },
+      setDevMode: vi.fn(),
+      clients: new Map([["default", fakeClient]]),
+      getActiveQuerySubscriptions: vi.fn(() => []),
+      onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
+    };
+
+    const portPromise = captureRuntimePort(fakeWindow);
+    await attachDevTools({ db: fakeDb as any }, {} as any);
+    const port = await portPromise;
+
+    const events = collectEvents(port);
+    const proxy = Comlink.wrap<DevtoolsRuntimeAPI>(port);
+
+    await proxy.subscribe('{"table":"todos"}', "sub-1", undefined);
+
+    expect(fakeClient.subscribe).toHaveBeenCalled();
+    expect(subscribeCallback).not.toBeNull();
+
+    // Trigger a delta
+    const delta = [{ op: "insert", row: { id: "1" } }];
+    subscribeCallback!(delta);
+
+    // Give the event time to arrive
+    await new Promise((r) => setTimeout(r, 50));
+
+    const deltaEvents = events.filter((e) => e.type === "subscription-delta");
+    expect(deltaEvents).toHaveLength(1);
+    expect(deltaEvents[0]).toEqual({
+      type: "subscription-delta",
+      subscriptionId: "sub-1",
+      delta,
+    });
+
+    proxy[Comlink.releaseProxy]();
+    port.close();
+  });
+});
+
+describe("attachDevTools active query subscription bridge", () => {
+  it("returns snapshots and pushes updates as event messages", async () => {
     const fakeWindow = new FakeWindow();
     (globalThis as { window?: unknown }).window = fakeWindow as unknown;
 
@@ -131,91 +331,72 @@ describe("attachDevTools active query subscription bridge", () => {
       },
     ];
     const nextSubscriptions: ActiveQuerySubscriptionTrace[] = [
-      {
-        ...initialSubscriptions[0]!,
-        id: "sub-2",
-      },
+      { ...initialSubscriptions[0]!, id: "sub-2" },
     ];
 
     let currentSubscriptions = initialSubscriptions;
-    let notifySubscriptionsChange:
-      | ((subscriptions: readonly ActiveQuerySubscriptionTrace[]) => void)
-      | null = null;
+    let notifyChange: ((subs: readonly ActiveQuerySubscriptionTrace[]) => void) | null = null;
 
     const fakeDb = {
-      config: {
-        appId: "devtools-test",
-        devMode: true,
-      },
+      config: { appId: "devtools-test", devMode: true },
       setDevMode: vi.fn(),
-      clients: new Map([["default", {}]]),
+      clients: new Map([["default", { getSchema: () => ({ tables: [] }) }]]),
       getActiveQuerySubscriptions: vi.fn(() => currentSubscriptions),
       onActiveQuerySubscriptionsChange: vi.fn(
-        (listener: (subscriptions: readonly ActiveQuerySubscriptionTrace[]) => void) => {
-          notifySubscriptionsChange = listener;
-          listener(currentSubscriptions);
+        (listener: (subs: readonly ActiveQuerySubscriptionTrace[]) => void) => {
+          notifyChange = listener;
           return () => {
-            notifySubscriptionsChange = null;
+            notifyChange = null;
           };
         },
       ),
     };
 
+    const portPromise = captureRuntimePort(fakeWindow);
     await attachDevTools({ db: fakeDb as any }, {} as any);
+    const port = await portPromise;
 
-    const announceRequestId = "announce-1";
-    const announceResponsePromise = waitForResponse(fakeWindow, announceRequestId);
-    fakeWindow.postMessage({
-      channel: DEVTOOLS_BRIDGE_CHANNEL,
-      kind: "request",
-      requestId: announceRequestId,
-      command: DEVTOOLS_COMMANDS.ANNOUNCE,
-      payload: {},
-    });
+    const events = collectEvents(port);
+    const proxy = Comlink.wrap<DevtoolsRuntimeAPI>(port);
 
-    expect((await announceResponsePromise).ok).toBe(true);
+    // Announce triggers the active query subscription listener setup
+    await proxy.announce();
 
-    const listRequestId = "list-1";
-    const listResponsePromise = waitForResponse(fakeWindow, listRequestId);
-    fakeWindow.postMessage({
-      channel: DEVTOOLS_BRIDGE_CHANNEL,
-      kind: "request",
-      requestId: listRequestId,
-      command: DEVTOOLS_COMMANDS.CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS,
-      payload: {},
-    });
+    const listed = await proxy.listActiveQuerySubscriptions();
+    expect(listed).toEqual(initialSubscriptions);
 
-    expect((await listResponsePromise).payload).toEqual(initialSubscriptions);
-
-    const eventPromise = waitForEvent(
-      fakeWindow,
-      DEVTOOLS_EVENTS.CLIENT_ACTIVE_QUERY_SUBSCRIPTIONS_CHANGED,
-    );
+    // Trigger a change
     currentSubscriptions = nextSubscriptions;
-    if (notifySubscriptionsChange) {
-      // @ts-expect-error
-      notifySubscriptionsChange(nextSubscriptions);
+    notifyChange!(nextSubscriptions);
+
+    await new Promise((r) => setTimeout(r, 50));
+
+    const changeEvents = events.filter((e) => e.type === "active-query-subscriptions-changed");
+    expect(changeEvents.length).toBeGreaterThanOrEqual(1);
+    const lastEvent = changeEvents[changeEvents.length - 1]!;
+    if (lastEvent.type === "active-query-subscriptions-changed") {
+      expect(lastEvent.subscriptions).toEqual(nextSubscriptions);
     }
 
-    expect((await eventPromise).payload.subscriptions).toEqual(nextSubscriptions);
+    proxy[Comlink.releaseProxy]();
+    port.close();
   });
 });
 
-describe("attachDevTools mutation bridge", () => {
-  it("routes client.insertDurable to runtime createDurable", async () => {
+describe("attachDevTools disconnect cleanup", () => {
+  it("cleans up subscriptions when a new connection replaces the old one", async () => {
     const fakeWindow = new FakeWindow();
     (globalThis as { window?: unknown }).window = fakeWindow as unknown;
 
-    const insertedRow = {
-      id: "row-1",
-      values: [{ type: "Text", value: "hello" }],
-    };
-    const createDurable = vi.fn(async () => insertedRow);
+    const unsubscribe = vi.fn();
+    let subscribeCallback: ((delta: unknown) => void) | null = null;
     const fakeClient = {
-      createDurable,
-      updateDurable: vi.fn(async () => undefined),
-      deleteDurable: vi.fn(async () => undefined),
-      unsubscribe: vi.fn(),
+      subscribe: vi.fn((_query: unknown, callback: (delta: unknown) => void) => {
+        subscribeCallback = callback;
+        return 42;
+      }),
+      unsubscribe,
+      getSchema: () => ({ tables: [] }),
     };
     const fakeDb = {
       config: { appId: "devtools-test" },
@@ -225,169 +406,28 @@ describe("attachDevTools mutation bridge", () => {
       onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
     };
 
+    // First connection
+    const portPromise1 = captureRuntimePort(fakeWindow);
     await attachDevTools({ db: fakeDb as any }, {} as any);
+    const port1 = await portPromise1;
 
-    const requestId = "insert-1";
-    const responsePromise = waitForResponse(fakeWindow, requestId);
-    fakeWindow.postMessage({
-      channel: DEVTOOLS_BRIDGE_CHANNEL,
-      kind: "request",
-      requestId,
-      command: DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE,
-      payload: {
-        table: "todos",
-        values: [{ type: "Text", value: "hello" }],
-        tier: "worker",
-      },
-    });
+    const proxy1 = Comlink.wrap<DevtoolsRuntimeAPI>(port1);
+    await proxy1.subscribe('{"table":"todos"}', "sub-1", undefined);
+    proxy1[Comlink.releaseProxy]();
 
-    const response = await responsePromise;
-    expect(response.ok).toBe(true);
-    expect(response.payload).toEqual(insertedRow);
-    expect(createDurable).toHaveBeenCalledWith("todos", insertedRow.values, { tier: "worker" });
-  });
+    // Simulate reconnection — content script requests a new port
+    const portPromise2 = captureRuntimePort(fakeWindow);
+    fakeWindow.postMessage({ channel: DEVTOOLS_MC_CHANNEL, kind: "request-port" });
+    const port2 = await portPromise2;
 
-  it("routes client.updateDurable to runtime updateDurable", async () => {
-    const fakeWindow = new FakeWindow();
-    (globalThis as { window?: unknown }).window = fakeWindow as unknown;
+    // Old subscriptions should have been cleaned up
+    expect(unsubscribe).toHaveBeenCalledWith(42);
 
-    const updateDurable = vi.fn(async () => undefined);
-    const fakeClient = {
-      createDurable: vi.fn(async () => ({ id: "row-1", values: [] })),
-      updateDurable,
-      deleteDurable: vi.fn(async () => undefined),
-      unsubscribe: vi.fn(),
-    };
-    const fakeDb = {
-      config: { appId: "devtools-test" },
-      setDevMode: vi.fn(),
-      clients: new Map([["default", fakeClient]]),
-      getActiveQuerySubscriptions: vi.fn(() => []),
-      onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
-    };
+    const proxy2 = Comlink.wrap<DevtoolsRuntimeAPI>(port2);
+    const result = await proxy2.announce();
+    expect(result).toBeDefined();
 
-    await attachDevTools({ db: fakeDb as any }, {} as any);
-
-    const requestId = "update-1";
-    const responsePromise = waitForResponse(fakeWindow, requestId);
-    fakeWindow.postMessage({
-      channel: DEVTOOLS_BRIDGE_CHANNEL,
-      kind: "request",
-      requestId,
-      command: DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE,
-      payload: {
-        objectId: "row-1",
-        updates: {
-          title: { type: "Text", value: "updated" },
-        },
-        tier: "edge",
-      },
-    });
-
-    const response = await responsePromise;
-    expect(response.ok).toBe(true);
-    expect(response.payload).toEqual({ updated: true });
-    expect(updateDurable).toHaveBeenCalledWith(
-      "row-1",
-      { title: { type: "Text", value: "updated" } },
-      { tier: "edge" },
-    );
-  });
-
-  it("routes client.deleteDurable to runtime deleteDurable", async () => {
-    const fakeWindow = new FakeWindow();
-    (globalThis as { window?: unknown }).window = fakeWindow as unknown;
-
-    const deleteDurable = vi.fn(async () => undefined);
-    const fakeClient = {
-      createDurable: vi.fn(async () => ({ id: "row-1", values: [] })),
-      updateDurable: vi.fn(async () => undefined),
-      deleteDurable,
-      unsubscribe: vi.fn(),
-    };
-    const fakeDb = {
-      config: { appId: "devtools-test" },
-      setDevMode: vi.fn(),
-      clients: new Map([["default", fakeClient]]),
-      getActiveQuerySubscriptions: vi.fn(() => []),
-      onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
-    };
-
-    await attachDevTools({ db: fakeDb as any }, {} as any);
-
-    const requestId = "delete-1";
-    const responsePromise = waitForResponse(fakeWindow, requestId);
-    fakeWindow.postMessage({
-      channel: DEVTOOLS_BRIDGE_CHANNEL,
-      kind: "request",
-      requestId,
-      command: DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE,
-      payload: {
-        objectId: "row-1",
-        tier: "global",
-      },
-    });
-
-    const response = await responsePromise;
-    expect(response.ok).toBe(true);
-    expect(response.payload).toEqual({ deleted: true });
-    expect(deleteDurable).toHaveBeenCalledWith("row-1", { tier: "global" });
-  });
-
-  it("returns command-specific errors for invalid mutation payloads", async () => {
-    const fakeWindow = new FakeWindow();
-    (globalThis as { window?: unknown }).window = fakeWindow as unknown;
-
-    const fakeClient = {
-      createDurable: vi.fn(async () => ({ id: "row-1", values: [] })),
-      updateDurable: vi.fn(async () => undefined),
-      deleteDurable: vi.fn(async () => undefined),
-      unsubscribe: vi.fn(),
-    };
-    const fakeDb = {
-      config: { appId: "devtools-test" },
-      setDevMode: vi.fn(),
-      clients: new Map([["default", fakeClient]]),
-      getActiveQuerySubscriptions: vi.fn(() => []),
-      onActiveQuerySubscriptionsChange: vi.fn(() => () => {}),
-    };
-
-    await attachDevTools({ db: fakeDb as any }, {} as any);
-
-    const invalidCases = [
-      {
-        requestId: "invalid-insert",
-        command: DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE,
-        payload: { table: 123, values: [] },
-        expectedMessage: "Invalid payload for client.insertDurable.",
-      },
-      {
-        requestId: "invalid-update",
-        command: DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE,
-        payload: { objectId: "row-1", updates: null },
-        expectedMessage: "Invalid payload for client.updateDurable.",
-      },
-      {
-        requestId: "invalid-delete",
-        command: DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE,
-        payload: { objectId: 123 },
-        expectedMessage: "Invalid payload for client.deleteDurable.",
-      },
-    ];
-
-    for (const testCase of invalidCases) {
-      const responsePromise = waitForResponse(fakeWindow, testCase.requestId);
-      fakeWindow.postMessage({
-        channel: DEVTOOLS_BRIDGE_CHANNEL,
-        kind: "request",
-        requestId: testCase.requestId,
-        command: testCase.command,
-        payload: testCase.payload,
-      });
-
-      const response = await responsePromise;
-      expect(response.ok).toBe(false);
-      expect(response.error?.message).toBe(testCase.expectedMessage);
-    }
+    proxy2[Comlink.releaseProxy]();
+    port2.close();
   });
 });
