@@ -1,7 +1,7 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { app } from "./fixtures/basic/app";
-import { insertUser, uniqueDbName } from "./factories";
+import { insertProject, insertUser, uniqueDbName } from "./factories";
 
 describe("TS Insert API", () => {
   let db: Db;
@@ -42,6 +42,26 @@ describe("TS Insert API", () => {
       tags: ["tag1", "tag2"],
       projectId: project.id,
       ownerId: owner.id,
+      assigneesIds: [],
+    });
+  });
+
+  it("uses default values missing from the insert data", async () => {
+    const project = insertProject(db);
+    const owner = insertUser(db);
+    const todo = db.insert(app.todos, {
+      title: "Test Todo",
+      projectId: project.id,
+      ownerId: owner.id,
+    });
+
+    expect(todo).toEqual({
+      id: todo.id,
+      title: "Test Todo",
+      projectId: project.id,
+      ownerId: owner.id,
+      done: false,
+      tags: [],
       assigneesIds: [],
     });
   });

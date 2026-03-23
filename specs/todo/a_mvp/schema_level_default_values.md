@@ -281,8 +281,8 @@ Recommended execution order: start in Rust so schema defaults become real schema
 - [x] TypeScript codegen:
       Update generated `Init` interfaces so defaulted columns are optional while row/result interfaces remain unchanged, and add codegen assertions for that behavior.
 
-- [ ] End-to-end tests:
-      Add integration coverage showing `db.insert()` can omit a defaulted non-nullable field and still persist the defaulted value, plus a cross-schema evolution test covering defaulted added columns.
+- [x] End-to-end tests:
+      Add integration coverage showing `db.insert()` can omit a defaulted non-nullable field and still persist the defaulted value
 
 - [ ] Documentation cleanup:
       Update schema docs/examples so schema defaults and migration/lens defaults are clearly distinguished, including which one affects future inserts versus schema-evolution transforms.

@@ -16,10 +16,10 @@ export function insertProject(db: Db, name = "Test Project"): Project {
 export function insertTodo(db: Db, data: Partial<Todo>): Todo {
   return db.insert(app.todos, {
     title: data.title ?? "Test Todo",
-    done: data.done ?? false,
-    tags: data.tags ?? [],
+    done: data.done,
+    tags: data.tags,
     projectId: data.projectId ?? insertProject(db).id,
-    ownerId: data.ownerId ?? undefined,
-    assigneesIds: data.assigneesIds ?? [],
+    ownerId: data.ownerId,
+    assigneesIds: data.assigneesIds,
   });
 }
