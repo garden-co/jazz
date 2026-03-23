@@ -1,0 +1,599 @@
+#![cfg(feature = "test")]
+
+mod support;
+
+use std::time::Duration;
+
+use jazz_tools::server::TestingServer;
+use jazz_tools::{ColumnType, DurabilityTier, QueryBuilder, SchemaBuilder, TableSchema, Value};
+use support::{TestingClient, has_updated, wait_for_query, wait_for_subscription_update};
+
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
+
+fn test_schema() -> jazz_tools::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("completed", ColumnType::Boolean),
+        )
+        .build()
+}
+
+/// Two clients update the same todo concurrently (no sync wait between writes).
+/// Both must eventually converge to the same final title.
+///
+/// ```text
+/// alice ──create todo──► server ◄──update same todo── bob
+///          (both update title concurrently, no sync between writes)
+///
+///          both query → see same winner
+/// ```
+#[tokio::test]
+async fn concurrent_updates_resolve_to_lww_winner() {
+    let server = TestingServer::start().await;
+    let schema = test_schema();
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice-conflict")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("bob-conflict")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    // Alice creates a todo
+    let (todo_id, _) = alice
+        .create(
+            "todos",
+            vec![Value::Text("original".to_string()), Value::Boolean(false)],
+        )
+        .await
+        .expect("alice creates todo");
+
+    // Wait for Bob to see it
+    let query = QueryBuilder::new("todos").build();
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees alice's todo",
+        |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(()),
+    )
+    .await;
+
+    // Both update concurrently — no sync wait between
+    alice
+        .update(
+            todo_id,
+            vec![("title".to_string(), Value::Text("alice-edit".to_string()))],
+        )
+        .await
+        .expect("alice updates title");
+    bob.update(
+        todo_id,
+        vec![("title".to_string(), Value::Text("bob-edit".to_string()))],
+    )
+    .await
+    .expect("bob updates title");
+
+    // Poll until both clients see the same non-"original" title (convergence).
+    support::wait_for(
+        QUERY_TIMEOUT,
+        "alice and bob converge on same title",
+        || {
+            let alice = &alice;
+            let bob = &bob;
+            let query = query.clone();
+            async move {
+                let alice_rows = alice
+                    .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                    .await
+                    .ok()?;
+                let bob_rows = bob
+                    .query(query, Some(DurabilityTier::EdgeServer))
+                    .await
+                    .ok()?;
+
+                if alice_rows.len() == 1 && bob_rows.len() == 1 {
+                    if let (Value::Text(a_title), Value::Text(b_title)) =
+                        (&alice_rows[0].1[0], &bob_rows[0].1[0])
+                    {
+                        if a_title != "original" && a_title == b_title {
+                            return Some(());
+                        }
+                    }
+                }
+                None
+            }
+        },
+    )
+    .await;
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Two clients each create a todo concurrently. Both should eventually see 2 todos.
+///
+/// ```text
+/// alice ──create "buy milk"──► server ◄──create "buy eggs"── bob
+///
+///          both query → see 2 todos
+/// ```
+#[tokio::test]
+async fn concurrent_creates_both_survive() {
+    let server = TestingServer::start().await;
+    let schema = test_schema();
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice-creates")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("bob-creates")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    // Both create concurrently
+    alice
+        .create(
+            "todos",
+            vec![Value::Text("buy milk".to_string()), Value::Boolean(false)],
+        )
+        .await
+        .expect("alice creates");
+    bob.create(
+        "todos",
+        vec![Value::Text("buy eggs".to_string()), Value::Boolean(false)],
+    )
+    .await
+    .expect("bob creates");
+
+    let query = QueryBuilder::new("todos").build();
+
+    // Both should eventually see 2 todos
+    wait_for_query(
+        &alice,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "alice sees 2 todos",
+        |rows| (rows.len() == 2).then_some(()),
+    )
+    .await;
+
+    wait_for_query(
+        &bob,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees 2 todos",
+        |rows| (rows.len() == 2).then_some(()),
+    )
+    .await;
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Both clients fire 10 rapid updates to the same row. They must converge.
+///
+/// ```text
+/// alice ──update ×10──► server ◄──update ×10── bob
+///               (interleaved, no explicit sync waits)
+///
+///          both query → same final value
+/// ```
+#[tokio::test]
+async fn rapid_concurrent_updates_converge() {
+    let server = TestingServer::start().await;
+    let schema = test_schema();
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice-rapid")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("bob-rapid")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    // Alice creates, wait for Bob to see it
+    let (todo_id, _) = alice
+        .create(
+            "todos",
+            vec![Value::Text("start".to_string()), Value::Boolean(false)],
+        )
+        .await
+        .expect("create");
+
+    let query = QueryBuilder::new("todos").build();
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees todo",
+        |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(()),
+    )
+    .await;
+
+    // Both fire 10 rapid updates
+    for i in 0..10 {
+        alice
+            .update(
+                todo_id,
+                vec![("title".to_string(), Value::Text(format!("alice-{i}")))],
+            )
+            .await
+            .expect("alice rapid update");
+        bob.update(
+            todo_id,
+            vec![("title".to_string(), Value::Text(format!("bob-{i}")))],
+        )
+        .await
+        .expect("bob rapid update");
+    }
+
+    // Poll until both see the same non-"start" title (convergence).
+    support::wait_for(
+        QUERY_TIMEOUT,
+        "alice and bob converge after rapid updates",
+        || {
+            let alice = &alice;
+            let bob = &bob;
+            let query = query.clone();
+            async move {
+                let alice_rows = alice
+                    .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                    .await
+                    .ok()?;
+                let bob_rows = bob
+                    .query(query, Some(DurabilityTier::EdgeServer))
+                    .await
+                    .ok()?;
+
+                if alice_rows.len() == 1 && bob_rows.len() == 1 {
+                    if let (Value::Text(a_title), Value::Text(b_title)) =
+                        (&alice_rows[0].1[0], &bob_rows[0].1[0])
+                    {
+                        if a_title != "start" && a_title == b_title {
+                            return Some(());
+                        }
+                    }
+                }
+                None
+            }
+        },
+    )
+    .await;
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// A fresh client connecting after a conflict sees the same winner as
+/// the original participants.
+///
+/// ```text
+/// alice + bob conflict on a todo ──► server
+///                                       │
+///               charlie connects fresh, queries
+///                                       │
+///                                       └──► sees same winner
+/// ```
+#[tokio::test]
+async fn fresh_client_sees_lww_winner_after_conflict() {
+    let server = TestingServer::start().await;
+    let schema = test_schema();
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice-fresh")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("bob-fresh")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    // Alice creates, Bob sees it
+    let (todo_id, _) = alice
+        .create(
+            "todos",
+            vec![Value::Text("original".to_string()), Value::Boolean(false)],
+        )
+        .await
+        .expect("create");
+
+    let query = QueryBuilder::new("todos").build();
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees todo",
+        |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(()),
+    )
+    .await;
+
+    // Create conflict
+    alice
+        .update(
+            todo_id,
+            vec![("title".to_string(), Value::Text("alice-edit".to_string()))],
+        )
+        .await
+        .expect("alice updates");
+    bob.update(
+        todo_id,
+        vec![("title".to_string(), Value::Text("bob-edit".to_string()))],
+    )
+    .await
+    .expect("bob updates");
+
+    // Poll until both clients see the same non-"original" title (convergence).
+    // We query both in a loop because each may temporarily see different titles
+    // as commits propagate through the server.
+    let converged_title = support::wait_for(
+        QUERY_TIMEOUT,
+        "alice and bob converge on same title",
+        || {
+            let alice = &alice;
+            let bob = &bob;
+            let query = query.clone();
+            async move {
+                let alice_rows = alice
+                    .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                    .await
+                    .ok()?;
+                let bob_rows = bob
+                    .query(query, Some(DurabilityTier::EdgeServer))
+                    .await
+                    .ok()?;
+
+                if alice_rows.len() == 1 && bob_rows.len() == 1 {
+                    if let (Value::Text(a_title), Value::Text(b_title)) =
+                        (&alice_rows[0].1[0], &bob_rows[0].1[0])
+                    {
+                        if a_title != "original" && a_title == b_title {
+                            return Some(a_title.clone());
+                        }
+                    }
+                }
+                None
+            }
+        },
+    )
+    .await;
+
+    // Charlie connects fresh
+    let charlie = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("charlie-fresh")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    // Charlie must see the same winner
+    let charlie_title = wait_for_query(
+        &charlie,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "charlie sees converged title",
+        |rows| {
+            if rows.len() == 1 {
+                match &rows[0].1[0] {
+                    Value::Text(t) if *t == converged_title => Some(t.clone()),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        },
+    )
+    .await;
+
+    assert_eq!(
+        charlie_title, converged_title,
+        "fresh client must see same winner"
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    charlie.shutdown().await.expect("shutdown charlie");
+    server.shutdown().await;
+}
+
+/// Alice subscribes, Bob updates — Alice's subscription fires with the change.
+///
+/// ```text
+/// alice subscribes to todos
+/// bob updates a todo alice created
+/// alice's subscription stream → sees update delta with bob's change
+/// ```
+#[tokio::test]
+async fn subscription_reflects_concurrent_update() {
+    let server = TestingServer::start().await;
+    let schema = test_schema();
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice-sub")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("bob-sub")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    // Alice creates a todo
+    let (todo_id, _) = alice
+        .create(
+            "todos",
+            vec![Value::Text("task".to_string()), Value::Boolean(false)],
+        )
+        .await
+        .expect("create");
+
+    // Wait for Bob to see it
+    let query = QueryBuilder::new("todos").build();
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees todo",
+        |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(()),
+    )
+    .await;
+
+    // Alice subscribes
+    let mut stream = alice.subscribe(query).await.expect("subscribe");
+    let mut log = Vec::new();
+
+    // Bob updates
+    bob.update(
+        todo_id,
+        vec![("title".to_string(), Value::Text("bob-updated".to_string()))],
+    )
+    .await
+    .expect("bob updates");
+
+    // Alice's subscription should fire with the update
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "alice sees bob's update via subscription",
+        |log| has_updated(log, todo_id),
+    )
+    .await;
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Sequential updates are non-conflicting — always resolve to the last.
+///
+/// ```text
+/// alice: create → update "v1" → update "v2" → update "v3"
+/// bob: queries → sees "v3"
+/// ```
+#[tokio::test]
+async fn sequential_updates_preserve_latest() {
+    let server = TestingServer::start().await;
+    let schema = test_schema();
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice-seq")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    // Alice creates and updates 3 times
+    let (todo_id, _) = alice
+        .create(
+            "todos",
+            vec![Value::Text("v0".to_string()), Value::Boolean(false)],
+        )
+        .await
+        .expect("create");
+
+    for version in ["v1", "v2", "v3"] {
+        alice
+            .update(
+                todo_id,
+                vec![("title".to_string(), Value::Text(version.to_string()))],
+            )
+            .await
+            .expect("update");
+    }
+
+    // Wait for alice to see v3 at EdgeServer
+    let query = QueryBuilder::new("todos").build();
+    wait_for_query(
+        &alice,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "alice sees v3",
+        |rows| (rows.len() == 1 && rows[0].1[0] == Value::Text("v3".to_string())).then_some(()),
+    )
+    .await;
+
+    // Bob connects fresh, must see v3
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("bob-seq")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let bob_rows = wait_for_query(
+        &bob,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees v3",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == todo_id
+                && rows[0].1[0] == Value::Text("v3".to_string()))
+            .then_some(rows)
+        },
+    )
+    .await;
+
+    assert_eq!(bob_rows[0].1[0], Value::Text("v3".to_string()));
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
