@@ -3896,18 +3896,16 @@ fn join_produces_combined_tuples() {
         row.id, post_id.row_id,
         "Join output should not be keyed by joined table row id"
     );
-    assert_eq!(
+    assert!(
         row.data
             .windows("Alice".len())
             .any(|w| w == "Alice".as_bytes()),
-        true,
         "Joined row payload should contain base-table text value"
     );
-    assert_eq!(
+    assert!(
         row.data
             .windows("Hello World".len())
             .any(|w| w == "Hello World".as_bytes()),
-        true,
         "Joined row payload should contain joined-table text value"
     );
 }
@@ -4552,23 +4550,6 @@ fn file_storage_schema() -> Schema {
                 },
             )
             .references("file_parts"),
-        ])
-        .into(),
-    );
-    schema
-}
-
-fn scalar_fk_schema() -> Schema {
-    let mut schema = Schema::new();
-    schema.insert(
-        TableName::new("users"),
-        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
-    );
-    schema.insert(
-        TableName::new("posts"),
-        RowDescriptor::new(vec![
-            ColumnDescriptor::new("title", ColumnType::Text),
-            ColumnDescriptor::new("author_id", ColumnType::Uuid).references("users"),
         ])
         .into(),
     );
@@ -5704,7 +5685,7 @@ fn array_subquery_with_limit() {
             "posts",
             &[
                 Value::Integer(i),
-                Value::Text(format!("Post {}", i).into()),
+                Value::Text(format!("Post {}", i)),
                 Value::Integer(1),
             ],
         )
@@ -6980,11 +6961,11 @@ fn contributing_ids_reflect_filter() {
     let branch_str = get_branch(&qm);
     let branch = crate::object::BranchName::new(&branch_str);
     assert!(
-        contributing.contains(&(handle1.row_id, branch.clone())),
+        contributing.contains(&(handle1.row_id, branch)),
         "Alice should be in contributing set"
     );
     assert!(
-        !contributing.contains(&(handle2.row_id, branch.clone())),
+        !contributing.contains(&(handle2.row_id, branch)),
         "Bob should NOT be in contributing set (score < 50)"
     );
     assert!(
@@ -7054,7 +7035,7 @@ fn contributing_ids_update_reactively() {
     let branch_str = get_branch(&qm);
     let branch = crate::object::BranchName::new(&branch_str);
     assert!(
-        contributing.contains(&(handle3.row_id, branch.clone())),
+        contributing.contains(&(handle3.row_id, branch)),
         "Charlie should be in contributing set"
     );
 
@@ -7125,7 +7106,7 @@ fn contributing_ids_for_limit_offset_include_ordered_prefix() {
 
     qm.process(&mut storage);
 
-    let branch = crate::object::BranchName::new(&get_branch(&qm));
+    let branch = crate::object::BranchName::new(get_branch(&qm));
     let contributing = qm.get_subscription_contributing_ids(sub_id);
 
     assert_eq!(
@@ -7133,8 +7114,8 @@ fn contributing_ids_for_limit_offset_include_ordered_prefix() {
         3,
         "Paginated queries need the ordered prefix through offset + limit"
     );
-    assert!(contributing.contains(&(handle_a.row_id, branch.clone())));
-    assert!(contributing.contains(&(handle_b.row_id, branch.clone())));
+    assert!(contributing.contains(&(handle_a.row_id, branch)));
+    assert!(contributing.contains(&(handle_b.row_id, branch)));
     assert!(contributing.contains(&(handle_c.row_id, branch)));
 }
 
@@ -7176,7 +7157,7 @@ fn contributing_ids_for_offset_only_include_full_input() {
 
     qm.process(&mut storage);
 
-    let branch = crate::object::BranchName::new(&get_branch(&qm));
+    let branch = crate::object::BranchName::new(get_branch(&qm));
     let contributing = qm.get_subscription_contributing_ids(sub_id);
 
     assert_eq!(
@@ -7185,7 +7166,7 @@ fn contributing_ids_for_offset_only_include_full_input() {
         "Offset without limit still needs the full ordered input to replay locally"
     );
     for handle in handles {
-        assert!(contributing.contains(&(handle.row_id, branch.clone())));
+        assert!(contributing.contains(&(handle.row_id, branch)));
     }
 }
 
@@ -7235,7 +7216,7 @@ fn contributing_ids_for_array_subquery_include_inner_rows() {
 
     qm.process(&mut storage);
 
-    let branch = crate::object::BranchName::new(&get_branch(&qm));
+    let branch = crate::object::BranchName::new(get_branch(&qm));
     let contributing = qm.get_subscription_contributing_ids(sub_id);
 
     assert_eq!(
@@ -7243,8 +7224,8 @@ fn contributing_ids_for_array_subquery_include_inner_rows() {
         3,
         "Array subquery outputs depend on both outer and inner rows"
     );
-    assert!(contributing.contains(&(user.row_id, branch.clone())));
-    assert!(contributing.contains(&(post1.row_id, branch.clone())));
+    assert!(contributing.contains(&(user.row_id, branch)));
+    assert!(contributing.contains(&(post1.row_id, branch)));
     assert!(contributing.contains(&(post2.row_id, branch)));
 }
 
@@ -7294,7 +7275,7 @@ fn contributing_ids_for_recursive_hop_include_recursive_dependencies() {
 
     qm.process(&mut storage);
 
-    let branch = crate::object::BranchName::new(&get_branch(&qm));
+    let branch = crate::object::BranchName::new(get_branch(&qm));
     let contributing = qm.get_subscription_contributing_ids(sub_id);
 
     assert_eq!(
@@ -7302,10 +7283,10 @@ fn contributing_ids_for_recursive_hop_include_recursive_dependencies() {
         5,
         "Recursive hop outputs depend on both discovered rows and traversal edges"
     );
-    assert!(contributing.contains(&(team1.row_id, branch.clone())));
-    assert!(contributing.contains(&(team2.row_id, branch.clone())));
-    assert!(contributing.contains(&(team3.row_id, branch.clone())));
-    assert!(contributing.contains(&(edge1.row_id, branch.clone())));
+    assert!(contributing.contains(&(team1.row_id, branch)));
+    assert!(contributing.contains(&(team2.row_id, branch)));
+    assert!(contributing.contains(&(team3.row_id, branch)));
+    assert!(contributing.contains(&(edge1.row_id, branch)));
     assert!(contributing.contains(&(edge2.row_id, branch)));
 }
 
@@ -8363,7 +8344,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
                     .into_iter()
                     .collect(),
             }),
-            branch_name: branch_name.clone(),
+            branch_name,
             commits: vec![commit],
         },
     });

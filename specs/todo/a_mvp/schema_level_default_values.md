@@ -98,7 +98,7 @@ export interface TodoInit {
 
 Update the TS runtime bridge so `db.insert(table, { ... })` preserves omission information and delegates default materialization to Rust.
 
-The TS side should not eagerly turn a missing field into `Null` for inserts. It should pass named values to a schema-aware Rust insert path that can distinguish:
+The TS side should not eagerly turn a missing field into `Null` for inserts. It should pass a plain JS object keyed by field name to a schema-aware Rust insert path, which should deserialize to `HashMap<String, Value>` and distinguish:
 
 - omitted / `undefined`
 - explicit `null`
@@ -159,11 +159,11 @@ This preserves current behavior while making schema defaults authoritative when 
 
 ### Insert path
 
-Add a schema-aware insert path in Rust above `QueryManager::insert(table, &[Value])`.
+Use omission-preserving named input in the higher-level Rust insert APIs above `QueryManager::insert(table, &[Value])`.
 
 This path should:
 
-- accept omission-preserving named/partial input
+- accept omission-preserving named/partial input as `HashMap<String, Value>`
 - materialize schema defaults for omitted or `undefined` fields
 - allow explicit `null` only for nullable columns
 - reject missing required non-defaulted fields before row encoding
@@ -263,8 +263,8 @@ Recommended execution order: start in Rust so schema defaults become real schema
 - [x] Rust schema serialization and boundaries:
       Verify `ColumnDescriptor.default` flows through WASM, NAPI, and catalogue export, and add serde/catalogue tests for explicit defaults and absent defaults.
 
-- [ ] Rust schema-aware insert path:
-      Add an omission-preserving insert path above `QueryManager::insert(table, &[Value])` that materializes defaults, validates explicit nulls, and errors on missing required non-defaulted fields.
+- [x] Rust schema-aware insert path:
+      Use omission-preserving `HashMap<String, Value>` input in the higher-level Rust insert APIs above `QueryManager::insert(table, &[Value])`, materialize defaults, validate explicit nulls, and error on missing required non-defaulted fields.
 
 - [ ] Rust auto-lens and diffing:
       Update `auto_lens.rs` and `diff.rs` so explicit schema defaults are used for generated `AddColumn` and `RemoveColumn` defaults before falling back to the current heuristics.

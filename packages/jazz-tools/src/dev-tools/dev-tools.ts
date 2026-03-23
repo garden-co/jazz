@@ -2,6 +2,7 @@ import {
   ActiveQuerySubscriptionTrace,
   JazzClient,
   DurabilityTier,
+  InsertValues,
   QueryExecutionOptions,
   QueryInput,
   Value,
@@ -342,12 +343,16 @@ function hookRegistration(
           const table = payload.table;
           const values = payload.values;
           const tier = payload.tier as DurabilityTier | undefined;
-          if (typeof table !== "string" || !Array.isArray(values)) {
+          if (typeof table !== "string" || !isRecord(values)) {
             throw new Error("Invalid payload for client.insertDurable.");
           }
 
           const client = await resolveCommandClient();
-          const row = await client.createDurable(table, values, tier ? { tier } : undefined);
+          const row = await client.createDurable(
+            table,
+            values as InsertValues,
+            tier ? { tier } : undefined,
+          );
           respond({ ok: true, payload: row });
           return;
         }

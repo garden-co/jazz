@@ -2120,6 +2120,7 @@ fn send_query_subscription_includes_session() {
 /// A is a client of B, B is a client of C.
 /// Pumps until no messages remain or 10 rounds (whichever comes first).
 /// Auto-approves pending updates on B and C (simulates permissive server).
+#[allow(clippy::too_many_arguments)]
 fn pump_messages_3tier(
     a: &mut SyncManager,
     b: &mut SyncManager,

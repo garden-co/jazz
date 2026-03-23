@@ -6,7 +6,11 @@
 //!
 //! This benchmark outputs memory statistics rather than timing.
 
+#![allow(clippy::single_element_loop)]
+
 mod common;
+
+use std::collections::HashMap;
 
 use common::{
     BenchRuntime, MemoryBreakdown, ObjectManagerMemory, QueryManagerMemory, TrackingAllocator,
@@ -15,6 +19,13 @@ use common::{
 };
 use jazz_tools::query_manager::query::Query;
 use jazz_tools::query_manager::types::Value;
+
+fn row<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
+    pairs
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+}
 
 // Install tracking allocator globally
 #[global_allocator]
@@ -95,13 +106,13 @@ fn run_memory_benchmark(scale: usize) {
         let _handle = core
             .insert(
                 "documents",
-                vec![
-                    Value::Uuid(folder_id),
-                    Value::Text(format!("{} {}", insert_title, i)),
-                    Value::Text(insert_content.to_string()),
-                    Value::Text(USER_ID.to_string()),
-                    Value::Timestamp(timestamp),
-                ],
+                row([
+                    ("folder_id", Value::Uuid(folder_id)),
+                    ("title", Value::Text(format!("{} {}", insert_title, i))),
+                    ("content", Value::Text(insert_content.to_string())),
+                    ("author_id", Value::Text(USER_ID.to_string())),
+                    ("created_at", Value::Timestamp(timestamp)),
+                ]),
                 Some(&session),
             )
             .expect("insert");
