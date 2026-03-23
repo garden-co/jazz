@@ -1359,11 +1359,12 @@ mod tests {
     };
 
     #[test]
-    fn schema_json_roundtrip_preserves_enum_and_fk() {
+    fn schema_json_roundtrip_preserves_enum_fk_and_defaults() {
         let schema = SchemaBuilder::new()
             .table(TableSchema::builder("files").column("name", ColumnType::Text))
             .table(
                 TableSchema::builder("todos")
+                    .column_with_default("done", ColumnType::Boolean, Value::Boolean(false))
                     .column(
                         "status",
                         ColumnType::Enum {
@@ -1397,6 +1398,14 @@ mod tests {
             .column("image")
             .unwrap();
         assert_eq!(image.references, Some(TableName::new("files")));
+
+        let done = decoded
+            .get(&TableName::new("todos"))
+            .unwrap()
+            .columns
+            .column("done")
+            .unwrap();
+        assert_eq!(done.default, Some(Value::Boolean(false)));
     }
 
     fn declared_todo_schema() -> Schema {

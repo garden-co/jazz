@@ -260,7 +260,7 @@ Recommended execution order: start in Rust so schema defaults become real schema
 - [x] Rust SQL parser and writer:
       Stop discarding `DEFAULT` in `CREATE TABLE`, reuse default coercion logic for schema columns, emit schema defaults from `column_descriptor_to_sql()`, and add round-trip tests.
 
-- [ ] Rust schema serialization and boundaries:
+- [x] Rust schema serialization and boundaries:
       Verify `ColumnDescriptor.default` flows through WASM, NAPI, and catalogue export, and add serde/catalogue tests for explicit defaults and absent defaults.
 
 - [ ] Rust schema-aware insert path:
