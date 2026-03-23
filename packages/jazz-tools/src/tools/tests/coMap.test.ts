@@ -2967,6 +2967,280 @@ describe("co.map schema", () => {
     });
   });
 
+  describe("omit()", () => {
+    test("creates a new CoMap schema by omitting fields of another CoMap schema", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+        city: z.string(),
+      });
+
+      const PersonWithoutCity = Person.omit({
+        city: true,
+      });
+
+      const person = PersonWithoutCity.create({
+        name: "John",
+        age: 20,
+      });
+
+      expect(person.name).toEqual("John");
+      expect(person.age).toEqual(20);
+      // @ts-expect-error - property `city` does not exist in person
+      expect(person.city).toBeUndefined();
+    });
+
+    test("the new schema does not include catchall properties", () => {
+      const Person = co
+        .map({
+          name: z.string(),
+          age: z.number(),
+          city: z.string(),
+        })
+        .catchall(z.string());
+
+      const PersonWithoutCity = Person.omit({
+        city: true,
+      });
+
+      expect(PersonWithoutCity.catchAll).toBeUndefined();
+
+      const person = PersonWithoutCity.create({
+        name: "John",
+        age: 20,
+      });
+
+      // @ts-expect-error - property `extraField` does not exist in person
+      expect(person.extraField).toBeUndefined();
+    });
+  });
+
+  describe("extend()", () => {
+    test("creates a new CoMap schema by extending another CoMap schema", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+      });
+
+      const PersonWithAddress = Person.extend({
+        address: z.string(),
+      });
+
+      const person = PersonWithAddress.create({
+        name: "John",
+        age: 20,
+        address: "Earth",
+      });
+
+      expect(person.name).toEqual("John");
+      expect(person.age).toEqual(20);
+      expect(person.address).toEqual("Earth");
+    });
+
+    test("the new schema keeps catchall properties", () => {
+      const Person = co
+        .map({
+          name: z.string(),
+        })
+        .catchall(z.string());
+
+      const PersonWithAddress = Person.extend({
+        address: z.string(),
+      });
+
+      const person = PersonWithAddress.create({
+        name: "John",
+        address: "Earth",
+      });
+
+      person.$jazz.set("extraField", "extra");
+
+      expect(person.extraField).toEqual("extra");
+    });
+  });
+
+  describe("safeExtend()", () => {
+    test("creates a new CoMap schema by safely extending fields", () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+      });
+
+      const PersonWithAddress = Person.safeExtend({
+        name: z.literal("John"),
+        address: z.string(),
+      });
+
+      const person = PersonWithAddress.create({
+        name: "John",
+        age: 20,
+        address: "Earth",
+      });
+
+      expect(person.name).toEqual("John");
+      expect(person.address).toEqual("Earth");
+    });
+
+    test("the new schema keeps catchall properties", () => {
+      const Person = co
+        .map({
+          name: z.string(),
+        })
+        .catchall(z.string());
+
+      const PersonWithAddress = Person.safeExtend({
+        address: z.string(),
+      });
+
+      const person = PersonWithAddress.create({
+        name: "John",
+        address: "Earth",
+      });
+
+      person.$jazz.set("extraField", "extra");
+
+      expect(person.extraField).toEqual("extra");
+    });
+  });
+
+  describe("schema configuration inheritance", () => {
+    test("pick/omit/partial do not inherit migration", async () => {
+      const withMigration = co
+        .map({
+          name: z.string(),
+          version: z.literal([1, 2]),
+        })
+        .withMigration((person) => {
+          if (person.version === 1) {
+            person.$jazz.set("version", 2);
+          }
+        });
+
+      const Picked = withMigration.pick({ version: true });
+      const Omitted = withMigration.omit({ name: true });
+      const Partial = withMigration.partial();
+
+      const picked = Picked.create({ version: 1 });
+      const omitted = Omitted.create({ version: 1 });
+      const partial = Partial.create({ version: 1 });
+
+      const loadedPicked = await Picked.load(picked.$jazz.id);
+      const loadedOmitted = await Omitted.load(omitted.$jazz.id);
+      const loadedPartial = await Partial.load(partial.$jazz.id);
+
+      assertLoaded(loadedPicked);
+      assertLoaded(loadedOmitted);
+      assertLoaded(loadedPartial);
+
+      expect(loadedPicked.version).toEqual(1);
+      expect(loadedOmitted.version).toEqual(1);
+      expect(loadedPartial.version).toEqual(1);
+    });
+
+    test("extend/safeExtend inherit migration", async () => {
+      const withMigration = co
+        .map({
+          name: z.string(),
+          version: z.literal([1, 2]),
+        })
+        .withMigration((person) => {
+          if (person.version === 1) {
+            person.$jazz.set("version", 2);
+          }
+        });
+
+      const Extended = withMigration.extend({
+        city: z.string(),
+      });
+      const SafeExtended = withMigration.safeExtend({
+        name: z.literal("John"),
+      });
+
+      const extended = Extended.create({
+        name: "John",
+        version: 1,
+        city: "Paris",
+      });
+      const safeExtended = SafeExtended.create({
+        name: "John",
+        version: 1,
+      });
+
+      const loadedExtended = await Extended.load(extended.$jazz.id);
+      const loadedSafeExtended = await SafeExtended.load(safeExtended.$jazz.id);
+
+      assertLoaded(loadedExtended);
+      assertLoaded(loadedSafeExtended);
+
+      expect(loadedExtended.version).toEqual(2);
+      expect(loadedSafeExtended.version).toEqual(2);
+    });
+
+    test("pick/omit/partial reset default schema permissions", () => {
+      const customOwner = Group.create();
+      const base = co
+        .map({
+          name: z.string(),
+          age: z.number(),
+        })
+        .withPermissions({
+          default: () => customOwner,
+        });
+
+      const picked = base.pick({ name: true }).create({ name: "John" });
+      const omitted = base.omit({ age: true }).create({ name: "John" });
+      const partial = base.partial().create({});
+
+      expect(picked.$jazz.owner.$jazz.id).not.toEqual(customOwner.$jazz.id);
+      expect(omitted.$jazz.owner.$jazz.id).not.toEqual(customOwner.$jazz.id);
+      expect(partial.$jazz.owner.$jazz.id).not.toEqual(customOwner.$jazz.id);
+    });
+
+    test("extend/safeExtend inherit resolved query and default schema permissions", () => {
+      const customOwner = Group.create();
+      const Dog = co.map({
+        name: z.string(),
+      });
+      const base = co
+        .map({
+          name: z.string(),
+          dog1: Dog,
+          dog2: Dog,
+        })
+        .resolved({ dog1: true })
+        .withPermissions({
+          default: () => customOwner,
+        });
+
+      const extended = base.extend({
+        city: z.string(),
+      });
+      const safeExtended = base.safeExtend({
+        name: z.literal("John"),
+      });
+
+      expect(extended.resolveQuery).toEqual({ dog1: true });
+      expect(safeExtended.resolveQuery).toEqual({ dog1: true });
+
+      const extendedValue = extended.create({
+        name: "John",
+        dog1: Dog.create({ name: "Rex" }),
+        dog2: Dog.create({ name: "Fido" }),
+        city: "Paris",
+      });
+      const safeExtendedValue = safeExtended.create({
+        name: "John",
+        dog1: Dog.create({ name: "Rex" }),
+        dog2: Dog.create({ name: "Fido" }),
+      });
+
+      expect(extendedValue.$jazz.owner.$jazz.id).toEqual(customOwner.$jazz.id);
+      expect(safeExtendedValue.$jazz.owner.$jazz.id).toEqual(
+        customOwner.$jazz.id,
+      );
+    });
+  });
+
   test("co.map() should throw an error if passed a CoValue schema", () => {
     expect(() => co.map(co.map({}))).toThrow(
       "co.map() expects an object as its argument, not a CoValue schema",

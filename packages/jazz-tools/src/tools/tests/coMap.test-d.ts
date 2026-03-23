@@ -491,6 +491,70 @@ describe("CoMap", async () => {
     matches(Person);
   });
 
+  test("CoMap.omit()", () => {
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+      dog: co.map({
+        name: z.string(),
+        breed: z.string(),
+      }),
+    });
+
+    const PersonWithoutDog = Person.omit({
+      dog: true,
+    });
+
+    type ExpectedType = co.Map<{
+      name: ZodString;
+      age: ZodNumber;
+    }>;
+
+    function matches(value: ExpectedType) {
+      return value;
+    }
+
+    matches(PersonWithoutDog);
+  });
+
+  test("CoMap.omit() with a recursive reference", () => {
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+      dog: co.map({
+        name: z.string(),
+        breed: z.string(),
+      }),
+      get friend() {
+        return Person.omit({
+          dog: true,
+          friend: true,
+        }).optional();
+      },
+    });
+
+    type ExpectedType = co.Map<{
+      name: ZodString;
+      age: ZodNumber;
+      dog: co.Map<{
+        name: ZodString;
+        breed: ZodString;
+      }>;
+      friend: co.Optional<
+        co.Map<{
+          name: ZodString;
+          age: ZodNumber;
+        }>
+      >;
+    }>;
+
+    function matches(value: ExpectedType) {
+      return value;
+    }
+
+    matches(Person);
+  });
+
   test("CoMap.partial()", () => {
     const Person = co.map({
       name: z.string(),
@@ -566,6 +630,202 @@ describe("CoMap", async () => {
     }
 
     matches(Person);
+  });
+
+  test("CoMap.extend()", () => {
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+    });
+
+    const PersonWithDog = Person.extend({
+      address: z.string(),
+      dog: co.map({
+        name: z.string(),
+        breed: z.string(),
+      }),
+    });
+
+    type ExpectedType = co.Map<{
+      name: ZodString;
+      age: ZodNumber;
+      address: ZodString;
+      dog: co.Map<{
+        name: ZodString;
+        breed: ZodString;
+      }>;
+    }>;
+
+    function matches(value: ExpectedType) {
+      return value;
+    }
+
+    matches(PersonWithDog);
+  });
+
+  test("CoMap.extend() with a recursive reference", () => {
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+    });
+
+    const PersonWithDog = Person.extend({
+      dog: co.map({
+        name: z.string(),
+        breed: z.string(),
+      }),
+      get friend() {
+        return PersonWithDog.optional();
+      },
+    });
+
+    type ExpectedType = co.Map<{
+      name: ZodString;
+      age: ZodNumber;
+      dog: co.Map<{
+        name: ZodString;
+        breed: ZodString;
+      }>;
+      friend: co.Optional<
+        co.Map<{
+          name: ZodString;
+          age: ZodNumber;
+          dog: co.Map<{
+            name: ZodString;
+            breed: ZodString;
+          }>;
+          friend: co.Optional<ExpectedType>;
+        }>
+      >;
+    }>;
+
+    function matches(value: ExpectedType) {
+      return value;
+    }
+
+    matches(PersonWithDog);
+  });
+
+  test("CoMap.safeExtend()", () => {
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+    });
+
+    const PersonWithDog = Person.safeExtend({
+      address: z.string(),
+      dog: co.map({
+        name: z.string(),
+        breed: z.string(),
+      }),
+    });
+
+    type ExpectedType = co.Map<{
+      name: ZodString;
+      age: ZodNumber;
+      address: ZodString;
+      dog: co.Map<{
+        name: ZodString;
+        breed: ZodString;
+      }>;
+    }>;
+
+    function matches(value: ExpectedType) {
+      return value;
+    }
+
+    matches(PersonWithDog);
+  });
+
+  test("CoMap.safeExtend() works with compatible existing keys", () => {
+    const PersonWithDog = co.map({
+      name: z.string(),
+      age: z.number(),
+      dog: co.map({
+        name: z.string(),
+        breed: z.string(),
+      }),
+    });
+
+    const PersonWithDogAndAddress = PersonWithDog.safeExtend({
+      name: z.string().min(1),
+      address: z.string(),
+      dog: co.map({
+        name: z.string(),
+        breed: z.string(),
+      }),
+    });
+
+    type ExpectedType = co.Map<{
+      name: ZodString;
+      age: ZodNumber;
+      address: ZodString;
+      dog: co.Map<{
+        name: ZodString;
+        breed: ZodString;
+      }>;
+    }>;
+
+    function matches(value: ExpectedType) {
+      return value;
+    }
+
+    matches(PersonWithDogAndAddress);
+  });
+
+  test("CoMap.safeExtend() rejects incompatible Zod type overrides", () => {
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+    });
+
+    Person.safeExtend({
+      // @ts-expect-error - cannot override with an incompatible Zod type
+      name: z.number(),
+    });
+  });
+
+  test("CoMap.safeExtend() rejects incompatible CoValue overrides", () => {
+    const PersonWithDog = co.map({
+      name: z.string(),
+      age: z.number(),
+      dog: co.map({
+        name: z.string(),
+        breed: z.string(),
+      }),
+    });
+
+    PersonWithDog.safeExtend({
+      // @ts-expect-error - cannot override with an incompatible CoValue schema
+      dog: co.map({
+        name: z.string(),
+      }),
+    });
+  });
+
+  test("CoMap.safeExtend() rejects deep incompatible CoValue overrides", () => {
+    const PersonWithDog = co.map({
+      name: z.string(),
+      age: z.number(),
+      dog: co.map({
+        name: z.string(),
+        breed: z.string(),
+        home: co.map({
+          address: z.string(),
+        }),
+      }),
+    });
+
+    PersonWithDog.safeExtend({
+      // @ts-expect-error - cannot override with an incompatible CoValue schema
+      dog: co.map({
+        name: z.string(),
+        breed: z.string(),
+        home: co.map({
+          street: z.string(),
+        }),
+      }),
+    });
   });
 });
 
