@@ -29,6 +29,8 @@ pub struct TestingServerBuilder {
     data_dir: Option<PathBuf>,
     schema: Option<Schema>,
     persistent_storage: bool,
+    admin_secret: Option<String>,
+    backend_secret: Option<String>,
 }
 
 impl TestingServerBuilder {
@@ -59,6 +61,16 @@ impl TestingServerBuilder {
 
     pub fn with_persistent_storage(mut self) -> Self {
         self.persistent_storage = true;
+        self
+    }
+
+    pub fn with_admin_secret(mut self, secret: impl Into<String>) -> Self {
+        self.admin_secret = Some(secret.into());
+        self
+    }
+
+    pub fn with_backend_secret(mut self, secret: impl Into<String>) -> Self {
+        self.backend_secret = Some(secret.into());
         self
     }
 
@@ -111,6 +123,8 @@ pub struct TestingServer {
     client: reqwest::Client,
     app_id: AppId,
     data_dir: PathBuf,
+    admin_secret: String,
+    backend_secret: String,
     default_client_user_id: String,
     client_data_dirs: Mutex<Vec<OwnedTempDir>>,
     _owned_data_dir: Option<OwnedTempDir>,
@@ -141,6 +155,8 @@ impl TestingServer {
             data_dir,
             schema,
             persistent_storage,
+            admin_secret,
+            backend_secret,
         } = builder;
 
         let app_id = app_id.unwrap_or_else(Self::default_app_id);
@@ -151,12 +167,15 @@ impl TestingServer {
         };
         let jwks_server = TestingJwksServer::start().await;
 
+        let admin_secret = admin_secret.unwrap_or_else(|| Self::ADMIN_SECRET.to_string());
+        let backend_secret = backend_secret.unwrap_or_else(|| Self::BACKEND_SECRET.to_string());
+
         let auth_config = AuthConfig {
             jwks_url: Some(jwks_server.endpoint()),
             allow_anonymous: true,
             allow_demo: true,
-            backend_secret: Some(Self::BACKEND_SECRET.to_string()),
-            admin_secret: Some(Self::ADMIN_SECRET.to_string()),
+            backend_secret: Some(backend_secret.clone()),
+            admin_secret: Some(admin_secret.clone()),
         };
 
         let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
@@ -193,6 +212,8 @@ impl TestingServer {
             client: reqwest::Client::new(),
             app_id,
             data_dir,
+            admin_secret,
+            backend_secret,
             default_client_user_id: format!("testing-user-{}", Uuid::new_v4()),
             client_data_dirs: Mutex::new(Vec::new()),
             _owned_data_dir: owned_data_dir,
@@ -207,9 +228,13 @@ impl TestingServer {
     }
 
     pub fn jwt_for_user(sub: &str) -> String {
+        Self::jwt_for_user_with_claims(sub, json!({"role": "user"}))
+    }
+
+    pub fn jwt_for_user_with_claims(sub: &str, claims: JsonValue) -> String {
         let claims = JwtClaims {
             sub: sub.to_string(),
-            claims: json!({"role": "user"}),
+            claims,
             exp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("clock drift")
@@ -232,8 +257,20 @@ impl TestingServer {
         self.app_id
     }
 
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
     pub fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
+    }
+
+    pub fn admin_secret(&self) -> &str {
+        &self.admin_secret
+    }
+
+    pub fn backend_secret(&self) -> &str {
+        &self.backend_secret
     }
 
     pub fn make_client_context(&self, schema: Schema) -> AppContext {
@@ -260,8 +297,8 @@ impl TestingServer {
             data_dir,
             storage: crate::ClientStorage::Memory,
             jwt_token: Some(Self::jwt_for_user(user_id.as_ref())),
-            backend_secret: Some(Self::BACKEND_SECRET.to_string()),
-            admin_secret: Some(Self::ADMIN_SECRET.to_string()),
+            backend_secret: Some(self.backend_secret.clone()),
+            admin_secret: Some(self.admin_secret.clone()),
         }
     }
 
@@ -292,14 +329,13 @@ impl TestingServer {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        if let Some(mut task) = self.task.take() {
-            if tokio::time::timeout(Duration::from_millis(500), &mut task)
+        if let Some(mut task) = self.task.take()
+            && tokio::time::timeout(Duration::from_millis(500), &mut task)
                 .await
                 .is_err()
-            {
-                task.abort();
-                let _ = task.await;
-            }
+        {
+            task.abort();
+            let _ = task.await;
         }
         self.state
             .runtime

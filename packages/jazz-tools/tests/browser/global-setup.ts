@@ -1,28 +1,15 @@
-import {
-  type LocalJazzServerHandle,
-  startLocalJazzServer,
-} from "../../src/testing/local-jazz-server.js";
-import { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID } from "./test-constants.js";
+import { stopTestingServer } from "./testing-server-node.js";
 
-export { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID };
+interface BrowserProjectHooks {
+  onClose?: (cb: () => void | Promise<void>) => void;
+  onTestsRerun?: (cb: () => void | Promise<void>) => void;
+}
 
-let server: Promise<LocalJazzServerHandle> | null = null;
-export async function setup(): Promise<void> {
-  if (server) {
-    await server;
-    return;
-  }
-
-  server = startLocalJazzServer({
-    appId: APP_ID,
-    port: TEST_PORT,
-    adminSecret: ADMIN_SECRET,
-    healthTimeoutMs: 5000,
-  });
-
-  await server;
+export function setup(project: BrowserProjectHooks): void {
+  project.onClose?.(() => stopTestingServer());
+  project.onTestsRerun?.(() => stopTestingServer());
 }
 
 export async function teardown(): Promise<void> {
-  await (await server)?.stop();
+  await stopTestingServer();
 }
