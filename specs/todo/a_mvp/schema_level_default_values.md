@@ -245,7 +245,7 @@ Recommended execution order: start in Rust so schema defaults become real schema
 - [x] Rust schema hashing:
       Update schema hashing so column defaults affect `SchemaHash`, and add tests proving a default-only change produces a new hash.
 
-- [ ] Rust SQL parser and writer:
+- [x] Rust SQL parser and writer:
       Stop discarding `DEFAULT` in `CREATE TABLE`, reuse default coercion logic for schema columns, emit schema defaults from `column_descriptor_to_sql()`, and add round-trip tests.
 
 - [ ] Rust schema serialization and boundaries:

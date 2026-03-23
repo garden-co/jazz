@@ -927,6 +927,7 @@ impl Parser {
 
         let mut nullable = true;
         let mut references = None;
+        let mut default = None;
 
         // Parse optional modifiers: REFERENCES, NOT NULL, DEFAULT (in any order)
         loop {
@@ -946,9 +947,8 @@ impl Parser {
                     references = Some(TableName::new(ref_table));
                 }
                 Some(Token::Default) => {
-                    // Skip DEFAULT in schema (we don't store defaults in schema, only in lenses)
                     self.advance();
-                    self.parse_value()?; // consume and discard
+                    default = Some(self.parse_value()?);
                 }
                 _ => break,
             }
@@ -960,6 +960,10 @@ impl Parser {
         }
         if let Some(ref_table) = references {
             desc = desc.references(ref_table);
+        }
+        if let Some(default) = default {
+            let coerced_default = coerce_default_for_column_type(&desc.column_type, default)?;
+            desc = desc.default(coerced_default);
         }
         Ok(desc)
     }
@@ -1704,13 +1708,18 @@ fn column_descriptor_to_sql(col: &ColumnDescriptor) -> String {
         Some(table) => format!(" REFERENCES {}", quote_identifier(table.as_str())),
         None => String::new(),
     };
+    let default_str = match &col.default {
+        Some(default) => format!(" DEFAULT {}", value_to_sql(default)),
+        None => String::new(),
+    };
     let nullable_str = if col.nullable { "" } else { " NOT NULL" };
 
     format!(
-        "{} {}{}{}",
+        "{} {}{}{}{}",
         quote_identifier(col.name.as_str()),
         type_str,
         ref_str,
+        default_str,
         nullable_str
     )
 }
@@ -1906,6 +1915,31 @@ mod tests {
         assert!(!users.columns.columns[0].nullable); // name
         assert!(users.columns.columns[1].nullable); // email
         assert!(users.columns.columns[2].nullable); // age
+    }
+
+    #[test]
+    fn parse_schema_column_defaults() {
+        let sql = r#"
+            CREATE TABLE users (
+                name TEXT DEFAULT 'Anonymous' NOT NULL,
+                age INTEGER DEFAULT 42,
+                active BOOLEAN DEFAULT TRUE NOT NULL,
+                created_at TIMESTAMP DEFAULT 0 NOT NULL,
+                nickname TEXT DEFAULT NULL
+            );
+        "#;
+
+        let schema = parse_schema(sql).unwrap();
+        let users = schema.get(&TableName::new("users")).unwrap();
+
+        assert_eq!(
+            users.columns.columns[0].default,
+            Some(Value::Text("Anonymous".to_string()))
+        );
+        assert_eq!(users.columns.columns[1].default, Some(Value::Integer(42)));
+        assert_eq!(users.columns.columns[2].default, Some(Value::Boolean(true)));
+        assert_eq!(users.columns.columns[3].default, Some(Value::Timestamp(0)));
+        assert_eq!(users.columns.columns[4].default, Some(Value::Null));
     }
 
     #[test]
@@ -2757,6 +2791,24 @@ mod tests {
     }
 
     #[test]
+    fn schema_to_sql_includes_defaults() {
+        let mut schema = HashMap::new();
+        schema.insert(
+            TableName::new("users"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new(ColumnName::new("name"), ColumnType::Text)
+                    .default(Value::Text("Anonymous".into())),
+                ColumnDescriptor::new(ColumnName::new("created_at"), ColumnType::Timestamp)
+                    .default(Value::Timestamp(0)),
+            ])),
+        );
+        let sql = schema_to_sql(&schema);
+
+        assert!(sql.contains("name TEXT DEFAULT 'Anonymous' NOT NULL"));
+        assert!(sql.contains("created_at TIMESTAMP DEFAULT 0 NOT NULL"));
+    }
+
+    #[test]
     fn schema_to_sql_includes_policies() {
         let mut schema = HashMap::new();
         schema.insert(
@@ -2851,6 +2903,40 @@ mod tests {
             .columns[0];
         assert_eq!(col.references, Some(TableName::new("users")));
         assert!(!col.nullable);
+    }
+
+    #[test]
+    fn sql_round_trip_with_defaults() {
+        let sql = r#"CREATE TABLE users (
+    name TEXT DEFAULT 'Anonymous' NOT NULL,
+    age INTEGER DEFAULT 42,
+    active BOOLEAN DEFAULT TRUE NOT NULL,
+    created_at TIMESTAMP DEFAULT 0 NOT NULL
+);"#;
+        let schema = parse_schema(sql).unwrap();
+        let regenerated = schema_to_sql(&schema);
+        let reparsed = parse_schema(&regenerated).unwrap();
+
+        let orig = schema.get(&TableName::new("users")).unwrap();
+        let round = reparsed.get(&TableName::new("users")).unwrap();
+
+        assert_eq!(orig.columns.columns.len(), round.columns.columns.len());
+        assert_eq!(
+            orig.columns.columns[0].default,
+            round.columns.columns[0].default
+        );
+        assert_eq!(
+            orig.columns.columns[1].default,
+            round.columns.columns[1].default
+        );
+        assert_eq!(
+            orig.columns.columns[2].default,
+            round.columns.columns[2].default
+        );
+        assert_eq!(
+            orig.columns.columns[3].default,
+            round.columns.columns[3].default
+        );
     }
 
     #[test]
