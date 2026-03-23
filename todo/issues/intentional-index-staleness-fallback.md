@@ -22,7 +22,7 @@ Stale index entries are silently tolerated.
 
 ## Priority
 
-high
+medium
 
 ## Notes
 
