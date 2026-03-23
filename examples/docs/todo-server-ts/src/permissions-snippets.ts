@@ -10,12 +10,12 @@ const schema = {
   todos: s.table({
     title: s.string(),
     done: s.boolean(),
-    parent: s.ref("todos").optional(),
-    project: s.ref("projects").optional(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
     owner_id: s.string(),
   }),
   todoShares: s.table({
-    todo: s.ref("todos"),
+    todoId: s.ref("todos"),
     user_id: s.string(),
     can_read: s.boolean(),
   }),
@@ -100,7 +100,7 @@ s.definePermissions(app, ({ policy, anyOf, session }) => {
     anyOf([
       { owner_id: session.user_id },
       policy.todoShares.exists.where({
-        todo: todo.id,
+        todoId: todo.id,
         user_id: session.user_id,
         can_read: true,
       }),

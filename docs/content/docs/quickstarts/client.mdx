@@ -36,6 +36,7 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
     <Callout>
       This quickstart uses Svelte 5 features (`$state`, `$props`, `$derived`, snippets). Make sure you're on Svelte 5 or later.
     </Callout>
+
   </Tab>
   <Tab value="Expo">
     ```bash title="Terminal"
@@ -104,7 +105,7 @@ Install Jazz in your project.
     };
     ```
 
-    ```js title="metro.config.mjs"
+    ```js title="metro.config.js"
     import path from "node:path";
     import { fileURLToPath } from "node:url";
     import { createRequire } from "node:module";
@@ -126,6 +127,7 @@ Install Jazz in your project.
 
     </Accordion>
     </Accordions>
+
   </Tab>
   <Tab value="TypeScript">
     ```bash title="Terminal"
@@ -145,13 +147,14 @@ Create a file at `schema/current.ts` describing the structure of your app's data
 ### Run codegen
 
 ```bash title="Terminal"
-npx jazz-tools build
+npx jazz-tools@alpha build
 ```
 
 This generates `schema/app.ts`, which exports a typed `app` object with a property for each table (e.g. `app.todos`). Import `app` whenever you need to query or write data.
 
 <Callout title="Generated code">
-  Never edit `schema/app.ts` by hand. Edit `schema/current.ts` and re-run `npx jazz-tools build`.
+  Never edit `schema/app.ts` by hand. Edit `schema/current.ts` and re-run `npx jazz-tools@alpha
+  build`.
 </Callout>
 
 [Learn more about schemas](/docs/schemas/defining-tables).
@@ -193,12 +196,14 @@ We're also adding a to-do list which we'll build out later.
     <include cwd lang="ts" meta='title="src/main.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/quickstart.ts#setup-ts
     </include>
+
   </Tab>
 </Tabs>
 
 <Accordions type="single">
   <Accordion title="Client Config">
-    `appId` identifies your app for storage and sync. For all config options, see [Server Setup](/docs/reference/server-setup#client-config-options).
+    `appId` identifies your app for storage and sync. For all config options, see [Server
+    Setup](/docs/reference/server-setup#client-config-options).
   </Accordion>
 </Accordions>
 
@@ -206,7 +211,12 @@ We're also adding a to-do list which we'll build out later.
 
 Use `db.insert` to create a new row.
 
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Expo", "TypeScript"]} persist updateAnchor>
+<Tabs
+  groupId="jazz-framework"
+  items={["React", "Vue", "Svelte", "Expo", "TypeScript"]}
+  persist
+  updateAnchor
+>
   <Tab value="React">
     <include cwd lang="tsx" meta='title="src/AddTodo.tsx"'>
       ../examples/docs/todo-client-localfirst-react/src/quickstart-add.tsx
@@ -238,7 +248,12 @@ Use `db.insert` to create a new row.
 
 Display a to-do with toggle and delete controls.
 
-<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Expo", "TypeScript"]} persist updateAnchor>
+<Tabs
+  groupId="jazz-framework"
+  items={["React", "Vue", "Svelte", "Expo", "TypeScript"]}
+  persist
+  updateAnchor
+>
   <Tab value="React">
     <include cwd lang="tsx" meta='title="src/TodoItem.tsx"'>
       ../examples/docs/todo-client-localfirst-react/src/quickstart-item.tsx
@@ -270,7 +285,8 @@ Full mutation API: [Writing Data](/docs/writing/writing-data).
 
 <Accordions type="single">
   <Accordion title="Local writes">
-    Jazz persists all writes locally, so your data is saved and your UI updates immediately — even while offline.
+    Jazz persists all writes locally, so your data is saved and your UI updates
+    immediately&hairsp;—&hairsp;even while offline.
   </Accordion>
 </Accordions>
 
@@ -305,10 +321,11 @@ Subscribe to a query to get real-time updates as data changes, regardless of whe
     </include>
 
     `subscribeAll` receives an object with `all`, `added`, `updated`, and `removed` arrays.
+
   </Tab>
 </Tabs>
 
-Queries return `undefined` while connecting, then an array of matching rows. For filtering, sorting, and pagination, see [Queries](/docs/reading/queries).
+Queries return `undefined` while loading, then an array of matching rows. For filtering, sorting, and pagination, see [Queries](/docs/reading/queries).
 
 ## Enable sync
 
@@ -319,14 +336,14 @@ So far, your to-do list only works locally. To sync across devices, you need a s
 Generate an app ID:
 
 ```bash title="Terminal"
-npx jazz-tools create app
+npx jazz-tools@alpha create app
 # outputs a UUID like: 019d0ba1-519a-7e01-b0eb-0059ee898e4d
 ```
 
 Start the server with that ID and an admin secret (required for clients to push schemas). The default port is 1625, but you can use `--port` to change it:
 
 ```bash title="Terminal"
-npx jazz-tools server <your-app-id> --admin-secret secret
+npx jazz-tools@alpha server <your-app-id> --admin-secret secret
 ```
 
 ### Add permissions
@@ -348,7 +365,7 @@ export default definePermissions(app, ({ policy }) => [
 Re-run codegen so the build picks up the new file:
 
 ```bash title="Terminal"
-npx jazz-tools build
+npx jazz-tools@alpha build
 ```
 
 ### Connect the client
@@ -367,14 +384,21 @@ Update your client config to use the same app ID, and add `serverUrl` and `admin
 The schema and permissions are automatically published when the client connects. Data now syncs in real time between every connected client.
 
 <Callout type="warn" title="Likely to change">
-  The schema sync mechanism is under active development. Expect the admin secret flow and auto-publish behaviour to change before launch.
+  The schema sync mechanism is under active development. Expect the admin secret flow and
+  auto-publish behaviour to change before launch.
 </Callout>
 
 For production deployment and hosting options, see [Server Setup](/docs/reference/server-setup).
 
 ## Next steps
 
-- [Authentication](/docs/auth/authentication) — anonymous, demo, and external JWT auth
-- [Permissions](/docs/auth/permissions) — row-level access policies
-- [Queries](/docs/reading/queries) — filtering, sorting, pagination, and relations
-- [Durability tiers](/docs/writing/writing-data#write-durability-tiers) — control when writes are confirmed
+- [Authentication](/docs/auth/authentication)&hairsp;—&hairsp;anonymous, demo, and external JWT auth
+- [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;row-level access policies
+- [Queries](/docs/reading/queries)&hairsp;—&hairsp;filtering, sorting, pagination, and relations
+- [Durability tiers](/docs/writing/writing-data#write-durability-tiers)&hairsp;—&hairsp;control when writes are confirmed
+
+## Example apps
+
+- [Todo app (React)](https://github.com/garden-co/jazz2/tree/main/docs/examples/todo-client-localfirst-react)&hairsp;—&hairsp;the app you just built, as a complete project
+- [File upload (React)](https://github.com/garden-co/jazz2/tree/main/docs/examples/file-upload-react)&hairsp;—&hairsp;image upload and rendering with Jazz
+- [Wequencer (Svelte)](https://github.com/garden-co/jazz2/tree/main/docs/examples/wequencer)&hairsp;—&hairsp;collaborative real-time music sequencer

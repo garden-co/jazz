@@ -8,8 +8,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { startApp } from "../../src/main.js";
 import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
-import { app } from "../../schema.js";
-import { createDb, DbConfig } from "jazz-tools";
+import { DbConfig } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
 // Helpers

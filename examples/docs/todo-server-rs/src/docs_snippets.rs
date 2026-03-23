@@ -326,12 +326,16 @@ pub async fn where_operator_examples(client: &JazzClient) -> jazz_tools::Result<
 
 // #region reading-composing-queries-rust
 pub fn composing_queries() {
-    // Store a base query and reuse it for different views.
-    let open_todos = QueryBuilder::new("todos")
-        .filter_eq("done", Value::Boolean(false));
-
-    let by_title = open_todos.clone().order_by("title").limit(20).build();
-    let by_newest = open_todos.clone().order_by_desc("id").build();
+    // Build two views from the same base conditions.
+    let by_title = QueryBuilder::new("todos")
+        .filter_eq("done", Value::Boolean(false))
+        .order_by("title")
+        .limit(20)
+        .build();
+    let by_newest = QueryBuilder::new("todos")
+        .filter_eq("done", Value::Boolean(false))
+        .order_by_desc("id")
+        .build();
 
     let _ = (by_title, by_newest);
 }

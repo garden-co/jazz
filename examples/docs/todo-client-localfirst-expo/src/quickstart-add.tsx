@@ -1,11 +1,18 @@
 import { useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
-import { useDb } from "jazz-tools/react-native";
+import { useDb, useSession } from "jazz-tools/react-native";
 import { app } from "../schema/app";
 
 export function AddTodo() {
   const db = useDb();
+  const session = useSession();
   const [title, setTitle] = useState("");
+
+  const addTodo = () => {
+    if (!title.trim() || !session) return;
+    db.insert(app.todos, { title, done: false, ownerId: session.user_id });
+    setTitle("");
+  };
 
   return (
     <View>
@@ -13,17 +20,9 @@ export function AddTodo() {
         value={title}
         onChangeText={setTitle}
         placeholder="What needs to be done?"
-        onSubmitEditing={() => {
-          db.insert(app.todos, { title, done: false });
-          setTitle("");
-        }}
+        onSubmitEditing={addTodo}
       />
-      <Pressable
-        onPress={() => {
-          db.insert(app.todos, { title, done: false });
-          setTitle("");
-        }}
-      >
+      <Pressable onPress={addTodo}>
         <Text>Add</Text>
       </Pressable>
     </View>

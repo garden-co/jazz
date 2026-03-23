@@ -35,7 +35,7 @@ is optional metadata; `createFileFromBlob(...)` fills it from `File.name` when a
 `uploads` owns access. `files` inherit read and delete access from `uploads.file`, and
 `file_parts` inherit from `files.partIds`.
 
-<Callout title="Insert permissions are direct for now">
+<Callout type="warn" title="Insert permissions are direct for now">
   `createFileFromBlob(...)` and `createFileFromStream(...)` create `file_parts` and `files` before
   your parent row exists, so insert inheritance does not naturally apply yet. Currently, grant
   direct insert access to the clients that may upload, or perform uploads in a trusted backend
@@ -51,8 +51,7 @@ policies.
   ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-create-from-blob-ts
 </include>
 
-The helper chunks the blob, creates the `file_parts` rows first, then creates the `files` row,
-and returns that file row so you can store its id on your own table.
+Returns the file row; store its id on your own table.
 
 ## Create from a ReadableStream
 
@@ -72,9 +71,7 @@ and returns that file row so you can store its id on your own table.
   ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-load-stream-ts
 </include>
 
-`loadFileAsBlob(...)` and `loadFileAsStream(...)` first fetch the `files` row without includes,
-then query each referenced `file_parts` row one at a time. That keeps loading simple and
-sequential instead of eager-loading every chunk into one query.
+`loadFileAsBlob(...)` and `loadFileAsStream(...)` fetch each chunk sequentially rather than eager-loading every part in one query.
 
 ## Durability and Incomplete Local Data
 
@@ -90,8 +87,12 @@ when you need the read to wait for a more complete remote snapshot than local OP
 ## No Automatic Cascade Yet
 
 Until file cascade delete lands, delete the chunk rows and the `files` row before deleting your
-parent app row so the [inherited delete policies](/docs/auth/permissions#inherited-access-policies) still match:
+parent app row so the [inherited delete policies](/docs/auth/permissions#inherited-access-allowedto) still match:
 
 <include cwd lang="ts" meta='title="src/files-and-blobs-snippets.ts"'>
   ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-delete-ts
 </include>
+
+## Example
+
+See the [file upload example](https://github.com/garden-co/jazz2/tree/main/docs/examples/file-upload-react) for a complete React app with image upload, rendering, and deletion.

@@ -4,7 +4,7 @@ description: An overview of how Jazz syncs data between clients, covering query 
 reviewedAt: "14cd73f0"
 ---
 
-In a traditional application, clients send queries to remote application servers, which then run the query against your database, and return the data.
+Traditional apps send queries to a remote server, which queries a database and returns data.
 
 This presents a number of difficulties:
 
@@ -12,7 +12,7 @@ This presents a number of difficulties:
 - Both the client and the server must be online
 - Your app's performance depends on the speed of each network hop
 
-Techniques like websockets, client-side caching, and optimistic updates help alleviate some of these issues, but they add complexity without solving the underlying problem.
+Techniques like websockets, client-side caching, and optimistic updates alleviate some of these issues, but they add complexity without solving the underlying problem.
 
 Jazz solves these problems with **query subscriptions**.
 
@@ -36,11 +36,9 @@ The server watches continuously, efficiently re-evaluating only parts of queries
 
 ## What happens offline
 
-Reads always come from your local storage. In the browser, Jazz uses a dedicated worker thread reading from data stored locally in OPFS (Origin Private File System). When multiple tabs are open, Jazz automatically elects one tab as the storage leader — the others route through it, with automatic failover if the leader tab closes. Even without a network connection, your app can read data it already has locally (for example, because it has been synced previously, or because the data was written locally).
+Reads always come from your local storage. In the browser, Jazz uses a dedicated worker thread reading from data stored locally in OPFS (Origin Private File System). When multiple tabs are open, Jazz automatically elects one tab as the storage leader, and other tabs route through it. In case the leader tab closes, a new leader is elected. Even without a network connection, your app can read data it already has locally (for example, because it has been synced previously, or because the data was written locally).
 
-[Writes](/docs/writing/writing-data) work the same way: they are stored immediately locally so your UI updates without waiting on a round-trip. Jazz automatically queues those writes to be synced upstream.
-
-When you reconnect, all queued writes are sent to the sync server, and active query subscriptions are replayed. This means that as soon as you reconnect, your app automatically refreshes with the latest data.
+[Writes](/docs/writing/writing-data) work the same way: they are stored immediately locally so your UI updates without waiting on a round-trip. Jazz automatically queues those writes to be synced upstream. When you reconnect, all queued writes are sent to the sync server, and active query subscriptions are replayed. This means that as soon as you reconnect, your app automatically refreshes with the latest data.
 
 ## Infrastructure tiers
 
@@ -55,7 +53,7 @@ graph TD
 
 **Worker** runs on the client itself, making it the first tier to respond to queries. The worker keeps a local copy of all the data the client is subscribed to so it can respond immediately while updates from higher tiers stream in. It also immediately persists writes and handles the syncing with the next tier up.
 
-**Edge** is a nearby server node. It's the first hop your data takes after it leaves your device. Edge servers only hold data that their connected clients have written or read.
+**Edge** is a server node. It's the first hop your data takes after it leaves your client. In cloud configurations, this will normally be a node geographically close to your user. Edge servers only hold data that their connected clients have written or read.
 
 **Global** is the global core. Edge servers reconcile through global, which is how updates cascade to all clients. An edge server fetches data from global only when a connected client subscribes to data the edge doesn't already have. Two clients on different edge servers will see each other's writes once both edges have reconciled.
 
@@ -81,16 +79,20 @@ Lower tiers have lower latency, but the write has further to propagate before ot
 - the default worker tier is good for most data where eventual consistency is acceptable
 
 <Callout type="info" title="Sync is automatic">
-  Sync happens whenever a node is online. Writes will automatically propagate up through the network
-  even if you only wait for the worker to acknowledge the write. Reads similarly will propagate down
-  as each tier registers your query subscription with the next tier. If higher tiers have newer
-  data, it streams down to your client automatically.
+  Sync happens whenever a node is online. Writes automatically propagate up through the network even
+  if the promise resolves at the worker level. Reads similarly propagate down as each tier registers
+  your query subscription with the next tier. If higher tiers have newer data, it streams down to
+  your client automatically.
 </Callout>
 
 ## Consistency model
 
-Every write in Jazz produces a **commit**: an immutable, timestamped record of the change. This allows us to store a full history of every row in your database.
+Every write in Jazz produces a **commit**: an immutable, timestamped record of the change. All commits are stored, meaning a full history of every row in your database is saved.
 
-This commit-based model allows us to propagate changes throughout the network in an eventually consistent way, without needing clients to wait for a full round trip. This means that the state of data between tiers can diverge. A client that has just written locally has a different view of the data than the global core until the commit propagates. Another client on a different edge server might have its own unreconciled writes. All of this converges: commits propagate upward, get persisted at a global level, and flow back down to every subscribed client. Under normal circumstances, convergence takes roughly one network round-trip to the global core.
+This commit-based model allows changes to propagate throughout the network in an eventually consistent way, without needing clients to wait for a full round trip. This means that the state of data between tiers can diverge. A client that has just written locally has a different view of the data than the global core until the commit propagates. Another client on a different edge server might have its own unreconciled writes. All of this converges: commits propagate upward, get persisted at a global level, and flow back down to every subscribed client. Under normal circumstances, convergence takes roughly one network round-trip to the global core.
 
-As clients can write concurrently, Jazz uses **last-writer-wins (LWW)** to resolve merge conflicts when they occur. When two clients try to write to the same row concurrently, the commit with the later timestamp wins. There is no manual conflict resolution to implement. Because Jazz tracks all commits, even commits which lose out in the merge are still stored in the row's history, and no data is ever lost.
+As clients can write concurrently, Jazz uses **last-writer-wins (LWW)** to resolve merge conflicts when they occur. When two clients try to write to the same column of the same row concurrently, the commit with the later timestamp wins. Because Jazz tracks all commits, even commits which lose out in the merge are still stored in the row's history, and no data is ever lost. This allows you to implement your own conflict resolution strategies if LWW is not suitable for your use case.
+
+## See it in action
+
+[Wequencer](https://github.com/garden-co/jazz2/tree/main/docs/examples/wequencer) is a collaborative real-time music sequencer built with Jazz and Svelte. Multiple users place beats on a shared grid and hear each other's changes immediately&hairsp;—&hairsp;a good example of query subscriptions, real-time sync, and conflict-free collaboration in practice.

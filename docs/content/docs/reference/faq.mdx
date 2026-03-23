@@ -4,7 +4,7 @@ description: Frequently asked questions about Jazz.
 reviewedAt: "14cd73f0"
 ---
 
-import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 
 <Accordions type="multiple">
 
@@ -12,12 +12,12 @@ import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
 
 Call `db.deleteClientStorage()` to delete the local OPFS database for the current namespace:
 
-```ts
-await db.deleteClientStorage();
-```
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/faq-snippets.ts#faq-delete-client-storage-ts
+</include>
 
 - Browser worker-backed `Db` only.
-- Must be called from the leader tab; otherwise it throws. Close other tabs first.
+- Must be called from the leader tab; otherwise it logs an error and returns without deleting. Close other tabs first.
 - Deletes OPFS storage only (`${namespace}.opfsbtree` for the active namespace).
 - Does not clear `localStorage` auth/synthetic-user data.
 - Reopens a clean worker runtime, so the same `db` instance remains usable.
@@ -46,7 +46,7 @@ Yes. Link the local identity to an external one when the user signs in. See [Upg
 
 <Accordion id="rust-migrations" title="Do Rust apps need separate migration files?">
 
-No. Rust services author and ship the same TypeScript migration files. The Rust runtime consumes the compiled schema representation through the CLI. See [Rust apps use the same files](/docs/schemas/migrations#rust-apps-use-the-same-files).
+No. Rust services use the same TypeScript migration files. The Rust runtime consumes the compiled schema representation through the CLI. See [Migrations](/docs/schemas/migrations) for details.
 
 </Accordion>
 

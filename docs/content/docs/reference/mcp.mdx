@@ -6,8 +6,6 @@ reviewedAt: "14cd73f0"
 
 The `jazz-tools` package ships with a built-in [MCP](https://modelcontextprotocol.io) server that
 exposes the Jazz docs as tools any MCP-compatible AI assistant can call during a conversation.
-Once registered, your assistant can search, browse, and retrieve full page content without
-leaving the session.
 
 The docs served are always matched to the version of `jazz-tools` you install, so your
 assistant is reading documentation for the exact API you have available. To use a different
@@ -20,7 +18,12 @@ version's docs, specify a version in the npx command (e.g. `npx jazz-tools@2.0.0
 
 ## Installation
 
-<Tabs items={["Claude Code", "Gemini CLI", "Codex", "OpenCode"]} persist>
+<Tabs
+  groupId="jazz-mcp-client"
+  items={["Claude Code", "Gemini CLI", "Codex", "OpenCode"]}
+  persist
+  updateAnchor
+>
   <Tab value="Claude Code">
     <include lang="bash" meta='title="Terminal"'>
       ../../partials/mcp/install.sh#claude-code
@@ -48,7 +51,7 @@ Restart your assistant after running the command. The server starts automaticall
 <Callout type="info" title="Tip">
   To ensure your assistant uses the Jazz docs proactively, add a line to your project context file (e.g. `CLAUDE.md`):
 
-  `Jazz docs are available via the jazz-docs MCP server. Use search_docs and get_doc to look up APIs before answering Jazz questions.`
+`Jazz docs are available via the jazz-docs MCP server. Use search_docs and get_doc to look up APIs before answering Jazz questions.`
 
 </Callout>
 

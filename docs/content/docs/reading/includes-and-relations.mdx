@@ -12,7 +12,6 @@ Use `include(...)` to load related rows as nested objects in a single query resu
 
 Including a relation adds the resolved object alongside the foreign-key column — it does not replace it. For example, `include({ project: true })` gives you both `projectId` (the FK string) and `project` (the resolved row).
 
-
 <Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="schema.ts"'>
@@ -62,7 +61,7 @@ Use `select(...)` to narrow a row to `id` plus the columns you pick. You can com
   </Tab>
 </Tabs>
 
-## Computed Permissions Columns
+## Computed permissions columns
 
 These columns are computed at query time&hairsp;—&hairsp;they don't exist in the database. They are omitted from `select("*")`, so you opt in explicitly&hairsp;—&hairsp;for example, `select("*", "$canDelete")` returns the normal row columns plus `$canDelete`.
 
@@ -84,8 +83,7 @@ These columns are computed at query time&hairsp;—&hairsp;they don't exist in t
   </Tab>
 </Tabs>
 
-<Accordions type="single">
-<Accordion title="Recursive queries">
+## Recursive queries
 
 If your data has self-referencing relations (e.g. a todo with a `parent` that points to another todo), you can walk the chain with a recursive query. It starts from the rows that match your filter, then follows references one level at a time up to a maximum depth.
 
@@ -101,6 +99,3 @@ If your data has self-referencing relations (e.g. a todo with a `parent` that po
     </include>
   </Tab>
 </Tabs>
-
-</Accordion>
-</Accordions>

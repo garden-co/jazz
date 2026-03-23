@@ -43,7 +43,7 @@ These options apply to:
 
 <Tabs
   groupId="jazz-framework"
-  items={["React", "Svelte", "TypeScript", "Rust"]}
+  items={["React", "Vue", "Svelte", "Expo", "TypeScript", "Rust"]}
   persist
   updateAnchor
 >
@@ -52,9 +52,19 @@ These options apply to:
       ../examples/docs/todo-client-localfirst-react/src/TodoList.tsx#reading-tier-react
     </include>
   </Tab>
+  <Tab value="Vue">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-vue/src/docs-snippets.ts#reading-tier-vue
+    </include>
+  </Tab>
   <Tab value="Svelte">
     <include cwd lang="svelte" meta='title="App.svelte"'>
       ../examples/docs/todo-client-localfirst-svelte/src/TodoList.svelte#reading-tier-svelte
+    </include>
+  </Tab>
+  <Tab value="Expo">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-expo/src/docs-snippets.ts#reading-tier-expo
     </include>
   </Tab>
   <Tab value="TypeScript">

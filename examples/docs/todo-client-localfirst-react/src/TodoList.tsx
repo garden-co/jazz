@@ -9,7 +9,7 @@ export function TodoList() {
   const todos = useAll(app.todos) ?? [];
   // #endregion reading-reactive-hooks-react
   // #region reading-filtering-react
-  const _incompleteTodos = useAll(
+  const incompleteTodos = useAll(
     app.todos.where({ done: false }).orderBy("title", "asc").limit(50),
   );
   // #endregion reading-filtering-react
@@ -24,11 +24,7 @@ export function TodoList() {
 
   // #region reading-loading-state-react
   const allTodos = useAll(app.todos);
-
-  if (allTodos === undefined) {
-    return <p>Connecting…</p>;
-  }
-  // allTodos is now Todo[] — empty array means no rows, not "still loading"
+  // allTodos is undefined while connecting, [] when loaded but empty
   // #endregion reading-loading-state-react
 
   // #region reading-conditional-query-react
@@ -59,6 +55,10 @@ export function TodoList() {
     addTodo(title.trim());
     setTitle("");
   };
+
+  if (allTodos === undefined) {
+    return <p>Connecting…</p>;
+  }
 
   return (
     <>

@@ -4,7 +4,7 @@ description: An overview of how Jazz manages versions, history, conflicts, and a
 reviewedAt: "14cd73f0"
 ---
 
-Jazz uses a local-first data model: your app embeds a database on the device and syncs in the background. This page covers how that works, including versioning, conflict resolution, and why there are almost no loading states.
+Jazz embeds a database on each device and syncs to the server in the background.
 
 ## How Jazz stores data
 
@@ -23,13 +23,13 @@ Devices can't show data they don't have. On the very first load from the server,
 
 ## Versioned objects
 
-Every update or change made to a row in Jazz is recorded as a **commit**, and each commit results in a new, immutable version of the row it affects. Under the hood, each row's history is an append-only log of commits. The full history of each row is available, allowing you to view a row as it looked at any point in history.
+Every update or change made to a row in Jazz is recorded as a **commit**, and each commit results in a new, immutable version of the row it affects. Under the hood, each row's history is an append-only log of commits. The full history of each row is available, allowing you to view a row as it looked at any point in history, including intermediate, conflicting states.
 
-Each version records its parent, forming a chain.
+Each version links back to its parent, forming a chain.
 
 ## The DAG
 
-When only a single device is creating commits, the chain is simple and linear. However, when multiple peers edit the same row concurrently, the history is no longer a single chain — it can diverge into multiple states. Peer A creates version `a3` from `v2`; peer B independently creates version `b3` from the same `v2`. When these peers sync, the database merges the updates, producing a new version with two parents.
+When only a single device is creating commits, the chain is simple and linear. However, when multiple peers edit the same row concurrently, the history is no longer a single chain, and it can diverge into multiple states. Peer A creates version `a3` from `v2`; peer B independently creates version `b3` from the same `v2`. When these peers sync, the database merges the updates, producing a new version with two parents.
 
 The result is a [**directed acyclic graph**](https://en.wikipedia.org/wiki/Directed_acyclic_graph) (DAG), similar to Git:
 
@@ -46,7 +46,7 @@ gitGraph
     merge "Peer B" id: "m5"
 ```
 
-Two peers that have never synced will each have their own view of history. Once they sync, their updates are merged and from that point on, both peers share the same history.
+Two peers that have never synced will each have their own view of history. Once they sync, their updates are merged, and from that point on, both peers share the same history.
 
 For explicit isolation between independent lines of history, see [Branches](/docs/concepts/branches).
 
@@ -56,9 +56,9 @@ When updates from multiple peers are merged, two or more peers may have changed 
 
 Jazz only uses this strategy when multiple peers have written to the same column of the same row. For example, if Alice changes the `title` of a to-do while Bob changes its `completed` status, even though both have updated the same row, there is no conflict, and both edits can be preserved in full.
 
-Conflict resolution is deterministic: every peer that sees the same set of versions will arrive at the same merged result, and even commits that lose out in a merge are still stored in the row's history. No data is ever lost during conflict resolution.
+Conflict resolution is deterministic: every peer that sees the same set of versions will arrive at the same merged result, and even commits that lose out in a merge are still stored in the row's history. No data is ever lost.
 
-<Callout type="info" title="Beware of unexpected results">
+<Callout type="warn" title="Beware of unexpected results">
   In the example above, Jazz allows Alice to change a `title` and Bob to change the `completed`
   status. This can lead to unexpected results, where Bob marks a to-do as `completed`, but in the
   meantime, Alice has completely changed what needed to be done. Jazz resolves structural conflicts,

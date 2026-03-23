@@ -41,7 +41,9 @@ Apps that do not need user-scoped filtering can still define explicit allow-all 
   can find them.
 </Callout>
 
-## Simple policies
+## Basic policies
+
+### Simple conditions
 
 Use the policy helpers `allowRead`, `allowInsert`, `allowUpdate`, and `allowDelete` with [`.where(...)`](/docs/reference/where-operators) to restrict access based on column values.
 
@@ -58,12 +60,10 @@ Use the policy helpers `allowRead`, `allowInsert`, `allowUpdate`, and `allowDele
   </Tab>
 </Tabs>
 
-## Explicitly allow an operation (`.always()`)
+### `.always()`
 
 Use `.always()` when an operation should always be permitted. It is equivalent to
 `.where({})` and compiles to a `TRUE` policy expression.
-
-This helper is available on read, insert, update, and delete policy builders.
 
 <Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
   <Tab value="TypeScript">
@@ -78,7 +78,7 @@ This helper is available on read, insert, update, and delete policy builders.
   </Tab>
 </Tabs>
 
-## Explicitly deny an operation (`.never()`)
+### `.never()`
 
 Use `.never()` when an operation should be impossible. It is equivalent to
 `.where(anyOf([]))` and compiles to a `FALSE` policy expression.
@@ -96,23 +96,43 @@ Use `.never()` when an operation should be impossible. It is equivalent to
   </Tab>
 </Tabs>
 
-## Combining conditions (`allOf` / `anyOf`)
+## Composing policies
 
-If you need to build more complex conditions, you can combine multiple conditions with `allOf` (all must match) or `anyOf` (any can match).
+### Combining conditions (`allOf` / `anyOf`)
 
-<include cwd lang="ts" meta='title="schema/permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-combinators-ts
-</include>
+Combine conditions with `allOf` (all must match) or `anyOf` (any can match).
 
-## JWT session claims
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="schema/permissions.ts"'>
+      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-combinators-ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include cwd lang="sql" meta='title="schema/permissions.sql"'>
+      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-combinators-sql
+    </include>
+  </Tab>
+</Tabs>
+
+### JWT session claims
 
 When external auth JWTs carry claims, `session.where(...)` lets you check them directly in permissions without mapping them onto row columns first.
 
-<include cwd lang="ts" meta='title="schema/permissions.ts"'>
-  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
-</include>
+<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="schema/permissions.ts"'>
+      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
+    </include>
+  </Tab>
+  <Tab value="SQL">
+    <include cwd lang="sql" meta='title="schema/permissions.sql"'>
+      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-session-claims-sql
+    </include>
+  </Tab>
+</Tabs>
 
-## Inherited access policies (`allowedTo.*`)
+### Inherited access (`allowedTo.*`)
 
 A row can inherit its access from a related row. Use `allowedTo.read/insert/update/delete(...)` in TypeScript, or `INHERITS` in SQL.
 
@@ -129,7 +149,7 @@ A row can inherit its access from a related row. Use `allowedTo.read/insert/upda
   </Tab>
 </Tabs>
 
-## Share-based access
+### Share-based access
 
 Sometimes access isn't determined by ownership or a parent relationship, but by a separate "shares" table. Use `policy.<table>.exists.where(...)` to check whether a matching row exists in another table.
 
@@ -171,3 +191,31 @@ Every policy is evaluated against the current user's session. On the frontend, t
 </include>
 
 See [Setup](/docs/reference/server-setup) for context setup details.
+
+<Callout type="info">
+  Policies are enforced on the sync server, not on the client. A client can write any data locally,
+  but the server will reject writes that violate policies when they sync. Reads are filtered
+  server-side before data is sent to the client.
+</Callout>
+
+## Computed permissions columns
+
+These columns are computed at query time&hairsp;—&hairsp;they don't exist in the database. They are omitted from `select("*")`, so you opt in explicitly&hairsp;—&hairsp;for example, `select("*", "$canDelete")` returns the normal row columns plus `$canDelete`.
+
+- `$canRead`&hairsp;—&hairsp;whether the current session can read the row. Since read policies already gate which rows appear, this will usually be `true`.
+- `$canEdit`&hairsp;—&hairsp;whether the current session passes the row's `UPDATE USING` policy.
+- `$canDelete`&hairsp;—&hairsp;whether the current session passes the row's `DELETE USING` policy.
+- Without a session, all three return `null`.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-magic-columns-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-magic-columns-rust
+    </include>
+  </Tab>
+</Tabs>

@@ -25,6 +25,22 @@ CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (FALSE) WITH CHECK (
 CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (FALSE);
 -- #endregion permissions-never-sql
 
+-- #region permissions-combinators-sql
+-- Users can read a todo if they own it, or if it's not done and they can read its project
+CREATE POLICY todos_select_policy ON todos FOR SELECT USING (
+  (owner_id = @session.user_id)
+  OR ((done = FALSE) AND (INHERITS SELECT VIA project))
+);
+-- #endregion permissions-combinators-sql
+
+-- #region permissions-session-claims-sql
+-- Users can read a todo if they own it, or if their JWT role claim is 'manager'
+CREATE POLICY todos_select_policy ON todos FOR SELECT USING (
+  (owner_id = @session.user_id)
+  OR (@session.claims.role = 'manager')
+);
+-- #endregion permissions-session-claims-sql
+
 -- #region permissions-inherits-sql
 -- Users can read a todo if it's not done, or if they can read its project
 CREATE POLICY todos_select_policy ON todos FOR SELECT USING ((done = FALSE) OR (INHERITS SELECT VIA project));

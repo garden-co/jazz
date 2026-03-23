@@ -22,19 +22,17 @@ export interface Todo {
   id: string;
   title: string;
   done: boolean;
-  description?: string;
+  owner_id: string;
 }
 
 interface CreateTodoRequest {
   title: string;
-  description?: string;
   owner_id?: string;
 }
 
 interface UpdateTodoRequest {
   title?: string;
   done?: boolean;
-  description?: string;
 }
 
 export interface TodoServer {
@@ -125,7 +123,6 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
       const todo = db.insert(schemaApp.todos, {
         title: body.title,
         done: false,
-        description: body.description?.trim(),
         owner_id: body.owner_id ?? "anonymous",
       });
 
@@ -199,7 +196,6 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
       const updates = {
         title: body.title,
         done: body.done,
-        description: body.description === undefined ? undefined : body.description.trim(),
       };
 
       if (Object.values(updates).every((value) => value === undefined)) {

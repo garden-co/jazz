@@ -109,7 +109,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         server_url,
         storage: ClientStorage::Fjall,
         data_dir: PathBuf::from(data_dir),
-        storage: ClientStorage::Fjall,
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,

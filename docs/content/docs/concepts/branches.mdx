@@ -4,9 +4,7 @@ description: How Jazz uses branches to isolate data across environments, schema 
 reviewedAt: "14cd73f0"
 ---
 
-Every commit in Jazz is written to a **branch**. When you query, Jazz gathers relevant commits across branches to return the rows you requested. Branches keep commits isolated, so changes in one context don't affect another. This is useful for keeping development data separate from production, creating drafts, or when you otherwise need to include or exclude certain updates from queries.
-
-Branches work like in Git: a branch is a named, independent line of history for your data.
+Every commit in Jazz is written to a **branch**&hairsp;—&hairsp;a named, independent line of history, like a Git branch for your data. Some branches are merged automatically at query time (schema versions), while others are fully isolated (environments and user branches). This makes it easy to keep development data separate from production, or to create parallel lines of history like drafts or staging.
 
 ## How branches are composed
 
@@ -58,15 +56,14 @@ All [reads](/docs/reading/queries) and [writes](/docs/writing/writing-data) thro
 
 <Callout type="info">
   As a best practice, set `env` to `"prod"` in production using an environment variable. This avoids
-  cross-pollination of data between development and production. Note that production mode also
-  disables [anonymous and demo auth](/docs/auth/authentication) by default.
+  cross-pollination of data between development and production.
 </Callout>
 
 ## Schema versions are merged automatically
 
 When your schema changes, Jazz creates a new branch with a different schema hash (e.g. `prod-a1b2c3d4-main` for v1 and `prod-e5f6g7h8-main` for v2). At the storage level, data from different schema versions is kept separate.
 
-However, when you query, Jazz automatically fetches data from all known schema versions within your current environment and user branch. It applies [lens transforms](/docs/schemas/migrations) to adapt older data to your current schema with no manual migration step.
+At query time, Jazz automatically fetches data from all known schema versions within your current environment and user branch. It applies [migration lenses](/docs/schemas/migrations) to adapt older data to your current schema automatically.
 
 ## Environments and user branches are fully isolated
 
@@ -74,6 +71,6 @@ Unlike schema versions, different environments and user branches are never merge
 
 <Callout type="info" title="Not to be confused with the DAG">
   The [DAG](/docs/concepts/local-first-data-model#the-dag) describes how concurrent edits diverge
-  and merge within a single branch. Branches as described on this page are a separate concept —
-  named, isolated lines of history.
+  and merge within a single row's history. The concept is similar, but branches as described on this
+  page are a separate concept.
 </Callout>
