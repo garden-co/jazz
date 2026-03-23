@@ -95,7 +95,7 @@
     "react-dom": "^19.0.0",
     "svelte": "^5.0.0",
     "typescript": "catalog:default",
-    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-top-level-await": "catalog:default",
     "vite-plugin-wasm": "catalog:default",
     "vitest": "catalog:default",
     "vue": "^3.5.22",
