@@ -4,16 +4,7 @@ Distributed, local-first relational database. Rust core (`crates/groove`), TypeS
 
 ## Specs
 
-Architecture docs live in `specs/`. Status-quo specs describe what's built; todo specs describe what's next.
-
-Todo specs are organized by timeline in `specs/todo/`:
-
-- `a_week_YYYY_MM_DD/` — this week's tasks (new folder each week)
-- `b_mvp/` — must-have for first adopters
-- `c_launch/` — public launch readiness
-- `d_later/` — post-launch
-
-Each file is a single, descriptively named topic. Read the filenames to get an overview.
+Architecture docs live in `specs/`. Status-quo specs describe what's built;
 
 ## Work style
 

@@ -42,4 +42,5 @@ data-multi/
 .env.local
 .turbo/
 
-.claude
+.claude/*
+!.claude/commands
