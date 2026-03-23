@@ -1,10 +1,14 @@
 import { defineConfig, type Plugin } from "vitest/config";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { builtinModules } from "node:module";
+import { fileURLToPath } from "node:url";
 
 // sqlite was added in Node.js 22.5 and isn't in the standard builtins list
 const allBuiltins = [...builtinModules, "sqlite"];
 const allBuiltinsWithPrefix = allBuiltins.flatMap((m) => [m, `node:${m}`]);
+const jazzRnVitestStub = fileURLToPath(
+  new URL("./test-support/jazz-rn-vitest-stub.ts", import.meta.url),
+);
 
 // Plugin to handle node:sqlite resolution - use native require
 function nodeSqlitePlugin(): Plugin {
@@ -34,7 +38,14 @@ function nodeSqlitePlugin(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [nodeSqlitePlugin(), svelte({ hot: false })],
+  plugins: [nodeSqlitePlugin(), svelte()],
+  resolve: {
+    alias: {
+      // Node-side Vitest runs should not load the real RN native bridge package.
+      // Stubbing jazz-rn keeps Vite 8 from traversing React Native and UniFFI internals.
+      "jazz-rn": jazzRnVitestStub,
+    },
+  },
   test: {
     // Use Node environment for node:sqlite support
     environment: "node",
