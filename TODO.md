@@ -4,8 +4,6 @@
 
 ### High
 
-- [**duplicated-sync-transport-state-machines**](todo/issues/duplicated-sync-transport-state-machines.md) — Main-thread client and worker each implement similar reconnect/auth/streaming logic, creating divergence risk and duplicated bug-fix cost.
-- [**intentional-index-staleness-fallback**](todo/issues/intentional-index-staleness-fallback.md) — Update paths tolerate stale indexing when old row content is missing, making query correctness probabilistic under some sync histories.
 - [**opfs-btree-corruption-on-interrupted-write**](todo/issues/opfs-btree-corruption-on-interrupted-write.md) — Reloading the page mid-write can corrupt the OPFS B-tree, producing "page id X out of bounds for total_pages Y" errors on next load.
 - [**test_catalogue-sync**](todo/issues/test_catalogue-sync.md) — Catalogue tests call `process_catalogue_update()` directly rather than pumping through SyncManager — missing a full end-to-end flow.
 - [**test_history-and-conflict-resolution**](todo/issues/test_history-and-conflict-resolution.md) — Missing integration tests for history tracking and conflict resolution across concurrent writers.
@@ -16,6 +14,8 @@
 
 ### Medium
 
+- [**duplicated-sync-transport-state-machines**](todo/issues/duplicated-sync-transport-state-machines.md) — Main-thread client and worker each implement similar reconnect/auth/streaming logic, creating divergence risk and duplicated bug-fix cost.
+- [**intentional-index-staleness-fallback**](todo/issues/intentional-index-staleness-fallback.md) — Update paths tolerate stale indexing when old row content is missing, making query correctness probabilistic under some sync histories.
 - [**lens-transform-silent-degradation**](todo/issues/lens-transform-silent-degradation.md) — Failed lens transforms fall back to original data and continue, silently propagating schema mismatches.
 - [**test_client-storage-opfs**](todo/issues/test_client-storage-opfs.md) — Missing integration tests for the OPFS B-tree storage backend in client/browser context.
 - [**test_server-storage-fjall**](todo/issues/test_server-storage-fjall.md) — Missing integration tests for the fjall storage backend in server context.

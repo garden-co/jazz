@@ -23,7 +23,7 @@ Two near-identical implementations maintained in parallel.
 
 ## Priority
 
-high
+medium
 
 ## Notes
 
