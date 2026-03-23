@@ -38,7 +38,7 @@ export interface Todo {
 
 export interface UserInit {
   name: string;
-  friendsIds: string[];
+  friendsIds?: string[];
 }
 
 export interface ProjectInit {
@@ -47,11 +47,11 @@ export interface ProjectInit {
 
 export interface TodoInit {
   title: string;
-  done: boolean;
-  tags: string[];
+  done?: boolean;
+  tags?: string[];
   projectId: string;
   ownerId?: string;
-  assigneesIds: string[];
+  assigneesIds?: string[];
 }
 
 export interface UserWhereInput {
@@ -292,6 +292,10 @@ export const wasmSchema: WasmSchema = {
           },
         },
         nullable: false,
+        default: {
+          type: "Array",
+          value: [],
+        },
         references: "users",
       },
     ],
@@ -322,6 +326,10 @@ export const wasmSchema: WasmSchema = {
           type: "Boolean",
         },
         nullable: false,
+        default: {
+          type: "Boolean",
+          value: false,
+        },
       },
       {
         name: "tags",
@@ -332,6 +340,10 @@ export const wasmSchema: WasmSchema = {
           },
         },
         nullable: false,
+        default: {
+          type: "Array",
+          value: [],
+        },
       },
       {
         name: "projectId",
@@ -358,6 +370,10 @@ export const wasmSchema: WasmSchema = {
           },
         },
         nullable: false,
+        default: {
+          type: "Array",
+          value: [],
+        },
         references: "users",
       },
     ],
