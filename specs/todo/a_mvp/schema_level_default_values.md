@@ -266,7 +266,7 @@ Recommended execution order: start in Rust so schema defaults become real schema
 - [x] Rust schema-aware insert path:
       Use omission-preserving `HashMap<String, Value>` input in the higher-level Rust insert APIs above `QueryManager::insert(table, &[Value])`, materialize defaults, validate explicit nulls, and error on missing required non-defaulted fields.
 
-- [ ] Rust auto-lens and diffing:
+- [x] Rust auto-lens and diffing:
       Update `auto_lens.rs` and `diff.rs` so explicit schema defaults are used for generated `AddColumn` and `RemoveColumn` defaults before falling back to the current heuristics.
 
 - [ ] Rust schema-evolution tests:
