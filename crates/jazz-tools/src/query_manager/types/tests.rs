@@ -24,12 +24,53 @@ fn column_type_fixed_sizes() {
 fn column_descriptor_builder() {
     let col = ColumnDescriptor::new("email", ColumnType::Text)
         .nullable()
-        .references("users");
+        .references("users")
+        .default(Value::Text("unknown@example.com".into()));
 
     assert_eq!(col.name, "email");
     assert_eq!(col.column_type, ColumnType::Text);
     assert!(col.nullable);
     assert_eq!(col.references, Some(TableName::new("users")));
+    assert_eq!(col.default, Some(Value::Text("unknown@example.com".into())));
+}
+
+#[test]
+fn column_descriptor_deserializes_payload_without_default() {
+    let col: ColumnDescriptor = serde_json::from_str(
+        r#"{
+            "name":"email",
+            "column_type":{"type":"Text"},
+            "nullable":true,
+            "references":"users"
+        }"#,
+    )
+    .expect("deserialize column descriptor without default");
+
+    assert_eq!(col.name, "email");
+    assert_eq!(col.column_type, ColumnType::Text);
+    assert!(col.nullable);
+    assert_eq!(col.references, Some(TableName::new("users")));
+    assert_eq!(col.default, None);
+}
+
+#[test]
+fn column_descriptor_deserializes_payload_with_default() {
+    let col: ColumnDescriptor = serde_json::from_str(
+        r#"{
+            "name":"email",
+            "column_type":{"type":"Text"},
+            "nullable":true,
+            "references":"users",
+            "default":{"type":"Text","value":"unknown@example.com"}
+        }"#,
+    )
+    .expect("deserialize column descriptor without default");
+
+    assert_eq!(col.name, "email");
+    assert_eq!(col.column_type, ColumnType::Text);
+    assert!(col.nullable);
+    assert_eq!(col.references, Some(TableName::new("users")));
+    assert_eq!(col.default, Some(Value::Text("unknown@example.com".into())));
 }
 
 #[test]

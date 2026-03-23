@@ -285,6 +285,7 @@ fn decode_column_descriptor(
         column_type,
         nullable,
         references,
+        default: None,
     })
 }
 
@@ -307,6 +308,7 @@ fn decode_column_descriptor_v2(
         column_type,
         nullable,
         references,
+        default: None,
     })
 }
 
