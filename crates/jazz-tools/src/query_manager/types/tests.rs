@@ -561,6 +561,29 @@ fn schema_hash_different_schemas() {
 }
 
 #[test]
+fn schema_hash_changes_when_column_default_changes() {
+    let schema1 = SchemaBuilder::new()
+        .table(TableSchema::builder("users").column("role", ColumnType::Text))
+        .build();
+
+    let schema2 = SchemaBuilder::new()
+        .table(TableSchema::builder("users").column_with_default(
+            "role",
+            ColumnType::Text,
+            Value::Text("member".into()),
+        ))
+        .build();
+
+    let hash1 = SchemaHash::compute(&schema1);
+    let hash2 = SchemaHash::compute(&schema2);
+
+    assert_ne!(
+        hash1, hash2,
+        "Changing only a column default should change the schema hash"
+    );
+}
+
+#[test]
 fn schema_hash_short() {
     let schema = SchemaBuilder::new()
         .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
@@ -609,17 +632,23 @@ fn schema_hash_to_object_id_different_hashes() {
 fn table_schema_builder() {
     let (name, schema) = TableSchema::builder("users")
         .column("id", ColumnType::Uuid)
+        .column_with_default("role", ColumnType::Text, Value::Text("member".into()))
         .nullable_column("email", ColumnType::Text)
         .fk_column("org_id", "orgs")
         .nullable_fk_column("manager_id", "users")
         .build_named();
 
     assert_eq!(name.as_str(), "users");
-    assert_eq!(schema.columns.columns.len(), 4);
+    assert_eq!(schema.columns.columns.len(), 5);
 
     let id_col = schema.columns.column("id").unwrap();
     assert_eq!(id_col.column_type, ColumnType::Uuid);
     assert!(!id_col.nullable);
+
+    let role_col = schema.columns.column("role").unwrap();
+    assert_eq!(role_col.column_type, ColumnType::Text);
+    assert_eq!(role_col.default, Some(Value::Text("member".into())));
+    assert!(!role_col.nullable);
 
     let email_col = schema.columns.column("email").unwrap();
     assert_eq!(email_col.column_type, ColumnType::Text);
@@ -653,6 +682,16 @@ fn row_descriptor_content_hash() {
     // Different columns -> different hash
     let desc3 = RowDescriptor::new(vec![ColumnDescriptor::new("id", ColumnType::Uuid)]);
     assert_ne!(desc1.content_hash(), desc3.content_hash());
+
+    let desc4 = RowDescriptor::new(vec![
+        ColumnDescriptor::new("id", ColumnType::Uuid),
+        ColumnDescriptor::new("name", ColumnType::Text).default(Value::Text("anonymous".into())),
+    ]);
+    assert_ne!(
+        desc1.content_hash(),
+        desc4.content_hash(),
+        "Column defaults should affect row descriptor content hash"
+    );
 }
 
 // ========================================================================

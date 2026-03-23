@@ -242,7 +242,7 @@ Recommended execution order: start in Rust so schema defaults become real schema
 - [x] Rust schema core:
       Add `default: Option<Value>` to `ColumnDescriptor`, add a builder/helper for setting it, and ensure old serialized schemas still deserialize with `default: None`.
 
-- [ ] Rust schema hashing:
+- [x] Rust schema hashing:
       Update schema hashing so column defaults affect `SchemaHash`, and add tests proving a default-only change produces a new hash.
 
 - [ ] Rust SQL parser and writer:

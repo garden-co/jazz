@@ -374,6 +374,18 @@ impl TableSchemaBuilder {
         self
     }
 
+    /// Add a column with a schema-level default to the table.
+    pub fn column_with_default(
+        mut self,
+        name: &str,
+        column_type: ColumnType,
+        default: Value,
+    ) -> Self {
+        self.columns
+            .push(ColumnDescriptor::new(name, column_type).default(default));
+        self
+    }
+
     /// Add a nullable column to the table.
     pub fn nullable_column(mut self, name: &str, column_type: ColumnType) -> Self {
         self.columns
