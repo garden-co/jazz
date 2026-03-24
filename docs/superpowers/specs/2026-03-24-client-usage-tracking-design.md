@@ -1,14 +1,14 @@
-# Client Abuse Detection via Warning Logs
+# Client Usage Tracking via Warning Logs
 
 ## Problem
 
-Some clients push too much content or too many messages through the sync queues. We need visibility into which clients are abusing the service so we can investigate and take action.
+Some clients push too much content or too many messages through the sync queues. This could be intentional heavy usage, or unintentional (e.g., a useEffect loop or misconfigured sync). We need visibility into which clients are exceeding expected usage patterns so we can investigate and help.
 
 OTel metrics are not suitable here because `peerId` is an unbound dimension — tracking per-peer metrics would cause cardinality explosion.
 
 ## Solution
 
-Add per-client-peer abuse detection in `IncomingMessagesQueue` that emits `logger.warn()` when a client exceeds message rate or content size thresholds within a time window.
+Add per-client-peer usage tracking in `IncomingMessagesQueue` that emits `logger.warn()` when a client exceeds message rate or content size thresholds within a time window.
 
 ## Design
 
@@ -45,7 +45,7 @@ The tumbling window is purely push-driven: counters reset on the next push after
 ### Thresholds (configurable defaults)
 
 ```ts
-const CLIENT_ABUSE_CONFIG = {
+const CLIENT_USAGE_CONFIG = {
   WINDOW_SIZE: 60_000,            // 60 second tumbling window
   MAX_MESSAGES_PER_WINDOW: 1000,  // messages per window
   MAX_CONTENT_BYTES_PER_WINDOW: 10 * 1024 * 1024,  // 10 MB per window
@@ -60,27 +60,27 @@ These follow the existing config pattern used by `CO_VALUE_LOADING_CONFIG` and `
 ```ts
 logger.warn("Client peer exceeding message rate threshold", {
   peerId: peer.id,
-  abuseType: "message_rate",
+  warningType: "message_rate",
   messageCount: stats.messageCount,
-  threshold: CLIENT_ABUSE_CONFIG.MAX_MESSAGES_PER_WINDOW,
-  windowSeconds: CLIENT_ABUSE_CONFIG.WINDOW_SIZE / 1000,
+  threshold: CLIENT_USAGE_CONFIG.MAX_MESSAGES_PER_WINDOW,
+  windowSeconds: CLIENT_USAGE_CONFIG.WINDOW_SIZE / 1000,
 })
 
 logger.warn("Client peer exceeding content size threshold", {
   peerId: peer.id,
-  abuseType: "content_size",
+  warningType: "content_size",
   contentBytes: stats.contentBytes,
-  threshold: CLIENT_ABUSE_CONFIG.MAX_CONTENT_BYTES_PER_WINDOW,
-  windowSeconds: CLIENT_ABUSE_CONFIG.WINDOW_SIZE / 1000,
+  threshold: CLIENT_USAGE_CONFIG.MAX_CONTENT_BYTES_PER_WINDOW,
+  windowSeconds: CLIENT_USAGE_CONFIG.WINDOW_SIZE / 1000,
 })
 ```
 
-The `abuseType` field enables structured log filtering.
+The `warningType` field enables structured log filtering.
 
 ## Files to modify
 
 - `packages/cojson/src/queue/IncomingMessagesQueue.ts` — add tracking logic in `push()`
-- `packages/cojson/src/config.ts` — add `CLIENT_ABUSE_CONFIG`
+- `packages/cojson/src/config.ts` — add `CLIENT_USAGE_CONFIG`
 
 ## Files to add
 
