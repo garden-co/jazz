@@ -57,7 +57,50 @@ jobs:
       - run: pnpm lint
       - run: cargo clippy --workspace -- -D warnings
 
-  test:
+  test-rust:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_DIR: /home/runner/.cache/sccache
+      SCCACHE_CACHE_SIZE: 8G
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown, aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
+          components: clippy, rustfmt
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install Rust prerequisites
+        run: pnpm run ensure:rust-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: sccache
+
+      - name: Mount sccache sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: sccache-${{ github.repository_id }}-${{ runner.os }}-v1
+          path: /home/runner/.cache/sccache
+
+      - run: cargo test --workspace --lib --bins --tests --exclude jazz-rn --features test
+
+  test-ts:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     env:
@@ -106,55 +149,5 @@ jobs:
           key: playwright-browsers-${{ github.repository_id }}-${{ runner.os }}-v1
           path: /home/runner/.cache/ms-playwright
       - run: pnpm exec playwright install chromium
-      - run: pnpm test
-
-  test-browser:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 15
-    env:
-      JAZZ_NAPI_RELEASE: "0"
-      RUSTC_WRAPPER: sccache
-      SCCACHE_DIR: /home/runner/.cache/sccache
-      SCCACHE_CACHE_SIZE: 8G
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.93.1
-          targets: wasm32-unknown-unknown, aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
-          components: clippy, rustfmt
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version-file: .nvmrc
-
-      - run: corepack enable
-      - run: pnpm install --frozen-lockfile
-
-      - name: Install Rust prerequisites
-        run: pnpm run ensure:rust-toolchain
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sccache
-
-      - name: Mount sccache sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: sccache-${{ github.repository_id }}-${{ runner.os }}-v1
-          path: /home/runner/.cache/sccache
-
-      - run: pnpm build
-      - name: Mount Playwright sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: playwright-browsers-${{ github.repository_id }}-${{ runner.os }}-v1
-          path: /home/runner/.cache/ms-playwright
-      - run: pnpm exec playwright install chromium
+      - run: pnpm test --filter=!@jazz/rust --filter=!jazz-rn
       - run: pnpm --filter jazz-tools test:browser
