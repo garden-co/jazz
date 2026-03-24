@@ -65,6 +65,7 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_CACHE_SIZE: 8G
+      TURBO_CACHE_DIR: /home/runner/.cache/turbo
 
     steps:
       - uses: actions/checkout@v6
@@ -98,6 +99,12 @@ jobs:
         with:
           key: sccache-${{ github.repository_id }}-${{ runner.os }}-v1
           path: /home/runner/.cache/sccache
+
+      - name: Mount turbo cache sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: turbo-cache-${{ github.repository_id }}-${{ runner.os }}-v1
+          path: /home/runner/.cache/turbo
 
       - run: pnpm build
       - name: Mount Playwright sticky disk
@@ -116,6 +123,7 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_CACHE_SIZE: 8G
+      TURBO_CACHE_DIR: /home/runner/.cache/turbo
 
     steps:
       - uses: actions/checkout@v6
@@ -149,6 +157,12 @@ jobs:
         with:
           key: sccache-${{ github.repository_id }}-${{ runner.os }}-v1
           path: /home/runner/.cache/sccache
+
+      - name: Mount turbo cache sticky disk
+        uses: useblacksmith/stickydisk@v1
+        with:
+          key: turbo-cache-${{ github.repository_id }}-${{ runner.os }}-v1
+          path: /home/runner/.cache/turbo
 
       - run: pnpm build
       - name: Mount Playwright sticky disk
