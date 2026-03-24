@@ -137,7 +137,7 @@ constructor(
 Child scopes are self-contained and do not know who created them.
 The CDC must therefore thread `parentId` manually through every recursive traversal of the scope tree.
 
-Adding `readonly parentId: string | undefined` to the constructor — set by `loadChildNode` when it creates child scopes — makes scope trees self-describing:
+Adding `readonly parentId: string | undefined` to the constructor — set by `loadChildNode` when it creates child scopes — makes scope trees self-describing. To preserve backward compatibility, it should be appended after the existing optional parameters rather than inserted in the middle:
 
 ```ts
 constructor(
@@ -145,8 +145,8 @@ constructor(
   public readonly resolve: RefsToResolve<any>,
   public id: string,
   public schema: RefEncoded<CoValue>,
-  public readonly parentId: string | undefined,  // new
   ...
+  public readonly parentId: string | undefined,  // new, last param
 )
 ```
 
