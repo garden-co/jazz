@@ -1,5 +1,12 @@
 # cojson-core-wasm
 
+## 0.20.15
+
+### Patch Changes
+
+- 2d5cb0b: Surface WASM panics as JavaScript errors and ship the generated inline snippet
+  bundle.
+
 ## 0.20.14
 
 ## 0.20.13
