@@ -75,9 +75,13 @@ describe("History & Conflict Management", () => {
    *
    *            waitForQuery on both → same title
    *
-   * KNOWN ISSUE: currently each client sees only its own update —
-   * concurrent commits on the same object don't cross-propagate through
-   * the browser sync pipeline. This test documents the gap.
+   *
+   * KNOWN BUG: the server does not relay concurrent commits between
+   * browser clients. Each client only ever sees its own update
+   * (alice=alice-edit, bob=bob-edit — verified via 40s polling).
+   * The server scope-based forwarding (forward_update_to_clients_except)
+   * appears to work in Rust E2E tests (in-process RuntimeCore) but not
+   * through the HTTP /sync + /events pipeline.
    */
   it.skip("concurrent updates converge in browser", async () => {
     const token = `hc-concurrent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -266,8 +270,9 @@ describe("History & Conflict Management", () => {
    *                                             │
    *                                             └──► sees same winner
    *
-   * KNOWN ISSUE: same as "concurrent updates converge" — concurrent
-   * commits don't cross-propagate through the browser sync pipeline.
+   * KNOWN BUG: same root cause as "concurrent updates converge" —
+   * server doesn't relay concurrent commits between browser clients
+   * via the HTTP /sync + /events pipeline.
    */
   it.skip("fresh db sees converged state", async () => {
     const token = `hc-fresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
