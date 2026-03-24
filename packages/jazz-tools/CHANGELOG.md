@@ -1,5 +1,17 @@
 # jazz-tools
 
+## 0.20.15
+
+### Patch Changes
+
+- 05b28a9: Fix race condition in `AuthSecretStorage.set()` where `isAuthenticated` was set to `true` before the KV store write completed, causing spurious logouts in the BetterAuth client.
+- 53bd0c4: Correctly handle `z.partialRecord` to allow optional enum keys
+- 109afa7: Introduce `omit`, `extend`, and `safeExtend` methods to CoMap schemas
+- Updated dependencies [7446c56]
+  - cojson@0.20.15
+  - cojson-storage-indexeddb@0.20.15
+  - cojson-transport-ws@0.20.15
+
 ## 0.20.14
 
 ### Patch Changes

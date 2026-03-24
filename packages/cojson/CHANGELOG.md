@@ -1,5 +1,16 @@
 # cojson
 
+## 0.20.15
+
+### Patch Changes
+
+- 7446c56: Add an incoming queue metric that measures sync message processing time by
+  `messageType`.
+- Updated dependencies [2d5cb0b]
+  - cojson-core-wasm@0.20.15
+  - cojson-core-rn@0.20.15
+  - cojson-core-napi@0.20.15
+
 ## 0.20.14
 
 ### Patch Changes
