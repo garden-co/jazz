@@ -1,4 +1,3 @@
-import { expect } from "vitest";
 import { TestingServer, pushSchemaCatalogue } from "jazz-napi";
 import { createJazzContext, Db, Session, type JazzContext } from "../backend/index.js";
 
@@ -8,6 +7,7 @@ import { createJazzContext, Db, Session, type JazzContext } from "../backend/ind
  */
 export class PolicyTestApp {
   constructor(
+    private readonly expect: Function,
     private readonly app: any,
     private readonly jazzContext: JazzContext,
     private readonly server: TestingServer,
@@ -34,7 +34,7 @@ export class PolicyTestApp {
    * TODO: rollback mutations performed as part of the callback (once we support transactions).
    */
   expectAllowed(callback: () => unknown): void {
-    expect(callback).not.toThrow();
+    this.expect(callback).not.toThrow();
   }
 
   /**
@@ -42,7 +42,7 @@ export class PolicyTestApp {
    * TODO: rollback mutations performed as part of the callback (once we support transactions).
    */
   expectDenied(callback: () => unknown): void {
-    expect(callback).toThrow('WriteError("policy denied');
+    this.expect(callback).toThrow('WriteError("policy denied');
   }
 
   /**
@@ -58,9 +58,13 @@ export class PolicyTestApp {
  * Create a new policy test app.
  * This will start a local Jazz server and push the schema catalogue to it.
  * Returns a PolicyTestApp instance that can be used to seed the database and validate policy checks.
+ * @param expect - The expect function to use for assertions - e.g. `expect` from `vitest` or `expect` from `jest`.
  * @param schemaDir - The directory containing the Jazz schema and permissions
  */
-export async function createPolicyTestApp(schemaDir: string): Promise<PolicyTestApp> {
+export async function createPolicyTestApp(
+  expect: Function,
+  schemaDir: string,
+): Promise<PolicyTestApp> {
   const server = await TestingServer.start();
   const { backendSecret, adminSecret } = server;
 
@@ -88,5 +92,5 @@ export async function createPolicyTestApp(schemaDir: string): Promise<PolicyTest
     tier: "worker",
   });
 
-  return new PolicyTestApp(app, jazzContext, server);
+  return new PolicyTestApp(expect, app, jazzContext, server);
 }
