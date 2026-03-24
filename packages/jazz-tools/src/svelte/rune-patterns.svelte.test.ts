@@ -1,6 +1,86 @@
 import { describe, expect, it, vi } from "vitest";
 import { flushSync } from "svelte";
+import { reconcileArray } from "../reconcile-array.js";
 import "./test-helpers.svelte.js";
+
+// ── reconcileArray through $state proxy ────────────────────────────
+// Prove that reconcileArray's in-place mutations propagate correctly
+// through Svelte's reactive proxy.
+
+describe("reconcileArray through $state proxy", () => {
+  it("preserves object identity after reconciliation", () => {
+    let items: Array<{ id: string; name: string }> = $state([{ id: "1", name: "Alice" }]);
+
+    const ref = items[0];
+    reconcileArray(items, [{ id: "1", name: "Alice (updated)" }]);
+    flushSync();
+
+    expect(items[0]).toBe(ref);
+    expect(items[0].name).toBe("Alice (updated)");
+  });
+
+  it("appends new items and removes stale ones", () => {
+    let items: Array<{ id: string; name: string }> = $state([
+      { id: "1", name: "Alice" },
+      { id: "2", name: "Bob" },
+    ]);
+
+    reconcileArray(items, [
+      { id: "2", name: "Bob" },
+      { id: "3", name: "Carol" },
+    ]);
+    flushSync();
+
+    expect(items).toHaveLength(2);
+    expect(items[0].name).toBe("Bob");
+    expect(items[1].name).toBe("Carol");
+  });
+
+  it("$effect observes property changes from reconciliation", async () => {
+    let items: Array<{ id: string; name: string }> = $state([{ id: "1", name: "Alice" }]);
+
+    const observed: string[] = [];
+    const cleanup = $effect.root(() => {
+      $effect(() => {
+        observed.push(items[0]?.name ?? "empty");
+      });
+    });
+
+    await Promise.resolve();
+    flushSync();
+    expect(observed).toEqual(["Alice"]);
+
+    reconcileArray(items, [{ id: "1", name: "Alice (v2)" }]);
+    await Promise.resolve();
+    flushSync();
+    expect(observed).toEqual(["Alice", "Alice (v2)"]);
+
+    cleanup();
+  });
+
+  it("$effect does not re-fire when reconciled values are identical", async () => {
+    let items: Array<{ id: string; name: string }> = $state([{ id: "1", name: "Alice" }]);
+
+    let effectCount = 0;
+    const cleanup = $effect.root(() => {
+      $effect(() => {
+        void items[0]?.name;
+        effectCount++;
+      });
+    });
+
+    await Promise.resolve();
+    flushSync();
+    expect(effectCount).toBe(1);
+
+    reconcileArray(items, [{ id: "1", name: "Alice" }]);
+    await Promise.resolve();
+    flushSync();
+    expect(effectCount).toBe(1);
+
+    cleanup();
+  });
+});
 
 // ── Rune behaviour smoke tests ─────────────────────────────────────
 // These verify that the callback patterns used by QuerySubscription
@@ -24,23 +104,35 @@ describe("$state callback patterns", () => {
     expect(loading).toBe(false);
   });
 
-  it("onDelta replaces current with delta.all", () => {
+  it("onDelta reconciles into existing $state array", () => {
+    //  ┌──────────┐    onDelta    ┌──────────────────┐
+    //  │ current  │ ──────────▶   │ reconcileArray() │
+    //  │ $state[] │    delta.all  │ in-place merge   │
+    //  └──────────┘               └──────────────────┘
     let current: any[] | undefined = $state([{ id: "1", title: "First" }]);
 
+    const firstRef = current![0];
+
     const onDelta = (delta: { all: any[] }) => {
-      current = delta.all;
+      if (current) {
+        reconcileArray(current, delta.all);
+      } else {
+        current = delta.all;
+      }
     };
 
     onDelta({
       all: [
-        { id: "1", title: "First" },
+        { id: "1", title: "First (edited)" },
         { id: "2", title: "Second" },
       ],
     });
     flushSync();
 
-    expect($state.snapshot(current)).toHaveLength(2);
-    expect($state.snapshot(current)![1].title).toBe("Second");
+    expect(current).toHaveLength(2);
+    expect(current![0]).toBe(firstRef);
+    expect(current![0].title).toBe("First (edited)");
+    expect(current![1].title).toBe("Second");
   });
 
   it("onError surfaces error and clears current", () => {
