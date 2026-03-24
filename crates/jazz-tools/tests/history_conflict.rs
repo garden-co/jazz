@@ -72,20 +72,21 @@ async fn concurrent_updates_resolve_to_lww_winner() {
     )
     .await;
 
-    // Both update concurrently — no sync wait between
-    alice
-        .update(
+    // Both update concurrently — tokio::join! polls both futures on the
+    // same task, ensuring neither awaits the other's round-trip first.
+    // This maximises the chance of creating diverged tips (true conflict).
+    let (alice_res, bob_res) = tokio::join!(
+        alice.update(
             todo_id,
             vec![("title".to_string(), Value::Text("alice-edit".to_string()))],
+        ),
+        bob.update(
+            todo_id,
+            vec![("title".to_string(), Value::Text("bob-edit".to_string()))],
         )
-        .await
-        .expect("alice updates title");
-    bob.update(
-        todo_id,
-        vec![("title".to_string(), Value::Text("bob-edit".to_string()))],
-    )
-    .await
-    .expect("bob updates title");
+    );
+    alice_res.expect("alice updates title");
+    bob_res.expect("bob updates title");
 
     // Poll until both clients see the same non-"original" title (convergence).
     support::wait_for(
@@ -245,21 +246,21 @@ async fn rapid_concurrent_updates_converge() {
     )
     .await;
 
-    // Both fire 10 rapid updates
+    // Both fire 10 rapid updates concurrently — each pair runs via
+    // tokio::join! so alice-N and bob-N race on the same tick.
     for i in 0..10 {
-        alice
-            .update(
+        let (a_res, b_res) = tokio::join!(
+            alice.update(
                 todo_id,
                 vec![("title".to_string(), Value::Text(format!("alice-{i}")))],
+            ),
+            bob.update(
+                todo_id,
+                vec![("title".to_string(), Value::Text(format!("bob-{i}")))],
             )
-            .await
-            .expect("alice rapid update");
-        bob.update(
-            todo_id,
-            vec![("title".to_string(), Value::Text(format!("bob-{i}")))],
-        )
-        .await
-        .expect("bob rapid update");
+        );
+        a_res.expect("alice rapid update");
+        b_res.expect("bob rapid update");
     }
 
     // Poll until both see the same non-"start" title (convergence).
@@ -351,20 +352,19 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
     )
     .await;
 
-    // Create conflict
-    alice
-        .update(
+    // Create conflict — tokio::join! ensures both updates race concurrently.
+    let (alice_res, bob_res) = tokio::join!(
+        alice.update(
             todo_id,
             vec![("title".to_string(), Value::Text("alice-edit".to_string()))],
+        ),
+        bob.update(
+            todo_id,
+            vec![("title".to_string(), Value::Text("bob-edit".to_string()))],
         )
-        .await
-        .expect("alice updates");
-    bob.update(
-        todo_id,
-        vec![("title".to_string(), Value::Text("bob-edit".to_string()))],
-    )
-    .await
-    .expect("bob updates");
+    );
+    alice_res.expect("alice updates");
+    bob_res.expect("bob updates");
 
     // Poll until both clients see the same non-"original" title (convergence).
     // We query both in a loop because each may temporarily see different titles
