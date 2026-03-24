@@ -16,6 +16,7 @@ on:
 jobs:
   unit-tests:
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
