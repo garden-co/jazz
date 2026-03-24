@@ -2,6 +2,7 @@
 
 mod support;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use jazz_tools::server::TestingServer;
@@ -72,29 +73,43 @@ async fn concurrent_updates_resolve_to_lww_winner() {
     )
     .await;
 
-    // Both update concurrently — tokio::join! polls both futures on the
-    // same task, ensuring neither awaits the other's round-trip first.
-    // This maximises the chance of creating diverged tips (true conflict).
-    let (alice_res, bob_res) = tokio::join!(
-        alice.update(
-            todo_id,
-            vec![("title".to_string(), Value::Text("alice-edit".to_string()))],
-        ),
-        bob.update(
+    // Both update concurrently — tokio::spawn runs each on a separate
+    // OS thread, giving true parallelism. This maximises the chance of
+    // creating diverged tips (true conflict) rather than a linear chain.
+    let alice = Arc::new(alice);
+    let bob = Arc::new(bob);
+    let alice2 = Arc::clone(&alice);
+    let bob2 = Arc::clone(&bob);
+
+    let alice_handle = tokio::spawn(async move {
+        alice2
+            .update(
+                todo_id,
+                vec![("title".to_string(), Value::Text("alice-edit".to_string()))],
+            )
+            .await
+            .expect("alice updates title");
+    });
+    let bob_handle = tokio::spawn(async move {
+        bob2.update(
             todo_id,
             vec![("title".to_string(), Value::Text("bob-edit".to_string()))],
         )
-    );
-    alice_res.expect("alice updates title");
-    bob_res.expect("bob updates title");
+        .await
+        .expect("bob updates title");
+    });
+
+    let (alice_res, bob_res) = tokio::join!(alice_handle, bob_handle);
+    alice_res.expect("alice task panicked");
+    bob_res.expect("bob task panicked");
 
     // Poll until both clients see the same non-"original" title (convergence).
     support::wait_for(
         QUERY_TIMEOUT,
         "alice and bob converge on same title",
         || {
-            let alice = &alice;
-            let bob = &bob;
+            let alice = Arc::clone(&alice);
+            let bob = Arc::clone(&bob);
             let query = query.clone();
             async move {
                 let alice_rows = alice
@@ -121,8 +136,16 @@ async fn concurrent_updates_resolve_to_lww_winner() {
     )
     .await;
 
-    alice.shutdown().await.expect("shutdown alice");
-    bob.shutdown().await.expect("shutdown bob");
+    Arc::try_unwrap(alice)
+        .unwrap_or_else(|_| panic!("alice still shared"))
+        .shutdown()
+        .await
+        .expect("shutdown alice");
+    Arc::try_unwrap(bob)
+        .unwrap_or_else(|_| panic!("bob still shared"))
+        .shutdown()
+        .await
+        .expect("shutdown bob");
     server.shutdown().await;
 }
 
@@ -246,21 +269,34 @@ async fn rapid_concurrent_updates_converge() {
     )
     .await;
 
-    // Both fire 10 rapid updates concurrently — each pair runs via
-    // tokio::join! so alice-N and bob-N race on the same tick.
+    // Both fire 10 rapid updates concurrently — each pair spawned on
+    // separate OS threads for true parallelism.
+    let alice = Arc::new(alice);
+    let bob = Arc::new(bob);
+
     for i in 0..10 {
-        let (a_res, b_res) = tokio::join!(
-            alice.update(
-                todo_id,
-                vec![("title".to_string(), Value::Text(format!("alice-{i}")))],
-            ),
-            bob.update(
+        let alice2 = Arc::clone(&alice);
+        let bob2 = Arc::clone(&bob);
+        let alice_handle = tokio::spawn(async move {
+            alice2
+                .update(
+                    todo_id,
+                    vec![("title".to_string(), Value::Text(format!("alice-{i}")))],
+                )
+                .await
+                .expect("alice rapid update");
+        });
+        let bob_handle = tokio::spawn(async move {
+            bob2.update(
                 todo_id,
                 vec![("title".to_string(), Value::Text(format!("bob-{i}")))],
             )
-        );
-        a_res.expect("alice rapid update");
-        b_res.expect("bob rapid update");
+            .await
+            .expect("bob rapid update");
+        });
+        let (a_res, b_res) = tokio::join!(alice_handle, bob_handle);
+        a_res.expect("alice task panicked");
+        b_res.expect("bob task panicked");
     }
 
     // Poll until both see the same non-"start" title (convergence).
@@ -268,8 +304,8 @@ async fn rapid_concurrent_updates_converge() {
         QUERY_TIMEOUT,
         "alice and bob converge after rapid updates",
         || {
-            let alice = &alice;
-            let bob = &bob;
+            let alice = Arc::clone(&alice);
+            let bob = Arc::clone(&bob);
             let query = query.clone();
             async move {
                 let alice_rows = alice
@@ -296,8 +332,16 @@ async fn rapid_concurrent_updates_converge() {
     )
     .await;
 
-    alice.shutdown().await.expect("shutdown alice");
-    bob.shutdown().await.expect("shutdown bob");
+    Arc::try_unwrap(alice)
+        .unwrap_or_else(|_| panic!("alice still shared"))
+        .shutdown()
+        .await
+        .expect("shutdown alice");
+    Arc::try_unwrap(bob)
+        .unwrap_or_else(|_| panic!("bob still shared"))
+        .shutdown()
+        .await
+        .expect("shutdown bob");
     server.shutdown().await;
 }
 
@@ -352,19 +396,32 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
     )
     .await;
 
-    // Create conflict — tokio::join! ensures both updates race concurrently.
-    let (alice_res, bob_res) = tokio::join!(
-        alice.update(
-            todo_id,
-            vec![("title".to_string(), Value::Text("alice-edit".to_string()))],
-        ),
-        bob.update(
+    // Create conflict — tokio::spawn runs each on a separate OS thread.
+    let alice = Arc::new(alice);
+    let bob = Arc::new(bob);
+    let alice2 = Arc::clone(&alice);
+    let bob2 = Arc::clone(&bob);
+
+    let alice_handle = tokio::spawn(async move {
+        alice2
+            .update(
+                todo_id,
+                vec![("title".to_string(), Value::Text("alice-edit".to_string()))],
+            )
+            .await
+            .expect("alice updates");
+    });
+    let bob_handle = tokio::spawn(async move {
+        bob2.update(
             todo_id,
             vec![("title".to_string(), Value::Text("bob-edit".to_string()))],
         )
-    );
-    alice_res.expect("alice updates");
-    bob_res.expect("bob updates");
+        .await
+        .expect("bob updates");
+    });
+    let (a_res, b_res) = tokio::join!(alice_handle, bob_handle);
+    a_res.expect("alice task panicked");
+    b_res.expect("bob task panicked");
 
     // Poll until both clients see the same non-"original" title (convergence).
     // We query both in a loop because each may temporarily see different titles
@@ -373,8 +430,8 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
         QUERY_TIMEOUT,
         "alice and bob converge on same title",
         || {
-            let alice = &alice;
-            let bob = &bob;
+            let alice = Arc::clone(&alice);
+            let bob = Arc::clone(&bob);
             let query = query.clone();
             async move {
                 let alice_rows = alice
@@ -435,8 +492,16 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
         "fresh client must see same winner"
     );
 
-    alice.shutdown().await.expect("shutdown alice");
-    bob.shutdown().await.expect("shutdown bob");
+    Arc::try_unwrap(alice)
+        .unwrap_or_else(|_| panic!("alice still shared"))
+        .shutdown()
+        .await
+        .expect("shutdown alice");
+    Arc::try_unwrap(bob)
+        .unwrap_or_else(|_| panic!("bob still shared"))
+        .shutdown()
+        .await
+        .expect("shutdown bob");
     charlie.shutdown().await.expect("shutdown charlie");
     server.shutdown().await;
 }
