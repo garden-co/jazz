@@ -183,6 +183,7 @@ struct TestingServerStartOptions {
     persistent_storage: Option<bool>,
     admin_secret: Option<String>,
     backend_secret: Option<String>,
+    jwks_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1168,6 +1169,7 @@ pub struct TestingServer {
     data_dir: String,
     backend_secret: String,
     admin_secret: String,
+    built_in_jwt_helpers_available: bool,
 }
 
 #[napi]
@@ -1175,7 +1177,7 @@ impl TestingServer {
     #[napi(factory, ts_return_type = "Promise<TestingServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId?: string; port?: number; dataDir?: string; persistentStorage?: boolean; adminSecret?: string; backendSecret?: string }"
+            ts_arg_type = "{ appId?: string; port?: number; dataDir?: string; persistentStorage?: boolean; adminSecret?: string; backendSecret?: string; jwksUrl?: string }"
         )]
         options: Option<JsonValue>,
     ) -> napi::Result<Self> {
@@ -1208,6 +1210,10 @@ impl TestingServer {
             builder = builder.with_backend_secret(backend_secret);
         }
 
+        if let Some(jwks_url) = options.jwks_url {
+            builder = builder.with_jwks_url(jwks_url);
+        }
+
         let server = builder.start().await;
         let app_id = server.app_id().to_string();
         let url = server.base_url();
@@ -1215,6 +1221,7 @@ impl TestingServer {
         let data_dir = server.data_dir().to_string_lossy().into_owned();
         let admin_secret = server.admin_secret().to_string();
         let backend_secret = server.backend_secret().to_string();
+        let built_in_jwt_helpers_available = server.built_in_jwt_helpers_available();
 
         Ok(Self {
             inner: Mutex::new(Some(server)),
@@ -1224,6 +1231,7 @@ impl TestingServer {
             data_dir,
             backend_secret,
             admin_secret,
+            built_in_jwt_helpers_available,
         })
     }
 
@@ -1263,6 +1271,12 @@ impl TestingServer {
         user_id: String,
         #[napi(ts_arg_type = "Record<string, unknown> | undefined")] claims: Option<JsonValue>,
     ) -> napi::Result<String> {
+        if !self.built_in_jwt_helpers_available {
+            return Err(napi::Error::from_reason(
+                "TestingServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead.",
+            ));
+        }
+
         let claims = claims.unwrap_or_else(|| json!({ "role": "user" }));
         Ok(JazzTestingServer::jwt_for_user_with_claims(
             &user_id, claims,
