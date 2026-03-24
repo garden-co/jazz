@@ -132,6 +132,53 @@ describe("History & Conflict Management", () => {
   }, 90000);
 
   // -------------------------------------------------------------------------
+  // Diagnostic: does a sequential UPDATE propagate at all?
+  // -------------------------------------------------------------------------
+
+  it("sequential update propagates from A to B", async () => {
+    const token = `hc-seq-update-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const dbAlice = await createSyncedDb(ctx, "hc-alice-seq-upd", token);
+    const dbBob = await createSyncedDb(ctx, "hc-bob-seq-upd", token);
+
+    // Alice inserts
+    const { id } = await withTimeout(
+      dbAlice.insertDurable(todos, { title: "original", done: false }, { tier: "worker" }),
+      10000,
+      "Alice insert did not resolve",
+    );
+
+    // Bob sees the insert
+    await waitForQuery(
+      dbBob,
+      allTodos,
+      (rows) => rows.some((row) => row.id === id && row.title === "original"),
+      "Bob sees original",
+      20000,
+    );
+
+    // Alice updates
+    await dbAlice.updateDurable(todos, id, { title: "updated-by-alice" }, { tier: "worker" });
+
+    // Alice sees her own update locally
+    await waitForQuery(
+      dbAlice,
+      allTodos,
+      (rows) => rows.some((row) => row.id === id && row.title === "updated-by-alice"),
+      "Alice sees her own update",
+      10000,
+    );
+
+    // Bob should see the update — THIS is the question
+    await waitForQuery(
+      dbBob,
+      allTodos,
+      (rows) => rows.some((row) => row.id === id && row.title === "updated-by-alice"),
+      "Bob sees Alice's update",
+      20000,
+    );
+  }, 60000);
+
+  // -------------------------------------------------------------------------
   // Test 13: concurrent_creates_both_visible_in_browser
   // -------------------------------------------------------------------------
 
