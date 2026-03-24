@@ -48,6 +48,7 @@ export default defineConfig({
       },
     },
     include: ["tests/browser/**/*.test.ts", "tests/browser/**/*.test.tsx"],
+    exclude: ["tests/browser/realistic-bench.test.ts"],
     globalSetup: ["tests/browser/global-setup.ts"],
     testTimeout: 30000,
   },
