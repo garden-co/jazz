@@ -365,4 +365,114 @@ describe("History & Conflict Management", () => {
     const charlieTodo = charlieRows.find((r) => r.id === id);
     expect(charlieTodo?.title).toBe(convergedTitle);
   }, 120000);
+
+  /**
+   * Alice edits title, Bob edits done — concurrently on the same row.
+   * With whole-object LWW the latest commit wins ALL fields, so one
+   * side's field change is lost. This test documents that behavior.
+   *
+   *   dbAlice ──update title──► server ◄──update done── dbBob
+   *
+   *   KNOWN BUG: same server relay issue as concurrent-updates test.
+   */
+  it.skip("concurrent edits on different fields", async () => {
+    const token = `hc-fields-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const dbAlice = await createSyncedDb(ctx, "hc-alice-fields", token);
+    const dbBob = await createSyncedDb(ctx, "hc-bob-fields", token);
+
+    const { id } = await withTimeout(
+      dbAlice.insertDurable(todos, { title: "task", done: false }, { tier: "worker" }),
+      10000,
+      "Alice insert did not resolve",
+    );
+
+    await waitForQuery(
+      dbBob,
+      allTodos,
+      (rows) => rows.some((row) => row.id === id),
+      "Bob sees todo",
+      20000,
+    );
+
+    // Alice updates title, Bob updates done — concurrently
+    await Promise.all([
+      dbAlice.updateDurable(todos, id, { title: "alice-title" }, { tier: "worker" }),
+      dbBob.updateDurable(todos, id, { done: true }, { tier: "worker" }),
+    ]);
+
+    // Both must converge to the same state
+    await waitForCondition(
+      async () => {
+        const aliceRows = await dbAlice.all(allTodos);
+        const bobRows = await dbBob.all(allTodos);
+        const a = aliceRows.find((r) => r.id === id);
+        const b = bobRows.find((r) => r.id === id);
+        if (!a || !b) return false;
+        return a.title === b.title && a.done === b.done;
+      },
+      40000,
+      "Alice and Bob converge on same row state",
+    );
+  }, 90000);
+
+  /**
+   * Alice makes 5 sequential updates. Bob (offline) makes 1 from stale
+   * state. When Bob reconnects, LWW by timestamp should pick Alice's
+   * latest commit (higher timestamp).
+   *
+   *   root
+   *    ├── a1 → a2 → a3 → a4 → a5   (alice, online)
+   *    └── b1                          (bob, offline)
+   */
+  it("deep history vs single offline commit", async () => {
+    const token = `hc-offline-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const dbAlice = await createSyncedDb(ctx, "hc-alice-offline", token);
+    const dbBob = await createSyncedDb(ctx, "hc-bob-offline", token);
+
+    // Alice creates, Bob sees it
+    const { id } = await withTimeout(
+      dbAlice.insertDurable(todos, { title: "v0", done: false }, { tier: "worker" }),
+      10000,
+      "Alice insert did not resolve",
+    );
+
+    await waitForQuery(
+      dbBob,
+      allTodos,
+      (rows) => rows.some((row) => row.id === id && row.title === "v0"),
+      "Bob sees v0",
+      20000,
+    );
+
+    // Alice makes 5 sequential updates
+    for (let i = 1; i <= 5; i++) {
+      await dbAlice.updateDurable(todos, id, { title: `alice-v${i}` }, { tier: "worker" });
+    }
+
+    // Wait for alice-v5 to be visible on alice
+    await waitForQuery(
+      dbAlice,
+      allTodos,
+      (rows) => rows.some((row) => row.id === id && row.title === "alice-v5"),
+      "Alice sees v5",
+      20000,
+    );
+
+    // Bob updates from stale state (simulates offline edit)
+    await dbBob.updateDurable(todos, id, { title: "bob-offline" }, { tier: "worker" });
+
+    // Both must converge — alice-v5 should win (later timestamp)
+    await waitForCondition(
+      async () => {
+        const aliceRows = await dbAlice.all(allTodos);
+        const bobRows = await dbBob.all(allTodos);
+        const a = aliceRows.find((r) => r.id === id);
+        const b = bobRows.find((r) => r.id === id);
+        if (!a || !b) return false;
+        return a.title !== "v0" && a.title === b.title;
+      },
+      30000,
+      "Alice and Bob converge after offline conflict",
+    );
+  }, 90000);
 });

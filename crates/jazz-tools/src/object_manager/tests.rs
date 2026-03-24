@@ -1555,3 +1555,164 @@ fn truncate_rejects_when_tip_not_descendant_of_tail() {
     let commits = manager.get_commits(object_id, "main").unwrap();
     assert_eq!(commits.len(), 3); // root, alice, bob
 }
+
+#[test]
+fn lww_deep_history_vs_single_offline_commit() {
+    // Alice makes 5 sequential updates while Bob is offline.
+    // Bob makes 1 update from the root. LWW picks the highest timestamp.
+    //
+    //   root (ts=100)
+    //    ├── a1(200) → a2(300) → a3(400) → a4(500) → a5(600)  ← alice
+    //    └── b1(550)                                             ← bob offline
+    //
+    //   LWW winner: a5 (ts=600 > ts=550)
+    let mut io = MemoryStorage::new();
+    let mut manager = ObjectManager::new();
+    let object_id = manager.create(&mut io, None);
+    let alice = ObjectId::new();
+    let bob = ObjectId::new();
+
+    // Root
+    let root = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            "main",
+            vec![],
+            b"root".to_vec(),
+            alice,
+            None,
+        )
+        .unwrap();
+
+    // Alice's chain: root → a1 → a2 → a3 → a4 → a5
+    let mut parent = root;
+    let mut alice_ids = Vec::new();
+    for (i, ts) in [(1, 200u64), (2, 300), (3, 400), (4, 500), (5, 600)] {
+        let commit = Commit {
+            parents: smallvec![parent],
+            content: format!("alice-v{i}").into_bytes(),
+            timestamp: ts,
+            author: alice,
+            metadata: None,
+            stored_state: StoredState::default(),
+            ack_state: CommitAckState::default(),
+        };
+        let id = manager
+            .receive_commit(&mut io, object_id, "main", commit)
+            .unwrap();
+        alice_ids.push(id);
+        parent = id;
+    }
+    let a5 = *alice_ids.last().unwrap();
+
+    // Bob's single offline commit from root (ts=550, between a4 and a5)
+    let bob_commit = Commit {
+        parents: smallvec![root],
+        content: b"bob-offline-edit".to_vec(),
+        timestamp: 550,
+        author: bob,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+    let b1 = manager
+        .receive_commit(&mut io, object_id, "main", bob_commit)
+        .unwrap();
+
+    // Two tips: a5 and b1
+    let tips = manager.get_tip_ids(object_id, "main").unwrap();
+    assert_eq!(tips.len(), 2);
+    assert!(tips.contains(&a5));
+    assert!(tips.contains(&b1));
+
+    // LWW: a5 wins because ts=600 > ts=550
+    let object = manager.get(object_id).unwrap();
+    let branch = &object.branches[&BranchName::new("main")];
+    let sorted = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
+    assert_eq!(
+        *sorted.last().unwrap(),
+        a5,
+        "a5 (ts=600) should be LWW winner over b1 (ts=550)"
+    );
+    assert_eq!(
+        branch.commits[&a5].content, b"alice-v5",
+        "winner content should be alice's last update"
+    );
+}
+
+#[test]
+fn lww_different_fields_same_object_whole_commit_wins() {
+    // Two concurrent edits on different "fields" of the same object.
+    // With whole-object LWW, the winner's entire content replaces the loser's.
+    // This means one side's field change is lost.
+    //
+    //   root (content: title="task", completed=false)
+    //    ├── alice_edit (ts=200, content: title="alice-title", completed=false)
+    //    └── bob_edit   (ts=300, content: title="task", completed=true)
+    //
+    //   LWW winner: bob_edit (ts=300) → title reverts to "task", completed=true
+    //   Alice's title change is lost.
+    let mut io = MemoryStorage::new();
+    let mut manager = ObjectManager::new();
+    let object_id = manager.create(&mut io, None);
+    let alice = ObjectId::new();
+    let bob = ObjectId::new();
+
+    let root = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            "main",
+            vec![],
+            b"title=task,completed=false".to_vec(),
+            alice,
+            None,
+        )
+        .unwrap();
+
+    // Alice edits title only (her snapshot has completed=false)
+    let alice_edit = Commit {
+        parents: smallvec![root],
+        content: b"title=alice-title,completed=false".to_vec(),
+        timestamp: 200,
+        author: alice,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+    let alice_id = manager
+        .receive_commit(&mut io, object_id, "main", alice_edit)
+        .unwrap();
+
+    // Bob edits completed only (his snapshot has title=task)
+    let bob_edit = Commit {
+        parents: smallvec![root],
+        content: b"title=task,completed=true".to_vec(),
+        timestamp: 300,
+        author: bob,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+    let bob_id = manager
+        .receive_commit(&mut io, object_id, "main", bob_edit)
+        .unwrap();
+
+    // Two tips
+    let tips = manager.get_tip_ids(object_id, "main").unwrap();
+    assert_eq!(tips.len(), 2);
+
+    // LWW: bob wins (ts=300 > ts=200)
+    let object = manager.get(object_id).unwrap();
+    let branch = &object.branches[&BranchName::new("main")];
+    let sorted = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
+    let winner = *sorted.last().unwrap();
+    assert_eq!(winner, bob_id, "bob (ts=300) should be LWW winner");
+
+    // Bob's content wins — alice's title change is lost
+    assert_eq!(
+        branch.commits[&winner].content, b"title=task,completed=true",
+        "whole-object LWW: bob's full snapshot wins, alice's title change lost"
+    );
+}

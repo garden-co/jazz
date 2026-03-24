@@ -178,19 +178,31 @@ async fn concurrent_creates_both_survive() {
         .await;
 
     // Both create concurrently
-    alice
-        .create(
+    let alice = Arc::new(alice);
+    let bob = Arc::new(bob);
+    let alice2 = Arc::clone(&alice);
+    let bob2 = Arc::clone(&bob);
+    let alice_handle = tokio::spawn(async move {
+        alice2
+            .create(
+                "todos",
+                vec![Value::Text("buy milk".to_string()), Value::Boolean(false)],
+            )
+            .await
+            .expect("alice creates");
+    });
+    let bob_handle = tokio::spawn(async move {
+        bob2.create(
             "todos",
-            vec![Value::Text("buy milk".to_string()), Value::Boolean(false)],
+            vec![Value::Text("buy eggs".to_string()), Value::Boolean(false)],
         )
         .await
-        .expect("alice creates");
-    bob.create(
-        "todos",
-        vec![Value::Text("buy eggs".to_string()), Value::Boolean(false)],
-    )
-    .await
-    .expect("bob creates");
+        .expect("bob creates");
+    });
+
+    let (alice_res, bob_res) = tokio::join!(alice_handle, bob_handle);
+    alice_res.expect("alice task panicked");
+    bob_res.expect("bob task panicked");
 
     let query = QueryBuilder::new("todos").build();
 
@@ -215,8 +227,16 @@ async fn concurrent_creates_both_survive() {
     )
     .await;
 
-    alice.shutdown().await.expect("shutdown alice");
-    bob.shutdown().await.expect("shutdown bob");
+    Arc::try_unwrap(alice)
+        .unwrap_or_else(|_| panic!("alice still shared"))
+        .shutdown()
+        .await
+        .expect("shutdown alice");
+    Arc::try_unwrap(bob)
+        .unwrap_or_else(|_| panic!("bob still shared"))
+        .shutdown()
+        .await
+        .expect("shutdown bob");
     server.shutdown().await;
 }
 
@@ -660,5 +680,280 @@ async fn sequential_updates_preserve_latest() {
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Alice edits the title, Bob edits completed — concurrently on the same row.
+/// Current LWW is whole-object: the latest commit wins ALL fields.
+/// This test documents the behavior (may lose one side's field change).
+///
+/// ```text
+/// alice ──update title──► server ◄──update completed── bob
+///
+///          both query → see same row (one writer's full state wins)
+/// ```
+#[tokio::test]
+async fn concurrent_edits_on_different_fields() {
+    let server = TestingServer::start().await;
+    let schema = test_schema();
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice-fields")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("bob-fields")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    // Alice creates a todo: title="task", completed=false
+    let (todo_id, _) = alice
+        .create(
+            "todos",
+            vec![Value::Text("task".to_string()), Value::Boolean(false)],
+        )
+        .await
+        .expect("create");
+
+    // Bob sees it
+    let query = QueryBuilder::new("todos").build();
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees todo",
+        |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(()),
+    )
+    .await;
+
+    // Concurrent edits on different fields
+    let alice = Arc::new(alice);
+    let bob = Arc::new(bob);
+    let alice2 = Arc::clone(&alice);
+    let bob2 = Arc::clone(&bob);
+
+    // Alice updates title only
+    let alice_handle = tokio::spawn(async move {
+        alice2
+            .update(
+                todo_id,
+                vec![("title".to_string(), Value::Text("alice-title".to_string()))],
+            )
+            .await
+            .expect("alice updates title");
+    });
+    // Bob updates completed only
+    let bob_handle = tokio::spawn(async move {
+        bob2.update(
+            todo_id,
+            vec![("completed".to_string(), Value::Boolean(true))],
+        )
+        .await
+        .expect("bob updates completed");
+    });
+
+    let (a_res, b_res) = tokio::join!(alice_handle, bob_handle);
+    a_res.expect("alice task panicked");
+    b_res.expect("bob task panicked");
+
+    // Both must converge to the same state
+    support::wait_for(QUERY_TIMEOUT, "alice and bob converge on same row", || {
+        let alice = Arc::clone(&alice);
+        let bob = Arc::clone(&bob);
+        let query = query.clone();
+        async move {
+            let alice_rows = alice
+                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .await
+                .ok()?;
+            let bob_rows = bob
+                .query(query, Some(DurabilityTier::EdgeServer))
+                .await
+                .ok()?;
+
+            if alice_rows.len() == 1 && bob_rows.len() == 1 {
+                // Both see the same title and completed values
+                if alice_rows[0].1 == bob_rows[0].1 {
+                    let title = &alice_rows[0].1[0];
+                    let completed = &alice_rows[0].1[1];
+                    // Must have moved past the original state
+                    if *title != Value::Text("task".to_string())
+                        || *completed != Value::Boolean(false)
+                    {
+                        return Some((title.clone(), completed.clone()));
+                    }
+                }
+            }
+            None
+        }
+    })
+    .await;
+
+    // NOTE: With whole-object LWW, the "winner" commit overwrites all fields.
+    // If alice's commit wins (higher timestamp), we get title="alice-title"
+    // but completed reverts to false (alice's snapshot didn't include bob's change).
+    // If bob's commit wins, we get completed=true but title reverts to "task".
+    // Per-field CRDTs would preserve both changes — that's a future enhancement.
+
+    Arc::try_unwrap(alice)
+        .unwrap_or_else(|_| panic!("alice still shared"))
+        .shutdown()
+        .await
+        .expect("shutdown alice");
+    Arc::try_unwrap(bob)
+        .unwrap_or_else(|_| panic!("bob still shared"))
+        .shutdown()
+        .await
+        .expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Alice makes 5 sequential updates while Bob is offline.
+/// Bob makes 1 update (from stale state). When Bob reconnects,
+/// Bob's single commit diverges from Alice's chain at the original root.
+/// LWW picks the highest timestamp — typically Alice's last commit.
+///
+/// ```text
+///          root
+///           ├── a1 → a2 → a3 → a4 → a5   (alice, online)
+///           └── b1                          (bob, offline then reconnects)
+///
+///          both query → see LWW winner (a5, unless bob's clock is ahead)
+/// ```
+#[tokio::test]
+async fn deep_history_vs_single_offline_commit() {
+    let server = TestingServer::start().await;
+    let schema = test_schema();
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice-deep")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("bob-offline")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    // Alice creates a todo, Bob sees it
+    let (todo_id, _) = alice
+        .create(
+            "todos",
+            vec![Value::Text("v0".to_string()), Value::Boolean(false)],
+        )
+        .await
+        .expect("create");
+
+    let query = QueryBuilder::new("todos").build();
+    wait_for_query(
+        &bob,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "bob sees todo",
+        |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(()),
+    )
+    .await;
+
+    // Alice makes 5 sequential updates (all synced through server)
+    for i in 1..=5 {
+        alice
+            .update(
+                todo_id,
+                vec![("title".to_string(), Value::Text(format!("alice-v{i}")))],
+            )
+            .await
+            .expect("alice sequential update");
+    }
+
+    // Wait for alice's v5 to settle on the server
+    wait_for_query(
+        &alice,
+        query.clone(),
+        Some(DurabilityTier::EdgeServer),
+        QUERY_TIMEOUT,
+        "alice sees v5",
+        |rows| {
+            (rows.len() == 1 && rows[0].1[0] == Value::Text("alice-v5".to_string())).then_some(())
+        },
+    )
+    .await;
+
+    // Bob updates from his stale state (his last known state was v0).
+    // This simulates a client that was offline and made a local edit.
+    bob.update(
+        todo_id,
+        vec![(
+            "title".to_string(),
+            Value::Text("bob-offline-edit".to_string()),
+        )],
+    )
+    .await
+    .expect("bob offline update");
+
+    // Both must converge. With LWW by timestamp, alice-v5 should win
+    // because her commits have later timestamps. But we only assert
+    // convergence, not which side wins.
+    let alice = Arc::new(alice);
+    let bob = Arc::new(bob);
+    let converged = support::wait_for(
+        QUERY_TIMEOUT,
+        "alice and bob converge after offline conflict",
+        || {
+            let alice = Arc::clone(&alice);
+            let bob = Arc::clone(&bob);
+            let query = query.clone();
+            async move {
+                let alice_rows = alice
+                    .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                    .await
+                    .ok()?;
+                let bob_rows = bob
+                    .query(query, Some(DurabilityTier::EdgeServer))
+                    .await
+                    .ok()?;
+
+                if alice_rows.len() == 1 && bob_rows.len() == 1 {
+                    if let (Value::Text(a_title), Value::Text(b_title)) =
+                        (&alice_rows[0].1[0], &bob_rows[0].1[0])
+                    {
+                        if a_title != "v0" && a_title == b_title {
+                            return Some(a_title.clone());
+                        }
+                    }
+                }
+                None
+            }
+        },
+    )
+    .await;
+
+    // Document what actually won
+    eprintln!("deep_history_vs_offline: converged to {converged:?}");
+
+    Arc::try_unwrap(alice)
+        .unwrap_or_else(|_| panic!("alice still shared"))
+        .shutdown()
+        .await
+        .expect("shutdown alice");
+    Arc::try_unwrap(bob)
+        .unwrap_or_else(|_| panic!("bob still shared"))
+        .shutdown()
+        .await
+        .expect("shutdown bob");
     server.shutdown().await;
 }
