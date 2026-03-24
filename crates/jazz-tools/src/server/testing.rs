@@ -31,6 +31,7 @@ pub struct TestingServerBuilder {
     persistent_storage: bool,
     admin_secret: Option<String>,
     backend_secret: Option<String>,
+    jwks_url: Option<String>,
 }
 
 impl TestingServerBuilder {
@@ -71,6 +72,11 @@ impl TestingServerBuilder {
 
     pub fn with_backend_secret(mut self, secret: impl Into<String>) -> Self {
         self.backend_secret = Some(secret.into());
+        self
+    }
+
+    pub fn with_jwks_url(mut self, jwks_url: impl Into<String>) -> Self {
+        self.jwks_url = Some(jwks_url.into());
         self
     }
 
@@ -128,7 +134,7 @@ pub struct TestingServer {
     default_client_user_id: String,
     client_data_dirs: Mutex<Vec<OwnedTempDir>>,
     _owned_data_dir: Option<OwnedTempDir>,
-    _jwks_server: TestingJwksServer,
+    embedded_jwks_server: Option<TestingJwksServer>,
 }
 
 impl TestingServer {
@@ -157,6 +163,7 @@ impl TestingServer {
             persistent_storage,
             admin_secret,
             backend_secret,
+            jwks_url,
         } = builder;
 
         let app_id = app_id.unwrap_or_else(Self::default_app_id);
@@ -165,13 +172,20 @@ impl TestingServer {
         } else {
             (PathBuf::new(), None)
         };
-        let jwks_server = TestingJwksServer::start().await;
+        let (jwks_url, embedded_jwks_server) = match jwks_url {
+            Some(jwks_url) => (jwks_url, None),
+            None => {
+                let jwks_server = TestingJwksServer::start().await;
+                let jwks_url = jwks_server.endpoint();
+                (jwks_url, Some(jwks_server))
+            }
+        };
 
         let admin_secret = admin_secret.unwrap_or_else(|| Self::ADMIN_SECRET.to_string());
         let backend_secret = backend_secret.unwrap_or_else(|| Self::BACKEND_SECRET.to_string());
 
         let auth_config = AuthConfig {
-            jwks_url: Some(jwks_server.endpoint()),
+            jwks_url: Some(jwks_url),
             allow_anonymous: true,
             allow_demo: true,
             backend_secret: Some(backend_secret.clone()),
@@ -217,7 +231,7 @@ impl TestingServer {
             default_client_user_id: format!("testing-user-{}", Uuid::new_v4()),
             client_data_dirs: Mutex::new(Vec::new()),
             _owned_data_dir: owned_data_dir,
-            _jwks_server: jwks_server,
+            embedded_jwks_server,
         };
         server.wait_ready().await;
         server
@@ -273,6 +287,30 @@ impl TestingServer {
         &self.backend_secret
     }
 
+    pub fn built_in_jwt_helpers_available(&self) -> bool {
+        self.embedded_jwks_server.is_some()
+    }
+
+    pub fn uses_external_jwks(&self) -> bool {
+        !self.built_in_jwt_helpers_available()
+    }
+
+    pub fn ensure_built_in_jwt_helpers_available(&self) -> Result<(), &'static str> {
+        if self.built_in_jwt_helpers_available() {
+            Ok(())
+        } else {
+            Err(
+                "TestingServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead.",
+            )
+        }
+    }
+
+    fn require_built_in_jwt_helpers(&self) {
+        if let Err(message) = self.ensure_built_in_jwt_helpers_available() {
+            panic!("{message}");
+        }
+    }
+
     pub fn make_client_context(&self, schema: Schema) -> AppContext {
         self.make_client_context_for_user(schema, &self.default_client_user_id)
     }
@@ -282,6 +320,8 @@ impl TestingServer {
         schema: Schema,
         user_id: impl AsRef<str>,
     ) -> AppContext {
+        self.require_built_in_jwt_helpers();
+
         let client_data_dir = OwnedTempDir::new("jazz-tools-testing-client");
         let data_dir = client_data_dir.path().to_path_buf();
         self.client_data_dirs
@@ -411,4 +451,68 @@ async fn jwks_handler() -> Json<JsonValue> {
             }
         ]
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use reqwest::StatusCode;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn default_testing_server_keeps_built_in_jwt_helpers_enabled() {
+        let server = TestingServer::start().await;
+        let context = server.make_client_context_for_user(Schema::new(), "default-helper-user");
+
+        assert!(server.built_in_jwt_helpers_available());
+        assert!(!server.uses_external_jwks());
+        assert!(context.jwt_token.is_some());
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn external_jwks_url_disables_built_in_jwt_helpers() {
+        let external_jwks = TestingJwksServer::start().await;
+        let server = TestingServer::builder()
+            .with_jwks_url(external_jwks.endpoint())
+            .start()
+            .await;
+
+        assert!(!server.built_in_jwt_helpers_available());
+        assert!(server.uses_external_jwks());
+        assert_eq!(
+            server.ensure_built_in_jwt_helpers_available(),
+            Err(
+                "TestingServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
+            )
+        );
+
+        let health = reqwest::Client::new()
+            .get(format!("{}/health", server.base_url()))
+            .send()
+            .await
+            .expect("health request");
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            server.make_client_context_for_user(Schema::new(), "external-helper-user")
+        }))
+        .expect_err("external JWKS mode should reject built-in JWT helpers");
+        let message = if let Some(message) = panic.downcast_ref::<String>() {
+            message.as_str()
+        } else if let Some(message) = panic.downcast_ref::<&str>() {
+            message
+        } else {
+            panic!("unexpected panic payload");
+        };
+        assert_eq!(
+            message,
+            "TestingServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
+        );
+
+        server.shutdown().await;
+    }
 }
