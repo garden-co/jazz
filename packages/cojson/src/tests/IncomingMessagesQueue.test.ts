@@ -575,30 +575,33 @@ describe("IncomingMessagesQueue", () => {
       );
     });
 
-    test("should only warn once per window", () => {
+    test("should warn at exponentially increasing thresholds", () => {
       warnSpy = vi.spyOn(logger, "warn");
       CLIENT_USAGE_CONFIG.MAX_MESSAGES_PER_WINDOW = 10;
 
       const { queue, peer1 } = setup();
 
-      // Exceed threshold — first warning fires
+      // First warning at 10
       for (let i = 0; i < 11; i++) {
         queue.push(createMockSyncMessage(`msg-${i}`), peer1);
       }
+      expect(warnSpy).toHaveBeenCalledTimes(1);
 
-      const countWarnings = () =>
-        warnSpy.mock.calls.filter(
-          (call: unknown[]) =>
-            typeof call[0] === "string" && call[0].includes("message rate"),
-        ).length;
-
-      expect(countWarnings()).toBe(1);
-
-      // Push more — should not warn again in the same window
-      for (let i = 0; i < 100; i++) {
-        queue.push(createMockSyncMessage(`extra-${i}`), peer1);
+      // No warning between 10 and 20
+      for (let i = 11; i < 20; i++) {
+        queue.push(createMockSyncMessage(`msg-${i}`), peer1);
       }
-      expect(countWarnings()).toBe(1);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+
+      // Second warning at 20
+      queue.push(createMockSyncMessage("msg-20"), peer1);
+      expect(warnSpy).toHaveBeenCalledTimes(2);
+
+      // Third warning at 40
+      for (let i = 21; i < 41; i++) {
+        queue.push(createMockSyncMessage(`msg-${i}`), peer1);
+      }
+      expect(warnSpy).toHaveBeenCalledTimes(3);
     });
 
     test("should warn again in a new window", () => {
@@ -608,17 +611,11 @@ describe("IncomingMessagesQueue", () => {
 
       const { queue, peer1 } = setup();
 
-      const countWarnings = () =>
-        warnSpy.mock.calls.filter(
-          (call: unknown[]) =>
-            typeof call[0] === "string" && call[0].includes("message rate"),
-        ).length;
-
       // Exceed threshold in first window
       for (let i = 0; i < 11; i++) {
         queue.push(createMockSyncMessage(`msg-${i}`), peer1);
       }
-      expect(countWarnings()).toBe(1);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
 
       // Advance past window
       vi.advanceTimersByTime(CLIENT_USAGE_CONFIG.WINDOW_SIZE + 1);
@@ -627,7 +624,7 @@ describe("IncomingMessagesQueue", () => {
       for (let i = 0; i < 11; i++) {
         queue.push(createMockSyncMessage(`msg2-${i}`), peer1);
       }
-      expect(countWarnings()).toBe(2);
+      expect(warnSpy).toHaveBeenCalledTimes(2);
     });
 
     test("should reset counters when window expires", () => {

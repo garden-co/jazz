@@ -1,18 +1,8 @@
 import { Counter, Histogram, ValueType, metrics } from "@opentelemetry/api";
-import { getContentMessageSize } from "../coValueContentMessage.js";
-import { CLIENT_USAGE_CONFIG } from "../config.js";
-import { logger } from "../logger.js";
 import type { PeerState } from "../PeerState.js";
 import type { SyncMessage } from "../sync.js";
+import { ClientUsageTracker } from "./ClientUsageTracker.js";
 import { LinkedList } from "./LinkedList.js";
-
-interface ClientPeerStats {
-  messageCount: number;
-  contentBytes: number;
-  windowStart: number;
-  warnedMessageRate: boolean;
-  warnedContentSize: boolean;
-}
 
 /**
  * A queue that manages incoming sync messages across different peers using a round-robin approach.
@@ -31,7 +21,7 @@ export class IncomingMessagesQueue {
   queues: [LinkedList<SyncMessage>, PeerState][];
   peerToQueue: WeakMap<PeerState, LinkedList<SyncMessage>>;
   currentQueue = 0;
-  private clientPeerStats: WeakMap<PeerState, ClientPeerStats> = new WeakMap();
+  private clientUsageTrackers: WeakMap<PeerState, ClientUsageTracker>;
 
   constructor(private processQueues: () => void) {
     this.pullCounter = metrics
@@ -83,70 +73,22 @@ export class IncomingMessagesQueue {
 
     this.queues = [];
     this.peerToQueue = new WeakMap();
+    this.clientUsageTrackers = new WeakMap();
   }
 
-  private trackClientUsage(msg: SyncMessage, peer: PeerState) {
-    if (peer.role !== "client") {
-      return;
+  private getClientUsageTracker(peer: PeerState): ClientUsageTracker {
+    let tracker = this.clientUsageTrackers.get(peer);
+    if (!tracker) {
+      tracker = new ClientUsageTracker(peer.id);
+      this.clientUsageTrackers.set(peer, tracker);
     }
-
-    const now = Date.now();
-    let stats = this.clientPeerStats.get(peer);
-
-    if (!stats) {
-      stats = {
-        messageCount: 0,
-        contentBytes: 0,
-        windowStart: now,
-        warnedMessageRate: false,
-        warnedContentSize: false,
-      };
-      this.clientPeerStats.set(peer, stats);
-    }
-
-    if (now - stats.windowStart > CLIENT_USAGE_CONFIG.WINDOW_SIZE) {
-      stats.messageCount = 0;
-      stats.contentBytes = 0;
-      stats.windowStart = now;
-      stats.warnedMessageRate = false;
-      stats.warnedContentSize = false;
-    }
-
-    stats.messageCount++;
-
-    if (msg.action === "content") {
-      stats.contentBytes += getContentMessageSize(msg);
-    }
-
-    if (
-      !stats.warnedMessageRate &&
-      stats.messageCount > CLIENT_USAGE_CONFIG.MAX_MESSAGES_PER_WINDOW
-    ) {
-      logger.warn("Client peer exceeding message rate threshold", {
-        peerId: peer.id,
-        warningType: "message_rate",
-        messageCount: stats.messageCount,
-        threshold: CLIENT_USAGE_CONFIG.MAX_MESSAGES_PER_WINDOW,
-      });
-      stats.warnedMessageRate = true;
-    }
-
-    if (
-      !stats.warnedContentSize &&
-      stats.contentBytes > CLIENT_USAGE_CONFIG.MAX_CONTENT_BYTES_PER_WINDOW
-    ) {
-      logger.warn("Client peer exceeding content size threshold", {
-        peerId: peer.id,
-        warningType: "content_size",
-        contentBytes: stats.contentBytes,
-        threshold: CLIENT_USAGE_CONFIG.MAX_CONTENT_BYTES_PER_WINDOW,
-      });
-      stats.warnedContentSize = true;
-    }
+    return tracker;
   }
 
   public push(msg: SyncMessage, peer: PeerState) {
-    this.trackClientUsage(msg, peer);
+    if (peer.role === "client") {
+      this.getClientUsageTracker(peer).track(msg);
+    }
 
     const queue = this.peerToQueue.get(peer);
 
