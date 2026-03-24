@@ -62,10 +62,6 @@ describe("History & Conflict Management", () => {
   const ctx = new TestCleanup();
   afterEach(() => ctx.cleanup());
 
-  // -------------------------------------------------------------------------
-  // Test 12: concurrent_updates_converge_in_browser
-  // -------------------------------------------------------------------------
-
   /**
    * Two browser clients update the same todo concurrently. Both must
    * eventually converge to the same title.
@@ -131,10 +127,6 @@ describe("History & Conflict Management", () => {
     );
   }, 90000);
 
-  // -------------------------------------------------------------------------
-  // Diagnostic: does a sequential UPDATE propagate at all?
-  // -------------------------------------------------------------------------
-
   it("sequential update propagates from A to B", async () => {
     const token = `hc-seq-update-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const dbAlice = await createSyncedDb(ctx, "hc-alice-seq-upd", token);
@@ -177,10 +169,6 @@ describe("History & Conflict Management", () => {
       20000,
     );
   }, 60000);
-
-  // -------------------------------------------------------------------------
-  // Test 13: concurrent_creates_both_visible_in_browser
-  // -------------------------------------------------------------------------
 
   /**
    * Two browser clients each create a todo concurrently. Both should
@@ -235,10 +223,6 @@ describe("History & Conflict Management", () => {
     );
     expect(bobRows.length).toBeGreaterThanOrEqual(2);
   }, 60000);
-
-  // -------------------------------------------------------------------------
-  // Test 14: subscription_fires_on_remote_concurrent_update
-  // -------------------------------------------------------------------------
 
   /**
    * Alice subscribes, Bob updates a todo — Alice's subscription fires
@@ -302,10 +286,6 @@ describe("History & Conflict Management", () => {
 
     unsub();
   }, 60000);
-
-  // -------------------------------------------------------------------------
-  // Test 15: fresh_db_sees_converged_state
-  // -------------------------------------------------------------------------
 
   /**
    * Alice and Bob create a conflict. Charlie connects fresh and sees
