@@ -731,7 +731,7 @@ impl QueryManager {
                 let obj = obj?;
                 // Find the newest commit across all subscription branches (LWW)
                 // Also track which branch it came from for schema transformation
-                let mut best: Option<(u64, Vec<u8>, CommitId, String)> = None;
+                let mut best: Option<(u64, CommitId, Vec<u8>, String)> = None;
 
                 for branch_name in branches {
                     if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
@@ -741,16 +741,18 @@ impl QueryManager {
                                     None => {
                                         best = Some((
                                             commit.timestamp,
-                                            commit.content.clone(),
                                             tip_id,
+                                            commit.content.clone(),
                                             branch_name.clone(),
                                         ));
                                     }
-                                    Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
+                                    Some((best_ts, best_id, _, _))
+                                        if (commit.timestamp, tip_id) > (*best_ts, *best_id) =>
+                                    {
                                         best = Some((
                                             commit.timestamp,
-                                            commit.content.clone(),
                                             tip_id,
+                                            commit.content.clone(),
                                             branch_name.clone(),
                                         ));
                                     }
@@ -762,8 +764,8 @@ impl QueryManager {
                 }
 
                 // Filter out empty content (hard delete tombstones only)
-                let (_, content, commit_id, source_branch) =
-                    best.filter(|(_, content, _, _)| !content.is_empty())?;
+                let (_, commit_id, content, source_branch) =
+                    best.filter(|(_, _, content, _)| !content.is_empty())?;
 
                 // Apply lens transform if row is from an old schema branch
                 if let Some(&source_hash) = branch_schema_map.get(&source_branch)
@@ -901,7 +903,7 @@ impl QueryManager {
         self.settle_server_subscriptions(storage_ref);
     }
     /// Load a row's data from a specific branch using LWW (last-writer-wins by timestamp).
-    /// When multiple concurrent tips exist, returns content from the tip with highest timestamp.
+    /// When timestamps tie, CommitId provides a deterministic secondary ordering.
     pub(super) fn load_row_from_object_on_branch(
         &self,
         row_id: ObjectId,
@@ -909,9 +911,14 @@ impl QueryManager {
     ) -> Option<(Vec<u8>, CommitId)> {
         let obj = self.sync_manager.object_manager.get(row_id)?;
         let branch = obj.branches.get(&BranchName::new(branch_name))?;
-        // Sort tips by timestamp (oldest first), take last (newest = LWW winner)
+        // Sort tips by (timestamp, CommitId) ascending, take last (newest = LWW winner)
         let mut tips: Vec<_> = branch.tips.iter().copied().collect();
-        tips.sort_by_key(|id| branch.commits.get(id).map(|c| c.timestamp).unwrap_or(0));
+        tips.sort_by_key(|id| {
+            (
+                branch.commits.get(id).map(|c| c.timestamp).unwrap_or(0),
+                *id,
+            )
+        });
         let tip_id = tips.last()?;
         let commit = branch.commits.get(tip_id)?;
         Some((commit.content.clone(), *tip_id))
