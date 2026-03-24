@@ -28,8 +28,11 @@
 - [**complex-merge-strategies**](todo/ideas/1_mvp/complex-merge-strategies.md) — Per-column/per-table merge strategies beyond LWW (counters, sets, rich text, custom logic).
 - [**explicit-indices**](todo/ideas/1_mvp/explicit-indices.md) — Developer-declared indices in the schema language, replacing auto-index-all-columns.
 - [**optimistic-update-dx**](todo/ideas/1_mvp/optimistic-update-dx.md) — Developer-facing API for mutation settlement state — show pending/confirmed/rejected status on rows and filter queries by settlement tier.
-- [**ordered-index-topk-query-path**](todo/ideas/1_mvp/ordered-index-topk-query-path.md) — Make paginated ordered queries fast by scanning in order and stopping early, instead of loading everything then sorting.
 - [**self-referential-inherits**](todo/ideas/1_mvp/self-referential-inherits.md) — Support bounded self-referential INHERITS relationships (e.g., a folder inheriting permissions from its parent folder).
 - [**storage-limits-and-eviction**](todo/ideas/1_mvp/storage-limits-and-eviction.md) — Bounded storage with LRU eviction of cold data on clients and edge servers, with lazy re-fetch from upstream.
 - [**sync-protocol-reliability**](todo/ideas/1_mvp/sync-protocol-reliability.md) — Fix critical reliability gaps in the HTTP/SSE sync path: out-of-order sends, early outbox clearing, poisoned incremental sync, ignored per-message results, asymmetric reconnect.
 - [**unified-binary-sync-protocol**](todo/ideas/1_mvp/unified-binary-sync-protocol.md) — Single binary protocol for network sync (client-server), worker communication (main thread-worker), and peer replication (server-server).
+
+## Projects
+
+- [**ordered-index-topk-query-path**](todo/projects/ordered-index-topk-query-path/)
