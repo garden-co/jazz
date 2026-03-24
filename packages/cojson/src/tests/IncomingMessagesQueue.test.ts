@@ -588,7 +588,7 @@ describe("IncomingMessagesQueue", () => {
 
       const countWarnings = () =>
         warnSpy.mock.calls.filter(
-          (call) =>
+          (call: unknown[]) =>
             typeof call[0] === "string" && call[0].includes("message rate"),
         ).length;
 
@@ -610,7 +610,7 @@ describe("IncomingMessagesQueue", () => {
 
       const countWarnings = () =>
         warnSpy.mock.calls.filter(
-          (call) =>
+          (call: unknown[]) =>
             typeof call[0] === "string" && call[0].includes("message rate"),
         ).length;
 
