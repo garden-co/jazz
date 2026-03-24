@@ -1,3 +1,24 @@
+Released Jazz 0.20.15:
+- Surface WASM panics as JavaScript errors and ship the generated inline snippet bundle.
+- Added an incoming queue metric that measures sync message processing time by `messageType`.
+- Fixed race condition in `AuthSecretStorage.set()` where `isAuthenticated` was set to `true` before the KV store write completed, causing spurious logouts in the BetterAuth client.
+- Correctly handle `z.partialRecord` to allow optional enum keys.
+- Introduce `omit`, `extend`, and `safeExtend` methods to CoMap schemas.
+
+Released Jazz 0.20.14:
+- Fixed recursive WASM aliasing errors when checking streaming state, including the `newContentSince()` path.
+
+Jazz 0.20.13 merged Version Packages PR (unpublished):
+- Added a new incoming queue metric that tracks pushed sync messages by type (`messageType`).
+- Added an MCP docs server exposing Jazz documentation as searchable tools for AI assistants via `jazz-run mcp`.
+- Updated `jazz-tools/tiptap` so `JazzSyncExtension` matches the Tiptap 3 plugin interface and lets `coRichText` be initialized later before syncing starts.
+- Fixed Better Auth 1.5.3 compatibility by importing `createAuthMiddleware` from `better-auth/api`.
+- `create-jazz-app` now scaffolds `AGENTS.md` and a `.skills/` directory in new projects.
+
+Released Jazz 0.20.12:
+- Fixed Better Auth email OTP sign-in to handle email addresses case-insensitively.
+- Added x86_64 iOS simulator support to the `cojson-core-rn` XCFramework build configuration.
+
 Released Jazz 0.20.11:
 - Wait for CoValue sync before acknowledging storage reconciliation batches, so reconciliation completion reflects actual sync state.
 - CoValue migration failures now resolve as unavailable (`$jazz.loadingState === "unavailable"`) instead of throwing during load.
