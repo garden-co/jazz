@@ -2,8 +2,10 @@ import { AccountRole, type InviteSecret, cojsonInternals } from "cojson";
 import { Account } from "../coValues/account.js";
 import type { CoValue, CoValueClassOrSchema } from "../internal.js";
 
-/** @category Invite Links */
-/** @deprecated Use the options object form: `createInviteLink(value, role, { baseURL, valueHint? })` */
+/**
+ * @category Invite Links
+ * @deprecated Use the options object form: `createInviteLink(value, role, { baseURL, valueHint? })`
+ */
 export function createInviteLink<C extends CoValue>(
   value: C,
   role: AccountRole,

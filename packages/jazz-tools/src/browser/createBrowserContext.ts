@@ -13,11 +13,9 @@ import {
   CoValueFromRaw,
   CryptoProvider,
   ID,
-  InviteSecret,
   NewAccountProps,
   SessionID,
   SyncConfig,
-  cojsonInternals,
   createAnonymousJazzContext,
 } from "jazz-tools";
 import { createJazzContext } from "jazz-tools";
@@ -243,68 +241,3 @@ export async function createJazzBrowserContext<
 export type SessionProvider = (
   accountID: ID<Account> | AgentID,
 ) => Promise<SessionID>;
-
-/** @category Invite Links */
-export function createInviteLink<C extends CoValue>(
-  value: C,
-  role: "reader" | "writer" | "admin" | "writeOnly",
-  // default to same address as window.location, but without hash
-  {
-    baseURL = window.location.href.replace(/#.*$/, ""),
-    valueHint,
-  }: { baseURL?: string; valueHint?: string } = {},
-): string {
-  const coValueCore = value.$jazz.raw.core;
-  let currentCoValue = coValueCore;
-
-  while (currentCoValue.verified.header.ruleset.type === "ownedByGroup") {
-    currentCoValue = currentCoValue.getGroup().core;
-  }
-
-  const { ruleset, meta } = currentCoValue.verified.header;
-
-  if (ruleset.type !== "group" || meta?.type === "account") {
-    throw new Error("Can't create invite link for object without group");
-  }
-
-  const group = cojsonInternals.expectGroup(currentCoValue.getCurrentContent());
-  const inviteSecret = group.createInvite(role);
-
-  return `${baseURL}#/invite/${valueHint ? valueHint + "/" : ""}${
-    value.$jazz.id
-  }/${inviteSecret}`;
-}
-
-/** @category Invite Links */
-export function parseInviteLink<C extends CoValue>(
-  inviteURL: string,
-):
-  | {
-      valueID: ID<C>;
-      valueHint?: string;
-      inviteSecret: InviteSecret;
-    }
-  | undefined {
-  const url = new URL(inviteURL);
-  const parts = url.hash.split("/");
-
-  let valueHint: string | undefined;
-  let valueID: ID<C> | undefined;
-  let inviteSecret: InviteSecret | undefined;
-
-  if (parts[0] === "#" && parts[1] === "invite") {
-    if (parts.length === 5) {
-      valueHint = parts[2];
-      valueID = parts[3] as ID<C>;
-      inviteSecret = parts[4] as InviteSecret;
-    } else if (parts.length === 4) {
-      valueID = parts[2] as ID<C>;
-      inviteSecret = parts[3] as InviteSecret;
-    }
-
-    if (!valueID || !inviteSecret) {
-      return undefined;
-    }
-    return { valueID, inviteSecret, valueHint };
-  }
-}
