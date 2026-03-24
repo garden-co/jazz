@@ -41,7 +41,7 @@ export declare class NapiRuntime {
 }
 
 export declare class TestingServer {
-  static start(options?: { appId?: string; port?: number; dataDir?: string; persistentStorage?: boolean; adminSecret?: string; backendSecret?: string }): Promise<TestingServer>
+  static start(options?: { appId?: string; port?: number; dataDir?: string; persistentStorage?: boolean; adminSecret?: string; backendSecret?: string; jwksUrl?: string }): Promise<TestingServer>
   get appId(): string
   get url(): string
   get port(): number
