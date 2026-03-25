@@ -2856,3 +2856,63 @@ fn doc_update_from_client_forwarded_to_servers() {
         _ => panic!("expected server destination"),
     }
 }
+
+// ========================================================================
+// Transport protocol wire-format roundtrip tests
+// ========================================================================
+
+#[test]
+fn doc_sync_payloads_serialize_roundtrip() {
+    use crate::sync_manager::types::ObjectMetadata;
+
+    let doc_id = ObjectId::new();
+
+    // Test DocUpdated roundtrip
+    let payload = SyncPayload::DocUpdated {
+        doc_id,
+        update: vec![1, 2, 3, 4, 5],
+        metadata: Some(ObjectMetadata {
+            id: doc_id,
+            metadata: HashMap::from([("table".to_string(), "todos".to_string())]),
+        }),
+    };
+
+    // JSON roundtrip
+    let json = payload.to_json().expect("should serialize to JSON");
+    let decoded = SyncPayload::from_json(&json).expect("should deserialize from JSON");
+    assert_eq!(payload, decoded);
+
+    // Postcard roundtrip
+    let bytes = payload.to_bytes().expect("should serialize to postcard");
+    let decoded = SyncPayload::from_bytes(&bytes).expect("should deserialize from postcard");
+    assert_eq!(payload, decoded);
+
+    // Test DocSyncRequest roundtrip
+    let payload = SyncPayload::DocSyncRequest {
+        doc_id,
+        state_vector: vec![10, 20, 30],
+    };
+    let bytes = payload.to_bytes().unwrap();
+    let decoded = SyncPayload::from_bytes(&bytes).unwrap();
+    assert_eq!(payload, decoded);
+
+    // Test DocSyncResponse roundtrip
+    let payload = SyncPayload::DocSyncResponse {
+        doc_id,
+        diff: vec![100, 200],
+        metadata: None,
+    };
+    let bytes = payload.to_bytes().unwrap();
+    let decoded = SyncPayload::from_bytes(&bytes).unwrap();
+    assert_eq!(payload, decoded);
+
+    // Test DocPersistenceAck roundtrip
+    let payload = SyncPayload::DocPersistenceAck {
+        doc_id,
+        state_vector: vec![1, 2],
+        tier: DurabilityTier::EdgeServer,
+    };
+    let bytes = payload.to_bytes().unwrap();
+    let decoded = SyncPayload::from_bytes(&bytes).unwrap();
+    assert_eq!(payload, decoded);
+}
