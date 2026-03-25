@@ -26,7 +26,7 @@ export const startSyncServer = async (port?: number) => {
 
   const connections = new Set<WebSocket>();
 
-  wss.on("connection", function connection(ws, req) {
+  wss.on("connection", function connection(ws, _req) {
     connections.add(ws);
 
     const sendPing = () => {
