@@ -34,7 +34,7 @@ export function reconcileArray<T extends { id: string }>(target: T[], source: T[
 
   for (let i = 0; i < result.length; i++) {
     if (target[i] !== result[i]) {
-      target[i] = result[i];
+      target[i] = result[i]!;
     }
   }
   if (target.length > result.length) {

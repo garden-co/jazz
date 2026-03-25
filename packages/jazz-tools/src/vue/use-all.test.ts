@@ -152,8 +152,8 @@ describe("vue/useAll", () => {
 
     expect(result!.value).toHaveLength(1);
     expect(result!.value![0]).toBe(originalRef); // same object reference
-    expect(result!.value![0].role).toBe("editor"); // updated value
-    expect(result!.value![0].name).toBe("Alice"); // unchanged
+    expect((result!.value![0] as any).role).toBe("editor"); // updated value
+    expect((result!.value![0] as any).name).toBe("Alice"); // unchanged
 
     scope.stop();
   });
