@@ -82,6 +82,54 @@ describe("reconcileArray through $state proxy", () => {
   });
 });
 
+// ── applyDelta skips unchanged rows ─────────────────────────────────
+
+describe("applyDelta only touches changed rows", () => {
+  it("$effect on unchanged row does not re-fire when only another row updates", async () => {
+    //  alice and bob in the array; only bob changes.
+    //  An $effect watching alice.name should NOT re-fire.
+    let items: Array<{ id: string; name: string }> = $state([
+      { id: "1", name: "Alice" },
+      { id: "2", name: "Bob" },
+    ]);
+
+    let aliceEffectCount = 0;
+    let bobEffectCount = 0;
+    const cleanup = $effect.root(() => {
+      $effect(() => {
+        void items[0]?.name;
+        aliceEffectCount++;
+      });
+      $effect(() => {
+        void items[1]?.name;
+        bobEffectCount++;
+      });
+    });
+
+    await Promise.resolve();
+    flushSync();
+    expect(aliceEffectCount).toBe(1);
+    expect(bobEffectCount).toBe(1);
+
+    // Delta: only bob updated
+    applyDelta(items, {
+      all: [
+        { id: "1", name: "Alice" },
+        { id: "2", name: "Bob (v2)" },
+      ],
+      delta: [{ kind: 2, id: "2", index: 1 }],
+    });
+    await Promise.resolve();
+    flushSync();
+
+    expect(aliceEffectCount).toBe(1); // alice untouched — no re-fire
+    expect(bobEffectCount).toBe(2); // bob changed — re-fired
+    expect(items[1].name).toBe("Bob (v2)");
+
+    cleanup();
+  });
+});
+
 // ── Rune behaviour smoke tests ─────────────────────────────────────
 // These verify that the callback patterns used by QuerySubscription
 // behave correctly under real $state proxying and flushSync — not
