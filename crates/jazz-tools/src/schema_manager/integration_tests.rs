@@ -2978,7 +2978,7 @@ mod tests {
         let row_id = ObjectId::new();
         let values = HashMap::from([
             ("id".to_string(), Value::Uuid(row_id)),
-            ("text".to_string(), Value::Text("hello".into())),
+            ("name".to_string(), Value::Text("hello".into())),
         ]);
         manager.insert(&mut storage, "items", values).unwrap();
         manager.process(&mut storage);

@@ -324,7 +324,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
                     "title".to_string(),
                     Value::Text("before-restart".to_string()),
                 ),
-                ("done".to_string(), Value::Boolean(false)),
+                ("completed".to_string(), Value::Boolean(false)),
             ]),
         )
         .await
@@ -370,7 +370,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
                     "title".to_string(),
                     Value::Text("after-restart".to_string()),
                 ),
-                ("done".to_string(), Value::Boolean(false)),
+                ("completed".to_string(), Value::Boolean(false)),
             ]),
         )
         .await
@@ -420,7 +420,7 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk() {
                     "title".to_string(),
                     Value::Text("only-in-memory".to_string()),
                 ),
-                ("done".to_string(), Value::Boolean(false)),
+                ("completed".to_string(), Value::Boolean(false)),
             ]),
         )
         .await
