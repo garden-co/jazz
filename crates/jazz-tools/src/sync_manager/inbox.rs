@@ -137,6 +137,51 @@ impl SyncManager {
                 // Log or handle server error
                 eprintln!("Error from server {:?}: {:?}", server_id, err);
             }
+            SyncPayload::DocUpdated {
+                doc_id,
+                update,
+                metadata,
+            } => {
+                tracing::debug!(%doc_id, update_len = update.len(), "server→DocUpdated");
+                if self.doc_manager.get(doc_id).is_none() {
+                    let meta = metadata
+                        .as_ref()
+                        .map(|m| m.metadata.clone())
+                        .unwrap_or_default();
+                    self.doc_manager.create_with_id(doc_id, meta);
+                }
+                if let Err(e) = self.doc_manager.apply_update(doc_id, &update) {
+                    tracing::warn!(%doc_id, error = %e, "failed to apply doc update");
+                }
+            }
+            SyncPayload::DocSyncRequest {
+                doc_id,
+                state_vector,
+            } => {
+                // TODO: compute diff and respond
+                tracing::debug!(%doc_id, sv_len = state_vector.len(), "DocSyncRequest received (not yet implemented)");
+            }
+            SyncPayload::DocSyncResponse {
+                doc_id,
+                diff,
+                metadata,
+            } => {
+                tracing::debug!(%doc_id, diff_len = diff.len(), "server→DocSyncResponse");
+                if self.doc_manager.get(doc_id).is_none() {
+                    let meta = metadata
+                        .as_ref()
+                        .map(|m| m.metadata.clone())
+                        .unwrap_or_default();
+                    self.doc_manager.create_with_id(doc_id, meta);
+                }
+                if let Err(e) = self.doc_manager.apply_update(doc_id, &diff) {
+                    tracing::warn!(%doc_id, error = %e, "failed to apply doc sync response");
+                }
+            }
+            SyncPayload::DocPersistenceAck { .. } => {
+                // TODO: implement state vector ack tracking
+                tracing::debug!("DocPersistenceAck received (not yet implemented)");
+            }
             // Servers shouldn't send these to us
             SyncPayload::QuerySubscription { .. } | SyncPayload::QueryUnsubscription { .. } => {}
         }
@@ -427,6 +472,57 @@ impl SyncManager {
             } => {
                 // Client relaying a QuerySettled from downstream
                 self.pending_query_settled.push((*query_id, *tier));
+            }
+            SyncPayload::DocUpdated {
+                doc_id,
+                update,
+                metadata,
+            } => {
+                let doc_id = *doc_id;
+                tracing::debug!(%doc_id, update_len = update.len(), "client→DocUpdated");
+                if self.doc_manager.get(doc_id).is_none() {
+                    let meta = metadata
+                        .as_ref()
+                        .map(|m| m.metadata.clone())
+                        .unwrap_or_default();
+                    self.doc_manager.create_with_id(doc_id, meta);
+                }
+                if let Err(e) = self.doc_manager.apply_update(doc_id, update) {
+                    tracing::warn!(%doc_id, error = %e, "failed to apply doc update from client");
+                }
+                // Forward to servers
+                self.forward_doc_update_to_servers(doc_id, update.clone(), metadata.clone());
+                // TODO: forward to other clients
+            }
+            SyncPayload::DocSyncRequest {
+                doc_id,
+                state_vector,
+            } => {
+                let doc_id = *doc_id;
+                // TODO: compute diff and respond
+                tracing::debug!(%doc_id, sv_len = state_vector.len(), "client→DocSyncRequest (not yet implemented)");
+            }
+            SyncPayload::DocSyncResponse {
+                doc_id,
+                diff,
+                metadata,
+            } => {
+                let doc_id = *doc_id;
+                tracing::debug!(%doc_id, diff_len = diff.len(), "client→DocSyncResponse");
+                if self.doc_manager.get(doc_id).is_none() {
+                    let meta = metadata
+                        .as_ref()
+                        .map(|m| m.metadata.clone())
+                        .unwrap_or_default();
+                    self.doc_manager.create_with_id(doc_id, meta);
+                }
+                if let Err(e) = self.doc_manager.apply_update(doc_id, diff) {
+                    tracing::warn!(%doc_id, error = %e, "failed to apply doc sync response from client");
+                }
+            }
+            SyncPayload::DocPersistenceAck { .. } => {
+                // TODO: implement state vector ack tracking
+                tracing::debug!("DocPersistenceAck from client (not yet implemented)");
             }
             // Clients shouldn't send these
             SyncPayload::Error(_) => {}

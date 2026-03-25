@@ -184,4 +184,23 @@ impl SyncManager {
             });
         }
     }
+
+    /// Forward a doc update to all connected servers.
+    pub(super) fn forward_doc_update_to_servers(
+        &mut self,
+        doc_id: ObjectId,
+        update: Vec<u8>,
+        metadata: Option<ObjectMetadata>,
+    ) {
+        for &server_id in self.servers.keys() {
+            self.outbox.push(OutboxEntry {
+                destination: Destination::Server(server_id),
+                payload: SyncPayload::DocUpdated {
+                    doc_id,
+                    update: update.clone(),
+                    metadata: metadata.clone(),
+                },
+            });
+        }
+    }
 }

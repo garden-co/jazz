@@ -264,6 +264,39 @@ pub enum SyncPayload {
 
     /// Error response.
     Error(SyncError),
+
+    /// Yrs document update (CRDT-based sync).
+    DocUpdated {
+        doc_id: ObjectId,
+        /// Raw Yrs v1 update bytes.
+        update: Vec<u8>,
+        /// Optional metadata (sent on first sync for a new doc).
+        metadata: Option<ObjectMetadata>,
+    },
+
+    /// Yrs document sync request — client sends state vector to request missing updates.
+    DocSyncRequest {
+        doc_id: ObjectId,
+        /// Client's current Yrs state vector (v1 encoded).
+        state_vector: Vec<u8>,
+    },
+
+    /// Yrs document sync response — server sends diff based on client's state vector.
+    DocSyncResponse {
+        doc_id: ObjectId,
+        /// Yrs diff (update bytes encoding the delta from the client's state vector).
+        diff: Vec<u8>,
+        /// Doc metadata if not previously sent.
+        metadata: Option<ObjectMetadata>,
+    },
+
+    /// Persistence ack for Yrs docs — confirms a state vector is durably stored.
+    DocPersistenceAck {
+        doc_id: ObjectId,
+        /// State vector encoding the highest state known to be persisted.
+        state_vector: Vec<u8>,
+        tier: DurabilityTier,
+    },
 }
 
 /// Sessions contain claims as a JSON object.
@@ -347,6 +380,9 @@ impl SyncPayload {
         let metadata = match self {
             SyncPayload::ObjectUpdated {
                 metadata: Some(m), ..
+            }
+            | SyncPayload::DocUpdated {
+                metadata: Some(m), ..
             } => &m.metadata,
             SyncPayload::ObjectTruncated { .. } => {
                 // Truncation could be catalogue, but we check conservatively.
@@ -374,6 +410,10 @@ impl SyncPayload {
             SyncPayload::PersistenceAck { .. } => "PersistenceAck",
             SyncPayload::QuerySettled { .. } => "QuerySettled",
             SyncPayload::Error(_) => "Error",
+            SyncPayload::DocUpdated { .. } => "DocUpdated",
+            SyncPayload::DocSyncRequest { .. } => "DocSyncRequest",
+            SyncPayload::DocSyncResponse { .. } => "DocSyncResponse",
+            SyncPayload::DocPersistenceAck { .. } => "DocPersistenceAck",
         }
     }
 }

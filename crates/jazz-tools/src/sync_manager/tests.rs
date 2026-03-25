@@ -2612,3 +2612,247 @@ fn query_subscription_demo_client_no_server_session_no_payload_session() {
         "anonymous client should produce session: None"
     );
 }
+
+// ========================================================================
+// Doc Sync (Yrs-based) Tests
+// ========================================================================
+
+/// Alice creates a doc, writes a field, encodes the full state as an update,
+/// and sends it to Bob via DocUpdated. Bob should see the same data.
+///
+/// ```text
+/// Alice                          Bob
+///   |--- DocUpdated(update) ----->|
+///   |                             | apply_update
+///   |                             | title == "Buy milk"
+/// ```
+#[test]
+fn doc_sync_roundtrip_between_two_peers() {
+    use yrs::updates::encoder::Encode;
+    use yrs::{Map, Transact};
+
+    let mut alice = SyncManager::new();
+    let mut bob = SyncManager::new();
+    let mut storage = MemoryStorage::new();
+
+    let server_id = ServerId::new();
+    alice.add_server(server_id);
+    alice.take_outbox(); // clear initial sync messages
+
+    // Alice creates a doc and writes to it
+    let doc_id = ObjectId::new();
+    let metadata = HashMap::from([("table".to_string(), "todos".to_string())]);
+    alice.doc_manager.create_with_id(doc_id, metadata.clone());
+
+    {
+        let row_doc = alice.doc_manager.get_mut(doc_id).unwrap();
+        let mut txn = row_doc.doc.transact_mut();
+        row_doc.root_map.insert(&mut txn, "title", "Buy milk");
+    }
+
+    // Get Alice's full state as an update (diff from empty state vector)
+    let alice_update = alice
+        .doc_manager
+        .encode_diff(doc_id, &yrs::StateVector::default().encode_v1())
+        .unwrap();
+
+    // Bob processes the update via inbox
+    bob.process_inbox_entry(
+        &mut storage,
+        InboxEntry {
+            source: Source::Server(server_id),
+            payload: SyncPayload::DocUpdated {
+                doc_id,
+                update: alice_update,
+                metadata: Some(ObjectMetadata {
+                    id: doc_id,
+                    metadata: metadata.clone(),
+                }),
+            },
+        },
+    );
+
+    // Verify bob has the data
+    let bob_doc = bob
+        .doc_manager
+        .get(doc_id)
+        .expect("bob should have the doc");
+    let txn = bob_doc.doc.transact();
+    match bob_doc.root_map.get(&txn, "title") {
+        Some(yrs::Out::Any(yrs::Any::String(s))) => assert_eq!(s.as_ref(), "Buy milk"),
+        other => panic!("expected 'Buy milk', got: {:?}", other),
+    }
+
+    // Verify bob's doc metadata was set
+    assert_eq!(
+        bob_doc.metadata.get("table").map(|s| s.as_str()),
+        Some("todos")
+    );
+}
+
+/// Alice writes title, Bob writes done — both sync their updates to each other.
+/// After convergence, both should see title + done.
+///
+/// ```text
+/// Alice                          Bob
+///   |  title="Buy milk"            |  done=true
+///   |--- DocUpdated(alice_upd) --->|
+///   |<-- DocUpdated(bob_upd) ------|
+///   |  title + done                |  title + done
+/// ```
+#[test]
+fn doc_sync_concurrent_writes_converge() {
+    use yrs::updates::encoder::Encode;
+    use yrs::{Map, Transact};
+
+    let mut alice = SyncManager::new();
+    let mut bob = SyncManager::new();
+    let mut storage = MemoryStorage::new();
+
+    let server_id = ServerId::new();
+
+    // Both create the same doc independently (simulating initial sync)
+    let doc_id = ObjectId::new();
+    let metadata = HashMap::from([("table".to_string(), "todos".to_string())]);
+    alice.doc_manager.create_with_id(doc_id, metadata.clone());
+    bob.doc_manager.create_with_id(doc_id, metadata.clone());
+
+    // Alice writes title
+    {
+        let row_doc = alice.doc_manager.get_mut(doc_id).unwrap();
+        let mut txn = row_doc.doc.transact_mut();
+        row_doc.root_map.insert(&mut txn, "title", "Buy milk");
+    }
+
+    // Bob writes done
+    {
+        let row_doc = bob.doc_manager.get_mut(doc_id).unwrap();
+        let mut txn = row_doc.doc.transact_mut();
+        row_doc.root_map.insert(&mut txn, "done", true);
+    }
+
+    // Get both updates (full state from empty SV)
+    let empty_sv = yrs::StateVector::default().encode_v1();
+    let alice_update = alice.doc_manager.encode_diff(doc_id, &empty_sv).unwrap();
+    let bob_update = bob.doc_manager.encode_diff(doc_id, &empty_sv).unwrap();
+
+    // Bob receives Alice's update
+    bob.process_inbox_entry(
+        &mut storage,
+        InboxEntry {
+            source: Source::Server(server_id),
+            payload: SyncPayload::DocUpdated {
+                doc_id,
+                update: alice_update,
+                metadata: None,
+            },
+        },
+    );
+
+    // Alice receives Bob's update
+    alice.process_inbox_entry(
+        &mut storage,
+        InboxEntry {
+            source: Source::Server(server_id),
+            payload: SyncPayload::DocUpdated {
+                doc_id,
+                update: bob_update,
+                metadata: None,
+            },
+        },
+    );
+
+    // Both should have title + done
+    for (name, sm) in [("alice", &alice), ("bob", &bob)] {
+        let row_doc = sm
+            .doc_manager
+            .get(doc_id)
+            .expect(&format!("{name} should have doc"));
+        let txn = row_doc.doc.transact();
+
+        match row_doc.root_map.get(&txn, "title") {
+            Some(yrs::Out::Any(yrs::Any::String(s))) => {
+                assert_eq!(s.as_ref(), "Buy milk", "{name} title")
+            }
+            other => panic!("{name}: expected title='Buy milk', got: {:?}", other),
+        }
+        match row_doc.root_map.get(&txn, "done") {
+            Some(yrs::Out::Any(yrs::Any::Bool(b))) => assert!(b, "{name} done"),
+            other => panic!("{name}: expected done=true, got: {:?}", other),
+        }
+    }
+}
+
+/// DocUpdated from a client should be applied and forwarded to servers.
+#[test]
+fn doc_update_from_client_forwarded_to_servers() {
+    use yrs::{Map, ReadTxn, Transact};
+
+    let mut sm = SyncManager::new();
+    let mut storage = MemoryStorage::new();
+
+    let server_id = ServerId::new();
+    sm.add_server(server_id);
+    sm.take_outbox(); // clear
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.take_outbox(); // clear catalogue sync
+
+    // Client sends a doc update
+    let doc_id = ObjectId::new();
+    let metadata = HashMap::from([("table".to_string(), "items".to_string())]);
+
+    // Create a temporary doc to generate an update
+    let tmp_doc = yrs::Doc::new();
+    let tmp_map = tmp_doc.get_or_insert_map("row");
+    {
+        let mut txn = tmp_doc.transact_mut();
+        tmp_map.insert(&mut txn, "name", "Widget");
+    }
+    let update = tmp_doc
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+
+    sm.process_inbox_entry(
+        &mut storage,
+        InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::DocUpdated {
+                doc_id,
+                update: update.clone(),
+                metadata: Some(ObjectMetadata {
+                    id: doc_id,
+                    metadata: metadata.clone(),
+                }),
+            },
+        },
+    );
+
+    // Verify the doc was applied locally
+    let row_doc = sm.doc_manager.get(doc_id).expect("doc should exist");
+    let txn = row_doc.doc.transact();
+    match row_doc.root_map.get(&txn, "name") {
+        Some(yrs::Out::Any(yrs::Any::String(s))) => assert_eq!(s.as_ref(), "Widget"),
+        other => panic!("expected 'Widget', got: {:?}", other),
+    }
+    drop(txn);
+
+    // Verify the update was forwarded to the server
+    let outbox = sm.take_outbox();
+    let doc_updated = outbox.iter().find(|e| {
+        matches!(
+            &e.payload,
+            SyncPayload::DocUpdated { doc_id: id, .. } if *id == doc_id
+        )
+    });
+    assert!(
+        doc_updated.is_some(),
+        "DocUpdated should be forwarded to server"
+    );
+    match &doc_updated.unwrap().destination {
+        Destination::Server(id) => assert_eq!(*id, server_id),
+        _ => panic!("expected server destination"),
+    }
+}
