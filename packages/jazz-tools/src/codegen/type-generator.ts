@@ -127,6 +127,48 @@ function singularize(word: string): string {
   return pluralize.singular(word);
 }
 
+function serializeTsLiteral(value: unknown, indent = 0): string {
+  const currentIndent = "  ".repeat(indent);
+  const nextIndent = "  ".repeat(indent + 1);
+
+  if (value instanceof Uint8Array) {
+    return `new Uint8Array([${Array.from(value).join(", ")}])`;
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return "[]";
+    }
+    return `[\n${value.map((entry) => `${nextIndent}${serializeTsLiteral(entry, indent + 1)}`).join(",\n")}\n${currentIndent}]`;
+  }
+
+  if (value === null) {
+    return "null";
+  }
+
+  switch (typeof value) {
+    case "string":
+      return JSON.stringify(value);
+    case "number":
+    case "boolean":
+      return String(value);
+    case "object": {
+      const entries = Object.entries(value).filter(([, entryValue]) => entryValue !== undefined);
+      if (entries.length === 0) {
+        return "{}";
+      }
+      return `{\n${entries
+        .map(
+          ([key, entryValue]) =>
+            `${nextIndent}${JSON.stringify(key)}: ${serializeTsLiteral(entryValue, indent + 1)}`,
+        )
+        .join(",\n")}\n${currentIndent}}`;
+    }
+    default:
+      throw new Error(`Unsupported literal value in generated schema: ${typeof value}`);
+  }
+}
+
 /**
  * Convert a table name to a TypeScript interface name.
  *
@@ -468,7 +510,7 @@ export function generateTypes(schema: WasmSchema): string {
   lines.push(...generateSelectionTypes(schema, relations));
 
   // Export WasmSchema JSON
-  lines.push(`export const wasmSchema: WasmSchema = ${JSON.stringify(schema, null, 2)};`);
+  lines.push(`export const wasmSchema: WasmSchema = ${serializeTsLiteral(schema)};`);
   lines.push("");
 
   // QueryBuilder classes
