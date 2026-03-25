@@ -72,32 +72,10 @@ Jazz dev server:  http://localhost:4200
 Demo auth:        http://localhost:4201
 ```
 
-### Client Configuration
-
-The client config accepts an `authServer` URL. If omitted, defaults to Jazz server port + 1 for zero-config dev.
-
-```typescript
-const db = createDb({
-  appId: "my-app",
-  server: "http://localhost:4200",
-  authServer: "http://localhost:4201", // default: inferred from server port
-});
-```
-
-In production, `authServer` points to the real auth provider:
-
-```typescript
-const db = createDb({
-  appId: "my-app",
-  server: "https://api.myapp.com",
-  authServer: "https://auth.myapp.com",
-});
-```
-
 ### Auth Flow
 
 1. Client detects no valid session
-2. Redirects to `{authServer}/pick` — the demo auth server's user picker
+2. Redirects to the demo auth server's user picker
 3. User clicks a name (Alice, Bob, Carol, or creates a new user)
 4. Demo auth issues a JWT, redirects back to the app
 5. Client stores the JWT, connects to Jazz server with `Authorization: Bearer`
@@ -148,7 +126,7 @@ Since demo auth _is_ Better Auth, the upgrade is config evolution, not system re
 
 1. **Add credential methods** — enable email/password, OAuth, etc. in Better Auth config
 2. **Point at production database** — swap SQLite for Postgres (or Jazz, via Matteo's adapter)
-3. **Update client config** — change `authServer` to the production URL
+3. **Update redirect URLs** — point login/logout at the production auth server
 4. **Disable anonymous plugin** — require real credentials
 
 With Matteo's Better Auth adapter storing users in Jazz, demo users created during development are already in the database. Adding credential methods to existing users makes them "real" — no migration, no data loss.
@@ -179,6 +157,5 @@ Demo auth is the recommended default. Client-only auth is documented as a fallba
 - User switching: redirect to picker, select different user, new JWT, different session
 - JWT validation: Jazz server accepts demo auth JWTs, rejects invalid/expired tokens
 - User persistence: created demo users survive server restart
-- Client config: omitting `authServer` defaults to server port + 1
-- Production config: explicit `authServer` URL overrides the default
+- Client-only auth continues to work independently (no demo auth server required)
 - Client-only auth continues to work independently (no demo auth server required)
