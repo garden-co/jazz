@@ -1,15 +1,25 @@
 import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
 
 /**
- * Apply a subscription delta to a reactive array, preserving object
- * identity for unchanged and updated items. Uses reconcileArray for
- * ordering and deepMerge for property-level updates.
+ * Apply a subscription delta to a reactive array, deep-merging only
+ * the rows that actually changed.
  */
 export function applyDelta<T extends { id: string }>(
   target: T[],
   delta: SubscriptionDelta<T>,
 ): void {
-  reconcileArray(target, delta.all);
+  const changedIds = new Set<string>();
+  for (const change of delta.delta) {
+    if (change.kind === 2) changedIds.add(change.id);
+  }
+
+  for (const id of changedIds) {
+    const existing = target.find((item) => item.id === id);
+    const source = delta.all.find((item) => item.id === id);
+    if (existing && source) {
+      deepMerge(existing as Record<string, unknown>, source as Record<string, unknown>);
+    }
+  }
 }
 
 /**
