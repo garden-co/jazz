@@ -286,25 +286,51 @@ impl OpfsFile {
                 .dyn_into()
                 .map_err(|_| BTreeError::Io("failed to cast OPFS file handle".to_string()))?;
 
-        let handle: web_sys::FileSystemSyncAccessHandle =
-            JsFuture::from(file.create_sync_access_handle())
-                .await
-                .map_err(map_js_error)?
-                .dyn_into()
-                .map_err(|_| {
-                    BTreeError::Io("failed to cast OPFS sync access handle".to_string())
-                })?;
+        // Retry with exponential backoff: on rapid page refresh the previous
+        // worker may still hold the exclusive SyncAccessHandle.  The browser
+        // releases it once the old worker is GC'd, typically within a few
+        // hundred milliseconds.
+        // Only retries on DOMExceptions (handle conflicts); other errors fail immediately.
+        const MAX_RETRIES: u32 = 5;
+        const BASE_DELAY_MS: u32 = 50; // 50, 100, 200, 400, 800 → ~1.5s total
 
-        let read_options = web_sys::FileSystemReadWriteOptions::new();
-        let write_options = web_sys::FileSystemReadWriteOptions::new();
+        let mut last_err = None;
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                let delay = BASE_DELAY_MS * (1 << (attempt - 1));
+                sleep_ms(delay).await;
+            }
+            match JsFuture::from(file.create_sync_access_handle()).await {
+                Ok(val) => {
+                    let handle: web_sys::FileSystemSyncAccessHandle =
+                        val.dyn_into().map_err(|_| {
+                            BTreeError::Io("failed to cast OPFS sync access handle".to_string())
+                        })?;
+                    if attempt > 0 {
+                        tracing::info!(attempt, "acquired OPFS access handle after retry");
+                    }
 
-        Ok(Self {
-            inner: Rc::new(OpfsFileInner {
-                handle,
-                read_options,
-                write_options,
-            }),
-        })
+                    let read_options = web_sys::FileSystemReadWriteOptions::new();
+                    let write_options = web_sys::FileSystemReadWriteOptions::new();
+                    return Ok(Self {
+                        inner: Rc::new(OpfsFileInner {
+                            handle,
+                            read_options,
+                            write_options,
+                        }),
+                    });
+                }
+                Err(e) => {
+                    if !is_retryable_handle_conflict(&e) {
+                        return Err(map_js_error(e));
+                    }
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        // All retries exhausted — return the last error.
+        Err(map_js_error(last_err.unwrap()))
     }
 
     pub async fn destroy(namespace: &str) -> Result<(), BTreeError> {
@@ -420,6 +446,28 @@ fn truncate_handle(
         .call1(handle, &wasm_bindgen::JsValue::from_f64(len as f64))
         .map_err(map_js_error)?;
     Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn sleep_ms(ms: u32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        let global = js_sys::global();
+        let set_timeout = js_sys::Reflect::get(&global, &"setTimeout".into()).unwrap();
+        let set_timeout: js_sys::Function = set_timeout.unchecked_into();
+        let _ = set_timeout.call2(&global, &resolve, &wasm_bindgen::JsValue::from(ms));
+    });
+    let _ = JsFuture::from(promise).await;
+}
+
+/// Returns true if the JS error is a DOMException (has a `name` property),
+/// meaning it's likely a retryable handle conflict. Non-DOMException errors
+/// (e.g. quota, TypeError) fail immediately.
+#[cfg(target_arch = "wasm32")]
+fn is_retryable_handle_conflict(value: &wasm_bindgen::JsValue) -> bool {
+    js_sys::Reflect::get(value, &"name".into())
+        .ok()
+        .and_then(|v| v.as_string())
+        .is_some()
 }
 
 #[cfg(target_arch = "wasm32")]

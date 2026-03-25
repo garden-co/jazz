@@ -587,6 +587,34 @@ describe("Worker Bridge with OPFS", () => {
     expect(titles).toEqual(["Also survives", "Crash-proof"]);
   });
 
+  it("recovers from OPFS handle conflict after abrupt worker termination", async () => {
+    // Hold a WritableStream on the OPFS file from the main thread — this
+    // blocks createSyncAccessHandle in the worker, exactly like a stale
+    // handle from a previous page load.
+    //
+    //  main thread: createWritable() ──── holds ──── close()
+    //  worker:            createSyncAccessHandle() → conflict → retry → success
+    //
+    const dbName = uniqueDbName("handle-conflict");
+    // Coupled to OpfsFile::file_name() in crates/opfs-btree/src/file.rs
+    const fileName = `${dbName}.opfsbtree`;
+
+    // Pre-create the OPFS file and hold a writable stream to block the worker.
+    const root = await navigator.storage.getDirectory();
+    const fileHandle = await root.getFileHandle(fileName, { create: true });
+    const writable = await fileHandle.createWritable();
+
+    // Start the Db — its worker will hit NoModificationAllowedError and retry.
+    const dbPromise = createDb({ appId: "test-app", driver: { type: "persistent", dbName } });
+
+    // Release the lock after 100ms so the retry can succeed.
+    setTimeout(() => writable.close(), 100);
+
+    const db = track(await dbPromise);
+    const rows = await db.all(allTodos, { tier: "worker" });
+    expect(rows).toEqual([]);
+  });
+
   it("deletes OPFS storage for the current namespace and keeps the same Db usable", async () => {
     const db = track(
       await createDb({
