@@ -23,6 +23,6 @@
     "@types/node": "^20",
     "@types/react-dom": "^19",
     "execa": "^9.5.2",
-    "typescript": "^5"
+    "typescript": "catalog:default"
   }
 }

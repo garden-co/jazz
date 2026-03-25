@@ -31,7 +31,7 @@
     "@vitejs/plugin-react-swc": "^3.10.1",
     "is-ci": "^3.0.1",
     "jstat": "^1.9.6",
-    "typescript": "5.6.2",
+    "typescript": "catalog:default",
     "vite": "^6.3.5"
   }
 }
