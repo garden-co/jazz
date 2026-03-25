@@ -20,6 +20,8 @@ export function applyDelta<T extends { id: string }>(
       deepMerge(existing as Record<string, unknown>, source as Record<string, unknown>);
     }
   }
+  // Without reconciliation, ordering is not guaranteed.
+  reconcileArray(target, delta.all);
 }
 
 /**
