@@ -43,6 +43,14 @@ catalogs:
     "@sveltejs/vite-plugin-svelte": "^5.1.1"
     "svelte": "5.46.4"
     "svelte-check": "4.3.1"
+  tiptap:
+    "@tiptap/core": "^3.19.0"
+    "@tiptap/extension-color": "^3.19.0"
+    "@tiptap/extension-list-item": "^3.19.0"
+    "@tiptap/extension-text-style": "^3.19.0"
+    "@tiptap/pm": "^3.19.0"
+    "@tiptap/react": "^3.19.0"
+    "@tiptap/starter-kit": "^3.19.0"
 onlyBuiltDependencies:
   - esbuild
   - '@tailwindcss/oxide'
