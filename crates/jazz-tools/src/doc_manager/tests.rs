@@ -390,6 +390,126 @@ mod tests {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Column type mapping tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn column_type_roundtrip_text() {
+        use crate::query_manager::types::Value;
+        use crate::row_doc::{read_column, write_column};
+
+        let doc = Doc::new();
+        let map = doc.get_or_insert_map("row");
+        {
+            let mut txn = doc.transact_mut();
+            write_column(&map, &mut txn, "name", &Value::Text("Alice".into()));
+        }
+        let txn = doc.transact();
+        let val = read_column(&map, &txn, "name").unwrap();
+        assert_eq!(val, Value::Text("Alice".into()));
+    }
+
+    #[test]
+    fn column_type_roundtrip_integer() {
+        use crate::query_manager::types::Value;
+        use crate::row_doc::{read_column, write_column};
+
+        let doc = Doc::new();
+        let map = doc.get_or_insert_map("row");
+        {
+            let mut txn = doc.transact_mut();
+            write_column(&map, &mut txn, "age", &Value::Integer(42));
+        }
+        let txn = doc.transact();
+        let val = read_column(&map, &txn, "age").unwrap();
+        assert_eq!(val, Value::Integer(42));
+    }
+
+    #[test]
+    fn column_type_roundtrip_double() {
+        use crate::query_manager::types::Value;
+        use crate::row_doc::{read_column, write_column};
+
+        let doc = Doc::new();
+        let map = doc.get_or_insert_map("row");
+        {
+            let mut txn = doc.transact_mut();
+            write_column(&map, &mut txn, "score", &Value::Double(3.14));
+        }
+        let txn = doc.transact();
+        let val = read_column(&map, &txn, "score").unwrap();
+        assert_eq!(val, Value::Double(3.14));
+    }
+
+    #[test]
+    fn column_type_roundtrip_boolean() {
+        use crate::query_manager::types::Value;
+        use crate::row_doc::{read_column, write_column};
+
+        let doc = Doc::new();
+        let map = doc.get_or_insert_map("row");
+        {
+            let mut txn = doc.transact_mut();
+            write_column(&map, &mut txn, "done", &Value::Boolean(true));
+        }
+        let txn = doc.transact();
+        let val = read_column(&map, &txn, "done").unwrap();
+        assert_eq!(val, Value::Boolean(true));
+    }
+
+    #[test]
+    fn column_type_roundtrip_bigint() {
+        use crate::query_manager::types::Value;
+        use crate::row_doc::{read_column, write_column};
+
+        let doc = Doc::new();
+        let map = doc.get_or_insert_map("row");
+        {
+            let mut txn = doc.transact_mut();
+            write_column(&map, &mut txn, "big", &Value::BigInt(9_000_000_000));
+        }
+        let txn = doc.transact();
+        let val = read_column(&map, &txn, "big").unwrap();
+        assert_eq!(val, Value::BigInt(9_000_000_000));
+    }
+
+    #[test]
+    fn column_type_roundtrip_null() {
+        use crate::query_manager::types::Value;
+        use crate::row_doc::{read_column, write_column};
+
+        let doc = Doc::new();
+        let map = doc.get_or_insert_map("row");
+        {
+            let mut txn = doc.transact_mut();
+            write_column(&map, &mut txn, "name", &Value::Text("Alice".into()));
+        }
+        {
+            let mut txn = doc.transact_mut();
+            write_column(&map, &mut txn, "name", &Value::Null);
+        }
+        let txn = doc.transact();
+        let val = read_column(&map, &txn, "name");
+        assert!(val.is_none() || val == Some(Value::Null));
+    }
+
+    #[test]
+    fn column_type_roundtrip_bytea() {
+        use crate::query_manager::types::Value;
+        use crate::row_doc::{read_column, write_column};
+
+        let doc = Doc::new();
+        let map = doc.get_or_insert_map("row");
+        {
+            let mut txn = doc.transact_mut();
+            write_column(&map, &mut txn, "data", &Value::Bytea(vec![1, 2, 3]));
+        }
+        let txn = doc.transact();
+        let val = read_column(&map, &txn, "data").unwrap();
+        assert_eq!(val, Value::Bytea(vec![1, 2, 3]));
+    }
+
     #[test]
     fn encode_diff_produces_minimal_update() {
         let mut mgr = make_manager();
