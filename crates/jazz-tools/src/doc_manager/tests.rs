@@ -253,6 +253,71 @@ mod tests {
     }
 
     #[test]
+    fn compact_replaces_updates_with_snapshot() {
+        use yrs::{Map, Transact};
+
+        let mut mgr = make_manager();
+        let metadata = HashMap::from([("table".to_string(), "todos".to_string())]);
+        let id = mgr.create(metadata);
+
+        // Write and persist as updates (not snapshots)
+        for i in 0..10 {
+            {
+                let row_doc = mgr.get_mut(id).unwrap();
+                let mut txn = row_doc.doc.transact_mut();
+                row_doc.root_map.insert(&mut txn, "counter", i as f64);
+            }
+            mgr.persist_update(id).unwrap();
+        }
+
+        // Compact: snapshot + clear updates
+        mgr.compact(id).unwrap();
+
+        // Evict and reload — should work from snapshot alone
+        mgr.evict(id);
+        let row_doc = mgr.get_or_load(id).unwrap();
+        let txn = row_doc.doc.transact();
+        let counter = row_doc.root_map.get(&txn, "counter");
+        match counter {
+            Some(yrs::Out::Any(yrs::Any::Number(n))) => assert_eq!(n, 9.0),
+            other => panic!("expected Number 9.0, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn crash_safe_compaction_stale_updates_are_deduplicated() {
+        use yrs::{Map, Transact};
+
+        let mut mgr = make_manager();
+        let metadata = HashMap::from([("table".to_string(), "todos".to_string())]);
+        let id = mgr.create(metadata);
+
+        {
+            let row_doc = mgr.get_mut(id).unwrap();
+            let mut txn = row_doc.doc.transact_mut();
+            row_doc.root_map.insert(&mut txn, "title", "Buy milk");
+        }
+        mgr.persist_update(id).unwrap();
+
+        // Simulate partial compaction: snapshot saved but updates NOT cleared
+        // persist() does both, but this simulates what happens if clear_updates crashes
+        // We call persist which saves snapshot AND clears updates, then re-add the stale update
+        mgr.persist(id).unwrap();
+        // Re-add the update to simulate crash (snapshot saved, but updates not cleared)
+        mgr.persist_update(id).unwrap();
+
+        // Reload — stale updates on top of snapshot should be harmless (Yrs deduplication)
+        mgr.evict(id);
+        let row_doc = mgr.get_or_load(id).unwrap();
+        let txn = row_doc.doc.transact();
+        let title = row_doc.root_map.get(&txn, "title");
+        match title {
+            Some(yrs::Out::Any(yrs::Any::String(s))) => assert_eq!(s.as_ref(), "Buy milk"),
+            other => panic!("expected String 'Buy milk', got: {:?}", other),
+        }
+    }
+
+    #[test]
     fn encode_diff_produces_minimal_update() {
         let mut mgr = make_manager();
         let id = mgr.create(HashMap::new());

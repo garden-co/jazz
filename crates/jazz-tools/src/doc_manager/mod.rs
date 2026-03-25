@@ -173,6 +173,12 @@ impl DocManager {
         Ok(())
     }
 
+    /// Replace accumulated updates with a single snapshot (maintenance compaction).
+    pub fn compact(&mut self, id: ObjectId) -> Result<(), Error> {
+        self.persist(id)?;
+        Ok(())
+    }
+
     /// Encode the diff between the doc's current state and `remote_sv` (v1).
     pub fn encode_diff(&self, id: ObjectId, remote_sv: &[u8]) -> Result<Vec<u8>, Error> {
         let row_doc = self.docs.get(&id).ok_or(Error::DocNotFound(id))?;
