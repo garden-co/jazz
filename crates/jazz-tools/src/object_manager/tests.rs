@@ -1557,15 +1557,16 @@ fn truncate_rejects_when_tip_not_descendant_of_tail() {
 }
 
 #[test]
-fn lww_deep_history_vs_single_offline_commit() {
-    // Alice makes 5 sequential updates while Bob is offline.
-    // Bob makes 1 update from the root. LWW picks the highest timestamp.
+fn lww_offline_edit_wins_when_later() {
+    // Real offline scenario: Bob syncs up to alice-v1, goes offline,
+    // Alice continues updating (v2..v4). Bob makes 1 edit offline.
+    // Bob's edit happens AFTER alice's last update (higher timestamp),
+    // so bob wins even though alice has more commits.
     //
-    //   root (ts=100)
-    //    ├── a1(200) → a2(300) → a3(400) → a4(500) → a5(600)  ← alice
-    //    └── b1(550)                                             ← bob offline
+    //   root → a1(200) → a2(300) → a3(400) → a4(500)    ← alice online
+    //   root → a1(200) → bob-offline(700)                 ← bob offline, edits later
     //
-    //   LWW winner: a5 (ts=600 > ts=550)
+    //   LWW winner: bob-offline (ts=700 > ts=500)
     let mut io = MemoryStorage::new();
     let mut manager = ObjectManager::new();
     let object_id = manager.create(&mut io, None);
@@ -1585,10 +1586,10 @@ fn lww_deep_history_vs_single_offline_commit() {
         )
         .unwrap();
 
-    // Alice's chain: root → a1 → a2 → a3 → a4 → a5
+    // Alice's chain: root → a1 → a2 → a3 → a4
     let mut parent = root;
     let mut alice_ids = Vec::new();
-    for (i, ts) in [(1, 200u64), (2, 300), (3, 400), (4, 500), (5, 600)] {
+    for (i, ts) in [(1, 200u64), (2, 300), (3, 400), (4, 500)] {
         let commit = Commit {
             parents: smallvec![parent],
             content: format!("alice-v{i}").into_bytes(),
@@ -1604,13 +1605,14 @@ fn lww_deep_history_vs_single_offline_commit() {
         alice_ids.push(id);
         parent = id;
     }
-    let a5 = *alice_ids.last().unwrap();
+    let a1 = alice_ids[0];
+    let a4 = *alice_ids.last().unwrap();
 
-    // Bob's single offline commit from root (ts=550, between a4 and a5)
+    // Bob was offline since a1. He edits from a1 at ts=700 (after alice finished).
     let bob_commit = Commit {
-        parents: smallvec![root],
+        parents: smallvec![a1],
         content: b"bob-offline-edit".to_vec(),
-        timestamp: 550,
+        timestamp: 700,
         author: bob,
         metadata: None,
         stored_state: StoredState::default(),
@@ -1620,24 +1622,24 @@ fn lww_deep_history_vs_single_offline_commit() {
         .receive_commit(&mut io, object_id, "main", bob_commit)
         .unwrap();
 
-    // Two tips: a5 and b1
+    // Two tips: a4 and b1 (diverged from a1)
     let tips = manager.get_tip_ids(object_id, "main").unwrap();
     assert_eq!(tips.len(), 2);
-    assert!(tips.contains(&a5));
+    assert!(tips.contains(&a4));
     assert!(tips.contains(&b1));
 
-    // LWW: a5 wins because ts=600 > ts=550
+    // LWW: bob wins because ts=700 > ts=500
     let object = manager.get(object_id).unwrap();
     let branch = &object.branches[&BranchName::new("main")];
     let sorted = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
     assert_eq!(
         *sorted.last().unwrap(),
-        a5,
-        "a5 (ts=600) should be LWW winner over b1 (ts=550)"
+        b1,
+        "bob (ts=700) should be LWW winner over alice-v4 (ts=500)"
     );
     assert_eq!(
-        branch.commits[&a5].content, b"alice-v5",
-        "winner content should be alice's last update"
+        branch.commits[&b1].content, b"bob-offline-edit",
+        "winner content should be bob's offline edit"
     );
 }
 

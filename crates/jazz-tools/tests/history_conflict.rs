@@ -825,7 +825,7 @@ async fn concurrent_edits_on_different_fields() {
 /// 3. Alice makes 3 more updates while Bob is offline (v2, v3, v4).
 /// 4. Bob reconnects without server, makes 1 local edit from stale v1.
 /// 5. Bob reconnects to the server. Sync resolves the conflict.
-/// 6. Both see alice-v4 (latest timestamp wins via LWW).
+/// 6. Both see bob-offline-edit (bob's edit happened last → highest timestamp → LWW winner).
 ///
 /// ```text
 ///  online:   create → alice-v1 ──► bob syncs, sees v1
@@ -841,7 +841,7 @@ async fn concurrent_edits_on_different_fields() {
 ///     create → v1 → alice-v2 → alice-v3 → alice-v4  (tip, ts=latest)
 ///     create → v1 → bob-offline-edit                  (tip, ts=earlier)
 ///
-///  LWW winner: alice-v4 (higher timestamp)
+///  LWW winner: bob-offline-edit (higher timestamp — bob edited last)
 /// ```
 #[tokio::test]
 async fn offline_edit_resolves_on_reconnect() {
@@ -978,12 +978,12 @@ async fn offline_edit_resolves_on_reconnect() {
         .await
         .expect("bob reconnects online");
 
-    // --- Phase 6: Both converge. Alice-v4 wins (later timestamp). ---
+    // --- Phase 6: Both converge. Bob wins (his edit happened last → higher ts). ---
 
     let alice = Arc::new(alice);
     let bob_online = Arc::new(bob_online);
 
-    let converged = support::wait_for(QUERY_TIMEOUT, "bob sees alice-v4 after reconnect", || {
+    let converged = support::wait_for(QUERY_TIMEOUT, "both converge after bob reconnects", || {
         let alice = Arc::clone(&alice);
         let bob = Arc::clone(&bob_online);
         let query = query.clone();
@@ -1010,8 +1010,8 @@ async fn offline_edit_resolves_on_reconnect() {
     .await;
 
     assert_eq!(
-        converged, "alice-v4",
-        "alice-v4 should win via LWW (later timestamp than bob-offline-edit)"
+        converged, "bob-offline-edit",
+        "bob-offline-edit should win via LWW (bob edited last → highest timestamp)"
     );
 
     Arc::try_unwrap(alice)
