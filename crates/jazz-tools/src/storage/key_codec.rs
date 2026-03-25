@@ -153,6 +153,36 @@ pub(super) fn ack_key(commit_id: CommitId) -> String {
     format!("ack:{}", hex::encode(commit_id.0))
 }
 
+#[allow(dead_code)]
+pub(super) fn doc_meta_key(id: ObjectId) -> Vec<u8> {
+    format!("doc:{}:meta", format_uuid(id)).into_bytes()
+}
+
+#[allow(dead_code)]
+pub(super) fn doc_snapshot_key(id: ObjectId) -> Vec<u8> {
+    format!("doc:{}:snapshot", format_uuid(id)).into_bytes()
+}
+
+#[allow(dead_code)]
+pub(super) fn doc_update_key(id: ObjectId, seq: u64) -> Vec<u8> {
+    format!("doc:{}:log:{:020}", format_uuid(id), seq).into_bytes()
+}
+
+#[allow(dead_code)]
+pub(super) fn doc_update_prefix(id: ObjectId) -> Vec<u8> {
+    format!("doc:{}:log:", format_uuid(id)).into_bytes()
+}
+
+#[allow(dead_code)]
+pub(super) fn doc_branch_key(id: ObjectId, branch_name: &str) -> Vec<u8> {
+    format!("doc:{}:branches:{}", format_uuid(id), branch_name).into_bytes()
+}
+
+#[allow(dead_code)]
+pub(super) fn doc_origin_key(id: ObjectId) -> Vec<u8> {
+    format!("doc:{}:origin", format_uuid(id)).into_bytes()
+}
+
 pub(super) fn catalogue_manifest_op_key(app_id: ObjectId, object_id: ObjectId) -> String {
     format!(
         "catman:{}:op:{}",

@@ -310,6 +310,26 @@ pub trait Storage {
     fn close(&self) -> Result<(), StorageError> {
         Ok(())
     }
+
+    // ================================================================
+    // Document storage (Y-CRDT)
+    // ================================================================
+
+    fn create_doc(
+        &mut self,
+        id: ObjectId,
+        metadata: &HashMap<String, String>,
+    ) -> Result<(), StorageError>;
+    fn load_doc_metadata(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<HashMap<String, String>>, StorageError>;
+    fn save_snapshot(&mut self, id: ObjectId, snapshot: &[u8]) -> Result<(), StorageError>;
+    fn load_snapshot(&self, id: ObjectId) -> Result<Option<Vec<u8>>, StorageError>;
+    fn append_update(&mut self, id: ObjectId, update: &[u8]) -> Result<(), StorageError>;
+    fn load_updates(&self, id: ObjectId) -> Result<Vec<Vec<u8>>, StorageError>;
+    fn clear_updates(&mut self, id: ObjectId) -> Result<(), StorageError>;
+    fn delete_doc(&mut self, id: ObjectId) -> Result<(), StorageError>;
 }
 
 // Box<Storage> is used to allow for dynamic dispatch of the Storage trait.
@@ -453,6 +473,45 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     fn close(&self) -> Result<(), StorageError> {
         (**self).close()
     }
+
+    fn create_doc(
+        &mut self,
+        id: ObjectId,
+        metadata: &HashMap<String, String>,
+    ) -> Result<(), StorageError> {
+        (**self).create_doc(id, metadata)
+    }
+
+    fn load_doc_metadata(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<HashMap<String, String>>, StorageError> {
+        (**self).load_doc_metadata(id)
+    }
+
+    fn save_snapshot(&mut self, id: ObjectId, snapshot: &[u8]) -> Result<(), StorageError> {
+        (**self).save_snapshot(id, snapshot)
+    }
+
+    fn load_snapshot(&self, id: ObjectId) -> Result<Option<Vec<u8>>, StorageError> {
+        (**self).load_snapshot(id)
+    }
+
+    fn append_update(&mut self, id: ObjectId, update: &[u8]) -> Result<(), StorageError> {
+        (**self).append_update(id, update)
+    }
+
+    fn load_updates(&self, id: ObjectId) -> Result<Vec<Vec<u8>>, StorageError> {
+        (**self).load_updates(id)
+    }
+
+    fn clear_updates(&mut self, id: ObjectId) -> Result<(), StorageError> {
+        (**self).clear_updates(id)
+    }
+
+    fn delete_doc(&mut self, id: ObjectId) -> Result<(), StorageError> {
+        (**self).delete_doc(id)
+    }
 }
 
 // ============================================================================
@@ -484,6 +543,13 @@ pub struct MemoryStorage {
     ack_tiers: HashMap<CommitId, HashSet<DurabilityTier>>,
     /// Append-only manifest ops keyed by app_id then op object_id.
     catalogue_manifest_ops: HashMap<ObjectId, HashMap<ObjectId, CatalogueManifestOp>>,
+
+    /// Y-CRDT document metadata.
+    doc_metadata: HashMap<ObjectId, HashMap<String, String>>,
+    /// Y-CRDT document snapshots.
+    doc_snapshots: HashMap<ObjectId, Vec<u8>>,
+    /// Y-CRDT document update logs.
+    doc_updates: HashMap<ObjectId, Vec<Vec<u8>>>,
 }
 
 /// Internal object storage structure.
@@ -909,6 +975,59 @@ impl Storage for MemoryStorage {
             return Vec::new();
         };
         index.values().flat_map(|ids| ids.iter().copied()).collect()
+    }
+
+    // ================================================================
+    // Document storage (Y-CRDT)
+    // ================================================================
+
+    fn create_doc(
+        &mut self,
+        id: ObjectId,
+        metadata: &HashMap<String, String>,
+    ) -> Result<(), StorageError> {
+        self.doc_metadata.insert(id, metadata.clone());
+        Ok(())
+    }
+
+    fn load_doc_metadata(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<HashMap<String, String>>, StorageError> {
+        Ok(self.doc_metadata.get(&id).cloned())
+    }
+
+    fn save_snapshot(&mut self, id: ObjectId, snapshot: &[u8]) -> Result<(), StorageError> {
+        self.doc_snapshots.insert(id, snapshot.to_vec());
+        Ok(())
+    }
+
+    fn load_snapshot(&self, id: ObjectId) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self.doc_snapshots.get(&id).cloned())
+    }
+
+    fn append_update(&mut self, id: ObjectId, update: &[u8]) -> Result<(), StorageError> {
+        self.doc_updates
+            .entry(id)
+            .or_default()
+            .push(update.to_vec());
+        Ok(())
+    }
+
+    fn load_updates(&self, id: ObjectId) -> Result<Vec<Vec<u8>>, StorageError> {
+        Ok(self.doc_updates.get(&id).cloned().unwrap_or_default())
+    }
+
+    fn clear_updates(&mut self, id: ObjectId) -> Result<(), StorageError> {
+        self.doc_updates.remove(&id);
+        Ok(())
+    }
+
+    fn delete_doc(&mut self, id: ObjectId) -> Result<(), StorageError> {
+        self.doc_metadata.remove(&id);
+        self.doc_snapshots.remove(&id);
+        self.doc_updates.remove(&id);
+        Ok(())
     }
 }
 
@@ -1399,5 +1518,33 @@ mod tests {
             },
         );
         assert!(matches!(conflict, Err(StorageError::IoError(_))));
+    }
+
+    #[test]
+    fn memory_storage_doc_roundtrip() {
+        let mut storage = MemoryStorage::new();
+        let id = ObjectId::new();
+        let metadata = HashMap::from([("table".to_string(), "todos".to_string())]);
+
+        storage.create_doc(id, &metadata).unwrap();
+        assert_eq!(storage.load_doc_metadata(id).unwrap(), Some(metadata));
+
+        storage.save_snapshot(id, b"snapshot_v1").unwrap();
+        assert_eq!(
+            storage.load_snapshot(id).unwrap(),
+            Some(b"snapshot_v1".to_vec())
+        );
+
+        storage.append_update(id, b"update_1").unwrap();
+        storage.append_update(id, b"update_2").unwrap();
+        let updates = storage.load_updates(id).unwrap();
+        assert_eq!(updates.len(), 2);
+
+        storage.clear_updates(id).unwrap();
+        assert!(storage.load_updates(id).unwrap().is_empty());
+
+        storage.delete_doc(id).unwrap();
+        assert!(storage.load_doc_metadata(id).unwrap().is_none());
+        assert!(storage.load_snapshot(id).unwrap().is_none());
     }
 }

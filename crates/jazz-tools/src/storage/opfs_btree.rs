@@ -418,6 +418,63 @@ impl Storage for OpfsBTreeStorage {
         // opfs-btree has no separate WAL; flush_wal maps to an incremental checkpoint.
         self.flush();
     }
+
+    // ================================================================
+    // Document storage (Y-CRDT) — implemented in Task 9
+    // ================================================================
+
+    fn create_doc(
+        &mut self,
+        _id: crate::object::ObjectId,
+        _metadata: &HashMap<String, String>,
+    ) -> Result<(), super::StorageError> {
+        todo!("OpfsBTreeStorage::create_doc — implement in Task 9")
+    }
+
+    fn load_doc_metadata(
+        &self,
+        _id: crate::object::ObjectId,
+    ) -> Result<Option<HashMap<String, String>>, super::StorageError> {
+        todo!("OpfsBTreeStorage::load_doc_metadata — implement in Task 9")
+    }
+
+    fn save_snapshot(
+        &mut self,
+        _id: crate::object::ObjectId,
+        _snapshot: &[u8],
+    ) -> Result<(), super::StorageError> {
+        todo!("OpfsBTreeStorage::save_snapshot — implement in Task 9")
+    }
+
+    fn load_snapshot(
+        &self,
+        _id: crate::object::ObjectId,
+    ) -> Result<Option<Vec<u8>>, super::StorageError> {
+        todo!("OpfsBTreeStorage::load_snapshot — implement in Task 9")
+    }
+
+    fn append_update(
+        &mut self,
+        _id: crate::object::ObjectId,
+        _update: &[u8],
+    ) -> Result<(), super::StorageError> {
+        todo!("OpfsBTreeStorage::append_update — implement in Task 9")
+    }
+
+    fn load_updates(
+        &self,
+        _id: crate::object::ObjectId,
+    ) -> Result<Vec<Vec<u8>>, super::StorageError> {
+        todo!("OpfsBTreeStorage::load_updates — implement in Task 9")
+    }
+
+    fn clear_updates(&mut self, _id: crate::object::ObjectId) -> Result<(), super::StorageError> {
+        todo!("OpfsBTreeStorage::clear_updates — implement in Task 9")
+    }
+
+    fn delete_doc(&mut self, _id: crate::object::ObjectId) -> Result<(), super::StorageError> {
+        todo!("OpfsBTreeStorage::delete_doc — implement in Task 9")
+    }
 }
 
 fn map_storage_err(error: BTreeError) -> StorageError {

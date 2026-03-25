@@ -447,6 +447,57 @@ impl Storage for FjallStorage {
         drop(inner);
         Ok(())
     }
+
+    // ================================================================
+    // Document storage (Y-CRDT) — implemented in Task 8
+    // ================================================================
+
+    fn create_doc(
+        &mut self,
+        _id: crate::object::ObjectId,
+        _metadata: &std::collections::HashMap<String, String>,
+    ) -> Result<(), StorageError> {
+        todo!("FjallStorage::create_doc — implement in Task 8")
+    }
+
+    fn load_doc_metadata(
+        &self,
+        _id: crate::object::ObjectId,
+    ) -> Result<Option<std::collections::HashMap<String, String>>, StorageError> {
+        todo!("FjallStorage::load_doc_metadata — implement in Task 8")
+    }
+
+    fn save_snapshot(
+        &mut self,
+        _id: crate::object::ObjectId,
+        _snapshot: &[u8],
+    ) -> Result<(), StorageError> {
+        todo!("FjallStorage::save_snapshot — implement in Task 8")
+    }
+
+    fn load_snapshot(&self, _id: crate::object::ObjectId) -> Result<Option<Vec<u8>>, StorageError> {
+        todo!("FjallStorage::load_snapshot — implement in Task 8")
+    }
+
+    fn append_update(
+        &mut self,
+        _id: crate::object::ObjectId,
+        _update: &[u8],
+    ) -> Result<(), StorageError> {
+        todo!("FjallStorage::append_update — implement in Task 8")
+    }
+
+    fn load_updates(&self, _id: crate::object::ObjectId) -> Result<Vec<Vec<u8>>, StorageError> {
+        todo!("FjallStorage::load_updates — implement in Task 8")
+    }
+
+    fn clear_updates(&mut self, _id: crate::object::ObjectId) -> Result<(), StorageError> {
+        todo!("FjallStorage::clear_updates — implement in Task 8")
+    }
+
+    fn delete_doc(&mut self, _id: crate::object::ObjectId) -> Result<(), StorageError> {
+        todo!("FjallStorage::delete_doc — implement in Task 8")
+    }
 }
 
 #[cfg(test)]
