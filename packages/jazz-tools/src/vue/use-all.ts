@@ -1,12 +1,13 @@
-import { shallowRef, toValue, watchEffect, type MaybeRefOrGetter, type ShallowRef } from "vue";
+import { ref, toValue, watchEffect, type MaybeRefOrGetter, type Ref } from "vue";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
+import { reconcileArray } from "../reconcile-array.js";
 import type { CacheEntryHandle, UseAllState } from "../subscriptions-orchestrator.js";
 import { useJazzClient } from "./provider.js";
 
 function applyEntryState<T extends { id: string }>(
   state: UseAllState<T>,
-  data: ShallowRef<T[] | undefined>,
+  data: Ref<T[] | undefined>,
 ): void {
   if (state.status === "fulfilled") {
     data.value = state.data;
@@ -17,7 +18,7 @@ function applyEntryState<T extends { id: string }>(
 
 function subscribeToEntry<T extends { id: string }>(
   entry: CacheEntryHandle<T>,
-  data: ShallowRef<T[] | undefined>,
+  data: Ref<T[] | undefined>,
 ): () => void {
   applyEntryState(entry.state, data);
 
@@ -26,7 +27,11 @@ function subscribeToEntry<T extends { id: string }>(
       data.value = nextData;
     },
     onDelta: (delta: SubscriptionDelta<T>) => {
-      data.value = delta.all;
+      if (data.value) {
+        reconcileArray(data.value, delta.all);
+      } else {
+        data.value = delta.all;
+      }
     },
     onError: () => {
       data.value = undefined;
@@ -37,9 +42,9 @@ function subscribeToEntry<T extends { id: string }>(
 export function useAll<T extends { id: string }>(
   query: MaybeRefOrGetter<QueryBuilder<T>>,
   options?: MaybeRefOrGetter<QueryOptions | undefined>,
-): ShallowRef<T[] | undefined> {
+): Ref<T[] | undefined> {
   const { manager } = useJazzClient();
-  const data = shallowRef<T[] | undefined>(undefined);
+  const data = ref<T[] | undefined>(undefined) as Ref<T[] | undefined>;
 
   watchEffect((onCleanup) => {
     const resolvedQuery = toValue(query);
