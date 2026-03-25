@@ -33,7 +33,10 @@ export async function createSqliteBackend(
   dbPath: string,
 ): Promise<DocsBackend> {
   // Dynamic import keeps node:sqlite off the top-level parse graph
-  const { DatabaseSync } = await import("node:sqlite");
+  // Use a variable so esbuild cannot statically analyse and strip the "node:" prefix.
+  // eslint-disable-next-line @typescript-eslint/no-implied-eval
+  const sqliteMod = "node:sqlite";
+  const { DatabaseSync } = await import(sqliteMod);
   const db = new DatabaseSync(dbPath, { readOnly: true });
 
   // ------------------------------------------------------------------
