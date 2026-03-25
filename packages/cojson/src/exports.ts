@@ -82,6 +82,16 @@ import {
   getTransactionSize,
   knownStateFromContent,
 } from "./coValueContentMessage.js";
+import {
+  loadChangesCursor,
+  subscribeToChanges,
+  CursorError,
+} from "./changes.js";
+import type {
+  ChangesMessage,
+  ChangesCursor,
+  ChangesSubscription,
+} from "./changes.js";
 import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
 import {
   CO_VALUE_LOADING_CONFIG,
@@ -201,6 +211,9 @@ export {
   bytesToBase64url,
   hwrServerPeerSelector,
   isAccountRole,
+  loadChangesCursor,
+  subscribeToChanges,
+  CursorError,
 };
 
 export type {
@@ -217,6 +230,9 @@ export type {
   PeerState,
   SyncWhen,
   CoValueHeader,
+  ChangesMessage,
+  ChangesCursor,
+  ChangesSubscription,
 };
 
 export * from "./storage/index.js";
