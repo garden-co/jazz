@@ -291,8 +291,8 @@ impl OpfsFile {
         // releases it once the old worker is GC'd, typically within a few
         // hundred milliseconds.
         // Only retries on DOMExceptions (handle conflicts); other errors fail immediately.
-        const MAX_RETRIES: u32 = 5;
-        const BASE_DELAY_MS: u32 = 50; // 50, 100, 200, 400, 800 → ~1.5s total
+        const MAX_RETRIES: u32 = 12;
+        const BASE_DELAY_MS: u32 = 50;
 
         let mut last_err = None;
         for attempt in 0..=MAX_RETRIES {
@@ -459,15 +459,11 @@ async fn sleep_ms(ms: u32) {
     let _ = JsFuture::from(promise).await;
 }
 
-/// Returns true if the JS error is a DOMException (has a `name` property),
-/// meaning it's likely a retryable handle conflict. Non-DOMException errors
-/// (e.g. quota, TypeError) fail immediately.
+/// Returns true if the JS error is a `DOMException`, which indicates a
+/// retryable handle conflict. Plain `Error`/`TypeError`/etc. fail immediately.
 #[cfg(target_arch = "wasm32")]
 fn is_retryable_handle_conflict(value: &wasm_bindgen::JsValue) -> bool {
-    js_sys::Reflect::get(value, &"name".into())
-        .ok()
-        .and_then(|v| v.as_string())
-        .is_some()
+    value.is_instance_of::<web_sys::DomException>()
 }
 
 #[cfg(target_arch = "wasm32")]
