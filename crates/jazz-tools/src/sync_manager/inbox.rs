@@ -480,19 +480,78 @@ impl SyncManager {
             } => {
                 let doc_id = *doc_id;
                 tracing::debug!(%doc_id, update_len = update.len(), "client→DocUpdated");
-                if self.doc_manager.get(doc_id).is_none() {
-                    let meta = metadata
-                        .as_ref()
-                        .map(|m| m.metadata.clone())
-                        .unwrap_or_default();
-                    self.doc_manager.create_with_id(doc_id, meta);
+                match client.role {
+                    ClientRole::Peer | ClientRole::Admin => {
+                        // Trusted — apply directly
+                        self.apply_doc_update_from_client(client_id, doc_id, update, metadata);
+                    }
+                    ClientRole::Backend => {
+                        if payload.is_catalogue() {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                                    object_id: doc_id,
+                                    branch_name: "main".into(),
+                                }),
+                            });
+                            return;
+                        }
+                        self.apply_doc_update_from_client(client_id, doc_id, update, metadata);
+                    }
+                    ClientRole::User => {
+                        let Some(session) = &client.session else {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::Error(SyncError::SessionRequired {
+                                    object_id: doc_id,
+                                    branch_name: "main".into(),
+                                }),
+                            });
+                            return;
+                        };
+                        if payload.is_catalogue() {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                                    object_id: doc_id,
+                                    branch_name: "main".into(),
+                                }),
+                            });
+                            return;
+                        }
+                        let payload_metadata = metadata
+                            .as_ref()
+                            .map(|m| m.metadata.clone())
+                            .unwrap_or_default();
+                        let stored_metadata = self
+                            .doc_manager
+                            .get(doc_id)
+                            .map(|d| d.metadata.clone())
+                            .unwrap_or_default();
+                        let operation = if self.doc_manager.get(doc_id).is_some() {
+                            Operation::Update
+                        } else {
+                            Operation::Insert
+                        };
+                        // Use payload metadata for new docs, stored metadata for existing
+                        let meta = if stored_metadata.is_empty() {
+                            payload_metadata
+                        } else {
+                            stored_metadata
+                        };
+                        // old_content / new_content: policy evaluator will decode from Yrs
+                        // update or read DocManager directly. We pass None here.
+                        self.queue_for_permission_check(
+                            client_id,
+                            payload,
+                            session.clone(),
+                            meta,
+                            None,
+                            None,
+                            operation,
+                        );
+                    }
                 }
-                if let Err(e) = self.doc_manager.apply_update(doc_id, update) {
-                    tracing::warn!(%doc_id, error = %e, "failed to apply doc update from client");
-                }
-                // Forward to servers
-                self.forward_doc_update_to_servers(doc_id, update.clone(), metadata.clone());
-                // TODO: forward to other clients
             }
             SyncPayload::DocSyncRequest {
                 doc_id,
@@ -594,8 +653,38 @@ impl SyncManager {
                 // Forward to other clients
                 self.forward_truncation_to_clients_except(object_id, branch_name, tails, client_id);
             }
+            SyncPayload::DocUpdated {
+                doc_id,
+                update,
+                metadata,
+            } => {
+                self.apply_doc_update_from_client(client_id, doc_id, &update, &metadata);
+            }
             _ => {}
         }
+    }
+
+    /// Apply a DocUpdated payload from a client: create doc if needed, apply update, forward.
+    fn apply_doc_update_from_client(
+        &mut self,
+        _client_id: ClientId,
+        doc_id: ObjectId,
+        update: &[u8],
+        metadata: &Option<ObjectMetadata>,
+    ) {
+        if self.doc_manager.get(doc_id).is_none() {
+            let meta = metadata
+                .as_ref()
+                .map(|m| m.metadata.clone())
+                .unwrap_or_default();
+            self.doc_manager.create_with_id(doc_id, meta);
+        }
+        if let Err(e) = self.doc_manager.apply_update(doc_id, update) {
+            tracing::warn!(%doc_id, error = %e, "failed to apply doc update from client");
+        }
+        // Forward to servers
+        self.forward_doc_update_to_servers(doc_id, update.to_vec(), metadata.clone());
+        // TODO: forward to other clients
     }
 
     /// Apply an ObjectUpdated payload to the local ObjectManager.

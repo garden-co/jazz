@@ -2916,3 +2916,412 @@ fn doc_sync_payloads_serialize_roundtrip() {
     let decoded = SyncPayload::from_bytes(&bytes).unwrap();
     assert_eq!(payload, decoded);
 }
+
+// ========================================================================
+// DocUpdated policy validation tests
+// ========================================================================
+
+/// User client (alice) sends DocUpdated with a session.
+/// The update should be queued for permission check, NOT applied immediately.
+///
+/// ```text
+/// alice (User)                  SyncManager
+///   |--- DocUpdated ----------->|
+///   |                           | queue_for_permission_check
+///   |                           | doc NOT applied yet
+/// ```
+#[test]
+fn doc_update_from_user_client_queues_for_permission_check() {
+    use yrs::{Map, ReadTxn, Transact};
+
+    let mut sm = SyncManager::new();
+    let mut storage = MemoryStorage::new();
+
+    let alice = ClientId::new();
+    sm.add_client(alice);
+    // Default role is User
+    sm.set_client_session(alice, Session::new("alice"));
+    sm.take_outbox(); // clear catalogue sync
+
+    let doc_id = ObjectId::new();
+
+    // Generate a Yrs update
+    let tmp_doc = yrs::Doc::new();
+    let tmp_map = tmp_doc.get_or_insert_map("row");
+    {
+        let mut txn = tmp_doc.transact_mut();
+        tmp_map.insert(&mut txn, "title", "Buy milk");
+    }
+    let update = tmp_doc
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(alice),
+        payload: SyncPayload::DocUpdated {
+            doc_id,
+            update: update.clone(),
+            metadata: Some(ObjectMetadata {
+                id: doc_id,
+                metadata: HashMap::from([("table".to_string(), "todos".to_string())]),
+            }),
+        },
+    });
+
+    sm.process_inbox(&mut storage);
+
+    // Should be queued for permission check
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].client_id, alice);
+    assert_eq!(pending[0].session.user_id, "alice");
+    assert_eq!(pending[0].operation, Operation::Insert);
+
+    // Doc should NOT be applied yet
+    assert!(
+        sm.doc_manager.get(doc_id).is_none(),
+        "doc should not be created before permission check approval"
+    );
+}
+
+/// Admin client sends DocUpdated — should apply directly, no permission check.
+///
+/// ```text
+/// admin (Admin)                 SyncManager
+///   |--- DocUpdated ----------->|
+///   |                           | apply directly
+///   |                           | doc created with data
+/// ```
+#[test]
+fn doc_update_from_admin_client_applies_directly() {
+    use yrs::{Map, ReadTxn, Transact};
+
+    let mut sm = SyncManager::new();
+    let mut storage = MemoryStorage::new();
+
+    let admin = ClientId::new();
+    sm.add_client(admin);
+    sm.set_client_role(admin, ClientRole::Admin);
+    sm.take_outbox();
+
+    let doc_id = ObjectId::new();
+
+    let tmp_doc = yrs::Doc::new();
+    let tmp_map = tmp_doc.get_or_insert_map("row");
+    {
+        let mut txn = tmp_doc.transact_mut();
+        tmp_map.insert(&mut txn, "title", "Admin task");
+    }
+    let update = tmp_doc
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(admin),
+        payload: SyncPayload::DocUpdated {
+            doc_id,
+            update,
+            metadata: Some(ObjectMetadata {
+                id: doc_id,
+                metadata: HashMap::from([("table".to_string(), "tasks".to_string())]),
+            }),
+        },
+    });
+
+    sm.process_inbox(&mut storage);
+
+    // No pending permission checks
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 0);
+
+    // Doc should be applied
+    let row_doc = sm.doc_manager.get(doc_id).expect("doc should exist");
+    let txn = row_doc.doc.transact();
+    let title = row_doc.root_map.get(&txn, "title");
+    assert_eq!(
+        title.map(|v| v.to_string(&txn)),
+        Some("Admin task".to_string())
+    );
+}
+
+/// Peer client sends DocUpdated — trusted, applies directly.
+#[test]
+fn doc_update_from_peer_client_applies_directly() {
+    use yrs::{Map, ReadTxn, Transact};
+
+    let mut sm = SyncManager::new();
+    let mut storage = MemoryStorage::new();
+
+    let peer = ClientId::new();
+    sm.add_client(peer);
+    sm.set_client_role(peer, ClientRole::Peer);
+    sm.take_outbox();
+
+    let doc_id = ObjectId::new();
+
+    let tmp_doc = yrs::Doc::new();
+    let tmp_map = tmp_doc.get_or_insert_map("row");
+    {
+        let mut txn = tmp_doc.transact_mut();
+        tmp_map.insert(&mut txn, "done", true);
+    }
+    let update = tmp_doc
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(peer),
+        payload: SyncPayload::DocUpdated {
+            doc_id,
+            update,
+            metadata: Some(ObjectMetadata {
+                id: doc_id,
+                metadata: HashMap::from([("table".to_string(), "tasks".to_string())]),
+            }),
+        },
+    });
+
+    sm.process_inbox(&mut storage);
+
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 0);
+
+    assert!(
+        sm.doc_manager.get(doc_id).is_some(),
+        "doc should be applied directly for Peer"
+    );
+}
+
+/// User client without session sends DocUpdated — should be rejected with SessionRequired.
+///
+/// ```text
+/// bob (User, no session)        SyncManager
+///   |--- DocUpdated ----------->|
+///   |<-- SessionRequired -------|
+/// ```
+#[test]
+fn doc_update_from_user_without_session_rejected() {
+    use yrs::{Map, ReadTxn, Transact};
+
+    let mut sm = SyncManager::new();
+    let mut storage = MemoryStorage::new();
+
+    let bob = ClientId::new();
+    sm.add_client(bob);
+    // No session set — default User role
+    sm.take_outbox();
+
+    let doc_id = ObjectId::new();
+
+    let tmp_doc = yrs::Doc::new();
+    let tmp_map = tmp_doc.get_or_insert_map("row");
+    {
+        let mut txn = tmp_doc.transact_mut();
+        tmp_map.insert(&mut txn, "title", "Unauthorized");
+    }
+    let update = tmp_doc
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(bob),
+        payload: SyncPayload::DocUpdated {
+            doc_id,
+            update,
+            metadata: Some(ObjectMetadata {
+                id: doc_id,
+                metadata: HashMap::from([("table".to_string(), "todos".to_string())]),
+            }),
+        },
+    });
+
+    sm.process_inbox(&mut storage);
+
+    let outbox = sm.take_outbox();
+    assert!(outbox.iter().any(|entry| {
+        matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::Error(SyncError::SessionRequired { object_id, .. }),
+            } if *id == bob && *object_id == doc_id
+        )
+    }));
+
+    // Doc should not exist
+    assert!(sm.doc_manager.get(doc_id).is_none());
+}
+
+/// Approved DocUpdated permission check should apply the doc.
+///
+/// ```text
+/// alice (User)                  SyncManager        PolicyEvaluator
+///   |--- DocUpdated ----------->|                        |
+///   |                           |--- check ------------->|
+///   |                           |<-- approve ------------|
+///   |                           | apply doc update       |
+/// ```
+#[test]
+fn approved_doc_permission_check_applies_update() {
+    use yrs::{Map, ReadTxn, Transact};
+
+    let mut sm = SyncManager::new();
+    let mut storage = MemoryStorage::new();
+
+    let alice = ClientId::new();
+    sm.add_client(alice);
+    sm.set_client_session(alice, Session::new("alice"));
+    sm.take_outbox();
+
+    let doc_id = ObjectId::new();
+
+    let tmp_doc = yrs::Doc::new();
+    let tmp_map = tmp_doc.get_or_insert_map("row");
+    {
+        let mut txn = tmp_doc.transact_mut();
+        tmp_map.insert(&mut txn, "title", "Approved task");
+    }
+    let update = tmp_doc
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(alice),
+        payload: SyncPayload::DocUpdated {
+            doc_id,
+            update,
+            metadata: Some(ObjectMetadata {
+                id: doc_id,
+                metadata: HashMap::from([("table".to_string(), "todos".to_string())]),
+            }),
+        },
+    });
+
+    sm.process_inbox(&mut storage);
+
+    // Take and approve the pending check
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 1);
+    sm.approve_permission_check(&mut storage, pending.into_iter().next().unwrap());
+
+    // Doc should now be applied
+    let row_doc = sm
+        .doc_manager
+        .get(doc_id)
+        .expect("doc should exist after approval");
+    let txn = row_doc.doc.transact();
+    let title = row_doc.root_map.get(&txn, "title");
+    assert_eq!(
+        title.map(|v| v.to_string(&txn)),
+        Some("Approved task".to_string())
+    );
+}
+
+/// Rejected DocUpdated permission check should send PermissionDenied error.
+#[test]
+fn rejected_doc_permission_check_sends_error() {
+    use yrs::{Map, ReadTxn, Transact};
+
+    let mut sm = SyncManager::new();
+    let mut storage = MemoryStorage::new();
+
+    let alice = ClientId::new();
+    sm.add_client(alice);
+    sm.set_client_session(alice, Session::new("alice"));
+    sm.take_outbox();
+
+    let doc_id = ObjectId::new();
+
+    let tmp_doc = yrs::Doc::new();
+    let tmp_map = tmp_doc.get_or_insert_map("row");
+    {
+        let mut txn = tmp_doc.transact_mut();
+        tmp_map.insert(&mut txn, "secret", "classified");
+    }
+    let update = tmp_doc
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(alice),
+        payload: SyncPayload::DocUpdated {
+            doc_id,
+            update,
+            metadata: Some(ObjectMetadata {
+                id: doc_id,
+                metadata: HashMap::from([("table".to_string(), "secrets".to_string())]),
+            }),
+        },
+    });
+
+    sm.process_inbox(&mut storage);
+
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 1);
+    sm.reject_permission_check(
+        pending.into_iter().next().unwrap(),
+        "policy denied".to_string(),
+    );
+
+    let outbox = sm.take_outbox();
+    assert!(outbox.iter().any(|entry| {
+        matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::Error(SyncError::PermissionDenied {
+                    object_id,
+                    reason,
+                    ..
+                }),
+            } if *id == alice && *object_id == doc_id && reason == "policy denied"
+        )
+    }));
+
+    // Doc should not exist
+    assert!(sm.doc_manager.get(doc_id).is_none());
+}
+
+/// User client sends DocUpdated for an existing doc — operation should be Update, not Insert.
+#[test]
+fn doc_update_on_existing_doc_infers_update_operation() {
+    use yrs::{Map, ReadTxn, Transact};
+
+    let mut sm = SyncManager::new();
+    let mut storage = MemoryStorage::new();
+
+    let alice = ClientId::new();
+    sm.add_client(alice);
+    sm.set_client_session(alice, Session::new("alice"));
+    sm.take_outbox();
+
+    // Pre-create the doc in DocManager
+    let doc_id = sm
+        .doc_manager
+        .create(HashMap::from([("table".to_string(), "todos".to_string())]));
+
+    let tmp_doc = yrs::Doc::new();
+    let tmp_map = tmp_doc.get_or_insert_map("row");
+    {
+        let mut txn = tmp_doc.transact_mut();
+        tmp_map.insert(&mut txn, "title", "Updated task");
+    }
+    let update = tmp_doc
+        .transact()
+        .encode_state_as_update_v1(&yrs::StateVector::default());
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(alice),
+        payload: SyncPayload::DocUpdated {
+            doc_id,
+            update,
+            metadata: None,
+        },
+    });
+
+    sm.process_inbox(&mut storage);
+
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].operation, Operation::Update);
+}

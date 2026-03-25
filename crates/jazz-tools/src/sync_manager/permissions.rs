@@ -46,6 +46,7 @@ impl SyncManager {
                 branch_name,
                 ..
             } => (*object_id, *branch_name),
+            SyncPayload::DocUpdated { doc_id, .. } => (*doc_id, "main".into()),
             _ => return,
         };
 
