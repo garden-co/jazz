@@ -1,3 +1,17 @@
+import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
+
+/**
+ * Apply a subscription delta to a reactive array, preserving object
+ * identity for unchanged and updated items. Uses reconcileArray for
+ * ordering and deepMerge for property-level updates.
+ */
+export function applyDelta<T extends { id: string }>(
+  target: T[],
+  delta: SubscriptionDelta<T>,
+): void {
+  reconcileArray(target, delta.all);
+}
+
 /**
  * Reconcile a target array in-place to match a source array,
  * preserving object identity for items with matching `id` fields.

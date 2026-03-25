@@ -1,7 +1,7 @@
 import { ref, toValue, watchEffect, type MaybeRefOrGetter, type Ref } from "vue";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
-import { reconcileArray } from "../reconcile-array.js";
+import { applyDelta } from "../reconcile-array.js";
 import type { CacheEntryHandle, UseAllState } from "../subscriptions-orchestrator.js";
 import { useJazzClient } from "./provider.js";
 
@@ -28,7 +28,7 @@ function subscribeToEntry<T extends { id: string }>(
     },
     onDelta: (delta: SubscriptionDelta<T>) => {
       if (data.value) {
-        reconcileArray(data.value, delta.all);
+        applyDelta(data.value, delta);
       } else {
         data.value = delta.all;
       }
