@@ -16,7 +16,7 @@ catalogs:
     "@vitest/browser-playwright": 4.1.0
     "@vitejs/plugin-react": 6.0.1
     "@vitejs/plugin-vue": 6.0.4
-    typescript: 5.9.3
+    typescript: 6.0.2
     vite: 8.0.1
     "vite-plugin-top-level-await": 1.6.0
     "vite-plugin-wasm": 3.6.0
