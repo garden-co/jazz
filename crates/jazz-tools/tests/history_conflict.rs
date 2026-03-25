@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use jazz_tools::server::TestingServer;
-use jazz_tools::{ColumnType, DurabilityTier, QueryBuilder, SchemaBuilder, TableSchema, Value};
+use jazz_tools::{
+    ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
+};
 use support::{TestingClient, has_updated, wait_for_query, wait_for_subscription_update};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -816,141 +818,208 @@ async fn concurrent_edits_on_different_fields() {
     server.shutdown().await;
 }
 
-/// Alice makes 5 sequential updates while Bob is offline.
-/// Bob makes 1 update (from stale state). When Bob reconnects,
-/// Bob's single commit diverges from Alice's chain at the original root.
-/// LWW picks the highest timestamp — typically Alice's last commit.
+/// Real offline scenario with persistent storage (Fjall).
+///
+/// 1. Both online. Alice creates a todo, updates to v1. Bob syncs, sees v1.
+/// 2. Bob goes offline (shutdown — Fjall persists his state at v1).
+/// 3. Alice makes 3 more updates while Bob is offline (v2, v3, v4).
+/// 4. Bob reconnects without server, makes 1 local edit from stale v1.
+/// 5. Bob reconnects to the server. Sync resolves the conflict.
+/// 6. Both see alice-v4 (latest timestamp wins via LWW).
 ///
 /// ```text
-///          root
-///           ├── a1 → a2 → a3 → a4 → a5   (alice, online)
-///           └── b1                          (bob, offline then reconnects)
+///  online:   create → alice-v1 ──► bob syncs, sees v1
+///                                   │
+///                                   ▼ bob.shutdown() (goes offline)
 ///
-///          both query → see LWW winner (a5, unless bob's clock is ahead)
+///  alice (online):  v1 → alice-v2 → alice-v3 → alice-v4
+///  bob   (offline): v1 → bob-offline-edit (local Fjall only)
+///
+///                                   ▼ bob reconnects to server
+///
+///  DAG after sync:
+///     create → v1 → alice-v2 → alice-v3 → alice-v4  (tip, ts=latest)
+///     create → v1 → bob-offline-edit                  (tip, ts=earlier)
+///
+///  LWW winner: alice-v4 (higher timestamp)
 /// ```
 #[tokio::test]
-async fn deep_history_vs_single_offline_commit() {
+async fn offline_edit_resolves_on_reconnect() {
     let server = TestingServer::start().await;
     let schema = test_schema();
+
+    // --- Phase 1: Both online. Alice creates + updates to v1. Bob sees v1. ---
 
     let alice = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema.clone())
-        .with_user_id("alice-deep")
+        .with_user_id("alice-offline-test")
         .ready_on("todos", READY_TIMEOUT)
         .connect()
         .await;
 
-    let bob = TestingClient::builder()
+    let (mut bob_ctx, bob) = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema)
-        .with_user_id("bob-offline")
+        .with_user_id("bob-offline-test")
+        .with_persistent_storage()
         .ready_on("todos", READY_TIMEOUT)
-        .connect()
+        .connect_with_context()
         .await;
 
-    // Alice creates a todo, Bob sees it
     let (todo_id, _) = alice
         .create(
             "todos",
-            vec![Value::Text("v0".to_string()), Value::Boolean(false)],
+            vec![Value::Text("create".to_string()), Value::Boolean(false)],
         )
         .await
-        .expect("create");
+        .expect("alice creates todo");
 
     let query = QueryBuilder::new("todos").build();
+
+    alice
+        .update(
+            todo_id,
+            vec![("title".to_string(), Value::Text("alice-v1".to_string()))],
+        )
+        .await
+        .expect("alice updates to v1");
+
     wait_for_query(
         &bob,
         query.clone(),
         Some(DurabilityTier::EdgeServer),
         QUERY_TIMEOUT,
-        "bob sees todo",
-        |rows| (rows.len() == 1 && rows[0].0 == todo_id).then_some(()),
+        "bob sees alice-v1",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == todo_id
+                && rows[0].1[0] == Value::Text("alice-v1".to_string()))
+            .then_some(())
+        },
     )
     .await;
 
-    // Alice makes 5 sequential updates (all synced through server)
-    for i in 1..=5 {
+    // --- Phase 2: Bob goes offline. ---
+
+    bob.shutdown().await.expect("bob shutdown for offline");
+
+    // --- Phase 3: Alice makes 3 more updates while Bob is offline. ---
+
+    for v in ["alice-v2", "alice-v3", "alice-v4"] {
         alice
             .update(
                 todo_id,
-                vec![("title".to_string(), Value::Text(format!("alice-v{i}")))],
+                vec![("title".to_string(), Value::Text(v.to_string()))],
             )
             .await
-            .expect("alice sequential update");
+            .expect("alice update while bob offline");
     }
 
-    // Wait for alice's v5 to settle on the server
     wait_for_query(
         &alice,
         query.clone(),
         Some(DurabilityTier::EdgeServer),
         QUERY_TIMEOUT,
-        "alice sees v5",
+        "alice sees v4 at edge",
         |rows| {
-            (rows.len() == 1 && rows[0].1[0] == Value::Text("alice-v5".to_string())).then_some(())
+            (rows.len() == 1 && rows[0].1[0] == Value::Text("alice-v4".to_string())).then_some(())
         },
     )
     .await;
 
-    // Bob updates from his stale state (his last known state was v0).
-    // This simulates a client that was offline and made a local edit.
-    bob.update(
-        todo_id,
-        vec![(
-            "title".to_string(),
-            Value::Text("bob-offline-edit".to_string()),
-        )],
-    )
-    .await
-    .expect("bob offline update");
+    // --- Phase 4: Bob reconnects WITHOUT server, makes 1 local edit. ---
 
-    // Both must converge. With LWW by timestamp, alice-v5 should win
-    // because her commits have later timestamps. But we only assert
-    // convergence, not which side wins.
+    bob_ctx.server_url = String::new();
+    let bob_offline = JazzClient::connect(bob_ctx.clone())
+        .await
+        .expect("bob connects offline");
+
+    // Hydrate the object from Fjall into memory by querying first
+    let bob_stale = bob_offline
+        .query(query.clone(), None)
+        .await
+        .expect("bob offline query to hydrate from Fjall");
+    assert_eq!(bob_stale.len(), 1, "bob should have 1 todo from Fjall");
+    assert_eq!(
+        bob_stale[0].1[0],
+        Value::Text("alice-v1".to_string()),
+        "bob's Fjall state should be at alice-v1 (last synced before offline)"
+    );
+
+    bob_offline
+        .update(
+            todo_id,
+            vec![(
+                "title".to_string(),
+                Value::Text("bob-offline-edit".to_string()),
+            )],
+        )
+        .await
+        .expect("bob offline edit");
+
+    // Verify bob sees his own edit locally
+    let bob_local = bob_offline
+        .query(query.clone(), None)
+        .await
+        .expect("bob local query");
+    assert_eq!(
+        bob_local[0].1[0],
+        Value::Text("bob-offline-edit".to_string()),
+        "bob should see his offline edit locally"
+    );
+
+    bob_offline.shutdown().await.expect("bob offline shutdown");
+
+    // --- Phase 5: Bob reconnects to the real server. ---
+
+    bob_ctx.server_url = server.base_url();
+    let bob_online = JazzClient::connect(bob_ctx)
+        .await
+        .expect("bob reconnects online");
+
+    // --- Phase 6: Both converge. Alice-v4 wins (later timestamp). ---
+
     let alice = Arc::new(alice);
-    let bob = Arc::new(bob);
-    let converged = support::wait_for(
-        QUERY_TIMEOUT,
-        "alice and bob converge after offline conflict",
-        || {
-            let alice = Arc::clone(&alice);
-            let bob = Arc::clone(&bob);
-            let query = query.clone();
-            async move {
-                let alice_rows = alice
-                    .query(query.clone(), Some(DurabilityTier::EdgeServer))
-                    .await
-                    .ok()?;
-                let bob_rows = bob
-                    .query(query, Some(DurabilityTier::EdgeServer))
-                    .await
-                    .ok()?;
+    let bob_online = Arc::new(bob_online);
 
-                if alice_rows.len() == 1 && bob_rows.len() == 1 {
-                    if let (Value::Text(a_title), Value::Text(b_title)) =
-                        (&alice_rows[0].1[0], &bob_rows[0].1[0])
-                    {
-                        if a_title != "v0" && a_title == b_title {
-                            return Some(a_title.clone());
-                        }
+    let converged = support::wait_for(QUERY_TIMEOUT, "bob sees alice-v4 after reconnect", || {
+        let alice = Arc::clone(&alice);
+        let bob = Arc::clone(&bob_online);
+        let query = query.clone();
+        async move {
+            let alice_rows = alice
+                .query(query.clone(), Some(DurabilityTier::EdgeServer))
+                .await
+                .ok()?;
+            let bob_rows = bob
+                .query(query, Some(DurabilityTier::EdgeServer))
+                .await
+                .ok()?;
+
+            if alice_rows.len() == 1 && bob_rows.len() == 1 {
+                if let (Value::Text(a), Value::Text(b)) = (&alice_rows[0].1[0], &bob_rows[0].1[0]) {
+                    if a == b && a != "create" {
+                        return Some(a.clone());
                     }
                 }
-                None
             }
-        },
-    )
+            None
+        }
+    })
     .await;
 
-    // Document what actually won
-    eprintln!("deep_history_vs_offline: converged to {converged:?}");
+    assert_eq!(
+        converged, "alice-v4",
+        "alice-v4 should win via LWW (later timestamp than bob-offline-edit)"
+    );
 
     Arc::try_unwrap(alice)
         .unwrap_or_else(|_| panic!("alice still shared"))
         .shutdown()
         .await
         .expect("shutdown alice");
-    Arc::try_unwrap(bob)
+    Arc::try_unwrap(bob_online)
         .unwrap_or_else(|_| panic!("bob still shared"))
         .shutdown()
         .await
