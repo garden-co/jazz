@@ -9602,3 +9602,97 @@ fn get_row_reads_from_doc_manager() {
         vec![Value::Text("Alice".into()), Value::Integer(42)]
     );
 }
+
+/// After soft-deleting a row, get_row_from_doc should return None (deleted rows
+/// are not readable), and the underlying RowDoc should have _deleted = "soft".
+#[test]
+fn soft_delete_marks_doc_as_deleted() {
+    let (mut qm, mut storage) = create_query_manager(SyncManager::new(), test_schema());
+
+    let result = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("diana".into()), Value::Integer(5)],
+        )
+        .unwrap();
+    let row_id = result.row_id;
+
+    qm.delete(&mut storage, row_id).unwrap();
+
+    // get_row_from_doc should return None for a soft-deleted row
+    assert!(
+        qm.get_row_from_doc(row_id).is_none(),
+        "get_row_from_doc should return None for soft-deleted row"
+    );
+
+    // The underlying RowDoc should still exist and carry _deleted = "soft"
+    let row_doc = qm
+        .sync_manager
+        .doc_manager
+        .get(row_id)
+        .expect("DocManager should still contain the soft-deleted row doc");
+    let txn = row_doc.doc.transact();
+    use yrs::{Map, Out};
+    let deleted = row_doc.root_map.get(&txn, "_deleted");
+    assert_eq!(
+        deleted,
+        Some(Out::Any(yrs::Any::String("soft".into()))),
+        "RowDoc _deleted should be 'soft'"
+    );
+}
+
+/// After hard-deleting a row, the DocManager RowDoc should have _deleted = "hard"
+/// and all column values should be removed. get_row_from_doc returns None.
+#[test]
+fn hard_delete_clears_doc_columns() {
+    // Insert eve, then hard-delete her directly (no soft-delete first)
+    //
+    //  insert(eve) --> hard_delete(eve)
+    //
+    let (mut qm, mut storage) = create_query_manager(SyncManager::new(), test_schema());
+
+    let result = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("eve".into()), Value::Integer(99)],
+        )
+        .unwrap();
+    let row_id = result.row_id;
+
+    qm.hard_delete(&mut storage, row_id).unwrap();
+
+    // get_row_from_doc should return None for a hard-deleted row
+    assert!(
+        qm.get_row_from_doc(row_id).is_none(),
+        "get_row_from_doc should return None for hard-deleted row"
+    );
+
+    // The underlying RowDoc should have _deleted = "hard" and no column values
+    let row_doc = qm
+        .sync_manager
+        .doc_manager
+        .get(row_id)
+        .expect("DocManager should still contain the hard-deleted row doc");
+    let txn = row_doc.doc.transact();
+    use yrs::{Map, Out};
+    let deleted = row_doc.root_map.get(&txn, "_deleted");
+    assert_eq!(
+        deleted,
+        Some(Out::Any(yrs::Any::String("hard".into()))),
+        "RowDoc _deleted should be 'hard'"
+    );
+
+    // Column values should be removed
+    let name_val = row_doc.root_map.get(&txn, "name");
+    let score_val = row_doc.root_map.get(&txn, "score");
+    assert!(
+        name_val.is_none(),
+        "name column should be absent after hard delete"
+    );
+    assert!(
+        score_val.is_none(),
+        "score column should be absent after hard delete"
+    );
+}

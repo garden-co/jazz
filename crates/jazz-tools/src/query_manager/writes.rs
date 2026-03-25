@@ -1339,6 +1339,19 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
+        // Mirror hard delete to DocManager
+        {
+            if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(id) {
+                let mut txn = row_doc.doc.transact_mut();
+                // Mark as hard deleted
+                row_doc.root_map.insert(&mut txn, "_deleted", "hard");
+                // Remove all column values
+                for col in &descriptor.columns {
+                    row_doc.root_map.remove(&mut txn, col.name.as_str());
+                }
+            }
+        }
+
         // Update indices: remove from ALL indices including _id_deleted
         self.update_indices_for_hard_delete(storage, &table, id, old_data.as_deref(), &descriptor)?;
 
@@ -1396,7 +1409,7 @@ impl QueryManager {
     }
 
     /// Try to read a row from DocManager's Yrs Docs.
-    /// Returns (table_name, decoded_values) if the doc exists.
+    /// Returns (table_name, decoded_values) if the doc exists and is not deleted.
     pub fn get_row_from_doc(&self, id: ObjectId) -> Option<(String, Vec<Value>)> {
         let row_doc = self.sync_manager.doc_manager.get(id)?;
         let table = row_doc.metadata.get("table")?.clone();
@@ -1404,6 +1417,11 @@ impl QueryManager {
         let table_schema = self.schema.get(&table_name)?;
 
         let txn = row_doc.doc.transact();
+
+        // Check if row is deleted (soft or hard)
+        if row_doc.root_map.get(&txn, "_deleted").is_some() {
+            return None;
+        }
         let mut values = Vec::with_capacity(table_schema.columns.columns.len());
         for col in &table_schema.columns.columns {
             let value = crate::row_doc::read_column(&row_doc.root_map, &txn, col.name.as_str())
