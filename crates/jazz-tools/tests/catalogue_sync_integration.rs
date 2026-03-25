@@ -7,6 +7,7 @@
 
 mod support;
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz_tools::query_manager::types::SchemaHash;
@@ -17,6 +18,13 @@ use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
 use support::{wait_for_edge_query_ready, wait_for_query};
+
+fn user_values(id: jazz_tools::ObjectId, name: &str) -> HashMap<String, Value> {
+    HashMap::from([
+        ("id".to_string(), Value::Uuid(id)),
+        ("name".to_string(), Value::Text(name.to_string())),
+    ])
+}
 
 fn schema_v1() -> jazz_tools::Schema {
     SchemaBuilder::new()
@@ -78,13 +86,7 @@ async fn catalogue_sync_e2e_schema_evolution_through_sync_manager() {
 
     let user_id_value = jazz_tools::ObjectId::new();
     let (user_obj_id, _) = alice
-        .create(
-            "users",
-            vec![
-                Value::Uuid(user_id_value),
-                Value::Text("Alice Smith".to_string()),
-            ],
-        )
+        .create("users", user_values(user_id_value, "Alice Smith"))
         .await
         .expect("alice creates user");
 
