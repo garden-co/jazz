@@ -44,7 +44,7 @@ function toArrayBuffer(view: Uint8Array): ArrayBuffer {
   return buffer;
 }
 
-export function base64URLtoBytes(base64: string): Uint8Array {
+export function base64URLtoBytes(base64: string): Uint8Array<ArrayBuffer> {
   // Use React Native native implementation if available
   if (nativeBase64urlToBytes) {
     return new Uint8Array(nativeBase64urlToBytes(base64));
@@ -53,7 +53,10 @@ export function base64URLtoBytes(base64: string): Uint8Array {
   if (hasNativeBase64) {
     return (
       Uint8Array as unknown as {
-        fromBase64: (s: string, opts: { alphabet: string }) => Uint8Array;
+        fromBase64: (
+          s: string,
+          opts: { alphabet: string },
+        ) => Uint8Array<ArrayBuffer>;
       }
     ).fromBase64(base64, { alphabet: "base64url" });
   }
@@ -98,7 +101,7 @@ export function bytesToBase64(bytes: Uint8Array): string {
 
 // --- Fallback implementations ---
 
-function base64URLtoBytesFallback(base64: string): Uint8Array {
+function base64URLtoBytesFallback(base64: string): Uint8Array<ArrayBuffer> {
   base64 = base64.replace(/=/g, "");
   const n = base64.length;
   const rem = n % 4;

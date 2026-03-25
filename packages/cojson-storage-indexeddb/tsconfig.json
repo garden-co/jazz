@@ -3,6 +3,7 @@
     "lib": ["ESNext", "DOM"],
     "module": "esnext",
     "target": "ES2020",
+    "rootDir": "./src",
     "moduleResolution": "bundler",
     "moduleDetection": "force",
     "strict": true,

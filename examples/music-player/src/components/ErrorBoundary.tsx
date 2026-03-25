@@ -12,6 +12,7 @@ function ErrorUI({
 }) {
   const logOut = useLogOut();
   const me = useAccount(MusicaAccount, { resolve: { root: true } });
+  const isDevelopment = import.meta.env?.DEV;
 
   if (me.$jazz.loadingState === "deleted") {
     return (
@@ -104,7 +105,7 @@ function ErrorUI({
         <p className="text-muted-foreground">
           {error.message || "An unexpected error occurred"}
         </p>
-        {process.env.NODE_ENV === "development" && (
+        {isDevelopment && (
           <pre className="mt-4 overflow-auto rounded-md bg-muted p-4 text-sm">
             {error.stack}
           </pre>

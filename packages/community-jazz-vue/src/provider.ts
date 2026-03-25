@@ -11,7 +11,6 @@ import {
   type PropType,
   defineComponent,
   markRaw,
-  nextTick,
   onUnmounted,
   provide,
   ref,
@@ -171,11 +170,12 @@ export const JazzVueProvider = defineComponent({
       cleanup();
     });
 
+    const isDev = (globalThis as any).process?.env?.NODE_ENV === "development";
     onUnmounted(() => {
       if (ctx.value) ctx.value.done?.();
 
       // Only call done() in production, not in development (for HMR)
-      if (process.env.NODE_ENV !== "development") {
+      if (!isDev) {
         contextManager.done();
       }
     });

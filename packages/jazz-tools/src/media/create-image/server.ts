@@ -106,7 +106,7 @@ async function createFileStreamFromSource(
   const mimeType = formatToMimeType(format);
 
   return FileStream.createFromArrayBuffer(
-    imageBlobOrBuffer,
+    imageBlobOrBuffer as ArrayBuffer,
     mimeType,
     undefined,
     { owner },

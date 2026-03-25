@@ -1240,7 +1240,6 @@ test("deep loaded CoList nested inside another CoValue can be iterated over", as
   const list = loadedMap.list;
 
   let expectedValue = 1;
-  // @ts-expect-error - https://github.com/microsoft/TypeScript/issues/62621
   for (const item of list) {
     expect(item).toEqual(expectedValue);
     expectedValue++;

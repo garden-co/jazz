@@ -129,10 +129,11 @@ export class RawBinaryCoStreamView<
     };
   }
 
-  getBinaryChunks(
-    allowUnfinished?: boolean,
-  ):
-    | (BinaryStreamInfo & { chunks: Uint8Array[]; finished: boolean })
+  getBinaryChunks(allowUnfinished?: boolean):
+    | (BinaryStreamInfo & {
+        chunks: Uint8Array<ArrayBuffer>[];
+        finished: boolean;
+      })
     | undefined {
     if (!this.start) return;
     if (!this.ended && !allowUnfinished) return;
