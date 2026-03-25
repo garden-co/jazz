@@ -1,5 +1,6 @@
 pub mod binding_support;
 pub mod commit;
+pub mod doc_manager;
 pub mod metadata;
 #[cfg(feature = "cli")]
 pub mod middleware;

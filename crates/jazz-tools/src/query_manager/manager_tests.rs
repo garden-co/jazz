@@ -4558,6 +4558,7 @@ fn file_storage_schema() -> Schema {
     schema
 }
 
+#[allow(dead_code)]
 fn scalar_fk_schema() -> Schema {
     let mut schema = Schema::new();
     schema.insert(
