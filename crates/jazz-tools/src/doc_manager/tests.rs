@@ -318,6 +318,79 @@ mod tests {
     }
 
     #[test]
+    fn subscribe_all_receives_change_notifications() {
+        use crate::object::ObjectId;
+        use std::sync::{Arc, Mutex};
+        use yrs::{Map, Transact};
+
+        let mut mgr = make_manager();
+        let metadata = HashMap::from([("table".to_string(), "todos".to_string())]);
+        let id = mgr.create(metadata);
+
+        let changes: Arc<Mutex<Vec<ObjectId>>> = Arc::new(Mutex::new(Vec::new()));
+        let changes_clone = changes.clone();
+
+        let sub_id = mgr.subscribe_all(move |doc_id| {
+            changes_clone.lock().unwrap().push(doc_id);
+        });
+
+        // Write to doc
+        {
+            let row_doc = mgr.get_mut(id).unwrap();
+            let mut txn = row_doc.doc.transact_mut();
+            row_doc.root_map.insert(&mut txn, "title", "Buy milk");
+        }
+        mgr.notify_change(id);
+
+        assert_eq!(changes.lock().unwrap().len(), 1);
+        assert_eq!(changes.lock().unwrap()[0], id);
+
+        mgr.unsubscribe_all(sub_id);
+    }
+
+    #[test]
+    fn observe_update_captures_raw_bytes_for_sync() {
+        use std::sync::{Arc, Mutex};
+        use yrs::updates::decoder::Decode;
+        use yrs::{Doc, Map, Transact, Update};
+
+        let mut mgr = make_manager();
+
+        let captured_updates: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+        let updates_clone = captured_updates.clone();
+
+        mgr.set_update_handler(move |_doc_id, update_bytes| {
+            updates_clone.lock().unwrap().push(update_bytes.to_vec());
+        });
+
+        let metadata = HashMap::from([("table".to_string(), "todos".to_string())]);
+        let id = mgr.create(metadata);
+
+        // Write to doc — should trigger update handler with raw Yrs update bytes
+        {
+            let row_doc = mgr.get_mut(id).unwrap();
+            let mut txn = row_doc.doc.transact_mut();
+            row_doc.root_map.insert(&mut txn, "title", "Buy milk");
+        }
+        // observe_update_v1 fires on transaction drop (which happens at end of block above)
+
+        let updates = captured_updates.lock().unwrap();
+        assert_eq!(updates.len(), 1);
+
+        // Verify the captured bytes can be applied to a fresh doc
+        let fresh_doc = Doc::new();
+        let fresh_map = fresh_doc.get_or_insert_map("row");
+        let update = Update::decode_v1(&updates[0]).unwrap();
+        fresh_doc.transact_mut().apply_update(update).unwrap();
+
+        let txn = fresh_doc.transact();
+        match fresh_map.get(&txn, "title") {
+            Some(yrs::Out::Any(yrs::Any::String(s))) => assert_eq!(s.as_ref(), "Buy milk"),
+            other => panic!("expected String 'Buy milk', got: {:?}", other),
+        }
+    }
+
+    #[test]
     fn encode_diff_produces_minimal_update() {
         let mut mgr = make_manager();
         let id = mgr.create(HashMap::new());

@@ -1,12 +1,19 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
-use yrs::{ReadTxn, StateVector, Transact, Update};
+use yrs::{Doc, ReadTxn, StateVector, Subscription, Transact, Update};
 
 use crate::object::ObjectId;
 use crate::row_doc::RowDoc;
 use crate::storage::Storage;
+
+mod subscriptions;
+pub use subscriptions::SubscriptionId;
+use subscriptions::SubscriptionManager;
+
+type UpdateHandler = Arc<Mutex<dyn FnMut(ObjectId, &[u8])>>;
 
 // ============================================================================
 // Error
@@ -38,6 +45,9 @@ impl std::error::Error for Error {}
 pub struct DocManager {
     docs: HashMap<ObjectId, RowDoc>,
     storage: Box<dyn Storage>,
+    subscriptions: SubscriptionManager,
+    update_handler: Option<UpdateHandler>,
+    yrs_subscriptions: HashMap<ObjectId, Subscription>,
 }
 
 impl DocManager {
@@ -45,7 +55,43 @@ impl DocManager {
         Self {
             docs: HashMap::new(),
             storage,
+            subscriptions: SubscriptionManager::new(),
+            update_handler: None,
+            yrs_subscriptions: HashMap::new(),
         }
+    }
+
+    pub fn subscribe_all(&mut self, callback: impl FnMut(ObjectId) + 'static) -> SubscriptionId {
+        self.subscriptions.subscribe_all(callback)
+    }
+
+    pub fn unsubscribe_all(&mut self, id: SubscriptionId) {
+        self.subscriptions.unsubscribe_all(id)
+    }
+
+    pub fn notify_change(&mut self, id: ObjectId) {
+        self.subscriptions.notify_change(id)
+    }
+
+    pub fn set_update_handler(&mut self, handler: impl FnMut(ObjectId, &[u8]) + 'static) {
+        self.update_handler = Some(Arc::new(Mutex::new(handler)));
+        // Re-wire all existing docs
+        let ids: Vec<ObjectId> = self.docs.keys().copied().collect();
+        for id in ids {
+            let doc = &self.docs[&id].doc;
+            let sub = self.wire_observe_update(id, doc);
+            self.yrs_subscriptions.insert(id, sub);
+        }
+    }
+
+    fn wire_observe_update(&self, id: ObjectId, doc: &Doc) -> Subscription {
+        let handler = self.update_handler.as_ref().unwrap().clone();
+        doc.observe_update_v1(move |_txn, event| {
+            if let Ok(mut h) = handler.lock() {
+                h(id, &event.update);
+            }
+        })
+        .unwrap()
     }
 
     /// Create a new RowDoc with a fresh ObjectId and return that id.
@@ -53,6 +99,10 @@ impl DocManager {
         let id = ObjectId::new();
         let row_doc = RowDoc::new(id, metadata);
         self.docs.insert(id, row_doc);
+        if self.update_handler.is_some() {
+            let sub = self.wire_observe_update(id, &self.docs[&id].doc);
+            self.yrs_subscriptions.insert(id, sub);
+        }
         id
     }
 
@@ -159,6 +209,10 @@ impl DocManager {
         }
 
         self.docs.insert(id, row_doc);
+        if self.update_handler.is_some() {
+            let sub = self.wire_observe_update(id, &self.docs[&id].doc);
+            self.yrs_subscriptions.insert(id, sub);
+        }
         Ok(self.docs.get(&id).unwrap())
     }
 
