@@ -510,6 +510,321 @@ mod tests {
         assert_eq!(val, Value::Bytea(vec![1, 2, 3]));
     }
 
+    // -------------------------------------------------------------------------
+    // End-to-end integration tests
+    // -------------------------------------------------------------------------
+
+    /// alice creates a row → syncs to bob → alice updates → bob receives incremental update
+    ///
+    ///   alice                          bob
+    ///   ──────                         ────
+    ///   create(title="Buy milk",
+    ///          done=false)
+    ///          ──── full sync ────▶    apply
+    ///                                  read ✓
+    ///   update(done=true)
+    ///          ──── incr sync ───▶     apply
+    ///                                  read ✓
+    #[test]
+    fn e2e_write_read_sync_cycle() {
+        use crate::query_manager::types::Value;
+        use crate::row_doc::{read_column, write_column};
+
+        let mut alice = make_manager();
+        let mut bob = make_manager();
+
+        let doc_id = crate::object::ObjectId::new();
+        let metadata = HashMap::from([("table".to_string(), "todos".to_string())]);
+
+        // Alice creates and writes
+        alice.create_with_id(doc_id, metadata.clone());
+        {
+            let row_doc = alice.get_mut(doc_id).unwrap();
+            let mut txn = row_doc.doc.transact_mut();
+            write_column(
+                &row_doc.root_map,
+                &mut txn,
+                "title",
+                &Value::Text("Buy milk".into()),
+            );
+            write_column(&row_doc.root_map, &mut txn, "done", &Value::Boolean(false));
+        }
+
+        // Alice encodes full state for bob
+        let alice_update = alice
+            .encode_diff(doc_id, &StateVector::default().encode_v1())
+            .unwrap();
+
+        // Bob creates doc and applies alice's state
+        bob.create_with_id(doc_id, metadata);
+        bob.apply_update(doc_id, &alice_update).unwrap();
+
+        // Bob reads — should see alice's data
+        {
+            let row_doc = bob.get(doc_id).unwrap();
+            let txn = row_doc.doc.transact();
+            assert_eq!(
+                read_column(&row_doc.root_map, &txn, "title"),
+                Some(Value::Text("Buy milk".into()))
+            );
+            assert_eq!(
+                read_column(&row_doc.root_map, &txn, "done"),
+                Some(Value::Boolean(false))
+            );
+        }
+
+        // Alice updates done=true
+        {
+            let row_doc = alice.get_mut(doc_id).unwrap();
+            let mut txn = row_doc.doc.transact_mut();
+            write_column(&row_doc.root_map, &mut txn, "done", &Value::Boolean(true));
+        }
+
+        // Get bob's current state vector, encode diff from alice
+        let bob_sv = bob.get_state_vector(doc_id).unwrap();
+        let incremental_update = alice.encode_diff(doc_id, &bob_sv).unwrap();
+
+        // Bob applies incremental update
+        bob.apply_update(doc_id, &incremental_update).unwrap();
+
+        // Bob reads updated state
+        {
+            let row_doc = bob.get(doc_id).unwrap();
+            let txn = row_doc.doc.transact();
+            assert_eq!(
+                read_column(&row_doc.root_map, &txn, "title"),
+                Some(Value::Text("Buy milk".into()))
+            );
+            assert_eq!(
+                read_column(&row_doc.root_map, &txn, "done"),
+                Some(Value::Boolean(true))
+            );
+        }
+    }
+
+    /// alice and bob make concurrent edits to different fields — both converge
+    ///
+    ///   alice                          bob
+    ///   ──────                         ────
+    ///   initial state synced           initial state synced
+    ///   write title="Alice's version"  write done=true
+    ///          ──── exchange diffs ──▶
+    ///          ◀── exchange diffs ────
+    ///   converge ✓                     converge ✓
+    #[test]
+    fn e2e_concurrent_different_fields_converge() {
+        use crate::query_manager::types::Value;
+        use crate::row_doc::{read_column, write_column};
+
+        let mut alice = make_manager();
+        let mut bob = make_manager();
+        let doc_id = crate::object::ObjectId::new();
+        let metadata = HashMap::from([("table".to_string(), "todos".to_string())]);
+
+        // Both start with same initial state
+        alice.create_with_id(doc_id, metadata.clone());
+        bob.create_with_id(doc_id, metadata);
+
+        {
+            let row_doc = alice.get_mut(doc_id).unwrap();
+            let mut txn = row_doc.doc.transact_mut();
+            write_column(
+                &row_doc.root_map,
+                &mut txn,
+                "title",
+                &Value::Text("Original".into()),
+            );
+            write_column(&row_doc.root_map, &mut txn, "done", &Value::Boolean(false));
+        }
+
+        // Sync initial state to bob
+        let alice_update = alice
+            .encode_diff(doc_id, &StateVector::default().encode_v1())
+            .unwrap();
+        bob.apply_update(doc_id, &alice_update).unwrap();
+
+        // Capture state vectors BEFORE concurrent edits
+        let alice_sv_before = alice.get_state_vector(doc_id).unwrap();
+        let bob_sv_before = bob.get_state_vector(doc_id).unwrap();
+
+        // Concurrent writes to different fields
+        {
+            let row_doc = alice.get_mut(doc_id).unwrap();
+            let mut txn = row_doc.doc.transact_mut();
+            write_column(
+                &row_doc.root_map,
+                &mut txn,
+                "title",
+                &Value::Text("Alice's version".into()),
+            );
+        }
+        {
+            let row_doc = bob.get_mut(doc_id).unwrap();
+            let mut txn = row_doc.doc.transact_mut();
+            write_column(&row_doc.root_map, &mut txn, "done", &Value::Boolean(true));
+        }
+
+        // Exchange diffs
+        let alice_diff = alice.encode_diff(doc_id, &bob_sv_before).unwrap();
+        let bob_diff = bob.encode_diff(doc_id, &alice_sv_before).unwrap();
+
+        bob.apply_update(doc_id, &alice_diff).unwrap();
+        alice.apply_update(doc_id, &bob_diff).unwrap();
+
+        // Both should converge
+        for (name, mgr) in [("alice", &alice), ("bob", &bob)] {
+            let row_doc = mgr.get(doc_id).unwrap();
+            let txn = row_doc.doc.transact();
+            assert_eq!(
+                read_column(&row_doc.root_map, &txn, "title"),
+                Some(Value::Text("Alice's version".into())),
+                "{name} should have Alice's title"
+            );
+            assert_eq!(
+                read_column(&row_doc.root_map, &txn, "done"),
+                Some(Value::Boolean(true)),
+                "{name} should have bob's done=true"
+            );
+        }
+    }
+
+    /// fork a doc, edit branch and main independently, merge — both changes present
+    ///
+    ///   main           branch("draft")
+    ///   ────           ───────────────
+    ///   title="Buy milk"
+    ///   done=false
+    ///        ── fork ──▶  (same state)
+    ///   done=true         title="Buy eggs"
+    ///        ◀── merge ──
+    ///   title="Buy eggs"
+    ///   done=true
+    #[test]
+    fn e2e_fork_edit_merge() {
+        use crate::query_manager::types::Value;
+        use crate::row_doc::{read_column, write_column};
+
+        let mut mgr = make_manager();
+        let metadata = HashMap::from([("table".to_string(), "todos".to_string())]);
+        let main_id = mgr.create(metadata);
+
+        // Write initial state
+        {
+            let row_doc = mgr.get_mut(main_id).unwrap();
+            let mut txn = row_doc.doc.transact_mut();
+            write_column(
+                &row_doc.root_map,
+                &mut txn,
+                "title",
+                &Value::Text("Buy milk".into()),
+            );
+            write_column(&row_doc.root_map, &mut txn, "done", &Value::Boolean(false));
+        }
+
+        // Fork
+        let branch_id = mgr.fork(main_id, "draft").unwrap();
+
+        // Edit branch: change title
+        {
+            let row_doc = mgr.get_mut(branch_id).unwrap();
+            let mut txn = row_doc.doc.transact_mut();
+            write_column(
+                &row_doc.root_map,
+                &mut txn,
+                "title",
+                &Value::Text("Buy eggs".into()),
+            );
+        }
+
+        // Edit main: change done
+        {
+            let row_doc = mgr.get_mut(main_id).unwrap();
+            let mut txn = row_doc.doc.transact_mut();
+            write_column(&row_doc.root_map, &mut txn, "done", &Value::Boolean(true));
+        }
+
+        // Merge branch into main
+        mgr.merge(branch_id, main_id).unwrap();
+
+        // Main should have both changes
+        {
+            let row_doc = mgr.get(main_id).unwrap();
+            let txn = row_doc.doc.transact();
+            assert_eq!(
+                read_column(&row_doc.root_map, &txn, "title"),
+                Some(Value::Text("Buy eggs".into())),
+                "title should be branch's version"
+            );
+            assert_eq!(
+                read_column(&row_doc.root_map, &txn, "done"),
+                Some(Value::Boolean(true)),
+                "done should be main's version"
+            );
+        }
+    }
+
+    /// persist → evict → reload preserves all column types
+    #[test]
+    fn e2e_persist_evict_reload_preserves_types() {
+        use crate::query_manager::types::Value;
+        use crate::row_doc::{read_column, write_column};
+
+        let mut mgr = make_manager();
+        let metadata = HashMap::from([("table".to_string(), "todos".to_string())]);
+        let doc_id = mgr.create(metadata);
+
+        // Write various types
+        {
+            let row_doc = mgr.get_mut(doc_id).unwrap();
+            let mut txn = row_doc.doc.transact_mut();
+            write_column(
+                &row_doc.root_map,
+                &mut txn,
+                "title",
+                &Value::Text("Buy milk".into()),
+            );
+            write_column(&row_doc.root_map, &mut txn, "count", &Value::Integer(42));
+            write_column(&row_doc.root_map, &mut txn, "score", &Value::Double(3.14));
+            write_column(&row_doc.root_map, &mut txn, "done", &Value::Boolean(false));
+            write_column(
+                &row_doc.root_map,
+                &mut txn,
+                "big",
+                &Value::BigInt(9_000_000_000),
+            );
+        }
+
+        // Persist and evict
+        mgr.persist(doc_id).unwrap();
+        mgr.evict(doc_id);
+        assert!(mgr.get(doc_id).is_none());
+
+        // Reload
+        let row_doc = mgr.get_or_load(doc_id).unwrap();
+        let txn = row_doc.doc.transact();
+
+        assert_eq!(
+            read_column(&row_doc.root_map, &txn, "title"),
+            Some(Value::Text("Buy milk".into()))
+        );
+        assert_eq!(
+            read_column(&row_doc.root_map, &txn, "count"),
+            Some(Value::Integer(42))
+        );
+        assert_eq!(
+            read_column(&row_doc.root_map, &txn, "score"),
+            Some(Value::Double(3.14))
+        );
+        assert_eq!(
+            read_column(&row_doc.root_map, &txn, "done"),
+            Some(Value::Boolean(false))
+        );
+        assert_eq!(
+            read_column(&row_doc.root_map, &txn, "big"),
+            Some(Value::BigInt(9_000_000_000))
+        );
+    }
+
     #[test]
     fn encode_diff_produces_minimal_update() {
         let mut mgr = make_manager();
