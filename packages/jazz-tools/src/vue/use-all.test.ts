@@ -124,4 +124,37 @@ describe("vue/useAll", () => {
     expect(result!.value).toBeUndefined();
     scope.stop();
   });
+
+  it("VU-ALL-07: onDelta reconciles in-place, preserving object identity", () => {
+    const alice = { id: "u1", name: "Alice", role: "admin" };
+    let capturedOnDelta: ((delta: any) => void) | undefined;
+
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "fulfilled" as const, data: [alice] },
+      subscribe: (callbacks: any) => {
+        capturedOnDelta = callbacks.onDelta;
+        return vi.fn();
+      },
+    } as any);
+
+    const scope = effectScope();
+    const result = scope.run(() => useAll(makeQuery()));
+
+    // Initial state from cache
+    expect(result!.value).toHaveLength(1);
+    const originalRef = result!.value![0];
+
+    // Simulate a delta — role changed, name unchanged
+    capturedOnDelta!({
+      all: [{ id: "u1", name: "Alice", role: "editor" }],
+      delta: [{ kind: 2, id: "u1", index: 0, item: { id: "u1", name: "Alice", role: "editor" } }],
+    });
+
+    expect(result!.value).toHaveLength(1);
+    expect(result!.value![0]).toBe(originalRef); // same object reference
+    expect(result!.value![0].role).toBe("editor"); // updated value
+    expect(result!.value![0].name).toBe("Alice"); // unchanged
+
+    scope.stop();
+  });
 });
