@@ -1,0 +1,27 @@
+{
+  "name": "auth-betterauth-chat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "node ../../packages/jazz-tools/dist/cli.js build && next build",
+    "start": "next start",
+    "sync-server": "tsx scripts/sync-server.ts",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "better-auth": "^1.5.5",
+    "jazz-tools": "workspace:*",
+    "next": "16.1.6",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^20.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "catalog:default"
+  }
+}
