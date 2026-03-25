@@ -44,3 +44,4 @@ data-multi/
 
 .claude/*
 !.claude/commands
+!.claude/skills
