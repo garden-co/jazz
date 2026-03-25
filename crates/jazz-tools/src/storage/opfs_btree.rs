@@ -32,7 +32,7 @@ use crate::query_manager::types::Value;
 use crate::sync_manager::DurabilityTier;
 
 use super::{
-    CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
+    CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError, key_codec,
     key_codec::increment_bytes,
     storage_core::{
         append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
@@ -425,55 +425,88 @@ impl Storage for OpfsBTreeStorage {
 
     fn create_doc(
         &mut self,
-        _id: crate::object::ObjectId,
-        _metadata: &HashMap<String, String>,
+        id: crate::object::ObjectId,
+        metadata: &HashMap<String, String>,
     ) -> Result<(), super::StorageError> {
-        todo!("OpfsBTreeStorage::create_doc — implement in Task 9")
+        let key = String::from_utf8(key_codec::doc_meta_key(id)).unwrap();
+        let value = serde_json::to_vec(metadata)
+            .map_err(|e| StorageError::IoError(format!("json serialize: {e}")))?;
+        self.tree_insert(&key, &value)
     }
 
     fn load_doc_metadata(
         &self,
-        _id: crate::object::ObjectId,
+        id: crate::object::ObjectId,
     ) -> Result<Option<HashMap<String, String>>, super::StorageError> {
-        todo!("OpfsBTreeStorage::load_doc_metadata — implement in Task 9")
+        let key = String::from_utf8(key_codec::doc_meta_key(id)).unwrap();
+        match self.tree_read(&key)? {
+            Some(bytes) => {
+                let metadata = serde_json::from_slice(&bytes)
+                    .map_err(|e| StorageError::IoError(format!("json deserialize: {e}")))?;
+                Ok(Some(metadata))
+            }
+            None => Ok(None),
+        }
     }
 
     fn save_snapshot(
         &mut self,
-        _id: crate::object::ObjectId,
-        _snapshot: &[u8],
+        id: crate::object::ObjectId,
+        snapshot: &[u8],
     ) -> Result<(), super::StorageError> {
-        todo!("OpfsBTreeStorage::save_snapshot — implement in Task 9")
+        let key = String::from_utf8(key_codec::doc_snapshot_key(id)).unwrap();
+        self.tree_insert(&key, snapshot)
     }
 
     fn load_snapshot(
         &self,
-        _id: crate::object::ObjectId,
+        id: crate::object::ObjectId,
     ) -> Result<Option<Vec<u8>>, super::StorageError> {
-        todo!("OpfsBTreeStorage::load_snapshot — implement in Task 9")
+        let key = String::from_utf8(key_codec::doc_snapshot_key(id)).unwrap();
+        self.tree_read(&key)
     }
 
     fn append_update(
         &mut self,
-        _id: crate::object::ObjectId,
-        _update: &[u8],
+        id: crate::object::ObjectId,
+        update: &[u8],
     ) -> Result<(), super::StorageError> {
-        todo!("OpfsBTreeStorage::append_update — implement in Task 9")
+        let prefix = String::from_utf8(key_codec::doc_update_prefix(id)).unwrap();
+        let existing = self.tree_scan_prefix(&prefix)?;
+        let seq = existing.len() as u64;
+        let key = String::from_utf8(key_codec::doc_update_key(id, seq)).unwrap();
+        self.tree_insert(&key, update)
     }
 
     fn load_updates(
         &self,
-        _id: crate::object::ObjectId,
+        id: crate::object::ObjectId,
     ) -> Result<Vec<Vec<u8>>, super::StorageError> {
-        todo!("OpfsBTreeStorage::load_updates — implement in Task 9")
+        let prefix = String::from_utf8(key_codec::doc_update_prefix(id)).unwrap();
+        let pairs = self.tree_scan_prefix(&prefix)?;
+        Ok(pairs.into_iter().map(|(_, v)| v).collect())
     }
 
-    fn clear_updates(&mut self, _id: crate::object::ObjectId) -> Result<(), super::StorageError> {
-        todo!("OpfsBTreeStorage::clear_updates — implement in Task 9")
+    fn clear_updates(&mut self, id: crate::object::ObjectId) -> Result<(), super::StorageError> {
+        let prefix = String::from_utf8(key_codec::doc_update_prefix(id)).unwrap();
+        let pairs = self.tree_scan_prefix(&prefix)?;
+        for (key, _) in pairs {
+            self.tree_delete(&key)?;
+        }
+        Ok(())
     }
 
-    fn delete_doc(&mut self, _id: crate::object::ObjectId) -> Result<(), super::StorageError> {
-        todo!("OpfsBTreeStorage::delete_doc — implement in Task 9")
+    fn delete_doc(&mut self, id: crate::object::ObjectId) -> Result<(), super::StorageError> {
+        let meta_key = String::from_utf8(key_codec::doc_meta_key(id)).unwrap();
+        self.tree_delete(&meta_key)?;
+        let snapshot_key = String::from_utf8(key_codec::doc_snapshot_key(id)).unwrap();
+        self.tree_delete(&snapshot_key)?;
+        let prefix = String::from_utf8(key_codec::doc_update_prefix(id)).unwrap();
+        let update_pairs = self.tree_scan_prefix(&prefix)?;
+        for (key, _) in update_pairs {
+            self.tree_delete(&key)?;
+        }
+        Ok(())
     }
 }
 
