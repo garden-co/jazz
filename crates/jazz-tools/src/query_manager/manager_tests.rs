@@ -9556,3 +9556,49 @@ fn delete_mirrors_to_doc_manager() {
         "RowDoc should have _deleted marker"
     );
 }
+
+#[test]
+fn get_row_reads_from_doc_manager() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    // Insert a row — this mirrors data into DocManager
+    let insert = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(42)],
+        )
+        .expect("insert should succeed");
+    let row_id = insert.row_id;
+
+    // get_row_from_doc should return the values directly from DocManager
+    let (table, values) = qm
+        .get_row_from_doc(row_id)
+        .expect("get_row_from_doc should find the row");
+    assert_eq!(table, "users");
+    assert_eq!(
+        values,
+        vec![Value::Text("Alice".into()), Value::Integer(42)]
+    );
+
+    // get_row should also work (tries DocManager first)
+    let (table2, values2) = qm.get_row(row_id).expect("get_row should find the row");
+    assert_eq!(table2, "users");
+    assert_eq!(
+        values2,
+        vec![Value::Text("Alice".into()), Value::Integer(42)]
+    );
+
+    // load_row_data_from_doc should return binary-encoded data that round-trips
+    let binary = qm
+        .load_row_data_from_doc(row_id)
+        .expect("load_row_data_from_doc should return data");
+    let table_schema = qm.schema.get(&TableName::new("users")).unwrap();
+    let decoded = decode_row(&table_schema.columns, &binary).expect("binary should decode");
+    assert_eq!(
+        decoded,
+        vec![Value::Text("Alice".into()), Value::Integer(42)]
+    );
+}

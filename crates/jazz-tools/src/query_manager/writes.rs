@@ -1395,11 +1395,54 @@ impl QueryManager {
         self.hard_delete(storage, id)
     }
 
-    /// Get a row by ID if loaded in ObjectManager.
+    /// Try to read a row from DocManager's Yrs Docs.
+    /// Returns (table_name, decoded_values) if the doc exists.
+    pub fn get_row_from_doc(&self, id: ObjectId) -> Option<(String, Vec<Value>)> {
+        let row_doc = self.sync_manager.doc_manager.get(id)?;
+        let table = row_doc.metadata.get("table")?.clone();
+        let table_name = TableName::new(&table);
+        let table_schema = self.schema.get(&table_name)?;
+
+        let txn = row_doc.doc.transact();
+        let mut values = Vec::with_capacity(table_schema.columns.columns.len());
+        for col in &table_schema.columns.columns {
+            let value = crate::row_doc::read_column(&row_doc.root_map, &txn, col.name.as_str())
+                .unwrap_or(Value::Null);
+            values.push(value);
+        }
+        Some((table, values))
+    }
+
+    /// Try to load row data from DocManager, re-encoding to binary for compatibility.
+    /// Returns None if the doc doesn't exist in DocManager.
+    #[allow(dead_code)] // Used by tests now; will be wired into read paths in upcoming tasks
+    pub(super) fn load_row_data_from_doc(&self, row_id: ObjectId) -> Option<Vec<u8>> {
+        let row_doc = self.sync_manager.doc_manager.get(row_id)?;
+        let table = row_doc.metadata.get("table")?;
+        let table_name = TableName::new(table);
+        let table_schema = self.schema.get(&table_name)?;
+
+        let txn = row_doc.doc.transact();
+        let mut values = Vec::with_capacity(table_schema.columns.columns.len());
+        for col in &table_schema.columns.columns {
+            let value = crate::row_doc::read_column(&row_doc.root_map, &txn, col.name.as_str())
+                .unwrap_or(Value::Null);
+            values.push(value);
+        }
+
+        encode_row(&table_schema.columns, &values).ok()
+    }
+
+    /// Get a row by ID, trying DocManager first then falling back to ObjectManager.
     ///
     /// Returns decoded values and the table name if the row exists.
     pub fn get_row(&self, id: ObjectId) -> Option<(String, Vec<Value>)> {
-        // Get table name from object metadata
+        // Try DocManager first (Yrs Docs)
+        if let Some(result) = self.get_row_from_doc(id) {
+            return Some(result);
+        }
+
+        // Fall back to ObjectManager (commit DAG)
         let table = self
             .sync_manager
             .object_manager
@@ -1409,7 +1452,6 @@ impl QueryManager {
             .clone();
         let table_name = TableName::new(&table);
 
-        // Get row data from ObjectManager
         let (data, _) = self.load_row_from_object(id)?;
 
         let table_schema = self.schema.get(&table_name)?;
