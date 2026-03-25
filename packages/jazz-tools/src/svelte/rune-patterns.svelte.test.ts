@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { flushSync } from "svelte";
-import { reconcileArray } from "../reconcile-array.js";
+import { applyDelta, reconcileArray } from "../reconcile-array.js";
 import "./test-helpers.svelte.js";
 
 // ── reconcileArray through $state proxy ────────────────────────────
@@ -105,26 +105,18 @@ describe("$state callback patterns", () => {
   });
 
   it("onDelta reconciles into existing $state array", () => {
-    //  ┌──────────┐    onDelta    ┌──────────────────┐
-    //  │ current  │ ──────────▶   │ reconcileArray() │
-    //  │ $state[] │    delta.all  │ in-place merge   │
-    //  └──────────┘               └──────────────────┘
     let current: any[] | undefined = $state([{ id: "1", title: "First" }]);
 
     const firstRef = current![0];
 
-    const onDelta = (delta: { all: any[] }) => {
-      if (current) {
-        reconcileArray(current, delta.all);
-      } else {
-        current = delta.all;
-      }
-    };
-
-    onDelta({
+    applyDelta(current!, {
       all: [
         { id: "1", title: "First (edited)" },
         { id: "2", title: "Second" },
+      ],
+      delta: [
+        { kind: 2, id: "1", index: 0 },
+        { kind: 0, id: "2", index: 1, item: { id: "2", title: "Second" } },
       ],
     });
     flushSync();
@@ -148,19 +140,15 @@ describe("$state callback patterns", () => {
     const bobRef = current![1];
     const carolRef = current![2];
 
-    const onDelta = (delta: { all: any[] }) => {
-      if (current) {
-        reconcileArray(current, delta.all);
-      } else {
-        current = delta.all;
-      }
-    };
-
-    onDelta({
+    applyDelta(current!, {
       all: [
         { id: "2", name: "Bob" },
         { id: "3", name: "Carol" },
         { id: "4", name: "Dave" },
+      ],
+      delta: [
+        { kind: 1, id: "1", index: 0 },
+        { kind: 0, id: "4", index: 2, item: { id: "4", name: "Dave" } },
       ],
     });
     flushSync();
@@ -185,18 +173,14 @@ describe("$state callback patterns", () => {
     const bobRef = current![1];
     const daveRef = current![3];
 
-    const onDelta = (delta: { all: any[] }) => {
-      if (current) {
-        reconcileArray(current, delta.all);
-      } else {
-        current = delta.all;
-      }
-    };
-
-    onDelta({
+    applyDelta(current!, {
       all: [
         { id: "2", name: "Bob" },
         { id: "4", name: "Dave" },
+      ],
+      delta: [
+        { kind: 1, id: "1", index: 0 },
+        { kind: 1, id: "3", index: 2 },
       ],
     });
     flushSync();
@@ -220,20 +204,13 @@ describe("$state callback patterns", () => {
     const bobRef = current![1];
     const carolRef = current![2];
 
-    const onDelta = (delta: { all: any[] }) => {
-      if (current) {
-        reconcileArray(current, delta.all);
-      } else {
-        current = delta.all;
-      }
-    };
-
-    onDelta({
+    applyDelta(current!, {
       all: [
         { id: "2", name: "Bob", score: 20 },
         { id: "3", name: "Carol", score: 30 },
         { id: "1", name: "Alice", score: 5 },
       ],
+      delta: [{ kind: 2, id: "1", index: 2 }],
     });
     flushSync();
 
