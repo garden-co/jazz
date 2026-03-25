@@ -181,6 +181,78 @@ mod tests {
     }
 
     #[test]
+    fn get_or_load_restores_doc_from_storage() {
+        use yrs::{Map, Transact};
+
+        let mut mgr = make_manager();
+        let metadata = HashMap::from([("table".to_string(), "todos".to_string())]);
+        let id = mgr.create(metadata);
+
+        // Write some data
+        {
+            let row_doc = mgr.get_mut(id).unwrap();
+            let mut txn = row_doc.doc.transact_mut();
+            row_doc.root_map.insert(&mut txn, "title", "Buy milk");
+        }
+
+        // Persist to storage
+        mgr.persist(id).unwrap();
+
+        // Evict from memory
+        mgr.evict(id);
+        assert!(mgr.get(id).is_none());
+
+        // Load back
+        let row_doc = mgr.get_or_load(id).unwrap();
+        let txn = row_doc.doc.transact();
+        let title = row_doc.root_map.get(&txn, "title");
+        match title {
+            Some(yrs::Out::Any(yrs::Any::String(s))) => assert_eq!(s.as_ref(), "Buy milk"),
+            other => panic!("expected String 'Buy milk', got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn append_update_persists_incrementally() {
+        use yrs::{Map, Transact};
+
+        let mut mgr = make_manager();
+        let metadata = HashMap::from([("table".to_string(), "todos".to_string())]);
+        let id = mgr.create(metadata);
+
+        // Initial persist (snapshot)
+        {
+            let row_doc = mgr.get_mut(id).unwrap();
+            let mut txn = row_doc.doc.transact_mut();
+            row_doc.root_map.insert(&mut txn, "title", "Buy milk");
+        }
+        mgr.persist(id).unwrap();
+
+        // Make another change and persist as update (not full snapshot)
+        {
+            let row_doc = mgr.get_mut(id).unwrap();
+            let mut txn = row_doc.doc.transact_mut();
+            row_doc.root_map.insert(&mut txn, "done", false);
+        }
+        mgr.persist_update(id).unwrap();
+
+        // Evict and reload — should have both fields
+        mgr.evict(id);
+        let row_doc = mgr.get_or_load(id).unwrap();
+        let txn = row_doc.doc.transact();
+        let title = row_doc.root_map.get(&txn, "title");
+        match title {
+            Some(yrs::Out::Any(yrs::Any::String(s))) => assert_eq!(s.as_ref(), "Buy milk"),
+            other => panic!("expected String 'Buy milk', got: {:?}", other),
+        }
+        let done = row_doc.root_map.get(&txn, "done");
+        match done {
+            Some(yrs::Out::Any(yrs::Any::Bool(b))) => assert!(!b, "done should be false"),
+            other => panic!("expected Bool false, got: {:?}", other),
+        }
+    }
+
+    #[test]
     fn encode_diff_produces_minimal_update() {
         let mut mgr = make_manager();
         let id = mgr.create(HashMap::new());

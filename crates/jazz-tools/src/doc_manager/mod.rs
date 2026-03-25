@@ -37,7 +37,6 @@ impl std::error::Error for Error {}
 
 pub struct DocManager {
     docs: HashMap<ObjectId, RowDoc>,
-    #[allow(dead_code)]
     storage: Box<dyn Storage>,
 }
 
@@ -85,6 +84,93 @@ impl DocManager {
         let row_doc = self.docs.get(&id).ok_or(Error::DocNotFound(id))?;
         let sv = row_doc.doc.transact().state_vector();
         Ok(sv.encode_v1())
+    }
+
+    /// Encode the full doc state as a snapshot and save it to storage.
+    /// Creates doc metadata in storage if not yet persisted.
+    pub fn persist(&mut self, id: ObjectId) -> Result<(), Error> {
+        let row_doc = self.docs.get(&id).ok_or(Error::DocNotFound(id))?;
+        let txn = row_doc.doc.transact();
+        let snapshot = txn.encode_state_as_update_v1(&StateVector::default());
+        let metadata = row_doc.metadata.clone();
+
+        let existing = self
+            .storage
+            .load_doc_metadata(id)
+            .map_err(|e| Error::YrsError(e.to_string()))?;
+        if existing.is_none() {
+            self.storage
+                .create_doc(id, &metadata)
+                .map_err(|e| Error::YrsError(e.to_string()))?;
+        }
+        self.storage
+            .save_snapshot(id, &snapshot)
+            .map_err(|e| Error::YrsError(e.to_string()))?;
+        self.storage
+            .clear_updates(id)
+            .map_err(|e| Error::YrsError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Remove the doc from the in-memory map.
+    pub fn evict(&mut self, id: ObjectId) {
+        self.docs.remove(&id);
+    }
+
+    /// Return the doc if already loaded, otherwise load from storage (snapshot + updates).
+    pub fn get_or_load(&mut self, id: ObjectId) -> Result<&RowDoc, Error> {
+        if self.docs.contains_key(&id) {
+            return Ok(self.docs.get(&id).unwrap());
+        }
+
+        let metadata = self
+            .storage
+            .load_doc_metadata(id)
+            .map_err(|e| Error::YrsError(e.to_string()))?
+            .ok_or(Error::DocNotFound(id))?;
+        let row_doc = RowDoc::new(id, metadata);
+
+        if let Some(snapshot) = self
+            .storage
+            .load_snapshot(id)
+            .map_err(|e| Error::YrsError(e.to_string()))?
+        {
+            let update =
+                Update::decode_v1(&snapshot).map_err(|e| Error::YrsError(e.to_string()))?;
+            row_doc
+                .doc
+                .transact_mut()
+                .apply_update(update)
+                .map_err(|e| Error::YrsError(e.to_string()))?;
+        }
+
+        for update_bytes in self
+            .storage
+            .load_updates(id)
+            .map_err(|e| Error::YrsError(e.to_string()))?
+        {
+            let update =
+                Update::decode_v1(&update_bytes).map_err(|e| Error::YrsError(e.to_string()))?;
+            row_doc
+                .doc
+                .transact_mut()
+                .apply_update(update)
+                .map_err(|e| Error::YrsError(e.to_string()))?;
+        }
+
+        self.docs.insert(id, row_doc);
+        Ok(self.docs.get(&id).unwrap())
+    }
+
+    /// Append an incremental update to storage (currently encodes full state).
+    pub fn persist_update(&mut self, id: ObjectId) -> Result<(), Error> {
+        let row_doc = self.docs.get(&id).ok_or(Error::DocNotFound(id))?;
+        let txn = row_doc.doc.transact();
+        let update = txn.encode_state_as_update_v1(&StateVector::default());
+        self.storage
+            .append_update(id, &update)
+            .map_err(|e| Error::YrsError(e.to_string()))?;
+        Ok(())
     }
 
     /// Encode the diff between the doc's current state and `remote_sv` (v1).
