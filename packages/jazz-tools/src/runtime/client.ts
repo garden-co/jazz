@@ -361,7 +361,9 @@ function getScheduler(): (task: () => void) => void {
     };
   }
 
-  return queueMicrotask;
+  // Wrap rather than returning queueMicrotask directly: the native function
+  // throws "Illegal invocation" when called without globalThis as receiver.
+  return (task: () => void) => queueMicrotask(task);
 }
 
 function encodeQueryExecutionOptions(options: QueryExecutionOptions): string | undefined {
