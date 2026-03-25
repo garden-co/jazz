@@ -237,7 +237,7 @@ We've found AI coding assistants like Cursor to be effective at fixing remaining
 
 While introducing explicit loading states, we discovered [a TypeScript bug](https://github.com/microsoft/TypeScript/issues/62462) that prevents iterating over CoLists using methods that require an iterator, when these CoLists are loaded inside other CoValues (CoMaps, other CoLists, or CoFeeds).
 
-We've submitted [a fix](https://github.com/microsoft/TypeScript/pull/62661) for this bug. Until it's released, use one of the following workarounds if you encounter this issue:
+We submitted [a fix](https://github.com/microsoft/TypeScript/pull/62661) for this bug, which is available in TypeScript 6.0. If you are on a previous version, use one of the following workarounds if you encounter this issue:
 
 <CodeGroup>
 ```ts
