@@ -175,7 +175,7 @@ async fn wait_for_in_flight_pushes(in_flight_pushes: &Arc<AtomicUsize>) {
     }
 }
 
-/// Push schema catalogue objects to a sync server.
+/// Push schema catalogue objects to a sync server from a filesystem directory.
 pub async fn push(
     server_url: &str,
     app_id: &str,
@@ -185,10 +185,6 @@ pub async fn push(
     schema_dir: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id)?;
-    let connection = Arc::new(SyncServerClient::connect(server_url, admin_secret).await?);
-    let client_id = ClientId::new();
-    let in_flight_pushes = Arc::new(AtomicUsize::new(0));
-    let push_errors = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let schema_directory = SchemaDirectory::new(schema_dir);
     let schema_versions = schema_directory.schema_versions()?;
@@ -197,30 +193,13 @@ pub async fn push(
     }
 
     let mut schema_info_by_hash = HashMap::new();
+    let mut schemas = Vec::new();
     for schema_info in &schema_versions {
         schema_info_by_hash.insert(schema_info.hash.clone(), schema_info.clone());
+        schemas.push(schema_directory.schema_by_info(schema_info)?);
     }
 
-    for schema_info in &schema_versions {
-        let schema = schema_directory.schema_by_info(schema_info)?;
-        let schema_manager =
-            SchemaManager::new(SyncManager::new(), schema, app_id, env, user_branch).map_err(
-                |error| format!("Failed to initialize schema manager for schema push: {error:?}"),
-            )?;
-        let runtime = build_runtime(
-            schema_manager,
-            MemoryStorage::default(),
-            connection.clone(),
-            client_id,
-            in_flight_pushes.clone(),
-            push_errors.clone(),
-        );
-
-        runtime.persist_schema()?;
-        runtime.add_server(ServerId::default())?;
-        runtime.flush().await?;
-    }
-
+    let mut lenses = Vec::new();
     let forward_migrations = collect_forward_migration_files(&schema_directory)?;
     for migration in &forward_migrations {
         let source_schema_info =
@@ -267,20 +246,87 @@ pub async fn push(
         } else {
             forward_transform.invert()
         };
-        let lens = Lens::with_backward(
+        lenses.push(Lens::with_backward(
             source_hash,
             target_hash,
             forward_transform,
             backward_transform,
+        ));
+    }
+
+    push_in_memory(
+        server_url,
+        app_id,
+        env,
+        user_branch,
+        admin_secret,
+        &schemas,
+        &lenses,
+    )
+    .await
+}
+
+/// Push in-memory schemas and lenses to a sync server.
+///
+/// Same pipeline as [`push`] but accepts pre-built [`Schema`] and [`Lens`]
+/// values instead of reading from a filesystem directory.
+pub async fn push_in_memory(
+    server_url: &str,
+    app_id: AppId,
+    env: &str,
+    user_branch: &str,
+    admin_secret: &str,
+    schemas: &[crate::query_manager::types::Schema],
+    lenses: &[Lens],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let connection = Arc::new(SyncServerClient::connect(server_url, admin_secret).await?);
+    let client_id = ClientId::new();
+    let in_flight_pushes = Arc::new(AtomicUsize::new(0));
+    let push_errors = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    // Push each schema and build hash lookup for lens source resolution
+    let mut schema_by_hash: HashMap<SchemaHash, &crate::query_manager::types::Schema> =
+        HashMap::with_capacity(schemas.len());
+    for schema in schemas {
+        schema_by_hash.insert(SchemaHash::compute(schema), schema);
+        let schema_manager =
+            SchemaManager::new(SyncManager::new(), schema.clone(), app_id, env, user_branch)
+                .map_err(|error| {
+                    format!("Failed to initialize schema manager for schema push: {error:?}")
+                })?;
+        let runtime = build_runtime(
+            schema_manager,
+            MemoryStorage::default(),
+            connection.clone(),
+            client_id,
+            in_flight_pushes.clone(),
+            push_errors.clone(),
         );
 
+        runtime.persist_schema()?;
+        runtime.add_server(ServerId::default())?;
+        runtime.flush().await?;
+    }
+
+    // Push each lens
+    for lens in lenses {
+        let source_schema = schema_by_hash.get(&lens.source_hash).ok_or_else(|| {
+            format!(
+                "No schema provided for lens source hash {}",
+                lens.source_hash
+            )
+        })?;
+
         let mut storage = MemoryStorage::default();
-        let mut schema_manager =
-            SchemaManager::new(SyncManager::new(), source_schema, app_id, env, user_branch)
-                .map_err(|error| {
-                    format!("Failed to initialize schema manager for lens push: {error:?}")
-                })?;
-        schema_manager.persist_lens(&mut storage, &lens);
+        let mut schema_manager = SchemaManager::new(
+            SyncManager::new(),
+            (*source_schema).clone(),
+            app_id,
+            env,
+            user_branch,
+        )
+        .map_err(|error| format!("Failed to initialize schema manager for lens push: {error:?}"))?;
+        schema_manager.persist_lens(&mut storage, lens);
         let runtime = build_runtime(
             schema_manager,
             storage,
