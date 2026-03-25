@@ -634,6 +634,19 @@ describe("generateTypes", () => {
     expect(output).toContain('"columns"');
   });
 
+  it("serializes Bytea defaults as Uint8Array literals in wasmSchema", () => {
+    table("files", {
+      data: col.bytes().default(new Uint8Array([0, 1, 255])),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain('"default": {');
+    expect(output).toContain('"type": "Bytea"');
+    expect(output).toContain("new Uint8Array([0, 1, 255])");
+  });
+
   it("imports WasmSchema and QueryBuilder from jazz-tools", () => {
     table("todos", { title: col.string() });
     const schema = getCollectedSchema();
