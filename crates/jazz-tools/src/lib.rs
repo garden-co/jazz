@@ -8,6 +8,7 @@ pub mod object_manager;
 pub mod query_manager;
 #[cfg(feature = "cli")]
 pub mod routes;
+pub mod row_doc;
 pub mod runtime_core;
 #[cfg(feature = "cli")]
 pub mod schema_catalogue;

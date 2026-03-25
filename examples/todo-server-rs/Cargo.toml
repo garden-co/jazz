@@ -3,6 +3,9 @@ name = "todo-server"
 version = "0.1.0"
 edition = "2024"
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "todo-server"
 path = "src/main.rs"

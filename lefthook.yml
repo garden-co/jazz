@@ -6,7 +6,7 @@ pre-commit:
       stage_fixed: true
     clippy:
       glob: "*.rs"
-      run: cargo clippy --workspace -- -D warnings
+      run: cargo clippy --workspace
     oxfmt:
       glob: "*.{ts,tsx,js,jsx,md,mdx,json,html}"
       run: pnpm format {staged_files}

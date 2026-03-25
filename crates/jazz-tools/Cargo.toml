@@ -15,6 +15,9 @@ name = "jazz-tools"
 path = "src/main.rs"
 required-features = ["cli"]
 
+[lints]
+workspace = true
+
 [features]
 default = []
 fjall = ["dep:fjall"]
@@ -50,6 +53,7 @@ otel = [
 
 [dependencies]
 opfs-btree = { path = "../opfs-btree", version = "0.1.0" }
+yrs = { path = "../../y-crdt/yrs" }
 futures = "0.3"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "v7", "serde"] }
