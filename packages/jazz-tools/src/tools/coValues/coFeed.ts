@@ -913,7 +913,10 @@ export class FileStream extends CoValueBase implements CoValue {
   getChunks(options?: {
     allowUnfinished?: boolean;
   }):
-    | (BinaryStreamInfo & { chunks: Uint8Array[]; finished: boolean })
+    | (BinaryStreamInfo & {
+        chunks: Uint8Array<ArrayBuffer>[];
+        finished: boolean;
+      })
     | undefined {
     return this.$jazz.raw.getBinaryChunks(options?.allowUnfinished);
   }
@@ -943,7 +946,6 @@ export class FileStream extends CoValueBase implements CoValue {
       return undefined;
     }
 
-    // @ts-ignore
     return new Blob(chunks.chunks, { type: chunks.mimeType });
   }
 
