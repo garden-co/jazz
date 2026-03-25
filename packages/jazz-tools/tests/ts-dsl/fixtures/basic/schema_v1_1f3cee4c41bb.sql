@@ -2,6 +2,21 @@ CREATE TABLE projects (
     name TEXT NOT NULL
 );
 
+CREATE TABLE table_with_defaults (
+    integer INTEGER NOT NULL,
+    float REAL NOT NULL,
+    bytes BYTEA NOT NULL,
+    enum ENUM('a','b','c') NOT NULL,
+    json JSON('{"$schema":"http://json-schema.org/draft-07/schema#","properties":{"age":{"type":"number"},"name":{"type":"string"}},"required":["name"],"type":"object"}') NOT NULL,
+    timestampDate TIMESTAMP NOT NULL,
+    timestampNumber TIMESTAMP NOT NULL,
+    string TEXT NOT NULL,
+    array TEXT[] NOT NULL,
+    boolean BOOLEAN NOT NULL,
+    nullable TEXT,
+    refId UUID REFERENCES todos
+);
+
 CREATE TABLE todos (
     title TEXT NOT NULL,
     done BOOLEAN NOT NULL,

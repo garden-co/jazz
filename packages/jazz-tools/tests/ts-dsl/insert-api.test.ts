@@ -66,6 +66,26 @@ describe("TS Insert API", () => {
     });
   });
 
+  it("support schema defaults for all data types", async () => {
+    const row_with_defaults = db.insert(app.table_with_defaults, {});
+
+    expect(row_with_defaults).toEqual({
+      id: expect.any(String),
+      integer: 1,
+      float: 1,
+      bytes: new Uint8Array([0, 1, 255]),
+      enum: "a",
+      json: { name: "default name" },
+      timestampDate: new Date("2026-01-01"),
+      timestampNumber: new Date(0),
+      string: "default value",
+      array: ["a", "b", "c"],
+      boolean: true,
+      nullable: undefined,
+      refId: "00000000-0000-0000-0000-000000000000",
+    });
+  });
+
   it("can wait for row to be persisted up to a specific durability tier", async () => {
     const project = await db.insertDurable(
       app.projects,
