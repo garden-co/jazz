@@ -5,6 +5,8 @@ use crate::metadata::{DeleteKind, MetadataKey, hard_delete_metadata, soft_delete
 use crate::object::{BranchName, ObjectId};
 use crate::storage::Storage;
 
+use yrs::{Map, Transact};
+
 use super::encoding::{decode_column, decode_row, encode_row};
 use super::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
@@ -114,6 +116,27 @@ impl QueryManager {
         self.sync_manager
             .forward_update_to_servers(object_id, branch.into());
 
+        // Mirror to DocManager
+        {
+            let mut doc_metadata = HashMap::new();
+            doc_metadata.insert("table".to_string(), table.to_string());
+            self.sync_manager
+                .doc_manager
+                .create_with_id(object_id, doc_metadata);
+
+            if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(object_id) {
+                let mut txn = row_doc.doc.transact_mut();
+                for (i, col) in descriptor.columns.iter().enumerate() {
+                    crate::row_doc::write_column(
+                        &row_doc.root_map,
+                        &mut txn,
+                        col.name.as_str(),
+                        &values[i],
+                    );
+                }
+            }
+        }
+
         // Update indices immediately and persist
         self.update_indices_for_insert(storage, table, object_id, &data, &descriptor)?;
         tracing::trace!(%object_id, table, "index_insert complete");
@@ -220,6 +243,27 @@ impl QueryManager {
         // Forward new row to all connected servers
         self.sync_manager
             .forward_update_to_servers(object_id, branch.into());
+
+        // Mirror to DocManager
+        {
+            let mut doc_metadata = HashMap::new();
+            doc_metadata.insert("table".to_string(), table.to_string());
+            self.sync_manager
+                .doc_manager
+                .create_with_id(object_id, doc_metadata);
+
+            if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(object_id) {
+                let mut txn = row_doc.doc.transact_mut();
+                for (i, col) in descriptor.columns.iter().enumerate() {
+                    crate::row_doc::write_column(
+                        &row_doc.root_map,
+                        &mut txn,
+                        col.name.as_str(),
+                        &values[i],
+                    );
+                }
+            }
+        }
 
         // Update indices on specified branch
         Self::update_indices_for_insert_on_branch(
@@ -870,6 +914,21 @@ impl QueryManager {
         self.sync_manager
             .forward_update_to_servers(id, branch.into());
 
+        // Mirror to DocManager
+        {
+            if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(id) {
+                let mut txn = row_doc.doc.transact_mut();
+                for (i, col) in descriptor.columns.iter().enumerate() {
+                    crate::row_doc::write_column(
+                        &row_doc.root_map,
+                        &mut txn,
+                        col.name.as_str(),
+                        &values[i],
+                    );
+                }
+            }
+        }
+
         // Update indices and persist modified nodes
         self.update_indices_for_update(
             storage,
@@ -1013,6 +1072,14 @@ impl QueryManager {
             let branch = self.current_branch();
             self.sync_manager
                 .forward_update_to_servers(id, branch.into());
+        }
+
+        // Mirror soft delete to DocManager
+        {
+            if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(id) {
+                let mut txn = row_doc.doc.transact_mut();
+                row_doc.root_map.insert(&mut txn, "_deleted", "soft");
+            }
         }
 
         // Update indices: remove from _id and column indices, add to _id_deleted

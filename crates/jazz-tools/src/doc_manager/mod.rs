@@ -13,7 +13,7 @@ mod subscriptions;
 pub use subscriptions::SubscriptionId;
 use subscriptions::SubscriptionManager;
 
-type UpdateHandler = Arc<Mutex<dyn FnMut(ObjectId, &[u8])>>;
+type UpdateHandler = Arc<Mutex<dyn FnMut(ObjectId, &[u8]) + Send>>;
 
 // ============================================================================
 // Error
@@ -44,14 +44,14 @@ impl std::error::Error for Error {}
 
 pub struct DocManager {
     docs: HashMap<ObjectId, RowDoc>,
-    storage: Box<dyn Storage>,
+    storage: Box<dyn Storage + Send>,
     subscriptions: SubscriptionManager,
     update_handler: Option<UpdateHandler>,
     yrs_subscriptions: HashMap<ObjectId, Subscription>,
 }
 
 impl DocManager {
-    pub fn new(storage: Box<dyn Storage>) -> Self {
+    pub fn new(storage: Box<dyn Storage + Send>) -> Self {
         Self {
             docs: HashMap::new(),
             storage,
@@ -61,7 +61,10 @@ impl DocManager {
         }
     }
 
-    pub fn subscribe_all(&mut self, callback: impl FnMut(ObjectId) + 'static) -> SubscriptionId {
+    pub fn subscribe_all(
+        &mut self,
+        callback: impl FnMut(ObjectId) + Send + 'static,
+    ) -> SubscriptionId {
         self.subscriptions.subscribe_all(callback)
     }
 
@@ -73,7 +76,7 @@ impl DocManager {
         self.subscriptions.notify_change(id)
     }
 
-    pub fn set_update_handler(&mut self, handler: impl FnMut(ObjectId, &[u8]) + 'static) {
+    pub fn set_update_handler(&mut self, handler: impl FnMut(ObjectId, &[u8]) + Send + 'static) {
         self.update_handler = Some(Arc::new(Mutex::new(handler)));
         // Re-wire all existing docs
         let ids: Vec<ObjectId> = self.docs.keys().copied().collect();

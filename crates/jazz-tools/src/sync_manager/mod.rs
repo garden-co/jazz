@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::commit::CommitId;
+use crate::doc_manager::DocManager;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::ObjectManager;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::storage::Storage;
+use crate::storage::{MemoryStorage, Storage};
 
 // Module declarations
 pub mod forwarding;
@@ -29,9 +30,9 @@ pub use types::*;
 /// Coordinates:
 /// - Upstream servers (trusted, receive all our objects)
 /// - Downstream clients (untrusted, receive query-filtered subsets)
-#[derive(Clone)]
 pub struct SyncManager {
     pub object_manager: ObjectManager,
+    pub doc_manager: DocManager,
     pub(super) catalogue_objects: HashSet<ObjectId>,
 
     pub(super) servers: HashMap<ServerId, ServerState>,
@@ -66,6 +67,7 @@ impl std::fmt::Debug for SyncManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SyncManager")
             .field("object_manager", &self.object_manager)
+            .field("doc_manager", &"DocManager { .. }")
             .field("catalogue_objects", &self.catalogue_objects)
             .field("servers", &self.servers)
             .field("clients", &self.clients)
@@ -113,6 +115,7 @@ impl SyncManager {
 
         Self {
             object_manager,
+            doc_manager: DocManager::new(Box::new(MemoryStorage::new())),
             catalogue_objects,
             servers: HashMap::new(),
             clients: HashMap::new(),

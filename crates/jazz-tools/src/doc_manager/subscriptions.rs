@@ -5,7 +5,7 @@ pub type SubscriptionId = u64;
 
 pub struct SubscriptionManager {
     next_id: u64,
-    global_subscribers: HashMap<SubscriptionId, Box<dyn FnMut(ObjectId)>>,
+    global_subscribers: HashMap<SubscriptionId, Box<dyn FnMut(ObjectId) + Send>>,
 }
 
 impl SubscriptionManager {
@@ -16,7 +16,10 @@ impl SubscriptionManager {
         }
     }
 
-    pub fn subscribe_all(&mut self, callback: impl FnMut(ObjectId) + 'static) -> SubscriptionId {
+    pub fn subscribe_all(
+        &mut self,
+        callback: impl FnMut(ObjectId) + Send + 'static,
+    ) -> SubscriptionId {
         let id = self.next_id;
         self.next_id += 1;
         self.global_subscribers.insert(id, Box::new(callback));

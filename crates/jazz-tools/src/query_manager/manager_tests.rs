@@ -4,6 +4,7 @@
 
 use serde_json::json;
 use smallvec::smallvec;
+use yrs::Transact;
 
 use crate::metadata::MetadataKey;
 use crate::query_manager::encoding::{decode_row, encode_row};
@@ -9454,5 +9455,104 @@ fn e2e_three_tier_untrusted_downstream_keeps_result_only_scope() {
         results.len(),
         0,
         "Untrusted downstream should keep current result-only sync behavior"
+    );
+}
+
+// ============================================================================
+// DocManager mirroring tests
+// ============================================================================
+
+/// After inserting a row via QueryManager, the DocManager should contain a
+/// RowDoc with matching column values.
+#[test]
+fn insert_mirrors_to_doc_manager() {
+    let (mut qm, mut storage) = create_query_manager(SyncManager::new(), test_schema());
+
+    let result = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("alice".into()), Value::Integer(42)],
+        )
+        .unwrap();
+
+    let row_doc = qm
+        .sync_manager
+        .doc_manager
+        .get(result.row_id)
+        .expect("DocManager should contain the inserted row");
+
+    // Verify metadata
+    assert_eq!(row_doc.metadata.get("table").unwrap(), "users");
+
+    // Verify column values round-trip through the Yrs doc
+    let txn = row_doc.doc.transact();
+    let name = crate::row_doc::read_column(&row_doc.root_map, &txn, "name");
+    let score = crate::row_doc::read_column(&row_doc.root_map, &txn, "score");
+    assert_eq!(name, Some(Value::Text("alice".into())));
+    assert_eq!(score, Some(Value::Integer(42)));
+}
+
+/// After updating a row via QueryManager, the DocManager's RowDoc should
+/// reflect the new values.
+#[test]
+fn update_mirrors_to_doc_manager() {
+    let (mut qm, mut storage) = create_query_manager(SyncManager::new(), test_schema());
+
+    let result = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("bob".into()), Value::Integer(10)],
+        )
+        .unwrap();
+
+    qm.update(
+        &mut storage,
+        result.row_id,
+        &[Value::Text("bob".into()), Value::Integer(99)],
+    )
+    .unwrap();
+
+    let row_doc = qm
+        .sync_manager
+        .doc_manager
+        .get(result.row_id)
+        .expect("DocManager should contain the updated row");
+
+    let txn = row_doc.doc.transact();
+    let score = crate::row_doc::read_column(&row_doc.root_map, &txn, "score");
+    assert_eq!(score, Some(Value::Integer(99)));
+}
+
+/// After soft-deleting a row, the DocManager's RowDoc should have a
+/// `_deleted` key set to `"soft"`.
+#[test]
+fn delete_mirrors_to_doc_manager() {
+    let (mut qm, mut storage) = create_query_manager(SyncManager::new(), test_schema());
+
+    let result = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("charlie".into()), Value::Integer(7)],
+        )
+        .unwrap();
+
+    qm.delete(&mut storage, result.row_id).unwrap();
+
+    let row_doc = qm
+        .sync_manager
+        .doc_manager
+        .get(result.row_id)
+        .expect("DocManager should still contain the soft-deleted row");
+
+    let txn = row_doc.doc.transact();
+    use yrs::{Map, Out};
+    let deleted = row_doc.root_map.get(&txn, "_deleted");
+    assert_eq!(
+        deleted,
+        Some(Out::Any(yrs::Any::String("soft".into()))),
+        "RowDoc should have _deleted marker"
     );
 }
