@@ -449,54 +449,123 @@ impl Storage for FjallStorage {
     }
 
     // ================================================================
-    // Document storage (Y-CRDT) — implemented in Task 8
+    // Document storage (Y-CRDT)
     // ================================================================
 
     fn create_doc(
         &mut self,
-        _id: crate::object::ObjectId,
-        _metadata: &std::collections::HashMap<String, String>,
+        id: crate::object::ObjectId,
+        metadata: &std::collections::HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        todo!("FjallStorage::create_doc — implement in Task 8")
+        let value =
+            serde_json::to_vec(metadata).map_err(|e| StorageError::IoError(e.to_string()))?;
+        self.with_inner(|inner| {
+            let mut tx = inner.db.write_tx();
+            let key = String::from_utf8(super::key_codec::doc_meta_key(id)).unwrap();
+            Self::set_on_tx(&mut tx, &inner.keyspace, &key, &value)?;
+            Self::commit_tx(tx)
+        })
     }
 
     fn load_doc_metadata(
         &self,
-        _id: crate::object::ObjectId,
+        id: crate::object::ObjectId,
     ) -> Result<Option<std::collections::HashMap<String, String>>, StorageError> {
-        todo!("FjallStorage::load_doc_metadata — implement in Task 8")
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            let key = String::from_utf8(super::key_codec::doc_meta_key(id)).unwrap();
+            match Self::read_get(&tx, &inner.keyspace, &key)? {
+                None => Ok(None),
+                Some(bytes) => {
+                    let map = serde_json::from_slice(&bytes)
+                        .map_err(|e| StorageError::IoError(e.to_string()))?;
+                    Ok(Some(map))
+                }
+            }
+        })
     }
 
     fn save_snapshot(
         &mut self,
-        _id: crate::object::ObjectId,
-        _snapshot: &[u8],
+        id: crate::object::ObjectId,
+        snapshot: &[u8],
     ) -> Result<(), StorageError> {
-        todo!("FjallStorage::save_snapshot — implement in Task 8")
+        self.with_inner(|inner| {
+            let mut tx = inner.db.write_tx();
+            let key = String::from_utf8(super::key_codec::doc_snapshot_key(id)).unwrap();
+            Self::set_on_tx(&mut tx, &inner.keyspace, &key, snapshot)?;
+            Self::commit_tx(tx)
+        })
     }
 
-    fn load_snapshot(&self, _id: crate::object::ObjectId) -> Result<Option<Vec<u8>>, StorageError> {
-        todo!("FjallStorage::load_snapshot — implement in Task 8")
+    fn load_snapshot(&self, id: crate::object::ObjectId) -> Result<Option<Vec<u8>>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            let key = String::from_utf8(super::key_codec::doc_snapshot_key(id)).unwrap();
+            Self::read_get(&tx, &inner.keyspace, &key)
+        })
     }
 
     fn append_update(
         &mut self,
-        _id: crate::object::ObjectId,
-        _update: &[u8],
+        id: crate::object::ObjectId,
+        update: &[u8],
     ) -> Result<(), StorageError> {
-        todo!("FjallStorage::append_update — implement in Task 8")
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            let prefix = String::from_utf8(super::key_codec::doc_update_prefix(id)).unwrap();
+            let existing = Self::scan_prefix(&tx, &inner.keyspace, &prefix)?;
+            let seq = existing.len() as u64;
+            drop(tx);
+
+            let mut wtx = inner.db.write_tx();
+            let key = String::from_utf8(super::key_codec::doc_update_key(id, seq)).unwrap();
+            Self::set_on_tx(&mut wtx, &inner.keyspace, &key, update)?;
+            Self::commit_tx(wtx)
+        })
     }
 
-    fn load_updates(&self, _id: crate::object::ObjectId) -> Result<Vec<Vec<u8>>, StorageError> {
-        todo!("FjallStorage::load_updates — implement in Task 8")
+    fn load_updates(&self, id: crate::object::ObjectId) -> Result<Vec<Vec<u8>>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            let prefix = String::from_utf8(super::key_codec::doc_update_prefix(id)).unwrap();
+            let pairs = Self::scan_prefix(&tx, &inner.keyspace, &prefix)?;
+            Ok(pairs.into_iter().map(|(_, v)| v).collect())
+        })
     }
 
-    fn clear_updates(&mut self, _id: crate::object::ObjectId) -> Result<(), StorageError> {
-        todo!("FjallStorage::clear_updates — implement in Task 8")
+    fn clear_updates(&mut self, id: crate::object::ObjectId) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            let prefix = String::from_utf8(super::key_codec::doc_update_prefix(id)).unwrap();
+            let pairs = Self::scan_prefix(&tx, &inner.keyspace, &prefix)?;
+            drop(tx);
+
+            let mut wtx = inner.db.write_tx();
+            for (key, _) in pairs {
+                Self::delete_on_tx(&mut wtx, &inner.keyspace, &key)?;
+            }
+            Self::commit_tx(wtx)
+        })
     }
 
-    fn delete_doc(&mut self, _id: crate::object::ObjectId) -> Result<(), StorageError> {
-        todo!("FjallStorage::delete_doc — implement in Task 8")
+    fn delete_doc(&mut self, id: crate::object::ObjectId) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            let prefix = String::from_utf8(super::key_codec::doc_update_prefix(id)).unwrap();
+            let update_pairs = Self::scan_prefix(&tx, &inner.keyspace, &prefix)?;
+            drop(tx);
+
+            let mut wtx = inner.db.write_tx();
+            let meta_key = String::from_utf8(super::key_codec::doc_meta_key(id)).unwrap();
+            Self::delete_on_tx(&mut wtx, &inner.keyspace, &meta_key)?;
+            let snapshot_key = String::from_utf8(super::key_codec::doc_snapshot_key(id)).unwrap();
+            Self::delete_on_tx(&mut wtx, &inner.keyspace, &snapshot_key)?;
+            for (key, _) in update_pairs {
+                Self::delete_on_tx(&mut wtx, &inner.keyspace, &key)?;
+            }
+            Self::commit_tx(wtx)
+        })
     }
 }
 
@@ -764,5 +833,46 @@ mod tests {
                 target_hash,
             })
         );
+    }
+
+    #[test]
+    fn fjall_doc_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = FjallStorage::open(dir.path(), 64 * 1024 * 1024).unwrap();
+
+        let id = crate::object::ObjectId::new();
+        let metadata =
+            std::collections::HashMap::from([("table".to_string(), "todos".to_string())]);
+
+        // Create and load metadata
+        storage.create_doc(id, &metadata).unwrap();
+        assert_eq!(
+            storage.load_doc_metadata(id).unwrap(),
+            Some(metadata.clone())
+        );
+
+        // Snapshot roundtrip
+        storage.save_snapshot(id, b"snapshot_v1").unwrap();
+        assert_eq!(
+            storage.load_snapshot(id).unwrap(),
+            Some(b"snapshot_v1".to_vec())
+        );
+
+        // Update log
+        storage.append_update(id, b"update_1").unwrap();
+        storage.append_update(id, b"update_2").unwrap();
+        let updates = storage.load_updates(id).unwrap();
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0], b"update_1");
+        assert_eq!(updates[1], b"update_2");
+
+        // Clear updates
+        storage.clear_updates(id).unwrap();
+        assert!(storage.load_updates(id).unwrap().is_empty());
+
+        // Delete doc
+        storage.delete_doc(id).unwrap();
+        assert!(storage.load_doc_metadata(id).unwrap().is_none());
+        assert!(storage.load_snapshot(id).unwrap().is_none());
     }
 }
