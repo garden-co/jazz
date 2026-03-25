@@ -6,8 +6,7 @@
   "scripts": {
     "dev": "vite --port 5477",
     "build": "node ../../packages/jazz-tools/dist/cli.js build && vite build",
-    "preview": "vite preview",
-    "test": "vitest run --config vitest.config.browser.ts"
+    "preview": "vite preview"
   },
   "dependencies": {
     "jazz-tools": "workspace:*",
