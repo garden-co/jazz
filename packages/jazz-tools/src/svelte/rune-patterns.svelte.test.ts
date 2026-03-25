@@ -135,6 +135,115 @@ describe("$state callback patterns", () => {
     expect(current![1].title).toBe("Second");
   });
 
+  it("batch delta: remove + add preserves correct items through $state", () => {
+    //  Before: [alice, bob, carol]
+    //  Delta:  remove alice, add dave
+    //  After:  [bob, carol, dave]
+    let current: any[] | undefined = $state([
+      { id: "1", name: "Alice" },
+      { id: "2", name: "Bob" },
+      { id: "3", name: "Carol" },
+    ]);
+
+    const bobRef = current![1];
+    const carolRef = current![2];
+
+    const onDelta = (delta: { all: any[] }) => {
+      if (current) {
+        reconcileArray(current, delta.all);
+      } else {
+        current = delta.all;
+      }
+    };
+
+    onDelta({
+      all: [
+        { id: "2", name: "Bob" },
+        { id: "3", name: "Carol" },
+        { id: "4", name: "Dave" },
+      ],
+    });
+    flushSync();
+
+    expect(current).toHaveLength(3);
+    expect(current![0]).toBe(bobRef);
+    expect(current![1]).toBe(carolRef);
+    expect(current![2].name).toBe("Dave");
+  });
+
+  it("batch delta: two removes preserves survivors through $state", () => {
+    //  Before: [alice, bob, carol, dave]
+    //  Delta:  remove alice, remove carol
+    //  After:  [bob, dave]
+    let current: any[] | undefined = $state([
+      { id: "1", name: "Alice" },
+      { id: "2", name: "Bob" },
+      { id: "3", name: "Carol" },
+      { id: "4", name: "Dave" },
+    ]);
+
+    const bobRef = current![1];
+    const daveRef = current![3];
+
+    const onDelta = (delta: { all: any[] }) => {
+      if (current) {
+        reconcileArray(current, delta.all);
+      } else {
+        current = delta.all;
+      }
+    };
+
+    onDelta({
+      all: [
+        { id: "2", name: "Bob" },
+        { id: "4", name: "Dave" },
+      ],
+    });
+    flushSync();
+
+    expect(current).toHaveLength(2);
+    expect(current![0]).toBe(bobRef);
+    expect(current![1]).toBe(daveRef);
+  });
+
+  it("updated item changes position, array reorders through $state", () => {
+    //  Before: [alice, bob, carol]
+    //  Delta:  alice updated and moved to end (e.g. sort order changed)
+    //  After:  [bob, carol, alice']
+    let current: any[] | undefined = $state([
+      { id: "1", name: "Alice", score: 10 },
+      { id: "2", name: "Bob", score: 20 },
+      { id: "3", name: "Carol", score: 30 },
+    ]);
+
+    const aliceRef = current![0];
+    const bobRef = current![1];
+    const carolRef = current![2];
+
+    const onDelta = (delta: { all: any[] }) => {
+      if (current) {
+        reconcileArray(current, delta.all);
+      } else {
+        current = delta.all;
+      }
+    };
+
+    onDelta({
+      all: [
+        { id: "2", name: "Bob", score: 20 },
+        { id: "3", name: "Carol", score: 30 },
+        { id: "1", name: "Alice", score: 5 },
+      ],
+    });
+    flushSync();
+
+    expect(current).toHaveLength(3);
+    expect(current![0]).toBe(bobRef);
+    expect(current![1]).toBe(carolRef);
+    expect(current![2]).toBe(aliceRef); // moved, identity preserved
+    expect(current![2].score).toBe(5); // property updated
+  });
+
   it("onError surfaces error and clears current", () => {
     let current: any[] | undefined = $state([{ id: "1" }]);
     let loading: boolean = $state(false);

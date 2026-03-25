@@ -157,4 +157,136 @@ describe("vue/useAll", () => {
 
     scope.stop();
   });
+
+  it("VU-ALL-08: batch delta with remove + add preserves correct items", () => {
+    //  Before:  [alice, bob, carol]
+    //  Delta:   remove alice (index 0), add dave (index 2)
+    //  After:   [bob, carol, dave]
+    const alice = { id: "u1", name: "Alice" };
+    const bob = { id: "u2", name: "Bob" };
+    const carol = { id: "u3", name: "Carol" };
+    let capturedOnDelta: ((delta: any) => void) | undefined;
+
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "fulfilled" as const, data: [alice, bob, carol] },
+      subscribe: (callbacks: any) => {
+        capturedOnDelta = callbacks.onDelta;
+        return vi.fn();
+      },
+    } as any);
+
+    const scope = effectScope();
+    const result = scope.run(() => useAll(makeQuery()));
+
+    expect(result!.value).toHaveLength(3);
+    const bobRef = result!.value![1];
+    const carolRef = result!.value![2];
+
+    // Batch: remove alice (was at index 0) + add dave (at index 2 in final state)
+    capturedOnDelta!({
+      all: [
+        { id: "u2", name: "Bob" },
+        { id: "u3", name: "Carol" },
+        { id: "u4", name: "Dave" },
+      ],
+      delta: [
+        { kind: 1, id: "u1", index: 0 },
+        { kind: 0, id: "u4", index: 2, item: { id: "u4", name: "Dave" } },
+      ],
+    });
+
+    expect(result!.value).toHaveLength(3);
+    expect(result!.value![0]).toBe(bobRef); // bob preserved
+    expect(result!.value![1]).toBe(carolRef); // carol preserved
+    expect((result!.value![2] as any).name).toBe("Dave"); // dave added
+
+    scope.stop();
+  });
+
+  it("VU-ALL-09: batch delta with two removes preserves survivors", () => {
+    //  Before:  [alice, bob, carol, dave]
+    //  Delta:   remove alice (index 0), remove carol (index 2)
+    //  After:   [bob, dave]
+    const alice = { id: "u1", name: "Alice" };
+    const bob = { id: "u2", name: "Bob" };
+    const carol = { id: "u3", name: "Carol" };
+    const dave = { id: "u4", name: "Dave" };
+    let capturedOnDelta: ((delta: any) => void) | undefined;
+
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "fulfilled" as const, data: [alice, bob, carol, dave] },
+      subscribe: (callbacks: any) => {
+        capturedOnDelta = callbacks.onDelta;
+        return vi.fn();
+      },
+    } as any);
+
+    const scope = effectScope();
+    const result = scope.run(() => useAll(makeQuery()));
+
+    expect(result!.value).toHaveLength(4);
+    const bobRef = result!.value![1];
+    const daveRef = result!.value![3];
+
+    // Batch: remove alice + remove carol
+    capturedOnDelta!({
+      all: [
+        { id: "u2", name: "Bob" },
+        { id: "u4", name: "Dave" },
+      ],
+      delta: [
+        { kind: 1, id: "u1", index: 0 },
+        { kind: 1, id: "u3", index: 2 },
+      ],
+    });
+
+    expect(result!.value).toHaveLength(2);
+    expect(result!.value![0]).toBe(bobRef); // bob preserved
+    expect(result!.value![1]).toBe(daveRef); // dave preserved
+
+    scope.stop();
+  });
+
+  it("VU-ALL-10: updated item changes position, array reorders correctly", () => {
+    //  Before: [alice, bob, carol]
+    //  Delta:  alice updated and moved to end (e.g. sort order changed)
+    //  After:  [bob, carol, alice']
+    const alice = { id: "u1", name: "Alice", score: 10 };
+    const bob = { id: "u2", name: "Bob", score: 20 };
+    const carol = { id: "u3", name: "Carol", score: 30 };
+    let capturedOnDelta: ((delta: any) => void) | undefined;
+
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "fulfilled" as const, data: [alice, bob, carol] },
+      subscribe: (callbacks: any) => {
+        capturedOnDelta = callbacks.onDelta;
+        return vi.fn();
+      },
+    } as any);
+
+    const scope = effectScope();
+    const result = scope.run(() => useAll(makeQuery()));
+
+    const aliceRef = result!.value![0];
+    const bobRef = result!.value![1];
+    const carolRef = result!.value![2];
+
+    // Alice's score changed, causing her to sort to the end
+    capturedOnDelta!({
+      all: [
+        { id: "u2", name: "Bob", score: 20 },
+        { id: "u3", name: "Carol", score: 30 },
+        { id: "u1", name: "Alice", score: 5 },
+      ],
+      delta: [{ kind: 2, id: "u1", index: 2, item: { id: "u1", name: "Alice", score: 5 } }],
+    });
+
+    expect(result!.value).toHaveLength(3);
+    expect(result!.value![0]).toBe(bobRef); // bob kept position
+    expect(result!.value![1]).toBe(carolRef); // carol kept position
+    expect(result!.value![2]).toBe(aliceRef); // alice moved, identity preserved
+    expect((result!.value![2] as any).score).toBe(5); // property updated
+
+    scope.stop();
+  });
 });
