@@ -1828,7 +1828,7 @@ fn value_to_sql(val: &Value) -> String {
         }
         Value::Text(s) => format!("'{}'", s.replace('\'', "''")),
         Value::Timestamp(t) => t.to_string(),
-        Value::Uuid(id) => format!("'{:?}'", id),
+        Value::Uuid(id) => format!("'{}'", id.uuid()),
         Value::Bytea(bytes) => format!("'\\\\x{}'", hex::encode(bytes)),
         Value::Array(_) => "'[]'".to_string(),
         Value::Row { .. } => "'{}'".to_string(),
@@ -1837,6 +1837,8 @@ fn value_to_sql(val: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::object::ObjectId;
+
     use super::*;
     use serde_json::json;
 
@@ -2793,6 +2795,7 @@ mod tests {
     #[test]
     fn schema_to_sql_includes_defaults() {
         let mut schema = HashMap::new();
+        let object_id = ObjectId::from_uuid(uuid::Uuid::nil());
         schema.insert(
             TableName::new("users"),
             TableSchema::new(RowDescriptor::new(vec![
@@ -2800,12 +2803,17 @@ mod tests {
                     .default(Value::Text("Anonymous".into())),
                 ColumnDescriptor::new(ColumnName::new("created_at"), ColumnType::Timestamp)
                     .default(Value::Timestamp(0)),
+                ColumnDescriptor::new(ColumnName::new("test_id"), ColumnType::Uuid)
+                    .default(Value::Uuid(object_id)),
             ])),
         );
         let sql = schema_to_sql(&schema);
 
         assert!(sql.contains("name TEXT DEFAULT 'Anonymous' NOT NULL"));
         assert!(sql.contains("created_at TIMESTAMP DEFAULT 0 NOT NULL"));
+        assert!(
+            sql.contains("test_id UUID DEFAULT '00000000-0000-0000-0000-000000000000' NOT NULL")
+        );
     }
 
     #[test]
