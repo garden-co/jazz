@@ -67,6 +67,119 @@ mod tests {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Branch tests
+    // -------------------------------------------------------------------------
+
+    fn write_str(mgr: &mut DocManager, id: crate::object::ObjectId, key: &str, value: &str) {
+        let row_doc = mgr.get_mut(id).expect("doc should exist");
+        let mut txn = row_doc.doc.transact_mut();
+        row_doc.root_map.insert(&mut txn, key, value);
+    }
+
+    fn write_bool(mgr: &mut DocManager, id: crate::object::ObjectId, key: &str, value: bool) {
+        let row_doc = mgr.get_mut(id).expect("doc should exist");
+        let mut txn = row_doc.doc.transact_mut();
+        row_doc.root_map.insert(&mut txn, key, value);
+    }
+
+    fn read_str(mgr: &DocManager, id: crate::object::ObjectId, key: &str) -> Option<String> {
+        let row_doc = mgr.get(id)?;
+        let txn = row_doc.doc.transact();
+        match row_doc.root_map.get(&txn, key)? {
+            yrs::Out::Any(yrs::Any::String(s)) => Some(s.to_string()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn fork_creates_independent_branch_doc() {
+        let mut mgr = make_manager();
+        let parent_id = mgr.create(HashMap::new());
+        write_str(&mut mgr, parent_id, "title", "Buy milk");
+
+        let branch_id = mgr.fork(parent_id, "draft").expect("fork should succeed");
+
+        // Branch has same state
+        assert_eq!(
+            read_str(&mgr, branch_id, "title").as_deref(),
+            Some("Buy milk")
+        );
+
+        // Branch origin points to parent
+        let branch = mgr.get(branch_id).expect("branch doc should exist");
+        assert!(branch.origin.is_some(), "branch.origin should be Some");
+        assert_eq!(branch.origin.as_ref().unwrap().0, parent_id);
+
+        // Parent.branches contains "draft" -> branch_id
+        let parent = mgr.get(parent_id).expect("parent doc should exist");
+        assert_eq!(parent.branches.get("draft"), Some(&branch_id));
+
+        // Modify branch, parent is unaffected
+        write_str(&mut mgr, branch_id, "title", "Buy eggs");
+        assert_eq!(
+            read_str(&mgr, parent_id, "title").as_deref(),
+            Some("Buy milk")
+        );
+        assert_eq!(
+            read_str(&mgr, branch_id, "title").as_deref(),
+            Some("Buy eggs")
+        );
+    }
+
+    #[test]
+    fn merge_applies_branch_changes_to_main() {
+        let mut mgr = make_manager();
+        let main_id = mgr.create(HashMap::new());
+        write_str(&mut mgr, main_id, "title", "Buy milk");
+        write_bool(&mut mgr, main_id, "done", false);
+
+        let branch_id = mgr.fork(main_id, "draft").expect("fork should succeed");
+
+        // Edit branch: title = "Buy eggs"
+        write_str(&mut mgr, branch_id, "title", "Buy eggs");
+
+        // Edit main: done = true
+        write_bool(&mut mgr, main_id, "done", true);
+
+        // Merge branch into main
+        mgr.merge(branch_id, main_id).expect("merge should succeed");
+
+        // Main now has both changes
+        assert_eq!(
+            read_str(&mgr, main_id, "title").as_deref(),
+            Some("Buy eggs")
+        );
+        let main_doc = mgr.get(main_id).expect("main doc should exist");
+        let txn = main_doc.doc.transact();
+        let done = main_doc.root_map.get(&txn, "done");
+        match done {
+            Some(yrs::Out::Any(yrs::Any::Bool(b))) => assert!(b, "done should be true"),
+            other => panic!("unexpected value for 'done': {:?}", other),
+        }
+    }
+
+    #[test]
+    fn merge_concurrent_same_field_resolves_deterministically() {
+        let mut mgr = make_manager();
+        let main_id = mgr.create(HashMap::new());
+        write_str(&mut mgr, main_id, "title", "Original");
+
+        let branch_id = mgr.fork(main_id, "draft").expect("fork should succeed");
+
+        // Both sides edit "title"
+        write_str(&mut mgr, branch_id, "title", "Branch version");
+        write_str(&mut mgr, main_id, "title", "Main version");
+
+        mgr.merge(branch_id, main_id).expect("merge should succeed");
+
+        let result = read_str(&mgr, main_id, "title").expect("title should exist");
+        assert!(
+            result == "Branch version" || result == "Main version",
+            "expected one of the two concurrent values, got: {result}"
+        );
+    }
+
     #[test]
     fn encode_diff_produces_minimal_update() {
         let mut mgr = make_manager();

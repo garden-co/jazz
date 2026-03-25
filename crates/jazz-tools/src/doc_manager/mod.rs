@@ -96,6 +96,8 @@ impl DocManager {
     }
 }
 
+mod branches;
+
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
