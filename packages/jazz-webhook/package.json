@@ -27,6 +27,7 @@
     "jazz-tools": "workspace:*"
   },
   "devDependencies": {
+    "@types/node": "^22.16.5",
     "@types/ws": "8.5.10",
     "typescript": "catalog:default",
     "vitest": "catalog:default"

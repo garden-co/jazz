@@ -6,6 +6,7 @@
     "rootDir": "./src",
     "moduleResolution": "bundler",
     "moduleDetection": "force",
+    "types": ["node"],
     "strict": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
