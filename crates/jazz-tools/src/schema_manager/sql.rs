@@ -893,6 +893,26 @@ impl Parser {
             Some(Token::Null) => Ok(Value::Null),
             Some(Token::True) => Ok(Value::Boolean(true)),
             Some(Token::False) => Ok(Value::Boolean(false)),
+            Some(Token::Ident(ident)) if ident.eq_ignore_ascii_case("ARRAY") => {
+                self.expect(&Token::LBracket)?;
+                let mut elements = Vec::new();
+
+                if self.peek() != Some(&Token::RBracket) {
+                    loop {
+                        elements.push(self.parse_value()?);
+
+                        if self.peek() == Some(&Token::Comma) {
+                            self.advance();
+                            continue;
+                        }
+
+                        break;
+                    }
+                }
+
+                self.expect(&Token::RBracket)?;
+                Ok(Value::Array(elements))
+            }
             Some(Token::Number(n)) => {
                 if n.contains('.') {
                     if let Ok(f) = n.parse::<f64>() {
@@ -1830,7 +1850,14 @@ fn value_to_sql(val: &Value) -> String {
         Value::Timestamp(t) => t.to_string(),
         Value::Uuid(id) => format!("'{}'", id.uuid()),
         Value::Bytea(bytes) => format!("'\\\\x{}'", hex::encode(bytes)),
-        Value::Array(_) => "'[]'".to_string(),
+        Value::Array(elements) => {
+            let elements = elements
+                .iter()
+                .map(value_to_sql)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("ARRAY[{elements}]")
+        }
         Value::Row { .. } => "'{}'".to_string(),
     }
 }
@@ -1927,6 +1954,7 @@ mod tests {
                 age INTEGER DEFAULT 42,
                 active BOOLEAN DEFAULT TRUE NOT NULL,
                 created_at TIMESTAMP DEFAULT 0 NOT NULL,
+                tags TEXT[] DEFAULT ARRAY['tag1', 'tag2'] NOT NULL,
                 nickname TEXT DEFAULT NULL
             );
         "#;
@@ -1941,7 +1969,14 @@ mod tests {
         assert_eq!(users.columns.columns[1].default, Some(Value::Integer(42)));
         assert_eq!(users.columns.columns[2].default, Some(Value::Boolean(true)));
         assert_eq!(users.columns.columns[3].default, Some(Value::Timestamp(0)));
-        assert_eq!(users.columns.columns[4].default, Some(Value::Null));
+        assert_eq!(
+            users.columns.columns[4].default,
+            Some(Value::Array(vec![
+                Value::Text("tag1".to_string()),
+                Value::Text("tag2".to_string()),
+            ]))
+        );
+        assert_eq!(users.columns.columns[5].default, Some(Value::Null));
     }
 
     #[test]
@@ -2445,6 +2480,7 @@ mod tests {
             ALTER TABLE users ADD COLUMN count INTEGER DEFAULT 42;
             ALTER TABLE users ADD COLUMN name TEXT DEFAULT 'unknown';
             ALTER TABLE users ADD COLUMN active BOOLEAN DEFAULT TRUE;
+            ALTER TABLE users ADD COLUMN tags TEXT[] DEFAULT ARRAY['tag1', 'tag2'];
         "#;
 
         let transform = parse_lens(sql).unwrap();
@@ -2466,6 +2502,19 @@ mod tests {
         match &transform.ops[2] {
             LensOp::AddColumn { default, .. } => {
                 assert_eq!(*default, Value::Boolean(true));
+            }
+            _ => panic!(),
+        }
+
+        match &transform.ops[3] {
+            LensOp::AddColumn { default, .. } => {
+                assert_eq!(
+                    *default,
+                    Value::Array(vec![
+                        Value::Text("tag1".to_string()),
+                        Value::Text("tag2".to_string()),
+                    ])
+                );
             }
             _ => panic!(),
         }
@@ -2803,6 +2852,16 @@ mod tests {
                     .default(Value::Text("Anonymous".into())),
                 ColumnDescriptor::new(ColumnName::new("created_at"), ColumnType::Timestamp)
                     .default(Value::Timestamp(0)),
+                ColumnDescriptor::new(
+                    ColumnName::new("tags"),
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Text),
+                    },
+                )
+                .default(Value::Array(vec![
+                    Value::Text("tag1".into()),
+                    Value::Text("tag2".into()),
+                ])),
                 ColumnDescriptor::new(ColumnName::new("test_id"), ColumnType::Uuid)
                     .default(Value::Uuid(object_id)),
             ])),
@@ -2811,6 +2870,7 @@ mod tests {
 
         assert!(sql.contains("name TEXT DEFAULT 'Anonymous' NOT NULL"));
         assert!(sql.contains("created_at TIMESTAMP DEFAULT 0 NOT NULL"));
+        assert!(sql.contains("tags TEXT[] DEFAULT ARRAY['tag1', 'tag2'] NOT NULL"));
         assert!(
             sql.contains("test_id UUID DEFAULT '00000000-0000-0000-0000-000000000000' NOT NULL")
         );
@@ -2919,7 +2979,8 @@ mod tests {
     name TEXT DEFAULT 'Anonymous' NOT NULL,
     age INTEGER DEFAULT 42,
     active BOOLEAN DEFAULT TRUE NOT NULL,
-    created_at TIMESTAMP DEFAULT 0 NOT NULL
+    created_at TIMESTAMP DEFAULT 0 NOT NULL,
+    tags TEXT[] DEFAULT ARRAY['tag1', 'tag2'] NOT NULL
 );"#;
         let schema = parse_schema(sql).unwrap();
         let regenerated = schema_to_sql(&schema);
@@ -2944,6 +3005,10 @@ mod tests {
         assert_eq!(
             orig.columns.columns[3].default,
             round.columns.columns[3].default
+        );
+        assert_eq!(
+            orig.columns.columns[4].default,
+            round.columns.columns[4].default
         );
     }
 
