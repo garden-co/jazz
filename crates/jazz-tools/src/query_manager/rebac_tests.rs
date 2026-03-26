@@ -2412,6 +2412,121 @@ fn local_delete_with_exists_rel_policy_allows_admin_and_denies_non_admin() {
 }
 
 #[test]
+fn synced_soft_delete_should_use_delete_policy() {
+    let mut schema = Schema::new();
+    let admins_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("user_id", ColumnType::Text)]);
+    schema.insert(
+        TableName::new("admins"),
+        TableSchema::new(admins_descriptor.clone()),
+    );
+
+    let protected_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("data", ColumnType::Text)]);
+    let protected_policies = TablePolicies::new().with_delete(PolicyExpr::ExistsRel {
+        rel: RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("admins"),
+            }),
+            predicate: PredicateExpr::Cmp {
+                left: ColumnRef::unscoped("user_id"),
+                op: PredicateCmpOp::Eq,
+                right: ValueRef::SessionRef(vec!["user_id".into()]),
+            },
+        },
+    });
+    schema.insert(
+        TableName::new("protected"),
+        TableSchema::with_policies(protected_descriptor.clone(), protected_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    qm.insert(&mut storage, "admins", &[Value::Text("alice".into())])
+        .expect("seed admin row");
+    let protected = qm
+        .insert(&mut storage, "protected", &[Value::Text("initial".into())])
+        .expect("seed protected row");
+    let branch = get_branch(&qm);
+
+    let protected_metadata = qm
+        .sync_manager()
+        .object_manager
+        .get(protected.row_id)
+        .map(|obj| obj.metadata.clone())
+        .expect("protected row metadata");
+
+    let bob_client = ClientId::new();
+    qm.sync_manager_mut().add_client(bob_client);
+    qm.sync_manager_mut()
+        .set_client_session(bob_client, Session::new("bob"));
+
+    let mut bob_scope = HashSet::new();
+    bob_scope.insert((protected.row_id, branch.clone().into()));
+    qm.sync_manager_mut()
+        .set_client_query_scope(bob_client, QueryId(1), bob_scope, None);
+    qm.sync_manager_mut().take_outbox();
+
+    let delete_content =
+        encode_row(&protected_descriptor, &[Value::Text("initial".into())]).unwrap();
+    let delete_commit = Commit {
+        parents: smallvec![protected.row_commit_id],
+        content: delete_content,
+        timestamp: 2000,
+        author: ObjectId::new(),
+        metadata: Some(crate::metadata::soft_delete_metadata()),
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(bob_client),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: protected.row_id,
+            metadata: Some(ObjectMetadata {
+                id: protected.row_id,
+                metadata: protected_metadata,
+            }),
+            branch_name: branch.clone().into(),
+            commits: vec![delete_commit.clone()],
+        },
+    });
+
+    for _ in 0..10 {
+        qm.process(&mut storage);
+    }
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let denied = outbox.iter().any(|entry| {
+        matches!(
+            (&entry.destination, &entry.payload),
+            (Destination::Client(id), SyncPayload::Error(SyncError::PermissionDenied { .. }))
+                if *id == bob_client
+        )
+    });
+    assert!(
+        denied,
+        "soft deletes replicated over sync should be checked against DELETE policy"
+    );
+
+    let tips = qm
+        .sync_manager_mut()
+        .object_manager
+        .get_tip_ids(protected.row_id, &branch)
+        .unwrap();
+    assert!(
+        !tips.contains(&delete_commit.id()),
+        "denied synced soft delete should not be applied"
+    );
+    assert!(
+        !qm.row_is_deleted(&storage, "protected", protected.row_id),
+        "denied synced soft delete should leave the row visible"
+    );
+}
+
+#[test]
 fn magic_columns_reactively_track_update_and_delete_permissions() {
     let schema = magic_introspection_schema();
     let sync_manager = SyncManager::new();

@@ -1,5 +1,6 @@
 use super::*;
 use crate::commit::{Commit, CommitId};
+use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
 use crate::storage::Storage;
@@ -237,8 +238,15 @@ impl SyncManager {
                         } else {
                             stored_metadata
                         };
-                        let new_content = commits.last().map(|c| c.content.clone());
-                        let operation = if old_content.is_some() {
+                        let is_delete = Self::is_deleted_update(commits);
+                        let new_content = if is_delete {
+                            None
+                        } else {
+                            commits.last().map(|c| c.content.clone())
+                        };
+                        let operation = if is_delete {
+                            Operation::Delete
+                        } else if old_content.is_some() {
                             Operation::Update
                         } else {
                             Operation::Insert
@@ -546,5 +554,16 @@ impl SyncManager {
             }
         }
         persisted
+    }
+
+    /// Soft deletes travel over sync as `ObjectUpdated`; we infer them from the
+    /// newest commit carrying delete metadata on the payload's tip.
+    fn is_deleted_update(commits: &[Commit]) -> bool {
+        commits.last().is_some_and(|commit| {
+            commit
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.contains_key(MetadataKey::Delete.as_str()))
+        })
     }
 }

@@ -1173,6 +1173,63 @@ fn write_with_session_goes_to_pending_permission_checks() {
 }
 
 #[test]
+fn soft_delete_object_updated_is_queued_as_delete_permission_check() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let c1 = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            "main",
+            vec![],
+            b"original".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("user123"));
+    sm.take_outbox();
+
+    let delete_commit = Commit {
+        parents: smallvec![c1],
+        content: b"original".to_vec(),
+        timestamp: 2000,
+        author,
+        metadata: Some(crate::metadata::soft_delete_metadata()),
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: "main".into(),
+            commits: vec![delete_commit.clone()],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].operation, Operation::Delete);
+    assert_eq!(pending[0].old_content, Some(b"original".to_vec()));
+    assert_eq!(pending[0].new_content, None);
+
+    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    assert!(!tips.contains(&delete_commit.id()));
+}
+
+#[test]
 fn approve_permission_check_applies_write() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();
