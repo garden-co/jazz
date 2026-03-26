@@ -208,6 +208,7 @@ pub fn translate_column_for_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object::ObjectId;
     use crate::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
     use crate::schema_manager::auto_lens::generate_lens;
     use crate::schema_manager::lens::{Lens, LensOp, LensTransform};
