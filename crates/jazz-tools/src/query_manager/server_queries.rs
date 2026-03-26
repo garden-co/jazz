@@ -146,7 +146,7 @@ impl QueryManager {
                 let Some(commit) = branch.commits.get(&tip_id) else {
                     continue;
                 };
-                let is_soft_deleted = commit.is_deleted();
+                let is_soft_deleted = commit.is_soft_deleted();
                 match &best {
                     None => {
                         best = Some((

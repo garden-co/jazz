@@ -1557,7 +1557,7 @@ impl QueryManager {
             return false;
         };
         // Hard delete: empty content + delete: hard metadata
-        commit.content.is_empty() && commit.is_deleted()
+        commit.content.is_empty() && commit.is_hard_deleted()
     }
 
     /// Check if the current tip has `delete: soft` metadata.
@@ -1575,7 +1575,7 @@ impl QueryManager {
             return false;
         };
         // Soft delete: has delete: soft metadata (content is preserved)
-        commit.is_deleted()
+        commit.is_soft_deleted()
     }
 
     /// Check if an incoming update has hard delete metadata.
@@ -1593,7 +1593,7 @@ impl QueryManager {
             return false;
         };
         // Hard delete: empty content + delete: hard metadata
-        commit.content.is_empty() && commit.is_deleted()
+        commit.content.is_empty() && commit.is_hard_deleted()
     }
 
     /// Check if a commit has been stored to disk.
