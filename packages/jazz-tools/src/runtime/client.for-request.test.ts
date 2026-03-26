@@ -540,15 +540,15 @@ describe("JazzClient schema order", () => {
       },
     });
 
-    await client.create("todos", [
-      { type: "Text", value: "Buy milk" },
-      { type: "Boolean", value: false },
-    ]);
+    await client.create("todos", {
+      title: { type: "Text", value: "Buy milk" },
+      done: { type: "Boolean", value: false },
+    });
 
-    expect(insert).toHaveBeenCalledWith("todos", [
-      { type: "Text", value: "Buy milk" },
-      { type: "Boolean", value: false },
-    ]);
+    expect(insert).toHaveBeenCalledWith("todos", {
+      title: { type: "Text", value: "Buy milk" },
+      done: { type: "Boolean", value: false },
+    });
     expect(insertDurable).not.toHaveBeenCalled();
   });
 

@@ -468,6 +468,14 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
     } else {
         hasher.update(&[0]);
     }
+
+    // Schema-level default
+    if let Some(default) = &col.default {
+        hasher.update(&[1]);
+        hash_value(hasher, default);
+    } else {
+        hasher.update(&[0]);
+    }
     hasher.update(&[0]); // delimiter
 }
 

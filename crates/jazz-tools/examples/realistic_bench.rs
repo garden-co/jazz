@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,13 @@ use serde_json::json;
 use tempfile::TempDir;
 
 type DynError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+fn row<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
+    pairs
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -385,10 +392,10 @@ async fn seed_dataset(
         let (id, _row_values) = client
             .create(
                 "users",
-                vec![
-                    Value::Text(format!("User {}", i)),
-                    Value::Text(format!("user{}@bench.test", i)),
-                ],
+                row([
+                    ("display_name", Value::Text(format!("User {}", i))),
+                    ("email", Value::Text(format!("user{}@bench.test", i))),
+                ]),
             )
             .await?;
         users.push(id);
@@ -399,10 +406,10 @@ async fn seed_dataset(
         let (id, _row_values) = client
             .create(
                 "organizations",
-                vec![
-                    Value::Text(format!("Org {}", i)),
-                    Value::Timestamp(start_ts + i as u64),
-                ],
+                row([
+                    ("name", Value::Text(format!("Org {}", i))),
+                    ("created_at", Value::Timestamp(start_ts + i as u64)),
+                ]),
             )
             .await?;
         organizations.push(id);
@@ -415,11 +422,14 @@ async fn seed_dataset(
         let _ = client
             .create(
                 "memberships",
-                vec![
-                    Value::Uuid(org),
-                    Value::Uuid(user),
-                    Value::Text(if i % 9 == 0 { "admin" } else { "member" }.to_string()),
-                ],
+                row([
+                    ("organization_id", Value::Uuid(org)),
+                    ("user_id", Value::Uuid(user)),
+                    (
+                        "role",
+                        Value::Text(if i % 9 == 0 { "admin" } else { "member" }.to_string()),
+                    ),
+                ]),
             )
             .await?;
     }
@@ -430,12 +440,12 @@ async fn seed_dataset(
         let (id, _row_values) = client
             .create(
                 "projects",
-                vec![
-                    Value::Uuid(org),
-                    Value::Text(format!("Project {}", i)),
-                    Value::Boolean(false),
-                    Value::Timestamp(start_ts + i as u64),
-                ],
+                row([
+                    ("organization_id", Value::Uuid(org)),
+                    ("name", Value::Text(format!("Project {}", i))),
+                    ("archived", Value::Boolean(false)),
+                    ("updated_at", Value::Timestamp(start_ts + i as u64)),
+                ]),
             )
             .await?;
         projects.push(id);
@@ -449,15 +459,18 @@ async fn seed_dataset(
         let (id, _row_values) = client
             .create(
                 "tasks",
-                vec![
-                    Value::Uuid(projects[project_idx]),
-                    Value::Text(format!("Task {}", i)),
-                    Value::Text(STATUSES[i % STATUSES.len()].to_string()),
-                    Value::Integer((1 + (i % 4)) as i32),
-                    Value::Uuid(users[assignee_idx]),
-                    Value::Timestamp(start_ts + i as u64),
-                    Value::Timestamp(start_ts + (i as u64 * 7)),
-                ],
+                row([
+                    ("project_id", Value::Uuid(projects[project_idx])),
+                    ("title", Value::Text(format!("Task {}", i))),
+                    (
+                        "status",
+                        Value::Text(STATUSES[i % STATUSES.len()].to_string()),
+                    ),
+                    ("priority", Value::Integer((1 + (i % 4)) as i32)),
+                    ("assignee_id", Value::Uuid(users[assignee_idx])),
+                    ("updated_at", Value::Timestamp(start_ts + i as u64)),
+                    ("due_at", Value::Timestamp(start_ts + (i as u64 * 7))),
+                ]),
             )
             .await?;
         tasks.push(TaskRecord { id, project_idx });
@@ -470,12 +483,12 @@ async fn seed_dataset(
         let _ = client
             .create(
                 "task_comments",
-                vec![
-                    Value::Uuid(tasks[task_idx].id),
-                    Value::Uuid(author),
-                    Value::Text(format!("Comment {} body", i)),
-                    Value::Timestamp(start_ts + i as u64),
-                ],
+                row([
+                    ("task_id", Value::Uuid(tasks[task_idx].id)),
+                    ("author_id", Value::Uuid(author)),
+                    ("body", Value::Text(format!("Comment {} body", i))),
+                    ("created_at", Value::Timestamp(start_ts + i as u64)),
+                ]),
             )
             .await?;
         comments_per_task[task_idx] += 1;
@@ -488,7 +501,10 @@ async fn seed_dataset(
             let _ = client
                 .create(
                     "task_watchers",
-                    vec![Value::Uuid(task.id), Value::Uuid(watcher)],
+                    row([
+                        ("task_id", Value::Uuid(task.id)),
+                        ("user_id", Value::Uuid(watcher)),
+                    ]),
                 )
                 .await?;
         }
@@ -502,21 +518,24 @@ async fn seed_dataset(
         let _ = client
             .create(
                 "activity_events",
-                vec![
-                    Value::Uuid(projects[task.project_idx]),
-                    Value::Uuid(task.id),
-                    Value::Uuid(actor),
-                    Value::Text(
-                        if i % 3 == 0 {
-                            "task_updated"
-                        } else {
-                            "comment_added"
-                        }
-                        .into(),
+                row([
+                    ("project_id", Value::Uuid(projects[task.project_idx])),
+                    ("task_id", Value::Uuid(task.id)),
+                    ("actor_id", Value::Uuid(actor)),
+                    (
+                        "kind",
+                        Value::Text(
+                            if i % 3 == 0 {
+                                "task_updated"
+                            } else {
+                                "comment_added"
+                            }
+                            .into(),
+                        ),
                     ),
-                    Value::Timestamp(start_ts + i as u64),
-                    Value::Text(format!("{{\"event\":{}}}", i)),
-                ],
+                    ("created_at", Value::Timestamp(start_ts + i as u64)),
+                    ("payload", Value::Text(format!("{{\"event\":{}}}", i))),
+                ]),
             )
             .await?;
     }
@@ -688,12 +707,12 @@ async fn run_w1_interactive(
                 client
                     .create(
                         "task_comments",
-                        vec![
-                            Value::Uuid(seed.tasks[task_idx].id),
-                            Value::Uuid(author),
-                            Value::Text(format!("interactive comment {}", i)),
-                            Value::Timestamp(now_micros()),
-                        ],
+                        row([
+                            ("task_id", Value::Uuid(seed.tasks[task_idx].id)),
+                            ("author_id", Value::Uuid(author)),
+                            ("body", Value::Text(format!("interactive comment {}", i))),
+                            ("created_at", Value::Timestamp(now_micros())),
+                        ]),
                     )
                     .await?;
                 seed.comments_per_task[task_idx] += 1;
@@ -778,12 +797,15 @@ async fn run_w3_offline_reconnect(
         let _ = offline_client
             .create(
                 "task_comments",
-                vec![
-                    Value::Uuid(target_task_id),
-                    Value::Uuid(author),
-                    Value::Text(format!("offline_reconnect_marker_{}", i)),
-                    Value::Timestamp(now_micros()),
-                ],
+                row([
+                    ("task_id", Value::Uuid(target_task_id)),
+                    ("author_id", Value::Uuid(author)),
+                    (
+                        "body",
+                        Value::Text(format!("offline_reconnect_marker_{}", i)),
+                    ),
+                    ("created_at", Value::Timestamp(now_micros())),
+                ]),
             )
             .await?;
         seed.comments_per_task[target_task_idx] += 1;

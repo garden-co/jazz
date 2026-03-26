@@ -1,4 +1,4 @@
-import type { WasmSchema } from "../drivers/types.js";
+import type { InsertValues, WasmSchema } from "../drivers/types.js";
 import type { Row, Runtime } from "../runtime/client.js";
 import { OutboxDestinationKind } from "../runtime/sync-transport.js";
 
@@ -197,7 +197,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
     });
   }
 
-  insert(table: string, values: any): Row {
+  insert(table: string, values: InsertValues): Row {
     try {
       const rowJson = this.binding.insert(table, JSON.stringify(values));
       return JSON.parse(rowJson) as Row;
@@ -306,7 +306,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
     this.handleMap.delete(handle);
   }
 
-  insertDurable(table: string, values: any, tier: string): Promise<Row> {
+  insertDurable(table: string, values: InsertValues, tier: string): Promise<Row> {
     assertWorkerTier(tier);
     const row = this.insert(table, values);
     this.binding.flush();

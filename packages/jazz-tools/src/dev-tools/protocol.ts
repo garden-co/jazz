@@ -1,6 +1,7 @@
 import type {
   ActiveQuerySubscriptionTrace,
   DurabilityTier,
+  InsertValues,
   QueryExecutionOptions,
   QueryInput,
   Row,
@@ -54,7 +55,7 @@ export type DevtoolsClientQueryResponsePayload = unknown[];
 
 export type DevtoolsClientInsertDurableRequestPayload = {
   table: string;
-  values: Value[];
+  values: InsertValues;
   tier?: DurabilityTier;
 };
 export type DevtoolsClientInsertDurableResponsePayload = Row;

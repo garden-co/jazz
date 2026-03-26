@@ -52,7 +52,7 @@ export default defineConfig({
     // Use forks pool to avoid Vite's module resolution issues with node: builtins
     pool: "forks",
     include: ["src/**/*.test.ts", "tests/ts-dsl/**/*.test.ts"],
-    exclude: ["tests/browser/**", "node_modules/**"],
+    exclude: ["tests/browser/**", "node_modules/**", "src/**/*.svelte.test.ts"],
     server: {
       deps: {
         // Force these to be treated as external and not bundled

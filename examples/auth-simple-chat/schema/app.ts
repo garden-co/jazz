@@ -43,7 +43,7 @@ type AnyMessageQueryBuilder<T = any> = { readonly _table: "messages" } & QueryBu
 export type MessageSelectableColumn = keyof Message | PermissionIntrospectionColumn | "*";
 export type MessageOrderableColumn = keyof Message | PermissionIntrospectionColumn;
 
-export type MessageSelected<S extends MessageSelectableColumn = keyof Message> = "*" extends S ? Message : Pick<Message, Extract<S | "id", keyof Message>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type MessageSelected<S extends MessageSelectableColumn = keyof Message> = ("*" extends S ? Message : Pick<Message, Extract<S | "id", keyof Message>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export const wasmSchema: WasmSchema = {
   "messages": {
@@ -535,6 +535,9 @@ export class MessageQueryBuilder<I extends Record<string, never> = {}, S extends
     }
 
     const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
     const stepConditions = stepBuilt.conditions.filter(
       (condition) => !(condition.op === "eq" && condition.value === currentToken),
     );

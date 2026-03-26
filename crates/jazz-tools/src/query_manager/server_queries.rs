@@ -135,7 +135,7 @@ impl QueryManager {
         >,
         schema_context: &crate::schema_manager::SchemaContext,
     ) -> Option<ResolvedSchemaRow> {
-        let mut best: Option<(u64, Vec<u8>, CommitId, BranchName, bool)> = None;
+        let mut best: Option<(u64, CommitId, Vec<u8>, BranchName, bool)> = None;
 
         for branch_name in branches {
             let branch_name = BranchName::new(branch_name);
@@ -151,17 +151,19 @@ impl QueryManager {
                     None => {
                         best = Some((
                             commit.timestamp,
-                            commit.content.clone(),
                             tip_id,
+                            commit.content.clone(),
                             branch_name,
                             is_soft_deleted,
                         ));
                     }
-                    Some((best_ts, _, _, _, _)) if commit.timestamp > *best_ts => {
+                    Some((best_ts, best_id, _, _, _))
+                        if (commit.timestamp, tip_id) > (*best_ts, *best_id) =>
+                    {
                         best = Some((
                             commit.timestamp,
-                            commit.content.clone(),
                             tip_id,
+                            commit.content.clone(),
                             branch_name,
                             is_soft_deleted,
                         ));
@@ -171,7 +173,7 @@ impl QueryManager {
             }
         }
 
-        let (_, content, commit_id, branch_name, is_soft_deleted) = best?;
+        let (_, commit_id, content, branch_name, is_soft_deleted) = best?;
         if content.is_empty() {
             return None;
         }

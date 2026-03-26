@@ -5,6 +5,8 @@
 //! Variants:
 //! - Update own documents (simple USING check)
 
+#![allow(clippy::single_element_loop)]
+
 mod common;
 
 use common::{create_runtime, create_session, current_timestamp, setup_data};

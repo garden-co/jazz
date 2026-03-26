@@ -364,7 +364,11 @@ impl JazzClient {
     }
 
     /// Create a new row in a table.
-    pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<(ObjectId, Vec<Value>)> {
+    pub async fn create(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+    ) -> Result<(ObjectId, Vec<Value>)> {
         let (object_id, row_values) = self
             .runtime
             .insert(table, values, None)
@@ -487,7 +491,11 @@ pub struct SessionClient<'a> {
 }
 
 impl<'a> SessionClient<'a> {
-    pub async fn create(&self, table: &str, values: Vec<Value>) -> Result<(ObjectId, Vec<Value>)> {
+    pub async fn create(
+        &self,
+        table: &str,
+        values: HashMap<String, Value>,
+    ) -> Result<(ObjectId, Vec<Value>)> {
         let (object_id, row_values) = self
             .client
             .runtime

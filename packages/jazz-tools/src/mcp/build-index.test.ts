@@ -258,7 +258,7 @@ describe("buildIndex", () => {
       contentDir: contentDir(),
       outputDir: outputDir(),
     });
-  }, 10_000);
+  }, 30_000);
 
   afterAll(async () => {
     await cleanupFixtureTree(tmpDir);

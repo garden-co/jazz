@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Db, type QueryBuilder, type TableProxy } from "./db.js";
-import type { Value, WasmRow, WasmSchema } from "../drivers/types.js";
+import type { InsertValues, WasmRow, WasmSchema } from "../drivers/types.js";
 import type { JazzClient, Row } from "./client.js";
 
 class TestDb extends Db {
@@ -31,7 +31,7 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const create = vi.fn<(...args: [string, Value[]]) => Row>(() => ({
+    const create = vi.fn<(...args: [string, InsertValues]) => Row>(() => ({
       id: "todo-1",
       values: [
         { type: "Text", value: "Buy milk" },
@@ -55,10 +55,10 @@ describe("Db runtime schema order", () => {
 
     const row = db.insert(table, { title: "Buy milk", done: false });
 
-    expect(create).toHaveBeenCalledWith("todos", [
-      { type: "Text", value: "Buy milk" },
-      { type: "Boolean", value: false },
-    ]);
+    expect(create).toHaveBeenCalledWith("todos", {
+      title: { type: "Text", value: "Buy milk" },
+      done: { type: "Boolean", value: false },
+    });
     expect(row).toEqual({
       id: "todo-1",
       title: "Buy milk",
@@ -130,7 +130,7 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const create = vi.fn<(...args: [string, Value[]]) => Row>(() => ({
+    const create = vi.fn<(...args: [string, InsertValues]) => Row>(() => ({
       id: "todo-1",
       values: [
         { type: "Text", value: "Buy milk" },
@@ -154,10 +154,10 @@ describe("Db runtime schema order", () => {
 
     const row = db.insert(table, { title: "Buy milk", done: false });
 
-    expect(create).toHaveBeenCalledWith("todos", [
-      { type: "Text", value: "Buy milk" },
-      { type: "Boolean", value: false },
-    ]);
+    expect(create).toHaveBeenCalledWith("todos", {
+      title: { type: "Text", value: "Buy milk" },
+      done: { type: "Boolean", value: false },
+    });
     expect(row).toEqual({
       id: "todo-1",
       title: "Buy milk",

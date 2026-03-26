@@ -236,7 +236,7 @@ describe("attachDevTools mutation bridge", () => {
       command: DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE,
       payload: {
         table: "todos",
-        values: [{ type: "Text", value: "hello" }],
+        values: { title: { type: "Text", value: "hello" } },
         tier: "worker",
       },
     });
@@ -244,7 +244,11 @@ describe("attachDevTools mutation bridge", () => {
     const response = await responsePromise;
     expect(response.ok).toBe(true);
     expect(response.payload).toEqual(insertedRow);
-    expect(createDurable).toHaveBeenCalledWith("todos", insertedRow.values, { tier: "worker" });
+    expect(createDurable).toHaveBeenCalledWith(
+      "todos",
+      { title: { type: "Text", value: "hello" } },
+      { tier: "worker" },
+    );
   });
 
   it("routes client.updateDurable to runtime updateDurable", async () => {
@@ -358,7 +362,7 @@ describe("attachDevTools mutation bridge", () => {
       {
         requestId: "invalid-insert",
         command: DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE,
-        payload: { table: 123, values: [] },
+        payload: { table: 123, values: {} },
         expectedMessage: "Invalid payload for client.insertDurable.",
       },
       {
