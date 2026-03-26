@@ -92,7 +92,7 @@ Primary TypeScript-facing APIs:
 
 - `createDb`, `Db`, `QueryBuilder`, `TableProxy`
 - `JazzClient`, `SessionClient`, `resolveClientSession`
-- Query/value adapters used internally by `Db` (`translateQuery`, `transformRows`, `toValueArray`, `toUpdateRecord`)
+- Query/value adapters used internally by `Db` (`translateQuery`, `transformRows`, `toInsertRecord`, `toUpdateRecord`)
 
 Current plain TypeScript usage pattern (see `examples/todo-client-localfirst-ts/src/main.ts`):
 

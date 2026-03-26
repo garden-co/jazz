@@ -16,9 +16,9 @@
   "devDependencies": {
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^4.0.0",
+    "@vitejs/plugin-react": "catalog:default",
     "typescript": "catalog:default",
-    "vite": "^6.0.0",
+    "vite": "catalog:default",
     "vitest": "catalog:default"
   }
 }

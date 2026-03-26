@@ -1,8 +1,11 @@
 import type {
   ActiveQuerySubscriptionTrace,
   DurabilityTier,
+  InsertValues,
   QueryExecutionOptions,
   QueryInput,
+  Row,
+  Value,
   WasmSchema,
 } from "../index.js";
 import type { DbConfig } from "../runtime/db.js";
@@ -14,6 +17,9 @@ export const DEVTOOLS_COMMANDS = {
   BRIDGE_HANDSHAKE: "bridge.handshake",
   ANNOUNCE: "devtools.announce",
   CLIENT_QUERY: "client.query",
+  CLIENT_INSERT_DURABLE: "client.insertDurable",
+  CLIENT_UPDATE_DURABLE: "client.updateDurable",
+  CLIENT_DELETE_DURABLE: "client.deleteDurable",
   CLIENT_SUBSCRIBE: "client.subscribe",
   CLIENT_UNSUBSCRIBE: "client.unsubscribe",
   CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS: "client.listActiveQuerySubscriptions",
@@ -47,6 +53,26 @@ export type DevtoolsClientQueryRequestPayload = {
 };
 export type DevtoolsClientQueryResponsePayload = unknown[];
 
+export type DevtoolsClientInsertDurableRequestPayload = {
+  table: string;
+  values: InsertValues;
+  tier?: DurabilityTier;
+};
+export type DevtoolsClientInsertDurableResponsePayload = Row;
+
+export type DevtoolsClientUpdateDurableRequestPayload = {
+  objectId: string;
+  updates: Record<string, Value>;
+  tier?: DurabilityTier;
+};
+export type DevtoolsClientUpdateDurableResponsePayload = { updated: true };
+
+export type DevtoolsClientDeleteDurableRequestPayload = {
+  objectId: string;
+  tier?: DurabilityTier;
+};
+export type DevtoolsClientDeleteDurableResponsePayload = { deleted: true };
+
 export type DevtoolsClientSubscribeRequestPayload = {
   query: string | QueryInput;
   options?: QueryExecutionOptions;
@@ -68,6 +94,9 @@ export interface DevtoolsRequestPayloadByCommand {
   [DEVTOOLS_COMMANDS.BRIDGE_HANDSHAKE]: DevtoolsBridgeHandshakeRequestPayload;
   [DEVTOOLS_COMMANDS.ANNOUNCE]: DevtoolsAnnounceRequestPayload;
   [DEVTOOLS_COMMANDS.CLIENT_QUERY]: DevtoolsClientQueryRequestPayload;
+  [DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE]: DevtoolsClientInsertDurableRequestPayload;
+  [DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE]: DevtoolsClientUpdateDurableRequestPayload;
+  [DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE]: DevtoolsClientDeleteDurableRequestPayload;
   [DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE]: DevtoolsClientSubscribeRequestPayload;
   [DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE]: DevtoolsClientUnsubscribeRequestPayload;
   [DEVTOOLS_COMMANDS.CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS]: DevtoolsClientListActiveQuerySubscriptionsRequestPayload;
@@ -77,6 +106,9 @@ export interface DevtoolsResponsePayloadByCommand {
   [DEVTOOLS_COMMANDS.BRIDGE_HANDSHAKE]: DevtoolsBridgeHandshakeResponsePayload;
   [DEVTOOLS_COMMANDS.ANNOUNCE]: DevtoolsAnnounceResponsePayload;
   [DEVTOOLS_COMMANDS.CLIENT_QUERY]: DevtoolsClientQueryResponsePayload;
+  [DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE]: DevtoolsClientInsertDurableResponsePayload;
+  [DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE]: DevtoolsClientUpdateDurableResponsePayload;
+  [DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE]: DevtoolsClientDeleteDurableResponsePayload;
   [DEVTOOLS_COMMANDS.CLIENT_SUBSCRIBE]: DevtoolsClientSubscribeResponsePayload;
   [DEVTOOLS_COMMANDS.CLIENT_UNSUBSCRIBE]: DevtoolsClientUnsubscribeResponsePayload;
   [DEVTOOLS_COMMANDS.CLIENT_LIST_ACTIVE_QUERY_SUBSCRIPTIONS]: DevtoolsClientListActiveQuerySubscriptionsResponsePayload;
@@ -103,6 +135,27 @@ export type DevtoolsRequestEnvelope =
       requestId: string;
       command: (typeof DEVTOOLS_COMMANDS)["CLIENT_QUERY"];
       payload: DevtoolsClientQueryRequestPayload;
+    }
+  | {
+      channel: typeof DEVTOOLS_BRIDGE_CHANNEL;
+      kind: "request";
+      requestId: string;
+      command: (typeof DEVTOOLS_COMMANDS)["CLIENT_INSERT_DURABLE"];
+      payload: DevtoolsClientInsertDurableRequestPayload;
+    }
+  | {
+      channel: typeof DEVTOOLS_BRIDGE_CHANNEL;
+      kind: "request";
+      requestId: string;
+      command: (typeof DEVTOOLS_COMMANDS)["CLIENT_UPDATE_DURABLE"];
+      payload: DevtoolsClientUpdateDurableRequestPayload;
+    }
+  | {
+      channel: typeof DEVTOOLS_BRIDGE_CHANNEL;
+      kind: "request";
+      requestId: string;
+      command: (typeof DEVTOOLS_COMMANDS)["CLIENT_DELETE_DURABLE"];
+      payload: DevtoolsClientDeleteDurableRequestPayload;
     }
   | {
       channel: typeof DEVTOOLS_BRIDGE_CHANNEL;

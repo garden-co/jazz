@@ -51,10 +51,10 @@ export interface ProjectInit {
 export interface TodoInit {
   title: string;
   done: boolean;
-  description?: string;
-  ownerId?: string;
-  parentId?: string;
-  projectId?: string;
+  description?: string | null;
+  ownerId?: string | null;
+  parentId?: string | null;
+  projectId?: string | null;
 }
 
 export interface FilePartInit {
@@ -62,7 +62,7 @@ export interface FilePartInit {
 }
 
 export interface FileInit {
-  name?: string;
+  name?: string | null;
   mimeType: string;
   partIds: string[];
   partSizes: number[];
@@ -294,35 +294,35 @@ export type UploadWithIncludes<I extends UploadInclude = {}, R extends boolean =
 export type ProjectSelectableColumn = keyof Project | PermissionIntrospectionColumn | "*";
 export type ProjectOrderableColumn = keyof Project | PermissionIntrospectionColumn;
 
-export type ProjectSelected<S extends ProjectSelectableColumn = keyof Project> = "*" extends S ? Project : Pick<Project, Extract<S | "id", keyof Project>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type ProjectSelected<S extends ProjectSelectableColumn = keyof Project> = ("*" extends S ? Project : Pick<Project, Extract<S | "id", keyof Project>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type ProjectSelectedWithIncludes<I extends ProjectInclude = {}, S extends ProjectSelectableColumn = keyof Project, R extends boolean = false> = ProjectSelected<S> & ProjectIncludedRelations<I, R>;
 
 export type TodoSelectableColumn = keyof Todo | PermissionIntrospectionColumn | "*";
 export type TodoOrderableColumn = keyof Todo | PermissionIntrospectionColumn;
 
-export type TodoSelected<S extends TodoSelectableColumn = keyof Todo> = "*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type TodoSelected<S extends TodoSelectableColumn = keyof Todo> = ("*" extends S ? Todo : Pick<Todo, Extract<S | "id", keyof Todo>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type TodoSelectedWithIncludes<I extends TodoInclude = {}, S extends TodoSelectableColumn = keyof Todo, R extends boolean = false> = TodoSelected<S> & TodoIncludedRelations<I, R>;
 
 export type FilePartSelectableColumn = keyof FilePart | PermissionIntrospectionColumn | "*";
 export type FilePartOrderableColumn = keyof FilePart | PermissionIntrospectionColumn;
 
-export type FilePartSelected<S extends FilePartSelectableColumn = keyof FilePart> = "*" extends S ? FilePart : Pick<FilePart, Extract<S | "id", keyof FilePart>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type FilePartSelected<S extends FilePartSelectableColumn = keyof FilePart> = ("*" extends S ? FilePart : Pick<FilePart, Extract<S | "id", keyof FilePart>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type FilePartSelectedWithIncludes<I extends FilePartInclude = {}, S extends FilePartSelectableColumn = keyof FilePart, R extends boolean = false> = FilePartSelected<S> & FilePartIncludedRelations<I, R>;
 
 export type FileSelectableColumn = keyof File | PermissionIntrospectionColumn | "*";
 export type FileOrderableColumn = keyof File | PermissionIntrospectionColumn;
 
-export type FileSelected<S extends FileSelectableColumn = keyof File> = "*" extends S ? File : Pick<File, Extract<S | "id", keyof File>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type FileSelected<S extends FileSelectableColumn = keyof File> = ("*" extends S ? File : Pick<File, Extract<S | "id", keyof File>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type FileSelectedWithIncludes<I extends FileInclude = {}, S extends FileSelectableColumn = keyof File, R extends boolean = false> = FileSelected<S> & FileIncludedRelations<I, R>;
 
 export type UploadSelectableColumn = keyof Upload | PermissionIntrospectionColumn | "*";
 export type UploadOrderableColumn = keyof Upload | PermissionIntrospectionColumn;
 
-export type UploadSelected<S extends UploadSelectableColumn = keyof Upload> = "*" extends S ? Upload : Pick<Upload, Extract<S | "id", keyof Upload>> & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+export type UploadSelected<S extends UploadSelectableColumn = keyof Upload> = ("*" extends S ? Upload : Pick<Upload, Extract<S | "id", keyof Upload>>) & Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
 
 export type UploadSelectedWithIncludes<I extends UploadInclude = {}, S extends UploadSelectableColumn = keyof Upload, R extends boolean = false> = UploadSelected<S> & UploadIncludedRelations<I, R>;
 
@@ -628,6 +628,9 @@ export class ProjectQueryBuilder<I extends ProjectInclude = {}, S extends Projec
     }
 
     const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
     const stepConditions = stepBuilt.conditions.filter(
       (condition) => !(condition.op === "eq" && condition.value === currentToken),
     );
@@ -825,6 +828,9 @@ export class TodoQueryBuilder<I extends TodoInclude = {}, S extends TodoSelectab
     }
 
     const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
     const stepConditions = stepBuilt.conditions.filter(
       (condition) => !(condition.op === "eq" && condition.value === currentToken),
     );
@@ -1022,6 +1028,9 @@ export class FilePartQueryBuilder<I extends FilePartInclude = {}, S extends File
     }
 
     const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
     const stepConditions = stepBuilt.conditions.filter(
       (condition) => !(condition.op === "eq" && condition.value === currentToken),
     );
@@ -1219,6 +1228,9 @@ export class FileQueryBuilder<I extends FileInclude = {}, S extends FileSelectab
     }
 
     const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
     const stepConditions = stepBuilt.conditions.filter(
       (condition) => !(condition.op === "eq" && condition.value === currentToken),
     );
@@ -1416,6 +1428,9 @@ export class UploadQueryBuilder<I extends UploadInclude = {}, S extends UploadSe
     }
 
     const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error("gather(...) step must include exactly one where condition bound to current.");
+    }
     const stepConditions = stepBuilt.conditions.filter(
       (condition) => !(condition.op === "eq" && condition.value === currentToken),
     );

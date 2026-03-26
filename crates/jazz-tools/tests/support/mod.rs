@@ -3,8 +3,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
-    AppContext, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query, QueryBuilder, Schema,
-    SubscriptionStream, Value,
+    AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Query,
+    QueryBuilder, Schema, SubscriptionStream, Value,
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,12 @@ enum TestingClientAuth {
     Claims(JsonValue),
 }
 
+#[derive(Clone, Copy)]
+enum TestingClientStorage {
+    Memory,
+    Persistent,
+}
+
 /// Builder-style helper for test clients backed by `TestingServer`.
 ///
 /// Supports the three common auth shapes used across the integration suite:
@@ -46,6 +52,7 @@ pub struct TestingClient<'a> {
     schema: Option<Schema>,
     user_id: Option<String>,
     auth: TestingClientAuth,
+    storage: TestingClientStorage,
     ready_table: Option<String>,
     ready_timeout: Option<Duration>,
 }
@@ -58,6 +65,7 @@ impl<'a> TestingClient<'a> {
             schema: None,
             user_id: None,
             auth: TestingClientAuth::Admin,
+            storage: TestingClientStorage::Memory,
             ready_table: None,
             ready_timeout: None,
         }
@@ -96,12 +104,25 @@ impl<'a> TestingClient<'a> {
         self
     }
 
+    pub fn with_memory_storage(mut self) -> Self {
+        self.storage = TestingClientStorage::Memory;
+        self
+    }
+
+    pub fn with_persistent_storage(mut self) -> Self {
+        self.storage = TestingClientStorage::Persistent;
+        self
+    }
+
     pub async fn connect(self) -> JazzClient {
         self.connect_with_context().await.1
     }
 
     /// Connects the client and also returns the exact `AppContext` used for
-    /// the connection so callers can later reconnect with the same local state.
+    /// the connection so callers can later reconnect with the same configuration.
+    ///
+    /// Persistent storage reuses local state across reconnects; memory storage
+    /// does not.
     pub async fn connect_with_context(self) -> (AppContext, JazzClient) {
         let ready_table = self.ready_table.clone();
         let ready_timeout = self.ready_timeout;
@@ -159,6 +180,11 @@ impl<'a> TestingClient<'a> {
                 context.admin_secret = None;
             }
         }
+
+        context.storage = match self.storage {
+            TestingClientStorage::Memory => ClientStorage::Memory,
+            TestingClientStorage::Persistent => ClientStorage::Fjall,
+        };
 
         context
     }

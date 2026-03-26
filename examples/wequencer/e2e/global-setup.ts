@@ -4,24 +4,21 @@
 
 import { join } from "node:path";
 import type { FullConfig } from "@playwright/test";
-import { startLocalJazzServer, pushSchemaCatalogue } from "jazz-tools/testing";
+import { TestingServer, pushSchemaCatalogue } from "jazz-tools/testing";
 
 const SERVER_PORT = 19878;
-const ADMIN_SECRET = "wequencer-test-admin-secret";
 const APP_ID = "00000000-0000-0000-0000-000000000099";
 
 async function globalSetup(_config: FullConfig): Promise<() => Promise<void>> {
-  const server = await startLocalJazzServer({
+  const server = await TestingServer.start({
     appId: APP_ID,
     port: SERVER_PORT,
-    adminSecret: ADMIN_SECRET,
-    enableLogs: true,
   });
 
   await pushSchemaCatalogue({
     serverUrl: server.url,
-    appId: APP_ID,
-    adminSecret: ADMIN_SECRET,
+    appId: server.appId,
+    adminSecret: server.adminSecret,
     schemaDir: join(import.meta.dirname ?? __dirname, "../schema"),
   });
 

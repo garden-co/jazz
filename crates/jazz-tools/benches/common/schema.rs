@@ -4,6 +4,8 @@
 //! - Simple session comparisons (`owner_id = @session.user_id`)
 //! - INHERITS chains (documents → folders → teams)
 
+use std::collections::HashMap;
+
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::policy::{Operation, PolicyExpr};
 use jazz_tools::query_manager::session::Session;
@@ -17,6 +19,13 @@ use jazz_tools::storage::MemoryStorage;
 use jazz_tools::sync_manager::SyncManager;
 
 pub type BenchRuntime = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
+
+fn row<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
+    pairs
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+}
 
 /// Create the benchmark schema with teams, folders, and documents.
 ///
@@ -144,10 +153,10 @@ pub fn setup_data(core: &mut BenchRuntime, scale: usize, user_id: &str) -> Bench
         let (row_id, _row_values) = core
             .insert(
                 "teams",
-                vec![
-                    Value::Text(format!("Team {}", i)),
-                    Value::Text(owner.to_string()),
-                ],
+                row([
+                    ("name", Value::Text(format!("Team {}", i))),
+                    ("owner_id", Value::Text(owner.to_string())),
+                ]),
                 None,
             )
             .expect("insert team");
@@ -173,11 +182,11 @@ pub fn setup_data(core: &mut BenchRuntime, scale: usize, user_id: &str) -> Bench
         let (row_id, _row_values) = core
             .insert(
                 "folders",
-                vec![
-                    Value::Uuid(team_id),
-                    Value::Text(format!("Folder {}", i)),
-                    Value::Timestamp(now + i as u64),
-                ],
+                row([
+                    ("team_id", Value::Uuid(team_id)),
+                    ("name", Value::Text(format!("Folder {}", i))),
+                    ("created_at", Value::Timestamp(now + i as u64)),
+                ]),
                 None,
             )
             .expect("insert folder");
@@ -213,13 +222,13 @@ pub fn setup_data(core: &mut BenchRuntime, scale: usize, user_id: &str) -> Bench
         let (row_id, _row_values) = core
             .insert(
                 "documents",
-                vec![
-                    Value::Uuid(folder_id),
-                    Value::Text(format!("Document {}", i)),
-                    Value::Text(format!("Content of document {}", i)),
-                    Value::Text(author.to_string()),
-                    Value::Timestamp(now + i as u64),
-                ],
+                row([
+                    ("folder_id", Value::Uuid(folder_id)),
+                    ("title", Value::Text(format!("Document {}", i))),
+                    ("content", Value::Text(format!("Content of document {}", i))),
+                    ("author_id", Value::Text(author.to_string())),
+                    ("created_at", Value::Timestamp(now + i as u64)),
+                ]),
                 None,
             )
             .expect("insert document");

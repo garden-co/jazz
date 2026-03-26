@@ -295,7 +295,7 @@ impl QueryManager {
             let table = sub.query.table.as_str().to_string();
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
                 let obj = om.get_or_load(id, storage_ref, &branches)?;
-                let mut best: Option<(u64, Vec<u8>, CommitId, BranchName)> = None;
+                let mut best: Option<(u64, CommitId, Vec<u8>, BranchName)> = None;
                 for branch_name in &branches {
                     let branch_name = BranchName::new(branch_name);
                     if let Some(branch) = obj.branches.get(&branch_name) {
@@ -305,16 +305,18 @@ impl QueryManager {
                                     None => {
                                         best = Some((
                                             commit.timestamp,
-                                            commit.content.clone(),
                                             tip_id,
+                                            commit.content.clone(),
                                             branch_name,
                                         ));
                                     }
-                                    Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
+                                    Some((best_ts, best_id, _, _))
+                                        if (commit.timestamp, tip_id) > (*best_ts, *best_id) =>
+                                    {
                                         best = Some((
                                             commit.timestamp,
-                                            commit.content.clone(),
                                             tip_id,
+                                            commit.content.clone(),
                                             branch_name,
                                         ));
                                     }
@@ -324,8 +326,8 @@ impl QueryManager {
                         }
                     }
                 }
-                let (_, content, commit_id, branch_name) =
-                    best.filter(|(_, content, _, _)| !content.is_empty())?;
+                let (_, commit_id, content, branch_name) =
+                    best.filter(|(_, _, content, _)| !content.is_empty())?;
                 Self::load_row_with_schema_transform(
                     id,
                     content,
@@ -461,7 +463,7 @@ impl QueryManager {
             // Row loader for this subscription
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
                 let obj = om.get_or_load(id, storage, branches)?;
-                let mut best: Option<(u64, Vec<u8>, CommitId, BranchName)> = None;
+                let mut best: Option<(u64, CommitId, Vec<u8>, BranchName)> = None;
                 for branch_name in branches {
                     let branch_name = BranchName::new(branch_name);
                     if let Some(branch) = obj.branches.get(&branch_name) {
@@ -471,16 +473,18 @@ impl QueryManager {
                                     None => {
                                         best = Some((
                                             commit.timestamp,
-                                            commit.content.clone(),
                                             tip_id,
+                                            commit.content.clone(),
                                             branch_name,
                                         ));
                                     }
-                                    Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
+                                    Some((best_ts, best_id, _, _))
+                                        if (commit.timestamp, tip_id) > (*best_ts, *best_id) =>
+                                    {
                                         best = Some((
                                             commit.timestamp,
-                                            commit.content.clone(),
                                             tip_id,
+                                            commit.content.clone(),
                                             branch_name,
                                         ));
                                     }
@@ -490,8 +494,8 @@ impl QueryManager {
                         }
                     }
                 }
-                let (_, content, commit_id, branch_name) =
-                    best.filter(|(_, content, _, _)| !content.is_empty())?;
+                let (_, commit_id, content, branch_name) =
+                    best.filter(|(_, _, content, _)| !content.is_empty())?;
                 Self::load_row_with_schema_transform(
                     id,
                     content,

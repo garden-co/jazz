@@ -4,16 +4,7 @@ Distributed, local-first relational database. Rust core (`crates/groove`), TypeS
 
 ## Specs
 
-Architecture docs live in `specs/`. Status-quo specs describe what's built; todo specs describe what's next.
-
-Todo specs are organized by timeline in `specs/todo/`:
-
-- `a_week_YYYY_MM_DD/` — this week's tasks (new folder each week)
-- `b_mvp/` — must-have for first adopters
-- `c_launch/` — public launch readiness
-- `d_later/` — post-launch
-
-Each file is a single, descriptively named topic. Read the filenames to get an overview.
+Architecture docs live in `specs/`. Status-quo specs describe what's built;
 
 ## Work style
 
@@ -52,3 +43,65 @@ Concretely:
 ## After hard problems
 
 When something was harder than expected, pause and reflect 5-whys-style: where did the difficulty actually come from? Was it a wrong assumption, a missing spec, an architectural gap? Write it down (in memory or as a spec update) so we don't repeat it.
+
+## Skills
+
+Repo-local skills live in `.agents/skills/`. Check them proactively.
+
+## Quick Capture: Ideas & Issues
+
+Low-friction capture only — no shaping, no implementation. Use what's in the prompt; don't re-ask what's already stated. After every write to `todo/`, run `bash scripts/update-todo.sh`.
+
+### Ideas → `todo/ideas/{priority}/{idea-name}.md`
+
+Priority buckets: `1_mvp/` (must-have for first adopters), `2_launch/` (needed for public launch), `3_later/` (post-launch). If unspecified, ask: _"Which bucket: mvp, launch, or later?"_
+
+Template (all fields optional, `unknown` always valid):
+
+```markdown
+# {Idea Title}
+
+## What
+
+## Why
+
+## Who
+
+## Rough appetite
+
+[small / medium / big / unknown]
+
+## Notes
+```
+
+After saving, list all ideas grouped by bucket with their `What` line. If mature enough, suggest: _"Run `/project` to shape this into a spec."_
+
+Rules: no gates, no refinement loops, no code. Ideas are uncommitted — capturing one is not a decision to build it.
+
+### Issues → `todo/issues/{issue-name}.md`
+
+For bugs and focused problems — not feature ideas. Kebab-case filename from description. Prefix `test_` for test-related issues.
+
+Template (`What` required, rest optional — use `unknown`/`N/A`):
+
+```markdown
+# {Issue Title}
+
+## What
+
+## Where
+
+## Steps to reproduce
+
+## Expected
+
+## Actual
+
+## Priority
+
+[critical / high / medium / low / unknown]
+
+## Notes
+```
+
+After saving, list all issues with their `What` line. Do not investigate or fix — capture only. If it sounds like a feature, route to Idea or Spec workflow instead.

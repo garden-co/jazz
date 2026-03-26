@@ -1861,7 +1861,11 @@ mod tests {
             .insert(
                 &mut io_a,
                 "users",
-                &[id_val.clone(), name.clone(), email.clone()],
+                HashMap::from([
+                    ("id".to_string(), id_val.clone()),
+                    ("name".to_string(), name.clone()),
+                    ("email".to_string(), email.clone()),
+                ]),
             )
             .unwrap();
         client_a.process(&mut io_a);
@@ -2212,14 +2216,12 @@ mod tests {
         // === Now test that row data syncs and is indexed via lazy activation ===
         // Client A creates a document
         let doc_uuid = ObjectId::new();
-        let doc_values = vec![
-            Value::Uuid(doc_uuid),
-            Value::Text("alice".into()),
-            Value::Text("Test Document".into()),
-        ];
-        let handle = client_a
-            .insert(&mut io_a, "documents", &doc_values)
-            .unwrap();
+        let doc_values = HashMap::from([
+            ("id".to_string(), Value::Uuid(doc_uuid)),
+            ("owner_id".to_string(), Value::Text("alice".into())),
+            ("title".to_string(), Value::Text("Test Document".into())),
+        ]);
+        let handle = client_a.insert(&mut io_a, "documents", doc_values).unwrap();
         let doc_id = handle.row_id; // The actual row object ID
         client_a.process(&mut io_a);
 
@@ -2263,7 +2265,7 @@ mod tests {
             .sync_manager_mut()
             .take_outbox();
         let query_b = QueryBuilder::new("documents")
-            .branch(&client_b.branch_name().to_string())
+            .branch(client_b.branch_name().to_string())
             .build();
         let _sub_b = client_b
             .query_manager_mut()
@@ -2431,11 +2433,14 @@ mod tests {
             .insert(
                 &mut io_server,
                 "documents",
-                &[
-                    Value::Uuid(ObjectId::new()),
-                    Value::Text("alice".into()),
-                    Value::Text("Alice's Secret Doc".into()),
-                ],
+                HashMap::from([
+                    ("id".to_string(), Value::Uuid(ObjectId::new())),
+                    ("owner_id".to_string(), Value::Text("alice".into())),
+                    (
+                        "title".to_string(),
+                        Value::Text("Alice's Secret Doc".into()),
+                    ),
+                ]),
             )
             .unwrap()
             .row_id;
@@ -2443,11 +2448,11 @@ mod tests {
             .insert(
                 &mut io_server,
                 "documents",
-                &[
-                    Value::Uuid(ObjectId::new()),
-                    Value::Text("bob".into()),
-                    Value::Text("Bob's Private Doc".into()),
-                ],
+                HashMap::from([
+                    ("id".to_string(), Value::Uuid(ObjectId::new())),
+                    ("owner_id".to_string(), Value::Text("bob".into())),
+                    ("title".to_string(), Value::Text("Bob's Private Doc".into())),
+                ]),
             )
             .unwrap()
             .row_id;
@@ -2457,7 +2462,7 @@ mod tests {
 
         // === Client A subscribes to documents (as alice) ===
         let query_a = QueryBuilder::new("documents")
-            .branch(&client_a.branch_name().to_string())
+            .branch(client_a.branch_name().to_string())
             .build();
 
         let _sub_a = client_a
@@ -2525,7 +2530,7 @@ mod tests {
 
         // === Client B subscribes to documents (as bob) ===
         let query_b = QueryBuilder::new("documents")
-            .branch(&client_b.branch_name().to_string())
+            .branch(client_b.branch_name().to_string())
             .build();
 
         let _sub_b = client_b
@@ -2666,16 +2671,16 @@ mod tests {
         // Transfer to server
         let outbox = client.query_manager_mut().sync_manager_mut().take_outbox();
         for entry in &outbox {
-            if let SyncPayload::ObjectUpdated { object_id, .. } = &entry.payload {
-                if *object_id == schema_obj_id {
-                    server
-                        .query_manager_mut()
-                        .sync_manager_mut()
-                        .push_inbox(InboxEntry {
-                            source: Source::Client(client_id),
-                            payload: entry.payload.clone(),
-                        });
-                }
+            if let SyncPayload::ObjectUpdated { object_id, .. } = &entry.payload
+                && *object_id == schema_obj_id
+            {
+                server
+                    .query_manager_mut()
+                    .sync_manager_mut()
+                    .push_inbox(InboxEntry {
+                        source: Source::Client(client_id),
+                        payload: entry.payload.clone(),
+                    });
             }
         }
 
@@ -2696,10 +2701,10 @@ mod tests {
             .insert(
                 &mut io_server,
                 "notes",
-                &[
-                    Value::Uuid(ObjectId::new()),
-                    Value::Text("Hello World".into()),
-                ],
+                HashMap::from([
+                    ("id".to_string(), Value::Uuid(ObjectId::new())),
+                    ("content".to_string(), Value::Text("Hello World".into())),
+                ]),
             )
             .unwrap()
             .row_id;
@@ -2708,7 +2713,7 @@ mod tests {
 
         // === Client subscribes to notes ===
         let query = QueryBuilder::new("notes")
-            .branch(&client.branch_name().to_string())
+            .branch(client.branch_name().to_string())
             .build();
 
         let _sub_id = client
@@ -2971,8 +2976,11 @@ mod tests {
 
         // Insert a row
         let row_id = ObjectId::new();
-        let values = vec![Value::Uuid(row_id), Value::Text("hello".into())];
-        manager.insert(&mut storage, "items", &values).unwrap();
+        let values = HashMap::from([
+            ("id".to_string(), Value::Uuid(row_id)),
+            ("name".to_string(), Value::Text("hello".into())),
+        ]);
+        manager.insert(&mut storage, "items", values).unwrap();
         manager.process(&mut storage);
 
         // Subscribe with settled_tier=None
@@ -3046,13 +3054,16 @@ mod tests {
 
         // Insert a row on server B
         let row_id = ObjectId::new();
-        let values = vec![Value::Uuid(row_id), Value::Text("srv".into())];
-        server_b.insert(&mut io_b, "items", &values).unwrap();
+        let values = HashMap::from([
+            ("id".to_string(), Value::Uuid(row_id)),
+            ("name".to_string(), Value::Text("srv".into())),
+        ]);
+        server_b.insert(&mut io_b, "items", values).unwrap();
         server_b.process(&mut io_b);
 
         // === Client A subscribes with settled_tier=Worker ===
         let query = QueryBuilder::new("items")
-            .branch(&client_a.branch_name().to_string())
+            .branch(client_a.branch_name().to_string())
             .build();
         let sub_id = client_a
             .query_manager_mut()
@@ -3162,7 +3173,7 @@ mod tests {
 
         // Subscribe with settled_tier=EdgeServer
         let query = QueryBuilder::new("items")
-            .branch(&client_a.branch_name().to_string())
+            .branch(client_a.branch_name().to_string())
             .build();
         let sub_id = client_a
             .query_manager_mut()
@@ -3177,8 +3188,11 @@ mod tests {
 
         // Insert a row locally on A (so there's data to deliver)
         let row_id = ObjectId::new();
-        let values = vec![Value::Uuid(row_id), Value::Text("local".into())];
-        client_a.insert(&mut io_a, "items", &values).unwrap();
+        let values = HashMap::from([
+            ("id".to_string(), Value::Uuid(row_id)),
+            ("name".to_string(), Value::Text("local".into())),
+        ]);
+        client_a.insert(&mut io_a, "items", values).unwrap();
         client_a.process(&mut io_a);
 
         // No delivery yet — tier not satisfied
@@ -3268,7 +3282,7 @@ mod tests {
 
         // Subscribe with settled_tier=Worker
         let query = QueryBuilder::new("items")
-            .branch(&client.branch_name().to_string())
+            .branch(client.branch_name().to_string())
             .build();
         let sub_id = client
             .query_manager_mut()
@@ -3284,8 +3298,11 @@ mod tests {
         // Insert 3 rows before tier is satisfied
         for i in 0..3 {
             let row_id = ObjectId::new();
-            let values = vec![Value::Uuid(row_id), Value::Text(format!("item_{}", i))];
-            client.insert(&mut storage, "items", &values).unwrap();
+            let values = HashMap::from([
+                ("id".to_string(), Value::Uuid(row_id)),
+                ("name".to_string(), Value::Text(format!("item_{}", i))),
+            ]);
+            client.insert(&mut storage, "items", values).unwrap();
             client.process(&mut storage);
         }
 
@@ -3356,13 +3373,16 @@ mod tests {
 
         // Insert a row first
         let row_id = ObjectId::new();
-        let values = vec![Value::Uuid(row_id), Value::Text("one-shot".into())];
-        client.insert(&mut storage, "items", &values).unwrap();
+        let values = HashMap::from([
+            ("id".to_string(), Value::Uuid(row_id)),
+            ("name".to_string(), Value::Text("one-shot".into())),
+        ]);
+        client.insert(&mut storage, "items", values).unwrap();
         client.process(&mut storage);
 
         // Subscribe with settled_tier=Worker (simulating one-shot behavior)
         let query = QueryBuilder::new("items")
-            .branch(&client.branch_name().to_string())
+            .branch(client.branch_name().to_string())
             .build();
         let sub_id = client
             .query_manager_mut()
@@ -3434,7 +3454,7 @@ mod tests {
 
         // No rows inserted. Subscribe with settled_tier=Worker.
         let query = QueryBuilder::new("items")
-            .branch(&client.branch_name().to_string())
+            .branch(client.branch_name().to_string())
             .build();
         let sub_id = client
             .query_manager_mut()

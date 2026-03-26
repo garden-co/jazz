@@ -1,23 +1,21 @@
 import { join } from "node:path";
 import { JazzClient, type WasmSchema } from "jazz-tools";
-import { pushSchemaCatalogue, startLocalJazzServer } from "jazz-tools/testing";
+import { TestingServer, pushSchemaCatalogue } from "jazz-tools/testing";
 import { ADMIN_SECRET, APP_ID, TEST_BRANCH, TEST_ENV, TEST_PORT } from "./test-constants.js";
 import { app } from "./schema/app.ts";
 
 export default async function globalSetup(): Promise<() => Promise<void>> {
-  const serverHandlePromise = startLocalJazzServer({
+  const serverHandlePromise = TestingServer.start({
     appId: APP_ID,
     port: TEST_PORT,
     adminSecret: ADMIN_SECRET,
-    allowAnonymous: true,
-    healthTimeoutMs: 5000,
   });
 
   const serverHandle = await serverHandlePromise;
   await pushSchemaCatalogue({
     serverUrl: serverHandle.url,
-    appId: APP_ID,
-    adminSecret: ADMIN_SECRET,
+    appId: serverHandle.appId,
+    adminSecret: serverHandle.adminSecret,
     env: TEST_ENV,
     userBranch: TEST_BRANCH,
     schemaDir: join(import.meta.dirname ?? __dirname, "./schema"),

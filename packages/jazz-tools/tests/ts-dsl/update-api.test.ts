@@ -75,4 +75,44 @@ describe("TS Update API", () => {
       "Cannot set required field 'title' to null",
     );
   });
+
+  it("updates rows synchronously without returning a promise", async () => {
+    const project = db.insert(app.projects, { name: "Test Project" });
+    const owner = insertUser(db);
+    const todo = db.insert(app.todos, {
+      title: "Test Todo",
+      done: false,
+      tags: ["tag1", "tag2"],
+      projectId: project.id,
+      ownerId: owner.id,
+      assigneesIds: [],
+    });
+
+    const result = db.update(app.todos, todo.id, { done: true });
+    expect(result).toBeUndefined();
+
+    const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }));
+    expect(updated!.done).toBe(true);
+  });
+
+  it("can wait for updates to be persisted up to a specific durability tier", async () => {
+    const project = db.insert(app.projects, { name: "Test Project" });
+    const owner = insertUser(db);
+    const todo = db.insert(app.todos, {
+      title: "Test Todo",
+      done: false,
+      tags: ["tag1", "tag2"],
+      projectId: project.id,
+      ownerId: owner.id,
+      assigneesIds: [],
+    });
+
+    const pending = db.updateDurable(app.todos, todo.id, { done: true }, { tier: "worker" });
+    expect(pending).toBeInstanceOf(Promise);
+
+    await pending;
+
+    const [updated] = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "worker" });
+    expect(updated!.done).toBe(true);
+  });
 });
