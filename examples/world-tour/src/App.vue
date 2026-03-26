@@ -1,11 +1,32 @@
 <template>
-  <div>
+  <div class="space-bg">
     <div class="control-bar">
       <div class="control-bar__brand">
-        <span class="control-bar__title">WORLDTOUR</span>
+        <div v-if="bandNameDisplay" class="band-name-row">
+          <input
+            v-if="editingBandName"
+            ref="bandNameInput"
+            class="band-name-input"
+            :value="bandNameDisplay"
+            @keydown.enter="saveBandName(($event.target as HTMLInputElement).value)"
+            @keydown.escape="editingBandName = false"
+            @blur="saveBandName(($event.target as HTMLInputElement).value)"
+          />
+          <span
+            v-else
+            class="band-name"
+            :class="{ editable: canEdit }"
+            @click="canEdit && startEditBandName()"
+            >{{ bandNameDisplay }}<span v-if="canEdit" class="band-name-pencil">✎</span></span
+          >
+        </div>
+        <div class="wordmark">
+          <span class="wordmark__world">WORLD</span>
+          <span class="wordmark__tour">TOUR</span>
+        </div>
       </div>
       <div class="control-bar__row">
-        <BandLogo v-if="firstBandId" :logoUrl="logoUrl" :canEdit="canEdit" @upload="onLogoUpload" />
+        <BandLogo v-if="firstBandId" :bandId="firstBandId" />
         <SyntheticUserSwitcher
           v-if="canEdit"
           :appId="appId"
@@ -32,28 +53,48 @@
         v-if="sheetMode === 'detail'"
         :stops="calendarStops"
         :selectedStopId="selectedStop?.id ?? null"
-        :canEdit="canEdit"
         @selectStop="onCalendarSelectStop"
-        @reschedule="onReschedule"
       />
       <StopDetail
         v-if="sheetMode === 'detail' && selectedStop"
         :stop="selectedStop"
-        :canEdit="canEdit"
-        @update="onStopUpdate(selectedStop!.id, $event)"
-        @delete="onStopDelete(selectedStop!.id)"
+        @close="closeSheet"
       />
       <StopCreateForm
-        v-if="sheetMode === 'create'"
+        v-if="sheetMode === 'create' && firstBandId"
         :lat="createLat"
         :lng="createLng"
-        :venues="venuesData ?? []"
-        @create="onStopCreate"
+        :bandId="firstBandId"
+        @created="closeSheet"
         @cancel="closeSheet"
       />
     </Sheet>
 
+    <TourPoster
+      v-if="showLandingPoster && landingPosterStops.length > 0"
+      :bandName="bandsData?.[0]?.name ?? 'Unknown Band'"
+      :stops="landingPosterStops"
+      @dismiss="showLandingPoster = false"
+    />
+
+    <StopPoster
+      v-if="posterStop && !showLandingPoster"
+      :stop="posterStop"
+      :bandName="bandsData?.[0]?.name ?? 'Unknown Band'"
+      @close="posterStop = null"
+    />
+
     <GeolocateFab :sheetOpen="sheetOpen" @locate="onGeolocate" />
+
+    <!-- Splash hint for logged-in users -->
+    <Transition name="splash-fade">
+      <div v-if="showSplash" class="splash-overlay" @click="showSplash = false">
+        <div class="splash-modal" @click.stop>
+          <p class="splash-text">Click on an event to edit details</p>
+          <button class="splash-btn" @click="showSplash = false">Got it</button>
+        </div>
+      </div>
+    </Transition>
 
     <button
       class="tour-btn"
@@ -66,16 +107,18 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, computed, watch } from "vue";
+import { onMounted, onUnmounted, ref, computed, watch, nextTick } from "vue";
 import { useAll, useDb, useSession, SyntheticUserSwitcher } from "jazz-tools/vue";
 import { app } from "../schema/app.js";
 import type { StopWithIncludes } from "../schema/app.js";
-import { MapController, type StopMapData } from "./lib/map-controller";
+import { MapController, TilePrefetcher, type StopMapData } from "./lib/map-controller";
 import { findNearestStop } from "./lib/nearest-stop";
 import type { StopWithLocation } from "./lib/nearest-stop";
-import { seedIfEmpty } from "./seed-loader";
+import { ensureData } from "./seed-loader";
 import Sheet from "./components/Sheet.vue";
 import StopDetail from "./components/StopDetail.vue";
+import StopPoster from "./components/StopPoster.vue";
+import TourPoster from "./components/TourPoster.vue";
 import StopCreateForm from "./components/StopCreateForm.vue";
 import AddStopPopover from "./components/AddStopPopover.vue";
 import TourCalendar from "./components/TourCalendar.vue";
@@ -97,10 +140,15 @@ function switchView() {
   }
 }
 
-seedIfEmpty(db, session?.user_id).catch((err) => console.error("Failed to seed data:", err));
+ensureData(db, session?.user_id, canEdit).catch((err) =>
+  console.error("Failed to ensure data:", err),
+);
 
 type StopWithVenue = StopWithIncludes<{ venue: true }>;
 const selectedStop = ref<StopWithVenue | null>(null);
+const posterStop = ref<StopWithVenue | null>(null);
+const showLandingPoster = ref(!canEdit);
+const showSplash = ref(canEdit);
 const sheetOpen = ref(false);
 const sheetMode = ref<"detail" | "create">("detail");
 
@@ -113,32 +161,60 @@ const popoverY = ref(0);
 const popoverLat = ref(0);
 const popoverLng = ref(0);
 
-const allStopsQuery = app.stops.include({ venue: true }).orderBy("date", "asc");
-const confirmedStopsQuery = app.stops
-  .where({ status: "confirmed" })
+const today = new Date();
+today.setHours(0, 0, 0, 0);
+const threeWeeks = new Date(today.getTime() + 21 * 24 * 60 * 60 * 1000);
+
+const baseStopsQuery = app.stops
+  .where({ date: { gte: today, lte: threeWeeks } })
   .include({ venue: true })
-  .orderBy("date", "asc");
-const stopsQuery = canEdit ? allStopsQuery : confirmedStopsQuery;
+  .orderBy("date", "asc")
+  .limit(12);
+const confirmedStopsQuery = app.stops
+  .where({ status: "confirmed", date: { gte: today, lte: threeWeeks } })
+  .include({ venue: true })
+  .orderBy("date", "asc")
+  .limit(12);
+const stopsQuery = canEdit ? baseStopsQuery : confirmedStopsQuery;
 const stopsData = useAll(stopsQuery);
 
 const bandsData = useAll(app.bands.limit(1));
-const bandsWithLogo = useAll(app.bands.include({ logoFile: { parts: true } }));
-const venuesData = useAll(app.venues);
 
 const firstBandId = computed(() => {
   const bands = bandsData.value;
   return bands && bands.length > 0 ? bands[0].id : null;
 });
 
-if (session) {
-  watch(bandsData, (bands) => {
-    if (!bands || bands.length === 0) return;
-    db.all(app.members.where({ userId: session.user_id })).then((rows) => {
-      if (rows.length > 0) return;
-      db.insert(app.members, { bandId: bands[0].id, userId: session.user_id });
-    });
-  }, { immediate: true });
+const bandNameDisplay = computed(() => bandsData.value?.[0]?.name ?? null);
+const editingBandName = ref(false);
+const bandNameInput = ref<HTMLInputElement | null>(null);
+
+function startEditBandName() {
+  editingBandName.value = true;
+  nextTick(() => bandNameInput.value?.focus());
 }
+
+function saveBandName(value: string) {
+  editingBandName.value = false;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === bandNameDisplay.value) return;
+  const bandId = firstBandId.value;
+  if (bandId) db.update(app.bands, bandId, { name: trimmed });
+}
+
+const landingPosterStops = computed(() => {
+  const stops = stopsData.value as StopWithVenue[] | null;
+  if (!stops) return [];
+  return stops
+    .filter((s) => s.venue != null)
+    .map((s) => ({
+      id: s.id,
+      date: s.date instanceof Date ? s.date : new Date(s.date),
+      venueName: s.venue!.name,
+      city: s.venue!.city,
+      country: s.venue!.country,
+    }));
+});
 
 const calendarStops = computed(() => {
   const stops = stopsData.value;
@@ -152,124 +228,14 @@ const calendarStops = computed(() => {
     }));
 });
 
-function onStopUpdate(id: string, data: Record<string, unknown>) {
-  db.update(app.stops, id, data);
-}
-
-function onStopDelete(id: string) {
-  db.delete(app.stops, id);
-  closeSheet();
-}
-
-function onStopCreate(stopData: {
-  venueMode: "new" | "existing";
-  selectedVenueId?: string;
-  newVenue?: {
-    name: string;
-    city: string;
-    country: string;
-    lat: number;
-    lng: number;
-    capacity?: number;
-  };
-  date: Date;
-  status: "confirmed" | "tentative" | "cancelled";
-  publicDescription: string;
-  privateNotes?: string;
-}) {
-  const band = bandsData.value?.[0];
-  if (!band) return;
-
-  let venueId: string;
-  if (stopData.venueMode === "existing" && stopData.selectedVenueId) {
-    venueId = stopData.selectedVenueId;
-  } else if (stopData.newVenue) {
-    const venue = db.insert(app.venues, stopData.newVenue);
-    venueId = venue.id;
-  } else {
-    return;
-  }
-
-  db.insert(app.stops, {
-    bandId: band.id,
-    venueId,
-    date: stopData.date,
-    status: stopData.status,
-    publicDescription: stopData.publicDescription,
-    ...(stopData.privateNotes ? { privateNotes: stopData.privateNotes } : {}),
-  });
-
-  closeSheet();
-}
-
-function onReschedule(stopId: string, newDate: Date) {
-  db.update(app.stops, stopId, { date: newDate });
-}
-
-const logoUrl = ref<string | null>(null);
-
-watch(
-  () => {
-    const bands = bandsWithLogo.value;
-    if (!bands) return null;
-    const band = bands.find((b) => b.id === firstBandId.value);
-    if (!band) return null;
-    return band.logoFile ?? null;
-  },
-  (logoFile) => {
-    if (!logoFile) {
-      if (logoUrl.value) {
-        URL.revokeObjectURL(logoUrl.value);
-        logoUrl.value = null;
-      }
-      return;
-    }
-
-    let isActive = true;
-
-    (async () => {
-      try {
-        const blob = await db.loadFileAsBlob(app, logoFile);
-        if (!isActive) return;
-
-        const nextUrl = URL.createObjectURL(blob);
-        if (logoUrl.value) {
-          URL.revokeObjectURL(logoUrl.value);
-        }
-        logoUrl.value = nextUrl;
-      } catch (err) {
-        if (!isActive) return;
-        console.error("Failed to load band logo:", err);
-      }
-    })();
-
-    return () => {
-      isActive = false;
-    };
-  },
-  { immediate: true },
-);
-
-onUnmounted(() => {
-  if (logoUrl.value) {
-    URL.revokeObjectURL(logoUrl.value);
-  }
-});
-
-async function onLogoUpload(file: File) {
-  try {
-    const insertedFile = await db.createFileFromBlob(app, file);
-    const band = bandsData.value?.[0];
-    if (band) db.update(app.bands, band.id, { logoFileId: insertedFile.id });
-  } catch (err) {
-    console.error("Failed to upload band logo:", err);
-  }
-}
-
 function selectStop(stop: StopWithVenue) {
-  selectedStop.value = stop;
-  sheetMode.value = "detail";
-  sheetOpen.value = true;
+  if (!canEdit) {
+    posterStop.value = stop;
+  } else {
+    selectedStop.value = stop;
+    sheetMode.value = "detail";
+    sheetOpen.value = true;
+  }
 
   if (stop.venue && mapCtrl) {
     mapCtrl.flyTo(
@@ -366,6 +332,20 @@ async function startTour() {
 
 let mapCtrl: MapController | null = null;
 
+// Hidden off-canvas map that visits each stop to warm the tile cache
+const prefetcher = new TilePrefetcher();
+watch(
+  stopsData,
+  (stops) => {
+    if (!stops || stops.length === 0) return;
+    const mapData: StopMapData[] = (stops as StopWithVenue[])
+      .filter((s) => s.venue != null)
+      .map((s) => ({ id: s.id, name: s.venue!.name, lng: s.venue!.lng, lat: s.venue!.lat }));
+    prefetcher.prefetch(mapData);
+  },
+  { immediate: true },
+);
+
 onMounted(async () => {
   mapCtrl = new MapController({ container: "map" });
 
@@ -378,6 +358,9 @@ onMounted(async () => {
 
   mapCtrl.on("mapClick", (e) => {
     dismissPopover();
+
+    // Reject clicks outside valid Earth coordinates
+    if (e.lat < -90 || e.lat > 90 || e.lng < -180 || e.lng > 180) return;
 
     if (canEdit) {
       popoverX.value = e.x;
@@ -410,6 +393,7 @@ onMounted(async () => {
 
   await mapCtrl.whenReady();
   renderStops();
+  mapCtrl.startRotation();
 
   const stops = stopsData.value as StopWithVenue[] | null;
   const firstStop = stops?.find((s) => s.venue != null);
@@ -422,6 +406,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  prefetcher.destroy();
   mapCtrl?.destroy();
   mapCtrl = null;
 });
@@ -487,9 +472,9 @@ function renderStops() {
   --status-cancelled-bg: rgba(255, 68, 68, 0.12);
 
   /* Text */
-  --text-primary: #f5f2ed;
-  --text-secondary: #a09da6;
-  --text-muted: #6b6677;
+  --text-primary: #ffffff;
+  --text-secondary: #c0bdc6;
+  --text-muted: #8a8694;
   --text-inverse: #08090d;
 
   /* Typography */
@@ -524,6 +509,65 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* ─── Change 1: Space background ─── */
+.space-bg {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: #000;
+}
+
+.space-bg::before {
+  content: "";
+  position: absolute;
+  inset: -50%;
+  width: 200%;
+  height: 200%;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse at 25% 35%, rgba(30, 15, 80, 0.9) 0%, transparent 55%),
+    radial-gradient(ellipse at 75% 55%, rgba(80, 10, 40, 0.7) 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 80%, rgba(10, 30, 80, 0.6) 0%, transparent 55%),
+    radial-gradient(ellipse at 60% 20%, rgba(60, 5, 50, 0.5) 0%, transparent 45%);
+  animation: nebula-drift 60s linear infinite;
+}
+
+.space-bg::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='400'%3E%3Cfilter id='s'%3E%3CfeTurbulence baseFrequency='0.8' numOctaves='1' seed='2'/%3E%3CfeColorMatrix values='0 0 0 9 -4 0 0 0 9 -4 0 0 0 9 -4 0 0 0 0 0.4'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23s)'/%3E%3C/svg%3E");
+  background-size: 400px 400px;
+  animation: star-twinkle 8s ease-in-out infinite alternate;
+}
+
+@keyframes nebula-drift {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes star-twinkle {
+  0% {
+    opacity: 0.3;
+  }
+  100% {
+    opacity: 0.9;
+  }
+}
+
+.space-bg #map {
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
 /* Noise texture overlay for the sheet */
 .noise-texture::before {
   content: "";
@@ -534,34 +578,145 @@ body {
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
 }
 
-/* Control bar */
 .control-bar {
   position: absolute;
-  top: 12px;
-  left: 12px;
+  top: 16px;
+  left: 16px;
   z-index: 10;
-  background: var(--bg-surface);
-  backdrop-filter: blur(12px);
-  padding: 10px 16px;
+  background: rgba(8, 9, 13, 0.7);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  padding: 16px 20px;
   border-radius: var(--radius-lg);
-  border-bottom: 2px solid var(--accent-primary);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow:
+    0 0 0 1px rgba(255, 45, 123, 0.08),
+    0 8px 32px rgba(0, 0, 0, 0.4);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
+  animation: control-fade-in 1.5s ease-out both;
+}
+
+@keyframes control-fade-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-12px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .control-bar__brand {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  gap: 4px;
 }
 
-.control-bar__title {
+.band-name-row {
+  min-height: 20px;
+}
+
+.band-name {
   font-family: var(--font-display);
+  font-size: 22px;
   font-weight: 800;
-  font-size: 14px;
-  letter-spacing: 0.15em;
+  color: var(--text-primary);
+  letter-spacing: 0.08em;
   text-transform: uppercase;
+  line-height: 1;
+}
+
+.band-name.editable {
+  cursor: pointer;
+  transition: color var(--duration-fast);
+}
+
+.band-name.editable:hover {
+  color: var(--text-primary);
+}
+
+.band-name-pencil {
+  font-size: 14px;
+  margin-left: 6px;
+  color: var(--text-muted);
+  transition: color var(--duration-fast);
+}
+
+.band-name.editable:hover .band-name-pencil {
   color: var(--accent-primary);
+}
+
+.band-name-input {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-primary);
+  background: var(--bg-input);
+  border: 1px solid var(--accent-primary);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  outline: none;
+  width: 100%;
+}
+
+.wordmark {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.wordmark__world {
+  font-weight: 400;
+  color: var(--text-secondary);
+  animation: wordmark-in 1s ease-out both;
+}
+
+.wordmark__tour {
+  font-weight: 800;
+  background: linear-gradient(135deg, #ff2d7b 0%, #ff6b9d 50%, #ff2d7b 100%);
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 12px rgba(255, 45, 123, 0.5))
+    drop-shadow(0 0 40px rgba(255, 45, 123, 0.2));
+  animation:
+    wordmark-in 1s ease-out 0.15s both,
+    glow-pulse 4s ease-in-out 2s infinite alternate;
+}
+
+@keyframes wordmark-in {
+  0% {
+    opacity: 0;
+    transform: translateY(-8px);
+    letter-spacing: 0.5em;
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+    letter-spacing: 0.2em;
+  }
+}
+
+@keyframes glow-pulse {
+  0% {
+    filter: drop-shadow(0 0 12px rgba(255, 45, 123, 0.5))
+      drop-shadow(0 0 40px rgba(255, 45, 123, 0.2));
+  }
+  100% {
+    filter: drop-shadow(0 0 18px rgba(255, 45, 123, 0.7))
+      drop-shadow(0 0 60px rgba(255, 45, 123, 0.3));
+  }
 }
 
 .control-bar__row {
@@ -570,28 +725,99 @@ body {
   gap: 8px;
 }
 
+/* ─── Change 3: SyntheticUserSwitcher styling ─── */
+.control-bar label {
+  font-size: 0;
+  line-height: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.control-bar select {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 4px 24px 4px 8px;
+  cursor: pointer;
+  outline: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23a09da6' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  transition:
+    border-color var(--duration-fast) var(--ease-smooth),
+    box-shadow var(--duration-fast) var(--ease-smooth);
+}
+
+.control-bar select:hover {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 8px rgba(255, 45, 123, 0.15);
+}
+
+.control-bar select:focus {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(255, 45, 123, 0.2);
+}
+
+/* Hide Add / Remove buttons from SyntheticUserSwitcher */
+.control-bar label + button,
+.control-bar label ~ button:not(.btn-auth) {
+  display: none;
+}
+
+/* ─── Public label with live dot ─── */
+.public-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.public-label::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-confirmed);
+  box-shadow: 0 0 6px rgba(0, 221, 110, 0.5);
+  flex-shrink: 0;
+}
+
+/* ─── Auth button ─── */
 .btn-auth {
   font-family: var(--font-display);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  padding: 4px 10px;
+  padding: 5px 12px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-subtle);
   background: none;
   color: var(--text-secondary);
   cursor: pointer;
   transition:
-    color var(--duration-fast),
-    border-color var(--duration-fast);
+    color var(--duration-fast) var(--ease-smooth),
+    border-color var(--duration-fast) var(--ease-smooth),
+    box-shadow var(--duration-normal) var(--ease-smooth);
 }
 
 .btn-auth:hover {
   color: var(--accent-primary);
   border-color: var(--accent-primary);
+  box-shadow: 0 0 12px rgba(255, 45, 123, 0.2);
 }
 
+/* ─── Tour button ─── */
 .tour-btn {
   position: fixed;
   bottom: 84px;
@@ -633,10 +859,75 @@ body {
   border-color: var(--accent-primary);
 }
 
-.public-label {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-muted);
-  letter-spacing: 0.04em;
+/* ─── Splash modal ─── */
+.splash-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.splash-modal {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: 32px 40px;
+  text-align: center;
+  box-shadow: var(--shadow-elevated);
+  animation: splash-in 0.4s var(--ease-smooth) both;
+}
+
+@keyframes splash-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.92) translateY(12px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.splash-text {
+  margin: 0 0 20px;
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.02em;
+}
+
+.splash-btn {
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 8px 24px;
+  border-radius: var(--radius-pill);
+  border: none;
+  background: var(--accent-primary);
+  color: var(--text-inverse);
+  cursor: pointer;
+  transition: opacity var(--duration-fast);
+}
+
+.splash-btn:hover {
+  opacity: 0.9;
+}
+
+.splash-fade-enter-active,
+.splash-fade-leave-active {
+  transition: opacity 0.3s var(--ease-smooth);
+}
+
+.splash-fade-enter-from,
+.splash-fade-leave-to {
+  opacity: 0;
 }
 </style>

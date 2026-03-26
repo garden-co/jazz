@@ -67,17 +67,21 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { useDb, useSession } from "jazz-tools/vue";
+import { app } from "../../schema/app.js";
 import type { StopWithIncludes } from "../../schema/app.js";
 
 const props = defineProps<{
   stop: StopWithIncludes<{ venue: true }>;
-  canEdit: boolean;
 }>();
 
 const emit = defineEmits<{
-  update: [data: Record<string, unknown>];
-  delete: [];
+  close: [];
 }>();
+
+const db = useDb();
+const session = useSession();
+const canEdit = !!session;
 
 const venue = computed(() => props.stop.venue);
 
@@ -115,7 +119,7 @@ function startEdit() {
 }
 
 function save() {
-  emit("update", {
+  db.update(app.stops, props.stop.id, {
     date: new Date(editDate.value),
     status: editStatus.value,
     publicDescription: editDescription.value,
@@ -129,7 +133,8 @@ function cancelEdit() {
 }
 
 function deleteStop() {
-  emit("delete");
+  db.delete(app.stops, props.stop.id);
+  emit("close");
 }
 </script>
 

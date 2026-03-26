@@ -4,18 +4,10 @@ export interface SeedVenue {
   country: string;
   lat: number;
   lng: number;
-  capacity?: number;
+  capacity: number;
 }
 
-export interface SeedStop {
-  venueIndex: number; // index into venues array
-  date: string; // ISO date string
-  status: "confirmed" | "tentative" | "cancelled";
-  publicDescription: string;
-  privateNotes?: string;
-}
-
-export const bandName = "The Placeholder Band";
+export const defaultBandName = "The Groove Syndicate";
 
 export const venues: SeedVenue[] = [
   { name: "O2 Arena", city: "London", country: "UK", lat: 51.503, lng: 0.003, capacity: 20000 },
@@ -84,75 +76,113 @@ export const venues: SeedVenue[] = [
     lng: 18.4113,
     capacity: 64100,
   },
+  {
+    name: "Red Rocks Amphitheatre",
+    city: "Morrison",
+    country: "USA",
+    lat: 39.6654,
+    lng: -105.2057,
+    capacity: 9525,
+  },
+  {
+    name: "Paradiso",
+    city: "Amsterdam",
+    country: "Netherlands",
+    lat: 52.3622,
+    lng: 4.8838,
+    capacity: 1500,
+  },
+  { name: "Roundhouse", city: "London", country: "UK", lat: 51.5434, lng: -0.1525, capacity: 3300 },
+  {
+    name: "Blue Note",
+    city: "New York",
+    country: "USA",
+    lat: 40.7311,
+    lng: -74.0003,
+    capacity: 240,
+  },
+  {
+    name: "Montreux Jazz Lab",
+    city: "Montreux",
+    country: "Switzerland",
+    lat: 46.4312,
+    lng: 6.9107,
+    capacity: 3500,
+  },
+  {
+    name: "Ronnie Scott's",
+    city: "London",
+    country: "UK",
+    lat: 51.5133,
+    lng: -0.1317,
+    capacity: 250,
+  },
+  {
+    name: "Hollywood Bowl",
+    city: "Los Angeles",
+    country: "USA",
+    lat: 34.1122,
+    lng: -118.3391,
+    capacity: 17500,
+  },
+  {
+    name: "Nippon Budokan",
+    city: "Tokyo",
+    country: "Japan",
+    lat: 35.6932,
+    lng: 139.75,
+    capacity: 14471,
+  },
+  {
+    name: "Zenith Paris",
+    city: "Paris",
+    country: "France",
+    lat: 48.8937,
+    lng: 2.3932,
+    capacity: 6293,
+  },
+  {
+    name: "Sala Apolo",
+    city: "Barcelona",
+    country: "Spain",
+    lat: 41.3741,
+    lng: 2.1688,
+    capacity: 1100,
+  },
 ];
 
-export const stops: SeedStop[] = [
-  {
-    venueIndex: 0,
-    date: "2026-06-15",
-    status: "confirmed",
-    publicDescription: "Opening night of the World Tour!",
-    privateNotes: "Sound check at 2pm. Rider: no brown M&Ms.",
-  },
-  {
-    venueIndex: 6,
-    date: "2026-06-22",
-    status: "confirmed",
-    publicDescription: "Paris summer show",
-    privateNotes: "French promoter contact: Jean-Pierre",
-  },
-  {
-    venueIndex: 3,
-    date: "2026-06-29",
-    status: "tentative",
-    publicDescription: "Berlin stadium show",
-    privateNotes: "Waiting on permit approval",
-  },
-  {
-    venueIndex: 1,
-    date: "2026-07-10",
-    status: "confirmed",
-    publicDescription: "NYC! The Garden!",
-    privateNotes: "After-party at rooftop bar TBD",
-  },
-  {
-    venueIndex: 8,
-    date: "2026-07-17",
-    status: "confirmed",
-    publicDescription: "Toronto summer festival tie-in",
-  },
-  {
-    venueIndex: 4,
-    date: "2026-07-28",
-    status: "tentative",
-    publicDescription: "São Paulo mega-show",
-    privateNotes: "Visa paperwork in progress",
-  },
-  {
-    venueIndex: 7,
-    date: "2026-08-05",
-    status: "cancelled",
-    publicDescription: "Buenos Aires (cancelled)",
-    privateNotes: "Venue double-booked, looking for alternatives",
-  },
-  {
-    venueIndex: 9,
-    date: "2026-08-15",
-    status: "confirmed",
-    publicDescription: "Cape Town — first time in Africa!",
-  },
-  {
-    venueIndex: 2,
-    date: "2026-09-01",
-    status: "confirmed",
-    publicDescription: "Tokyo finale!",
-    privateNotes: "Extended set — 3 hours. Pyrotechnics approved.",
-  },
-  {
-    venueIndex: 5,
-    date: "2026-09-10",
-    status: "tentative",
-    publicDescription: "Sydney encore — if demand warrants",
-    privateNotes: "Ticket pre-sale numbers due by July",
-  },
+export const descriptions: string[] = [
+  "Festival stage headline set",
+  "Intimate acoustic evening",
+  "Deep cuts and new material",
+  "Special guest appearance",
+  "Headline show",
+  "Late-night jazz session",
+  "Outdoor amphitheatre under the stars",
+  "Unplugged and up close",
+  "Full band — horns, strings, the works",
+  "Charity benefit concert",
+  "Double bill with local act",
+  "Rooftop sunset set",
+  "Extended set with full visual production",
+  "Stripped-back trio format",
+  "Late-addition show by popular demand",
+];
+
+export const privateNotes: string[] = [
+  "Load-in at 2pm. Rider: extra monitors stage left.",
+  "Promoter contact: check shared notes.",
+  "Sound check at 16:00. Green room confirmed.",
+  "Visa paperwork submitted — awaiting confirmation.",
+  "After-party at nearby rooftop bar TBD.",
+  "Merch table booked. 200 units of new vinyl.",
+  "Crew arriving a day early for setup.",
+  "Catering: vegetarian options required.",
+  "Local press interview at 14:00.",
+  "Pyrotechnics approved — fire marshal signed off.",
+  "Transport: two buses from hotel, 30 min ride.",
+  "Backup generator on standby.",
+  "VIP meet-and-greet at 18:30.",
+  "Extended set — 3 hours minimum.",
+  "Rain contingency plan in place.",
 ];

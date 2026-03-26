@@ -42,6 +42,8 @@
 
 <script setup lang="ts">
 import { ref, computed } from "vue";
+import { useDb, useSession } from "jazz-tools/vue";
+import { app } from "../../schema/app.js";
 import { buildMonthGrid, mapStopsToGrid } from "../lib/calendar-grid.js";
 
 interface StopProp {
@@ -53,13 +55,15 @@ interface StopProp {
 const props = defineProps<{
   stops: StopProp[];
   selectedStopId: string | null;
-  canEdit: boolean;
 }>();
 
 const emit = defineEmits<{
   selectStop: [stopId: string];
-  reschedule: [stopId: string, newDate: Date];
 }>();
+
+const db = useDb();
+const session = useSession();
+const canEdit = !!session;
 
 const dayHeaders = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -181,7 +185,7 @@ function onDrop(day: { date: Date }, event: DragEvent) {
   if (!props.canEdit) return;
   const stopId = event.dataTransfer?.getData("text/plain");
   if (!stopId) return;
-  emit("reschedule", stopId, day.date);
+  db.update(app.stops, stopId, { date: day.date });
 }
 </script>
 

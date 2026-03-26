@@ -63,6 +63,8 @@ export class MapController {
   private listeners: { [K in keyof MapControllerEvents]?: MapControllerEvents[K][] } = {};
   private tourAbort: AbortController | null = null;
   private ready: Promise<void>;
+  private rotationFrame: number | null = null;
+  private rotating = false;
 
   constructor(options: MapControllerOptions) {
     this.map = new maplibregl.Map({
@@ -226,7 +228,38 @@ export class MapController {
   }
 
   /** Clean up the map instance. Call when unmounting. */
+  startRotation(): void {
+    if (this.rotating) return;
+    this.rotating = true;
+    const spin = () => {
+      if (!this.rotating) return;
+      const center = this.map.getCenter();
+      center.lng += 0.03;
+      this.map.jumpTo({ center });
+      this.rotationFrame = requestAnimationFrame(spin);
+    };
+    this.rotationFrame = requestAnimationFrame(spin);
+
+    this.map.on("mousedown", this.pauseRotation);
+    this.map.on("touchstart", this.pauseRotation);
+  }
+
+  stopRotation(): void {
+    this.rotating = false;
+    if (this.rotationFrame !== null) {
+      cancelAnimationFrame(this.rotationFrame);
+      this.rotationFrame = null;
+    }
+    this.map.off("mousedown", this.pauseRotation);
+    this.map.off("touchstart", this.pauseRotation);
+  }
+
+  private pauseRotation = (): void => {
+    this.stopRotation();
+  };
+
   destroy(): void {
+    this.stopRotation();
     this.stopTour();
     this.map.remove();
   }
