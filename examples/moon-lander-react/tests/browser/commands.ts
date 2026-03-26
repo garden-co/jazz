@@ -10,8 +10,7 @@ import { join } from "node:path";
 import { createServer } from "node:net";
 import type { BrowserCommand } from "vitest/node";
 import type { BrowserContext, Page } from "playwright";
-import type { LocalJazzServerHandle } from "jazz-tools/testing";
-import { startLocalJazzServer, pushSchemaCatalogue } from "jazz-tools/testing";
+import { TestingServer, pushSchemaCatalogue } from "jazz-tools/testing";
 
 function findFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -212,7 +211,7 @@ export const debugIsolatedState: BrowserCommand<[label: string]> = async (_ctx, 
 const FRESH_ADMIN_SECRET = "test-admin-secret-for-moon-lander-tests";
 const FRESH_APP_ID = "00000000-0000-0000-0000-000000000004"; // APP_ID_MULTI
 
-const freshServers = new Map<string, LocalJazzServerHandle>();
+const freshServers = new Map<string, TestingServer>();
 
 // Ensure all fresh servers and isolated pages are cleaned up even if a test
 // times out before its finally block runs.
@@ -233,12 +232,10 @@ for (const sig of ["SIGTERM", "SIGINT"] as const) {
 
 export const startFreshTestServer: BrowserCommand<[label: string]> = async (_ctx, label) => {
   const port = await findFreePort();
-  const handle = await startLocalJazzServer({
+  const handle = await TestingServer.start({
     appId: FRESH_APP_ID,
     port,
     adminSecret: FRESH_ADMIN_SECRET,
-    allowAnonymous: true,
-    enableLogs: false,
   });
 
   const schemaDir = join(import.meta.dirname ?? __dirname, "../../schema");

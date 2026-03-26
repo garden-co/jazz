@@ -1,7 +1,5 @@
-import { useEffect, useState } from "react";
 import type { DbConfig } from "jazz-tools";
-import { createJazzClient, JazzProvider } from "jazz-tools/react";
-import type { JazzClient } from "jazz-tools/react";
+import { JazzProvider } from "jazz-tools/react";
 import type { PlayerMode } from "./game/constants";
 import { Game } from "./Game";
 import { GameWithSync } from "./jazz/GameWithSync";
@@ -19,49 +17,12 @@ interface AppProps {
 }
 
 export function App({ config, playerId, physicsSpeed, initialMode, spawnX }: AppProps) {
-  const [client, setClient] = useState<JazzClient | null>(null);
-  const [error, setError] = useState<unknown>(null);
-
-  useEffect(() => {
-    if (!config) return;
-
-    let active = true;
-    const client = createJazzClient(config);
-
-    client.then(
-      (resolved) => {
-        if (!active) {
-          resolved.shutdown();
-          return;
-        }
-        setClient(resolved);
-      },
-      (reason) => {
-        if (!active) return;
-        setError(reason);
-      },
-    );
-
-    return () => {
-      active = false;
-      client.then((resolved) => resolved.shutdown()).catch(() => {});
-    };
-  }, [config?.appId, config?.serverUrl, config?.dbName]);
-
-  if (error) {
-    throw error;
-  }
-
   if (!config) {
     return <Game physicsSpeed={physicsSpeed} initialMode={initialMode} spawnX={spawnX} />;
   }
 
-  if (!client) {
-    return null;
-  }
-
   return (
-    <JazzProvider client={client}>
+    <JazzProvider config={config}>
       <GameWithSync
         physicsSpeed={physicsSpeed}
         initialMode={initialMode}
