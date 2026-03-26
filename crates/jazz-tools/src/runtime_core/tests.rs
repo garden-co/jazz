@@ -2068,3 +2068,88 @@ fn rc_partial_update_changing_fk_to_missing_target_succeeds() {
     )
     .expect("changing FK to non-existent target must succeed without local FK checks");
 }
+
+/// Cold-start test: insert data, flush to storage, create a new RuntimeCore
+/// with the same storage, call load_persisted_docs, and verify data is queryable.
+///
+/// ```text
+///   Runtime A (insert + flush)
+///   ┌────────────────────┐
+///   │  DocManager: alice  │ ──flush──▶ MemoryStorage
+///   └────────────────────┘
+///
+///   Runtime B (cold start)
+///   ┌────────────────────┐
+///   │  DocManager: empty  │ ──load──▶ reads from same MemoryStorage
+///   │  after load: alice  │
+///   └────────────────────┘
+/// ```
+#[test]
+fn rc_cold_start_loads_persisted_docs() {
+    // Phase 1: create runtime, insert a row, flush to storage
+    let schema = test_schema();
+    let app_id = AppId::from_name("cold-start-test");
+    let sync_manager = SyncManager::new();
+    let schema_manager =
+        SchemaManager::new(sync_manager, schema.clone(), app_id, "dev", "main").unwrap();
+    let mut core = RuntimeCore::new(
+        schema_manager,
+        MemoryStorage::new(),
+        NoopScheduler,
+        VecSyncSender::new(),
+    );
+    core.immediate_tick();
+
+    let row_values = vec![
+        Value::Uuid(ObjectId::new()),
+        Value::Text("Alice".to_string()),
+    ];
+    let (row_id, _) = core.insert("users", row_values, None).unwrap();
+    core.immediate_tick();
+
+    // Flush docs to the MemoryStorage
+    core.flush_storage();
+
+    // Verify the doc was persisted
+    let persisted_ids = core.storage().list_doc_ids().unwrap();
+    assert!(
+        persisted_ids.contains(&row_id),
+        "inserted row should be in persisted storage after flush"
+    );
+
+    // Phase 2: take the storage, create a fresh runtime, load persisted docs
+    let storage = core.into_storage();
+    let sync_manager2 = SyncManager::new();
+    let schema_manager2 = SchemaManager::new(sync_manager2, schema, app_id, "dev", "main").unwrap();
+    let mut core2 = RuntimeCore::new(
+        schema_manager2,
+        storage,
+        NoopScheduler,
+        VecSyncSender::new(),
+    );
+    core2.load_persisted_docs();
+    core2.immediate_tick();
+
+    // The doc should be in DocManager
+    let doc = core2
+        .schema_manager()
+        .query_manager()
+        .sync_manager()
+        .doc_manager
+        .get(row_id);
+    assert!(
+        doc.is_some(),
+        "doc should be loaded into DocManager after cold start"
+    );
+
+    // Verify via index lookup — process_synced_docs should have indexed the row
+    let branch = core2.schema_manager().branch_name();
+    let found = core2
+        .storage()
+        .index_scan_all("users", "_id", branch.as_str());
+    assert!(
+        found.contains(&row_id),
+        "row should be indexed after cold start + immediate_tick. Found: {:?}",
+        found
+    );
+}

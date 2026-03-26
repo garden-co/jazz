@@ -587,6 +587,18 @@ describe("generateTypes", () => {
 
     expect(output).toContain("// AUTO-GENERATED FILE - DO NOT EDIT");
   });
+
+  it("does not emit Any*QueryBuilder aliases when the schema has no relations", () => {
+    table("messages", {
+      authorName: col.string(),
+      text: col.string(),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).not.toContain("type AnyMessageQueryBuilder");
+  });
 });
 
 describe("generateClient", () => {

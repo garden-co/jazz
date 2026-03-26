@@ -285,7 +285,48 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     }
 
     /// Flush the storage to persistent medium.
-    pub fn flush_storage(&self) {
+    ///
+    /// Persists all in-memory DocManager docs to the outer storage first,
+    /// then flushes the storage to disk.
+    pub fn flush_storage(&mut self) {
+        // Persist all DocManager docs to the real storage
+        let doc_ids: Vec<ObjectId> = self
+            .schema_manager
+            .query_manager()
+            .sync_manager()
+            .doc_manager
+            .all_docs()
+            .map(|(id, _)| id)
+            .collect();
+        for doc_id in doc_ids {
+            let row_doc = self
+                .schema_manager
+                .query_manager()
+                .sync_manager()
+                .doc_manager
+                .get(doc_id);
+            if let Some(row_doc) = row_doc {
+                use yrs::{ReadTxn, Transact};
+                let snapshot = row_doc
+                    .doc
+                    .transact()
+                    .encode_state_as_update_v1(&yrs::StateVector::default());
+                let metadata = row_doc.metadata.clone();
+
+                // Ensure doc exists in storage
+                if self
+                    .storage
+                    .load_doc_metadata(doc_id)
+                    .ok()
+                    .flatten()
+                    .is_none()
+                {
+                    let _ = self.storage.create_doc(doc_id, &metadata);
+                }
+                let _ = self.storage.save_snapshot(doc_id, &snapshot);
+            }
+        }
+
         self.storage.flush();
     }
 
@@ -350,6 +391,75 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Get access to the underlying SchemaManager.
     pub fn schema_manager(&self) -> &SchemaManager {
         &self.schema_manager
+    }
+
+    /// Load all persisted docs from storage into DocManager.
+    ///
+    /// Called at startup to restore in-memory state from persistent storage.
+    /// DocManager uses MemoryStorage internally (it's just a cache), so on
+    /// restart we need to reload docs from RuntimeCore's persistent storage.
+    pub fn load_persisted_docs(&mut self) {
+        type PersistedDocData = (
+            ObjectId,
+            HashMap<String, String>,
+            Option<Vec<u8>>,
+            Vec<Vec<u8>>,
+        );
+
+        let doc_ids = match self.storage.list_doc_ids() {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!("failed to list persisted doc IDs: {e}");
+                return;
+            }
+        };
+
+        // Collect all doc data from storage first (avoids borrow conflict with DocManager).
+        let mut to_load: Vec<PersistedDocData> = Vec::new();
+        for doc_id in &doc_ids {
+            let metadata = match self.storage.load_doc_metadata(*doc_id) {
+                Ok(Some(m)) => m,
+                _ => continue,
+            };
+            let snapshot = self.storage.load_snapshot(*doc_id).ok().flatten();
+            let updates = self.storage.load_updates(*doc_id).unwrap_or_default();
+            to_load.push((*doc_id, metadata, snapshot, updates));
+        }
+
+        // Now apply to DocManager.
+        let doc_manager = &mut self
+            .schema_manager
+            .query_manager_mut()
+            .sync_manager_mut()
+            .doc_manager;
+
+        for (doc_id, metadata, snapshot, updates) in &to_load {
+            if doc_manager.get(*doc_id).is_some() {
+                continue;
+            }
+
+            doc_manager.create_with_id(*doc_id, metadata.clone());
+
+            if let Some(snapshot) = snapshot {
+                let _ = doc_manager.apply_update(*doc_id, snapshot);
+            }
+
+            for update_bytes in updates {
+                let _ = doc_manager.apply_update(*doc_id, update_bytes);
+            }
+        }
+
+        // Queue loaded docs for indexing by process_synced_docs on the next tick.
+        let loaded_ids: Vec<ObjectId> = to_load.iter().map(|(id, _, _, _)| *id).collect();
+        let sync_manager = &mut self.schema_manager.query_manager_mut().sync_manager_mut();
+        for id in &loaded_ids {
+            sync_manager.push_synced_doc_id(*id);
+        }
+
+        info!(
+            count = loaded_ids.len(),
+            "loaded persisted docs into DocManager"
+        );
     }
 }
 

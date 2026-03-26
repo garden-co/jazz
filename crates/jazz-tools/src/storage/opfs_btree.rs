@@ -496,6 +496,17 @@ impl Storage for OpfsBTreeStorage {
         Ok(())
     }
 
+    fn list_doc_ids(&self) -> Result<Vec<crate::object::ObjectId>, super::StorageError> {
+        let keys = self.tree_scan_keys(key_codec::DOC_META_PREFIX)?;
+        let mut ids = Vec::new();
+        for key in &keys {
+            if let Some(id) = key_codec::parse_doc_id_from_meta_key(key) {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
+    }
+
     fn delete_doc(&mut self, id: crate::object::ObjectId) -> Result<(), super::StorageError> {
         let meta_key = String::from_utf8(key_codec::doc_meta_key(id)).unwrap();
         self.tree_delete(&meta_key)?;

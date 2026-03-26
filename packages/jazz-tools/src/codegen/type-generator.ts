@@ -149,10 +149,17 @@ export function tableNameToInterface(name: string): string {
   return parts.map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join("");
 }
 
-function generateAnyQueryBuilderAliases(schema: WasmSchema): string[] {
+function generateAnyQueryBuilderAliases(relations: Map<string, Relation[]>): string[] {
   const lines: string[] = [];
+  const tablesNeedingAliases = new Set<string>();
 
-  for (const tableName of Object.keys(schema)) {
+  for (const rels of relations.values()) {
+    for (const rel of rels) {
+      tablesNeedingAliases.add(rel.toTable);
+    }
+  }
+
+  for (const tableName of tablesNeedingAliases) {
     const baseInterface = tableNameToInterface(tableName);
     lines.push(
       `type Any${baseInterface}QueryBuilder<T = any> = { readonly _table: "${tableName}" } & QueryBuilder<T>;`,
@@ -446,11 +453,11 @@ export function generateTypes(schema: WasmSchema): string {
     ),
   );
 
-  // Helper aliases for any query builder specializations
-  lines.push(...generateAnyQueryBuilderAliases(schema));
-
   // Analyze relations and generate relation types
   const relations = analyzeRelations(schema);
+
+  // Helper aliases for any query builder specializations used by include typing
+  lines.push(...generateAnyQueryBuilderAliases(relations));
 
   // Include types (for specifying which relations to load)
   lines.push(...generateIncludeTypes(relations));

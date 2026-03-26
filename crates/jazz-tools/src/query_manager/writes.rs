@@ -1235,9 +1235,13 @@ impl QueryManager {
         self.hard_delete(storage, id)
     }
 
-    /// Try to read a row from DocManager's Yrs Docs.
+    /// Try to read a row from DocManager's Yrs Docs, loading from external storage if needed.
     /// Returns (table_name, decoded_values) if the doc exists and is not deleted.
-    pub fn get_row_from_doc(&self, id: ObjectId) -> Option<(String, Vec<Value>)> {
+    pub fn get_row_from_doc(&mut self, id: ObjectId) -> Option<(String, Vec<Value>)> {
+        // Try loading from DocManager's storage if not in memory
+        if self.sync_manager.doc_manager.get(id).is_none() {
+            let _ = self.sync_manager.doc_manager.get_or_load(id);
+        }
         let row_doc = self.sync_manager.doc_manager.get(id)?;
         let table = row_doc.metadata.get("table")?.clone();
         let table_name = TableName::new(&table);
@@ -1264,8 +1268,11 @@ impl QueryManager {
     }
 
     /// Try to load row data from DocManager, re-encoding to binary for compatibility.
-    /// Returns None if the doc doesn't exist in DocManager.
-    pub(super) fn load_row_data_from_doc(&self, row_id: ObjectId) -> Option<Vec<u8>> {
+    /// Loads from storage if not in memory.
+    pub(super) fn load_row_data_from_doc(&mut self, row_id: ObjectId) -> Option<Vec<u8>> {
+        if self.sync_manager.doc_manager.get(row_id).is_none() {
+            let _ = self.sync_manager.doc_manager.get_or_load(row_id);
+        }
         let row_doc = self.sync_manager.doc_manager.get(row_id)?;
         let table = row_doc.metadata.get("table")?;
         let table_name = TableName::new(table);
@@ -1290,7 +1297,7 @@ impl QueryManager {
     /// Get a row by ID from DocManager.
     ///
     /// Returns decoded values and the table name if the row exists.
-    pub fn get_row(&self, id: ObjectId) -> Option<(String, Vec<Value>)> {
+    pub fn get_row(&mut self, id: ObjectId) -> Option<(String, Vec<Value>)> {
         self.get_row_from_doc(id)
     }
 

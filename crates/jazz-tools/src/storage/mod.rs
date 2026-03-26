@@ -330,6 +330,9 @@ pub trait Storage {
     fn load_updates(&self, id: ObjectId) -> Result<Vec<Vec<u8>>, StorageError>;
     fn clear_updates(&mut self, id: ObjectId) -> Result<(), StorageError>;
     fn delete_doc(&mut self, id: ObjectId) -> Result<(), StorageError>;
+
+    /// List all document IDs that have metadata stored.
+    fn list_doc_ids(&self) -> Result<Vec<ObjectId>, StorageError>;
 }
 
 // Box<Storage> is used to allow for dynamic dispatch of the Storage trait.
@@ -511,6 +514,10 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 
     fn delete_doc(&mut self, id: ObjectId) -> Result<(), StorageError> {
         (**self).delete_doc(id)
+    }
+
+    fn list_doc_ids(&self) -> Result<Vec<ObjectId>, StorageError> {
+        (**self).list_doc_ids()
     }
 }
 
@@ -1028,6 +1035,10 @@ impl Storage for MemoryStorage {
         self.doc_snapshots.remove(&id);
         self.doc_updates.remove(&id);
         Ok(())
+    }
+
+    fn list_doc_ids(&self) -> Result<Vec<ObjectId>, StorageError> {
+        Ok(self.doc_metadata.keys().copied().collect())
     }
 }
 

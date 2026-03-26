@@ -485,6 +485,7 @@ impl WasmRuntime {
         // Create RuntimeCore
         let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
         core.set_tier_label(tier_label);
+        core.load_persisted_docs();
 
         // Wrap in Rc<RefCell>
         let core_rc = Rc::new(RefCell::new(core));
@@ -1252,7 +1253,7 @@ impl WasmRuntime {
     #[wasm_bindgen]
     pub fn flush(&self) {
         let _span = debug_span!("wasm::flush", tier = self.tier_label).entered();
-        self.core.borrow().flush_storage();
+        self.core.borrow_mut().flush_storage();
     }
 
     /// Flush only the WAL buffer to OPFS (not the snapshot).
@@ -1337,6 +1338,7 @@ impl WasmRuntime {
         // Create RuntimeCore
         let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
         core.set_tier_label(tier_label);
+        core.load_persisted_docs();
 
         // Wrap in Rc<RefCell>
         let core_rc = Rc::new(RefCell::new(core));

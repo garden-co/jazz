@@ -153,6 +153,19 @@ pub(super) fn ack_key(commit_id: CommitId) -> String {
     format!("ack:{}", hex::encode(commit_id.0))
 }
 
+pub(super) const DOC_META_PREFIX: &str = "doc:";
+pub(super) const DOC_META_SUFFIX: &str = ":meta";
+
+/// Parse an ObjectId from a `doc:{hex}:meta` key.
+pub(super) fn parse_doc_id_from_meta_key(key: &str) -> Option<ObjectId> {
+    let hex_str = key
+        .strip_prefix(DOC_META_PREFIX)?
+        .strip_suffix(DOC_META_SUFFIX)?;
+    let bytes = hex::decode(hex_str).ok()?;
+    let uuid = uuid::Uuid::from_slice(&bytes).ok()?;
+    Some(ObjectId::from_uuid(uuid))
+}
+
 pub(super) fn doc_meta_key(id: ObjectId) -> Vec<u8> {
     format!("doc:{}:meta", format_uuid(id)).into_bytes()
 }

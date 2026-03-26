@@ -549,6 +549,21 @@ impl Storage for FjallStorage {
         })
     }
 
+    fn list_doc_ids(&self) -> Result<Vec<crate::object::ObjectId>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            let keys =
+                Self::scan_prefix_keys(&tx, &inner.keyspace, super::key_codec::DOC_META_PREFIX)?;
+            let mut ids = Vec::new();
+            for key in &keys {
+                if let Some(id) = super::key_codec::parse_doc_id_from_meta_key(key) {
+                    ids.push(id);
+                }
+            }
+            Ok(ids)
+        })
+    }
+
     fn delete_doc(&mut self, id: crate::object::ObjectId) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let tx = inner.db.read_tx();

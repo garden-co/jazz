@@ -189,7 +189,8 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let sync_sender = CallbackSyncSender::new(sync_callback);
 
         // Create RuntimeCore
-        let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+        core.load_persisted_docs();
 
         // Wrap in Arc<Mutex>
         let core_arc = Arc::new(Mutex::new(core));

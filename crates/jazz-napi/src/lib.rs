@@ -332,7 +332,8 @@ fn build_napi_runtime(
     let sync_sender = NapiSyncSender::new();
 
     // Create RuntimeCore and wrap
-    let core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+    let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+    core.load_persisted_docs();
     let core_arc = Arc::new(Mutex::new(core));
 
     // Set up the scheduler's TSFN
@@ -1133,22 +1134,22 @@ impl NapiRuntime {
 
     #[napi]
     pub fn flush(&self) -> napi::Result<()> {
-        let core = self
+        let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.storage().flush();
+        core.flush_storage();
         Ok(())
     }
 
     /// Flush and close the underlying storage, releasing filesystem locks.
     #[napi]
     pub fn close(&self) -> napi::Result<()> {
-        let core = self
+        let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.storage().flush();
+        core.flush_storage();
         core.storage()
             .close()
             .map_err(|e| napi::Error::from_reason(format!("Failed to close storage: {:?}", e)))?;

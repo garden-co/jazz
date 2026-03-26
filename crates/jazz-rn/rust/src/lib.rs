@@ -330,6 +330,7 @@ impl RnRuntime {
             let sync_sender = RnSyncSender::default();
 
             let mut core = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
+            core.load_persisted_docs();
             core.persist_schema();
 
             Ok(Arc::new(Self {
@@ -771,7 +772,7 @@ impl RnRuntime {
 
     pub fn flush(&self) -> Result<(), JazzRnError> {
         with_panic_boundary("flush", || {
-            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
             core.flush_storage();
@@ -782,7 +783,7 @@ impl RnRuntime {
     /// Flush and close the underlying storage, releasing filesystem locks.
     pub fn close(&self) -> Result<(), JazzRnError> {
         with_panic_boundary("close", || {
-            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
+            let mut core = self.core.lock().map_err(|_| JazzRnError::Internal {
                 message: "lock poisoned".into(),
             })?;
             core.flush_storage();
