@@ -173,36 +173,7 @@ Output format:
 ...
 ```
 
-### Step 3: Conditionally spawn peripheral agents
-
-If changed files include `examples/` paths, spawn an **Examples Agent**:
-
-```
-You are reviewing example application changes for a local-first relational database framework. Examples serve as both documentation and integration tests.
-
-Review this branch diff against main, focusing only on files under examples/. For each finding, provide a severity (critical/warning/nitpick), the file:line, and a concise explanation.
-
-Flag:
-- Examples that don't reflect current API (outdated patterns, deprecated usage)
-- Missing error handling that would confuse users trying to learn from the example
-- Examples that are more complex than needed to demonstrate the concept
-- Broken imports or references to renamed/removed APIs
-- Examples that silently fail rather than showing clear errors
-
-Do NOT flag:
-- Internal implementation details (reviewed by core agents)
-- Style preferences
-
-Read the changed files for context when needed. Use the Read tool.
-
-Output format:
-## Examples Review
-
-1. [severity] `file:line` — description
-...
-```
-
-If changed files include `docs/` paths, spawn a **Docs Agent**:
+#### Agent 5: Docs Agent
 
 ```
 You are reviewing documentation changes for a local-first relational database framework.
@@ -229,7 +200,7 @@ Output format:
 ...
 ```
 
-### Step 4: Filter the false positives
+### Step 3: Filter the false positives
 
 Spawn a sub-agent to double-check every reported item. Give it the full list of findings and access to the codebase.
 
@@ -238,7 +209,7 @@ Filter out every false-positive. The filter must check two things for each findi
 1. **Factual accuracy** — does the code actually match what the finding claims?
 2. **Contextual relevance** — is the issue actually reachable given the surrounding execution context and invariants? A finding that is technically true but impossible to trigger (e.g. "X panics if Y is absent" when Y is guaranteed by an earlier check in the same code path) is a false positive and should be dropped.
 
-### Step 5: Final summary
+### Step 4: Final summary
 
 After all sub-agents complete, synthesize their findings into a final report:
 
@@ -260,11 +231,9 @@ Deduplicate overlapping findings across agents. Prefer concrete `file:line` refe
 
 ## Rules
 
-1. Always run all 4 core agents in parallel — never sequentially
+1. Always run all the agents in parallel — never sequentially
 2. If the diff is empty, stop immediately
 3. Agents must read changed files for context — don't review the diff blindly
 4. Findings must include `file:line` references
 5. Every finding must have a severity level
 6. Don't flag things outside the diff unless they're directly affected by the changes
-7. Examples and docs agents only spawn when those areas have changes
-8. Core agents (bug hunter, performance, simplicity) focus on `crates/` and `packages/` — they may read `examples/` or `docs/` for context but should not produce findings for those areas when dedicated agents handle them
