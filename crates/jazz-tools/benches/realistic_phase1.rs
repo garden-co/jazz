@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
@@ -36,6 +36,13 @@ use serde::Deserialize;
 use tempfile::TempDir;
 
 type BenchRuntime = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
+
+fn row<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
+    pairs
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+}
 
 #[derive(Debug, Clone, Deserialize)]
 struct ProfileConfig {
@@ -391,10 +398,10 @@ impl R1State {
                 .runtime
                 .insert(
                     "users",
-                    vec![
-                        Value::Text(format!("User {user_idx}")),
-                        Value::Text(format!("user{user_idx}@bench.local")),
-                    ],
+                    row([
+                        ("display_name", Value::Text(format!("User {user_idx}"))),
+                        ("email", Value::Text(format!("user{user_idx}@bench.local"))),
+                    ]),
                     None,
                 )
                 .expect("seed users");
@@ -407,10 +414,10 @@ impl R1State {
                 .runtime
                 .insert(
                     "organizations",
-                    vec![
-                        Value::Text(format!("Org {org_idx}")),
-                        Value::Timestamp(created_at),
-                    ],
+                    row([
+                        ("name", Value::Text(format!("Org {org_idx}"))),
+                        ("created_at", Value::Timestamp(created_at)),
+                    ]),
                     None,
                 )
                 .expect("seed organizations");
@@ -428,11 +435,11 @@ impl R1State {
                 .runtime
                 .insert(
                     "memberships",
-                    vec![
-                        Value::Uuid(org_id),
-                        Value::Uuid(self.users[user_idx]),
-                        Value::Text(role.to_string()),
-                    ],
+                    row([
+                        ("organization_id", Value::Uuid(org_id)),
+                        ("user_id", Value::Uuid(self.users[user_idx])),
+                        ("role", Value::Text(role.to_string())),
+                    ]),
                     None,
                 )
                 .expect("seed memberships");
@@ -445,12 +452,12 @@ impl R1State {
                 .runtime
                 .insert(
                     "projects",
-                    vec![
-                        Value::Uuid(org_id),
-                        Value::Text(format!("Project {project_idx}")),
-                        Value::Boolean(false),
-                        Value::Timestamp(updated_at),
-                    ],
+                    row([
+                        ("organization_id", Value::Uuid(org_id)),
+                        ("name", Value::Text(format!("Project {project_idx}"))),
+                        ("archived", Value::Boolean(false)),
+                        ("updated_at", Value::Timestamp(updated_at)),
+                    ]),
                     None,
                 )
                 .expect("seed projects");
@@ -472,15 +479,15 @@ impl R1State {
                 .runtime
                 .insert(
                     "tasks",
-                    vec![
-                        Value::Uuid(project_id),
-                        Value::Text(format!("Task {task_idx}")),
-                        Value::Text(status.to_string()),
-                        Value::Integer(priority),
-                        Value::Uuid(assignee_id),
-                        Value::Timestamp(updated_at),
-                        Value::Null,
-                    ],
+                    row([
+                        ("project_id", Value::Uuid(project_id)),
+                        ("title", Value::Text(format!("Task {task_idx}"))),
+                        ("status", Value::Text(status.to_string())),
+                        ("priority", Value::Integer(priority)),
+                        ("assignee_id", Value::Uuid(assignee_id)),
+                        ("updated_at", Value::Timestamp(updated_at)),
+                        ("due_at", Value::Null),
+                    ]),
                     None,
                 )
                 .expect("seed tasks");
@@ -495,7 +502,10 @@ impl R1State {
                     .runtime
                     .insert(
                         "task_watchers",
-                        vec![Value::Uuid(task_id), Value::Uuid(user_id)],
+                        row([
+                            ("task_id", Value::Uuid(task_id)),
+                            ("user_id", Value::Uuid(user_id)),
+                        ]),
                         None,
                     )
                     .expect("seed task_watchers");
@@ -510,12 +520,15 @@ impl R1State {
                 .runtime
                 .insert(
                     "task_comments",
-                    vec![
-                        Value::Uuid(task_id),
-                        Value::Uuid(author_id),
-                        Value::Text(format!("seed comment {}", self.next_comment_seq)),
-                        Value::Timestamp(created_at),
-                    ],
+                    row([
+                        ("task_id", Value::Uuid(task_id)),
+                        ("author_id", Value::Uuid(author_id)),
+                        (
+                            "body",
+                            Value::Text(format!("seed comment {}", self.next_comment_seq)),
+                        ),
+                        ("created_at", Value::Timestamp(created_at)),
+                    ]),
                     None,
                 )
                 .expect("seed task_comments");
@@ -531,14 +544,14 @@ impl R1State {
                 .runtime
                 .insert(
                     "activity_events",
-                    vec![
-                        Value::Uuid(project_id),
-                        Value::Uuid(task_id),
-                        Value::Uuid(actor_id),
-                        Value::Text("status_change".to_string()),
-                        Value::Timestamp(created_at),
-                        Value::Text("{\"kind\":\"seed\"}".to_string()),
-                    ],
+                    row([
+                        ("project_id", Value::Uuid(project_id)),
+                        ("task_id", Value::Uuid(task_id)),
+                        ("actor_id", Value::Uuid(actor_id)),
+                        ("kind", Value::Text("status_change".to_string())),
+                        ("created_at", Value::Timestamp(created_at)),
+                        ("payload", Value::Text("{\"kind\":\"seed\"}".to_string())),
+                    ]),
                     None,
                 )
                 .expect("seed activity_events");
@@ -669,15 +682,18 @@ impl R1State {
             .runtime
             .insert(
                 "tasks",
-                vec![
-                    Value::Uuid(project_id),
-                    Value::Text(format!("r1 task {}", self.next_task_seq)),
-                    Value::Text("todo".to_string()),
-                    Value::Integer(priority),
-                    Value::Uuid(assignee_id),
-                    Value::Timestamp(updated_at),
-                    due_at,
-                ],
+                row([
+                    ("project_id", Value::Uuid(project_id)),
+                    (
+                        "title",
+                        Value::Text(format!("r1 task {}", self.next_task_seq)),
+                    ),
+                    ("status", Value::Text("todo".to_string())),
+                    ("priority", Value::Integer(priority)),
+                    ("assignee_id", Value::Uuid(assignee_id)),
+                    ("updated_at", Value::Timestamp(updated_at)),
+                    ("due_at", due_at),
+                ]),
                 None,
             )
             .expect("insert task");
@@ -761,10 +777,10 @@ fn seed_project_board_dataset<S: Storage>(
         let (user_id, _row_values) = runtime
             .insert(
                 "users",
-                vec![
-                    Value::Text(format!("User {user_idx}")),
-                    Value::Text(format!("user{user_idx}@bench.local")),
-                ],
+                row([
+                    ("display_name", Value::Text(format!("User {user_idx}"))),
+                    ("email", Value::Text(format!("user{user_idx}@bench.local"))),
+                ]),
                 None,
             )
             .expect("seed users");
@@ -775,10 +791,10 @@ fn seed_project_board_dataset<S: Storage>(
         let (org_id, _row_values) = runtime
             .insert(
                 "organizations",
-                vec![
-                    Value::Text(format!("Org {org_idx}")),
-                    Value::Timestamp(next_timestamp()),
-                ],
+                row([
+                    ("name", Value::Text(format!("Org {org_idx}"))),
+                    ("created_at", Value::Timestamp(next_timestamp())),
+                ]),
                 None,
             )
             .expect("seed organizations");
@@ -795,11 +811,11 @@ fn seed_project_board_dataset<S: Storage>(
         runtime
             .insert(
                 "memberships",
-                vec![
-                    Value::Uuid(org_id),
-                    Value::Uuid(users[user_idx]),
-                    Value::Text(role.to_string()),
-                ],
+                row([
+                    ("organization_id", Value::Uuid(org_id)),
+                    ("user_id", Value::Uuid(users[user_idx])),
+                    ("role", Value::Text(role.to_string())),
+                ]),
                 None,
             )
             .expect("seed memberships");
@@ -810,12 +826,12 @@ fn seed_project_board_dataset<S: Storage>(
         let (project_id, _row_values) = runtime
             .insert(
                 "projects",
-                vec![
-                    Value::Uuid(org_id),
-                    Value::Text(format!("Project {project_idx}")),
-                    Value::Boolean(false),
-                    Value::Timestamp(next_timestamp()),
-                ],
+                row([
+                    ("organization_id", Value::Uuid(org_id)),
+                    ("name", Value::Text(format!("Project {project_idx}"))),
+                    ("archived", Value::Boolean(false)),
+                    ("updated_at", Value::Timestamp(next_timestamp())),
+                ]),
                 None,
             )
             .expect("seed projects");
@@ -835,15 +851,15 @@ fn seed_project_board_dataset<S: Storage>(
         let (task_id, _row_values) = runtime
             .insert(
                 "tasks",
-                vec![
-                    Value::Uuid(project_id),
-                    Value::Text(format!("Task {task_idx}")),
-                    Value::Text(status.to_string()),
-                    Value::Integer(priority),
-                    Value::Uuid(assignee_id),
-                    Value::Timestamp(next_timestamp()),
-                    Value::Null,
-                ],
+                row([
+                    ("project_id", Value::Uuid(project_id)),
+                    ("title", Value::Text(format!("Task {task_idx}"))),
+                    ("status", Value::Text(status.to_string())),
+                    ("priority", Value::Integer(priority)),
+                    ("assignee_id", Value::Uuid(assignee_id)),
+                    ("updated_at", Value::Timestamp(next_timestamp())),
+                    ("due_at", Value::Null),
+                ]),
                 None,
             )
             .expect("seed tasks");
@@ -856,7 +872,10 @@ fn seed_project_board_dataset<S: Storage>(
             runtime
                 .insert(
                     "task_watchers",
-                    vec![Value::Uuid(task_id), Value::Uuid(user_id)],
+                    row([
+                        ("task_id", Value::Uuid(task_id)),
+                        ("user_id", Value::Uuid(user_id)),
+                    ]),
                     None,
                 )
                 .expect("seed task_watchers");
@@ -869,12 +888,15 @@ fn seed_project_board_dataset<S: Storage>(
         runtime
             .insert(
                 "task_comments",
-                vec![
-                    Value::Uuid(task_id),
-                    Value::Uuid(author_id),
-                    Value::Text(format!("seed comment {next_comment_seq}")),
-                    Value::Timestamp(next_timestamp()),
-                ],
+                row([
+                    ("task_id", Value::Uuid(task_id)),
+                    ("author_id", Value::Uuid(author_id)),
+                    (
+                        "body",
+                        Value::Text(format!("seed comment {next_comment_seq}")),
+                    ),
+                    ("created_at", Value::Timestamp(next_timestamp())),
+                ]),
                 None,
             )
             .expect("seed task_comments");
@@ -888,14 +910,14 @@ fn seed_project_board_dataset<S: Storage>(
         runtime
             .insert(
                 "activity_events",
-                vec![
-                    Value::Uuid(project_id),
-                    Value::Uuid(task_id),
-                    Value::Uuid(actor_id),
-                    Value::Text("status_change".to_string()),
-                    Value::Timestamp(next_timestamp()),
-                    Value::Text("{\"kind\":\"seed\"}".to_string()),
-                ],
+                row([
+                    ("project_id", Value::Uuid(project_id)),
+                    ("task_id", Value::Uuid(task_id)),
+                    ("actor_id", Value::Uuid(actor_id)),
+                    ("kind", Value::Text("status_change".to_string())),
+                    ("created_at", Value::Timestamp(next_timestamp())),
+                    ("payload", Value::Text("{\"kind\":\"seed\"}".to_string())),
+                ]),
                 None,
             )
             .expect("seed activity_events");
@@ -1217,11 +1239,11 @@ impl PermissionR5State {
             .runtime
             .insert(
                 "folders",
-                vec![
-                    Value::Text("alice".to_string()),
-                    Value::Text("alice-root".to_string()),
-                    Value::Null,
-                ],
+                row([
+                    ("owner_id", Value::Text("alice".to_string())),
+                    ("name", Value::Text("alice-root".to_string())),
+                    ("parent_id", Value::Null),
+                ]),
                 None,
             )
             .expect("seed alice root folder");
@@ -1232,11 +1254,11 @@ impl PermissionR5State {
                 .runtime
                 .insert(
                     "folders",
-                    vec![
-                        Value::Text("bob".to_string()),
-                        Value::Text(format!("shared-folder-{idx}")),
-                        Value::Uuid(parent),
-                    ],
+                    row([
+                        ("owner_id", Value::Text("bob".to_string())),
+                        ("name", Value::Text(format!("shared-folder-{idx}"))),
+                        ("parent_id", Value::Uuid(parent)),
+                    ]),
                     None,
                 )
                 .expect("seed shared folder");
@@ -1252,14 +1274,17 @@ impl PermissionR5State {
                     .runtime
                     .insert(
                         "documents",
-                        vec![
-                            Value::Text(owner_id.to_string()),
-                            Value::Uuid(folder_id),
-                            Value::Text(format!("shared-doc-{depth_idx}-{doc_idx}")),
-                            Value::Text("open".to_string()),
-                            Value::Timestamp(updated_at),
-                            Value::Text("{\"kind\":\"shared\"}".to_string()),
-                        ],
+                        row([
+                            ("owner_id", Value::Text(owner_id.to_string())),
+                            ("folder_id", Value::Uuid(folder_id)),
+                            (
+                                "title",
+                                Value::Text(format!("shared-doc-{depth_idx}-{doc_idx}")),
+                            ),
+                            ("status", Value::Text("open".to_string())),
+                            ("updated_at", Value::Timestamp(updated_at)),
+                            ("payload", Value::Text("{\"kind\":\"shared\"}".to_string())),
+                        ]),
                         None,
                     )
                     .expect("seed shared docs");
@@ -1273,11 +1298,11 @@ impl PermissionR5State {
             .runtime
             .insert(
                 "folders",
-                vec![
-                    Value::Text("bob".to_string()),
-                    Value::Text("private-root".to_string()),
-                    Value::Null,
-                ],
+                row([
+                    ("owner_id", Value::Text("bob".to_string())),
+                    ("name", Value::Text("private-root".to_string())),
+                    ("parent_id", Value::Null),
+                ]),
                 None,
             )
             .expect("seed private root folder");
@@ -1287,14 +1312,14 @@ impl PermissionR5State {
                 .runtime
                 .insert(
                     "documents",
-                    vec![
-                        Value::Text("bob".to_string()),
-                        Value::Uuid(private_root),
-                        Value::Text(format!("private-doc-{doc_idx}")),
-                        Value::Text("open".to_string()),
-                        Value::Timestamp(updated_at),
-                        Value::Text("{\"kind\":\"private\"}".to_string()),
-                    ],
+                    row([
+                        ("owner_id", Value::Text("bob".to_string())),
+                        ("folder_id", Value::Uuid(private_root)),
+                        ("title", Value::Text(format!("private-doc-{doc_idx}"))),
+                        ("status", Value::Text("open".to_string())),
+                        ("updated_at", Value::Timestamp(updated_at)),
+                        ("payload", Value::Text("{\"kind\":\"private\"}".to_string())),
+                    ]),
                     None,
                 )
                 .expect("seed private docs");

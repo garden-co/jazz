@@ -1,6 +1,6 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-alpha.20",
+  "version": "2.0.0-alpha.21",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "bin": {
     "jazz-tools": "bin/jazz-tools.js"
@@ -67,7 +67,8 @@
   "scripts": {
     "build": "tsc && cp src/worker/jazz-worker.ts dist/worker/jazz-worker.ts && pnpm build:test && pnpm build:svelte",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
-    "test": "vitest run --config vitest.config.ts",
+    "test": "vitest run --config vitest.config.ts && vitest run --config vitest.config.svelte.ts",
+    "test:svelte": "vitest run --config vitest.config.svelte.ts",
     "build:test": "node dist/cli.js build --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json",
     "test:browser": "vitest run --config vitest.config.browser.ts",
     "bench:realistic:browser": "vitest run --config vitest.config.browser.ts tests/browser/realistic-bench.test.ts",
@@ -85,18 +86,19 @@
   },
   "devDependencies": {
     "@sveltejs/package": "^2.0.0",
-    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@sveltejs/vite-plugin-svelte": "catalog:default",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
     "fake-indexeddb": "^5.0.2",
+    "jsdom": "^26.0.0",
     "react-dom": "^19.0.0",
     "svelte": "^5.0.0",
     "typescript": "catalog:default",
-    "vite-plugin-top-level-await": "^1.6.0",
-    "vite-plugin-wasm": "^3.5.0",
+    "vite-plugin-top-level-await": "catalog:default",
+    "vite-plugin-wasm": "catalog:default",
     "vitest": "catalog:default",
     "vue": "^3.5.22",
     "zod": "^4.3.6"

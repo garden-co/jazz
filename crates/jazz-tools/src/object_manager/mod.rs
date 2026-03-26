@@ -756,7 +756,7 @@ impl ObjectManager {
         tips: &SmolSet<[CommitId; 2]>,
     ) -> Vec<CommitId> {
         let mut tip_vec: Vec<_> = tips.iter().copied().collect();
-        tip_vec.sort_by_key(|id| commits.get(id).map(|c| c.timestamp).unwrap_or(0));
+        tip_vec.sort_by_key(|id| (commits.get(id).map(|c| c.timestamp).unwrap_or(0), *id));
         tip_vec
     }
 

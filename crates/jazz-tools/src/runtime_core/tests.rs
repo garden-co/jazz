@@ -8,6 +8,7 @@ use crate::sync_manager::{
     ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
     SyncManager, SyncPayload,
 };
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 type TestCore = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
@@ -35,6 +36,57 @@ fn protected_documents_schema() -> Schema {
                 .policies(policies),
         )
         .build()
+}
+
+fn defaulted_todos_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column_with_default("done", ColumnType::Boolean, Value::Boolean(false)),
+        )
+        .build()
+}
+
+fn user_row_values(id: ObjectId, name: &str) -> Vec<Value> {
+    vec![Value::Uuid(id), Value::Text(name.to_string())]
+}
+
+fn user_insert_values(id: ObjectId, name: &str) -> HashMap<String, Value> {
+    HashMap::from([
+        ("id".to_string(), Value::Uuid(id)),
+        ("name".to_string(), Value::Text(name.to_string())),
+    ])
+}
+
+fn document_insert_values(owner_id: &str, title: &str) -> HashMap<String, Value> {
+    HashMap::from([
+        ("owner_id".to_string(), Value::Text(owner_id.to_string())),
+        ("title".to_string(), Value::Text(title.to_string())),
+    ])
+}
+
+fn project_insert_values(name: &str, owner_id: &str) -> HashMap<String, Value> {
+    HashMap::from([
+        ("name".to_string(), Value::Text(name.to_string())),
+        ("owner_id".to_string(), Value::Text(owner_id.to_string())),
+    ])
+}
+
+fn todo_insert_values(
+    title: &str,
+    done: bool,
+    description: Value,
+    owner_id: &str,
+    project: Value,
+) -> HashMap<String, Value> {
+    HashMap::from([
+        ("title".to_string(), Value::Text(title.to_string())),
+        ("done".to_string(), Value::Boolean(done)),
+        ("description".to_string(), description),
+        ("owner_id".to_string(), Value::Text(owner_id.to_string())),
+        ("project".to_string(), project),
+    ])
 }
 
 fn create_runtime_with_schema_and_sync_manager(
@@ -171,6 +223,7 @@ fn pump_client_messages_to_server(
     server.immediate_tick();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pump_server_with_three_clients(
     server: &mut TestCore,
     writer: &mut TestCore,
@@ -296,19 +349,46 @@ fn test_runtime_core_new() {
 fn test_runtime_core_insert_query() {
     let mut core = create_test_runtime();
 
-    let values = vec![
-        Value::Uuid(ObjectId::new()),
-        Value::Text("Alice".to_string()),
-    ];
-    let (object_id, row_values) = core.insert("users", values.clone(), None).unwrap();
+    let user_id = ObjectId::new();
+    let expected_values = user_row_values(user_id, "Alice");
+    let (object_id, row_values) = core
+        .insert("users", user_insert_values(user_id, "Alice"), None)
+        .unwrap();
     assert!(!object_id.0.is_nil());
-    assert_eq!(row_values, values);
+    assert_eq!(row_values, expected_values);
 
     core.immediate_tick();
     core.batched_tick();
 
     let query = Query::new("users");
     let results = execute_query(&mut core, query);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0, object_id);
+    assert_eq!(results[0].1, row_values);
+}
+
+#[test]
+fn test_runtime_core_insert_materializes_schema_defaults() {
+    let mut core = create_runtime_with_schema(defaulted_todos_schema(), "todos-with-defaults");
+
+    let (object_id, row_values) = core
+        .insert(
+            "todos",
+            HashMap::from([("title".to_string(), Value::Text("Ship it".to_string()))]),
+            None,
+        )
+        .unwrap();
+    assert!(!object_id.0.is_nil());
+    let descriptor = &core.current_schema()[&TableName::new("todos")].columns;
+    let title_idx = descriptor.column_index("title").unwrap();
+    let done_idx = descriptor.column_index("done").unwrap();
+    assert_eq!(row_values[title_idx], Value::Text("Ship it".to_string()));
+    assert_eq!(row_values[done_idx], Value::Boolean(false));
+
+    core.immediate_tick();
+    core.batched_tick();
+
+    let results = execute_query(&mut core, Query::new("todos"));
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, object_id);
     assert_eq!(results[0].1, row_values);
@@ -332,8 +412,9 @@ fn test_runtime_core_subscription() {
         )
         .unwrap();
 
-    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Bob".to_string())];
-    let _object_id = core.insert("users", values, None).unwrap();
+    let _object_id = core
+        .insert("users", user_insert_values(ObjectId::new(), "Bob"), None)
+        .unwrap();
 
     core.immediate_tick();
     core.batched_tick();
@@ -361,11 +442,13 @@ fn test_runtime_core_concurrent_inserts_from_multiple_callers() {
         let core_ref = Arc::clone(&core);
         handles.push(thread::spawn(move || {
             let mut locked = core_ref.lock().unwrap();
-            let values = vec![
-                Value::Uuid(ObjectId::new()),
-                Value::Text(format!("User-{i}")),
-            ];
-            locked.insert("users", values, None).unwrap();
+            locked
+                .insert(
+                    "users",
+                    user_insert_values(ObjectId::new(), &format!("User-{i}")),
+                    None,
+                )
+                .unwrap();
         }));
     }
 
@@ -390,8 +473,9 @@ fn test_runtime_core_update_delete() {
     let mut core = create_test_runtime();
 
     let id = ObjectId::new();
-    let values = vec![Value::Uuid(id), Value::Text("Charlie".to_string())];
-    let (object_id, _row_values) = core.insert("users", values, None).unwrap();
+    let (object_id, _row_values) = core
+        .insert("users", user_insert_values(id, "Charlie"), None)
+        .unwrap();
     core.immediate_tick();
     core.batched_tick();
 
@@ -445,9 +529,12 @@ fn rc_user_inserted_row_stays_hidden_from_other_sessions() {
     client.sync_sender().take();
     server.sync_sender().take();
 
-    let values = vec![Value::Text("alice".into()), Value::Text(title.into())];
     let (document_id, row_values) = client
-        .insert("documents", values.clone(), Some(&alice_session))
+        .insert(
+            "documents",
+            document_insert_values("alice", title),
+            Some(&alice_session),
+        )
         .expect("alice insert should satisfy local insert policy");
 
     pump_client_messages_to_server(&mut client, &mut server, server_id, client_id);
@@ -609,9 +696,12 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
         "server should register bob's active query before the write"
     );
 
-    let values = vec![Value::Text("alice".into()), Value::Text(title.into())];
     let (document_id, row_values) = writer
-        .insert("documents", values.clone(), Some(&alice_session))
+        .insert(
+            "documents",
+            document_insert_values("alice", title),
+            Some(&alice_session),
+        )
         .expect("alice insert should succeed through the public client API");
 
     let server_outputs_after_write = pump_server_with_three_clients(
@@ -789,7 +879,7 @@ fn create_3tier_rc() -> ThreeTierRC {
 
     // A = client (no tier)
     let sm_a = SyncManager::new();
-    let mgr_a = SchemaManager::new(sm_a, schema.clone(), app_id.clone(), "dev", "main").unwrap();
+    let mgr_a = SchemaManager::new(sm_a, schema.clone(), app_id, "dev", "main").unwrap();
     let mut a = RuntimeCore::new(
         mgr_a,
         MemoryStorage::new(),
@@ -799,7 +889,7 @@ fn create_3tier_rc() -> ThreeTierRC {
 
     // B = Worker server
     let sm_b = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
-    let mgr_b = SchemaManager::new(sm_b, schema.clone(), app_id.clone(), "dev", "main").unwrap();
+    let mgr_b = SchemaManager::new(sm_b, schema.clone(), app_id, "dev", "main").unwrap();
     let mut b = RuntimeCore::new(
         mgr_b,
         MemoryStorage::new(),
@@ -1031,14 +1121,8 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
     let schema = test_schema();
     let app_id = AppId::from_name("query-replay-test");
 
-    let mgr_a = SchemaManager::new(
-        SyncManager::new(),
-        schema.clone(),
-        app_id.clone(),
-        "dev",
-        "main",
-    )
-    .unwrap();
+    let mgr_a =
+        SchemaManager::new(SyncManager::new(), schema.clone(), app_id, "dev", "main").unwrap();
     let mut a = RuntimeCore::new(
         mgr_a,
         MemoryStorage::new(),
@@ -1049,7 +1133,7 @@ fn rc_replays_downstream_query_when_upstream_added_late() {
     let mgr_b = SchemaManager::new(
         SyncManager::new().with_durability_tier(DurabilityTier::Worker),
         schema.clone(),
-        app_id.clone(),
+        app_id,
         "dev",
         "main",
     )
@@ -1215,10 +1299,13 @@ fn rc_does_not_replay_unsubscribed_queries_on_upstream_reconnect() {
 #[test]
 fn rc_insert_returns_immediately() {
     let mut s = create_3tier_rc();
-    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let (id, row_values) = s.a.insert("users", values.clone(), None).unwrap();
+    let user_id = ObjectId::new();
+    let expected_values = user_row_values(user_id, "Alice");
+    let (id, row_values) =
+        s.a.insert("users", user_insert_values(user_id, "Alice"), None)
+            .unwrap();
     assert!(!id.0.is_nil());
-    assert_eq!(row_values, values);
+    assert_eq!(row_values, expected_values);
 
     let query = Query::new("users");
     let results = execute_query(&mut s.a, query);
@@ -1230,8 +1317,9 @@ fn rc_insert_returns_immediately() {
 #[test]
 fn rc_insert_data_syncs_to_server() {
     let mut s = create_3tier_rc();
-    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
+    let (id, _row_values) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
 
     pump_a_to_b(&mut s);
 
@@ -1244,8 +1332,9 @@ fn rc_insert_data_syncs_to_server() {
 #[test]
 fn rc_update_sync() {
     let mut s = create_3tier_rc();
-    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
+    let (id, _row_values) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
     pump_a_to_b(&mut s);
 
     s.a.update(id, vec![("name".into(), Value::Text("Bob".into()))], None)
@@ -1261,8 +1350,9 @@ fn rc_update_sync() {
 #[test]
 fn rc_delete_sync() {
     let mut s = create_3tier_rc();
-    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
+    let (id, _row_values) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
     pump_a_to_b(&mut s);
 
     s.a.delete(id, None).unwrap();
@@ -1276,12 +1366,18 @@ fn rc_delete_sync() {
 #[test]
 fn rc_insert_persisted_resolves_on_worker_ack() {
     let mut s = create_3tier_rc();
-    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
+    let user_id = ObjectId::new();
+    let expected_values = user_row_values(user_id, "Alice");
     let ((id, row_values), mut receiver) =
-        s.a.insert_persisted("users", values.clone(), None, DurabilityTier::Worker)
-            .unwrap();
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(user_id, "Alice"),
+            None,
+            DurabilityTier::Worker,
+        )
+        .unwrap();
     assert!(!id.0.is_nil());
-    assert_eq!(row_values, values);
+    assert_eq!(row_values, expected_values);
 
     assert!(
         receiver.try_recv().is_err() || receiver.try_recv() == Ok(None),
@@ -1301,10 +1397,14 @@ fn rc_insert_persisted_resolves_on_worker_ack() {
 #[test]
 fn rc_insert_persisted_holds_until_correct_tier() {
     let mut s = create_3tier_rc();
-    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
     let (_id, mut receiver) =
-        s.a.insert_persisted("users", values, None, DurabilityTier::EdgeServer)
-            .unwrap();
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::EdgeServer,
+        )
+        .unwrap();
 
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
@@ -1328,10 +1428,14 @@ fn rc_insert_persisted_holds_until_correct_tier() {
 #[test]
 fn rc_insert_persisted_higher_tier_satisfies_lower() {
     let mut s = create_3tier_rc();
-    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
     let (_id, mut receiver) =
-        s.a.insert_persisted("users", values, None, DurabilityTier::Worker)
-            .unwrap();
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Worker,
+        )
+        .unwrap();
 
     pump_3tier(&mut s);
 
@@ -1345,8 +1449,9 @@ fn rc_insert_persisted_higher_tier_satisfies_lower() {
 #[test]
 fn rc_update_persisted_resolves_on_ack() {
     let mut s = create_3tier_rc();
-    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
+    let (id, _row_values) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
     pump_a_to_b(&mut s);
 
     let mut receiver =
@@ -1375,8 +1480,9 @@ fn rc_update_persisted_resolves_on_ack() {
 #[test]
 fn rc_delete_persisted_resolves_on_ack() {
     let mut s = create_3tier_rc();
-    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
+    let (id, _row_values) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
     pump_a_to_b(&mut s);
 
     let mut receiver =
@@ -1401,15 +1507,23 @@ fn rc_delete_persisted_resolves_on_ack() {
 fn rc_multiple_persisted_inserts_independent() {
     let mut s = create_3tier_rc();
 
-    let values1 = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
     let (_id1, mut receiver1) =
-        s.a.insert_persisted("users", values1, None, DurabilityTier::Worker)
-            .unwrap();
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Worker,
+        )
+        .unwrap();
 
-    let values2 = vec![Value::Uuid(ObjectId::new()), Value::Text("Bob".into())];
     let (_id2, mut receiver2) =
-        s.a.insert_persisted("users", values2, None, DurabilityTier::Worker)
-            .unwrap();
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Bob"),
+            None,
+            DurabilityTier::Worker,
+        )
+        .unwrap();
 
     pump_3tier(&mut s);
 
@@ -1429,8 +1543,9 @@ fn rc_multiple_persisted_inserts_independent() {
 fn rc_query_no_settled_tier_immediate() {
     let mut s = create_3tier_rc();
 
-    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
+    let (id, _row_values) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
 
     let mut future = s.a.query(Query::new("users"), None);
 
@@ -1450,8 +1565,9 @@ fn rc_query_no_settled_tier_immediate() {
 fn rc_query_settled_tier_holds() {
     let mut s = create_3tier_rc();
 
-    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
+    let (id, _row_values) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
 
     let mut future = s.a.query_with_propagation(
         Query::new("users"),
@@ -1526,11 +1642,13 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
     let mut s = create_3tier_rc();
 
     // Seed data on server B that client A has not synced yet.
-    let values = vec![
-        Value::Uuid(ObjectId::new()),
-        Value::Text("upstream-row".into()),
-    ];
-    let (row_id, _row_values) = s.b.insert("users", values, None).unwrap();
+    let (row_id, _row_values) =
+        s.b.insert(
+            "users",
+            user_insert_values(ObjectId::new(), "upstream-row"),
+            None,
+        )
+        .unwrap();
     s.b.immediate_tick();
     s.b.batched_tick();
     s.b.sync_sender().take();
@@ -1654,8 +1772,9 @@ fn rc_subscribe_settled_tier() {
         )
         .unwrap();
 
-    let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Alice".into())];
-    let (id, _row_values) = s.a.insert("users", values, None).unwrap();
+    let (id, _row_values) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
     s.a.immediate_tick();
 
     assert!(
@@ -1700,11 +1819,13 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
         .unwrap();
 
     // Initial delivery should still wait for the requested remote tier.
-    let values = vec![
-        Value::Uuid(ObjectId::new()),
-        Value::Text("local-first".into()),
-    ];
-    let (first_id, _row_values) = s.a.insert("users", values, None).unwrap();
+    let (first_id, _row_values) =
+        s.a.insert(
+            "users",
+            user_insert_values(ObjectId::new(), "local-first"),
+            None,
+        )
+        .unwrap();
     s.a.immediate_tick();
 
     let calls = received.lock().unwrap();
@@ -1741,11 +1862,13 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
     drop(calls);
 
     // After initial delivery, local updates should callback immediately.
-    let second_values = vec![
-        Value::Uuid(ObjectId::new()),
-        Value::Text("local-second".into()),
-    ];
-    let (second_id, _row_values) = s.a.insert("users", second_values, None).unwrap();
+    let (second_id, _row_values) =
+        s.a.insert(
+            "users",
+            user_insert_values(ObjectId::new(), "local-second"),
+            None,
+        )
+        .unwrap();
     s.a.immediate_tick();
 
     let calls = received.lock().unwrap();
@@ -1796,11 +1919,11 @@ fn test_sync_edit_fires_callback_synchronously() {
     core.immediate_tick();
     let initial_count = *callback_count.lock().unwrap();
 
-    let values = vec![
-        Value::Uuid(ObjectId::new()),
-        Value::Text("test@test.com".to_string()),
-    ];
-    let _ = core.insert("users", values, None);
+    let _ = core.insert(
+        "users",
+        user_insert_values(ObjectId::new(), "test@test.com"),
+        None,
+    );
     core.immediate_tick();
 
     let final_count = *callback_count.lock().unwrap();
@@ -1881,11 +2004,9 @@ fn test_matching_catalogue_hash_skips_catalogue_replay_on_add_server() {
     );
 
     let schema_obj_id = core.persist_schema();
-    let row_values = vec![
-        Value::Uuid(ObjectId::new()),
-        Value::Text("Alice".to_string()),
-    ];
-    let (row_object_id, _) = core.insert("users", row_values, None).unwrap();
+    let (row_object_id, _) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
 
     let catalogue_state_hash = core.schema_manager().catalogue_state_hash();
 
@@ -1984,23 +2105,19 @@ fn rc_partial_update_with_unloaded_fk_reference() {
     let mut core = create_fk_runtime();
 
     let (project_id, _) = core
-        .insert(
-            "projects",
-            vec![Value::Text("Acme".into()), Value::Text("alice".into())],
-            None,
-        )
+        .insert("projects", project_insert_values("Acme", "alice"), None)
         .unwrap();
 
     let (todo_id, _) = core
         .insert(
             "todos",
-            vec![
-                Value::Text("Buy milk".into()),
-                Value::Boolean(true),        // done
-                Value::Null,                 // description (nullable)
-                Value::Text("alice".into()), // owner_id
-                Value::Uuid(project_id),     // project FK
-            ],
+            todo_insert_values(
+                "Buy milk",
+                true,
+                Value::Null,
+                "alice",
+                Value::Uuid(project_id),
+            ),
             None,
         )
         .unwrap();
@@ -2037,23 +2154,19 @@ fn rc_partial_update_changing_fk_to_missing_target_succeeds() {
     let mut core = create_fk_runtime();
 
     let (project_id, _) = core
-        .insert(
-            "projects",
-            vec![Value::Text("Acme".into()), Value::Text("alice".into())],
-            None,
-        )
+        .insert("projects", project_insert_values("Acme", "alice"), None)
         .unwrap();
 
     let (todo_id, _) = core
         .insert(
             "todos",
-            vec![
-                Value::Text("Buy milk".into()),
-                Value::Boolean(true),
+            todo_insert_values(
+                "Buy milk",
+                true,
                 Value::Null,
-                Value::Text("alice".into()),
+                "alice",
                 Value::Uuid(project_id),
-            ],
+            ),
             None,
         )
         .unwrap();

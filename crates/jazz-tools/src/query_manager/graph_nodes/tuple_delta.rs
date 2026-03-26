@@ -1,40 +1,77 @@
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 use crate::query_manager::types::{Tuple, TupleDelta, TupleElement};
 
+/// Borrowed tuple identity key with a precomputed hash.
+///
+/// We keep the "hash once, compare full IDs on collision" behavior from the old
+/// implementation, but we borrow the tuple instead of allocating a temporary
+/// `Vec<ObjectId>` just to key the maps in this function.
+#[derive(Clone, Copy)]
+struct HashedTupleRef<'a> {
+    tuple: &'a Tuple,
+    hash: u64,
+}
+
+impl<'a> HashedTupleRef<'a> {
+    fn new(tuple: &'a Tuple) -> Self {
+        let mut hasher = std::hash::DefaultHasher::new();
+        tuple.hash(&mut hasher);
+        Self {
+            tuple,
+            hash: hasher.finish(),
+        }
+    }
+}
+
+impl PartialEq for HashedTupleRef<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.tuple == other.tuple
+    }
+}
+
+impl Eq for HashedTupleRef<'_> {}
+
+impl Hash for HashedTupleRef<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.hash);
+    }
+}
+
 pub(crate) fn compute_tuple_delta(old_tuples: &[Tuple], new_tuples: &[Tuple]) -> TupleDelta {
     let mut delta = TupleDelta::new();
-    let old_ids: Vec<_> = old_tuples.iter().map(|t| t.ids()).collect();
-    let new_ids: Vec<_> = new_tuples.iter().map(|t| t.ids()).collect();
-    let old_pos_by_ids: HashMap<_, _> = old_ids
+    let old_hashed: Vec<_> = old_tuples.iter().map(HashedTupleRef::new).collect();
+    let new_hashed: Vec<_> = new_tuples.iter().map(HashedTupleRef::new).collect();
+    let old_pos_by_ids: HashMap<&HashedTupleRef<'_>, usize> = old_hashed
         .iter()
         .enumerate()
-        .map(|(idx, ids)| (ids.clone(), idx))
+        .map(|(idx, h)| (h, idx))
         .collect();
-    let new_pos_by_ids: HashMap<_, _> = new_ids
+    let new_pos_by_ids: HashMap<&HashedTupleRef<'_>, usize> = new_hashed
         .iter()
         .enumerate()
-        .map(|(idx, ids)| (ids.clone(), idx))
+        .map(|(idx, h)| (h, idx))
         .collect();
 
-    for (old, ids) in old_tuples.iter().zip(old_ids.iter()) {
-        if !new_pos_by_ids.contains_key(ids) {
+    for (old, h) in old_tuples.iter().zip(old_hashed.iter()) {
+        if !new_pos_by_ids.contains_key(h) {
             delta.removed.push(old.clone());
         }
     }
 
-    for (new, ids) in new_tuples.iter().zip(new_ids.iter()) {
-        if !old_pos_by_ids.contains_key(ids) {
+    for (new, h) in new_tuples.iter().zip(new_hashed.iter()) {
+        if !old_pos_by_ids.contains_key(h) {
             delta.added.push(new.clone());
         }
     }
 
-    let new_to_old_idx_mapping: Vec<_> = new_ids
+    let new_to_old_idx_mapping: Vec<_> = new_hashed
         .iter()
         .enumerate()
-        .filter_map(|(new_idx, ids)| {
+        .filter_map(|(new_idx, h)| {
             old_pos_by_ids
-                .get(ids)
+                .get(h)
                 .copied()
                 .map(|old_idx| (new_idx, old_idx))
         })
@@ -54,8 +91,8 @@ pub(crate) fn compute_tuple_delta(old_tuples: &[Tuple], new_tuples: &[Tuple]) ->
         }
     }
 
-    for (old, ids) in old_tuples.iter().zip(old_ids.iter()) {
-        if let Some(new_idx) = new_pos_by_ids.get(ids)
+    for (old, h) in old_tuples.iter().zip(old_hashed.iter()) {
+        if let Some(new_idx) = new_pos_by_ids.get(h)
             && has_tuple_content_changed(old, &new_tuples[*new_idx])
         {
             delta
@@ -156,4 +193,80 @@ fn has_tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
         ) => old_content != new_content || old_commit != new_commit,
         _ => false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commit::CommitId;
+    use crate::object::{BranchName, ObjectId};
+
+    fn id_tuple(ids: &[ObjectId]) -> Tuple {
+        Tuple::new(ids.iter().copied().map(TupleElement::Id).collect())
+    }
+
+    fn row_tuple(id: ObjectId, content: &[u8], commit_byte: u8) -> Tuple {
+        Tuple::new(vec![TupleElement::Row {
+            id,
+            content: content.to_vec(),
+            commit_id: CommitId([commit_byte; 32]),
+        }])
+    }
+
+    #[test]
+    fn compute_tuple_delta_reports_moves_from_id_order_only() {
+        let a = ObjectId::new();
+        let b = ObjectId::new();
+        let c = ObjectId::new();
+        let d = ObjectId::new();
+
+        let old = vec![
+            id_tuple(&[a]),
+            id_tuple(&[b]),
+            id_tuple(&[c]),
+            id_tuple(&[d]),
+        ];
+        let new = vec![
+            id_tuple(&[b]),
+            id_tuple(&[c]),
+            id_tuple(&[a]),
+            id_tuple(&[d]),
+        ];
+
+        let delta = compute_tuple_delta(&old, &new);
+
+        assert!(delta.added.is_empty());
+        assert!(delta.removed.is_empty());
+        assert!(delta.updated.is_empty());
+        assert_eq!(delta.moved, vec![id_tuple(&[a])]);
+    }
+
+    #[test]
+    fn compute_tuple_delta_reports_updates_for_same_ids() {
+        let id = ObjectId::new();
+        let old = vec![row_tuple(id, b"old", 1)];
+        let new = vec![row_tuple(id, b"new", 2)];
+
+        let delta = compute_tuple_delta(&old, &new);
+
+        assert!(delta.added.is_empty());
+        assert!(delta.removed.is_empty());
+        assert!(delta.moved.is_empty());
+        assert_eq!(delta.updated, vec![(old[0].clone(), new[0].clone())]);
+    }
+
+    #[test]
+    fn compute_tuple_delta_reports_provenance_only_updates() {
+        let id = ObjectId::new();
+        let branch = BranchName::new("main");
+        let old = vec![id_tuple(&[id])];
+        let new = vec![id_tuple(&[id]).with_provenance([(id, branch)].into_iter().collect())];
+
+        let delta = compute_tuple_delta(&old, &new);
+
+        assert!(delta.added.is_empty());
+        assert!(delta.removed.is_empty());
+        assert!(delta.moved.is_empty());
+        assert_eq!(delta.updated, vec![(old[0].clone(), new[0].clone())]);
+    }
 }

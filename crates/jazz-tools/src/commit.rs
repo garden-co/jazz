@@ -8,7 +8,7 @@ use crate::object::ObjectId;
 use crate::sync_manager::DurabilityTier;
 
 /// BLAKE3 hash identifying a commit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CommitId(pub [u8; 32]);
 
 /// Persistence acknowledgment state (runtime only, not serialized).

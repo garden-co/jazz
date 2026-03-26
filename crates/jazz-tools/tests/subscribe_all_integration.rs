@@ -2,17 +2,21 @@
 
 mod support;
 
+use std::collections::HashMap;
 use std::time::Duration;
 
+use jazz_tools::query_manager::encoding::decode_row;
+use jazz_tools::query_manager::types::RowDescriptor;
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
-    ColumnType, JazzClient, ObjectId, Query, QueryBuilder, Schema, SchemaBuilder, TableSchema,
-    Value,
+    AppContext, AppId, ClientStorage, ColumnType, JazzClient, ObjectId, OrderedRowDelta, Query,
+    QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
 };
 use support::{
     TestingClient, collect_stream_deltas, has_added, has_any_change, has_removed, has_updated,
-    wait_for_rows, wait_for_subscription_update,
+    wait_for_query, wait_for_rows, wait_for_subscription_update,
 };
+use tempfile::TempDir;
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
@@ -117,28 +121,40 @@ struct TodoSeed {
 }
 
 impl TodoSeed {
-    fn values(self) -> Vec<Value> {
-        vec![
-            Value::Text(self.title.to_string()),
-            Value::Boolean(self.done),
-            self.priority.map(Value::Integer).unwrap_or(Value::Null),
-            Value::Null,
-            Value::Array(
-                self.tags
-                    .iter()
-                    .map(|tag| Value::Text((*tag).to_string()))
-                    .collect(),
+    fn values(self) -> HashMap<String, Value> {
+        HashMap::from([
+            ("title".to_string(), Value::Text(self.title.to_string())),
+            ("done".to_string(), Value::Boolean(self.done)),
+            (
+                "priority".to_string(),
+                self.priority.map(Value::Integer).unwrap_or(Value::Null),
             ),
-            self.payload
-                .map(|bytes| Value::Bytea(bytes.to_vec()))
-                .unwrap_or(Value::Null),
-        ]
+            ("owner_id".to_string(), Value::Null),
+            (
+                "tags".to_string(),
+                Value::Array(
+                    self.tags
+                        .iter()
+                        .map(|tag| Value::Text((*tag).to_string()))
+                        .collect(),
+                ),
+            ),
+            (
+                "payload".to_string(),
+                self.payload
+                    .map(|bytes| Value::Bytea(bytes.to_vec()))
+                    .unwrap_or(Value::Null),
+            ),
+        ])
     }
 }
 
 async fn create_org(client: &JazzClient, name: &str) -> ObjectId {
     client
-        .create("orgs", vec![Value::Text(name.to_string())])
+        .create(
+            "orgs",
+            HashMap::from([("name".to_string(), Value::Text(name.to_string()))]),
+        )
         .await
         .expect("create org")
         .0
@@ -153,11 +169,17 @@ async fn create_team(
     client
         .create(
             "teams",
-            vec![
-                Value::Text(name.to_string()),
-                org_id.map(Value::Uuid).unwrap_or(Value::Null),
-                parent_id.map(Value::Uuid).unwrap_or(Value::Null),
-            ],
+            HashMap::from([
+                ("name".to_string(), Value::Text(name.to_string())),
+                (
+                    "org_id".to_string(),
+                    org_id.map(Value::Uuid).unwrap_or(Value::Null),
+                ),
+                (
+                    "parent_id".to_string(),
+                    parent_id.map(Value::Uuid).unwrap_or(Value::Null),
+                ),
+            ]),
         )
         .await
         .expect("create team")
@@ -168,10 +190,13 @@ async fn create_user(client: &JazzClient, name: &str, team_id: Option<ObjectId>)
     client
         .create(
             "users",
-            vec![
-                Value::Text(name.to_string()),
-                team_id.map(Value::Uuid).unwrap_or(Value::Null),
-            ],
+            HashMap::from([
+                ("name".to_string(), Value::Text(name.to_string())),
+                (
+                    "team_id".to_string(),
+                    team_id.map(Value::Uuid).unwrap_or(Value::Null),
+                ),
+            ]),
         )
         .await
         .expect("create user")
@@ -186,7 +211,10 @@ async fn create_team_edge(
     client
         .create(
             "team_edges",
-            vec![Value::Uuid(child_team), Value::Uuid(parent_team)],
+            HashMap::from([
+                ("child_team".to_string(), Value::Uuid(child_team)),
+                ("parent_team".to_string(), Value::Uuid(parent_team)),
+            ]),
         )
         .await
         .expect("create team edge")
@@ -203,7 +231,10 @@ async fn create_todo(client: &JazzClient, seed: TodoSeed) -> ObjectId {
 
 async fn create_file_part(client: &JazzClient, label: &str) -> ObjectId {
     client
-        .create("file_parts", vec![Value::Text(label.to_string())])
+        .create(
+            "file_parts",
+            HashMap::from([("label".to_string(), Value::Text(label.to_string()))]),
+        )
         .await
         .expect("create file part")
         .0
@@ -213,14 +244,109 @@ async fn create_file(client: &JazzClient, name: &str, parts: &[ObjectId]) -> Obj
     client
         .create(
             "files",
-            vec![
-                Value::Text(name.to_string()),
-                Value::Array(parts.iter().copied().map(Value::Uuid).collect()),
-            ],
+            HashMap::from([
+                ("name".to_string(), Value::Text(name.to_string())),
+                (
+                    "parts".to_string(),
+                    Value::Array(parts.iter().copied().map(Value::Uuid).collect()),
+                ),
+            ]),
         )
         .await
         .expect("create file")
         .0
+}
+
+fn todo_descriptor(schema: &Schema) -> RowDescriptor {
+    schema
+        .get(&"todos".into())
+        .expect("todos table should exist in runtime schema")
+        .columns
+        .clone()
+}
+
+fn last_updated_todo_title(
+    log: &[OrderedRowDelta],
+    descriptor: &RowDescriptor,
+    todo_id: ObjectId,
+) -> Option<String> {
+    let title_index = descriptor.column_index("title")?;
+
+    log.iter().rev().find_map(|delta| {
+        delta.updated.iter().rev().find_map(|change| {
+            if change.id != todo_id {
+                return None;
+            }
+
+            let row = change.row.as_ref()?;
+            let values = decode_row(descriptor, &row.data).ok()?;
+            match values.get(title_index) {
+                Some(Value::Text(title)) => Some(title.clone()),
+                _ => None,
+            }
+        })
+    })
+}
+
+fn last_row_bearing_todo_title(
+    log: &[OrderedRowDelta],
+    descriptor: &RowDescriptor,
+    todo_id: ObjectId,
+) -> Option<String> {
+    let title_index = descriptor.column_index("title")?;
+
+    log.iter().rev().find_map(|delta| {
+        delta
+            .updated
+            .iter()
+            .rev()
+            .find_map(|change| {
+                if change.id != todo_id {
+                    return None;
+                }
+
+                let row = change.row.as_ref()?;
+                let values = decode_row(descriptor, &row.data).ok()?;
+                match values.get(title_index) {
+                    Some(Value::Text(title)) => Some(title.clone()),
+                    _ => None,
+                }
+            })
+            .or_else(|| {
+                delta.added.iter().rev().find_map(|change| {
+                    if change.id != todo_id {
+                        return None;
+                    }
+
+                    let values = decode_row(descriptor, &change.row.data).ok()?;
+                    match values.get(title_index) {
+                        Some(Value::Text(title)) => Some(title.clone()),
+                        _ => None,
+                    }
+                })
+            })
+    })
+}
+
+async fn start_local_client(schema: Schema) -> (TempDir, JazzClient) {
+    let temp_dir = TempDir::new().expect("create local client temp dir");
+    let context = AppContext {
+        app_id: AppId::from_name("subscribe-all-local-overflow"),
+        client_id: None,
+        schema,
+        server_url: String::new(),
+        data_dir: temp_dir.path().to_path_buf(),
+        storage: ClientStorage::Memory,
+        jwt_token: None,
+        backend_secret: None,
+        admin_secret: None,
+    };
+
+    let client = JazzClient::connect(context)
+        .await
+        .expect("connect local test client");
+
+    (temp_dir, client)
 }
 
 /// Verifies that a subscription emits add, update, and remove deltas as a row
@@ -316,6 +442,139 @@ async fn subscribe_all_emits_add_update_remove_and_tracks_current_results() {
     assert!(
         !rows.iter().any(|(id, _)| *id == todo_id),
         "latest query results should no longer include the removed todo"
+    );
+
+    pair.shutdown().await;
+}
+
+/// Verifies that rapid overwrites on a single subscribed row still leave the
+/// subscriber with a last delta that carries the final value.
+///
+/// Alice creates one todo and Bob subscribes before the hot update burst. Alice
+/// then overwrites `title` 500 times in a tight loop. Intermediate deltas may
+/// be coalesced, but once the subscriber's EdgeServer query returns the final
+/// title, the last row-bearing update delta in Bob's stream must decode to that
+/// same final title.
+///
+/// TODO:
+/// Keep this test ignored until the client preserves "latest write wins" during
+/// a burst of updates. The assertion is fine; the remaining burst-load bug is
+/// in the writer's outbound sync path:
+///
+/// 1. Outgoing updates are sent in separate spawned tasks, so a fast sequence of
+///    writes can reach the server in a different order than the writer produced
+///    them.
+///
+/// The subscriber-side drop case is avoided by using an unbounded local stream,
+/// but that still does not fix out-of-order delivery to the server.
+///
+/// ```text
+/// intended
+/// --------
+/// Alice writes:  title-001 -> title-002 -> ... -> title-500
+/// Server state:  title-001 -> title-002 -> ... -> title-500
+/// Bob stream:    add ...... update ...... last row-bearing delta = title-500
+///
+/// current failure modes
+/// ---------------------
+/// send tasks can race:
+/// Alice writes:  title-001 -> title-002 -> title-003
+/// Server sees:   title-002 -> title-001 -> title-003
+///
+/// result:
+/// Bob snapshot query    = title-500
+/// Bob last stream delta != title-500
+/// ```
+#[tokio::test]
+#[ignore = "TODO: fix the sync reliability gaps specs/todo/a_mvp/sync_protocol_reliability_gaps.md"]
+async fn subscription_reflects_final_state_after_rapid_bulk_updates() {
+    const RAPID_UPDATES: usize = 500;
+
+    let pair = ClientPair::start().await;
+    let query = QueryBuilder::new("todos").build();
+    let runtime_schema = pair
+        .subscriber
+        .schema()
+        .await
+        .expect("load subscriber runtime schema");
+    let descriptor = todo_descriptor(&runtime_schema);
+
+    let todo_id = create_todo(
+        &pair.writer,
+        TodoSeed {
+            title: "bulk-000",
+            done: false,
+            priority: Some(1),
+            tags: &["burst"],
+            payload: None,
+        },
+    )
+    .await;
+
+    let mut stream = pair
+        .subscriber
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe to bulk-updated todo");
+    let mut log = Vec::new();
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "initial add before rapid updates",
+        |log| has_added(log, todo_id),
+    )
+    .await;
+    log.clear();
+
+    let final_title = format!("bulk-{RAPID_UPDATES:03}");
+    for revision in 1..=RAPID_UPDATES {
+        pair.writer
+            .update(
+                todo_id,
+                vec![(
+                    "title".to_string(),
+                    Value::Text(format!("bulk-{revision:03}")),
+                )],
+            )
+            .await
+            .expect("apply rapid bulk update");
+    }
+
+    let rows = wait_for_rows(
+        &pair.subscriber,
+        query.clone(),
+        format!("subscriber sees final bulk title {final_title}"),
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == todo_id
+                && rows[0].1.first() == Some(&Value::Text(final_title.clone())))
+            .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1[0], Value::Text(final_title.clone()));
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "final row-bearing bulk update delta",
+        |log| {
+            last_updated_todo_title(log, &descriptor, todo_id).as_deref()
+                == Some(final_title.as_str())
+        },
+    )
+    .await;
+    collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
+
+    let latest_delta_title = last_updated_todo_title(&log, &descriptor, todo_id);
+    assert_eq!(
+        latest_delta_title.as_deref(),
+        Some(final_title.as_str()),
+        "last row-bearing update delta should decode to the final rapid-update title"
     );
 
     pair.shutdown().await;
@@ -547,6 +806,103 @@ async fn subscribe_all_supports_condition_filters() {
 
     writer.shutdown().await.expect("shutdown condition writer");
     server.shutdown().await;
+}
+
+/// Verifies that a rapid burst of local updates still leaves the subscription
+/// stream carrying the final row state.
+///
+/// This test uses a single local client so it isolates the subscription
+/// delivery path from server sync ordering.
+#[tokio::test]
+async fn local_subscription_preserves_final_state_under_rapid_updates() {
+    const RAPID_UPDATES: usize = 100;
+
+    let (_temp_dir, client) = start_local_client(subscription_schema()).await;
+    let query = QueryBuilder::new("todos").build();
+    let runtime_schema = client.schema().await.expect("load local runtime schema");
+    let descriptor = todo_descriptor(&runtime_schema);
+
+    let mut stream = client
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe to local todos");
+    let mut log = Vec::new();
+
+    let todo_id = create_todo(
+        &client,
+        TodoSeed {
+            title: "local-bulk-000",
+            done: false,
+            priority: Some(1),
+            tags: &["burst"],
+            payload: None,
+        },
+    )
+    .await;
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "initial local add before rapid updates",
+        |log| has_added(log, todo_id),
+    )
+    .await;
+    log.clear();
+
+    let final_title = format!("local-bulk-{RAPID_UPDATES:03}");
+    for revision in 1..=RAPID_UPDATES {
+        client
+            .update(
+                todo_id,
+                vec![(
+                    "title".to_string(),
+                    Value::Text(format!("local-bulk-{revision:03}")),
+                )],
+            )
+            .await
+            .expect("apply rapid local update");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    let rows = wait_for_query(
+        &client,
+        query.clone(),
+        None,
+        QUERY_TIMEOUT,
+        format!("local client sees final bulk title {final_title}"),
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == todo_id
+                && rows[0].1.first() == Some(&Value::Text(final_title.clone())))
+            .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1[0], Value::Text(final_title.clone()));
+
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        QUERY_TIMEOUT,
+        "local stream carries the final row-bearing delta after rapid updates",
+        |log| {
+            last_row_bearing_todo_title(log, &descriptor, todo_id).as_deref()
+                == Some(final_title.as_str())
+        },
+    )
+    .await;
+    collect_stream_deltas(&mut stream, &mut log, NO_DELTA_WINDOW).await;
+
+    let latest_delta_title = last_row_bearing_todo_title(&log, &descriptor, todo_id);
+    assert_eq!(
+        latest_delta_title.as_deref(),
+        Some(final_title.as_str()),
+        "last row-bearing local delta should converge to the final title after rapid updates"
+    );
+
+    client.shutdown().await.expect("shutdown local client");
 }
 
 /// Verifies that a `Bytea` column value, including interior zero bytes, survives

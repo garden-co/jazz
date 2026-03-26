@@ -1,6 +1,8 @@
 //! Documentation snippet sources compiled with the example crate.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
+
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use jazz_tools::query_manager::policy::{Operation, PolicyExpr};
 use jazz_tools::query_manager::types::TablePolicies;
@@ -12,6 +14,14 @@ use serde_json::json;
 fn verify_jwt_and_extract_claims(_token: &str) -> (String, serde_json::Value) {
     // Replace with your auth provider's JWT verification logic.
     ("replace-with-verified-sub".to_string(), json!({}))
+}
+
+fn todo_values(title: impl Into<String>, description: impl Into<String>) -> HashMap<String, Value> {
+    HashMap::from([
+        ("title".to_string(), Value::Text(title.into())),
+        ("done".to_string(), Value::Boolean(false)),
+        ("description".to_string(), Value::Text(description.into())),
+    ])
 }
 
 // #region backend-request-session-rust
@@ -178,13 +188,7 @@ pub async fn read_todos_with_related_rows(client: &JazzClient) -> jazz_tools::Re
 
 // #region writing-crud-rust
 pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz_tools::Result<()> {
-    let values = vec![
-        Value::Text("Write docs".to_string()),
-        Value::Boolean(false),
-        Value::Text(String::new()),
-        Value::Null,
-        Value::Null,
-    ];
+    let values = todo_values("Write docs", "");
 
     let _new_row = client.create("todos", values).await?;
     client
@@ -205,13 +209,7 @@ pub async fn write_todo_with_default_durability(
     let (id, _row_values) = client
         .create(
             "todos",
-            vec![
-                Value::Text("Write docs with default durability behavior".to_string()),
-                Value::Boolean(false),
-                Value::Text(String::new()),
-                Value::Null,
-                Value::Null,
-            ],
+            todo_values("Write docs with default durability behavior", ""),
         )
         .await?;
 

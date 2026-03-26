@@ -560,6 +560,34 @@ describe("translateQuery", () => {
       });
     });
 
+    it("translates isNull=false condition to IsNotNull", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "priority", op: "isNull", value: false }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "IsNotNull",
+        column: { scope: "todos", column: "priority" },
+      });
+    });
+
+    it("rejects non-boolean values for isNull condition", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "priority", op: "isNull", value: "false" }],
+        includes: {},
+        orderBy: [],
+      });
+
+      expect(() => translateQuery(builderJson, basicSchema)).toThrow(
+        '"isNull" operator requires a boolean value.',
+      );
+    });
+
     it("translates multiple conditions", () => {
       const builderJson = JSON.stringify({
         table: "todos",

@@ -4,6 +4,7 @@ import { schemaToWasm } from "./schema-reader.js";
 import { generateTypes } from "./type-generator.js";
 import { generateClient, analyzeRelations } from "./index.js";
 import type { WasmSchema } from "../drivers/types.js";
+import type { Schema as DslSchema } from "../schema.js";
 import { z } from "zod/v4";
 
 describe("schemaToWasm", () => {
@@ -234,6 +235,46 @@ describe("schemaToWasm", () => {
     expect(wasm.todos!.columns).toHaveLength(2);
   });
 
+  it("serializes schema defaults when present on columns", () => {
+    const schema = {
+      tables: [
+        {
+          name: "todos",
+          columns: [
+            {
+              name: "done",
+              sqlType: "BOOLEAN",
+              nullable: false,
+              default: false,
+            },
+            {
+              name: "priority",
+              sqlType: "INTEGER",
+              nullable: true,
+              default: null,
+            },
+          ],
+        },
+      ],
+    } as unknown as DslSchema;
+    const wasm = schemaToWasm(schema);
+
+    expect(wasm.todos!.columns).toEqual([
+      {
+        name: "done",
+        column_type: { type: "Boolean" },
+        nullable: false,
+        default: { type: "Boolean", value: false },
+      },
+      {
+        name: "priority",
+        column_type: { type: "Integer" },
+        nullable: true,
+        default: { type: "Null" },
+      },
+    ]);
+  });
+
   it("carries table permissions into wasm schema", () => {
     table("todos", { ownerId: col.string(), title: col.string() });
     const schema = getCollectedSchema();
@@ -415,7 +456,7 @@ describe("generateTypes", () => {
     expect(initMatch![1]).not.toContain("id:");
   });
 
-  it("handles nullable columns with ?", () => {
+  it("makes nullable columns optional in Init without changing row interfaces", () => {
     table("todos", {
       title: col.string(),
       description: col.string().optional(),
@@ -424,8 +465,38 @@ describe("generateTypes", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("  title: string;");
-    expect(output).toContain("  description?: string;");
+    const rowMatch = output.match(/export interface Todo \{([^}]+)\}/);
+    expect(rowMatch).toBeTruthy();
+    expect(rowMatch![1]).toContain("title: string;");
+    expect(rowMatch![1]).toContain("description?: string;");
+
+    const initMatch = output.match(/export interface TodoInit \{([^}]+)\}/);
+    expect(initMatch).toBeTruthy();
+    expect(initMatch![1]).toContain("title: string;");
+    expect(initMatch![1]).toContain("description?: string | null;");
+  });
+
+  it("makes defaulted columns optional in Init without changing row interfaces", () => {
+    table("todos", {
+      title: col.string(),
+      done: col.boolean().default(false),
+      archivedAt: col.timestamp().optional().default(null),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    const rowMatch = output.match(/export interface Todo \{([^}]+)\}/);
+    expect(rowMatch).toBeTruthy();
+    expect(rowMatch![1]).toContain("title: string;");
+    expect(rowMatch![1]).toContain("done: boolean;");
+    expect(rowMatch![1]).toContain("archivedAt?: Date;");
+
+    const initMatch = output.match(/export interface TodoInit \{([^}]+)\}/);
+    expect(initMatch).toBeTruthy();
+    expect(initMatch![1]).toContain("title: string;");
+    expect(initMatch![1]).toContain("done?: boolean;");
+    expect(initMatch![1]).toContain("archivedAt?: Date | null;");
   });
 
   it("converts snake_case to PascalCase", () => {
@@ -568,6 +639,19 @@ describe("generateTypes", () => {
     expect(output).toContain("export const wasmSchema: WasmSchema = {");
     expect(output).toContain('"todos"');
     expect(output).toContain('"columns"');
+  });
+
+  it("serializes Bytea defaults as Uint8Array literals in wasmSchema", () => {
+    table("files", {
+      data: col.bytes().default(new Uint8Array([0, 1, 255])),
+    });
+    const schema = getCollectedSchema();
+    const wasm = schemaToWasm(schema);
+    const output = generateTypes(wasm);
+
+    expect(output).toContain('"default": {');
+    expect(output).toContain('"type": "Bytea"');
+    expect(output).toContain("new Uint8Array([0, 1, 255])");
   });
 
   it("imports WasmSchema and QueryBuilder from jazz-tools", () => {

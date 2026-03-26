@@ -1,6 +1,7 @@
 .container {
+  position: relative;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: 10px;
   height: 100%;
   min-height: 0;
@@ -50,10 +51,44 @@
 }
 
 .gridFrame {
+  display: block;
+  flex: 1 1 auto;
   min-height: 0;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
   border: 1px solid #2f3a4b;
   border-radius: 8px;
+}
+
+.contentArea {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid #2f3a4b;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.contentArea .gridFrame {
+  border: 0;
+  border-radius: 0;
+}
+
+.sidebarOverlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 7;
+  background: rgba(7, 12, 20, 0.22);
+}
+
+.sidebarPanel {
+  margin-left: auto;
+  width: fit-content;
+  height: 100%;
+  box-shadow: -18px 0 28px rgba(6, 12, 20, 0.5);
 }
 
 .table {
@@ -67,7 +102,8 @@
 .table thead th {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 3;
+  background: #1b2433;
 }
 
 .headerCell {
@@ -99,6 +135,61 @@
 
 .table tbody tr:hover td {
   background: #1c2534;
+}
+
+.actionsHeader {
+  composes: headerCell;
+  position: sticky;
+  right: 0;
+  z-index: 4;
+  min-width: 106px;
+}
+
+.actionsCell {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  min-width: 106px;
+  border-bottom: 1px solid #293445;
+  padding: 8px 10px;
+  background: #151a24;
+}
+
+.table tbody tr:hover .actionsCell {
+  background: #1c2534;
+}
+
+.actionButton {
+  border: 1px solid #3f5067;
+  background: #273245;
+  color: #d7e1f1;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.actionButton:hover {
+  background: #30415a;
+}
+
+.rowActions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.dangerActionButton {
+  border: 1px solid #6a3c49;
+  background: #4a2530;
+  color: #f1d6dc;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.dangerActionButton:hover {
+  background: #5a2c3a;
 }
 
 .footer {
