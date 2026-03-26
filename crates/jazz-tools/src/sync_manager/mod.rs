@@ -198,7 +198,7 @@ impl SyncManager {
         self.queue_catalogue_sync_to_client(client_id);
     }
 
-    /// Remove a client connection.
+    /// Remove a client connection and all associated state.
     pub fn remove_client(&mut self, client_id: ClientId) {
         self.clients.remove(&client_id);
         // Clean up interest map
@@ -211,6 +211,16 @@ impl SyncManager {
             clients.remove(&client_id);
             !clients.is_empty()
         });
+        // Clean up pending queues
+        self.pending_permission_checks
+            .retain(|c| c.client_id != client_id);
+        self.pending_query_subscriptions
+            .retain(|s| s.client_id != client_id);
+        self.pending_query_unsubscriptions
+            .retain(|u| u.client_id != client_id);
+        // Drop queued outbox messages destined for this client
+        self.outbox
+            .retain(|e| e.destination != Destination::Client(client_id));
     }
 
     /// Get server state.

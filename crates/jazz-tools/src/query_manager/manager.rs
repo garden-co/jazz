@@ -632,10 +632,12 @@ impl QueryManager {
         &mut self.sync_manager
     }
 
-    /// Remove a client and all its server-side query subscriptions.
+    /// Remove a client and all its server-side state (subscriptions, in-flight policy checks).
     pub fn remove_client(&mut self, client_id: ClientId) {
         self.server_subscriptions
             .retain(|&(cid, _), _| cid != client_id);
+        self.active_policy_checks
+            .retain(|_, state| state.pending_check.client_id != client_id);
         self.sync_manager.remove_client(client_id);
     }
 

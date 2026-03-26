@@ -2670,3 +2670,185 @@ fn query_subscription_demo_client_no_server_session_no_payload_session() {
         "anonymous client should produce session: None"
     );
 }
+
+// ========================================================================
+// Client disconnect cleanup tests
+// ========================================================================
+
+#[test]
+fn remove_client_cleans_pending_permission_checks() {
+    //
+    // alice ──write──▶ server (pending policy check)
+    // bob   ──write──▶ server (pending policy check)
+    //
+    // alice disconnects → only bob's check remains.
+    //
+    let mut sm = SyncManager::new();
+
+    let alice = ClientId::new();
+    let bob = ClientId::new();
+    sm.add_client(alice);
+    sm.add_client(bob);
+
+    let obj_id = ObjectId::new();
+    // Manually push pending permission checks
+    sm.pending_permission_checks.push(PendingPermissionCheck {
+        id: PendingUpdateId(1),
+        client_id: alice,
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: BranchName::new("main"),
+            commits: vec![],
+        },
+        session: crate::query_manager::session::Session {
+            user_id: "alice".into(),
+            claims: serde_json::Value::Null,
+        },
+        schema_wait_started_at: None,
+        metadata: Default::default(),
+        old_content: None,
+        new_content: None,
+        operation: Operation::Insert,
+    });
+    sm.pending_permission_checks.push(PendingPermissionCheck {
+        id: PendingUpdateId(2),
+        client_id: bob,
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: BranchName::new("main"),
+            commits: vec![],
+        },
+        session: crate::query_manager::session::Session {
+            user_id: "bob".into(),
+            claims: serde_json::Value::Null,
+        },
+        schema_wait_started_at: None,
+        metadata: Default::default(),
+        old_content: None,
+        new_content: None,
+        operation: Operation::Insert,
+    });
+
+    sm.remove_client(alice);
+
+    assert_eq!(sm.pending_permission_checks.len(), 1);
+    assert_eq!(sm.pending_permission_checks[0].client_id, bob);
+}
+
+#[test]
+fn remove_client_cleans_pending_query_subscriptions() {
+    //
+    // alice ──subscribe──▶ server (pending, not yet built)
+    // bob   ──subscribe──▶ server (pending, not yet built)
+    //
+    // alice disconnects → only bob's pending sub remains.
+    //
+    let mut sm = SyncManager::new();
+
+    let alice = ClientId::new();
+    let bob = ClientId::new();
+    sm.add_client(alice);
+    sm.add_client(bob);
+
+    let query = crate::query_manager::query::QueryBuilder::new("users").build();
+    sm.pending_query_subscriptions
+        .push(PendingQuerySubscription {
+            client_id: alice,
+            query_id: QueryId(1),
+            query: query.clone(),
+            session: None,
+            propagation: QueryPropagation::Full,
+        });
+    sm.pending_query_subscriptions
+        .push(PendingQuerySubscription {
+            client_id: bob,
+            query_id: QueryId(1),
+            query,
+            session: None,
+            propagation: QueryPropagation::Full,
+        });
+
+    sm.remove_client(alice);
+
+    assert_eq!(sm.pending_query_subscriptions.len(), 1);
+    assert_eq!(sm.pending_query_subscriptions[0].client_id, bob);
+}
+
+#[test]
+fn remove_client_cleans_pending_query_unsubscriptions() {
+    //
+    // alice ──unsubscribe──▶ server (pending cleanup)
+    // bob   ──unsubscribe──▶ server (pending cleanup)
+    //
+    // alice disconnects → only bob's pending unsub remains.
+    //
+    let mut sm = SyncManager::new();
+
+    let alice = ClientId::new();
+    let bob = ClientId::new();
+    sm.add_client(alice);
+    sm.add_client(bob);
+
+    sm.pending_query_unsubscriptions
+        .push(PendingQueryUnsubscription {
+            client_id: alice,
+            query_id: QueryId(1),
+        });
+    sm.pending_query_unsubscriptions
+        .push(PendingQueryUnsubscription {
+            client_id: bob,
+            query_id: QueryId(2),
+        });
+
+    sm.remove_client(alice);
+
+    assert_eq!(sm.pending_query_unsubscriptions.len(), 1);
+    assert_eq!(sm.pending_query_unsubscriptions[0].client_id, bob);
+}
+
+#[test]
+fn remove_client_cleans_outbox_entries() {
+    //
+    // server has queued messages for alice and bob.
+    // alice disconnects → only bob's messages remain.
+    //
+    let mut sm = SyncManager::new();
+
+    let alice = ClientId::new();
+    let bob = ClientId::new();
+    sm.add_client(alice);
+    sm.add_client(bob);
+
+    let obj_id = ObjectId::new();
+    let payload = SyncPayload::ObjectUpdated {
+        object_id: obj_id,
+        metadata: None,
+        branch_name: BranchName::new("main"),
+        commits: vec![],
+    };
+
+    sm.outbox.push(OutboxEntry {
+        destination: Destination::Client(alice),
+        payload: payload.clone(),
+    });
+    sm.outbox.push(OutboxEntry {
+        destination: Destination::Client(bob),
+        payload: payload.clone(),
+    });
+    // Server-destined messages should not be affected
+    let server_id = ServerId::new();
+    sm.outbox.push(OutboxEntry {
+        destination: Destination::Server(server_id),
+        payload,
+    });
+
+    sm.remove_client(alice);
+
+    assert_eq!(sm.outbox.len(), 2);
+    assert!(sm.outbox.iter().all(|e| match &e.destination {
+        Destination::Client(id) => *id != alice,
+        Destination::Server(_) => true,
+    }));
+}

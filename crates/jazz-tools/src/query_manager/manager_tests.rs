@@ -9545,3 +9545,109 @@ fn remove_client_preserves_other_clients_subscriptions() {
     );
     assert!(server_qm.sync_manager().get_client(bob).is_some());
 }
+
+#[test]
+fn remove_client_cleans_active_policy_checks() {
+    //
+    // alice ──write──▶ server (policy check in-flight)
+    // bob   ──write──▶ server (policy check in-flight)
+    //
+    // alice disconnects → only bob's policy check remains.
+    //
+    use crate::query_manager::policy::Operation;
+    use crate::sync_manager::{
+        ClientId, Destination, PendingPermissionCheck, PendingUpdateId, SyncPayload,
+    };
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, _storage) = create_query_manager(sync_manager, schema);
+
+    let alice = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let bob = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_client(alice);
+    server_qm.sync_manager_mut().add_client(bob);
+
+    let obj_id = crate::object::ObjectId::new();
+    let make_check = |id: u64, client_id: ClientId| PendingPermissionCheck {
+        id: PendingUpdateId(id),
+        client_id,
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: crate::object::BranchName::new("main"),
+            commits: vec![],
+        },
+        session: crate::query_manager::session::Session {
+            user_id: format!("{client_id}"),
+            claims: serde_json::Value::Null,
+        },
+        schema_wait_started_at: None,
+        metadata: Default::default(),
+        old_content: None,
+        new_content: None,
+        operation: Operation::Insert,
+    };
+
+    // Insert policy checks directly into the active_policy_checks map
+    use crate::query_manager::manager::PolicyCheckState;
+    server_qm.active_policy_checks.insert(
+        PendingUpdateId(1),
+        PolicyCheckState {
+            graphs: vec![],
+            table: "users".into(),
+            pending_check: make_check(1, alice),
+        },
+    );
+    server_qm.active_policy_checks.insert(
+        PendingUpdateId(2),
+        PolicyCheckState {
+            graphs: vec![],
+            table: "users".into(),
+            pending_check: make_check(2, bob),
+        },
+    );
+
+    assert_eq!(server_qm.active_policy_checks.len(), 2);
+
+    server_qm.remove_client(alice);
+
+    assert_eq!(
+        server_qm.active_policy_checks.len(),
+        1,
+        "only bob's policy check should remain"
+    );
+    assert!(
+        server_qm
+            .active_policy_checks
+            .contains_key(&PendingUpdateId(2))
+    );
+}
+
+#[test]
+fn remove_client_is_idempotent() {
+    //
+    // Calling remove_client twice should not panic or corrupt state.
+    //
+    use crate::sync_manager::ClientId;
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let alice = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_client(alice);
+
+    let query = server_qm.query("users").build();
+    push_query_subscription(&mut server_qm, alice, 1, query);
+    server_qm.process(&mut storage);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    server_qm.remove_client(alice);
+    server_qm.remove_client(alice); // second call — should be a no-op
+
+    assert!(server_qm.server_subscriptions.is_empty());
+    assert!(server_qm.sync_manager().get_client(alice).is_none());
+}
