@@ -77,7 +77,6 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     pub fn remove_client(&mut self, client_id: ClientId) {
         self.schema_manager
             .query_manager_mut()
-            .sync_manager_mut()
             .remove_client(client_id);
     }
 
