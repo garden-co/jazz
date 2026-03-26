@@ -81,7 +81,7 @@ export interface TodoInit {
   done?: boolean;
   tags?: string[];
   projectId: string;
-  ownerId?: string;
+  ownerId?: string | null;
   assigneesIds?: string[];
 }
 
@@ -96,8 +96,8 @@ export interface TableWithDefaultInit {
   string?: string;
   array?: string[];
   boolean?: boolean;
-  nullable?: string;
-  refId?: string;
+  nullable?: string | null;
+  refId?: string | null;
 }
 
 export interface UserWhereInput {

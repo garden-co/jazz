@@ -456,7 +456,7 @@ describe("generateTypes", () => {
     expect(initMatch![1]).not.toContain("id:");
   });
 
-  it("handles nullable columns with ?", () => {
+  it("makes nullable columns optional in Init without changing row interfaces", () => {
     table("todos", {
       title: col.string(),
       description: col.string().optional(),
@@ -465,8 +465,15 @@ describe("generateTypes", () => {
     const wasm = schemaToWasm(schema);
     const output = generateTypes(wasm);
 
-    expect(output).toContain("  title: string;");
-    expect(output).toContain("  description?: string;");
+    const rowMatch = output.match(/export interface Todo \{([^}]+)\}/);
+    expect(rowMatch).toBeTruthy();
+    expect(rowMatch![1]).toContain("title: string;");
+    expect(rowMatch![1]).toContain("description?: string;");
+
+    const initMatch = output.match(/export interface TodoInit \{([^}]+)\}/);
+    expect(initMatch).toBeTruthy();
+    expect(initMatch![1]).toContain("title: string;");
+    expect(initMatch![1]).toContain("description?: string | null;");
   });
 
   it("makes defaulted columns optional in Init without changing row interfaces", () => {
@@ -489,7 +496,7 @@ describe("generateTypes", () => {
     expect(initMatch).toBeTruthy();
     expect(initMatch![1]).toContain("title: string;");
     expect(initMatch![1]).toContain("done?: boolean;");
-    expect(initMatch![1]).toContain("archivedAt?: Date;");
+    expect(initMatch![1]).toContain("archivedAt?: Date | null;");
   });
 
   it("converts snake_case to PascalCase", () => {

@@ -212,6 +212,10 @@ function maybeUndefined(type: string, nullable: boolean): string {
   return nullable ? `${type} | undefined` : type;
 }
 
+function maybeNull(type: string, nullable: boolean): string {
+  return nullable ? `${type} | null` : type;
+}
+
 function relationResultType(baseType: string, rel: Relation, requiredFlag?: string): string {
   if (rel.isArray) {
     return maybeUndefined(`${baseType}[]`, rel.nullable);
@@ -475,7 +479,12 @@ export function generateTypes(schema: WasmSchema): string {
     lines.push(`export interface ${interfaceName} {`);
     for (const col of table.columns) {
       const opt = col.nullable || col.default !== undefined ? "?" : "";
-      lines.push(`  ${col.name}${opt}: ${wasmTypeToTs(col.column_type, jsonTypeBySchemaKey)};`);
+      lines.push(
+        `  ${col.name}${opt}: ${maybeNull(
+          wasmTypeToTs(col.column_type, jsonTypeBySchemaKey),
+          col.nullable,
+        )};`,
+      );
     }
     lines.push("}");
     lines.push("");
