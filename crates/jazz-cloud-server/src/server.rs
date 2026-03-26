@@ -1374,7 +1374,7 @@ impl MetaStore {
         admin_secret: Option<String>,
     ) -> Result<MetaAppRow, String> {
         let now = now_timestamp_us();
-        let mut values = Vec::with_capacity(self.apps_insert_descriptor.columns.len());
+        let mut values = HashMap::with_capacity(self.apps_insert_descriptor.columns.len());
         for column in &self.apps_insert_descriptor.columns {
             let value = match column.name.as_str() {
                 "admin_secret" => match &admin_secret {
@@ -1399,7 +1399,7 @@ impl MetaStore {
                 "updated_at" => Value::Timestamp(now),
                 other => panic!("unexpected meta apps column {other}"),
             };
-            values.push(value);
+            values.insert(column.name.to_string(), value);
         }
 
         let (object_id, _row_values) = self
@@ -1527,18 +1527,21 @@ impl MetaStore {
         principal_id: &str,
     ) -> Result<MetaExternalIdentityRow, String> {
         let now = now_timestamp_us();
-        let values: Vec<Value> = self
+        let values: HashMap<String, Value> = self
             .external_identities_insert_descriptor
             .columns
             .iter()
-            .map(|column| match column.name.as_str() {
-                "app_id" => Value::Uuid(app_id.as_object_id()),
-                "created_at" => Value::Timestamp(now),
-                "issuer" => Value::Text(issuer.to_string()),
-                "principal_id" => Value::Text(principal_id.to_string()),
-                "subject" => Value::Text(subject.to_string()),
-                "updated_at" => Value::Timestamp(now),
-                other => panic!("unexpected external identity column {other}"),
+            .map(|column| {
+                let value = match column.name.as_str() {
+                    "app_id" => Value::Uuid(app_id.as_object_id()),
+                    "created_at" => Value::Timestamp(now),
+                    "issuer" => Value::Text(issuer.to_string()),
+                    "principal_id" => Value::Text(principal_id.to_string()),
+                    "subject" => Value::Text(subject.to_string()),
+                    "updated_at" => Value::Timestamp(now),
+                    other => panic!("unexpected external identity column {other}"),
+                };
+                (column.name.to_string(), value)
             })
             .collect();
 

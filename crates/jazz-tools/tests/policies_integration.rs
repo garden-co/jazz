@@ -2,6 +2,7 @@
 
 mod support;
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz_tools::query_manager::policy::PolicyExpr;
@@ -104,7 +105,14 @@ fn in_session_array_policy_schema() -> Schema {
         .build()
 }
 
-fn document_values(owner_id: &str, title: &str) -> Vec<Value> {
+fn document_values(owner_id: &str, title: &str) -> HashMap<String, Value> {
+    HashMap::from([
+        ("owner_id".to_string(), Value::Text(owner_id.to_string())),
+        ("title".to_string(), Value::Text(title.to_string())),
+    ])
+}
+
+fn document_row_values(owner_id: &str, title: &str) -> Vec<Value> {
     vec![
         Value::Text(owner_id.to_string()),
         Value::Text(title.to_string()),
@@ -121,7 +129,10 @@ async fn create_document(client: &JazzClient, owner_id: &str, title: &str) -> Ob
 
 async fn create_org(client: &JazzClient, name: &str) -> ObjectId {
     client
-        .create("orgs", vec![Value::Text(name.to_string())])
+        .create(
+            "orgs",
+            HashMap::from([("name".to_string(), Value::Text(name.to_string()))]),
+        )
         .await
         .expect("create org")
         .0
@@ -131,7 +142,10 @@ async fn create_team(client: &JazzClient, name: &str, org_id: ObjectId) -> Objec
     client
         .create(
             "teams",
-            vec![Value::Text(name.to_string()), Value::Uuid(org_id)],
+            HashMap::from([
+                ("name".to_string(), Value::Text(name.to_string())),
+                ("org_id".to_string(), Value::Uuid(org_id)),
+            ]),
         )
         .await
         .expect("create team")
@@ -146,14 +160,24 @@ async fn create_team_membership(
     client
         .create(
             "team_memberships",
-            vec![Value::Text(owner_id.to_string()), Value::Uuid(team_id)],
+            HashMap::from([
+                ("owner_id".to_string(), Value::Text(owner_id.to_string())),
+                ("team_id".to_string(), Value::Uuid(team_id)),
+            ]),
         )
         .await
         .expect("create team membership")
         .0
 }
 
-fn team_document_values(team_id: ObjectId, title: &str) -> Vec<Value> {
+fn team_document_values(team_id: ObjectId, title: &str) -> HashMap<String, Value> {
+    HashMap::from([
+        ("team_id".to_string(), Value::Uuid(team_id)),
+        ("title".to_string(), Value::Text(title.to_string())),
+    ])
+}
+
+fn team_document_row_values(team_id: ObjectId, title: &str) -> Vec<Value> {
     vec![Value::Uuid(team_id), Value::Text(title.to_string())]
 }
 
@@ -252,13 +276,13 @@ async fn select_policies_filter_subscription_results_per_client_session() {
         (rows.len() == 1 && rows[0].0 == alice_doc).then_some(rows)
     })
     .await;
-    assert_eq!(alice_rows[0].1, document_values("alice", "Alice Only"));
+    assert_eq!(alice_rows[0].1, document_row_values("alice", "Alice Only"));
 
     let bob_rows = wait_for_rows(&bob, query, "bob visible rows", |rows| {
         (rows.len() == 1 && rows[0].0 == bob_doc).then_some(rows)
     })
     .await;
-    assert_eq!(bob_rows[0].1, document_values("bob", "Bob Only"));
+    assert_eq!(bob_rows[0].1, document_row_values("bob", "Bob Only"));
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
@@ -415,7 +439,10 @@ async fn in_session_array_policy_gates_visibility_by_membership() {
         |rows| (rows.len() == 1 && rows[0].0 == alice_doc).then_some(rows),
     )
     .await;
-    assert_eq!(alice_rows[0].1, team_document_values(team_a, "Team A only"));
+    assert_eq!(
+        alice_rows[0].1,
+        team_document_row_values(team_a, "Team A only")
+    );
     assert!(
         alice_rows.iter().all(|(id, _)| *id != bob_doc),
         "alice should not see rows for teams outside her membership claims"
@@ -430,7 +457,10 @@ async fn in_session_array_policy_gates_visibility_by_membership() {
         |rows| (rows.len() == 1 && rows[0].0 == bob_doc).then_some(rows),
     )
     .await;
-    assert_eq!(bob_rows[0].1, team_document_values(team_b, "Team B only"));
+    assert_eq!(
+        bob_rows[0].1,
+        team_document_row_values(team_b, "Team B only")
+    );
     assert!(
         bob_rows.iter().all(|(id, _)| *id != alice_doc),
         "bob should not see rows for teams outside his membership claims"
@@ -528,7 +558,7 @@ async fn insert_policies_are_enforced_by_server_for_client_sync() {
         |rows| (rows.len() == 1 && rows[0].0 == accepted_doc).then_some(rows),
     )
     .await;
-    assert_eq!(rows[0].1, document_values("alice", "allowed"));
+    assert_eq!(rows[0].1, document_row_values("alice", "allowed"));
 
     intruder.shutdown().await.expect("shutdown intruder");
     observer.shutdown().await.expect("shutdown observer");
@@ -605,7 +635,9 @@ async fn update_policies_block_unauthorized_server_mutations() {
 
     wait_for_rows(&bob, query.clone(), "bob sees readable row", |rows| {
         rows.iter()
-            .find(|(id, values)| *id == doc_id && *values == document_values("alice", "original"))
+            .find(|(id, values)| {
+                *id == doc_id && *values == document_row_values("alice", "original")
+            })
             .map(|_| ())
     })
     .await;
@@ -624,9 +656,9 @@ async fn update_policies_block_unauthorized_server_mutations() {
         .await
         .expect("EdgeServer query after unauthorized update");
     assert!(
-        rows_after_update
-            .iter()
-            .any(|(id, values)| *id == doc_id && *values == document_values("alice", "original")),
+        rows_after_update.iter().any(
+            |(id, values)| *id == doc_id && *values == document_row_values("alice", "original")
+        ),
         "unauthorized update should not be persisted at EdgeServer: rows={rows_after_update:?}"
     );
     collect_stream_deltas(&mut observer_stream, &mut observer_log, NO_DELTA_WINDOW).await;
@@ -808,7 +840,9 @@ async fn update_policy_read_clause_differs_from_write_clause() {
     // Bob can read alice's row — no SELECT restriction and using=True passes.
     wait_for_rows(&bob, query.clone(), "bob sees alice's row", |rows| {
         rows.iter()
-            .find(|(id, values)| *id == doc_id && *values == document_values("alice", "original"))
+            .find(|(id, values)| {
+                *id == doc_id && *values == document_row_values("alice", "original")
+            })
             .map(|_| ())
     })
     .await;
@@ -828,9 +862,9 @@ async fn update_policy_read_clause_differs_from_write_clause() {
         .await
         .expect("EdgeServer query after unauthorized update");
     assert!(
-        rows_after
-            .iter()
-            .any(|(id, values)| *id == doc_id && *values == document_values("alice", "original")),
+        rows_after.iter().any(
+            |(id, values)| *id == doc_id && *values == document_row_values("alice", "original")
+        ),
         "update rejected by with_check must not persist at EdgeServer: rows={rows_after:?}"
     );
     collect_stream_deltas(&mut observer_stream, &mut observer_log, NO_DELTA_WINDOW).await;
@@ -997,7 +1031,9 @@ async fn delete_policies_block_unauthorized_server_mutations() {
 
     wait_for_rows(&bob, query.clone(), "bob sees readable row", |rows| {
         rows.iter()
-            .find(|(id, values)| *id == doc_id && *values == document_values("alice", "original"))
+            .find(|(id, values)| {
+                *id == doc_id && *values == document_row_values("alice", "original")
+            })
             .map(|_| ())
     })
     .await;
@@ -1011,9 +1047,9 @@ async fn delete_policies_block_unauthorized_server_mutations() {
         .await
         .expect("EdgeServer query after unauthorized delete");
     assert!(
-        rows_after_delete
-            .iter()
-            .any(|(id, values)| *id == doc_id && *values == document_values("alice", "original")),
+        rows_after_delete.iter().any(
+            |(id, values)| *id == doc_id && *values == document_row_values("alice", "original")
+        ),
         "unauthorized delete should not be persisted at EdgeServer: rows={rows_after_delete:?}"
     );
     collect_stream_deltas(&mut observer_stream, &mut observer_log, NO_DELTA_WINDOW).await;

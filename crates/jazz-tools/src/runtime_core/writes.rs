@@ -9,13 +9,13 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     pub fn insert(
         &mut self,
         table: &str,
-        values: Vec<Value>,
+        values: HashMap<String, Value>,
         session: Option<&Session>,
     ) -> Result<InsertedRow, RuntimeError> {
         let _span = debug_span!("insert", table).entered();
         let result = self
             .schema_manager
-            .insert_with_session(&mut self.storage, table, &values, session)
+            .insert_with_session(&mut self.storage, table, values, session)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_id = result.row_id;
         let row_values = result.row_values;
@@ -68,13 +68,13 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     pub fn insert_persisted(
         &mut self,
         table: &str,
-        values: Vec<Value>,
+        values: HashMap<String, Value>,
         session: Option<&Session>,
         tier: DurabilityTier,
     ) -> Result<(InsertedRow, oneshot::Receiver<()>), RuntimeError> {
         let result = self
             .schema_manager
-            .insert_with_session(&mut self.storage, table, &values, session)
+            .insert_with_session(&mut self.storage, table, values, session)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_id = result.row_id;
         let row_commit_id = result.row_commit_id;

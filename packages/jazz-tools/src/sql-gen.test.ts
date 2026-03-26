@@ -137,6 +137,24 @@ describe("schemaToSql", () => {
     expect(sql).toContain("matrix INTEGER[][] NOT NULL");
   });
 
+  it("includes schema defaults in CREATE TABLE output", () => {
+    resetCollectedState();
+    table("todos", {
+      done: col.boolean().default(false),
+      tags: col.array(col.int()).default([1, 2, 3]),
+      payload: col.json().default({ name: "Ada" }),
+      createdAt: col.timestamp().default(new Date("2026-01-01T00:00:00.000Z")),
+    });
+    const schema = getCollectedSchema();
+
+    const sql = schemaToSql(schema);
+
+    expect(sql).toContain("done BOOLEAN DEFAULT FALSE NOT NULL");
+    expect(sql).toContain("tags INTEGER[] DEFAULT ARRAY[1, 2, 3] NOT NULL");
+    expect(sql).toContain('payload JSON DEFAULT \'{"name":"Ada"}\' NOT NULL');
+    expect(sql).toContain("createdAt TIMESTAMP DEFAULT 1767225600000 NOT NULL");
+  });
+
   it("generates UUID REFERENCES for required ref", () => {
     resetCollectedState();
     table("todos", {

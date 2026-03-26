@@ -12,6 +12,7 @@
 //! - `TokioRuntime<S>` wraps `Arc<Mutex<RuntimeCore<...>>>`
 //! - Methods grab the lock, call RuntimeCore, and return
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -219,7 +220,7 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn insert(
         &self,
         table: &str,
-        values: Vec<Value>,
+        values: HashMap<String, Value>,
         session: Option<&Session>,
     ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
@@ -523,6 +524,17 @@ mod tests {
             .build()
     }
 
+    fn user_row_values(id: ObjectId, name: &str) -> Vec<Value> {
+        vec![Value::Uuid(id), Value::Text(name.to_string())]
+    }
+
+    fn user_insert_values(id: ObjectId, name: &str) -> HashMap<String, Value> {
+        HashMap::from([
+            ("id".to_string(), Value::Uuid(id)),
+            ("name".to_string(), Value::Text(name.to_string())),
+        ])
+    }
+
     #[tokio::test]
     async fn test_runtime_insert_query() {
         let schema = test_schema();
@@ -539,13 +551,13 @@ mod tests {
         });
 
         // Insert a row
-        let values = vec![
-            Value::Uuid(ObjectId::new()),
-            Value::Text("Alice".to_string()),
-        ];
-        let (object_id, row_values) = runtime.insert("users", values.clone(), None).unwrap();
+        let user_id = ObjectId::new();
+        let expected_values = user_row_values(user_id, "Alice");
+        let (object_id, row_values) = runtime
+            .insert("users", user_insert_values(user_id, "Alice"), None)
+            .unwrap();
         assert!(!object_id.0.is_nil());
-        assert_eq!(row_values, values);
+        assert_eq!(row_values, expected_values);
 
         // Query
         let query = Query::new("users");
@@ -568,8 +580,9 @@ mod tests {
         let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new(), |_| {});
 
         // Insert
-        let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Bob".to_string())];
-        let (object_id, _row_values) = runtime.insert("users", values, None).unwrap();
+        let (object_id, _row_values) = runtime
+            .insert("users", user_insert_values(ObjectId::new(), "Bob"), None)
+            .unwrap();
 
         // Update
         let updates = vec![("name".to_string(), Value::Text("Charlie".to_string()))];
@@ -624,8 +637,9 @@ mod tests {
             .unwrap();
 
         // Insert a row - this should trigger the subscription callback
-        let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Eve".to_string())];
-        let (_object_id, _row_values) = runtime.insert("users", values, None).unwrap();
+        let (_object_id, _row_values) = runtime
+            .insert("users", user_insert_values(ObjectId::new(), "Eve"), None)
+            .unwrap();
 
         // Verify callback was invoked
         let updates_vec = updates.lock().unwrap();

@@ -1,5 +1,5 @@
 // AUTO-GENERATED FILE - DO NOT EDIT
-import type { WasmSchema, QueryBuilder } from "jazz-tools";
+import type { WasmSchema, QueryBuilder, JsonSchemaToTs } from "jazz-tools";
 export type JsonValue =
   | string
   | number
@@ -7,6 +7,21 @@ export type JsonValue =
   | null
   | { [key: string]: JsonValue }
   | JsonValue[];
+
+const __jsonSchema1 = {
+  $schema: "http://json-schema.org/draft-07/schema#",
+  type: "object",
+  properties: {
+    name: {
+      type: "string",
+    },
+    age: {
+      type: "number",
+    },
+  },
+  required: ["name"],
+} as const;
+type __JsonType1 = JsonSchemaToTs<typeof __jsonSchema1>;
 
 export type PermissionIntrospectionColumn = "$canRead" | "$canEdit" | "$canDelete";
 export interface PermissionIntrospectionColumns {
@@ -36,9 +51,25 @@ export interface Todo {
   assigneesIds: string[];
 }
 
+export interface TableWithDefault {
+  id: string;
+  integer: number;
+  float: number;
+  bytes: Uint8Array;
+  enum: "a" | "b" | "c";
+  json: __JsonType1;
+  timestampDate: Date;
+  timestampNumber: Date;
+  string: string;
+  array: string[];
+  boolean: boolean;
+  nullable?: string;
+  refId?: string;
+}
+
 export interface UserInit {
   name: string;
-  friendsIds: string[];
+  friendsIds?: string[];
 }
 
 export interface ProjectInit {
@@ -47,11 +78,26 @@ export interface ProjectInit {
 
 export interface TodoInit {
   title: string;
-  done: boolean;
-  tags: string[];
+  done?: boolean;
+  tags?: string[];
   projectId: string;
-  ownerId?: string;
-  assigneesIds: string[];
+  ownerId?: string | null;
+  assigneesIds?: string[];
+}
+
+export interface TableWithDefaultInit {
+  integer?: number;
+  float?: number;
+  bytes?: Uint8Array;
+  enum?: "a" | "b" | "c";
+  json?: __JsonType1;
+  timestampDate?: Date;
+  timestampNumber?: Date;
+  string?: string;
+  array?: string[];
+  boolean?: boolean;
+  nullable?: string | null;
+  refId?: string | null;
 }
 
 export interface UserWhereInput {
@@ -84,9 +130,53 @@ export interface TodoWhereInput {
   $canDelete?: boolean;
 }
 
+export interface TableWithDefaultWhereInput {
+  id?: string | { eq?: string; ne?: string; in?: string[] };
+  integer?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  float?:
+    | number
+    | { eq?: number; ne?: number; gt?: number; gte?: number; lt?: number; lte?: number };
+  bytes?: Uint8Array | { eq?: Uint8Array; ne?: Uint8Array };
+  enum?: "a" | "b" | "c" | { eq?: "a" | "b" | "c"; ne?: "a" | "b" | "c"; in?: ("a" | "b" | "c")[] };
+  json?: __JsonType1 | { eq?: __JsonType1; ne?: __JsonType1; in?: __JsonType1[] };
+  timestampDate?:
+    | Date
+    | number
+    | {
+        eq?: Date | number;
+        gt?: Date | number;
+        gte?: Date | number;
+        lt?: Date | number;
+        lte?: Date | number;
+      };
+  timestampNumber?:
+    | Date
+    | number
+    | {
+        eq?: Date | number;
+        gt?: Date | number;
+        gte?: Date | number;
+        lt?: Date | number;
+        lte?: Date | number;
+      };
+  string?: string | { eq?: string; ne?: string; contains?: string };
+  array?: string[] | { eq?: string[]; contains?: string };
+  boolean?: boolean;
+  nullable?: string | { eq?: string; ne?: string; contains?: string };
+  refId?: string | { eq?: string; ne?: string; isNull?: boolean };
+  $canRead?: boolean;
+  $canEdit?: boolean;
+  $canDelete?: boolean;
+}
+
 type AnyUserQueryBuilder<T = any> = { readonly _table: "users" } & QueryBuilder<T>;
 type AnyProjectQueryBuilder<T = any> = { readonly _table: "projects" } & QueryBuilder<T>;
 type AnyTodoQueryBuilder<T = any> = { readonly _table: "todos" } & QueryBuilder<T>;
+type AnyTableWithDefaultQueryBuilder<T = any> = {
+  readonly _table: "table_with_defaults";
+} & QueryBuilder<T>;
 
 export interface UserInclude {
   friends?: true | UserInclude | AnyUserQueryBuilder<any>;
@@ -103,6 +193,11 @@ export interface TodoInclude {
   project?: true | ProjectInclude | AnyProjectQueryBuilder<any>;
   owner?: true | UserInclude | AnyUserQueryBuilder<any>;
   assignees?: true | UserInclude | AnyUserQueryBuilder<any>;
+  table_with_defaultsViaRef?: true | TableWithDefaultInclude | AnyTableWithDefaultQueryBuilder<any>;
+}
+
+export interface TableWithDefaultInclude {
+  ref?: true | TodoInclude | AnyTodoQueryBuilder<any>;
 }
 
 export type UserIncludedRelations<I extends UserInclude = {}, R extends boolean = false> = {
@@ -200,7 +295,34 @@ export type TodoIncludedRelations<I extends TodoInclude = {}, R extends boolean 
                 ? UserWithIncludes<RelationInclude, false>[]
                 : never
           : never
-        : never;
+        : K extends "table_with_defaultsViaRef"
+          ? NonNullable<I["table_with_defaultsViaRef"]> extends infer RelationInclude
+            ? RelationInclude extends true
+              ? TableWithDefault[]
+              : RelationInclude extends AnyTableWithDefaultQueryBuilder<infer QueryRow>
+                ? QueryRow[]
+                : RelationInclude extends TableWithDefaultInclude
+                  ? TableWithDefaultWithIncludes<RelationInclude, false>[]
+                  : never
+            : never
+          : never;
+};
+
+export type TableWithDefaultIncludedRelations<
+  I extends TableWithDefaultInclude = {},
+  R extends boolean = false,
+> = {
+  [K in keyof I]-?: K extends "ref"
+    ? NonNullable<I["ref"]> extends infer RelationInclude
+      ? RelationInclude extends true
+        ? Todo | undefined
+        : RelationInclude extends AnyTodoQueryBuilder<infer QueryRow>
+          ? QueryRow | undefined
+          : RelationInclude extends TodoInclude
+            ? TodoWithIncludes<RelationInclude, false> | undefined
+            : never
+      : never
+    : never;
 };
 
 export interface UserRelations {
@@ -218,6 +340,11 @@ export interface TodoRelations {
   project: Project | undefined;
   owner: User | undefined;
   assignees: User[];
+  table_with_defaultsViaRef: TableWithDefault[];
+}
+
+export interface TableWithDefaultRelations {
+  ref: Todo | undefined;
 }
 
 export type UserWithIncludes<I extends UserInclude = {}, R extends boolean = false> = User &
@@ -230,6 +357,11 @@ export type ProjectWithIncludes<
 
 export type TodoWithIncludes<I extends TodoInclude = {}, R extends boolean = false> = Todo &
   TodoIncludedRelations<I, R>;
+
+export type TableWithDefaultWithIncludes<
+  I extends TableWithDefaultInclude = {},
+  R extends boolean = false,
+> = TableWithDefault & TableWithDefaultIncludedRelations<I, R>;
 
 export type UserSelectableColumn = keyof User | PermissionIntrospectionColumn | "*";
 export type UserOrderableColumn = keyof User | PermissionIntrospectionColumn;
@@ -273,6 +405,27 @@ export type TodoSelectedWithIncludes<
   R extends boolean = false,
 > = TodoSelected<S> & TodoIncludedRelations<I, R>;
 
+export type TableWithDefaultSelectableColumn =
+  | keyof TableWithDefault
+  | PermissionIntrospectionColumn
+  | "*";
+export type TableWithDefaultOrderableColumn =
+  | keyof TableWithDefault
+  | PermissionIntrospectionColumn;
+
+export type TableWithDefaultSelected<
+  S extends TableWithDefaultSelectableColumn = keyof TableWithDefault,
+> = ("*" extends S
+  ? TableWithDefault
+  : Pick<TableWithDefault, Extract<S | "id", keyof TableWithDefault>>) &
+  Pick<PermissionIntrospectionColumns, Extract<S, PermissionIntrospectionColumn>>;
+
+export type TableWithDefaultSelectedWithIncludes<
+  I extends TableWithDefaultInclude = {},
+  S extends TableWithDefaultSelectableColumn = keyof TableWithDefault,
+  R extends boolean = false,
+> = TableWithDefaultSelected<S> & TableWithDefaultIncludedRelations<I, R>;
+
 export const wasmSchema: WasmSchema = {
   users: {
     columns: [
@@ -292,6 +445,10 @@ export const wasmSchema: WasmSchema = {
           },
         },
         nullable: false,
+        default: {
+          type: "Array",
+          value: [],
+        },
         references: "users",
       },
     ],
@@ -322,6 +479,10 @@ export const wasmSchema: WasmSchema = {
           type: "Boolean",
         },
         nullable: false,
+        default: {
+          type: "Boolean",
+          value: false,
+        },
       },
       {
         name: "tags",
@@ -332,6 +493,10 @@ export const wasmSchema: WasmSchema = {
           },
         },
         nullable: false,
+        default: {
+          type: "Array",
+          value: [],
+        },
       },
       {
         name: "projectId",
@@ -358,6 +523,10 @@ export const wasmSchema: WasmSchema = {
           },
         },
         nullable: false,
+        default: {
+          type: "Array",
+          value: [],
+        },
         references: "users",
       },
     ],
@@ -404,6 +573,172 @@ export const wasmSchema: WasmSchema = {
         },
       },
     },
+  },
+  table_with_defaults: {
+    columns: [
+      {
+        name: "integer",
+        column_type: {
+          type: "Integer",
+        },
+        nullable: false,
+        default: {
+          type: "Integer",
+          value: 1,
+        },
+      },
+      {
+        name: "float",
+        column_type: {
+          type: "Double",
+        },
+        nullable: false,
+        default: {
+          type: "Double",
+          value: 1,
+        },
+      },
+      {
+        name: "bytes",
+        column_type: {
+          type: "Bytea",
+        },
+        nullable: false,
+        default: {
+          type: "Bytea",
+          value: new Uint8Array([0, 1, 255]),
+        },
+      },
+      {
+        name: "enum",
+        column_type: {
+          type: "Enum",
+          variants: ["a", "b", "c"],
+        },
+        nullable: false,
+        default: {
+          type: "Text",
+          value: "a",
+        },
+      },
+      {
+        name: "json",
+        column_type: {
+          type: "Json",
+          schema: {
+            $schema: "http://json-schema.org/draft-07/schema#",
+            type: "object",
+            properties: {
+              name: {
+                type: "string",
+              },
+              age: {
+                type: "number",
+              },
+            },
+            required: ["name"],
+          },
+        },
+        nullable: false,
+        default: {
+          type: "Text",
+          value: '{"name":"default name"}',
+        },
+      },
+      {
+        name: "timestampDate",
+        column_type: {
+          type: "Timestamp",
+        },
+        nullable: false,
+        default: {
+          type: "Timestamp",
+          value: 1767225600000,
+        },
+      },
+      {
+        name: "timestampNumber",
+        column_type: {
+          type: "Timestamp",
+        },
+        nullable: false,
+        default: {
+          type: "Timestamp",
+          value: 0,
+        },
+      },
+      {
+        name: "string",
+        column_type: {
+          type: "Text",
+        },
+        nullable: false,
+        default: {
+          type: "Text",
+          value: "default value",
+        },
+      },
+      {
+        name: "array",
+        column_type: {
+          type: "Array",
+          element: {
+            type: "Text",
+          },
+        },
+        nullable: false,
+        default: {
+          type: "Array",
+          value: [
+            {
+              type: "Text",
+              value: "a",
+            },
+            {
+              type: "Text",
+              value: "b",
+            },
+            {
+              type: "Text",
+              value: "c",
+            },
+          ],
+        },
+      },
+      {
+        name: "boolean",
+        column_type: {
+          type: "Boolean",
+        },
+        nullable: false,
+        default: {
+          type: "Boolean",
+          value: true,
+        },
+      },
+      {
+        name: "nullable",
+        column_type: {
+          type: "Text",
+        },
+        nullable: true,
+        default: {
+          type: "Null",
+        },
+      },
+      {
+        name: "refId",
+        column_type: {
+          type: "Uuid",
+        },
+        nullable: true,
+        default: {
+          type: "Uuid",
+          value: "00000000-0000-0000-0000-000000000000",
+        },
+        references: "todos",
+      },
+    ],
   },
 };
 
@@ -930,7 +1265,9 @@ export class TodoQueryBuilder<
     return clone;
   }
 
-  hopTo(relation: "project" | "owner" | "assignees"): TodoQueryBuilder<I, S, R> {
+  hopTo(
+    relation: "project" | "owner" | "assignees" | "table_with_defaultsViaRef",
+  ): TodoQueryBuilder<I, S, R> {
     const clone = this._clone();
     clone._hops.push(relation);
     return clone;
@@ -1066,10 +1403,232 @@ export class TodoQueryBuilder<
   }
 }
 
+export class TableWithDefaultQueryBuilder<
+  I extends TableWithDefaultInclude = {},
+  S extends TableWithDefaultSelectableColumn = keyof TableWithDefault,
+  R extends boolean = false,
+> implements QueryBuilder<TableWithDefaultSelectedWithIncludes<I, S, R>> {
+  readonly _table = "table_with_defaults";
+  readonly _schema: WasmSchema = wasmSchema;
+  readonly _rowType!: TableWithDefaultSelectedWithIncludes<I, S, R>;
+  readonly _initType!: TableWithDefaultInit;
+  private _conditions: Array<{ column: string; op: string; value: unknown }> = [];
+  private _includes: Partial<TableWithDefaultInclude> = {};
+  private _requireIncludes = false;
+  private _selectColumns?: string[];
+  private _orderBys: Array<[string, "asc" | "desc"]> = [];
+  private _limitVal?: number;
+  private _offsetVal?: number;
+  private _hops: string[] = [];
+  private _gatherVal?: {
+    max_depth: number;
+    step_table: string;
+    step_current_column: string;
+    step_conditions: Array<{ column: string; op: string; value: unknown }>;
+    step_hops: string[];
+  };
+
+  where(conditions: TableWithDefaultWhereInput): TableWithDefaultQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    for (const [key, value] of Object.entries(conditions)) {
+      if (value === undefined) continue;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        for (const [op, opValue] of Object.entries(value)) {
+          if (opValue !== undefined) {
+            clone._conditions.push({ column: key, op, value: opValue });
+          }
+        }
+      } else {
+        clone._conditions.push({ column: key, op: "eq", value });
+      }
+    }
+    return clone;
+  }
+
+  select<NewS extends TableWithDefaultSelectableColumn>(
+    ...columns: [NewS, ...NewS[]]
+  ): TableWithDefaultQueryBuilder<I, NewS, R> {
+    const clone = this._clone<I, NewS, R>();
+    clone._selectColumns = [...columns] as string[];
+    return clone;
+  }
+
+  include<NewI extends TableWithDefaultInclude>(
+    relations: NewI,
+  ): TableWithDefaultQueryBuilder<I & NewI, S, R> {
+    const clone = this._clone<I & NewI, S, R>();
+    clone._includes = { ...this._includes, ...relations };
+    return clone;
+  }
+
+  requireIncludes(): TableWithDefaultQueryBuilder<I, S, true> {
+    const clone = this._clone<I, S, true>();
+    clone._requireIncludes = true;
+    return clone;
+  }
+
+  orderBy(
+    column: TableWithDefaultOrderableColumn,
+    direction: "asc" | "desc" = "asc",
+  ): TableWithDefaultQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._orderBys.push([column as string, direction]);
+    return clone;
+  }
+
+  limit(n: number): TableWithDefaultQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._limitVal = n;
+    return clone;
+  }
+
+  offset(n: number): TableWithDefaultQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._offsetVal = n;
+    return clone;
+  }
+
+  hopTo(relation: "ref"): TableWithDefaultQueryBuilder<I, S, R> {
+    const clone = this._clone();
+    clone._hops.push(relation);
+    return clone;
+  }
+
+  gather(options: {
+    start: TableWithDefaultWhereInput;
+    step: (ctx: { current: string }) => QueryBuilder<unknown>;
+    maxDepth?: number;
+  }): TableWithDefaultQueryBuilder<I, S, R> {
+    if (options.start === undefined) {
+      throw new Error("gather(...) requires start where conditions.");
+    }
+    if (typeof options.step !== "function") {
+      throw new Error("gather(...) requires step callback.");
+    }
+
+    const maxDepth = options.maxDepth ?? 10;
+    if (!Number.isInteger(maxDepth) || maxDepth <= 0) {
+      throw new Error("gather(...) maxDepth must be a positive integer.");
+    }
+    if (Object.keys(this._includes).length > 0) {
+      throw new Error("gather(...) does not support include(...) in MVP.");
+    }
+    if (this._hops.length > 0) {
+      throw new Error("gather(...) must be called before hopTo(...).");
+    }
+
+    const currentToken = "__jazz_gather_current__";
+    const stepOutput = options.step({ current: currentToken });
+    if (
+      !stepOutput ||
+      typeof stepOutput !== "object" ||
+      typeof (stepOutput as { _build?: unknown })._build !== "function"
+    ) {
+      throw new Error("gather(...) step must return a query expression built from app.<table>.");
+    }
+
+    const stepBuilt = JSON.parse(stepOutput._build()) as {
+      table?: unknown;
+      conditions?: Array<{ column: string; op: string; value: unknown }>;
+      hops?: unknown;
+    };
+
+    if (typeof stepBuilt.table !== "string" || !stepBuilt.table) {
+      throw new Error("gather(...) step query is missing table metadata.");
+    }
+    if (!Array.isArray(stepBuilt.conditions)) {
+      throw new Error("gather(...) step query is missing condition metadata.");
+    }
+
+    const stepHops = Array.isArray(stepBuilt.hops)
+      ? stepBuilt.hops.filter((hop): hop is string => typeof hop === "string")
+      : [];
+    if (stepHops.length !== 1) {
+      throw new Error("gather(...) step must include exactly one hopTo(...).");
+    }
+
+    const currentConditions = stepBuilt.conditions.filter(
+      (condition) => condition.op === "eq" && condition.value === currentToken,
+    );
+    if (currentConditions.length !== 1) {
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
+    }
+
+    const currentCondition = currentConditions[0];
+    if (currentCondition === undefined) {
+      throw new Error(
+        "gather(...) step must include exactly one where condition bound to current.",
+      );
+    }
+    const stepConditions = stepBuilt.conditions.filter(
+      (condition) => !(condition.op === "eq" && condition.value === currentToken),
+    );
+
+    const withStart = this.where(options.start);
+    const clone = withStart._clone();
+    clone._hops = [];
+    clone._gatherVal = {
+      max_depth: maxDepth,
+      step_table: stepBuilt.table,
+      step_current_column: currentCondition.column,
+      step_conditions: stepConditions,
+      step_hops: stepHops,
+    };
+
+    return clone;
+  }
+
+  _build(): string {
+    return JSON.stringify({
+      table: this._table,
+      conditions: this._conditions,
+      includes: this._includes,
+      __jazz_requireIncludes: this._requireIncludes || undefined,
+      select: this._selectColumns,
+      orderBy: this._orderBys,
+      limit: this._limitVal,
+      offset: this._offsetVal,
+      hops: this._hops,
+      gather: this._gatherVal,
+    });
+  }
+
+  toJSON(): unknown {
+    return JSON.parse(this._build());
+  }
+
+  private _clone<
+    CloneI extends TableWithDefaultInclude = I,
+    CloneS extends TableWithDefaultSelectableColumn = S,
+    CloneR extends boolean = R,
+  >(): TableWithDefaultQueryBuilder<CloneI, CloneS, CloneR> {
+    const clone = new TableWithDefaultQueryBuilder<CloneI, CloneS, CloneR>();
+    clone._conditions = [...this._conditions];
+    clone._includes = { ...this._includes };
+    clone._requireIncludes = this._requireIncludes;
+    clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._orderBys = [...this._orderBys];
+    clone._limitVal = this._limitVal;
+    clone._offsetVal = this._offsetVal;
+    clone._hops = [...this._hops];
+    clone._gatherVal = this._gatherVal
+      ? {
+          ...this._gatherVal,
+          step_conditions: this._gatherVal.step_conditions.map((condition) => ({ ...condition })),
+          step_hops: [...this._gatherVal.step_hops],
+        }
+      : undefined;
+    return clone;
+  }
+}
+
 export interface GeneratedApp {
   users: UserQueryBuilder;
   projects: ProjectQueryBuilder;
   todos: TodoQueryBuilder;
+  table_with_defaults: TableWithDefaultQueryBuilder;
   wasmSchema: WasmSchema;
 }
 
@@ -1077,5 +1636,6 @@ export const app: GeneratedApp = {
   users: new UserQueryBuilder(),
   projects: new ProjectQueryBuilder(),
   todos: new TodoQueryBuilder(),
+  table_with_defaults: new TableWithDefaultQueryBuilder(),
   wasmSchema,
 };

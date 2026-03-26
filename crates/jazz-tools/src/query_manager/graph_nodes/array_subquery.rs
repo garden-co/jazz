@@ -123,6 +123,7 @@ impl ArraySubqueryNode {
             column_type: element_type,
             nullable: false,
             references: None,
+            default: None,
         });
 
         let output_descriptor = RowDescriptor::new(output_columns);

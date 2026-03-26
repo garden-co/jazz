@@ -60,14 +60,22 @@ function sqlIdentifier(identifier: string): string {
   return `"${identifier.replace(/"/g, '""')}"`;
 }
 
+function isJsonSqlType(sqlType: Column["sqlType"]): boolean {
+  return typeof sqlType !== "string" && sqlType.kind === "JSON";
+}
+
 function sessionPathToSql(path: string[]): string {
   return path.map(sqlIdentifier).join(".");
 }
 
 function columnToSql(column: Column): string {
   const ref = column.references ? ` REFERENCES ${sqlIdentifier(column.references)}` : "";
+  const defaultClause =
+    column.default === undefined
+      ? ""
+      : ` DEFAULT ${formatSchemaDefaultValue(column.default, column.sqlType)}`;
   const nullability = column.nullable ? "" : " NOT NULL";
-  return `    ${sqlIdentifier(column.name)} ${sqlTypeToString(column.sqlType)}${ref}${nullability}`;
+  return `    ${sqlIdentifier(column.name)} ${sqlTypeToString(column.sqlType)}${ref}${defaultClause}${nullability}`;
 }
 
 function tableToSql(table: Table): string {
@@ -231,6 +239,18 @@ function formatDefaultValue(value: unknown): string {
     return `ARRAY[${value.map(formatDefaultValue).join(", ")}]`;
   }
   throw new Error(`Unsupported default value type: ${typeof value}`);
+}
+
+function formatSchemaDefaultValue(value: unknown, sqlType: Column["sqlType"]): string {
+  if (value === null) {
+    return "NULL";
+  }
+
+  if (isJsonSqlType(sqlType)) {
+    return `'${JSON.stringify(value).replace(/'/g, "''")}'`;
+  }
+
+  return formatDefaultValue(value);
 }
 
 function lensOpToForwardSql(table: string, op: LensOp): string {

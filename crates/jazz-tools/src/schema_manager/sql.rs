@@ -893,6 +893,26 @@ impl Parser {
             Some(Token::Null) => Ok(Value::Null),
             Some(Token::True) => Ok(Value::Boolean(true)),
             Some(Token::False) => Ok(Value::Boolean(false)),
+            Some(Token::Ident(ident)) if ident.eq_ignore_ascii_case("ARRAY") => {
+                self.expect(&Token::LBracket)?;
+                let mut elements = Vec::new();
+
+                if self.peek() != Some(&Token::RBracket) {
+                    loop {
+                        elements.push(self.parse_value()?);
+
+                        if self.peek() == Some(&Token::Comma) {
+                            self.advance();
+                            continue;
+                        }
+
+                        break;
+                    }
+                }
+
+                self.expect(&Token::RBracket)?;
+                Ok(Value::Array(elements))
+            }
             Some(Token::Number(n)) => {
                 if n.contains('.') {
                     if let Ok(f) = n.parse::<f64>() {
@@ -927,6 +947,7 @@ impl Parser {
 
         let mut nullable = true;
         let mut references = None;
+        let mut default = None;
 
         // Parse optional modifiers: REFERENCES, NOT NULL, DEFAULT (in any order)
         loop {
@@ -946,9 +967,8 @@ impl Parser {
                     references = Some(TableName::new(ref_table));
                 }
                 Some(Token::Default) => {
-                    // Skip DEFAULT in schema (we don't store defaults in schema, only in lenses)
                     self.advance();
-                    self.parse_value()?; // consume and discard
+                    default = Some(self.parse_value()?);
                 }
                 _ => break,
             }
@@ -960,6 +980,10 @@ impl Parser {
         }
         if let Some(ref_table) = references {
             desc = desc.references(ref_table);
+        }
+        if let Some(default) = default {
+            let coerced_default = coerce_default_for_column_type(&desc.column_type, default)?;
+            desc = desc.default(coerced_default);
         }
         Ok(desc)
     }
@@ -1704,13 +1728,18 @@ fn column_descriptor_to_sql(col: &ColumnDescriptor) -> String {
         Some(table) => format!(" REFERENCES {}", quote_identifier(table.as_str())),
         None => String::new(),
     };
+    let default_str = match &col.default {
+        Some(default) => format!(" DEFAULT {}", value_to_sql(default)),
+        None => String::new(),
+    };
     let nullable_str = if col.nullable { "" } else { " NOT NULL" };
 
     format!(
-        "{} {}{}{}",
+        "{} {}{}{}{}",
         quote_identifier(col.name.as_str()),
         type_str,
         ref_str,
+        default_str,
         nullable_str
     )
 }
@@ -1819,15 +1848,24 @@ fn value_to_sql(val: &Value) -> String {
         }
         Value::Text(s) => format!("'{}'", s.replace('\'', "''")),
         Value::Timestamp(t) => t.to_string(),
-        Value::Uuid(id) => format!("'{:?}'", id),
+        Value::Uuid(id) => format!("'{}'", id.uuid()),
         Value::Bytea(bytes) => format!("'\\\\x{}'", hex::encode(bytes)),
-        Value::Array(_) => "'[]'".to_string(),
+        Value::Array(elements) => {
+            let elements = elements
+                .iter()
+                .map(value_to_sql)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("ARRAY[{elements}]")
+        }
         Value::Row { .. } => "'{}'".to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::object::ObjectId;
+
     use super::*;
     use serde_json::json;
 
@@ -1906,6 +1944,39 @@ mod tests {
         assert!(!users.columns.columns[0].nullable); // name
         assert!(users.columns.columns[1].nullable); // email
         assert!(users.columns.columns[2].nullable); // age
+    }
+
+    #[test]
+    fn parse_schema_column_defaults() {
+        let sql = r#"
+            CREATE TABLE users (
+                name TEXT DEFAULT 'Anonymous' NOT NULL,
+                age INTEGER DEFAULT 42,
+                active BOOLEAN DEFAULT TRUE NOT NULL,
+                created_at TIMESTAMP DEFAULT 0 NOT NULL,
+                tags TEXT[] DEFAULT ARRAY['tag1', 'tag2'] NOT NULL,
+                nickname TEXT DEFAULT NULL
+            );
+        "#;
+
+        let schema = parse_schema(sql).unwrap();
+        let users = schema.get(&TableName::new("users")).unwrap();
+
+        assert_eq!(
+            users.columns.columns[0].default,
+            Some(Value::Text("Anonymous".to_string()))
+        );
+        assert_eq!(users.columns.columns[1].default, Some(Value::Integer(42)));
+        assert_eq!(users.columns.columns[2].default, Some(Value::Boolean(true)));
+        assert_eq!(users.columns.columns[3].default, Some(Value::Timestamp(0)));
+        assert_eq!(
+            users.columns.columns[4].default,
+            Some(Value::Array(vec![
+                Value::Text("tag1".to_string()),
+                Value::Text("tag2".to_string()),
+            ]))
+        );
+        assert_eq!(users.columns.columns[5].default, Some(Value::Null));
     }
 
     #[test]
@@ -2409,6 +2480,7 @@ mod tests {
             ALTER TABLE users ADD COLUMN count INTEGER DEFAULT 42;
             ALTER TABLE users ADD COLUMN name TEXT DEFAULT 'unknown';
             ALTER TABLE users ADD COLUMN active BOOLEAN DEFAULT TRUE;
+            ALTER TABLE users ADD COLUMN tags TEXT[] DEFAULT ARRAY['tag1', 'tag2'];
         "#;
 
         let transform = parse_lens(sql).unwrap();
@@ -2430,6 +2502,19 @@ mod tests {
         match &transform.ops[2] {
             LensOp::AddColumn { default, .. } => {
                 assert_eq!(*default, Value::Boolean(true));
+            }
+            _ => panic!(),
+        }
+
+        match &transform.ops[3] {
+            LensOp::AddColumn { default, .. } => {
+                assert_eq!(
+                    *default,
+                    Value::Array(vec![
+                        Value::Text("tag1".to_string()),
+                        Value::Text("tag2".to_string()),
+                    ])
+                );
             }
             _ => panic!(),
         }
@@ -2757,6 +2842,41 @@ mod tests {
     }
 
     #[test]
+    fn schema_to_sql_includes_defaults() {
+        let mut schema = HashMap::new();
+        let object_id = ObjectId::from_uuid(uuid::Uuid::nil());
+        schema.insert(
+            TableName::new("users"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new(ColumnName::new("name"), ColumnType::Text)
+                    .default(Value::Text("Anonymous".into())),
+                ColumnDescriptor::new(ColumnName::new("created_at"), ColumnType::Timestamp)
+                    .default(Value::Timestamp(0)),
+                ColumnDescriptor::new(
+                    ColumnName::new("tags"),
+                    ColumnType::Array {
+                        element: Box::new(ColumnType::Text),
+                    },
+                )
+                .default(Value::Array(vec![
+                    Value::Text("tag1".into()),
+                    Value::Text("tag2".into()),
+                ])),
+                ColumnDescriptor::new(ColumnName::new("test_id"), ColumnType::Uuid)
+                    .default(Value::Uuid(object_id)),
+            ])),
+        );
+        let sql = schema_to_sql(&schema);
+
+        assert!(sql.contains("name TEXT DEFAULT 'Anonymous' NOT NULL"));
+        assert!(sql.contains("created_at TIMESTAMP DEFAULT 0 NOT NULL"));
+        assert!(sql.contains("tags TEXT[] DEFAULT ARRAY['tag1', 'tag2'] NOT NULL"));
+        assert!(
+            sql.contains("test_id UUID DEFAULT '00000000-0000-0000-0000-000000000000' NOT NULL")
+        );
+    }
+
+    #[test]
     fn schema_to_sql_includes_policies() {
         let mut schema = HashMap::new();
         schema.insert(
@@ -2851,6 +2971,45 @@ mod tests {
             .columns[0];
         assert_eq!(col.references, Some(TableName::new("users")));
         assert!(!col.nullable);
+    }
+
+    #[test]
+    fn sql_round_trip_with_defaults() {
+        let sql = r#"CREATE TABLE users (
+    name TEXT DEFAULT 'Anonymous' NOT NULL,
+    age INTEGER DEFAULT 42,
+    active BOOLEAN DEFAULT TRUE NOT NULL,
+    created_at TIMESTAMP DEFAULT 0 NOT NULL,
+    tags TEXT[] DEFAULT ARRAY['tag1', 'tag2'] NOT NULL
+);"#;
+        let schema = parse_schema(sql).unwrap();
+        let regenerated = schema_to_sql(&schema);
+        let reparsed = parse_schema(&regenerated).unwrap();
+
+        let orig = schema.get(&TableName::new("users")).unwrap();
+        let round = reparsed.get(&TableName::new("users")).unwrap();
+
+        assert_eq!(orig.columns.columns.len(), round.columns.columns.len());
+        assert_eq!(
+            orig.columns.columns[0].default,
+            round.columns.columns[0].default
+        );
+        assert_eq!(
+            orig.columns.columns[1].default,
+            round.columns.columns[1].default
+        );
+        assert_eq!(
+            orig.columns.columns[2].default,
+            round.columns.columns[2].default
+        );
+        assert_eq!(
+            orig.columns.columns[3].default,
+            round.columns.columns[3].default
+        );
+        assert_eq!(
+            orig.columns.columns[4].default,
+            round.columns.columns[4].default
+        );
     }
 
     #[test]
