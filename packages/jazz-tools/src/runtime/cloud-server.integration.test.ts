@@ -231,9 +231,10 @@ function getFreePort(): Promise<number> {
   });
 }
 
-async function waitForHealth(baseUrl: string): Promise<void> {
+async function waitForHealth(baseUrl: string, timeoutMs = 30_000): Promise<void> {
   const healthUrl = `${baseUrl}/health`;
-  for (let i = 0; i < 100; i++) {
+  const attempts = Math.ceil(timeoutMs / 100);
+  for (let i = 0; i < attempts; i++) {
     try {
       const response = await fetch(healthUrl);
       if (response.ok) return;
