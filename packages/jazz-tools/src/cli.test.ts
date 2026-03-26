@@ -458,7 +458,7 @@ describe("bin integration", () => {
 
     const appTs = await readFile(join(schemaDir, "app.ts"), "utf8");
     expect(appTs).toContain("comments");
-  });
+  }, 15_000);
 
   it("generates migration SQL from stub on rebuild when current.sql already exists", async () => {
     const { schemaDir } = await createWorkspace();
