@@ -22,7 +22,7 @@ CREATE TABLE bands (
     logoFileId UUID REFERENCES files
 );
 CREATE POLICY bands_select_policy ON bands FOR SELECT USING (TRUE);
-CREATE POLICY bands_insert_policy ON bands FOR INSERT WITH CHECK (EXISTS (SELECT FROM members WHERE userId = @session.user_id));
+CREATE POLICY bands_insert_policy ON bands FOR INSERT WITH CHECK (TRUE);
 CREATE POLICY bands_update_policy ON bands FOR UPDATE USING (EXISTS (SELECT FROM members WHERE userId = @session.user_id)) WITH CHECK (EXISTS (SELECT FROM members WHERE userId = @session.user_id));
 CREATE POLICY bands_delete_policy ON bands FOR DELETE USING (EXISTS (SELECT FROM members WHERE userId = @session.user_id));
 
@@ -35,7 +35,7 @@ CREATE TABLE venues (
     capacity INTEGER
 );
 CREATE POLICY venues_select_policy ON venues FOR SELECT USING (TRUE);
-CREATE POLICY venues_insert_policy ON venues FOR INSERT WITH CHECK (EXISTS (SELECT FROM members WHERE userId = @session.user_id));
+CREATE POLICY venues_insert_policy ON venues FOR INSERT WITH CHECK (TRUE);
 CREATE POLICY venues_update_policy ON venues FOR UPDATE USING (EXISTS (SELECT FROM members WHERE userId = @session.user_id)) WITH CHECK (EXISTS (SELECT FROM members WHERE userId = @session.user_id));
 CREATE POLICY venues_delete_policy ON venues FOR DELETE USING (EXISTS (SELECT FROM members WHERE userId = @session.user_id));
 

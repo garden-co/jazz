@@ -626,19 +626,7 @@ export const wasmSchema: WasmSchema = {
       },
       "insert": {
         "with_check": {
-          "type": "Exists",
-          "table": "members",
-          "condition": {
-            "type": "Cmp",
-            "column": "userId",
-            "op": "Eq",
-            "value": {
-              "type": "SessionRef",
-              "path": [
-                "user_id"
-              ]
-            }
-          }
+          "type": "True"
         }
       },
       "update": {
@@ -745,19 +733,7 @@ export const wasmSchema: WasmSchema = {
       },
       "insert": {
         "with_check": {
-          "type": "Exists",
-          "table": "members",
-          "condition": {
-            "type": "Cmp",
-            "column": "userId",
-            "op": "Eq",
-            "value": {
-              "type": "SessionRef",
-              "path": [
-                "user_id"
-              ]
-            }
-          }
+          "type": "True"
         }
       },
       "update": {

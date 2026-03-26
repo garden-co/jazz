@@ -219,8 +219,8 @@ describe("permission policies", () => {
       });
     });
 
-    it("public visitor cannot insert a venue", () => {
-      testApp.expectDenied(() => {
+    it("anyone can insert a venue (venues are factual data)", () => {
+      testApp.expectAllowed(() => {
         const db = testApp.as(publicVisitor);
         db.insert(app.venues, {
           name: "Fake Venue",

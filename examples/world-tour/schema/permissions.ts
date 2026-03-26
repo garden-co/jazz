@@ -5,7 +5,7 @@ export default definePermissions(app, ({ policy, session, anyOf }) => {
   const isBandMember = policy.members.exists.where({ userId: session.user_id });
 
   policy.bands.allowRead.where({});
-  policy.bands.allowInsert.where(isBandMember);
+  policy.bands.allowInsert.where({});
   policy.bands.allowUpdate.where(isBandMember);
   policy.bands.allowDelete.where(isBandMember);
 
@@ -13,7 +13,7 @@ export default definePermissions(app, ({ policy, session, anyOf }) => {
   policy.members.allowInsert.where({});
 
   policy.venues.allowRead.where({});
-  policy.venues.allowInsert.where(isBandMember);
+  policy.venues.allowInsert.where({});
   policy.venues.allowUpdate.where(isBandMember);
   policy.venues.allowDelete.where(isBandMember);
 
