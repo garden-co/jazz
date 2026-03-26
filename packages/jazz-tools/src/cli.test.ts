@@ -1,9 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { build } from "./cli.js";
 
 const dslPath = fileURLToPath(new URL("./dsl.ts", import.meta.url));
@@ -14,6 +15,7 @@ const distDslPath = fileURLToPath(new URL("../dist/dsl.js", import.meta.url));
 const distPermissionsDslPath = fileURLToPath(
   new URL("../dist/permissions/index.js", import.meta.url),
 );
+const jazzBinPath = fileURLToPath(new URL("../../../target/debug/jazz-tools", import.meta.url));
 
 const tempRoots: string[] = [];
 
@@ -21,15 +23,23 @@ afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function createWorkspace(): Promise<{ root: string; schemaDir: string; jazzBin: string }> {
+async function createWorkspace({
+  useRealJazzBin = false,
+}: { useRealJazzBin?: boolean } = {}): Promise<{
+  root: string;
+  schemaDir: string;
+  jazzBin: string;
+}> {
   const root = await mkdtemp(join(tmpdir(), "jazz-tools-cli-test-"));
   tempRoots.push(root);
   const schemaDir = join(root, "schema");
   await mkdir(schemaDir, { recursive: true });
 
-  const jazzBin = join(root, "fake-jazz");
-  await writeFile(jazzBin, "#!/bin/sh\nexit 0\n");
-  await chmod(jazzBin, 0o755);
+  const jazzBin = useRealJazzBin ? jazzBinPath : join(root, "fake-jazz");
+  if (!useRealJazzBin) {
+    await writeFile(jazzBin, "#!/bin/sh\nexit 0\n");
+    await chmod(jazzBin, 0o755);
+  }
 
   return { root, schemaDir, jazzBin };
 }
@@ -219,6 +229,28 @@ table("canvases", {
 `;
 }
 
+function schemaWithDefaultsBefore(): string {
+  return `
+import { table, col } from ${JSON.stringify(dslPath)};
+
+table("todos", {
+  title: col.string(),
+});
+`;
+}
+
+function schemaWithDefaultsAfter(): string {
+  return `
+import { table, col } from ${JSON.stringify(dslPath)};
+
+table("todos", {
+  title: col.string(),
+  scores: col.array(col.int()).default([1, 2, 3]),
+  payload: col.json().default({ name: "Ada" }),
+});
+`;
+}
+
 function migrationDropIsPublicFromBothTables(): string {
   return `
 import { migrate, col } from ${JSON.stringify(dslPath)};
@@ -269,6 +301,39 @@ describe("cli build migration SQL generation", () => {
     expect(fwdSql).toContain("ALTER TABLE canvases DROP COLUMN isPublic;");
     expect(bwdSql).toContain("ALTER TABLE messages ADD COLUMN isPublic BOOLEAN DEFAULT FALSE;");
     expect(bwdSql).toContain("ALTER TABLE canvases ADD COLUMN isPublic BOOLEAN DEFAULT FALSE;");
+  });
+});
+
+describe("cli build migration lens generation", () => {
+  beforeAll(() => {
+    if (!existsSync(jazzBinPath)) {
+      throw new Error(`Jazz bin not found at ${jazzBinPath}`);
+    }
+  });
+
+  it("auto-generated migration stubs use schema defaults", async () => {
+    const { schemaDir, jazzBin } = await createWorkspace({ useRealJazzBin: true });
+
+    await writeFile(join(schemaDir, "current.ts"), schemaWithDefaultsBefore());
+    await build({ schemaDir, jazzBin });
+
+    await writeFile(join(schemaDir, "current.ts"), schemaWithDefaultsAfter());
+    await build({ schemaDir, jazzBin });
+
+    const files = await readdir(schemaDir);
+    const migrationFile = files.find((name) =>
+      /^migration_v1_v2_[0-9a-f]{12}_[0-9a-f]{12}\.ts$/.test(name),
+    );
+
+    expect(migrationFile).toBeTruthy();
+
+    const migrationTs = await readFile(join(schemaDir, migrationFile!), "utf8");
+    expect(migrationTs).toContain(
+      'scores: col.add().array({ of: "INTEGER", default: [1, 2, 3] }),',
+    );
+    expect(migrationTs).toContain(
+      'payload: col.add().json({ default: "{\\"name\\":\\"Ada\\"}" }),',
+    );
   });
 });
 
