@@ -8,6 +8,8 @@ use serde::Serialize;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::wasm_bindgen;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
 
 pub trait SyncFile {
@@ -449,12 +451,16 @@ fn truncate_handle(
 }
 
 #[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+unsafe extern "C" {
+    #[wasm_bindgen(js_name = "setTimeout")]
+    fn set_timeout(handler: &js_sys::Function, timeout: i32);
+}
+
+#[cfg(target_arch = "wasm32")]
 async fn sleep_ms(ms: u32) {
     let promise = js_sys::Promise::new(&mut |resolve, _| {
-        let global = js_sys::global();
-        let set_timeout = js_sys::Reflect::get(&global, &"setTimeout".into()).unwrap();
-        let set_timeout: js_sys::Function = set_timeout.unchecked_into();
-        let _ = set_timeout.call2(&global, &resolve, &wasm_bindgen::JsValue::from(ms));
+        set_timeout(&resolve, i32::try_from(ms).unwrap_or(i32::MAX));
     });
     let _ = JsFuture::from(promise).await;
 }
