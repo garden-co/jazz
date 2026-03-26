@@ -218,7 +218,8 @@ impl SyncManager {
             .retain(|s| s.client_id != client_id);
         self.pending_query_unsubscriptions
             .retain(|u| u.client_id != client_id);
-        // Drop queued outbox messages destined for this client
+        // Drop queued inbox/outbox messages for this client
+        self.inbox.retain(|e| e.source != Source::Client(client_id));
         self.outbox
             .retain(|e| e.destination != Destination::Client(client_id));
     }
