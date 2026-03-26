@@ -229,6 +229,8 @@ pub(super) struct PolicyCheckState {
     pub(super) graphs: Vec<PolicyGraph>,
     /// Table name for error messages.
     pub(super) table: TableName,
+    /// Branch the write is being evaluated on.
+    pub(super) branch: BranchName,
     /// The original pending permission check.
     pub(super) pending_check: PendingPermissionCheck,
 }
@@ -1725,6 +1727,7 @@ impl QueryManager {
             policy_checks += 48; // HashMap entry
             policy_checks += state.graphs.len() * 1024; // Rough estimate per PolicyGraph
             policy_checks += state.table.0.len();
+            policy_checks += state.branch.as_str().len();
         }
 
         let total = indices + subscriptions + policy_checks;

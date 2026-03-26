@@ -1495,9 +1495,9 @@ impl QueryManager {
         descriptor: &RowDescriptor,
         _table: &TableName,
         session: &Session,
+        branch: &str,
     ) -> Vec<PolicyGraph> {
         let mut graphs = Vec::new();
-        let branch = self.current_branch();
 
         for clause in clauses {
             match clause {
@@ -1522,7 +1522,7 @@ impl QueryManager {
                     if super::encoding::column_is_null(descriptor, content, col_idx)
                         .unwrap_or(false)
                     {
-                        continue; // NULL FK passes INHERITS
+                        continue;
                     }
 
                     // Decode the FK value to get parent ObjectId
@@ -1558,7 +1558,7 @@ impl QueryManager {
                         parent_policy,
                         session,
                         &self.schema,
-                        &branch,
+                        branch,
                         1,
                     ) {
                         graphs.push(graph);
@@ -1571,13 +1571,13 @@ impl QueryManager {
                         condition,
                         session,
                         &self.schema,
-                        &branch,
+                        branch,
                     ) {
                         graphs.push(graph);
                     }
                 }
                 ComplexClause::ExistsRel { rel } => {
-                    if let Some(graph) = PolicyGraph::for_exists_rel(rel, &self.schema, &branch) {
+                    if let Some(graph) = PolicyGraph::for_exists_rel(rel, &self.schema, branch) {
                         graphs.push(graph);
                     }
                 }
@@ -1597,27 +1597,25 @@ impl QueryManager {
         let mut to_reject = Vec::new();
 
         // Create row loader for settling
-        let current_branch = self.current_branch();
-        let branches = vec![current_branch.clone()];
         let om = &mut self.sync_manager.object_manager;
         let storage_ref: &dyn Storage = storage;
 
         // Settle each active policy check
         for (pending_id, state) in &mut self.active_policy_checks {
+            let branch = state.branch;
+            let branches = vec![branch.as_str().to_string()];
             let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
                 let obj = om.get_or_load(id, storage_ref, &branches)?;
-                let branch = obj.branches.get(&BranchName::new(&current_branch))?;
-                let tip_id = branch.tips.iter().next()?;
-                let commit = branch.commits.get(tip_id)?;
+                let branch_state = obj.branches.get(&branch)?;
+                let tip_id = branch_state.tips.iter().next()?;
+                let commit = branch_state.commits.get(tip_id)?;
                 if commit.content.is_empty() {
                     return None;
                 }
                 Some(LoadedRow::new(
                     commit.content.clone(),
                     *tip_id,
-                    [(id, BranchName::new(&current_branch))]
-                        .into_iter()
-                        .collect(),
+                    [(id, branch)].into_iter().collect(),
                 ))
             };
 
