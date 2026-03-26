@@ -25,7 +25,7 @@
 - [**count-aggregation**](todo/ideas/1_mvp/count-aggregation.md) — Add terminal `.count()` queries for filtered relations, with the MVP limited to reactive `COUNT(*)` returning `{ count: number }`.
 - [**explicit-indices**](todo/ideas/1_mvp/explicit-indices.md) — Developer-declared indices in the schema language, replacing auto-index-all-columns.
 - [**optimistic-update-dx**](todo/ideas/1_mvp/optimistic-update-dx.md) — Developer-facing API for mutation settlement state — show pending/confirmed/rejected status on rows and filter queries by settlement tier.
-- [**storage-backend-rocksdb-surrealkv**](todo/ideas/1_mvp/storage-backend-rocksdb-surrealkv.md) — Replace Fjall with RocksDB on the server and evaluate SurrealKV as the RN storage backend.
+- [**storage-backend-alternatives**](todo/ideas/1_mvp/storage-backend-alternatives.md) — Find better storage backends to replace Fjall, potentially using different engines for server and mobile since their constraints differ.
 - [**storage-limits-and-eviction**](todo/ideas/1_mvp/storage-limits-and-eviction.md) — Bounded storage with LRU eviction of cold data on clients and edge servers, with lazy re-fetch from upstream.
 - [**sync-protocol-reliability**](todo/ideas/1_mvp/sync-protocol-reliability.md) — Fix critical reliability gaps in the sync path and unify the transport layer across network sync (client-server), worker communication (main thread-worker), and peer replication (server-server).
 
