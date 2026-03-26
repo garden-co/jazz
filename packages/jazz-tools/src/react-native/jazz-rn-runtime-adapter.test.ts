@@ -46,11 +46,11 @@ describe("JazzRnRuntimeAdapter", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    const row = adapter.insert("todos", [{ type: "Text", value: "milk" }]);
+    const row = adapter.insert("todos", { title: { type: "Text", value: "milk" } });
     expect(row).toEqual({ id: "row-1", values: [] });
     expect(binding.insert).toHaveBeenCalledWith(
       "todos",
-      JSON.stringify([{ type: "Text", value: "milk" }]),
+      JSON.stringify({ title: { type: "Text", value: "milk" } }),
     );
 
     adapter.update("row-1", { done: { type: "Boolean", value: true } });
@@ -204,7 +204,7 @@ describe("JazzRnRuntimeAdapter", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    await expect(adapter.insertDurable("todos", [], "worker")).resolves.toEqual({
+    await expect(adapter.insertDurable("todos", {}, "worker")).resolves.toEqual({
       id: "row-1",
       values: [],
     });
@@ -214,7 +214,7 @@ describe("JazzRnRuntimeAdapter", () => {
     await expect(adapter.deleteDurable("row-1", "worker")).resolves.toBeUndefined();
     expect(binding.flush).toHaveBeenCalledTimes(3);
 
-    expect(() => adapter.insertDurable("todos", [], "edge")).toThrow("supports only 'worker' tier");
+    expect(() => adapter.insertDurable("todos", {}, "edge")).toThrow("supports only 'worker' tier");
   });
 
   it("swallows ObjectNotFound runtime errors for update/delete", () => {
@@ -263,7 +263,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
     const insertError = (() => {
       try {
-        adapter.insert("todos", []);
+        adapter.insert("todos", {});
         return null;
       } catch (error) {
         return error;
@@ -321,7 +321,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
     const error = (() => {
       try {
-        adapter.insert("todos", []);
+        adapter.insert("todos", {});
         return null;
       } catch (caught) {
         return caught;
@@ -350,7 +350,7 @@ describe("JazzRnRuntimeAdapter", () => {
 
     const error = (() => {
       try {
-        adapter.insert("todos", []);
+        adapter.insert("todos", {});
         return null;
       } catch (caught) {
         return caught;

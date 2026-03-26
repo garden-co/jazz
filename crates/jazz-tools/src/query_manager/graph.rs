@@ -4144,10 +4144,12 @@ mod tests {
         );
         assert_eq!(graph.recursive_relation_tables.len(), 1);
         assert_eq!(graph.recursive_relation_tables[0].1.as_str(), "team_edges");
-        assert!(graph.nodes.iter().any(|ctx| match &ctx.node {
-            GraphNode::Join(_) => true,
-            _ => false,
-        }));
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .any(|ctx| matches!(&ctx.node, GraphNode::Join(_)))
+        );
     }
 
     #[test]

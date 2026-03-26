@@ -6,7 +6,7 @@
  */
 
 import type { AppContext, Session } from "./context.js";
-import type { Value, RowDelta, WasmSchema } from "../drivers/types.js";
+import type { InsertValues, Value, RowDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
   sendSyncPayload,
@@ -45,12 +45,12 @@ export interface RequestLike {
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
-  insert(table: string, values: any): Row;
-  insertWithSession?(table: string, values: any, session_json?: string | null): Row;
-  insertDurable(table: string, values: any, tier: string): Promise<Row>;
+  insert(table: string, values: InsertValues): Row;
+  insertWithSession?(table: string, values: InsertValues, session_json?: string | null): Row;
+  insertDurable(table: string, values: InsertValues, tier: string): Promise<Row>;
   insertDurableWithSession?(
     table: string,
-    values: any,
+    values: InsertValues,
     session_json: string | null | undefined,
     tier: string,
   ): Promise<Row>;
@@ -492,7 +492,7 @@ export class SessionClient {
   /**
    * Create a new row as this session's user.
    */
-  async create(table: string, values: Value[]): Promise<string> {
+  async create(table: string, values: InsertValues): Promise<string> {
     if (!this.client.getServerUrl()) {
       throw new Error("No server connection");
     }
@@ -735,7 +735,10 @@ export class JazzClient {
    * ```typescript
    * const userSession = { user_id: "user-123", claims: {} };
    * const userClient = client.forSession(userSession);
-   * const id = await userClient.create("todos", [{ type: "Text", value: "Buy milk" }]);
+   * const id = await userClient.create("todos", {
+   *   title: { type: "Text", value: "Buy milk" },
+   *   done: { type: "Boolean", value: false },
+   * });
    * ```
    */
   forSession(session: Session): SessionClient {
@@ -1002,7 +1005,7 @@ export class JazzClient {
   /**
    * Insert a new row into a table without waiting for durability.
    */
-  create(table: string, values: Value[]): Row {
+  create(table: string, values: InsertValues): Row {
     return this.createInternal(table, values);
   }
 
@@ -1010,7 +1013,7 @@ export class JazzClient {
    * Insert a new row into a table with an optional session for policy checks.
    * @internal
    */
-  createInternal(table: string, values: Value[], session?: Session): Row {
+  createInternal(table: string, values: InsertValues, session?: Session): Row {
     const row = session
       ? this.requireSessionWriteMethod("insertWithSession")(
           table,
@@ -1029,7 +1032,7 @@ export class JazzClient {
    */
   async createDurable(
     table: string,
-    values: Value[],
+    values: InsertValues,
     options?: WriteDurabilityOptions,
   ): Promise<Row> {
     return this.createDurableInternal(table, values, undefined, options);
@@ -1041,7 +1044,7 @@ export class JazzClient {
    */
   async createDurableInternal(
     table: string,
-    values: Value[],
+    values: InsertValues,
     session?: Session,
     options?: WriteDurabilityOptions,
   ): Promise<Row> {

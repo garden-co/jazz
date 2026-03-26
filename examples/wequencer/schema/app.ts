@@ -47,7 +47,7 @@ export interface InstrumentInit {
 
 export interface JamInit {
   created_at: Date;
-  transport_start?: Date;
+  transport_start?: Date | null;
   bpm: number;
   beat_count: number;
 }
