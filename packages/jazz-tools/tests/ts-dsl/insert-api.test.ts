@@ -86,6 +86,29 @@ describe("TS Insert API", () => {
     });
   });
 
+  it("allows explicit null for nullable fields without triggering defaults", async () => {
+    const row_with_defaults = db.insert(app.table_with_defaults, {
+      nullable: null,
+      refId: null,
+    });
+
+    expect(row_with_defaults).toEqual({
+      id: expect.any(String),
+      integer: 1,
+      float: 1,
+      bytes: new Uint8Array([0, 1, 255]),
+      enum: "a",
+      json: { name: "default name" },
+      timestampDate: new Date("2026-01-01"),
+      timestampNumber: new Date(0),
+      string: "default value",
+      array: ["a", "b", "c"],
+      boolean: true,
+      nullable: undefined,
+      refId: undefined,
+    });
+  });
+
   it("can wait for row to be persisted up to a specific durability tier", async () => {
     const project = await db.insertDurable(
       app.projects,

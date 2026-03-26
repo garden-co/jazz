@@ -37,10 +37,10 @@ export interface ProjectInit {
 export interface TodoInit {
   title: string;
   done: boolean;
-  description?: string;
+  description?: string | null;
   owner_id: string;
-  parent_id?: string;
-  project_id?: string;
+  parent_id?: string | null;
+  project_id?: string | null;
 }
 
 export interface ProjectWhereInput {
