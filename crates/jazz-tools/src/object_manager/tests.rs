@@ -1,4 +1,5 @@
 use super::*;
+use crate::commit::CommitAckState;
 use crate::storage::MemoryStorage;
 
 #[test]
@@ -1136,4 +1137,584 @@ fn frontier_with_three_way_divergence() {
         .unwrap();
     let updates = manager.take_subscription_updates();
     assert_eq!(updates[0].commit_ids, vec![merge_all]);
+}
+
+// --- history & conflict management tests ---
+
+#[test]
+fn lww_selects_highest_timestamp_tip() {
+    // Two concurrent edits diverge from the same root. The one with the
+    // higher timestamp should be the LWW winner (last in tips_by_timestamp).
+    //
+    //   root (ts=100)
+    //    ├── alice_edit (ts=200)
+    //    └── bob_edit   (ts=300)   ← LWW winner
+    let mut io = MemoryStorage::new();
+    let mut manager = ObjectManager::new();
+    let object_id = manager.create(&mut io, None);
+    let alice = ObjectId::new();
+    let bob = ObjectId::new();
+
+    // Root commit via add_commit (auto-timestamps)
+    let root = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            "main",
+            vec![],
+            b"root".to_vec(),
+            alice,
+            None,
+        )
+        .unwrap();
+
+    // Inject two diverging commits with controlled timestamps via receive_commit
+    let alice_edit = Commit {
+        parents: smallvec![root],
+        content: b"alice-edit".to_vec(),
+        timestamp: 200,
+        author: alice,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+    let bob_edit = Commit {
+        parents: smallvec![root],
+        content: b"bob-edit".to_vec(),
+        timestamp: 300,
+        author: bob,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+
+    let alice_id = manager
+        .receive_commit(&mut io, object_id, "main", alice_edit)
+        .unwrap();
+    let bob_id = manager
+        .receive_commit(&mut io, object_id, "main", bob_edit)
+        .unwrap();
+
+    // Both should be tips (diverged frontier)
+    let tips = manager.get_tip_ids(object_id, "main").unwrap();
+    assert_eq!(tips.len(), 2);
+    assert!(tips.contains(&alice_id));
+    assert!(tips.contains(&bob_id));
+
+    // tips_by_timestamp sorts oldest-first → last element is the LWW winner
+    let object = manager.get(object_id).unwrap();
+    let branch = &object.branches[&BranchName::new("main")];
+    let sorted = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
+    assert_eq!(
+        *sorted.last().unwrap(),
+        bob_id,
+        "LWW winner should be bob (ts=300 > ts=200)"
+    );
+}
+
+#[test]
+fn lww_deterministic_on_equal_timestamps() {
+    // Two commits with identical timestamps. The tie-breaking order is
+    // process-deterministic (Rust's stable sort over SmolSet iteration order)
+    // but not canonically defined by CommitId. We verify determinism: repeated
+    // calls always return the same winner.
+    //
+    //   root
+    //    ├── edit_x (ts=500)
+    //    └── edit_y (ts=500)
+    let mut io = MemoryStorage::new();
+    let mut manager = ObjectManager::new();
+    let object_id = manager.create(&mut io, None);
+    let author = ObjectId::new();
+
+    let root = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            "main",
+            vec![],
+            b"root".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let edit_x = Commit {
+        parents: smallvec![root],
+        content: b"edit-x".to_vec(),
+        timestamp: 500,
+        author,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+    let edit_y = Commit {
+        parents: smallvec![root],
+        content: b"edit-y".to_vec(),
+        timestamp: 500,
+        author,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+
+    manager
+        .receive_commit(&mut io, object_id, "main", edit_x)
+        .unwrap();
+    manager
+        .receive_commit(&mut io, object_id, "main", edit_y)
+        .unwrap();
+
+    let tips = manager.get_tip_ids(object_id, "main").unwrap();
+    assert_eq!(tips.len(), 2);
+
+    // Call tips_by_timestamp multiple times — must always return same order
+    let object = manager.get(object_id).unwrap();
+    let branch = &object.branches[&BranchName::new("main")];
+    let first_result = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
+    for _ in 0..10 {
+        let result = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
+        assert_eq!(
+            result, first_result,
+            "tips_by_timestamp should be deterministic on equal timestamps"
+        );
+    }
+}
+
+#[test]
+fn receive_commit_idempotent_during_conflict() {
+    // Replaying a commit that already exists should not alter the frontier
+    // or emit spurious subscription notifications.
+    //
+    //   root → alice_edit (tip)
+    //   root → bob_edit   (tip)     ← 2 tips = conflict
+    //
+    //   receive_commit(bob_edit) again → no change, still 2 tips
+    let mut io = MemoryStorage::new();
+    let mut manager = ObjectManager::new();
+    let object_id = manager.create(&mut io, None);
+    let alice = ObjectId::new();
+    let bob = ObjectId::new();
+
+    let root = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            "main",
+            vec![],
+            b"root".to_vec(),
+            alice,
+            None,
+        )
+        .unwrap();
+
+    let alice_edit = Commit {
+        parents: smallvec![root],
+        content: b"alice-edit".to_vec(),
+        timestamp: 100,
+        author: alice,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+    let bob_edit = Commit {
+        parents: smallvec![root],
+        content: b"bob-edit".to_vec(),
+        timestamp: 200,
+        author: bob,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+
+    let alice_id = manager
+        .receive_commit(&mut io, object_id, "main", alice_edit)
+        .unwrap();
+    let bob_id = manager
+        .receive_commit(&mut io, object_id, "main", bob_edit.clone())
+        .unwrap();
+
+    // Subscribe and drain initial updates
+    let _sub_id = manager.subscribe(object_id, "main");
+    manager.take_subscription_updates();
+
+    // Replay bob's commit — should be a no-op
+    let replayed_id = manager
+        .receive_commit(&mut io, object_id, "main", bob_edit)
+        .unwrap();
+    assert_eq!(replayed_id, bob_id, "idempotent: same CommitId on replay");
+
+    // Tips unchanged
+    let tips = manager.get_tip_ids(object_id, "main").unwrap();
+    assert_eq!(tips.len(), 2);
+    assert!(tips.contains(&alice_id));
+    assert!(tips.contains(&bob_id));
+
+    // No spurious subscription notifications
+    let updates = manager.take_subscription_updates();
+    assert!(
+        updates.is_empty(),
+        "replaying an existing commit should not notify subscribers"
+    );
+}
+
+#[test]
+fn truncate_with_diverged_tips() {
+    // Truncation should work correctly when the branch has multiple tips.
+    //
+    //   root → a1 → a2 (tip)
+    //   root → b1 → b2 (tip)
+    //
+    //   truncate(tails={a1, b1}) → root deleted, a1/b1 become tails, a2/b2 still tips
+    let mut io = MemoryStorage::new();
+    let mut manager = ObjectManager::new();
+    let object_id = manager.create(&mut io, None);
+    let alice = ObjectId::new();
+    let bob = ObjectId::new();
+
+    let root = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            "main",
+            vec![],
+            b"root".to_vec(),
+            alice,
+            None,
+        )
+        .unwrap();
+
+    // Alice's chain: root → a1 → a2
+    let a1_commit = Commit {
+        parents: smallvec![root],
+        content: b"a1".to_vec(),
+        timestamp: 100,
+        author: alice,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+    let a1 = manager
+        .receive_commit(&mut io, object_id, "main", a1_commit)
+        .unwrap();
+
+    let a2_commit = Commit {
+        parents: smallvec![a1],
+        content: b"a2".to_vec(),
+        timestamp: 200,
+        author: alice,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+    let a2 = manager
+        .receive_commit(&mut io, object_id, "main", a2_commit)
+        .unwrap();
+
+    // Bob's chain: root → b1 → b2
+    let b1_commit = Commit {
+        parents: smallvec![root],
+        content: b"b1".to_vec(),
+        timestamp: 150,
+        author: bob,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+    let b1 = manager
+        .receive_commit(&mut io, object_id, "main", b1_commit)
+        .unwrap();
+
+    let b2_commit = Commit {
+        parents: smallvec![b1],
+        content: b"b2".to_vec(),
+        timestamp: 250,
+        author: bob,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+    let b2 = manager
+        .receive_commit(&mut io, object_id, "main", b2_commit)
+        .unwrap();
+
+    // Verify pre-truncation state: 5 commits, 2 tips
+    let commits_before = manager.get_commits(object_id, "main").unwrap();
+    assert_eq!(commits_before.len(), 5); // root, a1, a2, b1, b2
+
+    let tips_before = manager.get_tip_ids(object_id, "main").unwrap();
+    assert_eq!(tips_before.len(), 2);
+    assert!(tips_before.contains(&a2));
+    assert!(tips_before.contains(&b2));
+
+    // Truncate: tails = {a1, b1}
+    let mut tail_ids = HashSet::new();
+    tail_ids.insert(a1);
+    tail_ids.insert(b1);
+
+    let result = manager.truncate_branch(&mut io, object_id, "main", tail_ids);
+    assert_eq!(
+        result,
+        TruncateResult::Success { deleted_commits: 1 },
+        "should delete root commit only"
+    );
+
+    // Post-truncation: 4 commits remain (a1, a2, b1, b2), root gone
+    let commits_after = manager.get_commits(object_id, "main").unwrap();
+    assert_eq!(commits_after.len(), 4);
+    assert!(!commits_after.contains_key(&root), "root should be deleted");
+    assert!(commits_after.contains_key(&a1));
+    assert!(commits_after.contains_key(&a2));
+    assert!(commits_after.contains_key(&b1));
+    assert!(commits_after.contains_key(&b2));
+
+    // Tips unchanged
+    let tips_after = manager.get_tip_ids(object_id, "main").unwrap();
+    assert_eq!(tips_after.len(), 2);
+    assert!(tips_after.contains(&a2));
+    assert!(tips_after.contains(&b2));
+
+    // Tails set correctly
+    let object = manager.get(object_id).unwrap();
+    let branch = &object.branches[&BranchName::new("main")];
+    let tails = branch.tails.as_ref().expect("tails should be set");
+    assert!(tails.contains(&a1));
+    assert!(tails.contains(&b1));
+}
+
+#[test]
+fn truncate_rejects_when_tip_not_descendant_of_tail() {
+    // Safety invariant: all tips must be descendants of some tail.
+    //
+    //   root → a (tip)
+    //   root → b (tip)
+    //
+    //   truncate(tails={a}) → error: b is not a descendant of a
+    let mut io = MemoryStorage::new();
+    let mut manager = ObjectManager::new();
+    let object_id = manager.create(&mut io, None);
+    let alice = ObjectId::new();
+    let bob = ObjectId::new();
+
+    let root = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            "main",
+            vec![],
+            b"root".to_vec(),
+            alice,
+            None,
+        )
+        .unwrap();
+
+    let alice_edit = Commit {
+        parents: smallvec![root],
+        content: b"alice-edit".to_vec(),
+        timestamp: 100,
+        author: alice,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+    let bob_edit = Commit {
+        parents: smallvec![root],
+        content: b"bob-edit".to_vec(),
+        timestamp: 200,
+        author: bob,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+
+    let alice_id = manager
+        .receive_commit(&mut io, object_id, "main", alice_edit)
+        .unwrap();
+    let bob_id = manager
+        .receive_commit(&mut io, object_id, "main", bob_edit)
+        .unwrap();
+
+    // Verify 2 tips
+    let tips = manager.get_tip_ids(object_id, "main").unwrap();
+    assert_eq!(tips.len(), 2);
+
+    // Truncate with only alice as tail — bob is not a descendant of alice
+    let mut tail_ids = HashSet::new();
+    tail_ids.insert(alice_id);
+
+    let result = manager.truncate_branch(&mut io, object_id, "main", tail_ids);
+
+    // Should fail: bob_id is a tip but is not a descendant of alice_id
+    assert_eq!(
+        result,
+        TruncateResult::PermanentError(TruncateError::TipBeforeTail(bob_id)),
+        "should reject: bob is not a descendant of alice"
+    );
+
+    // State unchanged — commits still intact
+    let commits = manager.get_commits(object_id, "main").unwrap();
+    assert_eq!(commits.len(), 3); // root, alice, bob
+}
+
+#[test]
+fn lww_offline_edit_wins_when_later() {
+    // Real offline scenario: Bob syncs up to alice-v1, goes offline,
+    // Alice continues updating (v2..v4). Bob makes 1 edit offline.
+    // Bob's edit happens AFTER alice's last update (higher timestamp),
+    // so bob wins even though alice has more commits.
+    //
+    //   root → a1(200) → a2(300) → a3(400) → a4(500)    ← alice online
+    //   root → a1(200) → bob-offline(700)                 ← bob offline, edits later
+    //
+    //   LWW winner: bob-offline (ts=700 > ts=500)
+    let mut io = MemoryStorage::new();
+    let mut manager = ObjectManager::new();
+    let object_id = manager.create(&mut io, None);
+    let alice = ObjectId::new();
+    let bob = ObjectId::new();
+
+    // Root
+    let root = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            "main",
+            vec![],
+            b"root".to_vec(),
+            alice,
+            None,
+        )
+        .unwrap();
+
+    // Alice's chain: root → a1 → a2 → a3 → a4
+    let mut parent = root;
+    let mut alice_ids = Vec::new();
+    for (i, ts) in [(1, 200u64), (2, 300), (3, 400), (4, 500)] {
+        let commit = Commit {
+            parents: smallvec![parent],
+            content: format!("alice-v{i}").into_bytes(),
+            timestamp: ts,
+            author: alice,
+            metadata: None,
+            stored_state: StoredState::default(),
+            ack_state: CommitAckState::default(),
+        };
+        let id = manager
+            .receive_commit(&mut io, object_id, "main", commit)
+            .unwrap();
+        alice_ids.push(id);
+        parent = id;
+    }
+    let a1 = alice_ids[0];
+    let a4 = *alice_ids.last().unwrap();
+
+    // Bob was offline since a1. He edits from a1 at ts=700 (after alice finished).
+    let bob_commit = Commit {
+        parents: smallvec![a1],
+        content: b"bob-offline-edit".to_vec(),
+        timestamp: 700,
+        author: bob,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+    let b1 = manager
+        .receive_commit(&mut io, object_id, "main", bob_commit)
+        .unwrap();
+
+    // Two tips: a4 and b1 (diverged from a1)
+    let tips = manager.get_tip_ids(object_id, "main").unwrap();
+    assert_eq!(tips.len(), 2);
+    assert!(tips.contains(&a4));
+    assert!(tips.contains(&b1));
+
+    // LWW: bob wins because ts=700 > ts=500
+    let object = manager.get(object_id).unwrap();
+    let branch = &object.branches[&BranchName::new("main")];
+    let sorted = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
+    assert_eq!(
+        *sorted.last().unwrap(),
+        b1,
+        "bob (ts=700) should be LWW winner over alice-v4 (ts=500)"
+    );
+    assert_eq!(
+        branch.commits[&b1].content, b"bob-offline-edit",
+        "winner content should be bob's offline edit"
+    );
+}
+
+#[test]
+fn lww_different_fields_same_object_whole_commit_wins() {
+    // Two concurrent edits on different "fields" of the same object.
+    // With whole-object LWW, the winner's entire content replaces the loser's.
+    // This means one side's field change is lost.
+    //
+    //   root (content: title="task", completed=false)
+    //    ├── alice_edit (ts=200, content: title="alice-title", completed=false)
+    //    └── bob_edit   (ts=300, content: title="task", completed=true)
+    //
+    //   LWW winner: bob_edit (ts=300) → title reverts to "task", completed=true
+    //   Alice's title change is lost.
+    let mut io = MemoryStorage::new();
+    let mut manager = ObjectManager::new();
+    let object_id = manager.create(&mut io, None);
+    let alice = ObjectId::new();
+    let bob = ObjectId::new();
+
+    let root = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            "main",
+            vec![],
+            b"title=task,completed=false".to_vec(),
+            alice,
+            None,
+        )
+        .unwrap();
+
+    // Alice edits title only (her snapshot has completed=false)
+    let alice_edit = Commit {
+        parents: smallvec![root],
+        content: b"title=alice-title,completed=false".to_vec(),
+        timestamp: 200,
+        author: alice,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+    let alice_id = manager
+        .receive_commit(&mut io, object_id, "main", alice_edit)
+        .unwrap();
+
+    // Bob edits completed only (his snapshot has title=task)
+    let bob_edit = Commit {
+        parents: smallvec![root],
+        content: b"title=task,completed=true".to_vec(),
+        timestamp: 300,
+        author: bob,
+        metadata: None,
+        stored_state: StoredState::default(),
+        ack_state: CommitAckState::default(),
+    };
+    let bob_id = manager
+        .receive_commit(&mut io, object_id, "main", bob_edit)
+        .unwrap();
+
+    // Two tips
+    let tips = manager.get_tip_ids(object_id, "main").unwrap();
+    assert_eq!(tips.len(), 2);
+
+    // LWW: bob wins (ts=300 > ts=200)
+    let object = manager.get(object_id).unwrap();
+    let branch = &object.branches[&BranchName::new("main")];
+    let sorted = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
+    let winner = *sorted.last().unwrap();
+    assert_eq!(winner, bob_id, "bob (ts=300) should be LWW winner");
+
+    // Bob's content wins — alice's title change is lost
+    assert_eq!(
+        branch.commits[&winner].content, b"title=task,completed=true",
+        "whole-object LWW: bob's full snapshot wins, alice's title change lost"
+    );
 }
