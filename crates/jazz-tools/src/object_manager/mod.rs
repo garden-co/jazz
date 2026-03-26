@@ -182,31 +182,33 @@ impl ObjectManager {
         branches: &[String],
     ) -> Option<&Object> {
         let _span = tracing::trace_span!("OM::get_or_load", %id).entered();
-        if self.objects.contains_key(&id) {
-            return self.objects.get(&id);
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.objects.entry(id) {
+            // Load metadata
+            let metadata = match storage.load_object_metadata(id) {
+                Ok(Some(m)) => m,
+                Ok(None) => {
+                    tracing::trace!(%id, "get_or_load: no metadata in storage");
+                    return None;
+                }
+                Err(e) => {
+                    tracing::warn!(%id, error = ?e, "get_or_load: storage error");
+                    return None;
+                }
+            };
+
+            entry.insert(Object {
+                id,
+                metadata,
+                branches: HashMap::new(),
+            });
         }
 
-        // Load metadata
-        let metadata = match storage.load_object_metadata(id) {
-            Ok(Some(m)) => m,
-            Ok(None) => {
-                tracing::trace!(%id, "get_or_load: no metadata in storage");
-                return None;
-            }
-            Err(e) => {
-                tracing::warn!(%id, error = ?e, "get_or_load: storage error");
-                return None;
-            }
-        };
-
-        // Build Object with branches
-        let mut object = Object {
-            id,
-            metadata,
-            branches: HashMap::new(),
-        };
+        let object = self.objects.get_mut(&id)?;
         for branch_name in branches {
             let bn = BranchName::new(branch_name);
+            if object.branches.contains_key(&bn) {
+                continue;
+            }
             if let Ok(Some(loaded)) = storage.load_branch(id, &bn) {
                 let mut commits = HashMap::new();
                 // Compute tips correctly: a tip is a commit not referenced
@@ -247,7 +249,6 @@ impl ObjectManager {
         let branch_count = object.branches.len();
         let commit_count: usize = object.branches.values().map(|b| b.commits.len()).sum();
         tracing::trace!(%id, branch_count, commit_count, "get_or_load: loaded from storage");
-        self.objects.insert(id, object);
         self.objects.get(&id)
     }
 

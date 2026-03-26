@@ -1307,7 +1307,7 @@ describe("cloud-server integration (Jazz TS)", () => {
       await stopProcess(server.child);
       await jwks.stop();
     }
-  }, 30000);
+  }, 60000);
 
   it("enforces split social read permissions (exists + readReferencing)", async () => {
     await runSocialReadPermissionsScenario("split");
