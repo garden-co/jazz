@@ -2852,3 +2852,46 @@ fn remove_client_cleans_outbox_entries() {
         Destination::Server(_) => true,
     }));
 }
+
+#[test]
+fn remove_client_cleans_inbox_entries() {
+    //
+    // alice ──msg──▶ server inbox (not yet processed)
+    // bob   ──msg──▶ server inbox (not yet processed)
+    //
+    // alice disconnects → only bob's inbox entry and server-sourced entries remain.
+    //
+    let mut sm = SyncManager::new();
+
+    let alice = ClientId::new();
+    let bob = ClientId::new();
+    let server_id = ServerId::new();
+    sm.add_client(alice);
+    sm.add_client(bob);
+
+    let obj_id = ObjectId::new();
+    let payload = SyncPayload::ObjectUpdated {
+        object_id: obj_id,
+        metadata: None,
+        branch_name: BranchName::new("main"),
+        commits: vec![],
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(alice),
+        payload: payload.clone(),
+    });
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(bob),
+        payload: payload.clone(),
+    });
+    sm.push_inbox(InboxEntry {
+        source: Source::Server(server_id),
+        payload,
+    });
+
+    sm.remove_client(alice);
+
+    assert_eq!(sm.inbox.len(), 2);
+    assert!(sm.inbox.iter().all(|e| e.source != Source::Client(alice)));
+}
