@@ -1,6 +1,6 @@
 ---
 name: project
-description: Shape Up spec workflow — use when designing a feature, shaping an idea into a spec, defining a project, writing a pitch, scoping work, or planning what to build. Triggers on "shape", "spec", "pitch", "scope", "design this", "plan this feature", "let's figure out how to build", "project for", or any intent to go from idea to concrete plan.
+description: Shape Up spec workflow — use when designing a feature, shaping an idea into a spec, defining a project, writing a pitch, scoping work, or planning what to build. Triggers on "shape", "spec", "pitch", "scope", "design this", "plan this feature", "let's figure out how to build", "project for", "write a spec", or any intent to go from idea to concrete plan.
 ---
 
 # Shape Up Spec Workflow
@@ -15,10 +15,8 @@ For quick idea or issue capture, follow the workflows in `AGENTS.md` instead.
 
 ```
 todo/projects/{feature-name}/
-├── 1_problem.md   <- required: raw problem framing
-├── 1b_appetite.md <- optional: time budget decision
-├── 2_pitch.md     <- shaped deliverable; input to the betting table
-└── 3_scopes.md    <- created only after pitch approval
+├── pitch.md     <- shaped deliverable; input to the betting table
+└── scopes.md    <- created only after pitch approval
 ```
 
 ## Refinement Loop (mandatory before every approval gate)
@@ -50,42 +48,12 @@ Create `todo/projects/{feature-name}/` using kebab-case for the feature name.
 
 ---
 
-### Step 2: Problem Statement — `1_problem.md` _(required)_
+### Step 2: Pitch — `pitch.md` _(required)_
 
-Create this file with:
+Create at `todo/projects/{feature-name}/pitch.md`. The pitch opens with the problem framing as its first paragraph (no separate problem document). Include:
 
-- What's broken or missing?
-- Who is affected? (be specific: developers using Jazz, app authors, end users of Jazz-powered apps?)
-- Concrete examples — not abstract requirements
-
-**Refinement loop**: After drafting, review to find any gaps or improvement areas.
-
----
-
-### Step 3: Appetite — `1b_appetite.md` _(optional)_
-
-Ask: _"Appetite is optional. Do you want to define a time budget for this feature, or skip to the pitch?"_
-
-If included, write:
-
-- **Small batch**: 1-2 weeks — what we're committing to
-- **Big batch**: 4-6 weeks — what we're committing to
-- **Rationale**: why this appetite fits this problem
-
-**Refinement loop**: Challenge the appetite choice:
-
-- "Is this really a big batch? What would we cut to make it small batch?"
-- "What's the non-negotiable core if we run out of time?"
-- "Does the appetite reflect business priority or just engineering comfort?"
-
----
-
-### Step 4: Pitch — `2_pitch.md` _(required)_
-
-Create at `todo/projects/{feature-name}/2_pitch.md`. Include:
-
-- **Problem** — 1-3 sentence framing of the raw need
-- **Appetite** — restated from `1b_appetite.md` if it was written; omit otherwise
+- **Problem** _(opening paragraph)_ — what's broken or missing, who is affected, concrete examples. This replaces a standalone problem document.
+- **Appetite** _(optional)_ — if the user wants to define a time budget (small batch: 1-2 weeks, big batch: 4-6 weeks), include it after the problem. Ask: _"Do you want to include an appetite (time budget) in the pitch?"_
 - **Solution** — described at the right level of abstraction:
   - _Breadboards_: text-based UI/flow descriptions — no wireframes needed
   - _Fat marker sketches_: high-level architecture, data flow, component interactions
@@ -116,7 +84,7 @@ Wait for explicit approval before proceeding.
 
 ---
 
-### Step 5: Scopes — `3_scopes.md` _(required, created after pitch approval)_
+### Step 3: Scopes — `scopes.md` _(required, created after pitch approval)_
 
 Break work into named, interconnected scopes. Scopes emerge from the solution — they are not a flat numbered task list.
 
@@ -149,7 +117,7 @@ Wait for explicit approval before proceeding.
 
 ---
 
-### Step 6: Stop
+### Step 4: Stop
 
 **Do not write any code.** The workflow ends here. Implementation is a separate activity initiated by the user.
 
@@ -160,6 +128,6 @@ Wait for explicit approval before proceeding.
 3. Optional steps require an explicit choice — ask "include or skip?" before proceeding
 4. Always wait for explicit approval before advancing
 5. No implementation — this workflow is for planning only
-6. Rabbit holes and No-gos sections in `2_pitch.md` cannot be empty
-7. `3_scopes.md` is only created after pitch approval
+6. Rabbit holes and No-gos sections in `pitch.md` cannot be empty
+7. `scopes.md` is only created after pitch approval
 8. Appetite is a constraint, not an estimate — it shapes what solution is possible
