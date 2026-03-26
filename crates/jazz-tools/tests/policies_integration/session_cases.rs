@@ -1,41 +1,25 @@
-#![cfg(feature = "test")]
-
-mod support;
-
 use std::collections::HashMap;
 use std::time::Duration;
 
+use super::support::{
+    TestingClient, collect_stream_deltas, has_added, has_any_change, has_removed, has_updated,
+    wait_for_query, wait_for_rows, wait_for_subscription_update,
+};
+use jazz_tools::middleware::auth::{LocalAuthMode, derive_local_principal_id};
 use jazz_tools::query_manager::policy::PolicyExpr;
-use jazz_tools::query_manager::types::TablePolicies;
+use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
     TableSchema, Value,
 };
 use serde_json::json;
-use support::{
-    TestingClient, collect_stream_deltas, has_added, has_any_change, has_removed, has_updated,
-    wait_for_query, wait_for_rows, wait_for_subscription_update,
-};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
 const NO_DELTA_WINDOW: Duration = Duration::from_millis(100);
 
-fn select_policy_schema() -> Schema {
-    SchemaBuilder::new()
-        .table(
-            TableSchema::builder("documents")
-                .column("owner_id", ColumnType::Text)
-                .column("title", ColumnType::Text)
-                .policies(
-                    TablePolicies::new()
-                        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
-                        .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
-                ),
-        )
-        .build()
-}
+// -- Schema builders --
 
 fn join_select_policy_schema() -> Schema {
     SchemaBuilder::new()
@@ -57,6 +41,8 @@ fn join_select_policy_schema() -> Schema {
         .build()
 }
 
+/// Schema for documents owned by `owner_id` with INSERT/UPDATE/DELETE restricted
+/// to the row owner. SELECT is unrestricted (no policy) so observers can read.
 fn write_policy_schema() -> Schema {
     let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
 
@@ -105,23 +91,92 @@ fn in_session_array_policy_schema() -> Schema {
         .build()
 }
 
-fn document_values(owner_id: &str, title: &str) -> HashMap<String, Value> {
+fn make_documents_schema(table_name: &str, policies: TablePolicies) -> TableSchemaBuilder {
+    TableSchema::builder(table_name)
+        .column("owner_id", ColumnType::Text)
+        .column("title", ColumnType::Text)
+        .column("archived", ColumnType::Boolean)
+        .policies(policies)
+}
+
+// -- Value constructors --
+
+fn document_input(owner_id: &str, title: &str) -> HashMap<String, Value> {
     HashMap::from([
         ("owner_id".to_string(), Value::Text(owner_id.to_string())),
         ("title".to_string(), Value::Text(title.to_string())),
     ])
 }
 
-fn document_row_values(owner_id: &str, title: &str) -> Vec<Value> {
+fn boolean_policy_document_input(
+    owner_id: &str,
+    title: &str,
+    archived: bool,
+) -> HashMap<String, Value> {
+    HashMap::from([
+        ("owner_id".to_string(), Value::Text(owner_id.to_string())),
+        ("title".to_string(), Value::Text(title.to_string())),
+        ("archived".to_string(), Value::Boolean(archived)),
+    ])
+}
+
+fn team_document_input(team_id: ObjectId, title: &str) -> HashMap<String, Value> {
+    HashMap::from([
+        ("team_id".to_string(), Value::Uuid(team_id)),
+        ("title".to_string(), Value::Text(title.to_string())),
+    ])
+}
+
+/// Returns row values for the 2-column `documents` table used in write policy tests.
+fn document_values(owner_id: &str, title: &str) -> Vec<Value> {
     vec![
         Value::Text(owner_id.to_string()),
         Value::Text(title.to_string()),
     ]
 }
 
+fn document_row_values(owner_id: &str, title: &str) -> Vec<Value> {
+    document_values(owner_id, title)
+}
+
+fn boolean_policy_document_values(owner_id: &str, title: &str, archived: bool) -> Vec<Value> {
+    vec![
+        Value::Text(owner_id.to_string()),
+        Value::Text(title.to_string()),
+        Value::Boolean(archived),
+    ]
+}
+
+fn team_document_values(team_id: ObjectId, title: &str) -> Vec<Value> {
+    vec![Value::Uuid(team_id), Value::Text(title.to_string())]
+}
+
+fn team_document_row_values(team_id: ObjectId, title: &str) -> Vec<Value> {
+    team_document_values(team_id, title)
+}
+
+// -- Seed / mutation helpers --
+
+async fn seed_document(
+    client: &JazzClient,
+    table_name: &str,
+    owner_id: &str,
+    title: &str,
+    archived: bool,
+) -> ObjectId {
+    client
+        .create(
+            table_name,
+            boolean_policy_document_input(owner_id, title, archived),
+        )
+        .await
+        .expect("create document")
+        .0
+}
+
 async fn create_document(client: &JazzClient, owner_id: &str, title: &str) -> ObjectId {
     client
-        .create("documents", document_values(owner_id, title))
+        .create("documents", document_input(owner_id, title))
         .await
         .expect("create document")
         .0
@@ -170,24 +225,58 @@ async fn create_team_membership(
         .0
 }
 
-fn team_document_values(team_id: ObjectId, title: &str) -> HashMap<String, Value> {
-    HashMap::from([
-        ("team_id".to_string(), Value::Uuid(team_id)),
-        ("title".to_string(), Value::Text(title.to_string())),
-    ])
-}
-
-fn team_document_row_values(team_id: ObjectId, title: &str) -> Vec<Value> {
-    vec![Value::Uuid(team_id), Value::Text(title.to_string())]
-}
-
 async fn create_team_document(client: &JazzClient, team_id: ObjectId, title: &str) -> ObjectId {
     client
-        .create("team_documents", team_document_values(team_id, title))
+        .create("team_documents", team_document_input(team_id, title))
         .await
         .expect("create team document")
         .0
 }
+
+async fn update_document_title(client: &JazzClient, document_id: ObjectId, title: &str) {
+    client
+        .update(
+            document_id,
+            vec![("title".to_string(), Value::Text(title.to_string()))],
+        )
+        .await
+        .expect("update document title");
+}
+
+async fn start_alice_and_bob_server(schema: Schema) -> (TestingServer, JazzClient, JazzClient) {
+    let server = TestingServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+
+    let ready_table = schema
+        .keys()
+        .next()
+        .map(|table| table.as_str().to_string())
+        .expect("schema must contain at least one table");
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice")
+        .as_user()
+        .ready_on(ready_table.clone(), READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let bob = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("bob")
+        .as_user()
+        .ready_on(ready_table, READY_TIMEOUT)
+        .connect()
+        .await;
+
+    (server, alice, bob)
+}
+
+// -- Tests --
 
 /// Verifies that `SELECT` policies scope subscription updates and query results
 /// to the requesting client's own session, preventing cross-user data leakage.
@@ -207,27 +296,17 @@ async fn create_team_document(client: &JazzClient, team_id: ObjectId, title: &st
 /// ```
 #[tokio::test]
 async fn select_policies_filter_subscription_results_per_client_session() {
-    let schema = select_policy_schema();
-    let server = TestingServer::builder()
-        .with_schema(schema.clone())
-        .start()
-        .await;
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice")
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("bob")
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
+    let schema = SchemaBuilder::new()
+        .table(make_documents_schema(
+            "documents",
+            TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+                .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        ))
+        .build();
+
+    let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
+
     let query = QueryBuilder::new("documents").build();
 
     let mut alice_stream = alice
@@ -238,7 +317,7 @@ async fn select_policies_filter_subscription_results_per_client_session() {
     let mut alice_log = Vec::new();
     let mut bob_log = Vec::new();
 
-    let alice_doc = create_document(&alice, "alice", "Alice Only").await;
+    let alice_doc = seed_document(&alice, "documents", "alice", "Alice Only", false).await;
     wait_for_subscription_update(
         &mut alice_stream,
         &mut alice_log,
@@ -256,7 +335,7 @@ async fn select_policies_filter_subscription_results_per_client_session() {
         "bob should not receive alice's document"
     );
 
-    let bob_doc = create_document(&bob, "bob", "Bob Only").await;
+    let bob_doc = seed_document(&bob, "documents", "bob", "Bob Only", false).await;
     wait_for_subscription_update(
         &mut bob_stream,
         &mut bob_log,
@@ -276,16 +355,487 @@ async fn select_policies_filter_subscription_results_per_client_session() {
         (rows.len() == 1 && rows[0].0 == alice_doc).then_some(rows)
     })
     .await;
-    assert_eq!(alice_rows[0].1, document_row_values("alice", "Alice Only"));
+    assert_eq!(
+        alice_rows[0].1,
+        boolean_policy_document_values("alice", "Alice Only", false)
+    );
 
     let bob_rows = wait_for_rows(&bob, query, "bob visible rows", |rows| {
         (rows.len() == 1 && rows[0].0 == bob_doc).then_some(rows)
     })
     .await;
-    assert_eq!(bob_rows[0].1, document_row_values("bob", "Bob Only"));
+    assert_eq!(
+        bob_rows[0].1,
+        boolean_policy_document_values("bob", "Bob Only", false)
+    );
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Verifies that an anonymous client with no `session.user_id` cannot see rows
+/// protected by `owner_id = session.user_id`.
+///
+/// Alice and bob each insert an owned row. After both rows are confirmed
+/// server-side, an unauthenticated client queries the same table and must see
+/// an empty result set because the SELECT policy cannot match without a
+/// session user id.
+#[tokio::test]
+async fn anonymous_client_cannot_see_owner_restricted_rows() {
+    let schema = SchemaBuilder::new()
+        .table(make_documents_schema(
+            "documents",
+            TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+                .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        ))
+        .build();
+
+    let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
+    let query = QueryBuilder::new("documents").build();
+
+    let alice_doc = seed_document(&alice, "documents", "alice", "Alice Only", false).await;
+    let bob_doc = seed_document(&bob, "documents", "bob", "Bob Only", false).await;
+
+    let alice_rows = wait_for_rows(&alice, query.clone(), "alice sees own row", |rows| {
+        (rows.len() == 1 && rows[0].0 == alice_doc).then_some(rows)
+    })
+    .await;
+    assert_eq!(
+        alice_rows[0].1,
+        boolean_policy_document_values("alice", "Alice Only", false)
+    );
+
+    let bob_rows = wait_for_rows(&bob, query.clone(), "bob sees own row", |rows| {
+        (rows.len() == 1 && rows[0].0 == bob_doc).then_some(rows)
+    })
+    .await;
+    assert_eq!(
+        bob_rows[0].1,
+        boolean_policy_document_values("bob", "Bob Only", false)
+    );
+
+    let anonymous_user_id = derive_local_principal_id(
+        server.app_id(),
+        LocalAuthMode::Anonymous,
+        "anonymous-owner-restricted-device",
+    );
+    let anonymous = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id(anonymous_user_id)
+        .with_claims(json!({
+            "auth_mode": "local",
+            "local_mode": "anonymous"
+        }))
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    let anonymous_rows = wait_for_query(
+        &anonymous,
+        query,
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(3),
+        "anonymous sees no owner-restricted rows",
+        Some,
+    )
+    .await;
+    assert!(anonymous_rows.is_empty());
+
+    anonymous.shutdown().await.expect("shutdown anonymous");
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Verifies that `owner_id = session.user_id` consistently scopes CRUD access
+/// per client:
+/// - inserts are accepted only for the caller's own `owner_id`
+/// - updates require both the old and new row to stay owned by the caller
+/// - deletes only succeed for rows owned by the caller
+/// - selects only return rows owned by the caller
+///
+/// ```text
+/// alice ──insert owner=alice──────► server ──► visible to alice only
+/// bob ────insert owner=bob────────► server ──► visible to bob only
+/// alice ──update own title────────► server ──► accepted
+/// alice ──transfer owner→bob──────► server ──✗ rejected (new row owner mismatch)
+/// bob ────delete own row──────────► server ──► removed
+/// ```
+#[tokio::test]
+async fn session_user_id_policies_scope_crud_to_owned_rows() {
+    let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+    let schema = SchemaBuilder::new()
+        .table(make_documents_schema(
+            "documents",
+            TablePolicies::new()
+                .with_select(owner_policy.clone())
+                .with_insert(owner_policy.clone())
+                .with_update(Some(owner_policy.clone()), owner_policy)
+                .with_delete(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        ))
+        .build();
+    let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
+    let alice_reader = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice")
+        .as_user()
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+    let bob_reader = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("bob")
+        .as_user()
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+    let query = QueryBuilder::new("documents").build();
+
+    let alice_doc = seed_document(&alice, "documents", "alice", "alice original", false).await;
+    let bob_doc = seed_document(&bob, "documents", "bob", "bob original", false).await;
+
+    let alice_rows = wait_for_rows(
+        &alice_reader,
+        query.clone(),
+        "alice reader sees only owned row",
+        |rows| (rows.len() == 1 && rows[0].0 == alice_doc).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        alice_rows[0].1,
+        boolean_policy_document_values("alice", "alice original", false)
+    );
+    assert!(
+        alice_rows.iter().all(|(id, _)| *id != bob_doc),
+        "alice should not see bob's row through select owner policy"
+    );
+
+    let bob_rows = wait_for_rows(
+        &bob_reader,
+        query.clone(),
+        "bob reader sees only owned row",
+        |rows| (rows.len() == 1 && rows[0].0 == bob_doc).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        bob_rows[0].1,
+        boolean_policy_document_values("bob", "bob original", false)
+    );
+    assert!(
+        bob_rows.iter().all(|(id, _)| *id != alice_doc),
+        "bob should not see alice's row through select owner policy"
+    );
+
+    update_document_title(&alice, alice_doc, "alice updated").await;
+    let alice_rows = wait_for_rows(
+        &alice_reader,
+        query.clone(),
+        "alice reader sees accepted update on owned row",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == alice_doc
+                        && *values
+                            == boolean_policy_document_values("alice", "alice updated", false)
+                })
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(alice_rows.len(), 1);
+
+    alice
+        .update(
+            alice_doc,
+            vec![
+                ("owner_id".to_string(), Value::Text("bob".to_string())),
+                ("title".to_string(), Value::Text("transferred".to_string())),
+            ],
+        )
+        .await
+        .expect("optimistic local ownership transfer");
+
+    let alice_rows = wait_for_rows(
+        &alice_reader,
+        query.clone(),
+        "alice reader still sees owned row after rejected ownership transfer",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == alice_doc
+                        && *values
+                            == boolean_policy_document_values("alice", "alice updated", false)
+                })
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(alice_rows.len(), 1);
+
+    let bob_rows = wait_for_rows(
+        &bob_reader,
+        query.clone(),
+        "bob reader still only sees bob row before own delete",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == bob_doc
+                        && *values == boolean_policy_document_values("bob", "bob original", false)
+                })
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(bob_rows.len(), 1);
+    assert!(
+        bob_rows.iter().all(|(id, _)| *id != alice_doc),
+        "bob should still be unable to see alice's row after alice's rejected transfer"
+    );
+
+    bob.delete(bob_doc).await.expect("delete bob owned row");
+    let bob_rows = wait_for_rows(
+        &bob_reader,
+        query,
+        "bob reader sees no owned rows after delete",
+        |rows| rows.is_empty().then_some(rows),
+    )
+    .await;
+    assert!(bob_rows.is_empty());
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    alice_reader
+        .shutdown()
+        .await
+        .expect("shutdown alice_reader");
+    bob_reader.shutdown().await.expect("shutdown bob_reader");
+    server.shutdown().await;
+}
+
+/// Verifies that ownership transfer is only allowed while a document is not
+/// archived.
+///
+/// Alice owns two documents: one active and one archived. The update policy
+/// allows changing `owner_id` only when the old row satisfies both
+/// `owner_id = session.user_id` and `archived = false`, and when the new row
+/// also keeps `archived = false`.
+///
+/// ```text
+/// alice ──update active owner→bob────► server ──► accepted
+/// bob query ─────────────────────────► [active row now owned by bob]
+///
+/// alice ──update active owner→bob, archived=true──► server ──✗ rejected
+/// alice query ────────────────────────────────────► [row stays active and owned by alice]
+///
+/// alice ──update archived owner→bob──► server ──✗ rejected
+/// alice query ───────────────────────► [archived row still owned by alice]
+/// ```
+#[tokio::test]
+async fn ownership_transfer_allowed_only_for_unarchived_documents() {
+    let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
+    let unarchived_policy = PolicyExpr::eq_literal("archived", Value::Boolean(false));
+    let schema = SchemaBuilder::new()
+        .table(make_documents_schema(
+            "documents",
+            TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+                .with_insert(owner_policy.clone())
+                .with_update(
+                    Some(PolicyExpr::and(vec![
+                        owner_policy.clone(),
+                        unarchived_policy.clone(),
+                    ])),
+                    unarchived_policy.clone(),
+                ),
+        ))
+        .build();
+    let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
+    let alice_reader = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema.clone())
+        .with_user_id("alice")
+        .as_user()
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+    let bob_reader = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("bob")
+        .as_user()
+        .ready_on("documents", READY_TIMEOUT)
+        .connect()
+        .await;
+    let query = QueryBuilder::new("documents").build();
+
+    let active_id = seed_document(&alice, "documents", "alice", "active", false).await;
+    let archived_id = seed_document(&alice, "documents", "alice", "archived", true).await;
+
+    let alice_rows = wait_for_rows(
+        &alice_reader,
+        query.clone(),
+        "alice reader sees both owned documents before transfer",
+        |rows| (rows.len() == 2).then_some(rows),
+    )
+    .await;
+    assert!(alice_rows.iter().any(|(id, values)| {
+        *id == active_id && *values == boolean_policy_document_values("alice", "active", false)
+    }));
+    assert!(alice_rows.iter().any(|(id, values)| {
+        *id == archived_id && *values == boolean_policy_document_values("alice", "archived", true)
+    }));
+
+    alice
+        .update(
+            active_id,
+            vec![
+                ("owner_id".to_string(), Value::Text("bob".to_string())),
+                (
+                    "title".to_string(),
+                    Value::Text("active transferred".to_string()),
+                ),
+            ],
+        )
+        .await
+        .expect("optimistic local active transfer");
+
+    let bob_rows = wait_for_rows(
+        &bob_reader,
+        query.clone(),
+        "bob reader sees transferred active document",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == active_id
+                        && *values
+                            == boolean_policy_document_values("bob", "active transferred", false)
+                })
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert!(bob_rows.iter().any(|(id, values)| {
+        *id == active_id
+            && *values == boolean_policy_document_values("bob", "active transferred", false)
+    }));
+    assert!(
+        bob_rows.iter().all(|(id, _)| *id != archived_id),
+        "bob should not receive the archived document"
+    );
+
+    let transferable_id = seed_document(&alice, "documents", "alice", "transferable", false).await;
+    let alice_rows = wait_for_rows(
+        &alice_reader,
+        query.clone(),
+        "alice reader sees transferable active document before rejected archive-on-transfer",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == transferable_id
+                        && *values == boolean_policy_document_values("alice", "transferable", false)
+                })
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert!(alice_rows.iter().any(|(id, values)| {
+        *id == transferable_id
+            && *values == boolean_policy_document_values("alice", "transferable", false)
+    }));
+
+    alice
+        .update(
+            transferable_id,
+            vec![
+                ("owner_id".to_string(), Value::Text("bob".to_string())),
+                (
+                    "title".to_string(),
+                    Value::Text("transfer while archiving".to_string()),
+                ),
+                ("archived".to_string(), Value::Boolean(true)),
+            ],
+        )
+        .await
+        .expect("optimistic local transfer with archived=true");
+
+    let alice_rows = wait_for_rows(
+        &alice_reader,
+        query.clone(),
+        "alice reader still sees transferable document unchanged after rejected archive-on-transfer",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == transferable_id
+                        && *values
+                            == boolean_policy_document_values("alice", "transferable", false)
+                })
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert!(alice_rows.iter().any(|(id, values)| {
+        *id == transferable_id
+            && *values == boolean_policy_document_values("alice", "transferable", false)
+    }));
+
+    alice
+        .update(
+            archived_id,
+            vec![
+                ("owner_id".to_string(), Value::Text("bob".to_string())),
+                (
+                    "title".to_string(),
+                    Value::Text("archived transferred".to_string()),
+                ),
+            ],
+        )
+        .await
+        .expect("optimistic local archived transfer");
+
+    let alice_rows = wait_for_rows(
+        &alice_reader,
+        query.clone(),
+        "alice reader still sees archived document after rejected transfer",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == archived_id
+                        && *values == boolean_policy_document_values("alice", "archived", true)
+                })
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert!(alice_rows.iter().any(|(id, values)| {
+        *id == archived_id && *values == boolean_policy_document_values("alice", "archived", true)
+    }));
+
+    let bob_rows = wait_for_rows(
+        &bob_reader,
+        query,
+        "bob reader still only sees the active transferred document",
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == active_id
+                && rows[0].1 == boolean_policy_document_values("bob", "active transferred", false))
+            .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(bob_rows.len(), 1);
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    alice_reader
+        .shutdown()
+        .await
+        .expect("shutdown alice_reader");
+    bob_reader.shutdown().await.expect("shutdown bob_reader");
     server.shutdown().await;
 }
 
@@ -528,7 +1078,7 @@ async fn insert_policies_are_enforced_by_server_for_client_sync() {
     let mut observer_log = Vec::new();
 
     let forged_id = intruder
-        .create("documents", document_values("alice", "forged"))
+        .create("documents", document_input("alice", "forged"))
         .await
         .expect("optimistic local create")
         .0;
@@ -717,7 +1267,7 @@ async fn insert_policy_violation_does_not_leak_to_pristine_subscriber() {
 
     // Mallory tries to insert a row claiming alice's ownership.
     let forged_id = mallory
-        .create("documents", document_values("alice", "forged"))
+        .create("documents", document_input("alice", "forged"))
         .await
         .expect("optimistic local create")
         .0;

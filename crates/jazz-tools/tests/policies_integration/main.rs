@@ -1,0 +1,10 @@
+#![cfg(feature = "test")]
+
+#[path = "../support/mod.rs"]
+mod support;
+
+mod claims_policies;
+mod inherited_policies;
+mod recursive_policies;
+mod session_cases;
+mod simple_policies;
