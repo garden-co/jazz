@@ -11,7 +11,7 @@ const clientConfig: Parameters<typeof createJazzClient>[0] = {
   appId,
   env: "dev",
   userBranch: "main",
-  serverUrl: "/jazz",
+  serverUrl: import.meta.env.VITE_JAZZ_SERVER_URL ?? "http://localhost:4200",
 };
 
 if (isPublicMode) {

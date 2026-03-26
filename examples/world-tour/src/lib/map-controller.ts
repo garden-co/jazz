@@ -74,7 +74,7 @@ export class MapController {
       zoom: options.zoom ?? 1.8,
       pitch: options.pitch ?? 30,
       bearing: 0,
-    });
+          });
 
     this.ready = new Promise<void>((resolve) => {
       this.map.on("style.load", () => {
@@ -127,6 +127,7 @@ export class MapController {
    * source creation on first call and data updates thereafter.
    */
   setStops(stops: StopMapData[], dates?: Date[]): void {
+    if (!this.map.isStyleLoaded()) return;
     const features = stops.map((s) => ({
       type: "Feature" as const,
       properties: { id: s.id, name: s.name },
@@ -179,11 +180,14 @@ export class MapController {
   async tour(stops: StopMapData[]): Promise<void> {
     if (stops.length === 0) return;
 
+    this.stopRotation();
     this.tourAbort = new AbortController();
     const signal = this.tourAbort.signal;
 
+    const SETTLE_ZOOM = 10;
+
     // Fly to first stop
-    await this.flyTo(stops[0], { zoom: 4, pitch: 50, duration: 2000 });
+    await this.flyTo(stops[0], { zoom: SETTLE_ZOOM, pitch: 50, duration: 2000 });
     await sleep(800, signal);
 
     for (let i = 1; i < stops.length; i++) {
@@ -192,25 +196,43 @@ export class MapController {
       const from: [number, number] = [stops[i - 1].lng, stops[i - 1].lat];
       const to: [number, number] = [stops[i].lng, stops[i].lat];
 
-      // Linear interpolation along the segment
-      const steps = 80;
+      const dLng = Math.abs(to[0] - from[0]);
+      const dLat = Math.abs(to[1] - from[1]);
+      const dist = Math.sqrt(dLng * dLng + dLat * dLat);
+
+      // Zoom out enough that the pan crosses ~4-6 tile widths total.
+      // At zoom z, one tile covers 360/2^z degrees of longitude.
+      // We want dist / (360/2^z) ≈ 5, so z ≈ log2(5 * 360 / dist)
+      const targetTileCrossings = 3;
+      const idealZoom = Math.log2(targetTileCrossings * 360 / Math.max(dist, 1));
+      // Subtract 1 extra to account for tiles needed during the zoom-out/in transitions
+      const midZoom = Math.max(2, Math.min(SETTLE_ZOOM - 2, idealZoom - 1));
+
+      // Duration proportional to distance: 4s min, 12s max
+      const legDuration = Math.min(12000, Math.max(4000, dist * 80));
+      const frameMs = 50;
+      const steps = Math.round(legDuration / frameMs);
+
       for (let s = 0; s <= steps; s++) {
         if (signal.aborted) break;
-        const t = s / steps;
-        const zoomEase = 3.5 + 1.5 * (1 - Math.sin(t * Math.PI));
+        const linear = s / steps;
+        const t = linear * linear * (3 - 2 * linear);
+        const lng = from[0] + (to[0] - from[0]) * t;
+        const lat = from[1] + (to[1] - from[1]) * t;
+        // Gentle sinusoidal zoom: smooth throughout, no sharp transitions
+        const zoomEase = midZoom + (SETTLE_ZOOM - midZoom) * (1 - Math.sin(linear * Math.PI));
         this.map.jumpTo({
-          center: [from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t],
+          center: [lng, lat],
           zoom: zoomEase,
           pitch: 45,
         });
-        await sleep(40, signal);
+        await sleep(frameMs, signal);
       }
 
       if (signal.aborted) break;
 
-      // Settle at the stop
-      await this.flyTo(stops[i], { zoom: 5, pitch: 45, duration: 800 });
-      await sleep(1200, signal);
+      await this.flyTo(stops[i], { zoom: SETTLE_ZOOM, pitch: 45, duration: 1500 });
+      await sleep(2500, signal);
     }
 
     this.tourAbort = null;
@@ -284,10 +306,12 @@ export class MapController {
       this.map.getCanvas().style.cursor = "";
     });
 
-    // Empty-area click
+    // Empty-area click (only on the globe, not outer space)
     this.map.on("click", (e) => {
       const hits = this.map.queryRenderedFeatures(e.point, { layers: ["stops-layer"] });
       if (hits.length > 0) return; // handled by layer click above
+      const allFeatures = this.map.queryRenderedFeatures(e.point);
+      if (allFeatures.length === 0) return; // clicked empty space (not on the globe)
       this.emit("mapClick", {
         lng: e.lngLat.lng,
         lat: e.lngLat.lat,
@@ -394,4 +418,83 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       { once: true },
     );
   });
+}
+
+// ---------------------------------------------------------------------------
+// Tile prefetcher: a hidden off-canvas map that silently visits each stop
+// location to warm the browser's tile cache before the user hits "Tour".
+// ---------------------------------------------------------------------------
+
+export class TilePrefetcher {
+  private map: maplibregl.Map;
+  private abort: AbortController | null = null;
+
+  constructor(styleUrl?: string) {
+    const container = document.createElement("div");
+    container.style.cssText = "position:absolute;left:-9999px;top:-9999px;width:512px;height:512px;";
+    document.body.appendChild(container);
+
+    this.map = new maplibregl.Map({
+      container,
+      style: styleUrl ?? DEFAULT_STYLE,
+      center: [0, 0],
+      zoom: 1,
+      interactive: false,
+          });
+  }
+
+  // Run the exact same tour animation as the real map, just 3× faster,
+  // so the HTTP tile cache is warm before the user hits Tour.
+  async prefetch(stops: StopMapData[]): Promise<void> {
+    if (stops.length < 2) return;
+
+    this.abort = new AbortController();
+    const signal = this.abort.signal;
+
+    await new Promise<void>((resolve) => {
+      this.map.on("load", () => resolve());
+      if (this.map.loaded()) resolve();
+    });
+
+    const SETTLE_ZOOM = 10;
+    const SPEED = 3;
+
+    this.map.jumpTo({ center: [stops[0].lng, stops[0].lat], zoom: SETTLE_ZOOM });
+    await sleep(500 / SPEED, signal);
+
+    for (let i = 1; i < stops.length; i++) {
+      if (signal.aborted) return;
+
+      const from: [number, number] = [stops[i - 1].lng, stops[i - 1].lat];
+      const to: [number, number] = [stops[i].lng, stops[i].lat];
+      const dLng = Math.abs(to[0] - from[0]);
+      const dLat = Math.abs(to[1] - from[1]);
+      const dist = Math.sqrt(dLng * dLng + dLat * dLat);
+      const midZoom = SETTLE_ZOOM - Math.min(7.5, dist * 0.08);
+      const legDuration = Math.min(10000, Math.max(2000, dist * 80));
+      const frameMs = 50;
+      const steps = Math.round(legDuration / frameMs);
+
+      for (let s = 0; s <= steps; s++) {
+        if (signal.aborted) return;
+        const linear = s / steps;
+        const t = linear * linear * (3 - 2 * linear);
+        const lng = from[0] + (to[0] - from[0]) * t;
+        const lat = from[1] + (to[1] - from[1]) * t;
+        const zoomEase = midZoom + (SETTLE_ZOOM - midZoom) * (1 - Math.sin(linear * Math.PI));
+        this.map.jumpTo({ center: [lng, lat], zoom: zoomEase, pitch: 45 });
+        await sleep(frameMs / SPEED, signal);
+      }
+
+      this.map.jumpTo({ center: to, zoom: SETTLE_ZOOM });
+      await sleep(300 / SPEED, signal);
+    }
+  }
+
+  destroy(): void {
+    this.abort?.abort();
+    const container = this.map.getContainer();
+    this.map.remove();
+    container.remove();
+  }
 }
