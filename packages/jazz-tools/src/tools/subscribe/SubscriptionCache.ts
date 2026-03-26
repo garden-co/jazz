@@ -2,6 +2,7 @@ import { LocalNode } from "cojson";
 import type {
   CoValue,
   CoValueClassOrSchema,
+  CoValueCursor,
   Loaded,
   RefEncoded,
   RefsToResolve,
@@ -25,6 +26,7 @@ interface CacheEntry {
   schema: CoValueClassOrSchema;
   resolve: RefsToResolve<any>;
   branch?: BranchDefinition;
+  cursor?: CoValueCursor;
   subscriberCount: number;
   cleanupTimeoutId?: ReturnType<typeof setTimeout>;
   unsubscribeFromScope: () => void;
@@ -67,6 +69,7 @@ export class SubscriptionCache {
     schema: CoValueClassOrSchema,
     resolve: RefsToResolve<any>,
     branch?: BranchDefinition,
+    cursor?: CoValueCursor,
   ): boolean {
     // Compare schema by object identity
     if (entry.schema !== schema) {
@@ -90,6 +93,10 @@ export class SubscriptionCache {
       return false;
     }
 
+    if (entry.cursor !== cursor) {
+      return false;
+    }
+
     return true;
   }
 
@@ -102,6 +109,7 @@ export class SubscriptionCache {
     id: string,
     resolve: RefsToResolve<any>,
     branch?: BranchDefinition,
+    cursor?: CoValueCursor,
   ): CacheEntry | undefined {
     // Get the inner set for this id (quick filter)
     const idSet = this.getIdSet(id);
@@ -111,7 +119,7 @@ export class SubscriptionCache {
 
     // Search only within entries for this id
     for (const entry of idSet) {
-      if (this.matchesEntry(entry, schema, resolve, branch)) {
+      if (this.matchesEntry(entry, schema, resolve, branch, cursor)) {
         return entry;
       }
     }
@@ -197,6 +205,7 @@ export class SubscriptionCache {
     skipRetry?: boolean,
     bestEffortResolution?: boolean,
     branch?: BranchDefinition,
+    cursor?: CoValueCursor,
   ): SubscriptionScope<Loaded<S, ResolveQuery<S>>> {
     // Handle undefined/null id case
     if (!id) {
@@ -204,7 +213,13 @@ export class SubscriptionCache {
     }
 
     // Search for matching entry
-    const matchingEntry = this.findMatchingEntry(schema, id, resolve, branch);
+    const matchingEntry = this.findMatchingEntry(
+      schema,
+      id,
+      resolve,
+      branch,
+      cursor,
+    );
 
     if (matchingEntry) {
       // Found existing entry - cancel any pending cleanup since we're reusing it
@@ -231,6 +246,7 @@ export class SubscriptionCache {
       skipRetry ?? false,
       bestEffortResolution ?? false,
       branch,
+      cursor,
     );
 
     const handleSubscriberChange = (count: number) => {
@@ -247,6 +263,7 @@ export class SubscriptionCache {
       schema,
       resolve: copyResolve(resolve),
       branch,
+      cursor,
       subscriberCount: subscriptionScope.subscribers.size,
       unsubscribeFromScope: subscriptionScope.onSubscriberChange(
         handleSubscriberChange,

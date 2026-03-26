@@ -3,6 +3,7 @@ import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
 import { TRANSACTION_CONFIG } from "../config.js";
 import { JsonObject } from "../jsonValue.js";
 import { DeletionOpPayload, OpID, RawCoList } from "./coList.js";
+import { CoValueFrontier } from "../knownState.js";
 
 export type StringifiedOpID = string & { __stringifiedOpID: true };
 
@@ -55,8 +56,14 @@ export class RawCoPlainText<
     PlaintextIdxMapping
   >;
 
-  constructor(core: AvailableCoValueCore, atTimeFilter?: number) {
-    super(core, atTimeFilter);
+  constructor(
+    core: AvailableCoValueCore,
+    options?: {
+      atTimeFilter?: number;
+      atFrontierFilter?: CoValueFrontier;
+    },
+  ) {
+    super(core, options);
     this._cachedMapping = new WeakMap();
   }
 
@@ -98,7 +105,15 @@ export class RawCoPlainText<
   }
 
   atTime(time: number): this {
-    return new RawCoPlainText(this.core, time) as this;
+    return new RawCoPlainText(this.core, {
+      atTimeFilter: time,
+    }) as this;
+  }
+
+  atFrontier(frontier: CoValueFrontier): this {
+    return new RawCoPlainText(this.core, {
+      atFrontierFilter: frontier,
+    }) as this;
   }
 
   /**

@@ -9,6 +9,7 @@ import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfrom
 import { isCoValue } from "../typeUtils/isCoValue.js";
 import { RawAccountID } from "./account.js";
 import type { RawGroup } from "./group.js";
+import { CoValueFrontier } from "../knownState.js";
 
 type MapOp<K extends string, V extends JsonValue | undefined> = {
   txID: TransactionID;
@@ -78,6 +79,8 @@ export class RawCoMap<
   ignorePrivateTransactions: boolean;
   /** @internal */
   atTimeFilter?: number = undefined;
+  /** @internal */
+  atFrontierFilter?: CoValueFrontier = undefined;
   /** @category 6. Meta */
   readonly _shape!: Shape;
 
@@ -169,7 +172,7 @@ export class RawCoMap<
   }
 
   isTimeTravelEntity() {
-    return Boolean(this.atTimeFilter);
+    return Boolean(this.atTimeFilter) || Boolean(this.atFrontierFilter);
   }
 
   /** @category 6. Meta */
@@ -192,21 +195,12 @@ export class RawCoMap<
     return clone as this;
   }
 
-  /** @internal */
-  timeFilteredOps<K extends keyof Shape & string>(
-    key: K,
-  ): MapOp<K, Shape[K]>[] | undefined {
-    if (key === "constructor") {
-      return undefined;
-    }
-
-    const atTimeFilter = this.atTimeFilter;
-
-    if (atTimeFilter) {
-      return this.ops[key]?.filter((op) => op.madeAt <= atTimeFilter);
-    } else {
-      return this.ops[key];
-    }
+  /** @category 4. Time travel */
+  atFrontier(frontier: CoValueFrontier): this {
+    const clone = Object.create(this) as RawCoMap<Shape, Meta>;
+    clone.atFrontierFilter = frontier;
+    clone.latest = {};
+    return clone as this;
   }
 
   /**
@@ -237,13 +231,14 @@ export class RawCoMap<
 
       // Time travel values are lazily computed
       if (entries && !(key in this.latest)) {
-        const atTimeFilter = this.atTimeFilter;
-
-        if (!atTimeFilter) {
-          latestChange = entries[entries.length - 1];
-        } else {
-          latestChange = entries.findLast((op) => op.madeAt <= atTimeFilter);
-        }
+        latestChange = entries.findLast(
+          (op) =>
+            (this.atTimeFilter === undefined ||
+              op.madeAt <= this.atTimeFilter) &&
+            (this.atFrontierFilter === undefined ||
+              op.txID.txIndex <
+                (this.atFrontierFilter[op.txID.sessionID] ?? -1)),
+        );
 
         this.latest[key] = latestChange;
       }
@@ -306,14 +301,20 @@ export class RawCoMap<
   nthEditAt<K extends keyof Shape & string>(key: K, n: number) {
     const ops = this.ops[key];
 
-    const atTimeFilter = this.atTimeFilter;
     const entry = ops?.[n];
 
     if (!entry) {
       return undefined;
     }
 
-    if (atTimeFilter && entry.madeAt > atTimeFilter) {
+    if (this.atTimeFilter && entry.madeAt > this.atTimeFilter) {
+      return undefined;
+    }
+
+    if (
+      this.atFrontierFilter &&
+      entry.txID.txIndex >= (this.atFrontierFilter[entry.txID.sessionID] ?? -1)
+    ) {
       return undefined;
     }
 
@@ -348,11 +349,17 @@ export class RawCoMap<
       return;
     }
 
-    const atTimeFilter = this.atTimeFilter;
-
     for (const entry of entries) {
       // Entries are sorted by madeAt
-      if (atTimeFilter && entry.madeAt > atTimeFilter) {
+      if (this.atTimeFilter && entry.madeAt > this.atTimeFilter) {
+        return;
+      }
+
+      if (
+        this.atFrontierFilter &&
+        entry.txID.txIndex >=
+          (this.atFrontierFilter[entry.txID.sessionID] ?? -1)
+      ) {
         return;
       }
 

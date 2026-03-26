@@ -1,12 +1,13 @@
 import {
   cojsonInternals,
   CoValueCore,
+  CoValueFrontier,
   isRawCoID,
   LocalNode,
   RawCoID,
   RawCoValue,
 } from "cojson";
-import type { BranchDefinition } from "./types.js";
+import type { BranchDefinition, DecodedCoValueCursor } from "./types.js";
 import { CoValueLoadingState } from "./types.js";
 
 /**
@@ -27,6 +28,7 @@ export class CoValueCoreSubscription {
     value: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE,
   ) => void;
   private skipRetry?: boolean;
+  private frontier?: CoValueFrontier;
 
   constructor(
     localNode: LocalNode,
@@ -36,6 +38,7 @@ export class CoValueCoreSubscription {
     ) => void,
     skipRetry?: boolean,
     branch?: BranchDefinition,
+    decodedCursor?: DecodedCoValueCursor,
   ) {
     this.localNode = localNode;
     this.listener = listener;
@@ -43,6 +46,10 @@ export class CoValueCoreSubscription {
     this.branchName = branch?.name;
     this.branchOwnerId = branch?.owner?.$jazz.raw.id;
     this.source = localNode.getCoValue(id as RawCoID);
+
+    if (decodedCursor) {
+      this.frontier = decodedCursor.frontiers[id as RawCoID];
+    }
 
     this.initializeSubscription();
   }
@@ -188,7 +195,13 @@ export class CoValueCoreSubscription {
     if (value === CoValueLoadingState.UNAVAILABLE) {
       this.listener(CoValueLoadingState.UNAVAILABLE);
     } else if (isCompletelyDownloaded(value)) {
-      this.listener(value.getCurrentContent());
+      const currentContent = value.getCurrentContent();
+
+      this.listener(
+        this.frontier
+          ? currentContent.atFrontier(this.frontier)
+          : currentContent,
+      );
     }
   }
 

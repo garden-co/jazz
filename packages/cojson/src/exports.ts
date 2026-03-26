@@ -76,7 +76,8 @@ import {
 } from "./sync.js";
 import { setSyncStateTrackingBatchDelay } from "./UnsyncedCoValuesTracker.js";
 import { emptyKnownState } from "./knownState.js";
-
+import type { CoValueFrontier } from "./knownState.js";
+import type { RawCoValueCursor } from "./cursor.js";
 import {
   getContentMessageSize,
   getTransactionSize,
@@ -217,6 +218,8 @@ export type {
   PeerState,
   SyncWhen,
   CoValueHeader,
+  CoValueFrontier,
+  RawCoValueCursor,
 };
 
 export * from "./storage/index.js";

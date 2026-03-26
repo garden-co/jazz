@@ -30,6 +30,7 @@ import {
   captureStack,
   getUnloadedCoValueWithoutId,
   type BranchDefinition,
+  type CoValueCursor,
 } from "jazz-tools";
 import { JazzContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
@@ -100,6 +101,7 @@ export function useCoValueSubscription<
   options?: {
     resolve?: ResolveQueryStrict<S, R>;
     unstable_branch?: BranchDefinition;
+    cursor?: CoValueCursor;
   },
   source?: string,
 ): CoValueSubscription<S, R> | null {
@@ -109,6 +111,7 @@ export function useCoValueSubscription<
     [id],
     resolve,
     options?.unstable_branch,
+    options?.cursor,
     source,
   );
   return (subscriptions[0] ?? null) as CoValueSubscription<S, R> | null;
@@ -127,6 +130,7 @@ interface SubscriptionsState {
   agent: AnonymousJazzAgent | Loaded<any, true>;
   branchName?: string;
   branchOwnerId?: string;
+  cursor?: CoValueCursor;
 }
 
 /**
@@ -142,6 +146,7 @@ function useCoValueSubscriptions(
   ids: readonly (string | undefined | null)[],
   resolve: ResolveQuery<any>,
   branch?: BranchDefinition,
+  cursor?: CoValueCursor,
   source?: string,
 ): (SubscriptionScope<CoValue> | null)[] {
   const contextManager = useJazzContext();
@@ -166,6 +171,7 @@ function useCoValueSubscriptions(
         false,
         false,
         branch,
+        cursor,
       );
 
       if (callerStack) {
@@ -187,6 +193,7 @@ function useCoValueSubscriptions(
       agent,
       branchName: branch?.name,
       branchOwnerId: branch?.owner?.$jazz.id,
+      cursor,
     };
   };
 
@@ -430,6 +437,12 @@ export function useCoState<
      * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
      */
     unstable_branch?: BranchDefinition;
+    /**
+     * Load the CoValue at a specific cursor.
+     *
+     * Cursors let you take a "snapshot" of a CoValue at the time of cursor creations.
+     */
+    cursor?: CoValueCursor;
     preloaded?: ExportedCoValue<Loaded<S, R>>;
   },
 ): TSelectorReturn {
@@ -477,6 +490,12 @@ export function useSuspenseCoState<
      * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
      */
     unstable_branch?: BranchDefinition;
+    /**
+     * Load the CoValue at a specific cursor.
+     *
+     * Cursors let you take a "snapshot" of a CoValue at the time of cursor creations.
+     */
+    cursor?: CoValueCursor;
     preloaded?: ExportedCoValue<Loaded<S, R>>;
   },
 ): TSelectorReturn {
@@ -549,6 +568,7 @@ export function useAccountSubscription<
   options?: {
     resolve?: ResolveQueryStrict<S, R>;
     unstable_branch?: BranchDefinition;
+    cursor?: CoValueCursor;
   },
   source?: string,
 ) {
@@ -580,6 +600,7 @@ export function useAccountSubscription<
       false,
       false,
       options?.unstable_branch,
+      options?.cursor,
     );
 
     // Set callerStack on returned subscription after retrieval
@@ -596,6 +617,7 @@ export function useAccountSubscription<
       Schema,
       branchName: options?.unstable_branch?.name,
       branchOwnerId: options?.unstable_branch?.owner?.$jazz.id,
+      cursor: options?.cursor,
     };
   };
 
@@ -609,7 +631,9 @@ export function useAccountSubscription<
       subscription.contextManager !== contextManager ||
       subscription.Schema !== Schema ||
       subscription.branchName !== options?.unstable_branch?.name ||
-      subscription.branchOwnerId !== options?.unstable_branch?.owner?.$jazz.id
+      subscription.branchOwnerId !==
+        options?.unstable_branch?.owner?.$jazz.id ||
+      subscription.cursor !== options?.cursor
     ) {
       // No need to manually destroy - cache handles cleanup via SubscriptionScope lifecycle
       setSubscription(createSubscription());
@@ -745,6 +769,12 @@ export function useAccount<
      * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
      */
     unstable_branch?: BranchDefinition;
+    /**
+     * Load the CoValue at a specific cursor.
+     *
+     * Cursors let you take a "snapshot" of a CoValue at the time of cursor creations.
+     */
+    cursor?: CoValueCursor;
   },
 ): TSelectorReturn {
   const subscription = useAccountSubscription(
@@ -787,6 +817,12 @@ export function useSuspenseAccount<
      * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
      */
     unstable_branch?: BranchDefinition;
+    /**
+     * Load the CoValue at a specific cursor.
+     *
+     * Cursors let you take a "snapshot" of a CoValue at the time of cursor creations.
+     */
+    cursor?: CoValueCursor;
   },
 ): TSelectorReturn {
   const subscription = useAccountSubscription(
@@ -1074,6 +1110,12 @@ export function useSuspenseCoStates<
      * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
      */
     unstable_branch?: BranchDefinition;
+    /**
+     * Load the CoValue at a specific cursor.
+     *
+     * Cursors let you take a "snapshot" of a CoValue at the time of cursor creations.
+     */
+    cursor?: CoValueCursor;
   },
 ): TSelectorReturn[] {
   const resolve = getResolveQuery(Schema, options?.resolve);
@@ -1082,6 +1124,7 @@ export function useSuspenseCoStates<
     ids,
     resolve,
     options?.unstable_branch,
+    options?.cursor,
     "useSuspenseCoStates",
   ) as SubscriptionScope<CoValue>[];
   useSuspendUntilLoaded(subscriptionScopes);
@@ -1144,6 +1187,12 @@ export function useCoStates<
      * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
      */
     unstable_branch?: BranchDefinition;
+    /**
+     * Load the CoValue at a specific cursor.
+     *
+     * Cursors let you take a "snapshot" of a CoValue at the time of cursor creations.
+     */
+    cursor?: CoValueCursor;
   },
 ): TSelectorReturn[] {
   const resolve = getResolveQuery(Schema, options?.resolve);
@@ -1152,6 +1201,7 @@ export function useCoStates<
     ids,
     resolve,
     options?.unstable_branch,
+    options?.cursor,
     "useCoStates",
   ) as SubscriptionScope<CoValue>[];
   return useSubscriptionsSelector(subscriptionScopes, options);

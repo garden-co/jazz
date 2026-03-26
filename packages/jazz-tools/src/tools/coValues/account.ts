@@ -59,6 +59,8 @@ import {
   subscribeToExistingCoValue,
   InstanceOfSchemaCoValuesMaybeLoaded,
   LoadedAndRequired,
+  CoValueCursor,
+  LoadCoValueCursorOption,
 } from "../internal.js";
 import type { CoreAccountSchema } from "../implementation/zodSchema/schemaTypes/AccountSchema.js";
 import type { AccountSchema as HydratedAccountSchema } from "../implementation/zodSchema/schemaTypes/AccountSchema.js";
@@ -571,6 +573,7 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
     options: {
       resolve: RefsToResolveStrict<A, R>;
       unstable_branch?: BranchDefinition;
+      cursor?: LoadCoValueCursorOption;
     },
   ): Promise<Resolved<A, R>> {
     return ensureCoValueLoaded(this.account as unknown as A, options);
@@ -586,6 +589,7 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
     options: {
       resolve?: RefsToResolveStrict<A, R>;
       unstable_branch?: BranchDefinition;
+      cursor?: CoValueCursor;
     },
     listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
   ): () => void;

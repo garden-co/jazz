@@ -4,6 +4,7 @@ import type { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
 import type { RawCoID } from "../ids.js";
 import type { JsonObject } from "../jsonValue.js";
 import type { RawGroup } from "./group.js";
+import { CoValueFrontier } from "../knownState.js";
 
 export type BinaryStreamInfo = {
   mimeType: string;
@@ -47,6 +48,9 @@ export class RawBinaryCoStreamView<
   private start: BinaryStreamStart | undefined;
   private ended: boolean;
 
+  /** @internal */
+  atFrontierFilter?: CoValueFrontier = undefined;
+
   private resetInternalState() {
     this.chunks = [];
     this.start = undefined;
@@ -84,6 +88,18 @@ export class RawBinaryCoStreamView<
     throw new Error("Not yet implemented");
   }
 
+  atFrontier(frontier: CoValueFrontier): this {
+    const clone = Object.create(this) as RawBinaryCoStreamView<Meta>;
+    clone.atFrontierFilter = frontier;
+    clone.resetInternalState();
+    clone.processNewTransactions();
+    return clone as this;
+  }
+
+  isTimeTravelEntity(): boolean {
+    return Boolean(this.atFrontierFilter);
+  }
+
   processNewTransactions() {
     if (this.ended) return;
 
@@ -97,6 +113,13 @@ export class RawBinaryCoStreamView<
     }
 
     for (const { txID, madeAt, changes } of newValidTransactions) {
+      if (
+        this.atFrontierFilter &&
+        txID.txIndex >= (this.atFrontierFilter[txID.sessionID] ?? -1)
+      ) {
+        continue;
+      }
+
       for (const changeUntyped of changes) {
         const change = changeUntyped as BinaryStreamItem;
 
@@ -172,6 +195,10 @@ export class RawBinaryCoStream<
     privacy: "private" | "trusting" = "private",
     updateView: boolean = true,
   ): void {
+    if (this.isTimeTravelEntity()) {
+      throw new Error("Cannot mutate a time travel entity");
+    }
+
     this.core.makeTransaction([item], privacy);
     if (updateView) {
       this.processNewTransactions();

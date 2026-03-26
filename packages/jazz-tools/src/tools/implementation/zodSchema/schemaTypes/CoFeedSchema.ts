@@ -17,6 +17,7 @@ import {
   withSchemaPermissions,
   type Schema,
   CoValueCreateOptions,
+  LoadCoValueCursorOption,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFeedSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
@@ -124,6 +125,7 @@ export class CoFeedSchema<
       resolve?: RefsToResolveStrict<CoFeedInstanceCoValuesMaybeLoaded<T>, R>;
       loadAs?: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
+      cursor?: LoadCoValueCursorOption;
     },
   ): Promise<Settled<Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>>> {
     // @ts-expect-error

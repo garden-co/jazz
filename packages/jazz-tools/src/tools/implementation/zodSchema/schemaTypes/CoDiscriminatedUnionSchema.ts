@@ -14,6 +14,8 @@ import {
   SubscribeCallback,
   SubscribeListenerOptions,
   coOptionalDefiner,
+  CoValueCursor,
+  LoadCoValueCursorOption,
 } from "../../../internal.js";
 import { z } from "../zodReExport.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
@@ -107,6 +109,7 @@ export class CoDiscriminatedUnionSchema<
       loadAs?: Account | AnonymousJazzAgent;
       skipRetry?: boolean;
       unstable_branch?: BranchDefinition;
+      cursor?: LoadCoValueCursorOption;
     },
   ): Promise<
     Settled<

@@ -1,4 +1,4 @@
-import { LocalNode, RawCoValue } from "cojson";
+import { LocalNode, RawCoValue, RawCoID, CoValueFrontier } from "cojson";
 import {
   CoFeed,
   CoList,
@@ -12,6 +12,9 @@ import {
   createUnloadedCoValue,
   instantiateRefEncodedFromRaw,
   isRefEncoded,
+  CoValueCursor,
+  DecodedCoValueCursor,
+  CoValueErrorState,
 } from "../internal.js";
 import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
@@ -39,6 +42,7 @@ import {
   rejectedPromise,
   resolvedPromise,
 } from "./utils.js";
+import { decodeAndValidateCursor, encodeCursor } from "./cursor.js";
 
 export class SubscriptionScope<D extends CoValue> {
   static isProfilingEnabled = isDev;
@@ -71,6 +75,7 @@ export class SubscriptionScope<D extends CoValue> {
   private subscription: CoValueCoreSubscription;
   private dirty = false;
   private resolve: RefsToResolve<any>;
+  private initialResolve: RefsToResolve<any>;
   private idsSubscribed = new Set<string>();
   private autoloaded = new Set<string>();
   private autoloadedKeys = new Set<string>();
@@ -81,6 +86,13 @@ export class SubscriptionScope<D extends CoValue> {
   private migrating = false;
   private migrationFailed = false;
   closed = false;
+
+  private _cursor:
+    | {
+        encoded: CoValueCursor;
+        decoded: DecodedCoValueCursor;
+      }
+    | undefined;
 
   private silenceUpdates = false;
 
@@ -99,12 +111,31 @@ export class SubscriptionScope<D extends CoValue> {
     public skipRetry = false,
     public bestEffortResolution = false,
     public unstable_branch?: BranchDefinition,
-    callerStack?: Error | undefined,
+    cursor?:
+      | CoValueCursor
+      | {
+          encoded: CoValueCursor;
+          decoded: DecodedCoValueCursor;
+        },
   ) {
-    // Use caller stack if provided, otherwise capture here (less useful but better than nothing)
-    this.callerStack = callerStack;
     this.resolve = resolve;
+    this.initialResolve = resolve;
     this.value = { type: CoValueLoadingState.LOADING, id };
+
+    if (cursor) {
+      if (typeof cursor === "object") {
+        this._cursor = cursor;
+      } else {
+        this._cursor = {
+          encoded: cursor,
+          decoded: decodeAndValidateCursor({
+            rootId: id,
+            cursor,
+            resolve,
+          }),
+        };
+      }
+    }
 
     let lastUpdate:
       | RawCoValue
@@ -164,6 +195,7 @@ export class SubscriptionScope<D extends CoValue> {
       },
       skipRetry,
       this.unstable_branch,
+      this._cursor?.decoded,
     );
   }
 
@@ -280,8 +312,17 @@ export class SubscriptionScope<D extends CoValue> {
   private handleUpdate(
     update: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE,
   ) {
-    if (update === CoValueLoadingState.UNAVAILABLE) {
-      if (this.value.type === CoValueLoadingState.LOADING) {
+    const cursorReplayedError =
+      this._cursor?.decoded?.valueErrors?.[this.id as RawCoID];
+
+    if (
+      update === CoValueLoadingState.UNAVAILABLE ||
+      cursorReplayedError === CoValueLoadingState.UNAVAILABLE
+    ) {
+      if (
+        this.value.type === CoValueLoadingState.LOADING ||
+        cursorReplayedError === CoValueLoadingState.UNAVAILABLE
+      ) {
         const error = new JazzError(this.id, CoValueLoadingState.UNAVAILABLE, [
           {
             code: CoValueLoadingState.UNAVAILABLE,
@@ -300,8 +341,14 @@ export class SubscriptionScope<D extends CoValue> {
       return;
     }
 
-    if (update.core.isDeleted) {
-      if (this.value.type !== CoValueLoadingState.DELETED) {
+    if (
+      update.core.isDeleted ||
+      cursorReplayedError === CoValueLoadingState.DELETED
+    ) {
+      if (
+        this.value.type !== CoValueLoadingState.DELETED ||
+        cursorReplayedError === CoValueLoadingState.DELETED
+      ) {
         const error = new JazzError(this.id, CoValueLoadingState.DELETED, [
           {
             code: CoValueLoadingState.DELETED,
@@ -319,8 +366,14 @@ export class SubscriptionScope<D extends CoValue> {
       return;
     }
 
-    if (!hasAccessToCoValue(update)) {
-      if (this.value.type !== CoValueLoadingState.UNAUTHORIZED) {
+    if (
+      !hasAccessToCoValue(update) ||
+      cursorReplayedError === CoValueLoadingState.UNAUTHORIZED
+    ) {
+      if (
+        this.value.type !== CoValueLoadingState.UNAUTHORIZED ||
+        cursorReplayedError === CoValueLoadingState.UNAUTHORIZED
+      ) {
         const message = `Jazz Authorization Error: The current user (${this.node.getCurrentAgent().id}) is not authorized to access ${this.id}`;
 
         const error = new JazzError(this.id, CoValueLoadingState.UNAUTHORIZED, [
@@ -738,6 +791,11 @@ export class SubscriptionScope<D extends CoValue> {
 
     const resolve: Record<string, any> = this.resolve;
     if (!resolve.$each && !(key in resolve)) {
+      // do not autoload any descendants if we're loading using a cursor
+      if (this.cursor) {
+        return;
+      }
+
       // Adding the key to the resolve object to resolve the key when calling loadChildren
       resolve[key] = true;
       // Track the keys that are autoloaded to flag any id on that key as autoloaded
@@ -845,6 +903,7 @@ export class SubscriptionScope<D extends CoValue> {
       this.skipRetry,
       this.bestEffortResolution,
       this.unstable_branch,
+      this._cursor,
     );
     this.childNodes.set(id, child);
     child.setListener((value) => this.handleChildUpdate(id, value));
@@ -1107,6 +1166,7 @@ export class SubscriptionScope<D extends CoValue> {
       this.skipRetry,
       this.bestEffortResolution,
       this.unstable_branch,
+      this._cursor,
     );
     this.childNodes.set(id, child);
     child.setListener((value) => this.handleChildUpdate(id, value, key));
@@ -1118,6 +1178,63 @@ export class SubscriptionScope<D extends CoValue> {
     if (this.closed) {
       child.destroy();
     }
+  }
+
+  private *selfAndChildrenFrontiers(): IterableIterator<
+    [RawCoID, CoValueFrontier | CoValueErrorState]
+  > {
+    if (this.value.type === CoValueLoadingState.LOADING) {
+      return;
+    }
+
+    if (this.value.type !== CoValueLoadingState.LOADED) {
+      yield [this.id as RawCoID, this.value.type];
+      return;
+    }
+
+    yield [this.id as RawCoID, this.value.value.$jazz.raw.core.frontier()];
+
+    for (const child of this.childNodes.values()) {
+      // do not add autoloaded children to frontiers
+      if (this.autoloaded.has(child.id)) {
+        continue;
+      }
+
+      yield* child.selfAndChildrenFrontiers();
+    }
+  }
+
+  get cursor() {
+    return this._cursor?.encoded;
+  }
+
+  createCursor() {
+    const { frontiers, valueErrors } = Array.from(
+      this.selfAndChildrenFrontiers(),
+    ).reduce(
+      (acc, [id, value]) => {
+        if (typeof value === "string") {
+          acc.valueErrors[id] = value;
+        } else {
+          acc.frontiers[id] = value;
+        }
+
+        return acc;
+      },
+      {
+        frontiers: {} as Record<RawCoID, CoValueFrontier>,
+        valueErrors: {} as Record<RawCoID, CoValueErrorState>,
+      },
+    );
+
+    return encodeCursor({
+      version: 1,
+      rootId: this.id as RawCoID,
+      // we pass the initial resolve, and not the actual resolve as it may have changed due to autoloading
+      resolveFingerprint: this.initialResolve,
+      frontiers,
+      valueErrors,
+    });
   }
 
   destroy() {

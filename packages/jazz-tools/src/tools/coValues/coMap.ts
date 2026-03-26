@@ -53,6 +53,8 @@ import {
   subscribeToExistingCoValue,
   CoreCoMapSchema,
   CoValueCreateOptionsInternal,
+  CoValueCursor,
+  LoadCoValueCursorOption,
 } from "../internal.js";
 import { z } from "../implementation/zodSchema/zodReExport.js";
 import {
@@ -779,6 +781,7 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
     options: {
       resolve: RefsToResolveStrict<Map, R>;
       unstable_branch?: BranchDefinition;
+      cursor?: LoadCoValueCursorOption;
     },
   ): Promise<Resolved<Map, R>> {
     return ensureCoValueLoaded(this.coMap, options);
@@ -802,6 +805,7 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
     options: {
       resolve?: RefsToResolveStrict<Map, R>;
       unstable_branch?: BranchDefinition;
+      cursor?: CoValueCursor;
     },
     listener: (value: Resolved<Map, R>, unsubscribe: () => void) => void,
   ): () => void;

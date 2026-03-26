@@ -2,10 +2,7 @@ import { UpDownCounter, ValueType, metrics } from "@opentelemetry/api";
 import type { PeerState } from "../PeerState.js";
 import type { RawCoValue } from "../coValue.js";
 import type { LoadMode } from "../queue/OutgoingLoadQueue.js";
-import {
-  RawAccount,
-  type ControlledAccountOrAgent,
-} from "../coValues/account.js";
+import { type ControlledAccountOrAgent } from "../coValues/account.js";
 import type { RawGroup } from "../coValues/group.js";
 import { CO_VALUE_LOADING_CONFIG } from "../config.js";
 import { coreToCoValue } from "../coreToCoValue.js";
@@ -53,6 +50,7 @@ import { decryptTransactionChangesAndMeta } from "./decryptTransactionChangesAnd
 import {
   cloneKnownState,
   combineKnownStateSessions,
+  CoValueFrontier,
   CoValueKnownState,
   emptyKnownState,
   KnownStateSessions,
@@ -669,6 +667,13 @@ export class CoValueCore {
 
     // 3. Fallback to empty state (truly unknown CoValue)
     return emptyKnownState(this.id);
+  }
+
+  /**
+   * Returns a new frontier object from the CoValue's known state
+   */
+  frontier(): CoValueFrontier {
+    return { ...this.knownState().sessions };
   }
 
   /**

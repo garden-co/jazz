@@ -21,6 +21,8 @@ import {
   isCoValueSchema,
   type Schema,
   CoValueCreateOptions,
+  CoValueCursor,
+  LoadCoValueCursorOption,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { removeGetters, withSchemaResolveQuery } from "../../schemaUtils.js";
@@ -178,6 +180,7 @@ export class CoMapSchema<
       loadAs?: Account | AnonymousJazzAgent;
       skipRetry?: boolean;
       unstable_branch?: BranchDefinition;
+      cursor?: LoadCoValueCursorOption;
     },
   ): Promise<
     Settled<

@@ -8,6 +8,7 @@ import { isCoValue } from "../typeUtils/isCoValue.js";
 import { RawAccountID } from "./account.js";
 import { RawGroup } from "./group.js";
 import { RawCoID } from "../ids.js";
+import { CoValueFrontier } from "../knownState.js";
 
 export type CoStreamItem<Item extends JsonValue> = {
   value: Item;
@@ -31,6 +32,9 @@ export class RawCoStreamView<
   knownTransactions: Record<RawCoID, number>;
   totalValidTransactions: number = 0;
   version: number = 0;
+
+  /** @internal */
+  atFrontierFilter?: CoValueFrontier = undefined;
 
   private resetInternalState() {
     this.items = {};
@@ -66,6 +70,18 @@ export class RawCoStreamView<
     throw new Error("Not yet implemented");
   }
 
+  atFrontier(frontier: CoValueFrontier): this {
+    const clone = Object.create(this) as RawCoStreamView<Item, Meta>;
+    clone.atFrontierFilter = frontier;
+    clone.resetInternalState();
+    clone.processNewTransactions();
+    return clone as this;
+  }
+
+  isTimeTravelEntity() {
+    return Boolean(this.atFrontierFilter);
+  }
+
   /** @internal */
   protected compareStreamItems(
     a: CoStreamItem<Item>,
@@ -96,6 +112,13 @@ export class RawCoStreamView<
     }
 
     for (const { txID, madeAt, changes } of newValidTransactions) {
+      if (
+        this.atFrontierFilter &&
+        txID.txIndex >= (this.atFrontierFilter[txID.sessionID] ?? -1)
+      ) {
+        continue;
+      }
+
       for (const changeUntyped of changes) {
         const change = changeUntyped as Item;
         let entries = this.items[txID.sessionID];
@@ -274,6 +297,10 @@ export class RawCoStream<
   implements RawCoValue
 {
   push(item: Item, privacy: "private" | "trusting" = "private"): void {
+    if (this.isTimeTravelEntity()) {
+      throw new Error("Cannot mutate a time travel entity");
+    }
+
     this.core.makeTransaction([isCoValue(item) ? item.id : item], privacy);
     this.processNewTransactions();
   }
