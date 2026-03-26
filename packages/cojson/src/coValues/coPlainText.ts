@@ -104,13 +104,13 @@ export class RawCoPlainText<
       .join("");
   }
 
-  atTime(time: number): this {
+  override atTime(time: number): this {
     return new RawCoPlainText(this.core, {
       atTimeFilter: time,
     }) as this;
   }
 
-  atFrontier(frontier: CoValueFrontier): this {
+  override atFrontier(frontier: CoValueFrontier): this {
     return new RawCoPlainText(this.core, {
       atFrontierFilter: frontier,
     }) as this;

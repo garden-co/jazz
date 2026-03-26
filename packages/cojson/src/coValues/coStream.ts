@@ -42,11 +42,17 @@ export class RawCoStreamView<
     this.totalValidTransactions = 0;
   }
 
-  constructor(core: AvailableCoValueCore) {
+  constructor(
+    core: AvailableCoValueCore,
+    options?: {
+      atFrontierFilter?: CoValueFrontier;
+    },
+  ) {
     this.id = core.id as CoID<this>;
     this.core = core;
     this.items = {};
     this.knownTransactions = { [core.id]: 0 };
+    this.atFrontierFilter = options?.atFrontierFilter;
     this.processNewTransactions();
   }
 
@@ -71,11 +77,9 @@ export class RawCoStreamView<
   }
 
   atFrontier(frontier: CoValueFrontier): this {
-    const clone = Object.create(this) as RawCoStreamView<Item, Meta>;
-    clone.atFrontierFilter = frontier;
-    clone.resetInternalState();
-    clone.processNewTransactions();
-    return clone as this;
+    return new RawCoStreamView(this.core, {
+      atFrontierFilter: frontier,
+    }) as this;
   }
 
   isTimeTravelEntity() {
@@ -253,16 +257,14 @@ export class RawCoStreamView<
 
   *itemsBy(account: RawAccountID | AgentID) {
     // TODO: this can be made more lazy without a huge collect and sort
-    const items = [
-      ...Object.keys(this.items).flatMap((sessionID) =>
-        sessionID.startsWith(account)
-          ? [...this.itemsIn(sessionID as SessionID)].map((item) => ({
-              in: sessionID as SessionID,
-              ...item,
-            }))
-          : [],
-      ),
-    ];
+    const items = Object.keys(this.items).flatMap((sessionID) =>
+      sessionID.startsWith(account)
+        ? [...this.itemsIn(sessionID as SessionID)].map((item) => ({
+            in: sessionID as SessionID,
+            ...item,
+          }))
+        : [],
+    );
 
     items.sort((a, b) => a.at.getTime() - b.at.getTime());
 
@@ -296,6 +298,12 @@ export class RawCoStream<
   extends RawCoStreamView<Item, Meta>
   implements RawCoValue
 {
+  override atFrontier(frontier: CoValueFrontier): this {
+    return new RawCoStream(this.core, {
+      atFrontierFilter: frontier,
+    }) as this;
+  }
+
   push(item: Item, privacy: "private" | "trusting" = "private"): void {
     if (this.isTimeTravelEntity()) {
       throw new Error("Cannot mutate a time travel entity");

@@ -59,12 +59,18 @@ export class RawBinaryCoStreamView<
     this.totalValidTransactions = 0;
   }
 
-  constructor(core: AvailableCoValueCore) {
+  constructor(
+    core: AvailableCoValueCore,
+    options?: {
+      atFrontierFilter?: CoValueFrontier;
+    },
+  ) {
     this.id = core.id as CoID<this>;
     this.core = core;
     this.ended = false;
     this.chunks = [];
     this.knownTransactions = { [core.id]: 0 };
+    this.atFrontierFilter = options?.atFrontierFilter;
     this.processNewTransactions();
   }
 
@@ -89,11 +95,9 @@ export class RawBinaryCoStreamView<
   }
 
   atFrontier(frontier: CoValueFrontier): this {
-    const clone = Object.create(this) as RawBinaryCoStreamView<Meta>;
-    clone.atFrontierFilter = frontier;
-    clone.resetInternalState();
-    clone.processNewTransactions();
-    return clone as this;
+    return new RawBinaryCoStreamView(this.core, {
+      atFrontierFilter: frontier,
+    }) as this;
   }
 
   isTimeTravelEntity(): boolean {
@@ -112,7 +116,7 @@ export class RawBinaryCoStreamView<
       return;
     }
 
-    for (const { txID, madeAt, changes } of newValidTransactions) {
+    for (const { txID, changes } of newValidTransactions) {
       if (
         this.atFrontierFilter &&
         txID.txIndex >= (this.atFrontierFilter[txID.sessionID] ?? -1)
@@ -189,6 +193,12 @@ export class RawBinaryCoStream<
   extends RawBinaryCoStreamView<Meta>
   implements RawCoValue
 {
+  override atFrontier(frontier: CoValueFrontier): this {
+    return new RawBinaryCoStream(this.core, {
+      atFrontierFilter: frontier,
+    }) as this;
+  }
+
   /** @internal */
   push(
     item: BinaryStreamItem,
