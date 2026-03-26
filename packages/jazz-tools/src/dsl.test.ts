@@ -44,6 +44,84 @@ describe("bytes DSL API", () => {
   });
 });
 
+describe("schema default DSL", () => {
+  it("stores schema defaults on built columns", () => {
+    resetCollectedState();
+    table("todos", {
+      done: col.boolean().default(false),
+      status: col.enum("todo", "done").default("todo"),
+      metadata: col.json().default({ archived: false }),
+      ownerId: col.ref("users").default("00000000-0000-0000-0000-000000000001"),
+      tags: col.array(col.string()).default(["work", "personal"]),
+      archivedAt: col.timestamp().optional().default(null),
+    });
+
+    const columns = getCollectedSchema().tables[0]?.columns;
+    expect(columns).toEqual([
+      { name: "done", sqlType: "BOOLEAN", nullable: false, default: false },
+      {
+        name: "status",
+        sqlType: { kind: "ENUM", variants: ["done", "todo"] },
+        nullable: false,
+        default: "todo",
+      },
+      {
+        name: "metadata",
+        sqlType: { kind: "JSON" },
+        nullable: false,
+        default: { archived: false },
+      },
+      {
+        name: "ownerId",
+        sqlType: "UUID",
+        nullable: false,
+        default: "00000000-0000-0000-0000-000000000001",
+        references: "users",
+      },
+      {
+        name: "tags",
+        sqlType: { kind: "ARRAY", element: "TEXT" },
+        nullable: false,
+        default: ["work", "personal"],
+      },
+      { name: "archivedAt", sqlType: "TIMESTAMP", nullable: true, default: null },
+    ]);
+  });
+
+  it("preserves optional() chaining when default is already set", () => {
+    resetCollectedState();
+    table("todos", {
+      archivedAt: col.timestamp().default(0).optional(),
+    });
+
+    expect(getCollectedSchema().tables[0]?.columns[0]).toEqual({
+      name: "archivedAt",
+      sqlType: "TIMESTAMP",
+      nullable: true,
+      default: 0,
+    });
+  });
+
+  it("types schema defaults by column and nullability", () => {
+    col.boolean().default(false);
+    col.timestamp().optional().default(null);
+    col.enum("todo", "done").default("todo");
+    col.ref("users").default("00000000-0000-0000-0000-000000000001");
+    col.array(col.int()).default([1, 2, 3]);
+
+    // @ts-expect-error non-nullable defaults cannot be null
+    col.boolean().default(null);
+    // @ts-expect-error integer defaults must be numbers
+    col.int().default("1");
+    // @ts-expect-error enum defaults must be one of the declared variants
+    col.enum("todo", "done").default("archived");
+    // @ts-expect-error ref defaults must be strings
+    col.ref("users").default(123);
+    // @ts-expect-error array defaults must match the element type
+    col.array(col.int()).default(["1"]);
+  });
+});
+
 describe("ref DSL", () => {
   it("stores references on ref columns", () => {
     resetCollectedState();

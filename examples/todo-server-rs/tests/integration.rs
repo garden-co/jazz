@@ -2,6 +2,7 @@
 //!
 //! Tests the full HTTP API end-to-end.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -135,6 +136,14 @@ fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
     })
 }
 
+fn todo_values(title: impl Into<String>, description: impl Into<String>) -> HashMap<String, Value> {
+    HashMap::from([
+        ("title".to_string(), Value::Text(title.into())),
+        ("done".to_string(), Value::Boolean(false)),
+        ("description".to_string(), Value::Text(description.into())),
+    ])
+}
+
 /// Broadcast current todos to all SSE connections.
 async fn broadcast_todos(state: &AppState) {
     let query = QueryBuilder::new("todos").build();
@@ -206,13 +215,7 @@ async fn create_todo(
     Json(request): Json<CreateTodoRequest>,
 ) -> impl IntoResponse {
     let description = request.description.clone().unwrap_or_default();
-    let values = vec![
-        Value::Text(request.title.clone()),
-        Value::Boolean(false),
-        Value::Text(description.clone()),
-        Value::Null,
-        Value::Null,
-    ];
+    let values = todo_values(request.title.clone(), description.clone());
     match state.client.create("todos", values).await {
         Ok((row_id, row_values)) => {
             let todo = row_to_todo(row_id, &row_values);
@@ -456,13 +459,7 @@ async fn test_local_persistence() {
         let client = JazzClient::connect(context).await.unwrap();
 
         // Create a todo
-        let values = vec![
-            Value::Text("Persist me".to_string()),
-            Value::Boolean(false),
-            Value::Text(String::new()),
-            Value::Null,
-            Value::Null,
-        ];
+        let values = todo_values("Persist me", "");
         let (row_id, _row_values) = client.create("todos", values).await.unwrap();
 
         // Verify it exists
@@ -755,13 +752,7 @@ async fn test_server_resync() {
         let client = JazzClient::connect(context).await.unwrap();
 
         // Create a todo
-        let values = vec![
-            Value::Text("Synced todo".to_string()),
-            Value::Boolean(false),
-            Value::Text(String::new()),
-            Value::Null,
-            Value::Null,
-        ];
+        let values = todo_values("Synced todo", "");
         let (_row_id, _row_values) = client.create("todos", values).await.unwrap();
 
         // Verify it exists locally

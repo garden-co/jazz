@@ -82,6 +82,7 @@ export interface Column {
   name: string;
   sqlType: SqlType;
   nullable: boolean;
+  default?: unknown;
   references?: string; // Target table name for foreign key
 }
 

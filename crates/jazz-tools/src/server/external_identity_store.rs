@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::query_manager::query::QueryBuilder;
@@ -123,18 +124,21 @@ impl ExternalIdentityStore {
         principal_id: &str,
     ) -> Result<(), String> {
         let now = now_timestamp_us();
-        let values: Vec<Value> = self
+        let values: HashMap<String, Value> = self
             .insert_descriptor
             .columns
             .iter()
-            .map(|column| match column.name.as_str() {
-                "app_id" => Value::Uuid(app_id.as_object_id()),
-                "created_at" => Value::Timestamp(now),
-                "issuer" => Value::Text(issuer.to_string()),
-                "principal_id" => Value::Text(principal_id.to_string()),
-                "subject" => Value::Text(subject.to_string()),
-                "updated_at" => Value::Timestamp(now),
-                other => panic!("unexpected external identity column {other}"),
+            .map(|column| {
+                let value = match column.name.as_str() {
+                    "app_id" => Value::Uuid(app_id.as_object_id()),
+                    "created_at" => Value::Timestamp(now),
+                    "issuer" => Value::Text(issuer.to_string()),
+                    "principal_id" => Value::Text(principal_id.to_string()),
+                    "subject" => Value::Text(subject.to_string()),
+                    "updated_at" => Value::Timestamp(now),
+                    other => panic!("unexpected external identity column {other}"),
+                };
+                (column.name.to_string(), value)
             })
             .collect();
 

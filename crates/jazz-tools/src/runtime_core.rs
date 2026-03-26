@@ -15,7 +15,13 @@
 //!
 //! ```ignore
 //! let runtime = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
-//! runtime.insert("users", values)?;
+//! runtime.insert(
+//!     "users",
+//!     std::collections::HashMap::from([
+//!         ("id".to_string(), id),
+//!         ("name".to_string(), name),
+//!     ]),
+//! )?;
 //! runtime.immediate_tick();
 //! let future = runtime.query(query);
 //! let results = future.await?;

@@ -114,6 +114,7 @@ impl ProjectNode {
                         column_type: source_column.column_type.clone(),
                         nullable: source_column.nullable,
                         references: source_column.references,
+                        default: source_column.default.clone(),
                     }
                 }
                 ProjectionSource::RowId { .. } => ColumnDescriptor {
@@ -121,6 +122,7 @@ impl ProjectNode {
                     column_type: ColumnType::Uuid,
                     nullable: false,
                     references: None,
+                    default: None,
                 },
             };
 

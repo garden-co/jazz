@@ -2,6 +2,7 @@
 
 mod support;
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz_tools::query_manager::encoding::decode_row;
@@ -120,28 +121,40 @@ struct TodoSeed {
 }
 
 impl TodoSeed {
-    fn values(self) -> Vec<Value> {
-        vec![
-            Value::Text(self.title.to_string()),
-            Value::Boolean(self.done),
-            self.priority.map(Value::Integer).unwrap_or(Value::Null),
-            Value::Null,
-            Value::Array(
-                self.tags
-                    .iter()
-                    .map(|tag| Value::Text((*tag).to_string()))
-                    .collect(),
+    fn values(self) -> HashMap<String, Value> {
+        HashMap::from([
+            ("title".to_string(), Value::Text(self.title.to_string())),
+            ("done".to_string(), Value::Boolean(self.done)),
+            (
+                "priority".to_string(),
+                self.priority.map(Value::Integer).unwrap_or(Value::Null),
             ),
-            self.payload
-                .map(|bytes| Value::Bytea(bytes.to_vec()))
-                .unwrap_or(Value::Null),
-        ]
+            ("owner_id".to_string(), Value::Null),
+            (
+                "tags".to_string(),
+                Value::Array(
+                    self.tags
+                        .iter()
+                        .map(|tag| Value::Text((*tag).to_string()))
+                        .collect(),
+                ),
+            ),
+            (
+                "payload".to_string(),
+                self.payload
+                    .map(|bytes| Value::Bytea(bytes.to_vec()))
+                    .unwrap_or(Value::Null),
+            ),
+        ])
     }
 }
 
 async fn create_org(client: &JazzClient, name: &str) -> ObjectId {
     client
-        .create("orgs", vec![Value::Text(name.to_string())])
+        .create(
+            "orgs",
+            HashMap::from([("name".to_string(), Value::Text(name.to_string()))]),
+        )
         .await
         .expect("create org")
         .0
@@ -156,11 +169,17 @@ async fn create_team(
     client
         .create(
             "teams",
-            vec![
-                Value::Text(name.to_string()),
-                org_id.map(Value::Uuid).unwrap_or(Value::Null),
-                parent_id.map(Value::Uuid).unwrap_or(Value::Null),
-            ],
+            HashMap::from([
+                ("name".to_string(), Value::Text(name.to_string())),
+                (
+                    "org_id".to_string(),
+                    org_id.map(Value::Uuid).unwrap_or(Value::Null),
+                ),
+                (
+                    "parent_id".to_string(),
+                    parent_id.map(Value::Uuid).unwrap_or(Value::Null),
+                ),
+            ]),
         )
         .await
         .expect("create team")
@@ -171,10 +190,13 @@ async fn create_user(client: &JazzClient, name: &str, team_id: Option<ObjectId>)
     client
         .create(
             "users",
-            vec![
-                Value::Text(name.to_string()),
-                team_id.map(Value::Uuid).unwrap_or(Value::Null),
-            ],
+            HashMap::from([
+                ("name".to_string(), Value::Text(name.to_string())),
+                (
+                    "team_id".to_string(),
+                    team_id.map(Value::Uuid).unwrap_or(Value::Null),
+                ),
+            ]),
         )
         .await
         .expect("create user")
@@ -189,7 +211,10 @@ async fn create_team_edge(
     client
         .create(
             "team_edges",
-            vec![Value::Uuid(child_team), Value::Uuid(parent_team)],
+            HashMap::from([
+                ("child_team".to_string(), Value::Uuid(child_team)),
+                ("parent_team".to_string(), Value::Uuid(parent_team)),
+            ]),
         )
         .await
         .expect("create team edge")
@@ -206,7 +231,10 @@ async fn create_todo(client: &JazzClient, seed: TodoSeed) -> ObjectId {
 
 async fn create_file_part(client: &JazzClient, label: &str) -> ObjectId {
     client
-        .create("file_parts", vec![Value::Text(label.to_string())])
+        .create(
+            "file_parts",
+            HashMap::from([("label".to_string(), Value::Text(label.to_string()))]),
+        )
         .await
         .expect("create file part")
         .0
@@ -216,10 +244,13 @@ async fn create_file(client: &JazzClient, name: &str, parts: &[ObjectId]) -> Obj
     client
         .create(
             "files",
-            vec![
-                Value::Text(name.to_string()),
-                Value::Array(parts.iter().copied().map(Value::Uuid).collect()),
-            ],
+            HashMap::from([
+                ("name".to_string(), Value::Text(name.to_string())),
+                (
+                    "parts".to_string(),
+                    Value::Array(parts.iter().copied().map(Value::Uuid).collect()),
+                ),
+            ]),
         )
         .await
         .expect("create file")

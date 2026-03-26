@@ -75,7 +75,7 @@ describe("JazzClient mutation durability split", () => {
       },
     });
 
-    expect(() => client.create("todos", [])).toThrow(insertError);
+    expect(() => client.create("todos", {})).toThrow(insertError);
     expect(() =>
       client.update("row-1", { done: { type: "Boolean" as const, value: true } }),
     ).toThrow(updateError);

@@ -839,7 +839,7 @@ impl QueryManager {
         self.settle_server_subscriptions(storage_ref);
     }
     /// Load a row's data from a specific branch using LWW (last-writer-wins by timestamp).
-    /// When multiple concurrent tips exist, returns content from the tip with highest timestamp.
+    /// When timestamps tie, CommitId provides a deterministic secondary ordering.
     pub(super) fn load_row_from_object_on_branch(
         &self,
         row_id: ObjectId,
@@ -847,9 +847,14 @@ impl QueryManager {
     ) -> Option<(Vec<u8>, CommitId)> {
         let obj = self.sync_manager.object_manager.get(row_id)?;
         let branch = obj.branches.get(&BranchName::new(branch_name))?;
-        // Sort tips by timestamp (oldest first), take last (newest = LWW winner)
+        // Sort tips by (timestamp, CommitId) ascending, take last (newest = LWW winner)
         let mut tips: Vec<_> = branch.tips.iter().copied().collect();
-        tips.sort_by_key(|id| branch.commits.get(id).map(|c| c.timestamp).unwrap_or(0));
+        tips.sort_by_key(|id| {
+            (
+                branch.commits.get(id).map(|c| c.timestamp).unwrap_or(0),
+                *id,
+            )
+        });
         let tip_id = tips.last()?;
         let commit = branch.commits.get(tip_id)?;
         Some((commit.content.clone(), *tip_id))

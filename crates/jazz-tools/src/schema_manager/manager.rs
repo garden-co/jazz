@@ -16,9 +16,7 @@ use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{
-    ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName, Value,
-};
+use crate::query_manager::types::{ComposedBranchName, Schema, SchemaHash, TableName, Value};
 use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
 use crate::storage::Storage;
 use crate::sync_manager::SyncManager;
@@ -59,7 +57,13 @@ use super::types::AppId;
 /// manager.persist_lens(&lens);
 ///
 /// // Insert data
-/// let handle = manager.insert("users", &[id, name])?;
+/// let handle = manager.insert(
+///     "users",
+///     std::collections::HashMap::from([
+///         ("id".to_string(), id),
+///         ("name".to_string(), name),
+///     ]),
+/// )?;
 ///
 /// // Query across all schema versions via subscription
 /// let sub_id = manager.query_manager_mut().subscribe(manager.query("users").build())?;
@@ -68,7 +72,6 @@ use super::types::AppId;
 /// manager.query_manager_mut().unsubscribe_with_sync(sub_id);
 /// ```
 pub struct SchemaManager {
-    declared_current_schema: Option<Schema>,
     context: SchemaContext,
     query_manager: QueryManager,
     app_id: AppId,
@@ -96,7 +99,6 @@ impl SchemaManager {
         env: &str,
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
-        let declared_current_schema = schema.clone();
         let schema = normalize_schema(schema);
 
         let context = SchemaContext::new(schema.clone(), env, user_branch);
@@ -111,7 +113,6 @@ impl SchemaManager {
         known_schemas.insert(current_hash, schema);
 
         Ok(Self {
-            declared_current_schema: Some(declared_current_schema),
             context,
             query_manager,
             app_id,
@@ -141,7 +142,6 @@ impl SchemaManager {
     pub fn new_server(sync_manager: SyncManager, app_id: AppId, _env: &str) -> Self {
         let query_manager = QueryManager::new(sync_manager);
         Self {
-            declared_current_schema: None,
             context: SchemaContext::empty(),
             query_manager,
             app_id,
@@ -226,21 +226,51 @@ impl SchemaManager {
         &self.context.user_branch
     }
 
-    fn align_insert_values_to_runtime_schema(&self, table: &str, values: &[Value]) -> Vec<Value> {
-        let Some(declared_schema) = self.declared_current_schema.as_ref() else {
-            return values.to_vec();
-        };
-
+    fn get_insert_values_with_defaults(
+        &self,
+        table: &str,
+        mut values_by_column: HashMap<String, Value>,
+    ) -> Result<Vec<Value>, QueryError> {
         let table_name = TableName::new(table);
-        let Some(declared_table) = declared_schema.get(&table_name) else {
-            return values.to_vec();
-        };
-        let Some(runtime_table) = self.context.current_schema.get(&table_name) else {
-            return values.to_vec();
-        };
+        let table_schema = self
+            .current_schema()
+            .get(&table_name)
+            .ok_or(QueryError::TableNotFound(table_name))?;
 
-        reorder_values_by_column_name(&declared_table.columns, &runtime_table.columns, values)
-            .unwrap_or_else(|| values.to_vec())
+        for column in values_by_column.keys() {
+            if table_schema.columns.column(column.as_str()).is_none() {
+                return Err(QueryError::EncodingError(format!(
+                    "unknown column `{column}` on table `{table}`"
+                )));
+            }
+        }
+
+        let mut aligned_values = Vec::with_capacity(table_schema.columns.columns.len());
+        for column in &table_schema.columns.columns {
+            if let Some(value) = values_by_column.remove(column.name.as_str()) {
+                if value == Value::Null && !column.nullable {
+                    return Err(QueryError::EncodingError(format!(
+                        "cannot set required field `{}` to null",
+                        column.name
+                    )));
+                }
+                aligned_values.push(value);
+                continue;
+            }
+
+            if let Some(default) = &column.default {
+                aligned_values.push(default.clone());
+            } else if column.nullable {
+                aligned_values.push(Value::Null);
+            } else {
+                return Err(QueryError::EncodingError(format!(
+                    "missing required field `{}` on table `{table}`",
+                    column.name
+                )));
+            }
+        }
+
+        Ok(aligned_values)
     }
 
     /// Add a live schema version with auto-generated lens.
@@ -886,7 +916,7 @@ impl SchemaManager {
         &mut self,
         storage: &mut H,
         table: &str,
-        values: &[Value],
+        values: HashMap<String, Value>,
     ) -> Result<InsertResult, QueryError> {
         let _span =
             tracing::debug_span!("SM::insert", table, schema_hash = %self.context.current_hash)
@@ -895,14 +925,16 @@ impl SchemaManager {
     }
 
     /// Insert with session-based policy checking.
+    ///
+    /// Omitted fields are filled from schema defaults or nullable nulls.
     pub fn insert_with_session<H: Storage>(
         &mut self,
         storage: &mut H,
         table: &str,
-        values: &[Value],
+        values: HashMap<String, Value>,
         session: Option<&Session>,
     ) -> Result<InsertResult, QueryError> {
-        let aligned_values = self.align_insert_values_to_runtime_schema(table, values);
+        let aligned_values = self.get_insert_values_with_defaults(table, values)?;
         self.query_manager.insert_on_branch_with_session(
             storage,
             table,
@@ -1040,30 +1072,6 @@ impl SchemaManager {
     }
 }
 
-fn reorder_values_by_column_name(
-    source_descriptor: &RowDescriptor,
-    target_descriptor: &RowDescriptor,
-    values: &[Value],
-) -> Option<Vec<Value>> {
-    if values.len() != source_descriptor.columns.len()
-        || source_descriptor.columns.len() != target_descriptor.columns.len()
-    {
-        return None;
-    }
-
-    let mut values_by_column = HashMap::with_capacity(values.len());
-    for (column, value) in source_descriptor.columns.iter().zip(values.iter()) {
-        values_by_column.insert(column.name, value.clone());
-    }
-
-    let mut reordered_values = Vec::with_capacity(values.len());
-    for column in &target_descriptor.columns {
-        reordered_values.push(values_by_column.remove(&column.name)?);
-    }
-
-    Some(reordered_values)
-}
-
 fn normalize_schema(mut schema: Schema) -> Schema {
     for table_schema in schema.values_mut() {
         normalize_table_schema(table_schema);
@@ -1098,7 +1106,9 @@ fn parse_schema_hash(hex_str: &str) -> Result<SchemaHash, SchemaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
+    use crate::query_manager::types::{
+        ColumnDescriptor, ColumnType, RowDescriptor, SchemaBuilder, TableSchema,
+    };
 
     fn test_app_id() -> AppId {
         AppId::from_name("test-app")
@@ -1123,6 +1133,21 @@ mod tests {
                     .nullable_column("email", ColumnType::Text),
             )
             .build()
+    }
+
+    fn make_schema_with_insert_defaults() -> Schema {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("todos"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("done", ColumnType::Boolean).default(Value::Boolean(false)),
+                ColumnDescriptor::new("note", ColumnType::Text)
+                    .nullable()
+                    .default(Value::Text("from default".into())),
+            ])),
+        );
+        schema
     }
 
     #[test]
@@ -1441,9 +1466,13 @@ mod tests {
             .unwrap()
             .columns
             .clone();
-        let values = vec![id_val.clone(), name.clone(), email.clone()];
+        let values = HashMap::from([
+            ("id".to_string(), id_val.clone()),
+            ("name".to_string(), name.clone()),
+            ("email".to_string(), email.clone()),
+        ]);
 
-        let _handle = manager.insert(&mut storage, "users", &values).unwrap();
+        let _handle = manager.insert(&mut storage, "users", values).unwrap();
         manager.process(&mut storage);
 
         // Query via subscribe/process/unsubscribe pattern
@@ -1457,5 +1486,132 @@ mod tests {
         assert_eq!(results.len(), 1);
         let id_idx = descriptor.column_index("id").unwrap();
         assert_eq!(results[0].1[id_idx], id_val);
+    }
+
+    #[test]
+    fn schema_manager_insert_materializes_schema_defaults() {
+        use crate::storage::MemoryStorage;
+
+        let schema = make_schema_with_insert_defaults();
+        let mut storage = MemoryStorage::new();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        let handle = manager
+            .insert(
+                &mut storage,
+                "todos",
+                HashMap::from([("title".to_string(), Value::Text("ship default".into()))]),
+            )
+            .unwrap();
+
+        manager.process(&mut storage);
+        let stored = manager
+            .query_manager_mut()
+            .get_row(handle.row_id)
+            .expect("inserted row should be readable")
+            .1;
+
+        let descriptor = &manager.current_schema()[&TableName::new("todos")].columns;
+        let done_idx = descriptor.column_index("done").unwrap();
+        let note_idx = descriptor.column_index("note").unwrap();
+        let title_idx = descriptor.column_index("title").unwrap();
+
+        assert_eq!(stored[title_idx], Value::Text("ship default".into()));
+        assert_eq!(stored[done_idx], Value::Boolean(false));
+        assert_eq!(stored[note_idx], Value::Text("from default".into()));
+    }
+
+    #[test]
+    fn schema_manager_insert_explicit_null_bypasses_default_for_nullable_column() {
+        use crate::storage::MemoryStorage;
+
+        let schema = make_schema_with_insert_defaults();
+        let mut storage = MemoryStorage::new();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        let handle = manager
+            .insert(
+                &mut storage,
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text("keep null".into())),
+                    ("note".to_string(), Value::Null),
+                ]),
+            )
+            .unwrap();
+
+        let descriptor = &manager.current_schema()[&TableName::new("todos")].columns;
+        let note_idx = descriptor.column_index("note").unwrap();
+        let done_idx = descriptor.column_index("done").unwrap();
+
+        assert_eq!(handle.row_values[note_idx], Value::Null);
+        assert_eq!(handle.row_values[done_idx], Value::Boolean(false));
+    }
+
+    #[test]
+    fn schema_manager_insert_missing_required_non_defaulted_field_errors() {
+        use crate::storage::MemoryStorage;
+
+        let schema = make_schema_with_insert_defaults();
+        let mut storage = MemoryStorage::new();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        let err = manager
+            .insert(&mut storage, "todos", HashMap::new())
+            .unwrap_err();
+        assert!(
+            matches!(err, QueryError::EncodingError(ref msg) if msg.contains("missing required field `title`")),
+            "expected missing required field error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn schema_manager_insert_explicit_null_for_required_column_errors() {
+        use crate::storage::MemoryStorage;
+
+        let schema = make_schema_with_insert_defaults();
+        let mut storage = MemoryStorage::new();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        let err = manager
+            .insert(
+                &mut storage,
+                "todos",
+                HashMap::from([("title".to_string(), Value::Null)]),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, QueryError::EncodingError(ref msg) if msg.contains("cannot set required field `title` to null")),
+            "expected nullability error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn schema_manager_insert_unknown_column_errors() {
+        use crate::storage::MemoryStorage;
+
+        let schema = make_schema_with_insert_defaults();
+        let mut storage = MemoryStorage::new();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        let err = manager
+            .insert(
+                &mut storage,
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text("first".into())),
+                    ("bogus".to_string(), Value::Text("second".into())),
+                ]),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, QueryError::EncodingError(ref msg) if msg.contains("unknown column `bogus`")),
+            "expected unknown column error, got {err:?}"
+        );
     }
 }
