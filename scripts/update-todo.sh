@@ -88,7 +88,6 @@ extract_what() {
       rel_path="${proj_dir#$ROOT/}"
       echo "- [**$name**]($rel_path)"
     done
-    echo ""
   fi
 } > "$TODO"
 
