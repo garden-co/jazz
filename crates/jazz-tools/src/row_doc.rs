@@ -87,6 +87,62 @@ pub fn read_column(map: &MapRef, txn: &impl ReadTxn, key: &str) -> Option<Value>
     Some(out_to_value(out, type_tag.as_deref()))
 }
 
+/// Read a Jazz2 `Value` from a Yrs `MapRef`, using the declared `ColumnType`
+/// to recover type information that Yrs cannot preserve (e.g. Uuid elements
+/// inside arrays are stored as raw `Buffer` bytes and would otherwise come
+/// back as `Bytea`).
+pub fn read_column_typed(
+    map: &MapRef,
+    txn: &impl ReadTxn,
+    key: &str,
+    column_type: &crate::query_manager::types::ColumnType,
+) -> Option<Value> {
+    let value = read_column(map, txn, key)?;
+    Some(coerce_value(value, column_type))
+}
+
+/// Coerce a `Value` to match the expected `ColumnType`.
+///
+/// Yrs round-trips lose type tags inside containers (Array, Row).  For
+/// example a `Uuid` stored inside an `Array` comes back as `Bytea(16 bytes)`
+/// because there is no per-element type tag.  This function walks the value
+/// and applies the schema to fix up such mismatches.
+fn coerce_value(value: Value, column_type: &crate::query_manager::types::ColumnType) -> Value {
+    use crate::query_manager::types::ColumnType;
+    match (value, column_type) {
+        // Bytea(16 bytes) → Uuid when schema expects Uuid
+        (Value::Bytea(ref buf), ColumnType::Uuid) if buf.len() == 16 => {
+            let bytes: [u8; 16] = buf[..16].try_into().unwrap();
+            Value::Uuid(ObjectId::from_uuid(uuid::Uuid::from_bytes(bytes)))
+        }
+        // Double → Integer when schema expects Integer (Yrs stores i32 as f64)
+        (Value::Double(n), ColumnType::Integer) => Value::Integer(n.round() as i32),
+        // BigInt → Timestamp when schema expects Timestamp
+        (Value::BigInt(i), ColumnType::Timestamp) => Value::Timestamp(i as u64),
+        // Recurse into arrays
+        (Value::Array(elems), ColumnType::Array { element }) => Value::Array(
+            elems
+                .into_iter()
+                .map(|e| coerce_value(e, element))
+                .collect(),
+        ),
+        // Recurse into rows
+        (Value::Row { id, values }, ColumnType::Row { columns }) => {
+            let coerced: Vec<Value> = values
+                .into_iter()
+                .zip(columns.columns.iter())
+                .map(|(v, col)| coerce_value(v, &col.column_type))
+                .collect();
+            Value::Row {
+                id,
+                values: coerced,
+            }
+        }
+        // Everything else passes through unchanged
+        (v, _) => v,
+    }
+}
+
 fn out_to_value(out: Out, type_tag: Option<&str>) -> Value {
     match out {
         Out::Any(any) => any_to_value(any, type_tag),

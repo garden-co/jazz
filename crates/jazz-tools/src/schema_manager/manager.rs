@@ -136,11 +136,21 @@ impl SchemaManager {
     ///
     /// Queries are executed with explicit `QuerySchemaContext` rather than
     /// using implicit current schema context.
-    pub fn new_server(sync_manager: SyncManager, app_id: AppId, _env: &str) -> Self {
-        let query_manager = QueryManager::new(sync_manager);
+    pub fn new_server(sync_manager: SyncManager, app_id: AppId, env: &str) -> Self {
+        let mut query_manager = QueryManager::new(sync_manager);
+        // Server doesn't have a current schema, but needs env/user_branch
+        // for correct branch name computation when indexing via known_schemas.
+        {
+            let ctx = query_manager.schema_context_mut();
+            ctx.env = env.to_string();
+            ctx.user_branch = "main".to_string();
+        }
+        let mut context = SchemaContext::empty();
+        context.env = env.to_string();
+        context.user_branch = "main".to_string();
         Self {
             declared_current_schema: None,
-            context: SchemaContext::empty(),
+            context,
             query_manager,
             app_id,
             known_schemas: Arc::new(HashMap::new()),

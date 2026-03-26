@@ -1,10 +1,9 @@
 use super::*;
-use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 impl SyncManager {
-    pub(super) fn is_catalogue_metadata(metadata: &HashMap<String, String>) -> bool {
+    pub fn is_catalogue_metadata(metadata: &HashMap<String, String>) -> bool {
         matches!(
             metadata
                 .get(crate::metadata::MetadataKey::Type.as_str())
@@ -15,7 +14,7 @@ impl SyncManager {
         )
     }
 
-    pub(super) fn track_catalogue_object(
+    pub fn track_catalogue_object(
         &mut self,
         object_id: ObjectId,
         metadata: &HashMap<String, String>,
@@ -27,6 +26,7 @@ impl SyncManager {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn object_is_catalogue(&self, object_id: ObjectId) -> bool {
         self.catalogue_objects.contains(&object_id)
     }
@@ -42,20 +42,11 @@ impl SyncManager {
         };
 
         let mut sent_metadata = HashSet::new();
-        let mut sent_tips = Vec::new();
 
         for object_id in self.catalogue_objects.iter().copied() {
-            let Some(object) = self.object_manager.objects.get(&object_id) else {
-                continue;
-            };
-
-            sent_metadata.insert(object_id);
-            for (branch_name, branch) in &object.branches {
-                sent_tips.push((
-                    object_id,
-                    *branch_name,
-                    branch.tips.iter().copied().collect::<HashSet<_>>(),
-                ));
+            // Check DocManager for catalogue objects
+            if self.doc_manager.get(object_id).is_some() {
+                sent_metadata.insert(object_id);
             }
         }
 
@@ -63,120 +54,140 @@ impl SyncManager {
             return;
         };
         server.sent_metadata.extend(sent_metadata);
-        for (object_id, branch_name, tips) in sent_tips {
-            server.sent_tips.insert((object_id, branch_name), tips);
-        }
     }
 
-    /// Queue all existing objects to sync to a new server.
+    /// Queue all existing doc-based objects to sync to a new server.
     pub(super) fn queue_full_sync_to_server(&mut self, server_id: ServerId) {
         let _span = tracing::debug_span!("queue_full_sync_to_server", %server_id).entered();
-        // Collect all object/branch/tips we need to sync
-        let mut to_sync: Vec<BranchSyncData> = Vec::new();
 
-        for (object_id, object) in &self.object_manager.objects {
-            for (branch_name, branch) in &object.branches {
-                to_sync.push((
-                    *object_id,
-                    object.metadata.clone(),
-                    *branch_name,
-                    branch.tips.iter().copied().collect(),
-                ));
-            }
-        }
+        // Collect doc IDs and their metadata
+        let docs: Vec<(ObjectId, HashMap<String, String>)> = self
+            .doc_manager
+            .all_docs()
+            .map(|(id, doc)| (id, doc.metadata.clone()))
+            .collect();
 
-        // Now queue messages (borrowing self.servers mutably)
-        for (object_id, metadata, branch_name, tips) in to_sync {
-            self.queue_tips_to_server(server_id, object_id, metadata, branch_name, tips);
-        }
-    }
+        // Check which catalogue objects are already marked as sent for this server
+        let already_sent: HashSet<ObjectId> = self
+            .servers
+            .get(&server_id)
+            .map(|s| s.sent_metadata.clone())
+            .unwrap_or_default();
 
-    /// Queue all existing catalogue objects to sync to a new client.
-    pub(super) fn queue_catalogue_sync_to_client(&mut self, client_id: ClientId) {
-        let mut to_sync: Vec<BranchSyncData> = Vec::new();
-
-        for object_id in self.catalogue_objects.iter().copied() {
-            let Some(object) = self.object_manager.objects.get(&object_id) else {
+        for (doc_id, metadata) in docs {
+            // Skip nosync objects
+            if metadata
+                .get(crate::metadata::MetadataKey::NoSync.as_str())
+                .map(|v| v == "true")
+                .unwrap_or(false)
+            {
                 continue;
-            };
-            for (branch_name, branch) in &object.branches {
-                to_sync.push((
-                    object_id,
-                    object.metadata.clone(),
-                    *branch_name,
-                    branch.tips.iter().copied().collect(),
-                ));
             }
-        }
 
-        for (object_id, metadata, branch_name, tips) in to_sync {
-            self.queue_tips_to_client_unscoped(client_id, object_id, metadata, branch_name, tips);
+            // Skip catalogue objects that were already marked as sent
+            // (happens when the upstream advertises a matching catalogue state hash)
+            if self.catalogue_objects.contains(&doc_id) && already_sent.contains(&doc_id) {
+                continue;
+            }
+
+            self.queue_doc_sync_to_server(server_id, doc_id, metadata);
         }
     }
 
-    /// Queue tips to a server, including metadata if first time.
-    pub(super) fn queue_tips_to_server(
+    /// Queue a doc update to a server using Yrs sync.
+    fn queue_doc_sync_to_server(
         &mut self,
         server_id: ServerId,
-        object_id: ObjectId,
+        doc_id: ObjectId,
         metadata: HashMap<String, String>,
-        branch_name: BranchName,
-        tips: HashSet<CommitId>,
     ) {
-        let _span = tracing::debug_span!("queue_tips_to_server", %server_id, %object_id, %branch_name, tips = tips.len()).entered();
-        // Skip objects marked as nosync (local-only, e.g., index nodes)
-        if metadata
-            .get(crate::metadata::MetadataKey::NoSync.as_str())
-            .map(|v| v == "true")
-            .unwrap_or(false)
-        {
+        let Some(row_doc) = self.doc_manager.get(doc_id) else {
             return;
-        }
+        };
 
-        // Extract needed info without holding mutable borrow
-        let (include_metadata, already_sent) = {
+        // Get the full doc state as an update
+        let update = {
+            let txn = row_doc.doc.transact();
+            use yrs::ReadTxn;
+            txn.encode_state_as_update_v1(&yrs::StateVector::default())
+        };
+
+        let include_metadata = {
             let Some(server) = self.servers.get(&server_id) else {
                 return;
             };
-            let include_metadata = !server.sent_metadata.contains(&object_id);
-            let already_sent = server
-                .sent_tips
-                .get(&(object_id, branch_name))
-                .cloned()
-                .unwrap_or_default();
-            (include_metadata, already_sent)
+            !server.sent_metadata.contains(&doc_id)
         };
 
-        // Collect commits we need to send
-        let commits = self.collect_commits_to_send(object_id, &branch_name, &already_sent, &tips);
-
-        if commits.is_empty() && !include_metadata {
-            return; // Nothing new to send
+        // Update server state
+        if let Some(server) = self.servers.get_mut(&server_id)
+            && include_metadata
+        {
+            server.sent_metadata.insert(doc_id);
         }
-
-        // Now update server state
-        let server = self.servers.get_mut(&server_id).unwrap();
-        if include_metadata {
-            server.sent_metadata.insert(object_id);
-        }
-        server.sent_tips.insert((object_id, branch_name), tips);
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Server(server_id),
-            payload: SyncPayload::ObjectUpdated {
-                object_id,
+            payload: SyncPayload::DocUpdated {
+                doc_id,
+                update,
                 metadata: if include_metadata {
                     Some(ObjectMetadata {
-                        id: object_id,
+                        id: doc_id,
                         metadata,
                     })
                 } else {
                     None
                 },
-                branch_name,
-                commits,
             },
         });
+    }
+
+    /// Queue all existing catalogue objects to sync to a new client.
+    pub(super) fn queue_catalogue_sync_to_client(&mut self, client_id: ClientId) {
+        let catalogue_ids: Vec<ObjectId> = self.catalogue_objects.iter().copied().collect();
+
+        for object_id in catalogue_ids {
+            let Some(row_doc) = self.doc_manager.get(object_id) else {
+                continue;
+            };
+            let metadata = row_doc.metadata.clone();
+
+            let update = {
+                let txn = row_doc.doc.transact();
+                use yrs::ReadTxn;
+                txn.encode_state_as_update_v1(&yrs::StateVector::default())
+            };
+
+            let include_metadata = {
+                let Some(client) = self.clients.get(&client_id) else {
+                    return;
+                };
+                !client.sent_metadata.contains(&object_id)
+            };
+
+            if let Some(client) = self.clients.get_mut(&client_id)
+                && include_metadata
+            {
+                client.sent_metadata.insert(object_id);
+            }
+
+            self.outbox.push(OutboxEntry {
+                destination: Destination::Client(client_id),
+                payload: SyncPayload::DocUpdated {
+                    doc_id: object_id,
+                    update,
+                    metadata: if include_metadata {
+                        Some(ObjectMetadata {
+                            id: object_id,
+                            metadata,
+                        })
+                    } else {
+                        None
+                    },
+                },
+            });
+        }
     }
 
     /// Queue initial sync to a client for a newly visible object/branch.
@@ -184,54 +195,27 @@ impl SyncManager {
         &mut self,
         client_id: ClientId,
         object_id: ObjectId,
-        branch_name: BranchName,
+        _branch_name: BranchName,
     ) {
-        // Get current tips from object manager
-        let Some(object) = self.object_manager.get(object_id) else {
+        let Some(row_doc) = self.doc_manager.get(object_id) else {
             return;
         };
-        let Some(branch) = object.branches.get(&branch_name) else {
-            return;
+        let metadata = row_doc.metadata.clone();
+
+        let update = {
+            let txn = row_doc.doc.transact();
+            use yrs::ReadTxn;
+            txn.encode_state_as_update_v1(&yrs::StateVector::default())
         };
-        let tips: HashSet<CommitId> = branch.tips.iter().copied().collect();
-        let metadata = object.metadata.clone();
 
-        self.queue_tips_to_client(client_id, object_id, metadata, branch_name, tips);
-    }
+        let include_metadata = {
+            let Some(client) = self.clients.get(&client_id) else {
+                return;
+            };
+            !client.sent_metadata.contains(&object_id)
+        };
 
-    /// Queue tips to a client, including metadata if first time.
-    pub(super) fn queue_tips_to_client(
-        &mut self,
-        client_id: ClientId,
-        object_id: ObjectId,
-        metadata: HashMap<String, String>,
-        branch_name: BranchName,
-        tips: HashSet<CommitId>,
-    ) {
-        self.queue_tips_to_client_inner(client_id, object_id, metadata, branch_name, tips, true);
-    }
-
-    pub(super) fn queue_tips_to_client_unscoped(
-        &mut self,
-        client_id: ClientId,
-        object_id: ObjectId,
-        metadata: HashMap<String, String>,
-        branch_name: BranchName,
-        tips: HashSet<CommitId>,
-    ) {
-        self.queue_tips_to_client_inner(client_id, object_id, metadata, branch_name, tips, false);
-    }
-
-    fn queue_tips_to_client_inner(
-        &mut self,
-        client_id: ClientId,
-        object_id: ObjectId,
-        metadata: HashMap<String, String>,
-        branch_name: BranchName,
-        tips: HashSet<CommitId>,
-        require_scope: bool,
-    ) {
-        // Skip objects marked as nosync (local-only, e.g., index nodes)
+        // Skip nosync objects
         if metadata
             .get(crate::metadata::MetadataKey::NoSync.as_str())
             .map(|v| v == "true")
@@ -240,48 +224,27 @@ impl SyncManager {
             return;
         }
 
-        // Extract needed info without holding mutable borrow
-        let (in_scope, include_metadata, already_sent) = {
+        // Check scope
+        {
             let Some(client) = self.clients.get(&client_id) else {
                 return;
             };
-
-            // Check if in scope
-            let in_scope = !require_scope || client.is_in_scope(object_id, &branch_name);
-
-            let include_metadata = !client.sent_metadata.contains(&object_id);
-
-            let already_sent = client
-                .sent_tips
-                .get(&(object_id, branch_name))
-                .cloned()
-                .unwrap_or_default();
-
-            (in_scope, include_metadata, already_sent)
-        };
-
-        if !in_scope {
-            return;
+            if !client.is_in_scope(object_id, &_branch_name) {
+                return;
+            }
         }
 
-        // Collect commits
-        let commits = self.collect_commits_to_send(object_id, &branch_name, &already_sent, &tips);
-
-        if commits.is_empty() && !include_metadata {
-            return;
-        }
-
-        // Now update client state
-        let client = self.clients.get_mut(&client_id).unwrap();
-        if include_metadata {
+        if let Some(client) = self.clients.get_mut(&client_id)
+            && include_metadata
+        {
             client.sent_metadata.insert(object_id);
         }
-        client.sent_tips.insert((object_id, branch_name), tips);
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
-            payload: SyncPayload::ObjectUpdated {
-                object_id,
+            payload: SyncPayload::DocUpdated {
+                doc_id: object_id,
+                update,
                 metadata: if include_metadata {
                     Some(ObjectMetadata {
                         id: object_id,
@@ -290,105 +253,7 @@ impl SyncManager {
                 } else {
                     None
                 },
-                branch_name,
-                commits,
             },
         });
-    }
-
-    /// Collect commits needed to bring destination from already_sent to new_tips.
-    /// Returns commits in topological order (parents first).
-    pub(super) fn collect_commits_to_send(
-        &self,
-        object_id: ObjectId,
-        branch_name: &BranchName,
-        already_sent: &HashSet<CommitId>,
-        new_tips: &HashSet<CommitId>,
-    ) -> Vec<Commit> {
-        let Some(object) = self.object_manager.get(object_id) else {
-            return Vec::new();
-        };
-        let Some(branch) = object.branches.get(branch_name) else {
-            return Vec::new();
-        };
-
-        // If no commits yet sent, send all commits reachable from tips
-        // If commits were sent, send only new commits (those not in ancestry of already_sent)
-
-        let mut to_send: HashSet<CommitId> = HashSet::new();
-        let mut to_visit: Vec<CommitId> = new_tips.iter().copied().collect();
-        let mut visited: HashSet<CommitId> = HashSet::new();
-
-        while let Some(commit_id) = to_visit.pop() {
-            if visited.contains(&commit_id) {
-                continue;
-            }
-            visited.insert(commit_id);
-
-            // If already sent this commit (or its descendant), stop traversal
-            if already_sent.contains(&commit_id) {
-                continue;
-            }
-
-            to_send.insert(commit_id);
-
-            // Visit parents
-            if let Some(commit) = branch.commits.get(&commit_id) {
-                for parent in &commit.parents {
-                    if !visited.contains(parent) {
-                        to_visit.push(*parent);
-                    }
-                }
-            }
-        }
-
-        // Sort topologically (parents before children)
-        self.topological_sort(&branch.commits, to_send)
-    }
-
-    /// Sort commits topologically (parents first).
-    pub(super) fn topological_sort(
-        &self,
-        all_commits: &HashMap<CommitId, Commit>,
-        to_sort: HashSet<CommitId>,
-    ) -> Vec<Commit> {
-        let mut result = Vec::new();
-        let mut remaining: HashSet<CommitId> = to_sort.clone();
-        let mut added: HashSet<CommitId> = HashSet::new();
-
-        // Simple iterative approach: repeatedly add commits whose parents are all added
-        while !remaining.is_empty() {
-            let mut progress = false;
-            let current: Vec<CommitId> = remaining.iter().copied().collect();
-
-            for commit_id in current {
-                let Some(commit) = all_commits.get(&commit_id) else {
-                    // Commit not found, skip
-                    remaining.remove(&commit_id);
-                    progress = true;
-                    continue;
-                };
-
-                // Check if all parents in to_sort are already added
-                let parents_ready = commit
-                    .parents
-                    .iter()
-                    .all(|p| !to_sort.contains(p) || added.contains(p));
-
-                if parents_ready {
-                    result.push(commit.clone());
-                    added.insert(commit_id);
-                    remaining.remove(&commit_id);
-                    progress = true;
-                }
-            }
-
-            if !progress {
-                // Cycle detected or missing parents, break to avoid infinite loop
-                break;
-            }
-        }
-
-        result
     }
 }

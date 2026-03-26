@@ -5,7 +5,6 @@ pub mod metadata;
 #[cfg(feature = "cli")]
 pub mod middleware;
 pub mod object;
-pub mod object_manager;
 pub mod query_manager;
 #[cfg(feature = "cli")]
 pub mod routes;

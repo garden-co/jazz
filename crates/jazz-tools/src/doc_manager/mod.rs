@@ -119,6 +119,11 @@ impl DocManager {
         self.docs.get(&id)
     }
 
+    /// Iterate over all docs.
+    pub fn all_docs(&self) -> impl Iterator<Item = (ObjectId, &RowDoc)> {
+        self.docs.iter().map(|(&id, doc)| (id, doc))
+    }
+
     pub fn get_mut(&mut self, id: ObjectId) -> Option<&mut RowDoc> {
         self.docs.get_mut(&id)
     }

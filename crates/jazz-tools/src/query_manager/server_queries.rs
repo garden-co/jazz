@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use yrs::{Map, Transact};
+
 use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
@@ -177,11 +179,11 @@ impl QueryManager {
             .unwrap_or(false)
     }
 
-    fn scope_with_policy_context_rows_from_object_manager(
+    fn scope_with_policy_context_rows_from_doc_manager(
         base_scope: &HashSet<(ObjectId, BranchName)>,
         graph: &super::graph::QueryGraph,
         branches: &[String],
-        object_manager: &crate::object_manager::ObjectManager,
+        doc_manager: &crate::doc_manager::DocManager,
     ) -> HashSet<(ObjectId, BranchName)> {
         let mut scope = base_scope.clone();
 
@@ -195,8 +197,8 @@ impl QueryManager {
         }
 
         let branch_names: Vec<BranchName> = branches.iter().map(BranchName::new).collect();
-        for (object_id, object) in &object_manager.objects {
-            let Some(table_name) = object.metadata.get(MetadataKey::Table.as_str()) else {
+        for (object_id, doc) in doc_manager.all_docs() {
+            let Some(table_name) = doc.metadata.get(MetadataKey::Table.as_str()) else {
                 continue;
             };
             if !policy_tables
@@ -206,20 +208,15 @@ impl QueryManager {
                 continue;
             }
 
+            // Check if the doc is not deleted
+            let txn = doc.doc.transact();
+            if doc.root_map.get(&txn, "_deleted").is_some() {
+                continue;
+            }
+
+            // Add to scope for each branch
             for branch_name in &branch_names {
-                let Some(branch) = object.branches.get(branch_name) else {
-                    continue;
-                };
-                let has_live_tip = branch.tips.iter().any(|tip_id| {
-                    branch
-                        .commits
-                        .get(tip_id)
-                        .map(|commit| !commit.content.is_empty())
-                        .unwrap_or(false)
-                });
-                if has_live_tip {
-                    scope.insert((*object_id, *branch_name));
-                }
+                scope.insert((object_id, *branch_name));
             }
         }
 
@@ -287,45 +284,38 @@ impl QueryManager {
             let branch_schema_map = Self::branch_schema_map_for_context(&subscription_context);
 
             // Initial settle to populate the graph
-            let om = &mut self.sync_manager.object_manager;
+            let doc_manager = &self.sync_manager.doc_manager;
+            let schema_ref = &schema_for_compile;
             let storage_ref: &dyn Storage = storage;
 
             let branches =
                 Self::resolved_server_query_branches(&query_for_compile, &subscription_context);
             let table = sub.query.table.as_str().to_string();
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let obj = om.get_or_load(id, storage_ref, &branches)?;
-                let mut best: Option<(u64, Vec<u8>, CommitId, BranchName)> = None;
-                for branch_name in &branches {
-                    let branch_name = BranchName::new(branch_name);
-                    if let Some(branch) = obj.branches.get(&branch_name) {
-                        for &tip_id in &branch.tips {
-                            if let Some(commit) = branch.commits.get(&tip_id) {
-                                match &best {
-                                    None => {
-                                        best = Some((
-                                            commit.timestamp,
-                                            commit.content.clone(),
-                                            tip_id,
-                                            branch_name,
-                                        ));
-                                    }
-                                    Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
-                                        best = Some((
-                                            commit.timestamp,
-                                            commit.content.clone(),
-                                            tip_id,
-                                            branch_name,
-                                        ));
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
+                let row_doc = doc_manager.get(id)?;
+                let table_name_str = row_doc.metadata.get("table")?;
+                let table_name = TableName::new(table_name_str);
+                let table_schema = schema_ref.get(&table_name)?;
+
+                let txn = row_doc.doc.transact();
+                let mut values = Vec::with_capacity(table_schema.columns.columns.len());
+                for col in &table_schema.columns.columns {
+                    let value = crate::row_doc::read_column_typed(
+                        &row_doc.root_map,
+                        &txn,
+                        col.name.as_str(),
+                        &col.column_type,
+                    )
+                    .unwrap_or(super::types::Value::Null);
+                    values.push(value);
                 }
-                let (_, content, commit_id, branch_name) =
-                    best.filter(|(_, content, _, _)| !content.is_empty())?;
+                let content = super::encoding::encode_row(&table_schema.columns, &values).ok()?;
+                if content.is_empty() {
+                    return None;
+                }
+
+                let commit_id = crate::query_manager::writes::synthetic_commit_id(id);
+                let branch_name = BranchName::new("main");
                 Self::load_row_with_schema_transform(
                     id,
                     content,
@@ -344,11 +334,11 @@ impl QueryManager {
             let result_scope = graph.sync_scope_object_ids();
             // Trusted clients (Peer/Admin) also need policy context rows.
             let scope = if sync_policy_context_rows {
-                Self::scope_with_policy_context_rows_from_object_manager(
+                Self::scope_with_policy_context_rows_from_doc_manager(
                     &result_scope,
                     &graph,
                     &branches,
-                    om,
+                    doc_manager,
                 )
             } else {
                 result_scope
@@ -451,7 +441,8 @@ impl QueryManager {
             })
             .collect();
 
-        let om = &mut self.sync_manager.object_manager;
+        let doc_manager = &self.sync_manager.doc_manager;
+        let schema_ref = &self.schema;
 
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
             let branches = &sub.branches;
@@ -460,38 +451,30 @@ impl QueryManager {
 
             // Row loader for this subscription
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let obj = om.get_or_load(id, storage, branches)?;
-                let mut best: Option<(u64, Vec<u8>, CommitId, BranchName)> = None;
-                for branch_name in branches {
-                    let branch_name = BranchName::new(branch_name);
-                    if let Some(branch) = obj.branches.get(&branch_name) {
-                        for &tip_id in &branch.tips {
-                            if let Some(commit) = branch.commits.get(&tip_id) {
-                                match &best {
-                                    None => {
-                                        best = Some((
-                                            commit.timestamp,
-                                            commit.content.clone(),
-                                            tip_id,
-                                            branch_name,
-                                        ));
-                                    }
-                                    Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
-                                        best = Some((
-                                            commit.timestamp,
-                                            commit.content.clone(),
-                                            tip_id,
-                                            branch_name,
-                                        ));
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
+                let row_doc = doc_manager.get(id)?;
+                let table_name_str = row_doc.metadata.get("table")?;
+                let table_name = TableName::new(table_name_str);
+                let table_schema = schema_ref.get(&table_name)?;
+
+                let txn = row_doc.doc.transact();
+                let mut values = Vec::with_capacity(table_schema.columns.columns.len());
+                for col in &table_schema.columns.columns {
+                    let value = crate::row_doc::read_column_typed(
+                        &row_doc.root_map,
+                        &txn,
+                        col.name.as_str(),
+                        &col.column_type,
+                    )
+                    .unwrap_or(super::types::Value::Null);
+                    values.push(value);
                 }
-                let (_, content, commit_id, branch_name) =
-                    best.filter(|(_, content, _, _)| !content.is_empty())?;
+                let content = super::encoding::encode_row(&table_schema.columns, &values).ok()?;
+                if content.is_empty() {
+                    return None;
+                }
+
+                let commit_id = crate::query_manager::writes::synthetic_commit_id(id);
+                let branch_name = BranchName::new("main");
                 Self::load_row_with_schema_transform(
                     id,
                     content,
@@ -516,11 +499,11 @@ impl QueryManager {
                 // Check if scope changed
                 let result_scope = sub.graph.sync_scope_object_ids();
                 if trusted_clients.contains(client_id) {
-                    Self::scope_with_policy_context_rows_from_object_manager(
+                    Self::scope_with_policy_context_rows_from_doc_manager(
                         &result_scope,
                         &sub.graph,
                         branches,
-                        om,
+                        doc_manager,
                     )
                 } else {
                     result_scope
@@ -725,6 +708,25 @@ impl QueryManager {
             }
         };
 
+        // For DocUpdated payloads, old_content and new_content may be None.
+        // Populate them from DocManager so policy evaluation can proceed.
+        if let SyncPayload::DocUpdated { doc_id, update, .. } = &check.payload {
+            let doc_id = *doc_id;
+            let update = update.clone();
+            if check.old_content.is_none() && check.operation == Operation::Update {
+                // Read old content from DocManager (update not yet applied for User clients)
+                check.old_content = self.load_row_data_from_doc(doc_id);
+            }
+            if check.new_content.is_none() {
+                // Compute new content by applying the update to a temp copy
+                check.new_content = self.compute_new_content_from_doc_update(
+                    doc_id,
+                    &update,
+                    &table_schema.columns,
+                );
+            }
+        }
+
         if check.operation == Operation::Insert
             && let Some(new_content) = check.new_content.as_ref()
             && let Err(err) = self.validate_json_for_content(&table_schema.columns, new_content)
@@ -830,12 +832,13 @@ impl QueryManager {
                     via_column,
                     max_depth,
                 } => {
-                    let (object_id, branch_name) = match &check.payload {
+                    let (object_id, branch_name_owned) = match &check.payload {
                         SyncPayload::ObjectUpdated {
                             object_id,
                             branch_name,
                             ..
-                        } => (*object_id, branch_name.as_str()),
+                        } => (*object_id, branch_name.as_str().to_string()),
+                        SyncPayload::DocUpdated { doc_id, .. } => (*doc_id, self.current_branch()),
                         _ => {
                             let reason = format!(
                                 "{:?} denied by policy on table {} (missing row context for INHERITS REFERENCING)",
@@ -855,7 +858,7 @@ impl QueryManager {
                         &via_column,
                         max_depth,
                         &check.session,
-                        branch_name,
+                        &branch_name_owned,
                     ) {
                         let reason = format!(
                             "{:?} denied by policy on table {} (INHERITS REFERENCING failed)",
@@ -1009,12 +1012,14 @@ impl QueryManager {
             return;
         }
 
+        let current_branch = self.current_branch();
         let row_context = match &check.payload {
             SyncPayload::ObjectUpdated {
                 object_id,
                 branch_name,
                 ..
             } => Some((*object_id, branch_name.as_str())),
+            SyncPayload::DocUpdated { doc_id, .. } => Some((*doc_id, current_branch.as_str())),
             _ => None,
         };
 
@@ -1204,27 +1209,40 @@ impl QueryManager {
         let mut to_reject = Vec::new();
 
         // Create row loader for settling
-        let current_branch = self.current_branch();
-        let branches = vec![current_branch.clone()];
-        let om = &mut self.sync_manager.object_manager;
+        let doc_manager = &self.sync_manager.doc_manager;
+        let schema_ref = &self.schema;
         let storage_ref: &dyn Storage = storage;
 
         // Settle each active policy check
         for (pending_id, state) in &mut self.active_policy_checks {
             let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let obj = om.get_or_load(id, storage_ref, &branches)?;
-                let branch = obj.branches.get(&BranchName::new(&current_branch))?;
-                let tip_id = branch.tips.iter().next()?;
-                let commit = branch.commits.get(tip_id)?;
-                if commit.content.is_empty() {
+                let row_doc = doc_manager.get(id)?;
+                let table_name_str = row_doc.metadata.get("table")?;
+                let table_name = TableName::new(table_name_str);
+                let table_schema = schema_ref.get(&table_name)?;
+
+                let txn = row_doc.doc.transact();
+                let mut values = Vec::with_capacity(table_schema.columns.columns.len());
+                for col in &table_schema.columns.columns {
+                    let value = crate::row_doc::read_column_typed(
+                        &row_doc.root_map,
+                        &txn,
+                        col.name.as_str(),
+                        &col.column_type,
+                    )
+                    .unwrap_or(super::types::Value::Null);
+                    values.push(value);
+                }
+                let content = super::encoding::encode_row(&table_schema.columns, &values).ok()?;
+                if content.is_empty() {
                     return None;
                 }
+
+                let commit_id = crate::query_manager::writes::synthetic_commit_id(id);
                 Some(LoadedRow::new(
-                    commit.content.clone(),
-                    *tip_id,
-                    [(id, BranchName::new(&current_branch))]
-                        .into_iter()
-                        .collect(),
+                    content,
+                    commit_id,
+                    [(id, BranchName::new("main"))].into_iter().collect(),
                 ))
             };
 
@@ -1264,5 +1282,61 @@ impl QueryManager {
                     .reject_permission_check(state.pending_check, reason);
             }
         }
+    }
+
+    /// Compute new content by applying a Yrs update to a temporary copy of the doc.
+    ///
+    /// Used to populate `new_content` for DocUpdated permission checks where the
+    /// update hasn't been applied yet (User role clients go through permission check first).
+    fn compute_new_content_from_doc_update(
+        &self,
+        doc_id: ObjectId,
+        update: &[u8],
+        descriptor: &RowDescriptor,
+    ) -> Option<Vec<u8>> {
+        use yrs::{Doc, ReadTxn, updates::decoder::Decode};
+
+        let row_doc = self.sync_manager.doc_manager.get(doc_id);
+
+        // Create a temp doc and merge the existing state + the new update
+        let temp_doc = Doc::new();
+        let root_map = temp_doc.get_or_insert_map("row");
+
+        // If the doc already exists, seed the temp doc with its current state
+        if let Some(existing) = row_doc {
+            let sv = yrs::StateVector::default();
+            let existing_state = {
+                let txn = existing.doc.transact();
+                txn.encode_state_as_update_v1(&sv)
+            };
+            let mut txn = temp_doc.transact_mut();
+            if let Ok(yrs_update) = yrs::Update::decode_v1(&existing_state) {
+                let _ = txn.apply_update(yrs_update);
+            }
+        }
+
+        // Apply the incoming update
+        {
+            let mut txn = temp_doc.transact_mut();
+            if let Ok(yrs_update) = yrs::Update::decode_v1(update) {
+                let _ = txn.apply_update(yrs_update);
+            }
+        }
+
+        // Read values from the temp doc
+        let txn = temp_doc.transact();
+        let mut values = Vec::with_capacity(descriptor.columns.len());
+        for col in &descriptor.columns {
+            let value = crate::row_doc::read_column_typed(
+                &root_map,
+                &txn,
+                col.name.as_str(),
+                &col.column_type,
+            )
+            .unwrap_or(Value::Null);
+            values.push(value);
+        }
+
+        super::encoding::encode_row(descriptor, &values).ok()
     }
 }

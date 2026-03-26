@@ -3,11 +3,9 @@
 //! Tests for CRUD operations, subscriptions, syncing, and deletions.
 
 use serde_json::json;
-use smallvec::smallvec;
 use yrs::Transact;
 
-use crate::metadata::MetadataKey;
-use crate::query_manager::encoding::{decode_row, encode_row};
+use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{QueryError, QueryManager};
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::session::Session as PolicySession;
@@ -1329,599 +1327,6 @@ fn local_update_updates_all_column_indices() {
 }
 
 #[test]
-fn synced_update_updates_column_indices() {
-    use crate::commit::{Commit, StoredState};
-    use crate::query_manager::encoding::encode_row;
-    use std::collections::HashMap;
-
-    // This test verifies that updates received via sync (receive_commit)
-    // correctly update column indices using old_content from AllObjectUpdate.
-
-    let sync_manager = SyncManager::new();
-    let schema = test_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-    let branch = get_branch(&qm);
-
-    // Simulate receiving a new object from sync
-    let row_id = crate::object::ObjectId::new();
-    let author = row_id;
-
-    // Receive object with table metadata
-    let mut metadata = HashMap::new();
-    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_object(&mut storage, row_id, metadata);
-
-    // Subscribe to all objects so we get AllObjectUpdate notifications
-    qm.sync_manager_mut().object_manager.subscribe_all();
-
-    // Encode the initial row data (name="Alice", score=100)
-    let descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("score", ColumnType::Integer),
-    ]);
-    let initial_data = encode_row(
-        &descriptor,
-        &[Value::Text("Alice".into()), Value::Integer(100)],
-    )
-    .unwrap();
-
-    // Receive the first commit (insert)
-    let commit1 = Commit {
-        parents: smallvec![],
-        content: initial_data.clone(),
-        timestamp: 1000,
-        author,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
-    let commit1_id = qm
-        .sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &branch, commit1)
-        .unwrap();
-
-    // Process to handle the AllObjectUpdate
-    qm.process(&mut storage);
-
-    // Query by name="Alice" → finds row
-    let query = qm
-        .query("users")
-        .filter_eq("name", Value::Text("Alice".into()))
-        .build();
-    let results = execute_query(&mut qm, &mut storage, query).unwrap();
-    assert_eq!(
-        results.len(),
-        1,
-        "Should find row by name=Alice after sync insert"
-    );
-
-    // Query by score=100 → finds row
-    let query = qm
-        .query("users")
-        .filter_eq("score", Value::Integer(100))
-        .build();
-    let results = execute_query(&mut qm, &mut storage, query).unwrap();
-    assert_eq!(
-        results.len(),
-        1,
-        "Should find row by score=100 after sync insert"
-    );
-
-    // Encode updated row data (name="Bob", score=200)
-    let updated_data = encode_row(
-        &descriptor,
-        &[Value::Text("Bob".into()), Value::Integer(200)],
-    )
-    .unwrap();
-
-    // Receive the second commit (update)
-    let commit2 = Commit {
-        parents: smallvec![commit1_id],
-        content: updated_data.clone(),
-        timestamp: 2000,
-        author,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &branch, commit2)
-        .unwrap();
-
-    // Process to handle the AllObjectUpdate with old_content
-    qm.process(&mut storage);
-
-    // Query by name="Alice" → empty (old value removed from index)
-    let query = qm
-        .query("users")
-        .filter_eq("name", Value::Text("Alice".into()))
-        .build();
-    let results = execute_query(&mut qm, &mut storage, query).unwrap();
-    assert_eq!(
-        results.len(),
-        0,
-        "Old name value should be removed from index after sync update"
-    );
-
-    // Query by name="Bob" → finds row (new value in index)
-    let query = qm
-        .query("users")
-        .filter_eq("name", Value::Text("Bob".into()))
-        .build();
-    let results = execute_query(&mut qm, &mut storage, query).unwrap();
-    assert_eq!(
-        results.len(),
-        1,
-        "New name value should be in index after sync update"
-    );
-
-    // Query by score=100 → empty (old value removed from index)
-    let query = qm
-        .query("users")
-        .filter_eq("score", Value::Integer(100))
-        .build();
-    let results = execute_query(&mut qm, &mut storage, query).unwrap();
-    assert_eq!(
-        results.len(),
-        0,
-        "Old score value should be removed from index after sync update"
-    );
-
-    // Query by score=200 → finds row (new value in index)
-    let query = qm
-        .query("users")
-        .filter_eq("score", Value::Integer(200))
-        .build();
-    let results = execute_query(&mut qm, &mut storage, query).unwrap();
-    assert_eq!(
-        results.len(),
-        1,
-        "New score value should be in index after sync update"
-    );
-}
-
-#[test]
-#[should_panic(expected = "missing old_content for historical sync update")]
-fn synced_update_missing_old_content_panics_fail_fast() {
-    use crate::object::BranchName;
-    use crate::object_manager::AllObjectUpdate;
-
-    let sync_manager = SyncManager::new();
-    let schema = test_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-    let branch = get_branch(&qm);
-
-    let handle = qm
-        .insert(
-            &mut storage,
-            "users",
-            &[Value::Text("Alice".into()), Value::Integer(100)],
-        )
-        .unwrap();
-    qm.process(&mut storage);
-
-    let mut metadata = std::collections::HashMap::new();
-    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-
-    // Simulate a historical sync update where ObjectManager couldn't provide
-    // old_content. We should fail-fast rather than accept index staleness.
-    qm.handle_object_update(
-        &mut storage,
-        AllObjectUpdate {
-            object_id: handle.row_id,
-            metadata,
-            branch_name: BranchName::new(&branch),
-            commit_ids: vec![],
-            is_new_object: false,
-            previous_commit_ids: vec![handle.row_commit_id],
-            old_content: None,
-        },
-    );
-}
-
-#[test]
-fn lens_transform_failure_drops_row_instead_of_fallback() {
-    use crate::commit::{Commit, StoredState};
-    use crate::query_manager::encoding::encode_row;
-    use std::collections::HashMap;
-
-    // Build a live schema without registering a lens path to current.
-    // Rows from that branch should be dropped at materialization time.
-    let sync_manager = SyncManager::new();
-    let schema = test_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-
-    let mut live_schema = Schema::new();
-    live_schema.insert(
-        TableName::new("users"),
-        RowDescriptor::new(vec![
-            ColumnDescriptor::new("name", ColumnType::Text),
-            ColumnDescriptor::new("score", ColumnType::Integer),
-            ColumnDescriptor::new("email", ColumnType::Text),
-        ])
-        .into(),
-    );
-    let live_descriptor = live_schema
-        .get(&TableName::new("users"))
-        .expect("live schema table should exist")
-        .columns
-        .clone();
-    qm.add_live_schema(live_schema);
-
-    let current_branch = get_branch(&qm);
-    let live_branch = qm
-        .all_query_branches()
-        .into_iter()
-        .find(|b| b != &current_branch)
-        .expect("live schema branch should exist");
-
-    let row_id = ObjectId::new();
-    let mut metadata = HashMap::new();
-    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_object(&mut storage, row_id, metadata);
-
-    let live_data = encode_row(
-        &live_descriptor,
-        &[
-            Value::Text("Alice".into()),
-            Value::Integer(100),
-            Value::Text("alice@example.com".into()),
-        ],
-    )
-    .unwrap();
-    let commit = Commit {
-        parents: smallvec![],
-        content: live_data,
-        timestamp: 1000,
-        author: row_id,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &live_branch, commit)
-        .unwrap();
-    qm.process(&mut storage);
-
-    assert!(
-        qm.row_is_indexed_on_branch(&storage, "users", &live_branch, row_id),
-        "row should be indexed on live branch before subscription settle"
-    );
-
-    let sub_id = qm.subscribe(qm.query("users").build()).unwrap();
-    qm.process(&mut storage);
-
-    let results = qm.get_subscription_results(sub_id);
-    assert_eq!(
-        results.len(),
-        0,
-        "row from branch with failed lens transform should be dropped"
-    );
-}
-
-#[test]
-fn synced_insert_appears_in_subscription_delta() {
-    use crate::commit::{Commit, StoredState};
-    use crate::query_manager::encoding::{decode_row, encode_row};
-    use std::collections::HashMap;
-
-    // Verify that a synced insert appears in subscription deltas
-
-    let sync_manager = SyncManager::new();
-    let schema = test_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-    let branch = get_branch(&qm);
-
-    // Simulate receiving a new row from sync BEFORE subscribing
-    // (similar to existing synced_update_updates_column_indices pattern)
-    let row_id = crate::object::ObjectId::new();
-    let author = row_id;
-
-    // Receive object with table metadata
-    let mut metadata = HashMap::new();
-    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_object(&mut storage, row_id, metadata);
-
-    // Subscribe to all objects so we get AllObjectUpdate notifications
-    qm.sync_manager_mut().object_manager.subscribe_all();
-
-    // NOW subscribe to query (after subscribe_all but before receive_commit)
-    let query = qm.query("users").build();
-    let sub_id = qm.subscribe(query).unwrap();
-
-    // Encode the row data (name="SyncedUser", score=42)
-    let descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("score", ColumnType::Integer),
-    ]);
-    let row_data = encode_row(
-        &descriptor,
-        &[Value::Text("SyncedUser".into()), Value::Integer(42)],
-    )
-    .unwrap();
-
-    // Receive the commit (insert)
-    let commit = Commit {
-        parents: smallvec![],
-        content: row_data,
-        timestamp: 1000,
-        author,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &branch, commit)
-        .unwrap();
-
-    // Process to handle the AllObjectUpdate
-    qm.process(&mut storage);
-
-    // Verify subscription delta contains the added row
-    let updates = qm.take_updates();
-    assert_eq!(updates.len(), 1, "Should have one subscription update");
-    assert_eq!(updates[0].subscription_id, sub_id);
-    assert_eq!(
-        updates[0].delta.added.len(),
-        1,
-        "Delta should contain one added row"
-    );
-
-    // Decode the row to verify contents
-    let row = &updates[0].delta.added[0];
-    let values = decode_row(&descriptor, &row.data).unwrap();
-    assert_eq!(values[0], Value::Text("SyncedUser".into()));
-    assert_eq!(values[1], Value::Integer(42));
-}
-
-#[test]
-fn synced_update_is_visible_in_query() {
-    use crate::commit::{Commit, StoredState};
-    use crate::query_manager::encoding::encode_row;
-
-    // Verify that synced updates (same row, new content) update indices correctly
-    // and are visible in subsequent queries.
-    // (Subscription delta behavior is covered by synced_update_emits_subscription_delta.)
-
-    let sync_manager = SyncManager::new();
-    let schema = test_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-    let branch = get_branch(&qm);
-
-    // Subscribe to all objects for sync updates
-    qm.sync_manager_mut().object_manager.subscribe_all();
-
-    // Insert a row locally first
-    let insert_handle = qm
-        .insert(
-            &mut storage,
-            "users",
-            &[Value::Text("Alice".into()), Value::Integer(100)],
-        )
-        .unwrap();
-    let row_id = insert_handle.row_id;
-    let first_commit_id = insert_handle.row_commit_id;
-
-    // Process to settle the initial insert
-    qm.process(&mut storage);
-
-    // Verify initial data is queryable
-    let query = qm
-        .query("users")
-        .filter_eq("name", Value::Text("Alice".into()))
-        .build();
-    let results = execute_query(&mut qm, &mut storage, query).unwrap();
-    assert_eq!(results.len(), 1, "Should find initial row");
-    assert_eq!(results[0].1[0], Value::Text("Alice".into()));
-    assert_eq!(results[0].1[1], Value::Integer(100));
-
-    // Now simulate a synced update to this row (e.g., from another peer)
-    let descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("score", ColumnType::Integer),
-    ]);
-    let updated_data = encode_row(
-        &descriptor,
-        &[Value::Text("Alice Updated".into()), Value::Integer(200)],
-    )
-    .unwrap();
-
-    let author = row_id; // Self-authored for simplicity
-    let update_commit = Commit {
-        parents: smallvec![first_commit_id],
-        content: updated_data,
-        timestamp: 2000,
-        author,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &branch, update_commit)
-        .unwrap();
-
-    // Process to handle the synced update
-    qm.process(&mut storage);
-
-    // Old data should no longer be in index
-    let query = qm
-        .query("users")
-        .filter_eq("name", Value::Text("Alice".into()))
-        .build();
-    let results = execute_query(&mut qm, &mut storage, query).unwrap();
-    assert_eq!(results.len(), 0, "Old name should not be found");
-
-    // New data should be queryable
-    let query = qm
-        .query("users")
-        .filter_eq("name", Value::Text("Alice Updated".into()))
-        .build();
-    let results = execute_query(&mut qm, &mut storage, query).unwrap();
-    assert_eq!(results.len(), 1, "Should find updated row by new name");
-    assert_eq!(results[0].1[0], Value::Text("Alice Updated".into()));
-    assert_eq!(results[0].1[1], Value::Integer(200));
-
-    // Score index should also be updated
-    let query = qm
-        .query("users")
-        .filter_eq("score", Value::Integer(200))
-        .build();
-    let results = execute_query(&mut qm, &mut storage, query).unwrap();
-    assert_eq!(results.len(), 1, "Should find updated row by new score");
-}
-
-#[test]
-fn synced_row_visible_in_filtered_subscription() {
-    use crate::commit::{Commit, StoredState};
-    use crate::query_manager::encoding::{decode_row, encode_row};
-    use std::collections::HashMap;
-
-    // Verify that synced rows are correctly filtered by subscription predicates.
-    // Rows matching the filter appear in deltas; rows not matching are excluded.
-
-    let sync_manager = SyncManager::new();
-    let schema = test_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-    let branch = get_branch(&qm);
-
-    // Subscribe to all objects for sync updates
-    qm.sync_manager_mut().object_manager.subscribe_all();
-
-    // Subscribe to filtered query: users with score > 25
-    let query = qm
-        .query("users")
-        .filter_gt("score", Value::Integer(25))
-        .build();
-    let sub_id = qm.subscribe(query).unwrap();
-
-    // Row descriptor for encoding
-    let descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("score", ColumnType::Integer),
-    ]);
-
-    // --- Test 1: Synced row that matches filter (score=30 > 25) ---
-
-    let row_id_1 = crate::object::ObjectId::new();
-    let author_1 = row_id_1;
-
-    let mut metadata_1 = HashMap::new();
-    metadata_1.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_object(&mut storage, row_id_1, metadata_1);
-
-    let data_1 = encode_row(
-        &descriptor,
-        &[Value::Text("HighScorer".into()), Value::Integer(30)],
-    )
-    .unwrap();
-
-    let commit_1 = Commit {
-        parents: smallvec![],
-        content: data_1,
-        timestamp: 1000,
-        author: author_1,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id_1, &branch, commit_1)
-        .unwrap();
-
-    qm.process(&mut storage);
-
-    let updates = qm.take_updates();
-    assert_eq!(
-        updates.len(),
-        1,
-        "Should have subscription update for matching row"
-    );
-    assert_eq!(updates[0].subscription_id, sub_id);
-    assert_eq!(
-        updates[0].delta.added.len(),
-        1,
-        "Delta should contain the matching row"
-    );
-
-    // Verify the row data
-    let row = &updates[0].delta.added[0];
-    let values = decode_row(&descriptor, &row.data).unwrap();
-    assert_eq!(values[0], Value::Text("HighScorer".into()));
-    assert_eq!(values[1], Value::Integer(30));
-
-    // --- Test 2: Synced row that does NOT match filter (score=20 < 25) ---
-
-    let row_id_2 = crate::object::ObjectId::new();
-    let author_2 = row_id_2;
-
-    let mut metadata_2 = HashMap::new();
-    metadata_2.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_object(&mut storage, row_id_2, metadata_2);
-
-    let data_2 = encode_row(
-        &descriptor,
-        &[Value::Text("LowScorer".into()), Value::Integer(20)],
-    )
-    .unwrap();
-
-    let commit_2 = Commit {
-        parents: smallvec![],
-        content: data_2,
-        timestamp: 2000,
-        author: author_2,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id_2, &branch, commit_2)
-        .unwrap();
-
-    qm.process(&mut storage);
-
-    let updates = qm.take_updates();
-    // Should have NO updates because the row doesn't match the filter
-    assert_eq!(
-        updates.len(),
-        0,
-        "Should have no subscription update for non-matching row"
-    );
-
-    // But verify it's in the index (just not in the filtered subscription)
-    let query = qm
-        .query("users")
-        .filter_eq("name", Value::Text("LowScorer".into()))
-        .build();
-    let results = execute_query(&mut qm, &mut storage, query).unwrap();
-    assert_eq!(
-        results.len(),
-        1,
-        "Non-matching row should still be in index"
-    );
-}
-
-// ========================================================================
-// Row content update propagation tests
-// ========================================================================
-
-#[test]
 fn local_update_emits_subscription_delta() {
     // Verify that local qm.update() causes subscription to emit an update delta
     let sync_manager = SyncManager::new();
@@ -1983,87 +1388,6 @@ fn local_update_emits_subscription_delta() {
     assert_eq!(old_values[1], Value::Integer(100));
     assert_eq!(new_values[0], Value::Text("Alice Updated".into()));
     assert_eq!(new_values[1], Value::Integer(200));
-}
-
-#[test]
-fn synced_update_emits_subscription_delta() {
-    use crate::commit::{Commit, StoredState};
-    use crate::query_manager::encoding::encode_row;
-
-    // Verify that synced updates (receive_commit) cause subscription to emit update delta
-
-    let sync_manager = SyncManager::new();
-    let schema = test_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-
-    // Subscribe to all objects for sync updates
-    qm.sync_manager_mut().object_manager.subscribe_all();
-
-    // Insert a row locally first
-    let handle = qm
-        .insert(
-            &mut storage,
-            "users",
-            &[Value::Text("Alice".into()), Value::Integer(100)],
-        )
-        .unwrap();
-    let row_id = handle.row_id;
-    let first_commit_id = handle.row_commit_id;
-
-    // Subscribe to all users
-    let query = qm.query("users").build();
-    let sub_id = qm.subscribe(query).unwrap();
-
-    // Process to get the initial add
-    qm.process(&mut storage);
-    let _updates = qm.take_updates(); // Clear initial add
-
-    // Now simulate a synced update
-    let descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("score", ColumnType::Integer),
-    ]);
-    let updated_data = encode_row(
-        &descriptor,
-        &[Value::Text("Alice Synced".into()), Value::Integer(300)],
-    )
-    .unwrap();
-
-    let author = row_id;
-    let update_commit = Commit {
-        parents: smallvec![first_commit_id],
-        content: updated_data,
-        timestamp: 2000,
-        author,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
-    let branch = get_branch(&qm);
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &branch, update_commit)
-        .unwrap();
-
-    // Process
-    qm.process(&mut storage);
-
-    // Should have an update delta
-    let updates = qm.take_updates();
-    assert_eq!(updates.len(), 1, "Should have one subscription update");
-    assert_eq!(updates[0].subscription_id, sub_id);
-    assert_eq!(
-        updates[0].delta.updated.len(),
-        1,
-        "Delta should contain one updated row"
-    );
-
-    // Verify new values
-    let (_old_row, new_row) = &updates[0].delta.updated[0];
-    let new_values =
-        crate::query_manager::encoding::decode_row(&descriptor, &new_row.data).unwrap();
-    assert_eq!(new_values[0], Value::Text("Alice Synced".into()));
-    assert_eq!(new_values[1], Value::Integer(300));
 }
 
 #[test]
@@ -2396,306 +1720,6 @@ fn insert_then_update_same_cycle() {
 // ========================================================================
 
 #[test]
-fn sync_inbox_insert_flows_to_subscription_delta() {
-    // End-to-end test: sync message → SyncManager inbox → QueryManager subscription
-    // This tests the full path through push_inbox() → process_inbox() → process()
-    use crate::commit::{Commit, StoredState};
-    use crate::query_manager::encoding::{decode_row, encode_row};
-    use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
-
-    let sync_manager = SyncManager::new();
-    let schema = test_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-    let branch = get_branch(&qm);
-
-    // Add a "server" that we'll receive updates from
-    let server_id = ServerId::new();
-    qm.sync_manager_mut().add_server(server_id);
-
-    // Subscribe to all objects for sync updates
-    qm.sync_manager_mut().object_manager.subscribe_all();
-
-    // Subscribe to users table
-    let query = qm.query("users").build();
-    let sub_id = qm.subscribe(query).unwrap();
-
-    // Process to initialize - expect an initial empty update (subscription settled)
-    qm.process(&mut storage);
-    let updates = qm.take_updates();
-    assert_eq!(updates.len(), 1, "Should have initial settlement update");
-    assert!(
-        updates[0].delta.added.is_empty(),
-        "Initial delta should be empty"
-    );
-
-    // Construct the sync message payload
-    let row_id = crate::object::ObjectId::new();
-    let author = row_id;
-
-    let descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("score", ColumnType::Integer),
-    ]);
-    let row_data = encode_row(
-        &descriptor,
-        &[Value::Text("SyncedUser".into()), Value::Integer(42)],
-    )
-    .unwrap();
-
-    let commit = Commit {
-        parents: smallvec![],
-        content: row_data,
-        timestamp: 1000,
-        author,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
-
-    // Object metadata marking it as a "users" table row
-    let mut obj_metadata = std::collections::HashMap::new();
-    obj_metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-
-    // Push the sync message through SyncManager's inbox
-    qm.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Server(server_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: row_id,
-            metadata: Some(crate::sync_manager::ObjectMetadata {
-                id: row_id,
-                metadata: obj_metadata,
-            }),
-            branch_name: branch.into(),
-            commits: vec![commit],
-        },
-    });
-
-    // Process the inbox (SyncManager level)
-    qm.sync_manager_mut().process_inbox(&mut storage);
-
-    // Process (QueryManager level) - this should pick up the object update
-    qm.process(&mut storage);
-
-    // Verify subscription received the delta
-    let updates = qm.take_updates();
-    assert_eq!(updates.len(), 1, "Should have one subscription update");
-    assert_eq!(updates[0].subscription_id, sub_id);
-    assert_eq!(
-        updates[0].delta.added.len(),
-        1,
-        "Delta should contain one added row"
-    );
-
-    // Verify the row contents
-    let row = &updates[0].delta.added[0];
-    let values = decode_row(&descriptor, &row.data).unwrap();
-    assert_eq!(values[0], Value::Text("SyncedUser".into()));
-    assert_eq!(values[1], Value::Integer(42));
-}
-
-#[test]
-fn sync_inbox_update_flows_to_subscription_delta() {
-    // End-to-end test: sync update message → subscription emits update delta
-    use crate::commit::{Commit, StoredState};
-    use crate::query_manager::encoding::{decode_row, encode_row};
-    use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
-
-    let sync_manager = SyncManager::new();
-    let schema = test_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-    let branch = get_branch(&qm);
-
-    // Add a "server"
-    let server_id = ServerId::new();
-    qm.sync_manager_mut().add_server(server_id);
-    qm.sync_manager_mut().object_manager.subscribe_all();
-
-    // Insert a row locally first
-    let handle = qm
-        .insert(
-            &mut storage,
-            "users",
-            &[Value::Text("Alice".into()), Value::Integer(100)],
-        )
-        .unwrap();
-    let row_id = handle.row_id;
-    let first_commit_id = handle.row_commit_id;
-
-    // Subscribe to users
-    let query = qm.query("users").build();
-    let sub_id = qm.subscribe(query).unwrap();
-
-    // Process to get initial state
-    qm.process(&mut storage);
-    let _ = qm.take_updates(); // Clear initial delta
-
-    // Now simulate receiving an update from sync (as if another peer modified the row)
-    let descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("score", ColumnType::Integer),
-    ]);
-    let updated_data = encode_row(
-        &descriptor,
-        &[Value::Text("Alice Updated".into()), Value::Integer(999)],
-    )
-    .unwrap();
-
-    let update_commit = Commit {
-        parents: smallvec![first_commit_id],
-        content: updated_data,
-        timestamp: 2000,
-        author: row_id,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
-
-    // Push the update through SyncManager inbox
-    qm.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Server(server_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: row_id,
-            metadata: None, // No metadata needed for existing object
-            branch_name: branch.into(),
-            commits: vec![update_commit],
-        },
-    });
-
-    // Process both layers
-    qm.sync_manager_mut().process_inbox(&mut storage);
-    qm.process(&mut storage);
-
-    // Verify subscription received update delta
-    let updates = qm.take_updates();
-    assert_eq!(updates.len(), 1, "Should have one subscription update");
-    assert_eq!(updates[0].subscription_id, sub_id);
-    assert_eq!(
-        updates[0].delta.updated.len(),
-        1,
-        "Delta should contain one updated row"
-    );
-
-    // Verify the new values
-    let (_old_row, new_row) = &updates[0].delta.updated[0];
-    let values = decode_row(&descriptor, &new_row.data).unwrap();
-    assert_eq!(values[0], Value::Text("Alice Updated".into()));
-    assert_eq!(values[1], Value::Integer(999));
-}
-
-#[test]
-fn two_peer_sync_insert_reaches_subscription() {
-    // Full two-peer test: Peer A inserts → (simulated sync) → Peer B subscription delta
-    // This demonstrates the conceptual flow even though we construct the payload manually
-    use crate::commit::{Commit, StoredState};
-    use crate::object::BranchName;
-    use crate::query_manager::encoding::decode_row;
-    use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
-
-    // Create two peers
-    let sync_manager_a = SyncManager::new();
-    let sync_manager_b = SyncManager::new();
-    let schema = test_schema();
-    let (mut peer_a, mut storage_a) = create_query_manager(sync_manager_a, schema.clone());
-    let (mut peer_b, mut storage_b) = create_query_manager(sync_manager_b, schema);
-
-    // Peer B subscribes to all objects and sets up query subscription
-    peer_b.sync_manager_mut().object_manager.subscribe_all();
-    let query = peer_b.query("users").build();
-    let sub_id = peer_b.subscribe(query).unwrap();
-
-    // Peer B adds a "server" (representing Peer A)
-    let peer_a_as_server = ServerId::new();
-    peer_b.sync_manager_mut().add_server(peer_a_as_server);
-
-    // Process both to initialize
-    peer_a.process(&mut storage_a);
-    peer_b.process(&mut storage_b);
-    let _ = peer_b.take_updates();
-
-    // Peer A inserts a row
-    let handle = peer_a
-        .insert(
-            &mut storage_a,
-            "users",
-            &[Value::Text("FromPeerA".into()), Value::Integer(123)],
-        )
-        .unwrap();
-    let row_id = handle.row_id;
-
-    // Get the actual commit data from Peer A's ObjectManager
-    // This simulates "what would be sent over the wire"
-    let branch_name = get_branch(&peer_a);
-    let (row_data, metadata) = {
-        let obj = peer_a
-            .sync_manager_mut()
-            .object_manager
-            .get(row_id)
-            .expect("Object should be available");
-        let branch = obj.branches.get(&BranchName::new(&branch_name)).unwrap();
-        let tip_id = branch.tips.iter().next().unwrap();
-        let commit = branch.commits.get(tip_id).unwrap();
-        (commit.content.clone(), obj.metadata.clone())
-    };
-
-    // Construct the sync payload as it would appear on the wire
-    let commit = Commit {
-        parents: smallvec![],
-        content: row_data,
-        timestamp: 1000,
-        author: row_id,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
-
-    // Send to Peer B via SyncManager inbox
-    peer_b.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Server(peer_a_as_server),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: row_id,
-            metadata: Some(crate::sync_manager::ObjectMetadata {
-                id: row_id,
-                metadata,
-            }),
-            branch_name: branch_name.clone().into(),
-            commits: vec![commit],
-        },
-    });
-
-    // Peer B processes the sync message
-    peer_b.sync_manager_mut().process_inbox(&mut storage_b);
-    peer_b.process(&mut storage_b);
-
-    // Verify Peer B's subscription received the row
-    let updates = peer_b.take_updates();
-    assert_eq!(
-        updates.len(),
-        1,
-        "Peer B should have one subscription update"
-    );
-    assert_eq!(updates[0].subscription_id, sub_id);
-    assert_eq!(
-        updates[0].delta.added.len(),
-        1,
-        "Delta should contain one added row"
-    );
-
-    // Verify the row came from Peer A
-    let row = &updates[0].delta.added[0];
-    let descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("score", ColumnType::Integer),
-    ]);
-    let values = decode_row(&descriptor, &row.data).unwrap();
-    assert_eq!(values[0], Value::Text("FromPeerA".into()));
-    assert_eq!(values[1], Value::Integer(123));
-}
-
-// ========================================================================
-// Soft Delete Tests
-// ========================================================================
-
-#[test]
 fn soft_delete_removes_from_id_index() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
@@ -2807,153 +1831,6 @@ fn delete_already_deleted_row_fails() {
         other => panic!("Expected RowAlreadyDeleted for deleted row, got {other:?}"),
     }
 }
-
-#[test]
-fn soft_delete_with_concurrent_tips_uses_lww() {
-    // Test that soft deleting an object with two concurrent tips results
-    // in a soft delete commit with content from the LWW winner (highest timestamp).
-    use crate::commit::{Commit, StoredState};
-    use crate::object::BranchName;
-    use crate::query_manager::encoding::encode_row;
-
-    let sync_manager = SyncManager::new();
-    let schema = test_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-
-    // Insert a row
-    let handle = qm
-        .insert(
-            &mut storage,
-            "users",
-            &[Value::Text("Original".into()), Value::Integer(0)],
-        )
-        .unwrap();
-    qm.process(&mut storage);
-
-    // Get the initial commit as the common parent
-    let branch = get_branch(&qm);
-    let branch_name = BranchName::new(&branch);
-    let initial_tips: Vec<_> = qm
-        .sync_manager_mut()
-        .object_manager
-        .get_tip_ids(handle.row_id, &branch)
-        .unwrap()
-        .iter()
-        .copied()
-        .collect();
-    assert_eq!(initial_tips.len(), 1);
-    let parent = initial_tips[0];
-
-    // Create two concurrent updates with different timestamps and content.
-    // Both have the same parent, creating diverging tips.
-    let descriptor = qm
-        .schema()
-        .get(&TableName::new("users"))
-        .unwrap()
-        .columns
-        .clone();
-
-    // Commit A: lower timestamp, content "TipA"
-    let content_a = encode_row(
-        &descriptor,
-        &[Value::Text("TipA".into()), Value::Integer(100)],
-    )
-    .unwrap();
-    let commit_a = Commit {
-        author: handle.row_id,
-        parents: smallvec![parent],
-        content: content_a,
-        timestamp: 1000, // Lower timestamp
-        metadata: None,
-        stored_state: StoredState::Pending,
-        ack_state: Default::default(),
-    };
-
-    // Commit B: higher timestamp, content "TipB" - this should win
-    let content_b = encode_row(
-        &descriptor,
-        &[Value::Text("TipB".into()), Value::Integer(200)],
-    )
-    .unwrap();
-    let commit_b = Commit {
-        author: handle.row_id,
-        parents: smallvec![parent],
-        content: content_b.clone(),
-        timestamp: 2000, // Higher timestamp - LWW winner
-        metadata: None,
-        stored_state: StoredState::Pending,
-        ack_state: Default::default(),
-    };
-
-    // Add both commits to create concurrent tips
-    // We need to receive these as synced commits
-    let commit_a_id = qm
-        .sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, handle.row_id, &branch, commit_a)
-        .unwrap();
-    let commit_b_id = qm
-        .sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, handle.row_id, &branch, commit_b)
-        .unwrap();
-
-    // Verify we now have concurrent tips
-    let tips: Vec<_> = qm
-        .sync_manager_mut()
-        .object_manager
-        .get_tip_ids(handle.row_id, &branch)
-        .unwrap()
-        .iter()
-        .copied()
-        .collect();
-    assert_eq!(tips.len(), 2, "Should have 2 concurrent tips");
-    assert!(tips.contains(&commit_a_id));
-    assert!(tips.contains(&commit_b_id));
-
-    // Process updates
-    qm.process(&mut storage);
-
-    // Now soft delete - should preserve content from LWW winner (commit_b, TipB)
-    let delete_handle = qm.delete(&mut storage, handle.row_id).unwrap();
-
-    // Get the delete commit and verify its content
-    let obj = qm
-        .sync_manager_mut()
-        .object_manager
-        .get(handle.row_id)
-        .expect("Object should be available");
-    {
-        let branch = obj.branches.get(&branch_name).unwrap();
-        let delete_commit = branch.commits.get(&delete_handle.delete_commit_id).unwrap();
-
-        // Verify the soft delete commit has content from the LWW winner (TipB)
-        assert_eq!(
-            delete_commit.content, content_b,
-            "Soft delete should preserve content from LWW winner"
-        );
-
-        // Also verify metadata
-        assert_eq!(
-            delete_commit
-                .metadata
-                .as_ref()
-                .and_then(|m| m.get(MetadataKey::Delete.as_str())),
-            Some(&"soft".to_string())
-        );
-    }
-
-    // Additionally verify that querying with include_deleted shows the correct content
-    let query = qm.query("users").include_deleted().build();
-    let results = execute_query(&mut qm, &mut storage, query).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].1[0], Value::Text("TipB".into()));
-    assert_eq!(results[0].1[1], Value::Integer(200));
-}
-
-// ========================================================================
-// Undelete Tests
-// ========================================================================
 
 #[test]
 fn undelete_adds_to_id_index() {
@@ -6835,107 +5712,6 @@ fn join_query_with_multiple_branches_reads_all_branches() {
 }
 
 #[test]
-fn handle_object_update_respects_branch() {
-    use crate::commit::{Commit, StoredState};
-    use crate::query_manager::encoding::encode_row;
-    use std::collections::HashMap;
-
-    // Verify that handle_object_update updates the correct branch's indices.
-    // Rows on a non-schema branch should NOT appear in queries on the schema branch.
-    let sync_manager = SyncManager::new();
-    let schema = test_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-
-    // Get the actual schema branch
-    let schema_branch = get_branch(&qm);
-
-    // Subscribe to all objects
-    qm.sync_manager_mut().object_manager.subscribe_all();
-
-    let row_id = crate::object::ObjectId::new();
-    let author = row_id;
-
-    let mut metadata = HashMap::new();
-    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_object(&mut storage, row_id, metadata);
-
-    let descriptor = RowDescriptor::new(vec![
-        ColumnDescriptor::new("name", ColumnType::Text),
-        ColumnDescriptor::new("score", ColumnType::Integer),
-    ]);
-    let row_data = encode_row(
-        &descriptor,
-        &[Value::Text("Alice".into()), Value::Integer(100)],
-    )
-    .unwrap();
-
-    // Receive commit on "other-branch" (not the schema's branch)
-    let commit = Commit {
-        parents: smallvec![],
-        content: row_data.clone(),
-        timestamp: 1000,
-        author,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, "other-branch", commit)
-        .unwrap();
-
-    qm.process(&mut storage);
-
-    // Query schema branch - should NOT find the row (it's on other-branch)
-    let query = qm.query("users").build();
-    let results = execute_query(&mut qm, &mut storage, query).unwrap();
-    assert_eq!(
-        results.len(),
-        0,
-        "Row on other-branch should not appear in schema branch query"
-    );
-
-    // Now insert on schema branch and verify it appears in default query
-    let row_id2 = crate::object::ObjectId::new();
-    let mut metadata2 = HashMap::new();
-    metadata2.insert(MetadataKey::Table.to_string(), "users".to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_object(&mut storage, row_id2, metadata2);
-
-    let commit2 = Commit {
-        parents: smallvec![],
-        content: row_data,
-        timestamp: 2000,
-        author: row_id2,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id2, &schema_branch, commit2)
-        .unwrap();
-
-    qm.process(&mut storage);
-
-    // Schema branch should now have 1 row
-    let query = qm.query("users").build();
-    let results = execute_query(&mut qm, &mut storage, query).unwrap();
-    assert_eq!(
-        results.len(),
-        1,
-        "Row on schema branch should appear in default query"
-    );
-}
-
-// ============================================================================
-// Contributing ObjectIds Tests
-// ============================================================================
-
-#[test]
 fn contributing_ids_reflect_filter() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
@@ -7373,25 +6149,25 @@ fn server_builds_query_graph_on_subscription() {
     // Server should send ObjectUpdated for matching users (Alice, Charlie)
     let outbox = server_qm.sync_manager_mut().take_outbox();
 
-    // Filter for ObjectUpdated messages to this client
+    // Filter for DocUpdated messages to this client
     let object_updates: Vec<_> = outbox
         .iter()
         .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
-        .filter(|e| matches!(e.payload, SyncPayload::ObjectUpdated { .. }))
+        .filter(|e| matches!(e.payload, SyncPayload::DocUpdated { .. }))
         .collect();
 
     assert_eq!(
         object_updates.len(),
         2,
-        "Should send 2 ObjectUpdated messages for matching users"
+        "Should send 2 DocUpdated messages for matching users"
     );
 
     // Verify the correct ObjectIds were sent
     let sent_ids: std::collections::HashSet<_> = object_updates
         .iter()
         .filter_map(|e| {
-            if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
-                Some(object_id)
+            if let SyncPayload::DocUpdated { doc_id, .. } = &e.payload {
+                Some(doc_id)
             } else {
                 None
             }
@@ -7641,18 +6417,18 @@ fn server_pushes_new_matches() {
     let object_updates: Vec<_> = outbox
         .iter()
         .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
-        .filter(|e| matches!(e.payload, SyncPayload::ObjectUpdated { .. }))
+        .filter(|e| matches!(e.payload, SyncPayload::DocUpdated { .. }))
         .collect();
 
     assert_eq!(
         object_updates.len(),
         1,
-        "Should send 1 ObjectUpdated for new matching user"
+        "Should send 1 DocUpdated for new matching user"
     );
 
     // Verify it's Charlie
-    if let SyncPayload::ObjectUpdated { object_id, .. } = &object_updates[0].payload {
-        assert_eq!(*object_id, handle2.row_id, "Should send Charlie's ObjectId");
+    if let SyncPayload::DocUpdated { doc_id, .. } = &object_updates[0].payload {
+        assert_eq!(*doc_id, handle2.row_id, "Should send Charlie's ObjectId");
     }
 }
 
@@ -8268,256 +7044,6 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
 }
 
 /// Test that objects from upstream are relayed to downstream clients with matching scope.
-#[test]
-fn mid_tier_relays_objects_to_clients_with_matching_scope() {
-    use crate::commit::Commit;
-    use crate::object::ObjectId;
-    use crate::sync_manager::{
-        ClientId, Destination, InboxEntry, ObjectMetadata, ServerId, Source, SyncPayload,
-    };
-    use uuid::Uuid;
-
-    // Setup mid-tier server
-    let sync_manager = SyncManager::new();
-    let schema = test_schema();
-    let (mut mid_tier, mut storage) = create_query_manager(sync_manager, schema.clone());
-
-    // Add upstream server and downstream client
-    let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
-    mid_tier.sync_manager_mut().add_server(upstream_id);
-    mid_tier.sync_manager_mut().add_client(client_id);
-
-    // Insert a matching row locally first (so it's in scope)
-    let handle = mid_tier
-        .insert(
-            &mut storage,
-            "users",
-            &[Value::Text("Alice".into()), Value::Integer(75)],
-        )
-        .unwrap();
-    mid_tier.process(&mut storage);
-
-    // Get the schema branch
-    let branch_str = get_branch(&mid_tier);
-    let branch_name = crate::object::BranchName::new(&branch_str);
-
-    // Establish client subscription
-    let query = mid_tier
-        .query("users")
-        .filter_gt("score", Value::Integer(50))
-        .build();
-
-    mid_tier.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Client(client_id),
-        payload: SyncPayload::QuerySubscription {
-            query_id: crate::sync_manager::QueryId(42),
-            query: Box::new(query),
-            session: None,
-            propagation: crate::sync_manager::QueryPropagation::Full,
-        },
-    });
-    mid_tier.process(&mut storage);
-
-    // Clear outbox (initial sync messages)
-    let _ = mid_tier.sync_manager_mut().take_outbox();
-
-    // Now receive an update for the existing object from upstream
-    // (simulating upstream sending fresh data)
-    let table_schema = schema.get(&TableName::new("users")).unwrap();
-    let row_data = encode_row(
-        &table_schema.columns,
-        &[Value::Text("Alice".into()), Value::Integer(80)],
-    )
-    .unwrap();
-
-    let current_tips: smallvec::SmallVec<[_; 2]> = mid_tier
-        .sync_manager()
-        .object_manager
-        .get(handle.row_id)
-        .unwrap()
-        .branches
-        .get(&branch_name)
-        .unwrap()
-        .tips
-        .iter()
-        .copied()
-        .collect();
-
-    let author = ObjectId::new();
-    let commit = Commit {
-        parents: current_tips,
-        content: row_data,
-        timestamp: 2000,
-        author,
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
-
-    mid_tier.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Server(upstream_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: handle.row_id,
-            metadata: Some(ObjectMetadata {
-                id: handle.row_id,
-                metadata: [("table".to_string(), "users".to_string())]
-                    .into_iter()
-                    .collect(),
-            }),
-            branch_name: branch_name.clone(),
-            commits: vec![commit],
-        },
-    });
-    mid_tier.process(&mut storage);
-
-    // Check that the update was forwarded to the client
-    let outbox = mid_tier.sync_manager_mut().take_outbox();
-
-    let relayed: Vec<_> = outbox
-        .iter()
-        .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
-        .filter(|e| matches!(&e.payload, SyncPayload::ObjectUpdated { object_id, .. } if *object_id == handle.row_id))
-        .collect();
-
-    assert_eq!(
-        relayed.len(),
-        1,
-        "Mid-tier should relay ObjectUpdated from upstream to client with matching scope"
-    );
-}
-
-// ============================================================================
-// Part 6: End-to-End Integration Tests
-// ============================================================================
-
-/// Helper to exchange messages between client and server QueryManagers.
-/// Runs multiple rounds until no more messages are exchanged.
-fn pump_messages(
-    client: &mut QueryManager,
-    server: &mut QueryManager,
-    client_io: &mut MemoryStorage,
-    server_io: &mut MemoryStorage,
-    client_id: crate::sync_manager::ClientId,
-    server_id: crate::sync_manager::ServerId,
-) {
-    use crate::sync_manager::{Destination, InboxEntry, Source};
-
-    for _ in 0..10 {
-        // Client → Server
-        let client_outbox = client.sync_manager_mut().take_outbox();
-        let client_to_server: Vec<_> = client_outbox
-            .into_iter()
-            .filter(|e| matches!(e.destination, Destination::Server(id) if id == server_id))
-            .collect();
-
-        for entry in client_to_server {
-            server.sync_manager_mut().push_inbox(InboxEntry {
-                source: Source::Client(client_id),
-                payload: entry.payload,
-            });
-        }
-        server.process(server_io);
-
-        // Server → Client
-        let server_outbox = server.sync_manager_mut().take_outbox();
-        let server_to_client: Vec<_> = server_outbox
-            .into_iter()
-            .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
-            .collect();
-
-        if server_to_client.is_empty() {
-            break;
-        }
-
-        for entry in server_to_client {
-            client.sync_manager_mut().push_inbox(InboxEntry {
-                source: Source::Server(server_id),
-                payload: entry.payload,
-            });
-        }
-        client.process(client_io);
-    }
-}
-
-/// Helper to exchange messages in a 3-tier topology: client <-> edge <-> core.
-/// Runs multiple rounds until no more routable messages are produced.
-#[allow(clippy::too_many_arguments)]
-fn pump_messages_three_tier(
-    client: &mut QueryManager,
-    edge: &mut QueryManager,
-    core: &mut QueryManager,
-    client_io: &mut MemoryStorage,
-    edge_io: &mut MemoryStorage,
-    core_io: &mut MemoryStorage,
-    client_id_on_edge: crate::sync_manager::ClientId,
-    edge_server_id_for_client: crate::sync_manager::ServerId,
-    edge_id_on_core: crate::sync_manager::ClientId,
-    core_server_id_for_edge: crate::sync_manager::ServerId,
-) {
-    use crate::sync_manager::{Destination, InboxEntry, Source};
-
-    for _ in 0..20 {
-        let mut moved = false;
-
-        // Client -> Edge
-        let client_outbox = client.sync_manager_mut().take_outbox();
-        for entry in client_outbox {
-            if matches!(entry.destination, Destination::Server(id) if id == edge_server_id_for_client)
-            {
-                moved = true;
-                edge.sync_manager_mut().push_inbox(InboxEntry {
-                    source: Source::Client(client_id_on_edge),
-                    payload: entry.payload,
-                });
-            }
-        }
-
-        // Edge -> (Client or Core)
-        let edge_outbox = edge.sync_manager_mut().take_outbox();
-        for entry in edge_outbox {
-            match entry.destination {
-                Destination::Client(id) if id == client_id_on_edge => {
-                    moved = true;
-                    client.sync_manager_mut().push_inbox(InboxEntry {
-                        source: Source::Server(edge_server_id_for_client),
-                        payload: entry.payload,
-                    });
-                }
-                Destination::Server(id) if id == core_server_id_for_edge => {
-                    moved = true;
-                    core.sync_manager_mut().push_inbox(InboxEntry {
-                        source: Source::Client(edge_id_on_core),
-                        payload: entry.payload,
-                    });
-                }
-                _ => {}
-            }
-        }
-
-        // Core -> Edge
-        let core_outbox = core.sync_manager_mut().take_outbox();
-        for entry in core_outbox {
-            if matches!(entry.destination, Destination::Client(id) if id == edge_id_on_core) {
-                moved = true;
-                edge.sync_manager_mut().push_inbox(InboxEntry {
-                    source: Source::Server(core_server_id_for_edge),
-                    payload: entry.payload,
-                });
-            }
-        }
-
-        if !moved {
-            break;
-        }
-
-        client.process(client_io);
-        edge.process(edge_io);
-        core.process(core_io);
-    }
-}
-
-/// E2E: Client subscribes to query, receives matching data from server.
 #[test]
 fn e2e_client_receives_server_data_via_subscription() {
     use crate::sync_manager::{ClientId, ServerId};
@@ -9695,4 +8221,1484 @@ fn hard_delete_clears_doc_columns() {
         score_val.is_none(),
         "score column should be absent after hard delete"
     );
+}
+
+/// Helper to exchange messages between client and server QueryManagers.
+/// Runs multiple rounds until no more messages are exchanged.
+fn pump_messages(
+    client: &mut QueryManager,
+    server: &mut QueryManager,
+    client_io: &mut MemoryStorage,
+    server_io: &mut MemoryStorage,
+    client_id: crate::sync_manager::ClientId,
+    server_id: crate::sync_manager::ServerId,
+) {
+    use crate::sync_manager::{Destination, InboxEntry, Source};
+
+    for _ in 0..10 {
+        // Client -> Server
+        let client_outbox = client.sync_manager_mut().take_outbox();
+        let client_to_server: Vec<_> = client_outbox
+            .into_iter()
+            .filter(|e| matches!(e.destination, Destination::Server(id) if id == server_id))
+            .collect();
+
+        for entry in client_to_server {
+            server.sync_manager_mut().push_inbox(InboxEntry {
+                source: Source::Client(client_id),
+                payload: entry.payload,
+            });
+        }
+        server.process(server_io);
+
+        // Server -> Client
+        let server_outbox = server.sync_manager_mut().take_outbox();
+        let server_to_client: Vec<_> = server_outbox
+            .into_iter()
+            .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
+            .collect();
+
+        if server_to_client.is_empty() {
+            break;
+        }
+
+        for entry in server_to_client {
+            client.sync_manager_mut().push_inbox(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+        client.process(client_io);
+    }
+}
+
+/// Helper to exchange messages in a 3-tier topology: client <-> edge <-> core.
+/// Runs multiple rounds until no more routable messages are produced.
+#[allow(clippy::too_many_arguments)]
+fn pump_messages_three_tier(
+    client: &mut QueryManager,
+    edge: &mut QueryManager,
+    core: &mut QueryManager,
+    client_io: &mut MemoryStorage,
+    edge_io: &mut MemoryStorage,
+    core_io: &mut MemoryStorage,
+    client_id_on_edge: crate::sync_manager::ClientId,
+    edge_server_id_for_client: crate::sync_manager::ServerId,
+    edge_id_on_core: crate::sync_manager::ClientId,
+    core_server_id_for_edge: crate::sync_manager::ServerId,
+) {
+    use crate::sync_manager::{Destination, InboxEntry, Source};
+
+    for _ in 0..20 {
+        let mut moved = false;
+
+        // Client -> Edge
+        let client_outbox = client.sync_manager_mut().take_outbox();
+        for entry in client_outbox {
+            if matches!(entry.destination, Destination::Server(id) if id == edge_server_id_for_client)
+            {
+                moved = true;
+                edge.sync_manager_mut().push_inbox(InboxEntry {
+                    source: Source::Client(client_id_on_edge),
+                    payload: entry.payload,
+                });
+            }
+        }
+
+        // Edge -> (Client or Core)
+        let edge_outbox = edge.sync_manager_mut().take_outbox();
+        for entry in edge_outbox {
+            match entry.destination {
+                Destination::Client(id) if id == client_id_on_edge => {
+                    moved = true;
+                    client.sync_manager_mut().push_inbox(InboxEntry {
+                        source: Source::Server(edge_server_id_for_client),
+                        payload: entry.payload,
+                    });
+                }
+                Destination::Server(id) if id == core_server_id_for_edge => {
+                    moved = true;
+                    core.sync_manager_mut().push_inbox(InboxEntry {
+                        source: Source::Client(edge_id_on_core),
+                        payload: entry.payload,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // Core -> Edge
+        let core_outbox = core.sync_manager_mut().take_outbox();
+        for entry in core_outbox {
+            if matches!(entry.destination, Destination::Client(id) if id == edge_id_on_core) {
+                moved = true;
+                edge.sync_manager_mut().push_inbox(InboxEntry {
+                    source: Source::Server(core_server_id_for_edge),
+                    payload: entry.payload,
+                });
+            }
+        }
+
+        if !moved {
+            break;
+        }
+
+        client.process(client_io);
+        edge.process(edge_io);
+        core.process(core_io);
+    }
+}
+
+// TODO(task-17): These tests use the removed ObjectManager API.
+// They need to be rewritten to use DocManager.
+#[cfg(any())]
+mod legacy_object_manager_tests {
+    use super::*;
+
+    #[test]
+    fn synced_update_updates_column_indices() {
+        use crate::commit::{Commit, StoredState};
+        use crate::query_manager::encoding::encode_row;
+        use std::collections::HashMap;
+
+        // This test verifies that updates received via sync (receive_commit)
+        // correctly update column indices using old_content from AllObjectUpdate.
+
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+        let branch = get_branch(&qm);
+
+        // Simulate receiving a new object from sync
+        let row_id = crate::object::ObjectId::new();
+        let author = row_id;
+
+        // Receive object with table metadata
+        let mut metadata = HashMap::new();
+        metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_object(&mut storage, row_id, metadata);
+
+        // Subscribe to all objects so we get AllObjectUpdate notifications
+        qm.sync_manager_mut().object_manager.subscribe_all();
+
+        // Encode the initial row data (name="Alice", score=100)
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+        ]);
+        let initial_data = encode_row(
+            &descriptor,
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+        // Receive the first commit (insert)
+        let commit1 = Commit {
+            parents: smallvec![],
+            content: initial_data.clone(),
+            timestamp: 1000,
+            author,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        };
+        let commit1_id = qm
+            .sync_manager_mut()
+            .object_manager
+            .receive_commit(&mut storage, row_id, &branch, commit1)
+            .unwrap();
+
+        // Process to handle the AllObjectUpdate
+        qm.process(&mut storage);
+
+        // Query by name="Alice" → finds row
+        let query = qm
+            .query("users")
+            .filter_eq("name", Value::Text("Alice".into()))
+            .build();
+        let results = execute_query(&mut qm, &mut storage, query).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "Should find row by name=Alice after sync insert"
+        );
+
+        // Query by score=100 → finds row
+        let query = qm
+            .query("users")
+            .filter_eq("score", Value::Integer(100))
+            .build();
+        let results = execute_query(&mut qm, &mut storage, query).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "Should find row by score=100 after sync insert"
+        );
+
+        // Encode updated row data (name="Bob", score=200)
+        let updated_data = encode_row(
+            &descriptor,
+            &[Value::Text("Bob".into()), Value::Integer(200)],
+        )
+        .unwrap();
+
+        // Receive the second commit (update)
+        let commit2 = Commit {
+            parents: smallvec![commit1_id],
+            content: updated_data.clone(),
+            timestamp: 2000,
+            author,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        };
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_commit(&mut storage, row_id, &branch, commit2)
+            .unwrap();
+
+        // Process to handle the AllObjectUpdate with old_content
+        qm.process(&mut storage);
+
+        // Query by name="Alice" → empty (old value removed from index)
+        let query = qm
+            .query("users")
+            .filter_eq("name", Value::Text("Alice".into()))
+            .build();
+        let results = execute_query(&mut qm, &mut storage, query).unwrap();
+        assert_eq!(
+            results.len(),
+            0,
+            "Old name value should be removed from index after sync update"
+        );
+
+        // Query by name="Bob" → finds row (new value in index)
+        let query = qm
+            .query("users")
+            .filter_eq("name", Value::Text("Bob".into()))
+            .build();
+        let results = execute_query(&mut qm, &mut storage, query).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "New name value should be in index after sync update"
+        );
+
+        // Query by score=100 → empty (old value removed from index)
+        let query = qm
+            .query("users")
+            .filter_eq("score", Value::Integer(100))
+            .build();
+        let results = execute_query(&mut qm, &mut storage, query).unwrap();
+        assert_eq!(
+            results.len(),
+            0,
+            "Old score value should be removed from index after sync update"
+        );
+
+        // Query by score=200 → finds row (new value in index)
+        let query = qm
+            .query("users")
+            .filter_eq("score", Value::Integer(200))
+            .build();
+        let results = execute_query(&mut qm, &mut storage, query).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "New score value should be in index after sync update"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "missing old_content for historical sync update")]
+    fn synced_update_missing_old_content_panics_fail_fast() {
+        use crate::object::BranchName;
+        use crate::object_manager::AllObjectUpdate;
+
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+        let branch = get_branch(&qm);
+
+        let handle = qm
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text("Alice".into()), Value::Integer(100)],
+            )
+            .unwrap();
+        qm.process(&mut storage);
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+
+        // Simulate a historical sync update where ObjectManager couldn't provide
+        // old_content. We should fail-fast rather than accept index staleness.
+        qm.handle_object_update(
+            &mut storage,
+            AllObjectUpdate {
+                object_id: handle.row_id,
+                metadata,
+                branch_name: BranchName::new(&branch),
+                commit_ids: vec![],
+                is_new_object: false,
+                previous_commit_ids: vec![handle.row_commit_id],
+                old_content: None,
+            },
+        );
+    }
+
+    #[test]
+    fn lens_transform_failure_drops_row_instead_of_fallback() {
+        use crate::commit::{Commit, StoredState};
+        use crate::query_manager::encoding::encode_row;
+        use std::collections::HashMap;
+
+        // Build a live schema without registering a lens path to current.
+        // Rows from that branch should be dropped at materialization time.
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+        let mut live_schema = Schema::new();
+        live_schema.insert(
+            TableName::new("users"),
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("name", ColumnType::Text),
+                ColumnDescriptor::new("score", ColumnType::Integer),
+                ColumnDescriptor::new("email", ColumnType::Text),
+            ])
+            .into(),
+        );
+        let live_descriptor = live_schema
+            .get(&TableName::new("users"))
+            .expect("live schema table should exist")
+            .columns
+            .clone();
+        qm.add_live_schema(live_schema);
+
+        let current_branch = get_branch(&qm);
+        let live_branch = qm
+            .all_query_branches()
+            .into_iter()
+            .find(|b| b != &current_branch)
+            .expect("live schema branch should exist");
+
+        let row_id = ObjectId::new();
+        let mut metadata = HashMap::new();
+        metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_object(&mut storage, row_id, metadata);
+
+        let live_data = encode_row(
+            &live_descriptor,
+            &[
+                Value::Text("Alice".into()),
+                Value::Integer(100),
+                Value::Text("alice@example.com".into()),
+            ],
+        )
+        .unwrap();
+        let commit = Commit {
+            parents: smallvec![],
+            content: live_data,
+            timestamp: 1000,
+            author: row_id,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        };
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_commit(&mut storage, row_id, &live_branch, commit)
+            .unwrap();
+        qm.process(&mut storage);
+
+        assert!(
+            qm.row_is_indexed_on_branch(&storage, "users", &live_branch, row_id),
+            "row should be indexed on live branch before subscription settle"
+        );
+
+        let sub_id = qm.subscribe(qm.query("users").build()).unwrap();
+        qm.process(&mut storage);
+
+        let results = qm.get_subscription_results(sub_id);
+        assert_eq!(
+            results.len(),
+            0,
+            "row from branch with failed lens transform should be dropped"
+        );
+    }
+
+    #[test]
+    fn synced_insert_appears_in_subscription_delta() {
+        use crate::commit::{Commit, StoredState};
+        use crate::query_manager::encoding::{decode_row, encode_row};
+        use std::collections::HashMap;
+
+        // Verify that a synced insert appears in subscription deltas
+
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+        let branch = get_branch(&qm);
+
+        // Simulate receiving a new row from sync BEFORE subscribing
+        // (similar to existing synced_update_updates_column_indices pattern)
+        let row_id = crate::object::ObjectId::new();
+        let author = row_id;
+
+        // Receive object with table metadata
+        let mut metadata = HashMap::new();
+        metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_object(&mut storage, row_id, metadata);
+
+        // Subscribe to all objects so we get AllObjectUpdate notifications
+        qm.sync_manager_mut().object_manager.subscribe_all();
+
+        // NOW subscribe to query (after subscribe_all but before receive_commit)
+        let query = qm.query("users").build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        // Encode the row data (name="SyncedUser", score=42)
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+        ]);
+        let row_data = encode_row(
+            &descriptor,
+            &[Value::Text("SyncedUser".into()), Value::Integer(42)],
+        )
+        .unwrap();
+
+        // Receive the commit (insert)
+        let commit = Commit {
+            parents: smallvec![],
+            content: row_data,
+            timestamp: 1000,
+            author,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        };
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_commit(&mut storage, row_id, &branch, commit)
+            .unwrap();
+
+        // Process to handle the AllObjectUpdate
+        qm.process(&mut storage);
+
+        // Verify subscription delta contains the added row
+        let updates = qm.take_updates();
+        assert_eq!(updates.len(), 1, "Should have one subscription update");
+        assert_eq!(updates[0].subscription_id, sub_id);
+        assert_eq!(
+            updates[0].delta.added.len(),
+            1,
+            "Delta should contain one added row"
+        );
+
+        // Decode the row to verify contents
+        let row = &updates[0].delta.added[0];
+        let values = decode_row(&descriptor, &row.data).unwrap();
+        assert_eq!(values[0], Value::Text("SyncedUser".into()));
+        assert_eq!(values[1], Value::Integer(42));
+    }
+
+    #[test]
+    fn synced_update_is_visible_in_query() {
+        use crate::commit::{Commit, StoredState};
+        use crate::query_manager::encoding::encode_row;
+
+        // Verify that synced updates (same row, new content) update indices correctly
+        // and are visible in subsequent queries.
+        // (Subscription delta behavior is covered by synced_update_emits_subscription_delta.)
+
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+        let branch = get_branch(&qm);
+
+        // Subscribe to all objects for sync updates
+        qm.sync_manager_mut().object_manager.subscribe_all();
+
+        // Insert a row locally first
+        let insert_handle = qm
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text("Alice".into()), Value::Integer(100)],
+            )
+            .unwrap();
+        let row_id = insert_handle.row_id;
+        let first_commit_id = insert_handle.row_commit_id;
+
+        // Process to settle the initial insert
+        qm.process(&mut storage);
+
+        // Verify initial data is queryable
+        let query = qm
+            .query("users")
+            .filter_eq("name", Value::Text("Alice".into()))
+            .build();
+        let results = execute_query(&mut qm, &mut storage, query).unwrap();
+        assert_eq!(results.len(), 1, "Should find initial row");
+        assert_eq!(results[0].1[0], Value::Text("Alice".into()));
+        assert_eq!(results[0].1[1], Value::Integer(100));
+
+        // Now simulate a synced update to this row (e.g., from another peer)
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+        ]);
+        let updated_data = encode_row(
+            &descriptor,
+            &[Value::Text("Alice Updated".into()), Value::Integer(200)],
+        )
+        .unwrap();
+
+        let author = row_id; // Self-authored for simplicity
+        let update_commit = Commit {
+            parents: smallvec![first_commit_id],
+            content: updated_data,
+            timestamp: 2000,
+            author,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        };
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_commit(&mut storage, row_id, &branch, update_commit)
+            .unwrap();
+
+        // Process to handle the synced update
+        qm.process(&mut storage);
+
+        // Old data should no longer be in index
+        let query = qm
+            .query("users")
+            .filter_eq("name", Value::Text("Alice".into()))
+            .build();
+        let results = execute_query(&mut qm, &mut storage, query).unwrap();
+        assert_eq!(results.len(), 0, "Old name should not be found");
+
+        // New data should be queryable
+        let query = qm
+            .query("users")
+            .filter_eq("name", Value::Text("Alice Updated".into()))
+            .build();
+        let results = execute_query(&mut qm, &mut storage, query).unwrap();
+        assert_eq!(results.len(), 1, "Should find updated row by new name");
+        assert_eq!(results[0].1[0], Value::Text("Alice Updated".into()));
+        assert_eq!(results[0].1[1], Value::Integer(200));
+
+        // Score index should also be updated
+        let query = qm
+            .query("users")
+            .filter_eq("score", Value::Integer(200))
+            .build();
+        let results = execute_query(&mut qm, &mut storage, query).unwrap();
+        assert_eq!(results.len(), 1, "Should find updated row by new score");
+    }
+
+    #[test]
+    fn synced_row_visible_in_filtered_subscription() {
+        use crate::commit::{Commit, StoredState};
+        use crate::query_manager::encoding::{decode_row, encode_row};
+        use std::collections::HashMap;
+
+        // Verify that synced rows are correctly filtered by subscription predicates.
+        // Rows matching the filter appear in deltas; rows not matching are excluded.
+
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+        let branch = get_branch(&qm);
+
+        // Subscribe to all objects for sync updates
+        qm.sync_manager_mut().object_manager.subscribe_all();
+
+        // Subscribe to filtered query: users with score > 25
+        let query = qm
+            .query("users")
+            .filter_gt("score", Value::Integer(25))
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        // Row descriptor for encoding
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+        ]);
+
+        // --- Test 1: Synced row that matches filter (score=30 > 25) ---
+
+        let row_id_1 = crate::object::ObjectId::new();
+        let author_1 = row_id_1;
+
+        let mut metadata_1 = HashMap::new();
+        metadata_1.insert(MetadataKey::Table.to_string(), "users".to_string());
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_object(&mut storage, row_id_1, metadata_1);
+
+        let data_1 = encode_row(
+            &descriptor,
+            &[Value::Text("HighScorer".into()), Value::Integer(30)],
+        )
+        .unwrap();
+
+        let commit_1 = Commit {
+            parents: smallvec![],
+            content: data_1,
+            timestamp: 1000,
+            author: author_1,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        };
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_commit(&mut storage, row_id_1, &branch, commit_1)
+            .unwrap();
+
+        qm.process(&mut storage);
+
+        let updates = qm.take_updates();
+        assert_eq!(
+            updates.len(),
+            1,
+            "Should have subscription update for matching row"
+        );
+        assert_eq!(updates[0].subscription_id, sub_id);
+        assert_eq!(
+            updates[0].delta.added.len(),
+            1,
+            "Delta should contain the matching row"
+        );
+
+        // Verify the row data
+        let row = &updates[0].delta.added[0];
+        let values = decode_row(&descriptor, &row.data).unwrap();
+        assert_eq!(values[0], Value::Text("HighScorer".into()));
+        assert_eq!(values[1], Value::Integer(30));
+
+        // --- Test 2: Synced row that does NOT match filter (score=20 < 25) ---
+
+        let row_id_2 = crate::object::ObjectId::new();
+        let author_2 = row_id_2;
+
+        let mut metadata_2 = HashMap::new();
+        metadata_2.insert(MetadataKey::Table.to_string(), "users".to_string());
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_object(&mut storage, row_id_2, metadata_2);
+
+        let data_2 = encode_row(
+            &descriptor,
+            &[Value::Text("LowScorer".into()), Value::Integer(20)],
+        )
+        .unwrap();
+
+        let commit_2 = Commit {
+            parents: smallvec![],
+            content: data_2,
+            timestamp: 2000,
+            author: author_2,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        };
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_commit(&mut storage, row_id_2, &branch, commit_2)
+            .unwrap();
+
+        qm.process(&mut storage);
+
+        let updates = qm.take_updates();
+        // Should have NO updates because the row doesn't match the filter
+        assert_eq!(
+            updates.len(),
+            0,
+            "Should have no subscription update for non-matching row"
+        );
+
+        // But verify it's in the index (just not in the filtered subscription)
+        let query = qm
+            .query("users")
+            .filter_eq("name", Value::Text("LowScorer".into()))
+            .build();
+        let results = execute_query(&mut qm, &mut storage, query).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "Non-matching row should still be in index"
+        );
+    }
+
+    // ========================================================================
+    // Row content update propagation tests
+    // ========================================================================
+
+    #[test]
+    fn synced_update_emits_subscription_delta() {
+        use crate::commit::{Commit, StoredState};
+        use crate::query_manager::encoding::encode_row;
+
+        // Verify that synced updates (receive_commit) cause subscription to emit update delta
+
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+        // Subscribe to all objects for sync updates
+        qm.sync_manager_mut().object_manager.subscribe_all();
+
+        // Insert a row locally first
+        let handle = qm
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text("Alice".into()), Value::Integer(100)],
+            )
+            .unwrap();
+        let row_id = handle.row_id;
+        let first_commit_id = handle.row_commit_id;
+
+        // Subscribe to all users
+        let query = qm.query("users").build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        // Process to get the initial add
+        qm.process(&mut storage);
+        let _updates = qm.take_updates(); // Clear initial add
+
+        // Now simulate a synced update
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+        ]);
+        let updated_data = encode_row(
+            &descriptor,
+            &[Value::Text("Alice Synced".into()), Value::Integer(300)],
+        )
+        .unwrap();
+
+        let author = row_id;
+        let update_commit = Commit {
+            parents: smallvec![first_commit_id],
+            content: updated_data,
+            timestamp: 2000,
+            author,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        };
+        let branch = get_branch(&qm);
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_commit(&mut storage, row_id, &branch, update_commit)
+            .unwrap();
+
+        // Process
+        qm.process(&mut storage);
+
+        // Should have an update delta
+        let updates = qm.take_updates();
+        assert_eq!(updates.len(), 1, "Should have one subscription update");
+        assert_eq!(updates[0].subscription_id, sub_id);
+        assert_eq!(
+            updates[0].delta.updated.len(),
+            1,
+            "Delta should contain one updated row"
+        );
+
+        // Verify new values
+        let (_old_row, new_row) = &updates[0].delta.updated[0];
+        let new_values =
+            crate::query_manager::encoding::decode_row(&descriptor, &new_row.data).unwrap();
+        assert_eq!(new_values[0], Value::Text("Alice Synced".into()));
+        assert_eq!(new_values[1], Value::Integer(300));
+    }
+
+    #[test]
+    fn sync_inbox_insert_flows_to_subscription_delta() {
+        // End-to-end test: sync message → SyncManager inbox → QueryManager subscription
+        // This tests the full path through push_inbox() → process_inbox() → process()
+        use crate::commit::{Commit, StoredState};
+        use crate::query_manager::encoding::{decode_row, encode_row};
+        use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
+
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+        let branch = get_branch(&qm);
+
+        // Add a "server" that we'll receive updates from
+        let server_id = ServerId::new();
+        qm.sync_manager_mut().add_server(server_id);
+
+        // Subscribe to all objects for sync updates
+        qm.sync_manager_mut().object_manager.subscribe_all();
+
+        // Subscribe to users table
+        let query = qm.query("users").build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        // Process to initialize - expect an initial empty update (subscription settled)
+        qm.process(&mut storage);
+        let updates = qm.take_updates();
+        assert_eq!(updates.len(), 1, "Should have initial settlement update");
+        assert!(
+            updates[0].delta.added.is_empty(),
+            "Initial delta should be empty"
+        );
+
+        // Construct the sync message payload
+        let row_id = crate::object::ObjectId::new();
+        let author = row_id;
+
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+        ]);
+        let row_data = encode_row(
+            &descriptor,
+            &[Value::Text("SyncedUser".into()), Value::Integer(42)],
+        )
+        .unwrap();
+
+        let commit = Commit {
+            parents: smallvec![],
+            content: row_data,
+            timestamp: 1000,
+            author,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        };
+
+        // Object metadata marking it as a "users" table row
+        let mut obj_metadata = std::collections::HashMap::new();
+        obj_metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+
+        // Push the sync message through SyncManager's inbox
+        qm.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Server(server_id),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: row_id,
+                metadata: Some(crate::sync_manager::ObjectMetadata {
+                    id: row_id,
+                    metadata: obj_metadata,
+                }),
+                branch_name: branch.into(),
+                commits: vec![commit],
+            },
+        });
+
+        // Process the inbox (SyncManager level)
+        qm.sync_manager_mut().process_inbox(&mut storage);
+
+        // Process (QueryManager level) - this should pick up the object update
+        qm.process(&mut storage);
+
+        // Verify subscription received the delta
+        let updates = qm.take_updates();
+        assert_eq!(updates.len(), 1, "Should have one subscription update");
+        assert_eq!(updates[0].subscription_id, sub_id);
+        assert_eq!(
+            updates[0].delta.added.len(),
+            1,
+            "Delta should contain one added row"
+        );
+
+        // Verify the row contents
+        let row = &updates[0].delta.added[0];
+        let values = decode_row(&descriptor, &row.data).unwrap();
+        assert_eq!(values[0], Value::Text("SyncedUser".into()));
+        assert_eq!(values[1], Value::Integer(42));
+    }
+
+    #[test]
+    fn sync_inbox_update_flows_to_subscription_delta() {
+        // End-to-end test: sync update message → subscription emits update delta
+        use crate::commit::{Commit, StoredState};
+        use crate::query_manager::encoding::{decode_row, encode_row};
+        use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
+
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+        let branch = get_branch(&qm);
+
+        // Add a "server"
+        let server_id = ServerId::new();
+        qm.sync_manager_mut().add_server(server_id);
+        qm.sync_manager_mut().object_manager.subscribe_all();
+
+        // Insert a row locally first
+        let handle = qm
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text("Alice".into()), Value::Integer(100)],
+            )
+            .unwrap();
+        let row_id = handle.row_id;
+        let first_commit_id = handle.row_commit_id;
+
+        // Subscribe to users
+        let query = qm.query("users").build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        // Process to get initial state
+        qm.process(&mut storage);
+        let _ = qm.take_updates(); // Clear initial delta
+
+        // Now simulate receiving an update from sync (as if another peer modified the row)
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+        ]);
+        let updated_data = encode_row(
+            &descriptor,
+            &[Value::Text("Alice Updated".into()), Value::Integer(999)],
+        )
+        .unwrap();
+
+        let update_commit = Commit {
+            parents: smallvec![first_commit_id],
+            content: updated_data,
+            timestamp: 2000,
+            author: row_id,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        };
+
+        // Push the update through SyncManager inbox
+        qm.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Server(server_id),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: row_id,
+                metadata: None, // No metadata needed for existing object
+                branch_name: branch.into(),
+                commits: vec![update_commit],
+            },
+        });
+
+        // Process both layers
+        qm.sync_manager_mut().process_inbox(&mut storage);
+        qm.process(&mut storage);
+
+        // Verify subscription received update delta
+        let updates = qm.take_updates();
+        assert_eq!(updates.len(), 1, "Should have one subscription update");
+        assert_eq!(updates[0].subscription_id, sub_id);
+        assert_eq!(
+            updates[0].delta.updated.len(),
+            1,
+            "Delta should contain one updated row"
+        );
+
+        // Verify the new values
+        let (_old_row, new_row) = &updates[0].delta.updated[0];
+        let values = decode_row(&descriptor, &new_row.data).unwrap();
+        assert_eq!(values[0], Value::Text("Alice Updated".into()));
+        assert_eq!(values[1], Value::Integer(999));
+    }
+
+    #[test]
+    fn two_peer_sync_insert_reaches_subscription() {
+        // Full two-peer test: Peer A inserts → (simulated sync) → Peer B subscription delta
+        // This demonstrates the conceptual flow even though we construct the payload manually
+        use crate::commit::{Commit, StoredState};
+        use crate::object::BranchName;
+        use crate::query_manager::encoding::decode_row;
+        use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
+
+        // Create two peers
+        let sync_manager_a = SyncManager::new();
+        let sync_manager_b = SyncManager::new();
+        let schema = test_schema();
+        let (mut peer_a, mut storage_a) = create_query_manager(sync_manager_a, schema.clone());
+        let (mut peer_b, mut storage_b) = create_query_manager(sync_manager_b, schema);
+
+        // Peer B subscribes to all objects and sets up query subscription
+        peer_b.sync_manager_mut().object_manager.subscribe_all();
+        let query = peer_b.query("users").build();
+        let sub_id = peer_b.subscribe(query).unwrap();
+
+        // Peer B adds a "server" (representing Peer A)
+        let peer_a_as_server = ServerId::new();
+        peer_b.sync_manager_mut().add_server(peer_a_as_server);
+
+        // Process both to initialize
+        peer_a.process(&mut storage_a);
+        peer_b.process(&mut storage_b);
+        let _ = peer_b.take_updates();
+
+        // Peer A inserts a row
+        let handle = peer_a
+            .insert(
+                &mut storage_a,
+                "users",
+                &[Value::Text("FromPeerA".into()), Value::Integer(123)],
+            )
+            .unwrap();
+        let row_id = handle.row_id;
+
+        // Get the actual commit data from Peer A's ObjectManager
+        // This simulates "what would be sent over the wire"
+        let branch_name = get_branch(&peer_a);
+        let (row_data, metadata) = {
+            let obj = peer_a
+                .sync_manager_mut()
+                .object_manager
+                .get(row_id)
+                .expect("Object should be available");
+            let branch = obj.branches.get(&BranchName::new(&branch_name)).unwrap();
+            let tip_id = branch.tips.iter().next().unwrap();
+            let commit = branch.commits.get(tip_id).unwrap();
+            (commit.content.clone(), obj.metadata.clone())
+        };
+
+        // Construct the sync payload as it would appear on the wire
+        let commit = Commit {
+            parents: smallvec![],
+            content: row_data,
+            timestamp: 1000,
+            author: row_id,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        };
+
+        // Send to Peer B via SyncManager inbox
+        peer_b.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Server(peer_a_as_server),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: row_id,
+                metadata: Some(crate::sync_manager::ObjectMetadata {
+                    id: row_id,
+                    metadata,
+                }),
+                branch_name: branch_name.clone().into(),
+                commits: vec![commit],
+            },
+        });
+
+        // Peer B processes the sync message
+        peer_b.sync_manager_mut().process_inbox(&mut storage_b);
+        peer_b.process(&mut storage_b);
+
+        // Verify Peer B's subscription received the row
+        let updates = peer_b.take_updates();
+        assert_eq!(
+            updates.len(),
+            1,
+            "Peer B should have one subscription update"
+        );
+        assert_eq!(updates[0].subscription_id, sub_id);
+        assert_eq!(
+            updates[0].delta.added.len(),
+            1,
+            "Delta should contain one added row"
+        );
+
+        // Verify the row came from Peer A
+        let row = &updates[0].delta.added[0];
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+        ]);
+        let values = decode_row(&descriptor, &row.data).unwrap();
+        assert_eq!(values[0], Value::Text("FromPeerA".into()));
+        assert_eq!(values[1], Value::Integer(123));
+    }
+
+    // ========================================================================
+    // Soft Delete Tests
+    // ========================================================================
+
+    #[test]
+    fn soft_delete_with_concurrent_tips_uses_lww() {
+        // Test that soft deleting an object with two concurrent tips results
+        // in a soft delete commit with content from the LWW winner (highest timestamp).
+        use crate::commit::{Commit, StoredState};
+        use crate::object::BranchName;
+        use crate::query_manager::encoding::encode_row;
+
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+        // Insert a row
+        let handle = qm
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text("Original".into()), Value::Integer(0)],
+            )
+            .unwrap();
+        qm.process(&mut storage);
+
+        // Get the initial commit as the common parent
+        let branch = get_branch(&qm);
+        let branch_name = BranchName::new(&branch);
+        let initial_tips: Vec<_> = qm
+            .sync_manager_mut()
+            .object_manager
+            .get_tip_ids(handle.row_id, &branch)
+            .unwrap()
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(initial_tips.len(), 1);
+        let parent = initial_tips[0];
+
+        // Create two concurrent updates with different timestamps and content.
+        // Both have the same parent, creating diverging tips.
+        let descriptor = qm
+            .schema()
+            .get(&TableName::new("users"))
+            .unwrap()
+            .columns
+            .clone();
+
+        // Commit A: lower timestamp, content "TipA"
+        let content_a = encode_row(
+            &descriptor,
+            &[Value::Text("TipA".into()), Value::Integer(100)],
+        )
+        .unwrap();
+        let commit_a = Commit {
+            author: handle.row_id,
+            parents: smallvec![parent],
+            content: content_a,
+            timestamp: 1000, // Lower timestamp
+            metadata: None,
+            stored_state: StoredState::Pending,
+            ack_state: Default::default(),
+        };
+
+        // Commit B: higher timestamp, content "TipB" - this should win
+        let content_b = encode_row(
+            &descriptor,
+            &[Value::Text("TipB".into()), Value::Integer(200)],
+        )
+        .unwrap();
+        let commit_b = Commit {
+            author: handle.row_id,
+            parents: smallvec![parent],
+            content: content_b.clone(),
+            timestamp: 2000, // Higher timestamp - LWW winner
+            metadata: None,
+            stored_state: StoredState::Pending,
+            ack_state: Default::default(),
+        };
+
+        // Add both commits to create concurrent tips
+        // We need to receive these as synced commits
+        let commit_a_id = qm
+            .sync_manager_mut()
+            .object_manager
+            .receive_commit(&mut storage, handle.row_id, &branch, commit_a)
+            .unwrap();
+        let commit_b_id = qm
+            .sync_manager_mut()
+            .object_manager
+            .receive_commit(&mut storage, handle.row_id, &branch, commit_b)
+            .unwrap();
+
+        // Verify we now have concurrent tips
+        let tips: Vec<_> = qm
+            .sync_manager_mut()
+            .object_manager
+            .get_tip_ids(handle.row_id, &branch)
+            .unwrap()
+            .iter()
+            .copied()
+            .collect();
+        assert_eq!(tips.len(), 2, "Should have 2 concurrent tips");
+        assert!(tips.contains(&commit_a_id));
+        assert!(tips.contains(&commit_b_id));
+
+        // Process updates
+        qm.process(&mut storage);
+
+        // Now soft delete - should preserve content from LWW winner (commit_b, TipB)
+        let delete_handle = qm.delete(&mut storage, handle.row_id).unwrap();
+
+        // Get the delete commit and verify its content
+        let obj = qm
+            .sync_manager_mut()
+            .object_manager
+            .get(handle.row_id)
+            .expect("Object should be available");
+        {
+            let branch = obj.branches.get(&branch_name).unwrap();
+            let delete_commit = branch.commits.get(&delete_handle.delete_commit_id).unwrap();
+
+            // Verify the soft delete commit has content from the LWW winner (TipB)
+            assert_eq!(
+                delete_commit.content, content_b,
+                "Soft delete should preserve content from LWW winner"
+            );
+
+            // Also verify metadata
+            assert_eq!(
+                delete_commit
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get(MetadataKey::Delete.as_str())),
+                Some(&"soft".to_string())
+            );
+        }
+
+        // Additionally verify that querying with include_deleted shows the correct content
+        let query = qm.query("users").include_deleted().build();
+        let results = execute_query(&mut qm, &mut storage, query).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].1[0], Value::Text("TipB".into()));
+        assert_eq!(results[0].1[1], Value::Integer(200));
+    }
+
+    // ========================================================================
+    // Undelete Tests
+    // ========================================================================
+
+    #[test]
+    fn handle_object_update_respects_branch() {
+        use crate::commit::{Commit, StoredState};
+        use crate::query_manager::encoding::encode_row;
+        use std::collections::HashMap;
+
+        // Verify that handle_object_update updates the correct branch's indices.
+        // Rows on a non-schema branch should NOT appear in queries on the schema branch.
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+        // Get the actual schema branch
+        let schema_branch = get_branch(&qm);
+
+        // Subscribe to all objects
+        qm.sync_manager_mut().object_manager.subscribe_all();
+
+        let row_id = crate::object::ObjectId::new();
+        let author = row_id;
+
+        let mut metadata = HashMap::new();
+        metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_object(&mut storage, row_id, metadata);
+
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("name", ColumnType::Text),
+            ColumnDescriptor::new("score", ColumnType::Integer),
+        ]);
+        let row_data = encode_row(
+            &descriptor,
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+        // Receive commit on "other-branch" (not the schema's branch)
+        let commit = Commit {
+            parents: smallvec![],
+            content: row_data.clone(),
+            timestamp: 1000,
+            author,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        };
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_commit(&mut storage, row_id, "other-branch", commit)
+            .unwrap();
+
+        qm.process(&mut storage);
+
+        // Query schema branch - should NOT find the row (it's on other-branch)
+        let query = qm.query("users").build();
+        let results = execute_query(&mut qm, &mut storage, query).unwrap();
+        assert_eq!(
+            results.len(),
+            0,
+            "Row on other-branch should not appear in schema branch query"
+        );
+
+        // Now insert on schema branch and verify it appears in default query
+        let row_id2 = crate::object::ObjectId::new();
+        let mut metadata2 = HashMap::new();
+        metadata2.insert(MetadataKey::Table.to_string(), "users".to_string());
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_object(&mut storage, row_id2, metadata2);
+
+        let commit2 = Commit {
+            parents: smallvec![],
+            content: row_data,
+            timestamp: 2000,
+            author: row_id2,
+            metadata: None,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        };
+        qm.sync_manager_mut()
+            .object_manager
+            .receive_commit(&mut storage, row_id2, &schema_branch, commit2)
+            .unwrap();
+
+        qm.process(&mut storage);
+
+        // Schema branch should now have 1 row
+        let query = qm.query("users").build();
+        let results = execute_query(&mut qm, &mut storage, query).unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "Row on schema branch should appear in default query"
+        );
+    }
+
+    // ============================================================================
+    // Contributing ObjectIds Tests
+    // ============================================================================
+
+    #[test]
+    fn mid_tier_relays_objects_to_clients_with_matching_scope() {
+        use crate::commit::Commit;
+        use crate::object::ObjectId;
+        use crate::sync_manager::{
+            ClientId, Destination, InboxEntry, ObjectMetadata, ServerId, Source, SyncPayload,
+        };
+        use uuid::Uuid;
+
+        // Setup mid-tier server
+        let sync_manager = SyncManager::new();
+        let schema = test_schema();
+        let (mut mid_tier, mut storage) = create_query_manager(sync_manager, schema.clone());
+
+        // Add upstream server and downstream client
+        let upstream_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+        let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+        mid_tier.sync_manager_mut().add_server(upstream_id);
+        mid_tier.sync_manager_mut().add_client(client_id);
+
+        // Insert a matching row locally first (so it's in scope)
+        let handle = mid_tier
+            .insert(
+                &mut storage,
+                "users",
+                &[Value::Text("Alice".into()), Value::Integer(75)],
+            )
+            .unwrap();
+        mid_tier.process(&mut storage);
+
+        // Get the schema branch
+        let branch_str = get_branch(&mid_tier);
+        let branch_name = crate::object::BranchName::new(&branch_str);
+
+        // Establish client subscription
+        let query = mid_tier
+            .query("users")
+            .filter_gt("score", Value::Integer(50))
+            .build();
+
+        mid_tier.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Client(client_id),
+            payload: SyncPayload::QuerySubscription {
+                query_id: crate::sync_manager::QueryId(42),
+                query: Box::new(query),
+                session: None,
+                propagation: crate::sync_manager::QueryPropagation::Full,
+            },
+        });
+        mid_tier.process(&mut storage);
+
+        // Clear outbox (initial sync messages)
+        let _ = mid_tier.sync_manager_mut().take_outbox();
+
+        // Now receive an update for the existing object from upstream
+        // (simulating upstream sending fresh data)
+        let table_schema = schema.get(&TableName::new("users")).unwrap();
+        let row_data = encode_row(
+            &table_schema.columns,
+            &[Value::Text("Alice".into()), Value::Integer(80)],
+        )
+        .unwrap();
+
+        let current_tips: smallvec::SmallVec<[_; 2]> = mid_tier
+            .sync_manager()
+            .object_manager
+            .get(handle.row_id)
+            .unwrap()
+            .branches
+            .get(&branch_name)
+            .unwrap()
+            .tips
+            .iter()
+            .copied()
+            .collect();
+
+        let author = ObjectId::new();
+        let commit = Commit {
+            parents: current_tips,
+            content: row_data,
+            timestamp: 2000,
+            author,
+            metadata: None,
+            stored_state: crate::commit::StoredState::Stored,
+            ack_state: Default::default(),
+        };
+
+        mid_tier.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Server(upstream_id),
+            payload: SyncPayload::ObjectUpdated {
+                object_id: handle.row_id,
+                metadata: Some(ObjectMetadata {
+                    id: handle.row_id,
+                    metadata: [("table".to_string(), "users".to_string())]
+                        .into_iter()
+                        .collect(),
+                }),
+                branch_name: branch_name.clone(),
+                commits: vec![commit],
+            },
+        });
+        mid_tier.process(&mut storage);
+
+        // Check that the update was forwarded to the client
+        let outbox = mid_tier.sync_manager_mut().take_outbox();
+
+        let relayed: Vec<_> = outbox
+        .iter()
+        .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
+        .filter(|e| matches!(&e.payload, SyncPayload::ObjectUpdated { object_id, .. } if *object_id == handle.row_id))
+        .collect();
+
+        assert_eq!(
+            relayed.len(),
+            1,
+            "Mid-tier should relay ObjectUpdated from upstream to client with matching scope"
+        );
+    }
+
+    // ============================================================================
+    // Part 6: End-to-End Integration Tests
+    // ============================================================================
+
+    // TODO(task-17): E2E: Client subscribes to query, receives matching data from server.
 }

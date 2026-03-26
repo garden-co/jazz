@@ -29,7 +29,6 @@ use std::task::{Context, Poll};
 use futures::channel::oneshot;
 use tracing::{debug, debug_span, info, trace, trace_span};
 
-use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::query_manager::QuerySubscriptionId;
 use crate::query_manager::encoding::decode_row;
@@ -241,9 +240,9 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
     /// Pending one-shot queries (query() calls waiting for first callback).
     pending_one_shot_queries: HashMap<SubscriptionHandle, PendingOneShotQuery>,
 
-    /// Watchers for persistence acks: (commit_id, requested_tier) → senders.
+    /// Watchers for persistence acks: (doc_id, requested_tier) → senders.
     /// A tier >= requested tier satisfies the watcher (e.g., EdgeServer ack satisfies Worker).
-    ack_watchers: HashMap<CommitId, Vec<(DurabilityTier, oneshot::Sender<()>)>>,
+    ack_watchers: HashMap<ObjectId, Vec<(DurabilityTier, oneshot::Sender<()>)>>,
 
     /// Label for tracing (e.g. "worker", "edge", "client").
     tier_label: &'static str,

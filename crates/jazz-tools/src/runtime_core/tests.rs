@@ -277,10 +277,10 @@ fn outbox_has_object_update_for_client(
             Destination::Client(dest_client_id) if *dest_client_id == client_id
         ) && matches!(
             &entry.payload,
-            SyncPayload::ObjectUpdated {
-                object_id: payload_object_id,
+            SyncPayload::DocUpdated {
+                doc_id,
                 ..
-            } if *payload_object_id == object_id
+            } if *doc_id == object_id
         )
     })
 }
@@ -1558,7 +1558,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
     s.b.batched_tick();
     let b_out = s.b.sync_sender().take();
 
-    // Force QuerySettled before ObjectUpdated to expose ordering assumptions.
+    // Force QuerySettled before DocUpdated to expose ordering assumptions.
     let mut settled_to_a = Vec::new();
     let mut updates_to_a = Vec::new();
     for entry in b_out {
@@ -1567,7 +1567,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
         }
         match entry.payload {
             payload @ SyncPayload::QuerySettled { .. } => settled_to_a.push(payload),
-            payload @ SyncPayload::ObjectUpdated { .. } => updates_to_a.push(payload),
+            payload @ SyncPayload::DocUpdated { .. } => updates_to_a.push(payload),
             _ => {}
         }
     }
@@ -1578,7 +1578,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
     );
     assert!(
         !updates_to_a.is_empty(),
-        "Expected ObjectUpdated payload for A"
+        "Expected DocUpdated payload for A"
     );
 
     // Mirror connected stream initialization: first expected seq is 1.
@@ -1627,7 +1627,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
             assert_eq!(results[0].0, row_id);
         }
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
-        Poll::Pending => panic!("Query should resolve after ObjectUpdated and QuerySettled"),
+        Poll::Pending => panic!("Query should resolve after DocUpdated and QuerySettled"),
     }
 }
 
@@ -1838,13 +1838,11 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
     // Check that the catalogue was sent
     let messages = core.sync_sender().take();
     let catalogue_msg = messages.iter().find(|m| {
-        if let SyncPayload::ObjectUpdated {
-            object_id,
-            metadata,
-            ..
+        if let SyncPayload::DocUpdated {
+            doc_id, metadata, ..
         } = &m.payload
         {
-            *object_id == schema_obj_id
+            *doc_id == schema_obj_id
                 && metadata
                     .as_ref()
                     .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
@@ -1897,13 +1895,13 @@ fn test_matching_catalogue_hash_skips_catalogue_replay_on_add_server() {
     let catalogue_msg = messages.iter().find(|m| {
         matches!(
             &m.payload,
-            SyncPayload::ObjectUpdated { object_id, .. } if *object_id == schema_obj_id
+            SyncPayload::DocUpdated { doc_id, .. } if *doc_id == schema_obj_id
         )
     });
     let row_msg = messages.iter().find(|m| {
         matches!(
             &m.payload,
-            SyncPayload::ObjectUpdated { object_id, .. } if *object_id == row_object_id
+            SyncPayload::DocUpdated { doc_id, .. } if *doc_id == row_object_id
         )
     });
 

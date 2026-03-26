@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
+use yrs::{Map, Transact};
+
 use crate::commit::CommitId;
 use crate::doc_manager::DocManager;
 use crate::object::{BranchName, ObjectId};
-use crate::object_manager::ObjectManager;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::storage::{MemoryStorage, Storage};
@@ -25,13 +26,12 @@ pub use types::*;
 // SyncManager
 // ============================================================================
 
-/// Manages synchronization state atop ObjectManager.
+/// Manages synchronization state and DocManager.
 ///
 /// Coordinates:
 /// - Upstream servers (trusted, receive all our objects)
 /// - Downstream clients (untrusted, receive query-filtered subsets)
 pub struct SyncManager {
-    pub object_manager: ObjectManager,
     pub doc_manager: DocManager,
     pub(super) catalogue_objects: HashSet<ObjectId>,
 
@@ -61,12 +61,19 @@ pub struct SyncManager {
 
     /// Acks received during inbox processing, for RuntimeCore to consume.
     pub(super) received_acks: Vec<(CommitId, DurabilityTier)>,
+
+    /// Doc IDs that received updates during inbox processing.
+    /// Drained by QueryManager to update storage indices and mark subscriptions dirty.
+    pub(super) synced_doc_ids: Vec<ObjectId>,
+
+    /// Doc-level persistence acks received during inbox processing.
+    /// Used by RuntimeCore to resolve `_persisted` mutation receivers.
+    pub(super) received_doc_acks: Vec<(ObjectId, DurabilityTier)>,
 }
 
 impl std::fmt::Debug for SyncManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SyncManager")
-            .field("object_manager", &self.object_manager)
             .field("doc_manager", &"DocManager { .. }")
             .field("catalogue_objects", &self.catalogue_objects)
             .field("servers", &self.servers)
@@ -88,6 +95,8 @@ impl std::fmt::Debug for SyncManager {
             .field("query_origin", &self.query_origin)
             .field("pending_query_settled", &self.pending_query_settled)
             .field("received_acks", &self.received_acks)
+            .field("synced_doc_ids", &self.synced_doc_ids)
+            .field("received_doc_acks", &self.received_doc_acks)
             .finish()
     }
 }
@@ -100,23 +109,9 @@ impl Default for SyncManager {
 
 impl SyncManager {
     pub fn new() -> Self {
-        Self::with_object_manager(ObjectManager::new())
-    }
-
-    /// Create with an existing ObjectManager.
-    pub fn with_object_manager(object_manager: ObjectManager) -> Self {
-        let catalogue_objects = object_manager
-            .objects
-            .iter()
-            .filter_map(|(object_id, object)| {
-                Self::is_catalogue_metadata(&object.metadata).then_some(*object_id)
-            })
-            .collect();
-
         Self {
-            object_manager,
             doc_manager: DocManager::new(Box::new(MemoryStorage::new())),
-            catalogue_objects,
+            catalogue_objects: HashSet::new(),
             servers: HashMap::new(),
             clients: HashMap::new(),
             inbox: Vec::new(),
@@ -130,6 +125,8 @@ impl SyncManager {
             query_origin: HashMap::new(),
             pending_query_settled: Vec::new(),
             received_acks: Vec::new(),
+            synced_doc_ids: Vec::new(),
+            received_doc_acks: Vec::new(),
         }
     }
 
@@ -273,35 +270,31 @@ impl SyncManager {
 
     /// Create an object with initial content for catalogue storage.
     ///
-    /// Creates an object with the specified ID, metadata, and content.
-    /// The content is stored as a commit on the "main" branch.
+    /// Creates a Yrs doc with the specified ID, metadata, and content stored
+    /// as a binary blob under the "content" key.
     ///
     /// Used for storing schemas and lenses in the catalogue.
     pub fn create_object_with_content<H: Storage>(
         &mut self,
-        storage: &mut H,
+        _storage: &mut H,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
         content: Vec<u8>,
     ) {
         self.track_catalogue_object(object_id, &metadata);
 
-        // Create the object if it doesn't exist
-        if self.object_manager.get(object_id).is_none() {
-            self.object_manager
-                .create_with_id(storage, object_id, Some(metadata));
+        // Create as a DocManager doc with metadata
+        if self.doc_manager.get(object_id).is_none() {
+            self.doc_manager.create_with_id(object_id, metadata);
         }
 
-        // Add content as a commit on the "main" branch
-        let _ = self.object_manager.add_commit(
-            storage,
-            object_id,
-            "main",
-            Vec::new(), // No parents - root commit
-            content,
-            ObjectId::from_uuid(uuid::Uuid::nil()), // System author
-            None,
-        );
+        // Store content as a binary blob in the Yrs doc
+        if let Some(row_doc) = self.doc_manager.get_mut(object_id) {
+            let mut txn = row_doc.doc.transact_mut();
+            row_doc
+                .root_map
+                .insert(&mut txn, "content", content.as_slice());
+        }
     }
 
     // ========================================================================
@@ -463,6 +456,24 @@ impl SyncManager {
     /// Used by RuntimeCore to resolve `_persisted` mutation receivers.
     pub fn take_received_acks(&mut self) -> Vec<(CommitId, DurabilityTier)> {
         std::mem::take(&mut self.received_acks)
+    }
+
+    /// Take doc IDs that were updated via sync since last call.
+    /// Used by QueryManager to update storage indices for synced docs.
+    pub fn take_synced_doc_ids(&mut self) -> Vec<ObjectId> {
+        std::mem::take(&mut self.synced_doc_ids)
+    }
+
+    /// Notify the sync manager that a doc was updated externally (e.g. in tests).
+    /// The doc ID will be picked up by `process_synced_docs` on the next cycle.
+    pub fn push_synced_doc_id(&mut self, doc_id: ObjectId) {
+        self.synced_doc_ids.push(doc_id);
+    }
+
+    /// Take received doc-level persistence acks since last call.
+    /// Used by RuntimeCore to resolve `_persisted` mutation receivers.
+    pub fn take_received_doc_acks(&mut self) -> Vec<(ObjectId, DurabilityTier)> {
+        std::mem::take(&mut self.received_doc_acks)
     }
 
     /// Emit a QuerySettled notification to a client.

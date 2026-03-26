@@ -95,6 +95,7 @@ pub enum QueryPropagation {
 pub struct PendingUpdateId(pub u64);
 
 /// Data needed to sync a branch: (object_id, metadata, branch_name, tips).
+#[allow(dead_code)]
 pub(super) type BranchSyncData = (
     ObjectId,
     HashMap<String, String>,
@@ -461,6 +462,29 @@ pub struct PendingQuerySubscription {
 pub struct PendingQueryUnsubscription {
     pub client_id: ClientId,
     pub query_id: QueryId,
+}
+
+/// Update sent to global (all-objects) subscribers when any object changes.
+///
+/// Fires on: create(), receive_object(), add_commit(), receive_commit()
+/// TODO(task-17): This type was moved from ObjectManager during the y-crdt migration.
+/// It's still used by QueryManager to process synced row updates.
+/// Once the commit DAG is fully removed, this should be replaced with
+/// DocManager-native notifications.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllObjectUpdate {
+    pub object_id: ObjectId,
+    pub metadata: HashMap<String, String>,
+    pub branch_name: BranchName,
+    /// Current frontier commit IDs for this branch, sorted by timestamp.
+    pub commit_ids: Vec<CommitId>,
+    /// True if this is a newly created/received object, false if existing object.
+    pub is_new_object: bool,
+    /// Previous tip commit IDs before this update (empty for new objects).
+    pub previous_commit_ids: Vec<CommitId>,
+    /// Content of previous "winning" tip (newest by timestamp). None if new object.
+    /// Used by QueryManager to compute index deltas for synced updates.
+    pub old_content: Option<Vec<u8>>,
 }
 
 /// A write from a User client awaiting permission check (policy evaluation).

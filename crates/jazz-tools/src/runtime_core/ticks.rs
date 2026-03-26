@@ -117,22 +117,22 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             }
         }
 
-        // 3b. Process received persistence acks — resolve matching watchers
-        let received_acks = self
+        // 3b. Process received doc persistence acks — resolve matching watchers
+        let received_doc_acks = self
             .schema_manager
             .query_manager_mut()
             .sync_manager_mut()
-            .take_received_acks();
-        for (commit_id, acked_tier) in received_acks {
-            if let Some(watchers) = self.ack_watchers.remove(&commit_id) {
+            .take_received_doc_acks();
+        for (doc_id, acked_tier) in received_doc_acks {
+            if let Some(watchers) = self.ack_watchers.remove(&doc_id) {
                 let mut remaining = Vec::new();
                 for (requested_tier, sender) in watchers {
                     if acked_tier >= requested_tier {
                         tracing::debug!(
-                            ?commit_id,
+                            %doc_id,
                             ?acked_tier,
                             ?requested_tier,
-                            "ack watcher resolved"
+                            "doc ack watcher resolved"
                         );
                         let _ = sender.send(());
                     } else {
@@ -140,7 +140,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                     }
                 }
                 if !remaining.is_empty() {
-                    self.ack_watchers.insert(commit_id, remaining);
+                    self.ack_watchers.insert(doc_id, remaining);
                 }
             }
         }

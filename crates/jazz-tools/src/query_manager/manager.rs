@@ -4,12 +4,14 @@ use std::sync::Arc;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use yrs::{Map, Transact};
+
 use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
-use crate::object_manager::AllObjectUpdate;
 use crate::schema_manager::{LensTransformer, SchemaContext};
 use crate::storage::{CatalogueManifestOp, Storage};
+use crate::sync_manager::types::AllObjectUpdate;
 use crate::sync_manager::{
     ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
     SyncManager,
@@ -352,10 +354,7 @@ impl QueryManager {
     ///
     /// Row-level security is evaluated via `process()` which handles pending
     /// permission checks from SyncManager.
-    pub fn new(mut sync_manager: SyncManager) -> Self {
-        // Subscribe to all object updates so we receive sync'd data
-        sync_manager.object_manager.subscribe_all();
-
+    pub fn new(sync_manager: SyncManager) -> Self {
         Self {
             sync_manager,
             schema: Arc::new(Schema::new()),
@@ -591,6 +590,11 @@ impl QueryManager {
         &self.schema_context
     }
 
+    /// Get a mutable reference to the schema context.
+    pub fn schema_context_mut(&mut self) -> &mut SchemaContext {
+        &mut self.schema_context
+    }
+
     /// Get the current branch name for writes.
     ///
     /// Returns the branch for the current schema, or "main" if context isn't initialized.
@@ -654,16 +658,9 @@ impl QueryManager {
         // 1. Process SyncManager inbox (receives client writes)
         self.sync_manager.process_inbox(storage);
 
-        // 2. Process object updates from SyncManager FIRST
-        // This ensures indices are updated before query subscriptions are processed,
-        // so new subscriptions can find data that arrived in the same batch.
-        let updates = self.sync_manager.object_manager.take_all_object_updates();
-        if !updates.is_empty() {
-            tracing::debug!(count = updates.len(), "processing object updates");
-        }
-        for update in updates {
-            self.handle_object_update(storage, update);
-        }
+        // 2. Process docs that received updates via sync (DocUpdated inbox).
+        // Indexes their content in Storage and marks subscriptions dirty.
+        self.process_synced_docs(storage);
 
         // 3. Process pending query subscriptions from downstream clients
         // (after indices are updated, so initial settle finds existing data)
@@ -707,8 +704,9 @@ impl QueryManager {
                 "settling subscriptions"
             );
         }
-        let om = &mut self.sync_manager.object_manager;
+        let doc_manager = &self.sync_manager.doc_manager;
         let storage_ref: &dyn Storage = storage;
+        let schema = &self.schema;
         let schema_context = &self.schema_context;
         let branch_schema_map = &self.branch_schema_map;
 
@@ -716,62 +714,98 @@ impl QueryManager {
             let _sub_span = tracing::trace_span!("settle_subscription", sub_id = sub_id.0, table = %subscription.graph.table).entered();
             let branches = &subscription.branches;
             let table = subscription.graph.table.as_str().to_string();
+            let include_deleted = subscription.query.include_deleted;
 
-            // Row loader returns None for empty content (hard delete tombstones)
-            // Soft deletes have preserved content and can be materialized normally
-            // For single-branch subscriptions, reads from that branch
-            // For multi-branch subscriptions, uses LWW across branches
-            // When schema context is present, applies lens transform for old schema branches
+            // Row loader reads from DocManager (Yrs Docs)
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let obj = om.get_or_load(id, storage_ref, branches);
-                if obj.is_none() {
-                    tracing::trace!(%id, "row_loader: object not found");
+                let row_doc = doc_manager.get(id)?;
+                let doc_table = row_doc.metadata.get("table")?;
+                let tn = TableName::new(doc_table);
+
+                let txn = row_doc.doc.transact();
+
+                // Check if row is deleted (skip for include_deleted queries)
+                if !include_deleted && row_doc.root_map.get(&txn, "_deleted").is_some() {
                     return None;
                 }
-                let obj = obj?;
-                // Find the newest commit across all subscription branches (LWW)
-                // Also track which branch it came from for schema transformation
-                let mut best: Option<(u64, Vec<u8>, CommitId, String)> = None;
 
-                for branch_name in branches {
-                    if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
-                        for &tip_id in &branch.tips {
-                            if let Some(commit) = branch.commits.get(&tip_id) {
-                                match &best {
-                                    None => {
-                                        best = Some((
-                                            commit.timestamp,
-                                            commit.content.clone(),
-                                            tip_id,
-                                            branch_name.clone(),
-                                        ));
+                let ts = schema.get(&tn)?;
+
+                // Determine which schema this row was actually written with.
+                // If the doc has all current-schema columns present, read with current schema.
+                // Otherwise, find the best-matching old schema and apply lens transform.
+                let (read_descriptor, source_hash_opt) = {
+                    // Check if row has all current schema columns
+                    let has_all_current = ts.columns.columns.iter().all(|col| {
+                        col.nullable || row_doc.root_map.get(&txn, col.name.as_str()).is_some()
+                    });
+                    if has_all_current {
+                        (ts.columns.clone(), None)
+                    } else {
+                        // Find the old schema whose columns best match what's in the doc
+                        let mut found = None;
+                        for branch in branches.iter() {
+                            if let Some(&hash) = branch_schema_map.get(branch.as_str()) {
+                                if hash == schema_context.current_hash {
+                                    continue;
+                                }
+                                if let Some(live_schema) = schema_context.live_schemas.get(&hash)
+                                    && let Some(live_ts) = live_schema.get(&tn)
+                                {
+                                    let all_present = live_ts.columns.columns.iter().all(|col| {
+                                        col.nullable
+                                            || row_doc
+                                                .root_map
+                                                .get(&txn, col.name.as_str())
+                                                .is_some()
+                                    });
+                                    if all_present {
+                                        found = Some((live_ts.columns.clone(), hash));
+                                        break;
                                     }
-                                    Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
-                                        best = Some((
-                                            commit.timestamp,
-                                            commit.content.clone(),
-                                            tip_id,
-                                            branch_name.clone(),
-                                        ));
-                                    }
-                                    _ => {}
                                 }
                             }
                         }
+                        match found {
+                            Some((desc, hash)) => (desc, Some(hash)),
+                            None => (ts.columns.clone(), None),
+                        }
                     }
+                };
+
+                let mut values = Vec::with_capacity(read_descriptor.columns.len());
+                for col in &read_descriptor.columns {
+                    let value = crate::row_doc::read_column_typed(
+                        &row_doc.root_map,
+                        &txn,
+                        col.name.as_str(),
+                        &col.column_type,
+                    )
+                    .unwrap_or(Value::Null);
+                    values.push(value);
+                }
+                let data = super::encoding::encode_row(&read_descriptor, &values).ok()?;
+                if data.is_empty() {
+                    return None;
                 }
 
-                // Filter out empty content (hard delete tombstones only)
-                let (_, content, commit_id, source_branch) =
-                    best.filter(|(_, content, _, _)| !content.is_empty())?;
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(id.uuid().as_bytes());
+                let hash = hasher.finalize();
+                let mut bytes = [0u8; 32];
+                bytes.copy_from_slice(&hash);
+                let commit_id = CommitId(bytes);
 
-                // Apply lens transform if row is from an old schema branch
-                if let Some(&source_hash) = branch_schema_map.get(&source_branch)
-                    && source_hash != schema_context.current_hash
-                {
-                    // Transform the row data using lens
+                let source_branch = branches
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "main".to_string());
+
+                // Apply lens transform if row was read with an old schema
+                if let Some(source_hash) = source_hash_opt {
                     let transformer = LensTransformer::new(schema_context, &table);
-                    match transformer.transform(&content, commit_id, source_hash) {
+                    match transformer.transform(&data, commit_id, source_hash) {
                         Ok(result) => {
                             return Some(LoadedRow::new(
                                 result.data,
@@ -786,7 +820,6 @@ impl QueryManager {
                                 sub_id = sub_id.0,
                                 row_id = %id,
                                 table = %table,
-                                source_branch = %source_branch,
                                 source_schema = %source_hash.short(),
                                 target_schema = %schema_context.current_hash.short(),
                                 error = %err,
@@ -798,7 +831,7 @@ impl QueryManager {
                 }
 
                 Some(LoadedRow::new(
-                    content,
+                    data,
                     commit_id,
                     [(id, BranchName::new(&source_branch))]
                         .into_iter()
@@ -900,34 +933,20 @@ impl QueryManager {
         // 8. Settle server-side subscriptions and update scopes
         self.settle_server_subscriptions(storage_ref);
     }
-    /// Load a row's data from a specific branch using LWW (last-writer-wins by timestamp).
-    /// When multiple concurrent tips exist, returns content from the tip with highest timestamp.
-    pub(super) fn load_row_from_object_on_branch(
-        &self,
-        row_id: ObjectId,
-        branch_name: &str,
-    ) -> Option<(Vec<u8>, CommitId)> {
-        let obj = self.sync_manager.object_manager.get(row_id)?;
-        let branch = obj.branches.get(&BranchName::new(branch_name))?;
-        // Sort tips by timestamp (oldest first), take last (newest = LWW winner)
-        let mut tips: Vec<_> = branch.tips.iter().copied().collect();
-        tips.sort_by_key(|id| branch.commits.get(id).map(|c| c.timestamp).unwrap_or(0));
-        let tip_id = tips.last()?;
-        let commit = branch.commits.get(tip_id)?;
-        Some((commit.content.clone(), *tip_id))
-    }
-
-    /// Load a row's data from ObjectManager using the default branch.
-    pub(super) fn load_row_from_object(&self, row_id: ObjectId) -> Option<(Vec<u8>, CommitId)> {
-        self.load_row_from_object_on_branch(row_id, &self.current_branch())
-    }
-
-    /// Load content from a catalogue object's "main" branch.
+    /// Load content from a catalogue object stored in DocManager.
     ///
     /// Used for loading schema/lens data from catalogue objects.
+    /// The content is stored as a binary blob under the "content" key in the Yrs doc.
     pub(super) fn load_object_content(&self, object_id: ObjectId) -> Option<Vec<u8>> {
-        self.load_row_from_object_on_branch(object_id, "main")
-            .map(|(content, _)| content)
+        let row_doc = self.sync_manager.doc_manager.get(object_id)?;
+        let txn = row_doc.doc.transact();
+        // Catalogue objects store their content as a binary blob
+        use yrs::types::ToJson;
+        let val = row_doc.root_map.get(&txn, "content")?;
+        match val.to_json(&txn) {
+            yrs::Any::Buffer(buf) => Some(buf.to_vec()),
+            _ => None,
+        }
     }
 
     fn parse_schema_hash_hex(hex_str: &str) -> Option<SchemaHash> {
@@ -1187,9 +1206,9 @@ impl QueryManager {
         let was_soft_deleted =
             self.row_is_deleted_on_branch(storage, &table, branch, update.object_id);
 
-        // Extract current (new) data from the object on this branch
-        let new_data = match self.load_row_from_object_on_branch(update.object_id, branch) {
-            Some((data, _)) => data,
+        // Extract current (new) data from DocManager
+        let new_data = match self.load_row_data_from_doc(update.object_id) {
+            Some(data) => data,
             None => return,
         };
 
@@ -1268,6 +1287,175 @@ impl QueryManager {
         self.mark_subscriptions_dirty(&table);
         self.mark_row_updated_in_subscriptions(&table, update.object_id);
     }
+
+    /// Process docs that were updated via sync (DocUpdated inbox).
+    ///
+    /// For each synced doc: read its content from DocManager, update the
+    /// Storage index, and mark matching subscriptions dirty so the query
+    /// graph picks up the new/changed rows on the next settle.
+    fn process_synced_docs<H: Storage>(&mut self, storage: &mut H) {
+        let synced_ids = self.sync_manager.take_synced_doc_ids();
+        if synced_ids.is_empty() {
+            return;
+        }
+        tracing::debug!(count = synced_ids.len(), "processing synced docs");
+
+        let branch = self.current_branch();
+
+        for doc_id in synced_ids {
+            // First pass: check if this is a catalogue doc (no table metadata).
+            // We must release the doc_manager borrow before calling load_object_content.
+            let catalogue_metadata = {
+                let Some(row_doc) = self.sync_manager.doc_manager.get(doc_id) else {
+                    continue;
+                };
+                if !row_doc.metadata.contains_key(MetadataKey::Table.as_str())
+                    && crate::sync_manager::SyncManager::is_catalogue_metadata(&row_doc.metadata)
+                {
+                    Some(row_doc.metadata.clone())
+                } else {
+                    None
+                }
+            };
+            if let Some(metadata) = catalogue_metadata {
+                if let Some(content) = self.load_object_content(doc_id) {
+                    self.pending_catalogue_updates.push(CatalogueUpdate {
+                        object_id: doc_id,
+                        metadata,
+                        content,
+                    });
+                }
+                continue;
+            }
+
+            let (table, descriptor, data, doc_branch, known_branch) = {
+                let Some(row_doc) = self.sync_manager.doc_manager.get(doc_id) else {
+                    continue;
+                };
+                let Some(table) = row_doc.metadata.get(MetadataKey::Table.as_str()) else {
+                    continue;
+                };
+                let table = table.clone();
+                let doc_branch = row_doc.metadata.get("branch").cloned();
+                let table_name = TableName::new(&table);
+                // Try current schema first, then fall back to known_schemas (server mode).
+                let table_schema_owned;
+                let (table_schema, known_branch): (&TableSchema, Option<String>) =
+                    if let Some(ts) = self.schema.get(&table_name) {
+                        (ts, None)
+                    } else {
+                        // Search known_schemas for a schema containing this table.
+                        // Also compute the branch name from the schema hash for correct indexing.
+                        let found = self
+                            .known_schemas
+                            .iter()
+                            .find_map(|(hash, s)| s.get(&table_name).map(|ts| (*hash, ts.clone())));
+                        match found {
+                            Some((hash, ts)) => {
+                                let known_branch_name = ComposedBranchName::new(
+                                    &self.schema_context.env,
+                                    hash,
+                                    &self.schema_context.user_branch,
+                                )
+                                .to_branch_name()
+                                .as_str()
+                                .to_string();
+                                table_schema_owned = ts;
+                                (&table_schema_owned, Some(known_branch_name))
+                            }
+                            None => {
+                                // Re-queue for next cycle (schema may arrive via catalogue sync)
+                                self.sync_manager.push_synced_doc_id(doc_id);
+                                continue;
+                            }
+                        }
+                    };
+                let txn = row_doc.doc.transact();
+
+                // Check if row is deleted
+                if row_doc.root_map.get(&txn, "_deleted").is_some() {
+                    // Handle synced delete
+                    let _ =
+                        storage.index_remove(&table, "_id", &branch, &Value::Uuid(doc_id), doc_id);
+                    drop(txn);
+                    self.mark_subscriptions_dirty(&table);
+                    continue;
+                }
+
+                // Determine the best-matching descriptor for this row.
+                // If the current schema's non-nullable columns are all present, use it.
+                // Otherwise, search live schemas for a match.
+                let descriptor = {
+                    let has_all_current = table_schema.columns.columns.iter().all(|col| {
+                        col.nullable || row_doc.root_map.get(&txn, col.name.as_str()).is_some()
+                    });
+                    if has_all_current {
+                        table_schema.columns.clone()
+                    } else {
+                        let mut found = None;
+                        for (hash, live_schema) in &self.schema_context.live_schemas {
+                            if *hash == self.schema_context.current_hash {
+                                continue;
+                            }
+                            if let Some(live_ts) = live_schema.get(&table_name) {
+                                let all_present = live_ts.columns.columns.iter().all(|col| {
+                                    col.nullable
+                                        || row_doc.root_map.get(&txn, col.name.as_str()).is_some()
+                                });
+                                if all_present {
+                                    found = Some(live_ts.columns.clone());
+                                    break;
+                                }
+                            }
+                        }
+                        found.unwrap_or_else(|| table_schema.columns.clone())
+                    }
+                };
+
+                let mut values = Vec::with_capacity(descriptor.columns.len());
+                for col in &descriptor.columns {
+                    let value = crate::row_doc::read_column_typed(
+                        &row_doc.root_map,
+                        &txn,
+                        col.name.as_str(),
+                        &col.column_type,
+                    )
+                    .unwrap_or(Value::Null);
+                    values.push(value);
+                }
+                let data = match super::encoding::encode_row(&descriptor, &values) {
+                    Ok(d) if !d.is_empty() => d,
+                    _ => continue,
+                };
+                (table, descriptor, data, doc_branch, known_branch)
+            };
+
+            // Create the object in storage if needed
+            let mut doc_metadata = HashMap::new();
+            doc_metadata.insert(MetadataKey::Table.to_string(), table.clone());
+            let _ = storage.create_object(doc_id, doc_metadata);
+
+            // Use known_branch (from known_schemas lookup), then doc's branch metadata, then current branch.
+            let index_branch = known_branch
+                .as_deref()
+                .or(doc_branch.as_deref())
+                .unwrap_or(&branch);
+
+            // Update indices
+            if let Err(e) = Self::update_indices_for_insert_on_branch(
+                storage,
+                &table,
+                index_branch,
+                doc_id,
+                &data,
+                &descriptor,
+            ) {
+                tracing::warn!(%doc_id, table, error = %e, "failed to index synced doc");
+            }
+            self.mark_subscriptions_dirty(&table);
+        }
+    }
+
     /// Mark subscriptions dirty for a table based on update origin.
     fn mark_subscriptions_dirty_with_origin(&mut self, table: &str, local_update: bool) {
         // Mark local subscriptions dirty

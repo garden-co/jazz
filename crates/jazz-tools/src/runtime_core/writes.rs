@@ -77,7 +77,6 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .insert_with_session(&mut self.storage, table, &values, session)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_id = result.row_id;
-        let row_commit_id = result.row_commit_id;
         let row_values = result.row_values;
 
         let (sender, receiver) = oneshot::channel();
@@ -90,7 +89,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             let _ = sender.send(());
         } else {
             self.ack_watchers
-                .entry(row_commit_id)
+                .entry(row_id)
                 .or_default()
                 .push((tier, sender));
         }
@@ -110,8 +109,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     ) -> Result<oneshot::Receiver<()>, RuntimeError> {
         let current_values = self.merge_row_update_values(object_id, values)?;
 
-        let commit_id = self
-            .schema_manager
+        self.schema_manager
             .query_manager_mut()
             .update_with_session(&mut self.storage, object_id, &current_values, session)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
@@ -126,7 +124,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             let _ = sender.send(());
         } else {
             self.ack_watchers
-                .entry(commit_id)
+                .entry(object_id)
                 .or_default()
                 .push((tier, sender));
         }
@@ -174,8 +172,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         session: Option<&Session>,
         tier: DurabilityTier,
     ) -> Result<oneshot::Receiver<()>, RuntimeError> {
-        let handle = self
-            .schema_manager
+        self.schema_manager
             .query_manager_mut()
             .delete_with_session(&mut self.storage, object_id, session)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
@@ -190,7 +187,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             let _ = sender.send(());
         } else {
             self.ack_watchers
-                .entry(handle.delete_commit_id)
+                .entry(object_id)
                 .or_default()
                 .push((tier, sender));
         }

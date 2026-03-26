@@ -3,9 +3,9 @@ use std::{
     sync::Arc,
 };
 
-use crate::object_manager::AllObjectUpdate;
 use crate::storage::Storage;
 use crate::sync_manager::QueryPropagation;
+use crate::sync_manager::types::AllObjectUpdate;
 use crate::sync_manager::{DurabilityTier, QueryId, ServerId};
 
 #[cfg(test)]

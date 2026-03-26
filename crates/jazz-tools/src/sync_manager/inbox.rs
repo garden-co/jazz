@@ -1,6 +1,5 @@
 use super::*;
-use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId};
+use crate::object::ObjectId;
 use crate::query_manager::policy::Operation;
 use crate::storage::Storage;
 use std::collections::HashSet;
@@ -30,47 +29,22 @@ impl SyncManager {
         match payload {
             SyncPayload::ObjectUpdated {
                 object_id,
-                metadata,
                 branch_name,
                 commits,
+                ..
             } => {
-                tracing::debug!(%object_id, %branch_name, commits = commits.len(), "server→ObjectUpdated");
-                let persisted =
-                    self.apply_object_updated(storage, object_id, metadata, branch_name, commits);
-
-                // Emit ack back to server for each local durability identity.
-                if !persisted.is_empty() {
-                    for tier in self.my_tiers.iter().copied() {
-                        self.outbox.push(OutboxEntry {
-                            destination: Destination::Server(server_id),
-                            payload: SyncPayload::PersistenceAck {
-                                object_id,
-                                branch_name,
-                                confirmed_commits: persisted.clone(),
-                                tier,
-                            },
-                        });
-                    }
-                }
-
-                // Forward to clients whose scope includes this object/branch
-                self.forward_update_to_clients(object_id, branch_name);
+                // TODO(task-17): Legacy commit-based sync — no longer applied.
+                // Peers should migrate to DocUpdated.
+                tracing::debug!(%object_id, %branch_name, commits = commits.len(),
+                    "server→ObjectUpdated (legacy, ignored)");
             }
             SyncPayload::ObjectTruncated {
                 object_id,
                 branch_name,
-                tails,
+                ..
             } => {
-                // Apply truncation locally
-                let _ = self.object_manager.truncate_branch(
-                    storage,
-                    object_id,
-                    branch_name,
-                    tails.clone(),
-                );
-
-                // Forward to clients
-                self.forward_truncation_to_clients(object_id, branch_name, tails);
+                // TODO(task-17): Legacy commit-based truncation — no longer applied.
+                tracing::debug!(%object_id, %branch_name, "server→ObjectTruncated (legacy, ignored)");
             }
             SyncPayload::PersistenceAck {
                 object_id,
@@ -79,15 +53,9 @@ impl SyncManager {
                 tier,
             } => {
                 tracing::debug!(%object_id, ?tier, commits = confirmed_commits.len(), "server→PersistenceAck");
-                // Persist ack state and update in-memory
+                // Persist ack state
                 for &commit_id in &confirmed_commits {
                     let _ = storage.store_ack_tier(commit_id, tier);
-                    if let Some(commit) =
-                        self.object_manager
-                            .get_commit_mut(object_id, &branch_name, commit_id)
-                    {
-                        commit.ack_state.confirmed_tiers.insert(tier);
-                    }
                     // Notify RuntimeCore of received ack
                     self.received_acks.push((commit_id, tier));
                 }
@@ -143,16 +111,21 @@ impl SyncManager {
                 metadata,
             } => {
                 tracing::debug!(%doc_id, update_len = update.len(), "server→DocUpdated");
+                let meta = metadata
+                    .as_ref()
+                    .map(|m| m.metadata.clone())
+                    .unwrap_or_default();
+                // Track catalogue objects so they get replayed to new clients
+                self.track_catalogue_object(doc_id, &meta);
                 if self.doc_manager.get(doc_id).is_none() {
-                    let meta = metadata
-                        .as_ref()
-                        .map(|m| m.metadata.clone())
-                        .unwrap_or_default();
                     self.doc_manager.create_with_id(doc_id, meta);
                 }
                 if let Err(e) = self.doc_manager.apply_update(doc_id, &update) {
                     tracing::warn!(%doc_id, error = %e, "failed to apply doc update");
                 }
+                self.synced_doc_ids.push(doc_id);
+                // Forward to clients in scope
+                self.forward_update_to_clients(doc_id, "main".into());
             }
             SyncPayload::DocSyncRequest {
                 doc_id,
@@ -178,9 +151,20 @@ impl SyncManager {
                     tracing::warn!(%doc_id, error = %e, "failed to apply doc sync response");
                 }
             }
-            SyncPayload::DocPersistenceAck { .. } => {
-                // TODO: implement state vector ack tracking
-                tracing::debug!("DocPersistenceAck received (not yet implemented)");
+            SyncPayload::DocPersistenceAck { doc_id, tier, .. } => {
+                tracing::debug!(%doc_id, ?tier, "server→DocPersistenceAck");
+                self.received_doc_acks.push((doc_id, tier));
+                // Relay to interested clients
+                for &cid in self.clients.keys() {
+                    self.outbox.push(OutboxEntry {
+                        destination: Destination::Client(cid),
+                        payload: SyncPayload::DocPersistenceAck {
+                            doc_id,
+                            state_vector: Vec::new(),
+                            tier,
+                        },
+                    });
+                }
             }
             // Servers shouldn't send these to us
             SyncPayload::QuerySubscription { .. } | SyncPayload::QueryUnsubscription { .. } => {}
@@ -204,101 +188,13 @@ impl SyncManager {
         match &payload {
             SyncPayload::ObjectUpdated {
                 object_id,
-                metadata,
                 branch_name,
-                commits,
                 ..
             } => {
                 let object_id = *object_id;
                 let branch_name = *branch_name;
-                match client.role {
-                    ClientRole::Peer | ClientRole::Admin => {
-                        // Trusted — apply directly
-                        self.apply_payload_from_client(storage, client_id, payload, false);
-                    }
-                    ClientRole::Backend => {
-                        if payload.is_catalogue() {
-                            self.outbox.push(OutboxEntry {
-                                destination: Destination::Client(client_id),
-                                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
-                                    object_id,
-                                    branch_name,
-                                }),
-                            });
-                            return;
-                        }
-                        self.apply_payload_from_client(storage, client_id, payload, false);
-                    }
-                    ClientRole::User => {
-                        // User requires session
-                        let Some(session) = &client.session else {
-                            self.outbox.push(OutboxEntry {
-                                destination: Destination::Client(client_id),
-                                payload: SyncPayload::Error(SyncError::SessionRequired {
-                                    object_id,
-                                    branch_name,
-                                }),
-                            });
-                            return;
-                        };
-                        // User cannot write catalogue objects
-                        if payload.is_catalogue() {
-                            self.outbox.push(OutboxEntry {
-                                destination: Destination::Client(client_id),
-                                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
-                                    object_id,
-                                    branch_name,
-                                }),
-                            });
-                            return;
-                        }
-                        // Row data — queue for ReBAC permission check
-                        let payload_metadata = metadata
-                            .as_ref()
-                            .map(|meta| meta.metadata.clone())
-                            .unwrap_or_default();
-                        let (stored_metadata, old_content) = self
-                            .object_manager
-                            .get(object_id)
-                            .map(|obj| {
-                                let old = obj
-                                    .branches
-                                    .get(&branch_name)
-                                    .and_then(|branch| {
-                                        branch
-                                            .tips
-                                            .iter()
-                                            .next()
-                                            .and_then(|tip_id| branch.commits.get(tip_id))
-                                    })
-                                    .map(|commit| commit.content.clone());
-                                (obj.metadata.clone(), old)
-                            })
-                            .unwrap_or_default();
-                        // For brand-new rows, metadata may only be present in the inbound payload
-                        // because the object has not been applied to ObjectManager yet.
-                        let metadata = if old_content.is_none() && stored_metadata.is_empty() {
-                            payload_metadata
-                        } else {
-                            stored_metadata
-                        };
-                        let new_content = commits.last().map(|c| c.content.clone());
-                        let operation = if old_content.is_some() {
-                            Operation::Update
-                        } else {
-                            Operation::Insert
-                        };
-                        self.queue_for_permission_check(
-                            client_id,
-                            payload,
-                            session.clone(),
-                            metadata,
-                            old_content,
-                            new_content,
-                            operation,
-                        );
-                    }
-                }
+                // TODO(task-17): Legacy commit-based sync from client — ignored.
+                tracing::debug!(%object_id, %branch_name, "client→ObjectUpdated (legacy, ignored)");
             }
             SyncPayload::ObjectTruncated {
                 object_id,
@@ -307,63 +203,8 @@ impl SyncManager {
             } => {
                 let object_id = *object_id;
                 let branch_name = *branch_name;
-                match client.role {
-                    ClientRole::Peer | ClientRole::Admin => {
-                        self.apply_payload_from_client(storage, client_id, payload, false);
-                    }
-                    ClientRole::Backend => {
-                        if payload.is_catalogue() {
-                            self.outbox.push(OutboxEntry {
-                                destination: Destination::Client(client_id),
-                                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
-                                    object_id,
-                                    branch_name,
-                                }),
-                            });
-                            return;
-                        }
-                        self.apply_payload_from_client(storage, client_id, payload, false);
-                    }
-                    ClientRole::User => {
-                        let Some(session) = &client.session else {
-                            self.outbox.push(OutboxEntry {
-                                destination: Destination::Client(client_id),
-                                payload: SyncPayload::Error(SyncError::SessionRequired {
-                                    object_id,
-                                    branch_name,
-                                }),
-                            });
-                            return;
-                        };
-                        let (metadata, old_content) = self
-                            .object_manager
-                            .get(object_id)
-                            .map(|obj| {
-                                let old = obj
-                                    .branches
-                                    .get(&branch_name)
-                                    .and_then(|branch| {
-                                        branch
-                                            .tips
-                                            .iter()
-                                            .next()
-                                            .and_then(|tip_id| branch.commits.get(tip_id))
-                                    })
-                                    .map(|commit| commit.content.clone());
-                                (obj.metadata.clone(), old)
-                            })
-                            .unwrap_or_default();
-                        self.queue_for_permission_check(
-                            client_id,
-                            payload,
-                            session.clone(),
-                            metadata,
-                            old_content,
-                            None,
-                            Operation::Delete,
-                        );
-                    }
-                }
+                // TODO(task-17): Legacy commit-based truncation from client — ignored.
+                tracing::debug!(%object_id, %branch_name, "client→ObjectTruncated (legacy, ignored)");
             }
             // Handle query subscription with full Query struct
             // Queue for QueryManager to process (SyncManager doesn't know about QueryGraph)
@@ -433,15 +274,9 @@ impl SyncManager {
                 let tier = *tier;
                 let confirmed_commits = confirmed_commits.clone();
                 // A client relaying an ack (e.g. from a further-upstream tier)
-                // Persist ack state and update in-memory
+                // Persist ack state
                 for &commit_id in &confirmed_commits {
                     let _ = storage.store_ack_tier(commit_id, tier);
-                    if let Some(commit) =
-                        self.object_manager
-                            .get_commit_mut(object_id, &branch_name, commit_id)
-                    {
-                        commit.ack_state.confirmed_tiers.insert(tier);
-                    }
                     // Notify RuntimeCore of received ack
                     self.received_acks.push((commit_id, tier));
                 }
@@ -579,9 +414,11 @@ impl SyncManager {
                     tracing::warn!(%doc_id, error = %e, "failed to apply doc sync response from client");
                 }
             }
-            SyncPayload::DocPersistenceAck { .. } => {
-                // TODO: implement state vector ack tracking
-                tracing::debug!("DocPersistenceAck from client (not yet implemented)");
+            SyncPayload::DocPersistenceAck { doc_id, tier, .. } => {
+                let doc_id = *doc_id;
+                let tier = *tier;
+                tracing::debug!(%doc_id, ?tier, "client→DocPersistenceAck");
+                self.received_doc_acks.push((doc_id, tier));
             }
             // Clients shouldn't send these
             SyncPayload::Error(_) => {}
@@ -591,7 +428,7 @@ impl SyncManager {
     /// Apply a payload from a client (either directly or after approval).
     pub(super) fn apply_payload_from_client<H: Storage>(
         &mut self,
-        storage: &mut H,
+        _storage: &mut H,
         client_id: ClientId,
         payload: SyncPayload,
         _was_pending: bool,
@@ -599,59 +436,19 @@ impl SyncManager {
         match payload {
             SyncPayload::ObjectUpdated {
                 object_id,
-                metadata,
                 branch_name,
-                commits,
+                ..
             } => {
-                // Track client interest for ack relay
-                for commit in &commits {
-                    self.commit_interest
-                        .entry(commit.id())
-                        .or_default()
-                        .insert(client_id);
-                }
-
-                let persisted =
-                    self.apply_object_updated(storage, object_id, metadata, branch_name, commits);
-
-                // Emit ack back to client for each local durability identity.
-                if !persisted.is_empty() {
-                    for tier in self.my_tiers.iter().copied() {
-                        self.outbox.push(OutboxEntry {
-                            destination: Destination::Client(client_id),
-                            payload: SyncPayload::PersistenceAck {
-                                object_id,
-                                branch_name,
-                                confirmed_commits: persisted.clone(),
-                                tier,
-                            },
-                        });
-                    }
-                }
-
-                // Forward to servers
-                self.forward_update_to_servers(object_id, branch_name);
-
-                // Forward to other clients (not the sender)
-                self.forward_update_to_clients_except(object_id, branch_name, client_id);
+                // TODO(task-17): Legacy commit-based sync — no longer applied.
+                tracing::debug!(%object_id, %branch_name, "apply_payload_from_client: ObjectUpdated (legacy, ignored)");
             }
             SyncPayload::ObjectTruncated {
                 object_id,
                 branch_name,
-                tails,
+                ..
             } => {
-                let _ = self.object_manager.truncate_branch(
-                    storage,
-                    object_id,
-                    branch_name,
-                    tails.clone(),
-                );
-
-                // Forward to servers
-                self.forward_truncation_to_servers(object_id, branch_name, tails.clone());
-
-                // Forward to other clients
-                self.forward_truncation_to_clients_except(object_id, branch_name, tails, client_id);
+                // TODO(task-17): Legacy commit-based truncation — no longer applied.
+                tracing::debug!(%object_id, %branch_name, "apply_payload_from_client: ObjectTruncated (legacy, ignored)");
             }
             SyncPayload::DocUpdated {
                 doc_id,
@@ -667,7 +464,7 @@ impl SyncManager {
     /// Apply a DocUpdated payload from a client: create doc if needed, apply update, forward.
     fn apply_doc_update_from_client(
         &mut self,
-        _client_id: ClientId,
+        client_id: ClientId,
         doc_id: ObjectId,
         update: &[u8],
         metadata: &Option<ObjectMetadata>,
@@ -682,54 +479,25 @@ impl SyncManager {
         if let Err(e) = self.doc_manager.apply_update(doc_id, update) {
             tracing::warn!(%doc_id, error = %e, "failed to apply doc update from client");
         }
+        self.synced_doc_ids.push(doc_id);
+
+        // Emit doc-level persistence acks for each of this node's durability tiers
+        for &tier in &self.my_tiers.clone() {
+            // Ack back to the sending client
+            self.outbox.push(OutboxEntry {
+                destination: Destination::Client(client_id),
+                payload: SyncPayload::DocPersistenceAck {
+                    doc_id,
+                    state_vector: Vec::new(), // Placeholder — full SV not needed for ack matching
+                    tier,
+                },
+            });
+            // Also notify RuntimeCore locally for relay scenarios
+            self.received_doc_acks.push((doc_id, tier));
+        }
+
         // Forward to servers
         self.forward_doc_update_to_servers(doc_id, update.to_vec(), metadata.clone());
         // TODO: forward to other clients
-    }
-
-    /// Apply an ObjectUpdated payload to the local ObjectManager.
-    /// Returns the set of newly persisted commit IDs (excludes duplicates).
-    pub(super) fn apply_object_updated<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        object_id: ObjectId,
-        metadata: Option<ObjectMetadata>,
-        branch_name: BranchName,
-        commits: Vec<Commit>,
-    ) -> HashSet<CommitId> {
-        if let Some(meta) = metadata.as_ref() {
-            self.track_catalogue_object(object_id, &meta.metadata);
-        }
-
-        // If we don't have this object yet and metadata is provided, create it
-        if self.object_manager.get(object_id).is_none() {
-            if let Some(meta) = metadata {
-                self.object_manager
-                    .receive_object(storage, object_id, meta.metadata);
-            } else {
-                return HashSet::new();
-            }
-        }
-
-        let mut persisted = HashSet::new();
-        for commit in commits {
-            let commit_id = commit.id();
-            // Check if commit already exists before applying
-            let already_exists = self
-                .object_manager
-                .get(object_id)
-                .and_then(|obj| obj.branches.get(&branch_name))
-                .is_some_and(|branch| branch.commits.contains_key(&commit_id));
-
-            if self
-                .object_manager
-                .receive_commit(storage, object_id, branch_name, commit)
-                .is_ok()
-                && !already_exists
-            {
-                persisted.insert(commit_id);
-            }
-        }
-        persisted
     }
 }

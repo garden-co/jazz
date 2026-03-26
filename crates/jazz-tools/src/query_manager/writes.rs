@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::commit::CommitId;
-use crate::metadata::{DeleteKind, MetadataKey, hard_delete_metadata, soft_delete_metadata};
+use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::storage::Storage;
 
@@ -12,6 +12,26 @@ use super::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::session::Session;
 use super::types::{ColumnType, LoadedRow, RowDescriptor, TableName, Value};
+
+/// Generate a deterministic CommitId from an ObjectId.
+///
+/// Used as a placeholder since we no longer have real commits.
+/// TODO(task-17): Remove CommitId from InsertResult/DeleteHandle API entirely.
+pub(super) fn synthetic_commit_id(object_id: ObjectId) -> CommitId {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(object_id.uuid().as_bytes());
+    // Mix in a timestamp for uniqueness across mutations
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    hasher.update(now.to_le_bytes());
+    let hash = hasher.finalize();
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&hash);
+    CommitId(bytes)
+}
 
 impl QueryManager {
     /// Insert a new row into a table.
@@ -85,57 +105,39 @@ impl QueryManager {
             });
         }
 
-        // Create object with table metadata
-        let mut metadata = HashMap::new();
-        metadata.insert(MetadataKey::Table.to_string(), table.to_string());
+        // Create doc with table metadata
+        let mut doc_metadata = HashMap::new();
+        doc_metadata.insert(MetadataKey::Table.to_string(), table.to_string());
 
-        let object_id = self
-            .sync_manager
-            .object_manager
-            .create(storage, Some(metadata));
-        let author = object_id; // Self-authored
+        let object_id = ObjectId::new();
 
-        // Add commit with row data
-        let branch = self.current_branch();
-        let row_commit_id = self
-            .sync_manager
-            .object_manager
-            .add_commit(
-                storage,
-                object_id,
-                &branch,
-                vec![],
-                data.clone(),
-                author,
-                None,
-            )
-            .map_err(|_| QueryError::ObjectNotFound(object_id))?;
+        // Also register in storage for index compatibility
+        let _ = storage.create_object(object_id, doc_metadata.clone());
+
+        self.sync_manager
+            .doc_manager
+            .create_with_id(object_id, doc_metadata);
+
+        // Write to DocManager
+        if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(object_id) {
+            let mut txn = row_doc.doc.transact_mut();
+            for (i, col) in descriptor.columns.iter().enumerate() {
+                crate::row_doc::write_column(
+                    &row_doc.root_map,
+                    &mut txn,
+                    col.name.as_str(),
+                    &values[i],
+                );
+            }
+        }
+
+        let row_commit_id = synthetic_commit_id(object_id);
 
         // Forward new row to all connected servers
+        let branch = self.current_branch();
         tracing::trace!(%object_id, ?row_commit_id, "forward to servers");
         self.sync_manager
             .forward_update_to_servers(object_id, branch.into());
-
-        // Mirror to DocManager
-        {
-            let mut doc_metadata = HashMap::new();
-            doc_metadata.insert("table".to_string(), table.to_string());
-            self.sync_manager
-                .doc_manager
-                .create_with_id(object_id, doc_metadata);
-
-            if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(object_id) {
-                let mut txn = row_doc.doc.transact_mut();
-                for (i, col) in descriptor.columns.iter().enumerate() {
-                    crate::row_doc::write_column(
-                        &row_doc.root_map,
-                        &mut txn,
-                        col.name.as_str(),
-                        &values[i],
-                    );
-                }
-            }
-        }
 
         // Update indices immediately and persist
         self.update_indices_for_insert(storage, table, object_id, &data, &descriptor)?;
@@ -215,55 +217,37 @@ impl QueryManager {
             });
         }
 
-        // Create object with table metadata
-        let mut metadata = HashMap::new();
-        metadata.insert(MetadataKey::Table.to_string(), table.to_string());
+        // Create doc with table metadata
+        let mut doc_metadata = HashMap::new();
+        doc_metadata.insert(MetadataKey::Table.to_string(), table.to_string());
 
-        let object_id = self
-            .sync_manager
-            .object_manager
-            .create(storage, Some(metadata));
-        let author = object_id; // Self-authored
+        let object_id = ObjectId::new();
 
-        // Add commit with row data to specified branch
-        let row_commit_id = self
-            .sync_manager
-            .object_manager
-            .add_commit(
-                storage,
-                object_id,
-                branch,
-                vec![],
-                data.clone(),
-                author,
-                None,
-            )
-            .map_err(|_| QueryError::ObjectNotFound(object_id))?;
+        // Also register in storage for index compatibility
+        let _ = storage.create_object(object_id, doc_metadata.clone());
+
+        self.sync_manager
+            .doc_manager
+            .create_with_id(object_id, doc_metadata);
+
+        // Write to DocManager
+        if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(object_id) {
+            let mut txn = row_doc.doc.transact_mut();
+            for (i, col) in descriptor.columns.iter().enumerate() {
+                crate::row_doc::write_column(
+                    &row_doc.root_map,
+                    &mut txn,
+                    col.name.as_str(),
+                    &values[i],
+                );
+            }
+        }
+
+        let row_commit_id = synthetic_commit_id(object_id);
 
         // Forward new row to all connected servers
         self.sync_manager
             .forward_update_to_servers(object_id, branch.into());
-
-        // Mirror to DocManager
-        {
-            let mut doc_metadata = HashMap::new();
-            doc_metadata.insert("table".to_string(), table.to_string());
-            self.sync_manager
-                .doc_manager
-                .create_with_id(object_id, doc_metadata);
-
-            if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(object_id) {
-                let mut txn = row_doc.doc.transact_mut();
-                for (i, col) in descriptor.columns.iter().enumerate() {
-                    crate::row_doc::write_column(
-                        &row_doc.root_map,
-                        &mut txn,
-                        col.name.as_str(),
-                        &values[i],
-                    );
-                }
-            }
-        }
 
         // Update indices on specified branch
         Self::update_indices_for_insert_on_branch(
@@ -378,10 +362,6 @@ impl QueryManager {
     }
 
     /// Evaluate a policy expression against encoded row content using full policy context.
-    ///
-    /// This uses the same simple/complex split as server-side permission checks:
-    /// - Evaluate simple predicates directly from row bytes.
-    /// - Materialize and settle policy graphs for complex clauses.
     #[allow(clippy::too_many_arguments)]
     fn evaluate_policy_for_content_with_context<H: Storage>(
         &mut self,
@@ -509,20 +489,39 @@ impl QueryManager {
             return true;
         }
 
-        let branches = vec![branch.to_string()];
         let storage_ref: &dyn Storage = storage;
-        let om = &mut self.sync_manager.object_manager;
+        let doc_manager = &self.sync_manager.doc_manager;
+        let schema = &self.schema;
         let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-            let obj = om.get_or_load(id, storage_ref, &branches)?;
-            let branch_state = obj.branches.get(&BranchName::new(branch))?;
-            let tip_id = branch_state.tips.iter().next()?;
-            let commit = branch_state.commits.get(tip_id)?;
-            if commit.content.is_empty() {
+            // Load from DocManager
+            let row_doc = doc_manager.get(id)?;
+            let table_str = row_doc.metadata.get("table")?;
+            let tn = TableName::new(table_str);
+            let ts = schema.get(&tn)?;
+
+            let txn = row_doc.doc.transact();
+            if row_doc.root_map.get(&txn, "_deleted").is_some() {
                 return None;
             }
+            let mut values = Vec::with_capacity(ts.columns.columns.len());
+            for col in &ts.columns.columns {
+                let value = crate::row_doc::read_column_typed(
+                    &row_doc.root_map,
+                    &txn,
+                    col.name.as_str(),
+                    &col.column_type,
+                )
+                .unwrap_or(Value::Null);
+                values.push(value);
+            }
+            let data = encode_row(&ts.columns, &values).ok()?;
+            if data.is_empty() {
+                return None;
+            }
+            let commit_id = synthetic_commit_id(id);
             Some(LoadedRow::new(
-                commit.content.clone(),
-                *tip_id,
+                data,
+                commit_id,
                 [(id, BranchName::new(branch))].into_iter().collect(),
             ))
         };
@@ -745,22 +744,12 @@ impl QueryManager {
 
     fn load_row_content_on_branch<H: Storage>(
         &mut self,
-        storage: &mut H,
+        _storage: &mut H,
         row_id: ObjectId,
-        branch: &str,
+        _branch: &str,
     ) -> Option<Vec<u8>> {
-        let branches = vec![branch.to_string()];
-        let obj = self
-            .sync_manager
-            .object_manager
-            .get_or_load(row_id, storage, &branches)?;
-        let branch_state = obj.branches.get(&BranchName::new(branch))?;
-        let tip_id = branch_state.tips.iter().next()?;
-        let commit = branch_state.commits.get(tip_id)?;
-        if commit.content.is_empty() {
-            return None;
-        }
-        Some(commit.content.clone())
+        // Load from DocManager and re-encode to binary
+        self.load_row_data_from_doc(row_id)
     }
 
     /// Update a row.
@@ -774,10 +763,6 @@ impl QueryManager {
     }
 
     /// Update a row with session-based policy checking.
-    ///
-    /// If the table has policies and a session is provided:
-    /// - USING policy is checked against the old row (if exists)
-    /// - WITH CHECK policy is checked against the new values
     pub fn update_with_session<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -786,25 +771,20 @@ impl QueryManager {
         session: Option<&Session>,
     ) -> Result<CommitId, QueryError> {
         let _span = tracing::debug_span!("QM::update", %id).entered();
-        // Ensure object is loaded from storage (cold-start: may only exist on disk)
-        let branch = self.current_branch();
-        self.sync_manager
-            .object_manager
-            .get_or_load(id, storage, &[branch]);
 
-        // Get table name from object metadata
+        // Get table name from DocManager metadata
         let table = self
             .sync_manager
-            .object_manager
+            .doc_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .and_then(|doc| doc.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
 
-        // Get old data from ObjectManager
-        let (old_data, _commit_id) = self
-            .load_row_from_object(id)
+        // Get old data from DocManager
+        let old_data = self
+            .load_row_data_from_doc(id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let (descriptor, using_policy, check_policy) = {
@@ -882,52 +862,26 @@ impl QueryManager {
             }
         }
 
-        // Get parent commit
-        let tips = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, self.current_branch())
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
+        // Write to DocManager
+        if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(id) {
+            let mut txn = row_doc.doc.transact_mut();
+            for (i, col) in descriptor.columns.iter().enumerate() {
+                crate::row_doc::write_column(
+                    &row_doc.root_map,
+                    &mut txn,
+                    col.name.as_str(),
+                    &values[i],
+                );
+            }
+        }
 
-        let parents: Vec<_> = tips.into_iter().collect();
-        let author = id;
-
-        // Add commit with new data
-        let commit_id = self
-            .sync_manager
-            .object_manager
-            .add_commit(
-                storage,
-                id,
-                self.current_branch(),
-                parents,
-                new_data.clone(),
-                author,
-                None,
-            )
-            .map_err(|_| QueryError::ObjectNotFound(id))?;
+        let commit_id = synthetic_commit_id(id);
 
         // Forward update to all connected servers
         let branch = self.current_branch();
         tracing::trace!(%id, ?commit_id, "forward update to servers");
         self.sync_manager
             .forward_update_to_servers(id, branch.into());
-
-        // Mirror to DocManager
-        {
-            if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(id) {
-                let mut txn = row_doc.doc.transact_mut();
-                for (i, col) in descriptor.columns.iter().enumerate() {
-                    crate::row_doc::write_column(
-                        &row_doc.root_map,
-                        &mut txn,
-                        col.name.as_str(),
-                        &values[i],
-                    );
-                }
-            }
-        }
 
         // Update indices and persist modified nodes
         self.update_indices_for_update(
@@ -949,10 +903,6 @@ impl QueryManager {
     }
 
     /// Soft delete a row.
-    ///
-    /// Creates a commit with the same content as the previous tip, plus `delete: soft` metadata.
-    /// This preserves the row data for queries with `include_deleted`.
-    /// Removes from `_id` and all column indices, adds to `_id_deleted` index.
     pub fn delete<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -962,9 +912,6 @@ impl QueryManager {
     }
 
     /// Soft delete a row with session-based policy checking.
-    ///
-    /// Checks DELETE USING policy against the existing row before allowing deletion.
-    /// Falls back to UPDATE's USING policy if no DELETE policy is defined.
     pub fn delete_with_session<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -972,23 +919,18 @@ impl QueryManager {
         session: Option<&Session>,
     ) -> Result<DeleteHandle, QueryError> {
         let _span = tracing::debug_span!("QM::delete", %id).entered();
-        // Ensure object is loaded from storage (cold-start: may only exist on disk)
-        let branch = self.current_branch();
-        self.sync_manager
-            .object_manager
-            .get_or_load(id, storage, &[branch]);
 
         // Check for hard delete first
         if self.is_hard_deleted(id) {
             return Err(QueryError::RowHardDeleted(id));
         }
 
-        // Get table name from object metadata
+        // Get table name from DocManager metadata
         let table = self
             .sync_manager
-            .object_manager
+            .doc_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .and_then(|doc| doc.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
@@ -998,9 +940,9 @@ impl QueryManager {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
 
-        // Get old data from ObjectManager (for index removal and content preservation)
-        let (old_data, _commit_id) = self
-            .load_row_from_object(id)
+        // Get old data from DocManager
+        let old_data = self
+            .load_row_data_from_doc(id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let (descriptor, using_policy) = {
@@ -1036,35 +978,13 @@ impl QueryManager {
             }
         }
 
-        // Get parent commit
-        let tips = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, self.current_branch())
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
+        // Mark as soft deleted in DocManager
+        if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(id) {
+            let mut txn = row_doc.doc.transact_mut();
+            row_doc.root_map.insert(&mut txn, "_deleted", "soft");
+        }
 
-        let parents: Vec<_> = tips.into_iter().collect();
-        let author = id;
-
-        // Create delete metadata
-        let delete_metadata = soft_delete_metadata();
-
-        // Add commit with preserved content + delete: soft metadata
-        // Content is copied from previous tip so soft-deleted rows can still be read
-        let delete_commit_id = self
-            .sync_manager
-            .object_manager
-            .add_commit(
-                storage,
-                id,
-                self.current_branch(),
-                parents,
-                old_data.clone(), // Preserve content for soft deletes
-                author,
-                Some(delete_metadata),
-            )
-            .map_err(|_| QueryError::ObjectNotFound(id))?;
+        let delete_commit_id = synthetic_commit_id(id);
 
         // Forward delete to all connected servers
         tracing::trace!(%id, ?delete_commit_id, "forward delete to servers");
@@ -1072,14 +992,6 @@ impl QueryManager {
             let branch = self.current_branch();
             self.sync_manager
                 .forward_update_to_servers(id, branch.into());
-        }
-
-        // Mirror soft delete to DocManager
-        {
-            if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(id) {
-                let mut txn = row_doc.doc.transact_mut();
-                row_doc.root_map.insert(&mut txn, "_deleted", "soft");
-            }
         }
 
         // Update indices: remove from _id and column indices, add to _id_deleted
@@ -1098,8 +1010,6 @@ impl QueryManager {
     }
 
     /// Soft delete a row on a specific branch.
-    ///
-    /// Used by SchemaManager for schema-aware deletes.
     pub fn delete_on_branch<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1119,9 +1029,9 @@ impl QueryManager {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
 
-        // Get old data from ObjectManager on this branch
-        let (old_data, _) = self
-            .load_row_from_object_on_branch(id, branch)
+        // Get old data from DocManager
+        let old_data = self
+            .load_row_data_from_doc(id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_schema = self
@@ -1129,34 +1039,14 @@ impl QueryManager {
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
         let descriptor = table_schema.columns.clone();
-        // Get parent commit on this branch
-        let tips = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, branch)
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
 
-        let parents: Vec<_> = tips.into_iter().collect();
-        let author = id;
+        // Mark as soft deleted in DocManager
+        if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(id) {
+            let mut txn = row_doc.doc.transact_mut();
+            row_doc.root_map.insert(&mut txn, "_deleted", "soft");
+        }
 
-        // Create delete metadata
-        let delete_metadata = soft_delete_metadata();
-
-        // Add commit with preserved content + delete: soft metadata
-        let delete_commit_id = self
-            .sync_manager
-            .object_manager
-            .add_commit(
-                storage,
-                id,
-                branch,
-                parents,
-                old_data.clone(),
-                author,
-                Some(delete_metadata),
-            )
-            .map_err(|_| QueryError::ObjectNotFound(id))?;
+        let delete_commit_id = synthetic_commit_id(id);
 
         // Update indices on this branch
         Self::update_indices_for_soft_delete_on_branch(
@@ -1179,9 +1069,6 @@ impl QueryManager {
     }
 
     /// Undelete a soft-deleted row.
-    ///
-    /// Restores a row from the `_id_deleted` index back to the `_id` and column indices.
-    /// Creates a new commit with the provided values (no `delete` metadata).
     pub fn undelete<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1193,12 +1080,12 @@ impl QueryManager {
             return Err(QueryError::RowHardDeleted(id));
         }
 
-        // Get table name from object metadata
+        // Get table name from DocManager metadata
         let table = self
             .sync_manager
-            .object_manager
+            .doc_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .and_then(|doc| doc.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
@@ -1233,31 +1120,21 @@ impl QueryManager {
         let new_data = encode_row(&descriptor, values)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
 
-        // Get parent commit
-        let tips = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, self.current_branch())
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
+        // Write to DocManager (remove _deleted flag, write new values)
+        if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(id) {
+            let mut txn = row_doc.doc.transact_mut();
+            row_doc.root_map.remove(&mut txn, "_deleted");
+            for (i, col) in descriptor.columns.iter().enumerate() {
+                crate::row_doc::write_column(
+                    &row_doc.root_map,
+                    &mut txn,
+                    col.name.as_str(),
+                    &values[i],
+                );
+            }
+        }
 
-        let parents: Vec<_> = tips.into_iter().collect();
-        let author = id;
-
-        // Add commit with row data (no delete metadata = undelete)
-        let row_commit_id = self
-            .sync_manager
-            .object_manager
-            .add_commit(
-                storage,
-                id,
-                self.current_branch(),
-                parents,
-                new_data.clone(),
-                author,
-                None,
-            )
-            .map_err(|_| QueryError::ObjectNotFound(id))?;
+        let row_commit_id = synthetic_commit_id(id);
 
         // Update indices: remove from _id_deleted, add to _id and column indices
         self.update_indices_for_undelete(storage, &table, id, &new_data, &descriptor)?;
@@ -1273,11 +1150,6 @@ impl QueryManager {
     }
 
     /// Hard delete a row.
-    ///
-    /// Creates a commit with empty content and `delete: hard` metadata.
-    /// Removes from ALL indices including `_id_deleted`.
-    /// Truncates history: only the hard delete tombstone remains.
-    /// Hard deletes are authoritative and override any concurrent or subsequent commits.
     pub fn hard_delete<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1288,21 +1160,19 @@ impl QueryManager {
             return Err(QueryError::RowHardDeleted(id));
         }
 
-        // Get table name from object metadata
+        // Get table name from DocManager metadata
         let table = self
             .sync_manager
-            .object_manager
+            .doc_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .and_then(|doc| doc.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
 
-        // Try to get old data (may be empty if already soft-deleted)
-        // Treat empty content as no data (tombstone)
+        // Try to get old data
         let old_data = self
-            .load_row_from_object(id)
-            .map(|(data, _)| data)
+            .load_row_data_from_doc(id)
             .filter(|data| !data.is_empty());
 
         let table_schema = self
@@ -1310,62 +1180,22 @@ impl QueryManager {
             .get(&table_name)
             .ok_or(QueryError::TableNotFound(table_name))?;
         let descriptor = table_schema.columns.clone();
-        // Get parent commit
-        let tips = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, self.current_branch())
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
 
-        let parents: Vec<_> = tips.into_iter().collect();
-        let author = id;
-
-        // Create hard delete metadata
-        let delete_metadata = hard_delete_metadata();
-
-        // Add commit with empty content + delete: hard metadata
-        let delete_commit_id = self
-            .sync_manager
-            .object_manager
-            .add_commit(
-                storage,
-                id,
-                self.current_branch(),
-                parents,
-                vec![], // Empty content for tombstone
-                author,
-                Some(delete_metadata),
-            )
-            .map_err(|_| QueryError::ObjectNotFound(id))?;
-
-        // Mirror hard delete to DocManager
-        {
-            if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(id) {
-                let mut txn = row_doc.doc.transact_mut();
-                // Mark as hard deleted
-                row_doc.root_map.insert(&mut txn, "_deleted", "hard");
-                // Remove all column values
-                for col in &descriptor.columns {
-                    row_doc.root_map.remove(&mut txn, col.name.as_str());
-                }
+        // Mark as hard deleted in DocManager
+        if let Some(row_doc) = self.sync_manager.doc_manager.get_mut(id) {
+            let mut txn = row_doc.doc.transact_mut();
+            // Mark as hard deleted
+            row_doc.root_map.insert(&mut txn, "_deleted", "hard");
+            // Remove all column values
+            for col in &descriptor.columns {
+                row_doc.root_map.remove(&mut txn, col.name.as_str());
             }
         }
 
+        let delete_commit_id = synthetic_commit_id(id);
+
         // Update indices: remove from ALL indices including _id_deleted
         self.update_indices_for_hard_delete(storage, &table, id, old_data.as_deref(), &descriptor)?;
-
-        // Truncate branch: set tails = [delete_commit_id], removing all history
-        // (In ObjectManager, this would be done via set_tails or similar)
-        // For now, we just record the hard delete tombstone
-        let mut tail_ids = std::collections::HashSet::new();
-        tail_ids.insert(delete_commit_id);
-        let _ = self.sync_manager.object_manager.truncate_branch(
-            storage,
-            id,
-            self.current_branch(),
-            tail_ids,
-        );
 
         // Mark subscriptions dirty and mark row as deleted
         self.mark_subscriptions_dirty_local(&table);
@@ -1378,9 +1208,6 @@ impl QueryManager {
     }
 
     /// Truncate a soft-deleted row (upgrade to hard delete).
-    ///
-    /// Can only be called on rows that are already soft-deleted.
-    /// Removes the row from `_id_deleted` and truncates history.
     pub fn truncate<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1391,12 +1218,12 @@ impl QueryManager {
             return Err(QueryError::RowHardDeleted(id));
         }
 
-        // Get table name from object metadata
+        // Get table name from DocManager metadata
         let table = self
             .sync_manager
-            .object_manager
+            .doc_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .and_then(|doc| doc.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         // Verify row is in _id_deleted index (soft-deleted)
@@ -1424,8 +1251,13 @@ impl QueryManager {
         }
         let mut values = Vec::with_capacity(table_schema.columns.columns.len());
         for col in &table_schema.columns.columns {
-            let value = crate::row_doc::read_column(&row_doc.root_map, &txn, col.name.as_str())
-                .unwrap_or(Value::Null);
+            let value = crate::row_doc::read_column_typed(
+                &row_doc.root_map,
+                &txn,
+                col.name.as_str(),
+                &col.column_type,
+            )
+            .unwrap_or(Value::Null);
             values.push(value);
         }
         Some((table, values))
@@ -1433,7 +1265,6 @@ impl QueryManager {
 
     /// Try to load row data from DocManager, re-encoding to binary for compatibility.
     /// Returns None if the doc doesn't exist in DocManager.
-    #[allow(dead_code)] // Used by tests now; will be wired into read paths in upcoming tasks
     pub(super) fn load_row_data_from_doc(&self, row_id: ObjectId) -> Option<Vec<u8>> {
         let row_doc = self.sync_manager.doc_manager.get(row_id)?;
         let table = row_doc.metadata.get("table")?;
@@ -1443,38 +1274,24 @@ impl QueryManager {
         let txn = row_doc.doc.transact();
         let mut values = Vec::with_capacity(table_schema.columns.columns.len());
         for col in &table_schema.columns.columns {
-            let value = crate::row_doc::read_column(&row_doc.root_map, &txn, col.name.as_str())
-                .unwrap_or(Value::Null);
+            let value = crate::row_doc::read_column_typed(
+                &row_doc.root_map,
+                &txn,
+                col.name.as_str(),
+                &col.column_type,
+            )
+            .unwrap_or(Value::Null);
             values.push(value);
         }
 
         encode_row(&table_schema.columns, &values).ok()
     }
 
-    /// Get a row by ID, trying DocManager first then falling back to ObjectManager.
+    /// Get a row by ID from DocManager.
     ///
     /// Returns decoded values and the table name if the row exists.
     pub fn get_row(&self, id: ObjectId) -> Option<(String, Vec<Value>)> {
-        // Try DocManager first (Yrs Docs)
-        if let Some(result) = self.get_row_from_doc(id) {
-            return Some(result);
-        }
-
-        // Fall back to ObjectManager (commit DAG)
-        let table = self
-            .sync_manager
-            .object_manager
-            .get(id)?
-            .metadata
-            .get(MetadataKey::Table.as_str())?
-            .clone();
-        let table_name = TableName::new(&table);
-
-        let (data, _) = self.load_row_from_object(id)?;
-
-        let table_schema = self.schema.get(&table_name)?;
-        let values = decode_row(&table_schema.columns, &data).ok()?;
-        Some((table, values))
+        self.get_row_from_doc(id)
     }
 
     /// Check if a row is indexed on a specific branch (appears in the _id index).
@@ -1511,91 +1328,41 @@ impl QueryManager {
         self.row_is_deleted_on_branch(storage, table, &self.current_branch(), row_id)
     }
 
-    /// Check if a row has a hard delete tombstone (empty content + delete: hard metadata).
+    /// Check if a row has a hard delete tombstone.
     pub(super) fn is_hard_deleted(&self, id: ObjectId) -> bool {
-        let Some(obj) = self.sync_manager.object_manager.get(id) else {
+        let Some(row_doc) = self.sync_manager.doc_manager.get(id) else {
             return false;
         };
-        let Some(branch) = obj.branches.get(&BranchName::new(self.current_branch())) else {
-            return false;
-        };
-        let Some(tip_id) = branch.tips.iter().next() else {
-            return false;
-        };
-        let Some(commit) = branch.commits.get(tip_id) else {
-            return false;
-        };
-        // Hard delete: empty content + delete: hard metadata
-        commit.content.is_empty()
-            && commit
-                .metadata
-                .as_ref()
-                .and_then(|m| m.get(MetadataKey::Delete.as_str()))
-                .map(|v| v == DeleteKind::Hard.as_str())
-                .unwrap_or(false)
+        let txn = row_doc.doc.transact();
+        matches!(
+            row_doc.root_map.get(&txn, "_deleted"),
+            Some(yrs::Out::Any(yrs::Any::String(ref s))) if s.as_ref() == "hard"
+        )
     }
 
-    /// Check if the current tip has `delete: soft` metadata.
+    /// Check if the current doc has `_deleted: soft`.
     pub(super) fn is_soft_delete_commit(&self, id: ObjectId) -> bool {
-        let Some(obj) = self.sync_manager.object_manager.get(id) else {
+        let Some(row_doc) = self.sync_manager.doc_manager.get(id) else {
             return false;
         };
-        let Some(branch) = obj.branches.get(&BranchName::new(self.current_branch())) else {
-            return false;
-        };
-        let Some(tip_id) = branch.tips.iter().next() else {
-            return false;
-        };
-        let Some(commit) = branch.commits.get(tip_id) else {
-            return false;
-        };
-        // Soft delete: has delete: soft metadata (content is preserved)
-        commit
-            .metadata
-            .as_ref()
-            .and_then(|m| m.get(MetadataKey::Delete.as_str()))
-            .map(|v| v == DeleteKind::Soft.as_str())
-            .unwrap_or(false)
+        let txn = row_doc.doc.transact();
+        matches!(
+            row_doc.root_map.get(&txn, "_deleted"),
+            Some(yrs::Out::Any(yrs::Any::String(ref s))) if s.as_ref() == "soft"
+        )
     }
 
     /// Check if an incoming update has hard delete metadata.
     pub(super) fn is_incoming_hard_delete(&self, id: ObjectId) -> bool {
-        let Some(obj) = self.sync_manager.object_manager.get(id) else {
-            return false;
-        };
-        let Some(branch) = obj.branches.get(&BranchName::new(self.current_branch())) else {
-            return false;
-        };
-        let Some(tip_id) = branch.tips.iter().next() else {
-            return false;
-        };
-        let Some(commit) = branch.commits.get(tip_id) else {
-            return false;
-        };
-        // Hard delete: empty content + delete: hard metadata
-        commit.content.is_empty()
-            && commit
-                .metadata
-                .as_ref()
-                .and_then(|m| m.get(MetadataKey::Delete.as_str()))
-                .map(|v| v == DeleteKind::Hard.as_str())
-                .unwrap_or(false)
+        // Same as is_hard_deleted — after applying an update, we check the current state
+        self.is_hard_deleted(id)
     }
 
     /// Check if a commit has been stored to disk.
     ///
-    /// With sync storage, commits are stored immediately.
-    /// Used by `InsertResult::is_complete()` to check durability.
-    pub fn is_commit_stored(&self, object_id: ObjectId, commit_id: &CommitId) -> bool {
-        if let Some(obj) = self.sync_manager.object_manager.get(object_id) {
-            // Check all branches for the commit
-            for branch in obj.branches.values() {
-                if let Some(commit) = branch.commits.get(commit_id) {
-                    return matches!(commit.stored_state, crate::commit::StoredState::Stored);
-                }
-            }
-        }
-        false
+    /// With DocManager, docs are always considered stored immediately.
+    pub fn is_commit_stored(&self, object_id: ObjectId, _commit_id: &CommitId) -> bool {
+        self.sync_manager.doc_manager.get(object_id).is_some()
     }
 }
 
