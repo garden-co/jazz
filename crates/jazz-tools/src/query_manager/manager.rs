@@ -632,6 +632,13 @@ impl QueryManager {
         &mut self.sync_manager
     }
 
+    /// Remove a client and all its server-side query subscriptions.
+    pub fn remove_client(&mut self, client_id: ClientId) {
+        self.server_subscriptions
+            .retain(|&(cid, _), _| cid != client_id);
+        self.sync_manager.remove_client(client_id);
+    }
+
     /// Get the schema.
     pub fn schema(&self) -> &Schema {
         &self.schema
