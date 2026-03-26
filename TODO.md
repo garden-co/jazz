@@ -4,7 +4,6 @@
 
 ### High
 
-- [**opfs-btree-corruption-on-interrupted-write**](todo/issues/opfs-btree-corruption-on-interrupted-write.md) — Reloading the page mid-write can corrupt the OPFS B-tree, producing "page id X out of bounds for total_pages Y" errors on next load.
 - [**test_history-and-conflict-resolution**](todo/issues/test_history-and-conflict-resolution.md) — Missing integration tests for history tracking and conflict resolution across concurrent writers.
 - [**test_multi-server-sync**](todo/issues/test_multi-server-sync.md) — Missing integration tests simulating client -> edge -> server communication topology.
 - [**test_policy-resolution**](todo/issues/test_policy-resolution.md) — Missing integration tests for end-to-end policy resolution through the full query/write pipeline.
