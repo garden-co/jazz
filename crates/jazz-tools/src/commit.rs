@@ -86,11 +86,19 @@ impl Commit {
         CommitId(*hasher.finalize().as_bytes())
     }
 
-    pub fn is_deleted(&self) -> bool {
+    pub fn is_soft_deleted(&self) -> bool {
         self.metadata
             .as_ref()
             .and_then(|m| m.get(MetadataKey::Delete.as_str()))
             .map(|v| v == DeleteKind::Soft.as_str())
+            .unwrap_or(false)
+    }
+
+    pub fn is_hard_deleted(&self) -> bool {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.get(MetadataKey::Delete.as_str()))
+            .map(|v| v == DeleteKind::Hard.as_str())
             .unwrap_or(false)
     }
 }
