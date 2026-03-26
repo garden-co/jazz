@@ -57,7 +57,7 @@
           Select venue
           <select v-model="selectedVenueId" class="input">
             <option value="" disabled>Choose a venue...</option>
-            <option v-for="venue in venues" :key="venue.id" :value="venue.id">
+            <option v-for="venue in venues ?? []" :key="venue.id" :value="venue.id">
               {{ venue.name }} — {{ venue.city }}, {{ venue.country }}
             </option>
           </select>
@@ -103,44 +103,22 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed } from "vue";
-
-interface VenueProp {
-  id: string;
-  name: string;
-  city: string;
-  country: string;
-  lat: number;
-  lng: number;
-  capacity?: number;
-}
+import { useDb, useAll } from "jazz-tools/vue";
+import { app } from "../../schema/app.js";
 
 const props = defineProps<{
   lat: number;
   lng: number;
-  venues: VenueProp[];
+  bandId: string;
 }>();
 
 const emit = defineEmits<{
-  create: [
-    data: {
-      venueMode: "new" | "existing";
-      selectedVenueId?: string;
-      newVenue?: {
-        name: string;
-        city: string;
-        country: string;
-        lat: number;
-        lng: number;
-        capacity?: number;
-      };
-      date: Date;
-      status: "confirmed" | "tentative" | "cancelled";
-      publicDescription: string;
-      privateNotes?: string;
-    },
-  ];
+  created: [];
   cancel: [];
 }>();
+
+const db = useDb();
+const venues = useAll(app.venues);
 
 const venueMode = ref<"new" | "existing">("new");
 
@@ -178,25 +156,33 @@ const canSubmit = computed(() => {
 function submit() {
   if (!canSubmit.value) return;
 
-  emit("create", {
-    venueMode: venueMode.value,
-    ...(venueMode.value === "existing"
-      ? { selectedVenueId: selectedVenueId.value }
-      : {
-          newVenue: {
-            name: newVenue.name,
-            city: newVenue.city,
-            country: newVenue.country,
-            lat: newVenue.lat,
-            lng: newVenue.lng,
-            ...(newVenue.capacity != null ? { capacity: newVenue.capacity } : {}),
-          },
-        }),
+  let venueId: string;
+  if (venueMode.value === "existing" && selectedVenueId.value) {
+    venueId = selectedVenueId.value;
+  } else if (venueMode.value === "new") {
+    const venue = db.insert(app.venues, {
+      name: newVenue.name,
+      city: newVenue.city,
+      country: newVenue.country,
+      lat: newVenue.lat,
+      lng: newVenue.lng,
+      ...(newVenue.capacity != null ? { capacity: newVenue.capacity } : {}),
+    });
+    venueId = venue.id;
+  } else {
+    return;
+  }
+
+  db.insert(app.stops, {
+    bandId: props.bandId,
+    venueId,
     date: new Date(stopDate.value),
     status: stopStatus.value,
     publicDescription: publicDescription.value,
     ...(privateNotes.value ? { privateNotes: privateNotes.value } : {}),
   });
+
+  emit("created");
 }
 </script>
 

@@ -11,10 +11,12 @@ const clientConfig: Parameters<typeof createJazzClient>[0] = {
   appId,
   env: "dev",
   userBranch: "main",
-  serverUrl: "http://localhost:4200",
+  serverUrl: "/jazz",
 };
 
-if (!isPublicMode) {
+if (isPublicMode) {
+  clientConfig.localAuthMode = "anonymous";
+} else {
   const auth = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
   clientConfig.localAuthMode = auth.localAuthMode;
   clientConfig.localAuthToken = auth.localAuthToken;
@@ -29,7 +31,7 @@ const vueApp = createApp({
       { client },
       {
         default: () => h(App),
-        fallback: () => h("p", "Loading Jazz..."),
+        fallback: () => h("p", "Loading globe..."),
       },
     );
   },
