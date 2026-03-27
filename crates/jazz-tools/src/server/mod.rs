@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use tokio::sync::{RwLock, broadcast};
+use tokio::time::Instant;
 
 use crate::middleware::AuthConfig;
 use crate::middleware::auth::JwksCache;
@@ -39,6 +41,12 @@ pub struct ServerState {
     pub external_identity_store: Arc<ExternalIdentityStore>,
     /// In-memory cache: (issuer, subject) -> principal_id.
     pub external_identities: RwLock<HashMap<(String, String), String>>,
+    /// Clients that lost their SSE stream, waiting to be reaped after TTL.
+    /// Maps client_id → instant when the last SSE connection closed.
+    pub disconnect_candidates: RwLock<HashMap<ClientId, Instant>>,
+    /// Client state TTL in milliseconds. Default: 5 minutes (300_000ms).
+    /// Disconnected clients are reaped after this duration.
+    pub client_ttl: Arc<AtomicU64>,
 }
 
 /// State for a single SSE connection.
