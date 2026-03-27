@@ -1,11 +1,7 @@
 import { createApp, h } from "vue";
 import { createJazzClient, JazzProvider, getActiveSyntheticAuth } from "jazz-tools/vue";
 import App from "./App.vue";
-
-const appId = "world-tour-example";
-const isPublicMode = new URLSearchParams(window.location.search).has("public");
-
-(window as any).__worldtour_public = isPublicMode;
+import { appId, isPublicMode } from "./constants";
 
 const clientConfig: Parameters<typeof createJazzClient>[0] = {
   appId,

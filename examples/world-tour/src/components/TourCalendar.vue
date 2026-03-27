@@ -67,20 +67,7 @@ const canEdit = !!session;
 
 const dayHeaders = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-const monthNames = [
-  "January",
-  "February",
-  "March",
-  "April",
-  "May",
-  "June",
-  "July",
-  "August",
-  "September",
-  "October",
-  "November",
-  "December",
-];
+const monthFormatter = new Intl.DateTimeFormat("en-GB", { month: "long" });
 
 // Default to earliest stop's month, or current month
 const initialDate = computed(() => {
@@ -97,7 +84,10 @@ const viewMonth = ref<number | null>(null);
 const currentYear = computed(() => viewYear.value ?? initialDate.value.getFullYear());
 const currentMonth = computed(() => viewMonth.value ?? initialDate.value.getMonth());
 
-const monthLabel = computed(() => `${monthNames[currentMonth.value]} ${currentYear.value}`);
+const monthLabel = computed(() => {
+  const name = monthFormatter.format(new Date(currentYear.value, currentMonth.value, 1));
+  return `${name} ${currentYear.value}`;
+});
 
 function prevMonth() {
   const y = currentYear.value;
@@ -167,12 +157,12 @@ function isSelectedDate(day: { date: Date }): boolean {
 const dragOverKey = ref<string | null>(null);
 
 function onDragStart(event: DragEvent, stopId: string) {
-  if (!props.canEdit) return;
+  if (!canEdit) return;
   event.dataTransfer?.setData("text/plain", stopId);
 }
 
 function onDragOver(day: { date: Date }) {
-  if (!props.canEdit) return;
+  if (!canEdit) return;
   dragOverKey.value = dateKey(day);
 }
 
@@ -182,125 +172,14 @@ function onDragLeave() {
 
 function onDrop(day: { date: Date }, event: DragEvent) {
   dragOverKey.value = null;
-  if (!props.canEdit) return;
+  if (!canEdit) return;
   const stopId = event.dataTransfer?.getData("text/plain");
   if (!stopId) return;
+  // day.date is already local midnight from the calendar grid — no UTC parsing issue
   db.update(app.stops, stopId, { date: day.date });
 }
 </script>
 
 <style scoped>
-.tour-calendar {
-  margin-bottom: 16px;
-}
-
-.cal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 10px;
-}
-
-.cal-nav {
-  background: none;
-  border: none;
-  color: var(--text-secondary);
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  cursor: pointer;
-  font-size: 14px;
-  line-height: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition:
-    color var(--duration-fast),
-    box-shadow var(--duration-fast);
-}
-
-.cal-nav:hover {
-  color: var(--accent-primary);
-  box-shadow: 0 0 8px var(--accent-primary-muted);
-}
-
-.cal-title {
-  font-family: var(--font-display);
-  font-weight: 700;
-  font-size: 18px;
-  text-transform: uppercase;
-  color: var(--text-primary);
-}
-
-.cal-grid {
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  gap: 1px;
-}
-
-.cal-day-header {
-  text-align: center;
-  font-family: var(--font-mono);
-  font-weight: 500;
-  font-size: 11px;
-  color: var(--text-muted);
-  padding: 4px 0;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
-.cal-cell {
-  min-height: 36px;
-  padding: 2px 3px;
-  background: rgba(255, 255, 255, 0.02);
-  border-bottom: 1px solid var(--border-subtle);
-  transition: background var(--duration-fast);
-  overflow: hidden;
-}
-
-.cal-cell.dimmed .cal-day-num {
-  opacity: 0.4;
-  color: var(--text-muted);
-}
-
-.cal-cell.selected {
-  border-left: 3px solid var(--accent-primary);
-}
-
-.cal-cell.drag-over {
-  box-shadow: inset 0 0 12px var(--accent-primary-muted);
-}
-
-.cal-day-num {
-  display: block;
-  font-family: var(--font-body);
-  font-weight: 400;
-  font-size: 13px;
-  color: var(--text-secondary);
-  line-height: 1;
-  margin-bottom: 2px;
-}
-
-.stop-chip {
-  font-family: var(--font-mono);
-  font-weight: 400;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 1px 6px;
-  border-radius: var(--radius-pill);
-  background: var(--accent-secondary-muted);
-  color: var(--accent-secondary);
-  cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-bottom: 1px;
-  line-height: 1.4;
-  transition: background var(--duration-fast);
-}
-
-.stop-chip:hover {
-  background: rgba(0, 229, 204, 0.22);
-}
+@import "../styles/tour-calendar.css";
 </style>

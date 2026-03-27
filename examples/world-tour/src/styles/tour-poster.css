@@ -1,0 +1,178 @@
+.poster-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.8);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  animation: overlay-in 0.4s ease-out;
+  cursor: pointer;
+}
+
+@keyframes overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.poster {
+  position: relative;
+  width: min(420px, 90vw);
+  aspect-ratio: 595 / 842;
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 25px 80px rgba(0, 0, 0, 0.6),
+    0 0 120px rgba(255, 45, 123, 0.08);
+  animation: poster-in 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+  cursor: default;
+}
+
+@keyframes poster-in {
+  from { opacity: 0; transform: scale(0.92) translateY(30px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.poster-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.poster-content {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 8% 8%;
+}
+
+.poster-header {
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.poster-tag {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.35em;
+  color: var(--accent-primary);
+  border: 1px solid var(--accent-primary);
+  padding: 3px 14px;
+  border-radius: 2px;
+  display: inline-block;
+  margin-bottom: 16px;
+}
+
+.poster-band {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: clamp(18px, 5vw, 34px);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #fff;
+  margin: 0;
+  line-height: 1.15;
+  text-shadow: 0 2px 40px rgba(0, 0, 0, 0.5);
+  text-wrap: balance;
+}
+
+.poster-divider {
+  width: 50px;
+  height: 2px;
+  background: var(--accent-primary);
+  margin: 14px auto;
+  box-shadow: 0 0 12px rgba(255, 45, 123, 0.5);
+}
+
+.poster-dates {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 6px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.poster-date-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.poster-date-row:last-child {
+  border-bottom: none;
+}
+
+.poster-date-left {
+  min-width: 52px;
+  text-align: right;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.poster-day {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 22px;
+  color: #fff;
+  line-height: 1;
+}
+
+.poster-month {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.15em;
+  color: var(--accent-primary);
+}
+
+.poster-date-right {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.poster-venue {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.poster-city {
+  font-family: var(--font-body);
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+  letter-spacing: 0.04em;
+}
+
+.poster-footer {
+  text-align: center;
+  margin-top: auto;
+  padding-top: 16px;
+}
+
+.poster-cta {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.3em;
+  color: rgba(255, 255, 255, 0.3);
+  animation: pulse-cta 3s ease-in-out infinite alternate;
+}
+
+@keyframes pulse-cta {
+  0% { opacity: 0.3; }
+  100% { opacity: 0.7; }
+}

@@ -19,7 +19,14 @@ export const venues: SeedVenue[] = [
     lng: -73.9934,
     capacity: 20789,
   },
-  { name: "Budokan", city: "Tokyo", country: "Japan", lat: 35.6932, lng: 139.75, capacity: 14471 },
+  {
+    name: "Blue Note Tokyo",
+    city: "Tokyo",
+    country: "Japan",
+    lat: 35.6605,
+    lng: 139.7292,
+    capacity: 300,
+  },
   {
     name: "Olympiastadion",
     city: "Berlin",
