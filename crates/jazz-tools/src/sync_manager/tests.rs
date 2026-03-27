@@ -2895,3 +2895,56 @@ fn remove_client_cleans_inbox_entries() {
     assert_eq!(sm.inbox.len(), 2);
     assert!(sm.inbox.iter().all(|e| e.source != Source::Client(alice)));
 }
+
+#[test]
+fn remove_client_cleans_query_origin() {
+    //
+    // alice ──subscribe(q1)──▶ server   (query_origin: q1→{alice, bob})
+    // bob   ──subscribe(q1)──▶ server
+    //
+    // alice disconnects → query_origin: q1→{bob}
+    //
+    let mut sm = SyncManager::new();
+
+    let alice = ClientId::new();
+    let bob = ClientId::new();
+    sm.add_client(alice);
+    sm.add_client(bob);
+
+    let q1 = QueryId(42);
+    sm.query_origin.entry(q1).or_default().insert(alice);
+    sm.query_origin.entry(q1).or_default().insert(bob);
+
+    sm.remove_client(alice);
+
+    assert!(
+        sm.query_origin.contains_key(&q1),
+        "q1 should still exist (bob is still interested)"
+    );
+    let clients = &sm.query_origin[&q1];
+    assert!(!clients.contains(&alice), "alice should be removed");
+    assert!(clients.contains(&bob), "bob should remain");
+}
+
+#[test]
+fn remove_client_removes_query_origin_entry_when_last_client() {
+    //
+    // alice ──subscribe(q1)──▶ server   (query_origin: q1→{alice})
+    //
+    // alice disconnects → query_origin: empty
+    //
+    let mut sm = SyncManager::new();
+
+    let alice = ClientId::new();
+    sm.add_client(alice);
+
+    let q1 = QueryId(42);
+    sm.query_origin.entry(q1).or_default().insert(alice);
+
+    sm.remove_client(alice);
+
+    assert!(
+        !sm.query_origin.contains_key(&q1),
+        "q1 entry should be removed when last client disconnects"
+    );
+}
