@@ -21,7 +21,6 @@
 
 ### Mvp
 
-- [**client-state-cleanup**](todo/ideas/1_mvp/client-state-cleanup.md) — Garbage collection of server-side state (sync cursors, query subscriptions, session records) for permanently disconnected clients.
 - [**complex-merge-strategies**](todo/ideas/1_mvp/complex-merge-strategies.md) — Per-column/per-table merge strategies beyond LWW (counters, sets, rich text, custom logic).
 - [**count-aggregation**](todo/ideas/1_mvp/count-aggregation.md) — Add terminal `.count()` queries for filtered relations, with the MVP limited to reactive `COUNT(*)` returning `{ count: number }`.
 - [**explicit-indices**](todo/ideas/1_mvp/explicit-indices.md) — Developer-declared indices in the schema language, replacing auto-index-all-columns.
@@ -32,4 +31,5 @@
 
 ## Projects
 
+- [**client-state-lifecycle**](todo/projects/client-state-lifecycle/)
 - [**ordered-index-topk-query-path**](todo/projects/ordered-index-topk-query-path/)
