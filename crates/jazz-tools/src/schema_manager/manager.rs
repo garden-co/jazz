@@ -25,11 +25,24 @@ use uuid::Uuid;
 use super::auto_lens::generate_lens;
 use super::context::{QuerySchemaContext, SchemaContext, SchemaError};
 use super::encoding::{
-    decode_lens_transform, decode_permissions, decode_schema, encode_lens_transform,
-    encode_permissions, encode_schema,
+    decode_lens_transform, decode_permissions, decode_permissions_bundle, decode_permissions_head,
+    decode_schema, encode_lens_transform, encode_permissions, encode_permissions_bundle,
+    encode_permissions_head, encode_schema,
 };
 use super::lens::Lens;
 use super::types::AppId;
+
+#[derive(Clone, Debug, PartialEq)]
+struct PermissionsBundleState {
+    schema_hash: SchemaHash,
+    permissions: HashMap<TableName, TablePolicies>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PermissionsHeadState {
+    schema_hash: SchemaHash,
+    bundle_object_id: ObjectId,
+}
 
 /// SchemaManager coordinates schema evolution with query execution.
 ///
@@ -74,9 +87,9 @@ pub struct SchemaManager {
     context: SchemaContext,
     query_manager: QueryManager,
     app_id: AppId,
-    current_permissions_hash: Option<SchemaHash>,
-    current_permissions: Option<HashMap<TableName, TablePolicies>>,
-    pending_permissions: Option<(SchemaHash, HashMap<TableName, TablePolicies>)>,
+    current_permissions_head: Option<PermissionsHeadState>,
+    known_permissions_bundles: HashMap<ObjectId, PermissionsBundleState>,
+    pending_permissions_head: Option<PermissionsHeadState>,
     /// Schemas known to this manager (for server mode).
     /// Server adds schemas here when received via catalogue sync.
     /// These are stored without requiring a lens path to current.
@@ -102,7 +115,6 @@ impl SchemaManager {
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
         let declared_current_schema = schema.clone();
-        let current_permissions = extract_schema_permissions(&schema);
         let schema = normalize_schema(schema);
         let structural_schema = strip_schema_policies(&schema);
 
@@ -122,9 +134,9 @@ impl SchemaManager {
             context,
             query_manager,
             app_id,
-            current_permissions_hash: Some(current_hash),
-            current_permissions: Some(current_permissions),
-            pending_permissions: None,
+            current_permissions_head: None,
+            known_permissions_bundles: HashMap::new(),
+            pending_permissions_head: None,
             known_schemas: Arc::new(known_schemas),
             known_schemas_dirty: true,
         })
@@ -155,9 +167,9 @@ impl SchemaManager {
             context: SchemaContext::empty(),
             query_manager,
             app_id,
-            current_permissions_hash: None,
-            current_permissions: None,
-            pending_permissions: None,
+            current_permissions_head: None,
+            known_permissions_bundles: HashMap::new(),
+            pending_permissions_head: None,
             known_schemas: Arc::new(HashMap::new()),
             known_schemas_dirty: false,
         }
@@ -194,7 +206,7 @@ impl SchemaManager {
             self.activate_pending_and_sync_to_query_manager();
         }
 
-        self.try_apply_pending_permissions();
+        self.try_apply_pending_permissions_head();
     }
 
     /// Get a known schema by hash.
@@ -434,13 +446,12 @@ impl SchemaManager {
             hash_len_prefixed(&mut hasher, &encoded);
         }
 
-        if let (Some(schema_hash), Some(permissions)) = (
-            self.current_permissions_hash,
-            self.current_permissions.as_ref(),
-        ) {
+        if let Some(head) = self.current_permissions_head
+            && let Some(bundle) = self.known_permissions_bundles.get(&head.bundle_object_id)
+        {
             hasher.update(b"permissions");
-            hasher.update(schema_hash.as_bytes());
-            let encoded = encode_permissions(permissions);
+            hasher.update(head.schema_hash.as_bytes());
+            let encoded = encode_permissions(&bundle.permissions);
             hash_len_prefixed(&mut hasher, &encoded);
         }
 
@@ -548,8 +559,6 @@ impl SchemaManager {
             .sync_manager_mut()
             .create_object_with_content(storage, object_id, metadata, content);
 
-        self.persist_current_permissions(storage);
-
         object_id
     }
 
@@ -594,15 +603,28 @@ impl SchemaManager {
     }
 
     pub fn persist_current_permissions<H: Storage>(&mut self, storage: &mut H) -> Option<ObjectId> {
-        let schema_hash = self.current_permissions_hash?;
-        let permissions = self.current_permissions.as_ref()?;
-        let object_id = self.permissions_object_id();
-        let content = encode_permissions(permissions);
-        let metadata = self.permissions_metadata(&schema_hash);
+        let head = self.current_permissions_head?;
+        let bundle = self.known_permissions_bundles.get(&head.bundle_object_id)?;
+
+        let bundle_metadata = self.permissions_bundle_metadata();
+        let head_object_id = self.permissions_head_object_id();
+        let head_metadata = self.permissions_head_metadata();
+        let bundle_content = encode_permissions_bundle(bundle.schema_hash, &bundle.permissions);
         self.query_manager
             .sync_manager_mut()
-            .create_object_with_content(storage, object_id, metadata, content);
-        Some(object_id)
+            .create_object_with_content(
+                storage,
+                head.bundle_object_id,
+                bundle_metadata,
+                bundle_content,
+            );
+
+        let head_content = encode_permissions_head(head.schema_hash, head.bundle_object_id);
+        self.query_manager
+            .sync_manager_mut()
+            .create_object_with_content(storage, head_object_id, head_metadata, head_content);
+
+        Some(head_object_id)
     }
 
     pub fn publish_permissions_bundle<H: Storage>(
@@ -611,12 +633,22 @@ impl SchemaManager {
         schema_hash: SchemaHash,
         permissions: HashMap<TableName, TablePolicies>,
     ) -> Option<ObjectId> {
-        self.current_permissions_hash = Some(schema_hash);
-        self.current_permissions = Some(permissions.clone());
-        if self.apply_permissions_bundle(schema_hash, permissions.clone()) {
-            self.pending_permissions = None;
+        let bundle_state = PermissionsBundleState {
+            schema_hash,
+            permissions,
+        };
+        let bundle_object_id = self.permissions_bundle_object_id(&bundle_state);
+        self.known_permissions_bundles
+            .insert(bundle_object_id, bundle_state);
+        let head = PermissionsHeadState {
+            schema_hash,
+            bundle_object_id,
+        };
+        self.current_permissions_head = Some(head);
+        if self.apply_permissions_head(head) {
+            self.pending_permissions_head = None;
         } else {
-            self.pending_permissions = Some((schema_hash, permissions));
+            self.pending_permissions_head = Some(head);
         }
         self.persist_current_permissions(storage)
     }
@@ -681,26 +713,49 @@ impl SchemaManager {
         metadata
     }
 
-    fn permissions_object_id(&self) -> ObjectId {
+    pub(crate) fn permissions_head_object_id_for(app_id: AppId) -> ObjectId {
         ObjectId::from_uuid(Uuid::new_v5(
             &Uuid::NAMESPACE_DNS,
-            format!("jazz-catalogue-permissions:{}", self.app_id.uuid()).as_bytes(),
+            format!("jazz-catalogue-permissions-head:{}", app_id.uuid()).as_bytes(),
         ))
     }
 
-    fn permissions_metadata(&self, schema_hash: &SchemaHash) -> HashMap<String, String> {
+    fn permissions_head_object_id(&self) -> ObjectId {
+        Self::permissions_head_object_id_for(self.app_id)
+    }
+
+    fn permissions_bundle_object_id(&self, bundle: &PermissionsBundleState) -> ObjectId {
+        let mut identity =
+            format!("jazz-catalogue-permissions-bundle:{}:", self.app_id.uuid()).into_bytes();
+        identity.extend_from_slice(&encode_permissions_bundle(
+            bundle.schema_hash,
+            &bundle.permissions,
+        ));
+        ObjectId::from_uuid(Uuid::new_v5(&Uuid::NAMESPACE_DNS, &identity))
+    }
+
+    fn permissions_bundle_metadata(&self) -> HashMap<String, String> {
         let mut metadata = HashMap::new();
         metadata.insert(
             crate::metadata::MetadataKey::Type.to_string(),
-            crate::metadata::ObjectType::CataloguePermissions.to_string(),
+            crate::metadata::ObjectType::CataloguePermissionsBundle.to_string(),
         );
         metadata.insert(
             crate::metadata::MetadataKey::AppId.to_string(),
             self.app_id.uuid().to_string(),
         );
+        metadata
+    }
+
+    fn permissions_head_metadata(&self) -> HashMap<String, String> {
+        let mut metadata = HashMap::new();
         metadata.insert(
-            crate::metadata::MetadataKey::SchemaHash.to_string(),
-            schema_hash.to_string(),
+            crate::metadata::MetadataKey::Type.to_string(),
+            crate::metadata::ObjectType::CataloguePermissionsHead.to_string(),
+        );
+        metadata.insert(
+            crate::metadata::MetadataKey::AppId.to_string(),
+            self.app_id.uuid().to_string(),
         );
         metadata
     }
@@ -736,7 +791,7 @@ impl SchemaManager {
     /// For lenses: registered immediately, then pending schemas are checked.
     pub fn process_catalogue_update(
         &mut self,
-        _object_id: ObjectId,
+        object_id: ObjectId,
         metadata: &HashMap<String, String>,
         content: &[u8],
     ) -> Result<(), SchemaError> {
@@ -748,8 +803,14 @@ impl SchemaManager {
             t if t == crate::metadata::ObjectType::CatalogueSchema.as_str() => {
                 self.process_catalogue_schema(metadata, content)
             }
+            t if t == crate::metadata::ObjectType::CataloguePermissionsBundle.as_str() => {
+                self.process_catalogue_permissions_bundle(object_id, metadata, content)
+            }
+            t if t == crate::metadata::ObjectType::CataloguePermissionsHead.as_str() => {
+                self.process_catalogue_permissions_head(metadata, content)
+            }
             t if t == crate::metadata::ObjectType::CataloguePermissions.as_str() => {
-                self.process_catalogue_permissions(metadata, content)
+                self.process_catalogue_permissions_legacy(object_id, metadata, content)
             }
             t if t == crate::metadata::ObjectType::CatalogueLens.as_str() => {
                 self.process_catalogue_lens(metadata, content)
@@ -799,13 +860,72 @@ impl SchemaManager {
             self.activate_pending_and_sync_to_query_manager();
         }
 
-        self.try_apply_pending_permissions();
+        self.try_apply_pending_permissions_head();
 
         Ok(())
     }
 
-    fn process_catalogue_permissions(
+    fn process_catalogue_permissions_bundle(
         &mut self,
+        object_id: ObjectId,
+        metadata: &HashMap<String, String>,
+        content: &[u8],
+    ) -> Result<(), SchemaError> {
+        let app_id_str = metadata
+            .get(crate::metadata::MetadataKey::AppId.as_str())
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        if app_id_str != self.app_id.uuid().to_string() {
+            return Ok(());
+        }
+
+        let (schema_hash, permissions) = decode_permissions_bundle(content)
+            .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
+        self.known_permissions_bundles.insert(
+            object_id,
+            PermissionsBundleState {
+                schema_hash,
+                permissions,
+            },
+        );
+
+        self.try_apply_pending_permissions_head();
+
+        Ok(())
+    }
+
+    fn process_catalogue_permissions_head(
+        &mut self,
+        metadata: &HashMap<String, String>,
+        content: &[u8],
+    ) -> Result<(), SchemaError> {
+        let app_id_str = metadata
+            .get(crate::metadata::MetadataKey::AppId.as_str())
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        if app_id_str != self.app_id.uuid().to_string() {
+            return Ok(());
+        }
+
+        let (schema_hash, bundle_object_id) = decode_permissions_head(content)
+            .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
+        let head = PermissionsHeadState {
+            schema_hash,
+            bundle_object_id,
+        };
+        self.current_permissions_head = Some(head);
+        if self.apply_permissions_head(head) {
+            self.pending_permissions_head = None;
+        } else {
+            self.pending_permissions_head = Some(head);
+        }
+
+        Ok(())
+    }
+
+    fn process_catalogue_permissions_legacy(
+        &mut self,
+        object_id: ObjectId,
         metadata: &HashMap<String, String>,
         content: &[u8],
     ) -> Result<(), SchemaError> {
@@ -823,14 +943,22 @@ impl SchemaManager {
             .and_then(|value| parse_schema_hash(value))?;
         let permissions = decode_permissions(content)
             .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
-
-        self.current_permissions_hash = Some(schema_hash);
-        self.current_permissions = Some(permissions.clone());
-        if self.apply_permissions_bundle(schema_hash, permissions) {
-            self.pending_permissions = None;
+        self.known_permissions_bundles.insert(
+            object_id,
+            PermissionsBundleState {
+                schema_hash,
+                permissions,
+            },
+        );
+        let head = PermissionsHeadState {
+            schema_hash,
+            bundle_object_id: object_id,
+        };
+        self.current_permissions_head = Some(head);
+        if self.apply_permissions_head(head) {
+            self.pending_permissions_head = None;
         } else {
-            self.pending_permissions =
-                Some((schema_hash, self.current_permissions.clone().unwrap()));
+            self.pending_permissions_head = Some(head);
         }
 
         Ok(())
@@ -897,6 +1025,7 @@ impl SchemaManager {
 
         // Try to activate pending schemas that may now be reachable
         self.activate_pending_and_sync_to_query_manager();
+        self.try_apply_pending_permissions_head();
 
         Ok(())
     }
@@ -912,28 +1041,30 @@ impl SchemaManager {
             .or_else(|| self.known_schemas.get(&schema_hash).cloned())
     }
 
-    fn apply_permissions_bundle(
-        &mut self,
-        schema_hash: SchemaHash,
-        permissions: HashMap<TableName, TablePolicies>,
-    ) -> bool {
-        let Some(schema) = self.schema_for_permissions_hash(schema_hash) else {
+    fn apply_permissions_head(&mut self, head: PermissionsHeadState) -> bool {
+        let Some(bundle) = self.known_permissions_bundles.get(&head.bundle_object_id) else {
+            return false;
+        };
+        if bundle.schema_hash != head.schema_hash {
+            return false;
+        }
+        let Some(schema) = self.schema_for_permissions_hash(head.schema_hash) else {
             return false;
         };
 
-        let authorization_schema = merge_permissions_into_schema(&schema, &permissions);
+        let authorization_schema = merge_permissions_into_schema(&schema, &bundle.permissions);
         self.query_manager
             .set_authorization_schema(authorization_schema);
         true
     }
 
-    fn try_apply_pending_permissions(&mut self) {
-        let Some((schema_hash, permissions)) = self.pending_permissions.clone() else {
+    fn try_apply_pending_permissions_head(&mut self) {
+        let Some(head) = self.pending_permissions_head else {
             return;
         };
 
-        if self.apply_permissions_bundle(schema_hash, permissions) {
-            self.pending_permissions = None;
+        if self.apply_permissions_head(head) {
+            self.pending_permissions_head = None;
         }
     }
 
@@ -1158,13 +1289,6 @@ fn reorder_values_by_column_name(
     Some(reordered_values)
 }
 
-fn extract_schema_permissions(schema: &Schema) -> HashMap<TableName, TablePolicies> {
-    schema
-        .iter()
-        .map(|(table_name, table_schema)| (*table_name, table_schema.policies.clone()))
-        .collect()
-}
-
 fn merge_permissions_into_schema(
     schema: &Schema,
     permissions: &HashMap<TableName, TablePolicies>,
@@ -1228,7 +1352,10 @@ fn parse_schema_hash(hex_str: &str) -> Result<SchemaHash, SchemaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
+    use crate::query_manager::policy::PolicyExpr;
+    use crate::query_manager::types::{
+        ColumnType, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
+    };
 
     fn test_app_id() -> AppId {
         AppId::from_name("test-app")
@@ -1493,6 +1620,55 @@ mod tests {
         // V2 has 3 columns (id, name, email)
         let v2_desc = manager.get_table_descriptor("users", &v2_hash).unwrap();
         assert_eq!(v2_desc.columns.len(), 3);
+    }
+
+    #[test]
+    fn permissions_head_waits_for_bundle_then_applies() {
+        let schema = make_schema_v2();
+        let schema_hash = SchemaHash::compute(&schema);
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let permissions = HashMap::from([(
+            TableName::new("users"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+        let bundle = PermissionsBundleState {
+            schema_hash,
+            permissions: permissions.clone(),
+        };
+        let bundle_object_id = manager.permissions_bundle_object_id(&bundle);
+        let head = PermissionsHeadState {
+            schema_hash,
+            bundle_object_id,
+        };
+
+        manager
+            .process_catalogue_update(
+                manager.permissions_head_object_id(),
+                &manager.permissions_head_metadata(),
+                &encode_permissions_head(schema_hash, bundle_object_id),
+            )
+            .expect("head should process");
+        assert_eq!(manager.current_permissions_head, Some(head));
+        assert_eq!(manager.pending_permissions_head, Some(head));
+
+        manager
+            .process_catalogue_update(
+                bundle_object_id,
+                &manager.permissions_bundle_metadata(),
+                &encode_permissions_bundle(schema_hash, &permissions),
+            )
+            .expect("bundle should process");
+
+        assert_eq!(manager.current_permissions_head, Some(head));
+        assert_eq!(manager.pending_permissions_head, None);
+        assert_eq!(
+            manager
+                .known_permissions_bundles
+                .get(&bundle_object_id)
+                .map(|state| state.permissions.clone()),
+            Some(permissions)
+        );
     }
 
     #[test]

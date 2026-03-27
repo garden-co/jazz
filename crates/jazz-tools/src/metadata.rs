@@ -51,6 +51,9 @@ impl fmt::Display for MetadataKey {
 pub enum ObjectType {
     CatalogueSchema,
     CatalogueLens,
+    CataloguePermissionsBundle,
+    CataloguePermissionsHead,
+    /// Legacy single-object permissions catalogue entry.
     CataloguePermissions,
     Index,
 }
@@ -60,9 +63,22 @@ impl ObjectType {
         match self {
             Self::CatalogueSchema => "catalogue_schema",
             Self::CatalogueLens => "catalogue_lens",
+            Self::CataloguePermissionsBundle => "catalogue_permissions_bundle",
+            Self::CataloguePermissionsHead => "catalogue_permissions_head",
             Self::CataloguePermissions => "catalogue_permissions",
             Self::Index => "index",
         }
+    }
+
+    pub fn is_catalogue_type_str(kind: &str) -> bool {
+        matches!(
+            kind,
+            "catalogue_schema"
+                | "catalogue_lens"
+                | "catalogue_permissions_bundle"
+                | "catalogue_permissions_head"
+                | "catalogue_permissions"
+        )
     }
 }
 

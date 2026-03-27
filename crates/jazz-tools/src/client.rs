@@ -12,7 +12,7 @@ use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
 use crate::runtime_core::ReadDurabilityOptions;
-use crate::schema_manager::SchemaManager;
+use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_manifest};
 use crate::storage::{FjallStorage, Storage, StorageError};
 use crate::sync_manager::{
     ClientId, Destination, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
@@ -45,6 +45,26 @@ pub struct JazzClient {
 /// State for an active subscription.
 struct SubscriptionState {
     runtime_handle: RuntimeSubHandle,
+}
+
+fn build_client_schema_manager<S: Storage + ?Sized>(
+    storage: &S,
+    context: &AppContext,
+) -> Result<SchemaManager> {
+    let sync_manager = SyncManager::new();
+    let mut schema_manager = SchemaManager::new(
+        sync_manager,
+        context.schema.clone(),
+        context.app_id,
+        "client",
+        "main",
+    )
+    .map_err(|e| JazzError::Schema(format!("{:?}", e)))?;
+
+    rehydrate_schema_manager_from_manifest(&mut schema_manager, storage, context.app_id)
+        .map_err(JazzError::Storage)?;
+
+    Ok(schema_manager)
 }
 
 impl JazzClient {
@@ -80,17 +100,6 @@ impl JazzClient {
             std::fs::write(&client_id_path, id.to_string())?;
             id
         };
-
-        // Create managers
-        let sync_manager = SyncManager::new();
-        let schema_manager = SchemaManager::new(
-            sync_manager,
-            context.schema.clone(),
-            context.app_id,
-            "client",
-            "main",
-        )
-        .map_err(|e| JazzError::Schema(format!("{:?}", e)))?;
 
         // Connect to server if URL provided (before creating runtime so we have the connection)
         let auth_config = AuthConfig::from_context(&context);
@@ -150,6 +159,8 @@ impl JazzClient {
                 return Err(JazzError::Storage(format!("{:?}", err)));
             }
         };
+
+        let schema_manager = build_client_schema_manager(&storage, &context)?;
 
         // Clone server connection for sync callback
         let server_conn_for_sync = server_connection.clone();
@@ -655,7 +666,13 @@ fn reorder_values_by_column_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query_manager::policy::PolicyExpr;
+    use crate::query_manager::types::{SchemaHash, TablePolicies};
+    use crate::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
+    use crate::schema_manager::AppId;
+    use crate::storage::{CatalogueManifestOp, FjallStorage};
     use crate::{ColumnType, ObjectId, SchemaBuilder, TableSchema};
+    use tempfile::TempDir;
 
     fn declared_todo_schema() -> Schema {
         SchemaBuilder::new()
@@ -675,6 +692,115 @@ mod tests {
                     .column("title", ColumnType::Text),
             )
             .build()
+    }
+
+    fn learned_runtime_todo_schema() -> Schema {
+        SchemaBuilder::new()
+            .table(
+                TableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .column("completed", ColumnType::Boolean)
+                    .nullable_column("description", ColumnType::Text),
+            )
+            .build()
+    }
+
+    fn make_offline_context(
+        app_id: AppId,
+        data_dir: std::path::PathBuf,
+        schema: Schema,
+    ) -> AppContext {
+        AppContext {
+            app_id,
+            client_id: None,
+            schema,
+            server_url: String::new(),
+            data_dir,
+            jwt_token: None,
+            backend_secret: None,
+            admin_secret: None,
+        }
+    }
+
+    fn seed_rehydrated_client_storage(
+        data_dir: &std::path::Path,
+        app_id: AppId,
+        publish_permissions: bool,
+    ) -> (SchemaHash, SchemaHash) {
+        std::fs::create_dir_all(data_dir).expect("create seeded client data dir");
+        let db_path = data_dir.join("jazz.fjall");
+        let storage =
+            FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage");
+
+        let bundled_schema = declared_todo_schema();
+        let learned_schema = learned_runtime_todo_schema();
+        let bundled_hash = SchemaHash::compute(&bundled_schema);
+        let learned_hash = SchemaHash::compute(&learned_schema);
+
+        let schema_manager = SchemaManager::new(
+            SyncManager::new(),
+            learned_schema.clone(),
+            app_id,
+            "seed",
+            "main",
+        )
+        .expect("seed schema manager");
+        let mut runtime =
+            RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
+        let learned_schema_object_id = runtime.persist_schema();
+        let bundled_schema_object_id = runtime.publish_schema(bundled_schema.clone());
+        let lens = runtime
+            .schema_manager()
+            .generate_lens(&bundled_schema, &learned_schema);
+        assert!(!lens.is_draft(), "seed lens should be publishable");
+        let lens_object_id = runtime.publish_lens(&lens).expect("persist learned lens");
+
+        if publish_permissions {
+            runtime.publish_permissions_bundle(
+                learned_hash,
+                HashMap::from([(
+                    TableName::new("todos"),
+                    TablePolicies::new().with_select(PolicyExpr::True),
+                )]),
+            );
+        }
+
+        let mut storage = runtime.into_storage();
+        storage
+            .append_catalogue_manifest_ops(
+                app_id.as_object_id(),
+                &[
+                    CatalogueManifestOp::SchemaSeen {
+                        object_id: learned_schema_object_id,
+                        schema_hash: learned_hash,
+                    },
+                    CatalogueManifestOp::SchemaSeen {
+                        object_id: bundled_schema_object_id,
+                        schema_hash: bundled_hash,
+                    },
+                    CatalogueManifestOp::LensSeen {
+                        object_id: lens_object_id,
+                        source_hash: bundled_hash,
+                        target_hash: learned_hash,
+                    },
+                ],
+            )
+            .expect("append seeded client catalogue manifest ops");
+        storage.flush();
+        storage.close().expect("close seeded client storage");
+
+        (bundled_hash, learned_hash)
+    }
+
+    fn expected_client_catalogue_hash(context: &AppContext) -> String {
+        let db_path = context.data_dir.join("jazz.fjall");
+        let storage =
+            FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage");
+        let schema_manager = build_client_schema_manager(&storage, context)
+            .expect("rehydrate client schema manager");
+        let catalogue_hash = schema_manager.catalogue_state_hash();
+        storage.close().expect("close seeded client storage");
+        catalogue_hash
     }
 
     #[test]
@@ -728,6 +854,79 @@ mod tests {
             aligned[0].1,
             vec![Value::Text("keep-id".to_string()), Value::Boolean(false)]
         );
+    }
+
+    #[tokio::test]
+    async fn client_rehydrates_learned_lens_from_local_catalogue_on_restart() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-rehydrate-lens");
+        let (_bundled_hash, learned_hash) =
+            seed_rehydrated_client_storage(data_dir.path(), app_id, false);
+        let context = make_offline_context(
+            app_id,
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+
+        let client = JazzClient::connect(context).await.expect("connect client");
+
+        let has_learned_schema = client
+            .runtime
+            .known_schema_hashes()
+            .expect("read known schema hashes")
+            .contains(&learned_hash);
+        assert!(
+            has_learned_schema,
+            "client should restore newer learned schema"
+        );
+
+        let lens_path_len = client
+            .runtime
+            .with_schema_manager(|manager| manager.lens_path(&learned_hash).map(|path| path.len()))
+            .expect("read client schema manager")
+            .expect("lens path to bundled schema");
+        assert_eq!(
+            lens_path_len, 1,
+            "client should restore learned migration lens"
+        );
+
+        client.shutdown().await.expect("shutdown client");
+    }
+
+    #[tokio::test]
+    async fn client_rehydrates_permissions_head_and_bundle_from_local_catalogue_on_restart() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-rehydrate-permissions");
+        let (_bundled_hash, learned_hash) =
+            seed_rehydrated_client_storage(data_dir.path(), app_id, true);
+        let context = make_offline_context(
+            app_id,
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+        let expected_catalogue_hash = expected_client_catalogue_hash(&context);
+
+        let client = JazzClient::connect(context).await.expect("connect client");
+
+        let actual_catalogue_hash = client
+            .runtime
+            .catalogue_state_hash()
+            .expect("read client catalogue hash");
+        assert_eq!(
+            actual_catalogue_hash, expected_catalogue_hash,
+            "client should restore learned permissions head and bundle before any network sync"
+        );
+
+        let lens_path_exists = client
+            .runtime
+            .with_schema_manager(|manager| manager.lens_path(&learned_hash).is_ok())
+            .expect("read client schema manager");
+        assert!(
+            lens_path_exists,
+            "permissions rehydrate should preserve the target schema's learned lens context"
+        );
+
+        client.shutdown().await.expect("shutdown client");
     }
 }
 

@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use crate::object::ObjectId;
 use crate::query_manager::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnName, ColumnType, RowDescriptor, Schema, TableName, TablePolicies,
-    TableSchema, Value,
+    ColumnDescriptor, ColumnName, ColumnType, RowDescriptor, Schema, SchemaHash, TableName,
+    TablePolicies, TableSchema, Value,
 };
 
 use super::lens::{LensOp, LensTransform};
@@ -20,6 +20,8 @@ use super::lens::{LensOp, LensTransform};
 const SCHEMA_VERSION: u8 = 4;
 const LENS_VERSION: u8 = 2;
 const PERMISSIONS_VERSION: u8 = 1;
+const PERMISSIONS_BUNDLE_VERSION: u8 = 1;
+const PERMISSIONS_HEAD_VERSION: u8 = 1;
 
 /// Encoding errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -808,6 +810,90 @@ pub fn decode_permissions(
     }
 
     Ok(permissions)
+}
+
+pub fn encode_permissions_bundle(
+    schema_hash: SchemaHash,
+    permissions: &HashMap<TableName, TablePolicies>,
+) -> Vec<u8> {
+    let encoded_permissions = encode_permissions(permissions);
+    let mut buf = Vec::with_capacity(1 + 32 + 4 + encoded_permissions.len());
+    buf.push(PERMISSIONS_BUNDLE_VERSION);
+    buf.extend_from_slice(schema_hash.as_bytes());
+    write_u32(&mut buf, encoded_permissions.len() as u32);
+    buf.extend_from_slice(&encoded_permissions);
+    buf
+}
+
+pub fn decode_permissions_bundle(
+    data: &[u8],
+) -> Result<(SchemaHash, HashMap<TableName, TablePolicies>), CatalogueEncodingError> {
+    if data.is_empty() {
+        return Err(CatalogueEncodingError::TruncatedData {
+            expected: 1,
+            actual: 0,
+        });
+    }
+
+    let version = data[0];
+    if version != PERMISSIONS_BUNDLE_VERSION {
+        return Err(CatalogueEncodingError::UnsupportedVersion {
+            found: version,
+            expected: PERMISSIONS_BUNDLE_VERSION,
+        });
+    }
+
+    let mut offset = 1;
+    let schema_hash = SchemaHash::from_bytes(
+        read_bytes(data, &mut offset, 32)?
+            .try_into()
+            .expect("schema hash length should be exact"),
+    );
+    let payload_len = read_u32(data, &mut offset)? as usize;
+    let payload = read_bytes(data, &mut offset, payload_len)?;
+    let permissions = decode_permissions(payload)?;
+    Ok((schema_hash, permissions))
+}
+
+pub fn encode_permissions_head(schema_hash: SchemaHash, bundle_object_id: ObjectId) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + 32 + 16);
+    buf.push(PERMISSIONS_HEAD_VERSION);
+    buf.extend_from_slice(schema_hash.as_bytes());
+    buf.extend_from_slice(bundle_object_id.uuid().as_bytes());
+    buf
+}
+
+pub fn decode_permissions_head(
+    data: &[u8],
+) -> Result<(SchemaHash, ObjectId), CatalogueEncodingError> {
+    if data.is_empty() {
+        return Err(CatalogueEncodingError::TruncatedData {
+            expected: 1,
+            actual: 0,
+        });
+    }
+
+    let version = data[0];
+    if version != PERMISSIONS_HEAD_VERSION {
+        return Err(CatalogueEncodingError::UnsupportedVersion {
+            found: version,
+            expected: PERMISSIONS_HEAD_VERSION,
+        });
+    }
+
+    let mut offset = 1;
+    let schema_hash = SchemaHash::from_bytes(
+        read_bytes(data, &mut offset, 32)?
+            .try_into()
+            .expect("schema hash length should be exact"),
+    );
+    let bundle_uuid =
+        uuid::Uuid::from_slice(read_bytes(data, &mut offset, 16)?).map_err(|err| {
+            CatalogueEncodingError::DecodeError {
+                message: format!("invalid permissions bundle object id: {err}"),
+            }
+        })?;
+    Ok((schema_hash, ObjectId::from_uuid(bundle_uuid)))
 }
 
 fn encode_operation_policy(
@@ -1816,6 +1902,43 @@ mod tests {
             decoded.get(&TableName::new("todos")),
             permissions.get(&TableName::new("todos"))
         );
+    }
+
+    #[test]
+    fn permissions_bundle_roundtrip_preserves_target_schema() {
+        let schema_hash = SchemaHash::compute(
+            &SchemaBuilder::new()
+                .table(TableSchema::builder("todos").column("title", ColumnType::Text))
+                .build(),
+        );
+        let permissions = HashMap::from([(
+            TableName::new("todos"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+
+        let encoded = encode_permissions_bundle(schema_hash, &permissions);
+        let (decoded_hash, decoded_permissions) =
+            decode_permissions_bundle(&encoded).expect("bundle should decode");
+
+        assert_eq!(decoded_hash, schema_hash);
+        assert_eq!(decoded_permissions, permissions);
+    }
+
+    #[test]
+    fn permissions_head_roundtrip_preserves_bundle_pointer() {
+        let schema_hash = SchemaHash::compute(
+            &SchemaBuilder::new()
+                .table(TableSchema::builder("todos").column("title", ColumnType::Text))
+                .build(),
+        );
+        let bundle_object_id = ObjectId::new();
+
+        let encoded = encode_permissions_head(schema_hash, bundle_object_id);
+        let (decoded_hash, decoded_bundle_object_id) =
+            decode_permissions_head(&encoded).expect("head should decode");
+
+        assert_eq!(decoded_hash, schema_hash);
+        assert_eq!(decoded_bundle_object_id, bundle_object_id);
     }
 
     #[test]

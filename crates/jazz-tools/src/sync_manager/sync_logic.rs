@@ -9,10 +9,7 @@ impl SyncManager {
             metadata
                 .get(crate::metadata::MetadataKey::Type.as_str())
                 .map(|value| value.as_str()),
-            Some(kind)
-                if kind == crate::metadata::ObjectType::CatalogueSchema.as_str()
-                    || kind == crate::metadata::ObjectType::CatalogueLens.as_str()
-                    || kind == crate::metadata::ObjectType::CataloguePermissions.as_str()
+            Some(kind) if crate::metadata::ObjectType::is_catalogue_type_str(kind)
         )
     }
 

@@ -199,9 +199,7 @@ fn is_catalogue_payload(payload: &SyncPayload) -> bool {
                     .metadata
                     .get(crate::metadata::MetadataKey::Type.as_str())
             {
-                return type_str == crate::metadata::ObjectType::CatalogueSchema.as_str()
-                    || type_str == crate::metadata::ObjectType::CatalogueLens.as_str()
-                    || type_str == crate::metadata::ObjectType::CataloguePermissions.as_str();
+                return crate::metadata::ObjectType::is_catalogue_type_str(type_str);
             }
             false
         }
