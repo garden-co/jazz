@@ -138,6 +138,21 @@ describe("`encodeCursor` and `decodeAndValidateCursor`", () => {
     expect(decoded).toEqual(decodedCursor);
   });
 
+  it("accepts resolve as subset of cursor resolveFingerprint", () => {
+    const decodedCursor = buildCursor({
+      resolveFingerprint: { pet: true, friends: true },
+    });
+    const encoded = encodeCursor(decodedCursor);
+
+    const decoded = decodeAndValidateCursor({
+      cursor: encoded,
+      rootId,
+      resolve: { pet: true },
+    });
+
+    expect(decoded).toEqual(decodedCursor);
+  });
+
   it("throws CursorError when root CoValue ID does not match", () => {
     const encoded = encodeCursor(buildCursor());
 
@@ -171,7 +186,26 @@ describe("`encodeCursor` and `decodeAndValidateCursor`", () => {
       }),
     ).toThrowError(
       new CursorError(
-        'Invalid cursor: resolve query mismatch. Expected {"profile":{"email":true}}, got cursor with {"profile":{"name":true}}',
+        'Invalid cursor: resolve query mismatch. Expected {"profile":{"email":true}} to be a subset of {"profile":{"name":true}}',
+      ),
+    );
+  });
+
+  it("throws CursorError when resolve query is a superset of the cursor resolveFingerprint", () => {
+    const decodedCursor = buildCursor({
+      resolveFingerprint: { profile: { name: true } },
+    });
+    const encoded = encodeCursor(decodedCursor);
+
+    expect(() =>
+      decodeAndValidateCursor({
+        cursor: encoded,
+        rootId,
+        resolve: { profile: { name: true, email: true } },
+      }),
+    ).toThrowError(
+      new CursorError(
+        'Invalid cursor: resolve query mismatch. Expected {"profile":{"name":true,"email":true}} to be a subset of {"profile":{"name":true}}',
       ),
     );
   });

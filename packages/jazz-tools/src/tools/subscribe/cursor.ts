@@ -3,6 +3,7 @@ import { cojsonInternals, RawCoID, Stringified } from "cojson";
 import { CoValueCursor, DecodedCoValueCursor } from "./types.js";
 import { z } from "zod/v4";
 import type { RefsToResolve } from "../coValues/deepLoading.js";
+import { isSubsetOfRefsToResolve } from "./utils.js";
 
 const cursorSchema = z.object({
   version: z.literal(1),
@@ -72,16 +73,16 @@ export const decodeAndValidateCursor = ({
     throw new CursorError("Invalid cursor: root CoValue ID mismatch");
   }
 
-  const normalizedResolveFingerprint = cojsonInternals.stableStringify(
-    decodedCursor.resolveFingerprint,
-  );
-  const normalizedResolve = cojsonInternals.stableStringify(
-    resolve === true ? {} : resolve,
-  );
+  const normalizedResolve = resolve === true ? {} : resolve;
 
-  if (normalizedResolveFingerprint !== normalizedResolve) {
+  if (
+    !isSubsetOfRefsToResolve(
+      normalizedResolve,
+      decodedCursor.resolveFingerprint,
+    )
+  ) {
     throw new CursorError(
-      `Invalid cursor: resolve query mismatch. Expected ${normalizedResolve}, got cursor with ${normalizedResolveFingerprint}`,
+      `Invalid cursor: resolve query mismatch. Expected ${JSON.stringify(normalizedResolve)} to be a subset of ${JSON.stringify(decodedCursor.resolveFingerprint)}`,
     );
   }
 
