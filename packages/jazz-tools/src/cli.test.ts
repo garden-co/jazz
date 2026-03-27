@@ -36,6 +36,24 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
+async function captureConsoleLogs<T>(
+  run: () => Promise<T>,
+): Promise<{ result: T; logs: string[] }> {
+  const logs: string[] = [];
+  const spy = vi
+    .spyOn(console, "log")
+    .mockImplementation((message?: unknown, ...rest: unknown[]) => {
+      logs.push([message, ...rest].map((value) => String(value ?? "")).join(" "));
+    });
+
+  try {
+    const result = await run();
+    return { result, logs };
+  } finally {
+    spy.mockRestore();
+  }
+}
+
 function rootSchemaWithoutInlinePermissions(indexImportPath: string = indexPath): string {
   return `
 import { schema as s } from ${JSON.stringify(indexImportPath)};
@@ -150,10 +168,15 @@ describe("cli build", () => {
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
     await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
 
-    await build({ schemaDir: root });
+    const { logs } = await captureConsoleLogs(() => build({ schemaDir: root }));
 
     expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
     expect(await fileExists(join(root, "permissions.test.ts"))).toBe(false);
+    expect(logs).toContain(`Loaded structural schema from ${join(root, "schema.ts")}.`);
+    expect(logs).toContain(`Loaded current permissions from ${join(root, "permissions.ts")}.`);
+    expect(logs).toContain(
+      "Permission-only changes do not create schema hashes or require migrations.",
+    );
   });
 
   it("accepts named permissions exports for transitional ergonomics", async () => {
@@ -275,13 +298,15 @@ describe("cli migrations", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const filePath = await createMigration({
-      serverUrl: "http://localhost:1625",
-      adminSecret: "admin-secret",
-      migrationsDir,
-      fromHash: fromShortHash,
-      toHash: toShortHash,
-    });
+    const { result: filePath, logs } = await captureConsoleLogs(() =>
+      createMigration({
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        migrationsDir,
+        fromHash: fromShortHash,
+        toHash: toShortHash,
+      }),
+    );
 
     const generated = await readFile(filePath, "utf8");
     expect(filePath).toContain(`-unnamed-${fromShortHash}-${toShortHash}.ts`);
@@ -290,6 +315,10 @@ describe("cli migrations", () => {
     expect(generated).toContain(`toHash: "${toShortHash}"`);
     expect(generated).toContain("migrate: {");
     expect(generated).toContain('"notes": s.add.string({ default: null }),');
+    expect(logs).toContain("Migration stubs are only for structural schema changes.");
+    expect(logs).toContain(
+      "Permission-only changes do not create schema hashes or require migrations.",
+    );
   });
 
   it("skips table add/drop steps when inferring a migration stub", async () => {

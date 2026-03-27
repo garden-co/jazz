@@ -38,6 +38,12 @@ Each top-level property of the `schema` object is a table. In the example above,
 
 The `type AppSchema = s.Schema<typeof schema>; export const app: s.App<AppSchema> = s.defineApp(schema);` pattern is there to keep TypeScript hovers short and readable. Without that alias boundary, TypeScript tends to expand the entire schema literal when you hover `app`, `app.todos`, or derived row/query types.
 
+## Lifecycle
+
+- `schema.ts` defines structure. Structural edits create new schema hashes.
+- `permissions.ts` defines the current auth rules. Permission-only edits do not create schema hashes.
+- `migrations/` connect structural schema hashes so old and new shapes stay interoperable.
+
 ## Datatypes and References
 
 - Use `s.string()`, `s.boolean()`, `s.int()`, `s.timestamp()`, and `s.bytes()` for scalar fields.
@@ -54,6 +60,8 @@ The `type AppSchema = s.Schema<typeof schema>; export const app: s.App<AppSchema
 
 Most of the time, schema evolution starts with a normal edit to `schema.ts`. New writes use the new schema immediately.
 
+If you only changed `permissions.ts`, stop there. That updates the active permission bundle and does not require a migration.
+
 When older rows are no longer reachable from the current schema graph, Jazz logs a warning with the exact hashes you need next. These warnings can appear in browser logs, backend logs, or be forwarded from upstream servers. A typical warning looks like this, wrapped for readability:
 
 ```text
@@ -69,7 +77,7 @@ That warning is the handoff from day-to-day schema editing to reviewed compatibi
 
 ### Generate a migration edge with `migrations create`
 
-`migrations create` connects to your Jazz server, loads both schema hashes, and writes a prefilled file into `migrations/{dateCreated}-unnamed-{fromHash}-{toHash}.ts`.
+`migrations create` is only for structural schema changes. It connects to your Jazz server, loads both schema hashes, and writes a prefilled file into `migrations/{dateCreated}-unnamed-{fromHash}-{toHash}.ts`.
 
 ```bash
 npx jazz-tools migrations create <fromHash> <toHash>
@@ -124,6 +132,8 @@ Migration files live in `migrations/` and are always TypeScript, even for Rust a
 ## Permissions
 
 To define row-level policies, add a sibling `permissions.ts` next to `schema.ts`.
+
+Those policies are versioned separately from structural schema hashes, so reviewing or publishing a permission change does not require a migration edge.
 
 <include cwd lang="ts" title="permissions.ts">
   ../examples/docs/todo-server-ts/permissions.ts
