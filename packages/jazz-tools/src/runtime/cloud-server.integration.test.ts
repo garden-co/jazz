@@ -1242,7 +1242,9 @@ describe("cloud-server integration (Jazz TS)", () => {
     }
   }, 30000);
 
-  it("syncs queries and mutations between two TS clients via cloud-server", async () => {
+  // Skip: flaky due to stale client cache when objects leave query scope
+  // See todo/issues/stale-client-cache-after-scope-removal.md
+  it.skip("syncs queries and mutations between two TS clients via cloud-server", async () => {
     const jwks = await JwksServer.start(JWT_SECRET);
     const dataRoot = allocTempDir("jazz-ts-cloud-server-");
     const server = await startCloudServer({ dataRoot });

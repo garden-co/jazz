@@ -69,7 +69,13 @@ high
 
 ## Notes
 
-### Key evidence from CI logs (trace `372fce7ea3e1c77951aae1133d33deb0`)
+### Key evidence from CI logs
+
+Failing runs on `fix/sync-reconnect-on-transport-failure`:
+
+- https://github.com/garden-co/jazz2/actions/runs/23639547938 (most recent, with debug logging)
+- https://github.com/garden-co/jazz2/actions/runs/23637118294
+- https://github.com/garden-co/jazz2/actions/runs/23624850103
 
 - Server processes ALL sync POSTs in 1-5ms, all 200 OK — zero failures
 - No "Sync POST timeout" errors anywhere in the run
@@ -84,10 +90,6 @@ high
 For create/update, the server sends `ObjectUpdated` to client B (either via reactive forwarding when B has an active subscription, or via `queue_initial_sync_to_client` when B creates a new subscription and the object enters scope). The client receives fresh data and its cache is correct.
 
 For delete, the object LEAVES scope. `set_client_query_scope` only handles `newly_visible` (entering scope), not objects exiting scope. And `forward_update_to_clients_except` only forwards to clients with the object in scope — which excludes client B during the 150ms polling gap.
-
-### The `abortStream()` fix (already on branch)
-
-Commit `20125d72` added `this.abortStream()` to `notifyTransportFailure()` in `sync-transport.ts`. This fixed a separate issue where failed POSTs couldn't trigger SSE reconnection (the old stream blocked `connectStream()` via the `streamConnecting` guard). This reduced the failure rate from ~2/6 to ~1/9 but didn't eliminate it — the scope-removal bug is independent.
 
 ### Possible fix directions
 
