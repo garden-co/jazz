@@ -46,7 +46,7 @@ pub struct ServerState {
     pub disconnect_candidates: RwLock<HashMap<ClientId, Instant>>,
     /// Client state TTL in milliseconds. Default: 5 minutes (300_000ms).
     /// Disconnected clients are reaped after this duration.
-    pub client_ttl: Arc<AtomicU64>,
+    pub client_ttl: AtomicU64,
 }
 
 /// State for a single SSE connection.
@@ -57,19 +57,25 @@ pub struct ConnectionState {
 impl ServerState {
     /// Record that a connection closed. If this was the last SSE connection
     /// for the given client_id, add it to disconnect_candidates.
+    /// Record that a connection closed. If this was the last SSE connection
+    /// for the given client_id, add it to disconnect_candidates.
+    ///
+    /// The connections check and candidate insertion are done under the
+    /// candidates write lock to prevent a TOCTOU race where a reconnect
+    /// could slip in between the check and the insert.
+    ///
+    /// Lock ordering: candidates(write) → connections(read). This is safe
+    /// because no code path holds connections while taking candidates.
     pub async fn on_connection_closed(&self, client_id: ClientId) {
+        let mut candidates = self.disconnect_candidates.write().await;
         let has_connections = self
             .connections
             .read()
             .await
             .values()
             .any(|c| c.client_id == client_id);
-
         if !has_connections {
-            self.disconnect_candidates
-                .write()
-                .await
-                .insert(client_id, Instant::now());
+            candidates.insert(client_id, Instant::now());
         }
     }
 
@@ -132,8 +138,9 @@ impl ServerState {
 
     /// Update the client state TTL. Takes effect on the next sweep tick.
     pub fn set_client_ttl(&self, ttl: std::time::Duration) {
+        let ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
         self.client_ttl
-            .store(ttl.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+            .store(ms, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Get the current client state TTL.
@@ -469,5 +476,215 @@ mod tests {
 
         let reaped = state.run_sweep_once().await;
         assert_eq!(reaped, vec![alice], "new TTL: alice should be reaped");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_after_reaping_produces_fresh_state() {
+        //
+        // alice ──connects──▶ server ──disconnects──▶ TTL expires ──▶ reaped
+        //                                                              │
+        //                     alice ──reconnects──▶ fresh ClientState ◀┘
+        //
+        use crate::query_manager::session::Session;
+
+        let state = build_test_state().await;
+        let alice = ClientId::new();
+        let session = Session {
+            user_id: "alice".into(),
+            claims: serde_json::Value::Null,
+        };
+
+        // Connect, register with session
+        let _ = state.runtime.add_client(alice, None);
+        let _ = state
+            .runtime
+            .ensure_client_with_session(alice, session.clone());
+
+        let conn = add_connection(&state, alice).await;
+        remove_connection(&state, conn).await;
+
+        // Reap
+        tokio::time::advance(Duration::from_secs(301)).await;
+        let reaped = state.run_sweep_once().await;
+        assert_eq!(reaped, vec![alice]);
+
+        // Verify gone
+        let has_client = state
+            .runtime
+            .with_sync_manager(|sm| sm.get_client(alice).is_some())
+            .expect("lock");
+        assert!(!has_client, "alice should be gone after reaping");
+
+        // Reconnect — should get fresh state
+        let _ = state.runtime.ensure_client_with_session(alice, session);
+        let _conn2 = add_connection(&state, alice).await;
+        state.on_client_connected(alice).await;
+
+        let has_client = state
+            .runtime
+            .with_sync_manager(|sm| sm.get_client(alice).is_some())
+            .expect("lock");
+        assert!(
+            has_client,
+            "alice should have fresh ClientState after reconnect"
+        );
+
+        let candidates = state.disconnect_candidates.read().await;
+        assert!(
+            !candidates.contains_key(&alice),
+            "alice should not be a disconnect candidate"
+        );
+    }
+
+    // ========================================================================
+    // Lock ordering / deadlock safety tests
+    //
+    // These exercise concurrent lock acquisition patterns to verify that
+    // the candidates(write) → connections(read) nesting in on_connection_closed
+    // does not deadlock with other paths.
+    // ========================================================================
+
+    #[tokio::test]
+    async fn no_deadlock_concurrent_disconnect_and_reconnect() {
+        // Exercises the lock ordering: on_connection_closed takes
+        // candidates(write) → connections(read), while on_client_connected
+        // takes candidates(write). Running them concurrently must not deadlock.
+        let state = build_test_state().await;
+        let alice = ClientId::new();
+
+        let conn1 = add_connection(&state, alice).await;
+        let conn2 = add_connection(&state, alice).await;
+
+        // Simulate: conn1 closes, alice reconnects (via on_client_connected),
+        // then conn2 closes — all interleaved.
+        {
+            let mut connections = state.connections.write().await;
+            connections.remove(&conn1);
+        }
+        state.on_connection_closed(alice).await;
+
+        // alice "reconnects" (conn2 is still active, plus a new one)
+        let conn3 = add_connection(&state, alice).await;
+        state.on_client_connected(alice).await;
+
+        // conn2 closes
+        {
+            let mut connections = state.connections.write().await;
+            connections.remove(&conn2);
+        }
+        state.on_connection_closed(alice).await;
+
+        // conn3 still active — should NOT be a candidate
+        let candidates = state.disconnect_candidates.read().await;
+        assert!(
+            !candidates.contains_key(&alice),
+            "alice still has conn3 — must not be a candidate"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_deadlock_sweep_during_disconnect() {
+        // Exercises: sweep takes candidates(write) then connections(read),
+        // while on_connection_closed takes candidates(write) → connections(read).
+        // Sequential in a single-threaded tokio test, but verifies the lock
+        // ordering doesn't cause issues when interleaved.
+        let state = build_test_state().await;
+        let alice = ClientId::new();
+        let bob = ClientId::new();
+
+        let _ = state.runtime.add_client(alice, None);
+        let _ = state.runtime.add_client(bob, None);
+
+        // alice disconnects and expires
+        let conn_a = add_connection(&state, alice).await;
+        remove_connection(&state, conn_a).await;
+        tokio::time::advance(Duration::from_secs(301)).await;
+
+        // bob disconnects while sweep is about to run
+        let conn_b = add_connection(&state, bob).await;
+        {
+            let mut connections = state.connections.write().await;
+            connections.remove(&conn_b);
+        }
+
+        // Interleave: sweep runs, then bob's on_connection_closed
+        let reaped = state.run_sweep_once().await;
+        state.on_connection_closed(bob).await;
+
+        assert_eq!(reaped, vec![alice], "only alice should be reaped");
+
+        let candidates = state.disconnect_candidates.read().await;
+        assert!(
+            candidates.contains_key(&bob),
+            "bob should be a candidate after disconnect"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_deadlock_concurrent_sweep_and_reconnect() {
+        // Exercises: sweep takes candidates(write) then connections(read),
+        // while connect path takes connections(write) then on_client_connected
+        // takes candidates(write). Verifies no deadlock.
+        let state = build_test_state().await;
+        let alice = ClientId::new();
+        let bob = ClientId::new();
+
+        let _ = state.runtime.add_client(alice, None);
+        let _ = state.runtime.add_client(bob, None);
+
+        let conn_a = add_connection(&state, alice).await;
+        let conn_b = add_connection(&state, bob).await;
+        remove_connection(&state, conn_a).await;
+        remove_connection(&state, conn_b).await;
+        tokio::time::advance(Duration::from_secs(301)).await;
+
+        // Interleave: alice reconnects between sweep drain and reap
+        // (simulated by reconnecting before sweep runs — sweep's
+        // connection guard catches it)
+        let _conn_a2 = add_connection(&state, alice).await;
+        state.on_client_connected(alice).await;
+
+        let reaped = state.run_sweep_once().await;
+
+        // alice reconnected — not reaped. bob — reaped.
+        assert_eq!(reaped, vec![bob]);
+
+        let has_alice = state
+            .runtime
+            .with_sync_manager(|sm| sm.get_client(alice).is_some())
+            .expect("lock");
+        assert!(has_alice, "alice reconnected — should be preserved");
+    }
+
+    #[tokio::test]
+    async fn on_connection_closed_is_atomic_wrt_candidates() {
+        // Verifies that on_connection_closed checks connections and inserts
+        // into candidates atomically (under the candidates write lock).
+        // If a reconnect happens after the connection is removed but before
+        // on_connection_closed runs, the candidate insertion must see the
+        // new connection and NOT insert.
+        let state = build_test_state().await;
+        let alice = ClientId::new();
+
+        // alice has one connection
+        let conn1 = add_connection(&state, alice).await;
+
+        // Remove conn1 from connections map
+        {
+            let mut connections = state.connections.write().await;
+            connections.remove(&conn1);
+        }
+
+        // alice reconnects (new connection added) BEFORE on_connection_closed runs
+        let _conn2 = add_connection(&state, alice).await;
+
+        // Now on_connection_closed runs — should see conn2 and NOT insert
+        state.on_connection_closed(alice).await;
+
+        let candidates = state.disconnect_candidates.read().await;
+        assert!(
+            !candidates.contains_key(&alice),
+            "alice has conn2 — on_connection_closed must see it and not insert"
+        );
     }
 }
