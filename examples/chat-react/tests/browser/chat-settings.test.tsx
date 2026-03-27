@@ -152,6 +152,13 @@ describe("ChatHeader + ChatSettings E2E", () => {
 
     await act(async () => typeInto(nameInput!, "Weekend plans"));
 
+    // Wait for the DB update to round-trip back into the controlled input
+    await waitFor(
+      () => nameInput!.value === "Weekend plans",
+      5000,
+      "Chat name input should reflect the persisted value",
+    );
+
     // Close the sheet
     const closeButton = document
       .querySelector('[data-slot="sheet-content"] .lucide-x')
