@@ -24,4 +24,4 @@ Six gaps identified: (1) outbound messages can arrive out of order (one async ta
 
 ### Protocol unification
 
-Open questions: WebSocket vs HTTP/2 vs both as transports with shared framing, message framing format, backpressure/flow control, compression strategy, interaction with existing SSE path. Comlink spike exists in dev-tools but core protocol is still HTTP+SSE.
+Open questions: WebSocket vs HTTP/2 vs both as transports with shared framing, message framing format, backpressure/flow control, compression strategy, interaction with existing SSE path.

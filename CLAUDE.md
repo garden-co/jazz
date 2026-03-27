@@ -54,7 +54,7 @@ Low-friction capture only — no shaping, no implementation. Use what's in the p
 
 ### Ideas → `todo/ideas/{priority}/{idea-name}.md`
 
-Priority buckets: `1_mvp/` (must-have for first adopters), `2_launch/` (needed for public launch), `3_later/` (post-launch). If unspecified, ask: _"Which bucket: mvp, launch, or later?"_
+Priority buckets: `1_mvp/` (must-have for first adopters), `2_launch/` (needed for public launch), `3_later/` (post-launch). Default to `1_mvp/` unless the user specifies otherwise.
 
 Template (all fields optional, `unknown` always valid):
 
@@ -65,8 +65,6 @@ Template (all fields optional, `unknown` always valid):
 
 ## Why
 
-## Who
-
 ## Rough appetite
 
 [small / medium / big / unknown]
@@ -76,7 +74,7 @@ Template (all fields optional, `unknown` always valid):
 
 After saving, list all ideas grouped by bucket with their `What` line. If mature enough, suggest: _"Run `/project` to shape this into a spec."_
 
-Rules: no gates, no refinement loops, no code. Ideas are uncommitted — capturing one is not a decision to build it.
+Rules: no gates, no refinement loops, no code, in plain english. Ideas are uncommitted — capturing one is not a decision to build it.
 
 ### Issues → `todo/issues/{issue-name}.md`
 
