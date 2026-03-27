@@ -2204,3 +2204,6 @@ export const app: GeneratedApp = {
   stops: new StopQueryBuilder(),
   wasmSchema,
 };
+
+// Re-export for createPolicyTestApp compatibility
+export default app;
