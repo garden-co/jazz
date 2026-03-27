@@ -9,6 +9,7 @@ use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
+use crate::schema_manager::QuerySchemaContext;
 
 /// Error returned when a policy denies an operation.
 #[derive(Debug, Clone)]
@@ -237,6 +238,7 @@ pub enum SyncPayload {
     QuerySubscription {
         query_id: QueryId,
         query: Box<Query>,
+        schema_context: QuerySchemaContext,
         #[serde(with = "query_subscription_session_serde")]
         session: Option<Session>,
         #[serde(default)]
@@ -412,6 +414,7 @@ pub struct PendingQuerySubscription {
     pub client_id: ClientId,
     pub query_id: QueryId,
     pub query: Query,
+    pub schema_context: QuerySchemaContext,
     pub session: Option<Session>,
     pub propagation: QueryPropagation,
 }

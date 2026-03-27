@@ -7337,11 +7337,13 @@ fn server_builds_query_graph_on_subscription() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
+    let schema_context = server_qm.schema_context().query_context();
     server_qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(1),
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -7437,11 +7439,13 @@ fn server_sends_error_for_uncompilable_query_subscription() {
 
     // Query references a table that does not exist in schema.
     let invalid_query = QueryBuilder::new("no_such_table").build();
+    let schema_context = server_qm.schema_context().query_context();
     server_qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(42),
             query: Box::new(invalid_query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -7490,11 +7494,13 @@ fn server_stale_recompile_failure_drops_subscription_and_notifies_client() {
     server_qm.sync_manager_mut().add_client(client_id);
 
     let valid_query = server_qm.query("users").build();
+    let schema_context = server_qm.schema_context().query_context();
     server_qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(7),
             query: Box::new(valid_query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -7589,11 +7595,13 @@ fn server_pushes_new_matches() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
+    let schema_context = server_qm.schema_context().query_context();
     server_qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(1),
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -7685,11 +7693,13 @@ fn server_subscription_telemetry_tracks_grouping_and_unsubscribe_lifecycle() {
             QueryPropagation::Full,
         ),
     ] {
+        let schema_context = server_qm.schema_context().query_context();
         server_qm.sync_manager_mut().push_inbox(InboxEntry {
             source: Source::Client(client_id),
             payload: SyncPayload::QuerySubscription {
                 query_id,
                 query: Box::new(query),
+                schema_context,
                 session: None,
                 propagation,
             },
@@ -7748,11 +7758,13 @@ fn server_does_not_push_non_matching() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
+    let schema_context = server_qm.schema_context().query_context();
     server_qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(1),
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -8063,11 +8075,13 @@ fn mid_tier_forwards_query_subscription_upstream() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
+    let schema_context = mid_tier.schema_context().query_context();
     mid_tier.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: crate::sync_manager::QueryId(42),
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -8113,11 +8127,13 @@ fn mid_tier_does_not_forward_local_only_query_subscription_upstream() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
+    let schema_context = mid_tier.schema_context().query_context();
     mid_tier.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: crate::sync_manager::QueryId(42),
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::LocalOnly,
         },
@@ -8155,11 +8171,13 @@ fn add_server_does_not_replay_downstream_local_only_query_subscription() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
+    let schema_context = mid_tier.schema_context().query_context();
     mid_tier.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(downstream_client),
         payload: SyncPayload::QuerySubscription {
             query_id: crate::sync_manager::QueryId(77),
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::LocalOnly,
         },
@@ -8209,11 +8227,13 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
 
     let query_id = crate::sync_manager::QueryId(42);
 
+    let schema_context = mid_tier.schema_context().query_context();
     mid_tier.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id,
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -8287,11 +8307,13 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
+    let schema_context = mid_tier.schema_context().query_context();
     mid_tier.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: crate::sync_manager::QueryId(42),
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },

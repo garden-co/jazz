@@ -398,6 +398,7 @@ impl SyncManager {
         &mut self,
         query_id: QueryId,
         query: Query,
+        schema_context: crate::schema_manager::QuerySchemaContext,
         session: Option<Session>,
         propagation: QueryPropagation,
     ) {
@@ -407,6 +408,7 @@ impl SyncManager {
                 server_id,
                 query_id,
                 query.clone(),
+                schema_context.clone(),
                 session.clone(),
                 propagation,
             );
@@ -421,6 +423,7 @@ impl SyncManager {
         server_id: ServerId,
         query_id: QueryId,
         query: Query,
+        schema_context: crate::schema_manager::QuerySchemaContext,
         session: Option<Session>,
         propagation: QueryPropagation,
     ) {
@@ -433,6 +436,7 @@ impl SyncManager {
             payload: SyncPayload::QuerySubscription {
                 query_id,
                 query: Box::new(query),
+                schema_context,
                 session,
                 propagation,
             },

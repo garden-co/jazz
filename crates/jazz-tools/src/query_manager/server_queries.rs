@@ -13,9 +13,7 @@ use super::manager::{PolicyCheckState, QueryManager, ServerQuerySubscription};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::policy_graph::PolicyGraph;
 use super::session::Session;
-use super::types::{
-    ComposedBranchName, LoadedRow, RowDescriptor, Schema, TableName, TableSchema, Value,
-};
+use super::types::{LoadedRow, RowDescriptor, Schema, TableName, TableSchema, Value};
 
 enum WriteSchemaResolution {
     Resolved(Box<TableSchema>),
@@ -35,24 +33,19 @@ const SCHEMA_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
 impl QueryManager {
     pub(super) fn build_server_subscription_context(
         &self,
-        query: &crate::query_manager::query::Query,
+        ctx: &crate::schema_manager::QuerySchemaContext,
     ) -> Option<(Arc<Schema>, crate::schema_manager::SchemaContext)> {
         if !self.schema.is_empty() {
             return Some((self.schema.clone(), self.schema_context.clone()));
         }
 
-        let composed = query
-            .branches
-            .first()
-            .and_then(|b| ComposedBranchName::parse(&BranchName::new(b)))?;
-        let full_hash = self.find_schema_by_short_hash(&composed.schema_hash)?;
-        let target_schema = self.known_schemas.get(&full_hash)?.clone();
+        let target_schema = self.known_schemas.get(&ctx.schema_hash)?.clone();
 
         let mut schema_context = crate::schema_manager::SchemaContext::new_with_batch_id(
             target_schema.clone(),
-            &composed.env,
-            &composed.user_branch,
-            composed.batch_id,
+            &ctx.env,
+            &ctx.user_branch,
+            ctx.batch_id,
         );
 
         for lens in self.schema_context.lenses.values() {
@@ -60,7 +53,7 @@ impl QueryManager {
         }
 
         for (hash, schema) in self.known_schemas.iter() {
-            if *hash != full_hash {
+            if *hash != ctx.schema_hash {
                 schema_context.add_pending_schema(schema.clone());
             }
         }
@@ -316,7 +309,7 @@ impl QueryManager {
 
         for sub in pending {
             let Some((schema_for_compile, subscription_context)) =
-                self.build_server_subscription_context(&sub.query)
+                self.build_server_subscription_context(&sub.schema_context)
             else {
                 deferred.push(sub);
                 continue;
@@ -423,6 +416,7 @@ impl QueryManager {
                 self.sync_manager.send_query_subscription_to_servers(
                     sub.query_id,
                     sub.query.clone(),
+                    subscription_context.query_context(),
                     session_for_policy.clone(),
                     sub.propagation,
                 );
@@ -605,16 +599,7 @@ impl QueryManager {
         table_name: TableName,
         branch_name: BranchName,
     ) -> WriteSchemaResolution {
-        let parsed_branch = ComposedBranchName::parse(&branch_name);
-        let schema_hash = self
-            .branch_schema_map
-            .get(branch_name.as_str())
-            .copied()
-            .or_else(|| {
-                parsed_branch
-                    .as_ref()
-                    .and_then(|composed| self.find_schema_by_short_hash(&composed.schema_hash))
-            });
+        let schema_hash = self.branch_schema_map.get(branch_name.as_str()).copied();
 
         if let Some(schema_hash) = schema_hash {
             self.branch_schema_map
@@ -655,10 +640,6 @@ impl QueryManager {
                 .map(Box::new)
                 .map(WriteSchemaResolution::Resolved)
                 .unwrap_or(WriteSchemaResolution::Unresolved);
-        }
-
-        if parsed_branch.is_some() {
-            return WriteSchemaResolution::PendingSchema;
         }
 
         WriteSchemaResolution::Unresolved

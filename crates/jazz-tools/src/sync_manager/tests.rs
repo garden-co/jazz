@@ -2080,6 +2080,7 @@ fn send_query_subscription_includes_session() {
     sm.send_query_subscription_to_servers(
         QueryId(1),
         query.clone(),
+        test_query_schema_context(),
         Some(session.clone()),
         QueryPropagation::Full,
     );
@@ -2096,6 +2097,7 @@ fn send_query_subscription_includes_session() {
                     query: sent_query,
                     session: sent_session,
                     propagation,
+                    ..
                 },
         } => {
             assert_eq!(*id, server_id);
@@ -2555,6 +2557,15 @@ fn ack_state_does_not_affect_commit_id_sync() {
 // QuerySubscription session fallback (inbox.rs fix)
 // ========================================================================
 
+fn test_query_schema_context() -> crate::schema_manager::QuerySchemaContext {
+    crate::schema_manager::QuerySchemaContext::new(
+        "dev",
+        crate::query_manager::types::SchemaHash::from_bytes([7; 32]),
+        "main",
+        crate::query_manager::types::BatchId::nil(),
+    )
+}
+
 /// Helper: push a QuerySubscription from a client and drain pending subs.
 fn push_query_subscription(
     sm: &mut SyncManager,
@@ -2568,6 +2579,7 @@ fn push_query_subscription(
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(1),
             query: Box::new(query),
+            schema_context: test_query_schema_context(),
             session: payload_session,
             propagation: QueryPropagation::Full,
         },

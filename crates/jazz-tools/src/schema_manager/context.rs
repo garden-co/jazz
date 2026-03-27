@@ -229,6 +229,16 @@ impl SchemaContext {
         self.branch_name_for_hash(self.current_hash)
     }
 
+    /// Build the query-time schema context needed on the wire.
+    pub fn query_context(&self) -> QuerySchemaContext {
+        QuerySchemaContext::new(
+            self.env.clone(),
+            self.current_hash,
+            self.user_branch.clone(),
+            self.batch_id,
+        )
+    }
+
     pub fn branch_name_for_hash(&self, schema_hash: SchemaHash) -> BranchName {
         ComposedBranchName::new(&self.env, schema_hash, &self.user_branch, self.batch_id)
             .to_branch_name()

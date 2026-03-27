@@ -333,6 +333,7 @@ impl SyncManager {
             SyncPayload::QuerySubscription {
                 query_id,
                 query,
+                schema_context,
                 session,
                 propagation,
             } => {
@@ -385,6 +386,7 @@ impl SyncManager {
                         client_id,
                         query_id: *query_id,
                         query: query.as_ref().clone(),
+                        schema_context: schema_context.clone(),
                         session: effective_session,
                         propagation: *propagation,
                     });

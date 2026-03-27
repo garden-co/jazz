@@ -284,6 +284,7 @@ impl QueryManager {
             self.sync_manager.send_query_subscription_to_servers(
                 query_id,
                 sync_query,
+                self.schema_context.query_context(),
                 session,
                 propagation,
             );
@@ -347,32 +348,46 @@ impl QueryManager {
     /// Replay all currently active local and downstream query subscriptions
     /// to a newly added upstream server.
     fn replay_active_query_subscriptions_to_server(&mut self, server_id: ServerId) {
-        let local_subs: Vec<(QueryId, Query, Option<Session>, QueryPropagation)> = self
+        let local_subs: Vec<(
+            QueryId,
+            Query,
+            crate::schema_manager::QuerySchemaContext,
+            Option<Session>,
+            QueryPropagation,
+        )> = self
             .subscriptions
             .iter()
             .map(|(sub_id, sub)| {
                 (
                     QueryId(sub_id.0),
                     self.sync_query_payload_for_upstream(&sub.query),
+                    self.schema_context.query_context(),
                     sub.session.clone(),
                     sub.propagation,
                 )
             })
             .collect();
 
-        for (query_id, query, session, propagation) in local_subs {
+        for (query_id, query, schema_context, session, propagation) in local_subs {
             if self.should_send_local_subscription_upstream(propagation) {
                 self.sync_manager.send_query_subscription_to_server(
                     server_id,
                     query_id,
                     query,
+                    schema_context,
                     session,
                     propagation,
                 );
             }
         }
 
-        let downstream_subs: Vec<(QueryId, Query, Option<Session>, QueryPropagation)> = self
+        let downstream_subs: Vec<(
+            QueryId,
+            Query,
+            crate::schema_manager::QuerySchemaContext,
+            Option<Session>,
+            QueryPropagation,
+        )> = self
             .server_subscriptions
             .iter()
             .filter(|(_, sub)| sub.propagation == QueryPropagation::Full)
@@ -380,17 +395,19 @@ impl QueryManager {
                 (
                     *query_id,
                     sub.query.clone(),
+                    sub.schema_context.query_context(),
                     sub.session.clone(),
                     sub.propagation,
                 )
             })
             .collect();
 
-        for (query_id, query, session, propagation) in downstream_subs {
+        for (query_id, query, schema_context, session, propagation) in downstream_subs {
             self.sync_manager.send_query_subscription_to_server(
                 server_id,
                 query_id,
                 query,
+                schema_context,
                 session,
                 propagation,
             );
