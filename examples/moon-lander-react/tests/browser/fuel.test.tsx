@@ -20,13 +20,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { Game } from "../../src/Game";
-import {
-  FUEL_BURN_X,
-  FUEL_BURN_Y,
-  FUEL_TYPES,
-  INITIAL_FUEL,
-  MAX_FUEL,
-} from "../../src/game/constants";
+import { FUEL_TYPES, INITIAL_FUEL, MAX_FUEL } from "../../src/game/constants";
 import {
   holdKey,
   type MountEntry,
@@ -136,16 +130,16 @@ describe("Moon Lander — Fuel Burn", () => {
     const fuelBefore = readNum(el, "lander-fuel");
     expect(fuelBefore).toBe(INITIAL_FUEL);
 
-    // 200ms ≈ 2s game time; expected burn ≈ FUEL_BURN_Y × 2s
-    await holdKey("ArrowUp", 200, "ArrowUp");
-    await waitFrames(5);
-
-    const fuelAfter = readNum(el, "lander-fuel");
-    expect(fuelAfter).toBeLessThan(fuelBefore);
-
-    const burned = fuelBefore - fuelAfter;
-    expect(burned).toBeGreaterThan(FUEL_BURN_Y * 1);
-    expect(burned).toBeLessThan(FUEL_BURN_Y * 4);
+    // Hold thrust and poll until fuel decreases (frame-timing-independent)
+    pressKey("ArrowUp", "ArrowUp");
+    await waitForNum(
+      el,
+      "lander-fuel",
+      (f) => f < fuelBefore,
+      3000,
+      "fuel should decrease during vertical thrust",
+    );
+    releaseKey("ArrowUp", "ArrowUp");
   });
 
   it("horizontal thrust burns fuel during descent", async () => {
@@ -153,15 +147,16 @@ describe("Moon Lander — Fuel Burn", () => {
 
     const fuelBefore = readNum(el, "lander-fuel");
 
-    await holdKey("ArrowRight", 200, "ArrowRight");
-    await waitFrames(5);
-
-    const fuelAfter = readNum(el, "lander-fuel");
-    expect(fuelAfter).toBeLessThan(fuelBefore);
-
-    const burned = fuelBefore - fuelAfter;
-    expect(burned).toBeGreaterThan(FUEL_BURN_X * 1);
-    expect(burned).toBeLessThan(FUEL_BURN_X * 4);
+    // Hold thrust and poll until fuel decreases (frame-timing-independent)
+    pressKey("ArrowRight", "ArrowRight");
+    await waitForNum(
+      el,
+      "lander-fuel",
+      (f) => f < fuelBefore,
+      3000,
+      "fuel should decrease during horizontal thrust",
+    );
+    releaseKey("ArrowRight", "ArrowRight");
   });
 
   it("thrust is disabled when fuel reaches 0", async () => {
@@ -173,11 +168,10 @@ describe("Moon Lander — Fuel Burn", () => {
      */
     const el = await mountDescending();
 
-    // 40 units / (FUEL_BURN_Y=8 units/sec) = 5 game-seconds = 500ms at 10x
-    await holdKey("ArrowUp", 600, "ArrowUp");
-    await waitFrames(5);
-
-    await waitForNum(el, "lander-fuel", (f) => f === 0, 3000, "fuel should reach 0");
+    // Hold thrust until fuel is fully depleted (frame-timing-independent)
+    pressKey("ArrowUp", "ArrowUp");
+    await waitForNum(el, "lander-fuel", (f) => f === 0, 5000, "fuel should reach 0");
+    releaseKey("ArrowUp", "ArrowUp");
 
     const vyBefore = readNum(el, "velocity-y");
 

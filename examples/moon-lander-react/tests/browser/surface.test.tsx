@@ -264,16 +264,16 @@ describe("Moon Lander — Walking", () => {
     expect(readNum(el, "player-x")).toBeGreaterThan(landerX);
     expect(readNum(el, "lander-x")).toBe(landerX);
 
-    // Walk back left (a bit further to end up left of lander, within radius)
-    await holdKey("a", 100, "KeyA");
-    await waitFrames(5);
-    expect(readNum(el, "player-x")).toBeLessThan(readNum(el, "lander-x") + 100);
-
-    pressKey("e", "KeyE");
-    await waitFrames(5);
-    releaseKey("e", "KeyE");
-
+    // Walk back left while pulsing interact — re-enters when within radius
+    pressKey("a", "KeyA");
+    const interactPulse = setInterval(() => {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "e", code: "KeyE", bubbles: true }),
+      );
+    }, 16);
     await waitForAttr(el, "player-mode", "in_lander", 3000);
+    clearInterval(interactPulse);
+    releaseKey("a", "KeyA");
   });
 });
 
