@@ -87,6 +87,20 @@ impl QueryManager {
             .get_leaf_head_ids_for_prefix(id, &composed_branch.prefix(), storage)
             .ok()?;
 
+        let missing_leaf_branches: Vec<String> = {
+            let object = self.sync_manager.object_manager.get(id)?;
+            leaf_heads
+                .keys()
+                .filter(|leaf_branch_name| !object.branches.contains_key(*leaf_branch_name))
+                .map(|leaf_branch_name| leaf_branch_name.as_str().to_string())
+                .collect()
+        };
+        if !missing_leaf_branches.is_empty() {
+            self.sync_manager
+                .object_manager
+                .get_or_load(id, storage, &missing_leaf_branches)?;
+        }
+
         let object = self.sync_manager.object_manager.get(id)?;
         let mut resolved: Option<ResolvedWriteHead> = None;
         for (leaf_branch_name, head_id) in leaf_heads {

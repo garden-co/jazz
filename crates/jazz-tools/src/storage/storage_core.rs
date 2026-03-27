@@ -4,19 +4,21 @@ use std::ops::Bound;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId};
+use crate::object::{BranchName, ObjectId, PrefixBatchCatalog, PrefixBatchMeta};
 use crate::sync_manager::DurabilityTier;
 
-use crate::query_manager::types::Value;
+use crate::query_manager::types::{BatchId, Value};
 
 use super::key_codec::{
     ack_key, branch_tips_key, catalogue_manifest_op_key, catalogue_manifest_op_prefix,
     commit_branch_key, commit_key, commit_prefix, index_entry_key, index_prefix,
     index_range_scan_bounds, index_value_prefix, obj_meta_key, parse_branch_from_table_prefix_key,
-    parse_uuid_from_index_key, prefix_leaf_branches_key, table_prefix_branch_key,
-    table_prefix_branch_prefix,
+    parse_uuid_from_index_key, prefix_batch_meta_key, prefix_batch_meta_prefix,
+    prefix_leaf_batches_key, table_prefix_branch_key, table_prefix_branch_prefix,
 };
-use super::{CatalogueManifest, CatalogueManifestOp, LoadedBranch, PrefixLeafUpdate, StorageError};
+use super::{
+    CatalogueManifest, CatalogueManifestOp, LoadedBranch, PrefixBatchUpdate, StorageError,
+};
 
 fn encode_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, StorageError> {
     serde_json::to_vec(value).map_err(|e| StorageError::IoError(format!("serialize {label}: {e}")))
@@ -103,14 +105,42 @@ pub(super) fn load_commit_branch_core(
     }
 }
 
-pub(super) fn load_prefix_leaf_branches_core(
+pub(super) fn load_prefix_batch_catalog_core(
     object_id: ObjectId,
     prefix: &str,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<HashSet<BranchName>>, StorageError> {
-    let key = prefix_leaf_branches_key(object_id, prefix);
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<Option<PrefixBatchCatalog>, StorageError> {
+    let leaf_key = prefix_leaf_batches_key(object_id, prefix);
+    let meta_prefix = prefix_batch_meta_prefix(object_id, prefix);
+
+    let leaf_batches: HashSet<BatchId> = match get(&leaf_key)? {
+        Some(data) => decode_json(&data, "prefix leaf batches")?,
+        None => HashSet::new(),
+    };
+    let entries = scan_prefix(&meta_prefix)?;
+    if leaf_batches.is_empty() && entries.is_empty() {
+        return Ok(None);
+    }
+
+    let mut catalog = PrefixBatchCatalog::default();
+    for (_key, data) in entries {
+        let meta: PrefixBatchMeta = decode_json(&data, "prefix batch meta")?;
+        catalog.batches.insert(meta.batch_id, meta);
+    }
+    catalog.leaf_batches = leaf_batches.into_iter().collect();
+    Ok(Some(catalog))
+}
+
+fn load_prefix_batch_meta(
+    object_id: ObjectId,
+    prefix: &str,
+    batch_id: BatchId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<PrefixBatchMeta>, StorageError> {
+    let key = prefix_batch_meta_key(object_id, prefix, batch_id);
     match get(&key)? {
-        Some(data) => Ok(Some(decode_json(&data, "prefix leaf branches")?)),
+        Some(data) => Ok(Some(decode_json(&data, "prefix batch meta")?)),
         None => Ok(None),
     }
 }
@@ -143,7 +173,7 @@ pub(super) fn append_commit_core(
     object_id: ObjectId,
     branch: &BranchName,
     commit: Commit,
-    prefix_leaf_update: Option<PrefixLeafUpdate>,
+    prefix_batch_update: Option<PrefixBatchUpdate>,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
@@ -171,18 +201,34 @@ pub(super) fn append_commit_core(
     let tips_json = encode_json(&tips, "tips")?;
     set(&tips_key, &tips_json)?;
 
-    if let Some(update) = prefix_leaf_update {
-        let leaf_key = prefix_leaf_branches_key(object_id, &update.prefix);
-        let mut leaf_branches: HashSet<BranchName> = match get(&leaf_key)? {
-            Some(data) => decode_json(&data, "prefix leaf branches")?,
+    if let Some(update) = prefix_batch_update {
+        for parent_batch_id in &update.increment_parent_child_counts {
+            if let Some(mut parent_meta) =
+                load_prefix_batch_meta(object_id, &update.prefix, *parent_batch_id, |key| get(key))?
+            {
+                parent_meta.child_count = parent_meta.child_count.saturating_add(1);
+                let parent_key = prefix_batch_meta_key(object_id, &update.prefix, *parent_batch_id);
+                let parent_json = encode_json(&parent_meta, "prefix batch meta")?;
+                set(&parent_key, &parent_json)?;
+            }
+        }
+
+        let leaf_key = prefix_leaf_batches_key(object_id, &update.prefix);
+        let mut leaf_batches: HashSet<BatchId> = match get(&leaf_key)? {
+            Some(data) => decode_json(&data, "prefix leaf batches")?,
             None => HashSet::new(),
         };
-        for removed_branch in update.remove_leaf_branches {
-            leaf_branches.remove(&removed_branch);
+        for removed_batch in update.remove_leaf_batches {
+            leaf_batches.remove(&removed_batch);
         }
-        leaf_branches.insert(*branch);
-        let leaf_json = encode_json(&leaf_branches, "prefix leaf branches")?;
+        leaf_batches.insert(update.batch_meta.batch_id);
+        let leaf_json = encode_json(&leaf_batches, "prefix leaf batches")?;
         set(&leaf_key, &leaf_json)?;
+
+        let batch_key =
+            prefix_batch_meta_key(object_id, &update.prefix, update.batch_meta.batch_id);
+        let batch_json = encode_json(&update.batch_meta, "prefix batch meta")?;
+        set(&batch_key, &batch_json)?;
     }
 
     Ok(())

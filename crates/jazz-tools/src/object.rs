@@ -6,6 +6,7 @@ use smolset::SmolSet;
 use uuid::Uuid;
 
 use crate::commit::{Commit, CommitId};
+use crate::query_manager::types::BatchId;
 
 /// Interned UUIDv7 identifying an object.
 /// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
@@ -141,6 +142,37 @@ pub struct Branch {
     pub loaded_state: BranchLoadedState,
 }
 
+/// Persisted metadata for one batch under a shared branch prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefixBatchMeta {
+    pub batch_id: BatchId,
+    pub batch_ord: u32,
+    pub root_commit_id: CommitId,
+    pub head_commit_id: CommitId,
+    pub first_timestamp: u64,
+    pub last_timestamp: u64,
+    pub parent_batch_ords: Vec<u32>,
+    pub child_count: u32,
+}
+
+/// In-memory per-prefix batch catalog.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PrefixBatchCatalog {
+    pub batches: HashMap<BatchId, PrefixBatchMeta>,
+    pub leaf_batches: SmolSet<[BatchId; 4]>,
+}
+
+impl PrefixBatchCatalog {
+    pub fn next_batch_ord(&self) -> u32 {
+        self.batches
+            .values()
+            .map(|meta| meta.batch_ord)
+            .max()
+            .map(|max_ord| max_ord.saturating_add(1))
+            .unwrap_or(0)
+    }
+}
+
 /// An object with metadata and named branches.
 #[derive(Debug, Clone)]
 pub struct Object {
@@ -148,7 +180,7 @@ pub struct Object {
     pub metadata: HashMap<String, String>,
     pub branches: HashMap<BranchName, Branch>,
     pub commit_branches: HashMap<CommitId, BranchName>,
-    pub leaf_branches_by_prefix: HashMap<String, SmolSet<[BranchName; 4]>>,
+    pub prefix_batches: HashMap<String, PrefixBatchCatalog>,
 }
 
 impl Object {
@@ -158,7 +190,7 @@ impl Object {
             metadata: metadata.unwrap_or_default(),
             branches: HashMap::new(),
             commit_branches: HashMap::new(),
-            leaf_branches_by_prefix: HashMap::new(),
+            prefix_batches: HashMap::new(),
         }
     }
 }

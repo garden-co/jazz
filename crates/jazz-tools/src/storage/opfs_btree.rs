@@ -31,15 +31,18 @@ use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
 use crate::sync_manager::DurabilityTier;
 
+#[cfg(test)]
+use super::PrefixBatchMeta;
 use super::{
-    CatalogueManifest, CatalogueManifestOp, LoadedBranch, PrefixLeafUpdate, Storage, StorageError,
+    CatalogueManifest, CatalogueManifestOp, LoadedBranch, PrefixBatchCatalog, PrefixBatchUpdate,
+    Storage, StorageError,
     key_codec::increment_bytes,
     storage_core::{
         append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
         create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
         index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
         load_catalogue_manifest_core, load_commit_branch_core, load_object_metadata_core,
-        load_prefix_leaf_branches_core, load_table_prefix_branches_core,
+        load_prefix_batch_catalog_core, load_table_prefix_branches_core,
         register_table_prefix_branch_core, set_branch_tails_core, store_ack_tier_core,
     },
 };
@@ -265,12 +268,17 @@ impl Storage for OpfsBTreeStorage {
         load_commit_branch_core(object_id, commit_id, |key| self.tree_read(key))
     }
 
-    fn load_prefix_leaf_branches(
+    fn load_prefix_batch_catalog(
         &self,
         object_id: ObjectId,
         prefix: &str,
-    ) -> Result<Option<HashSet<BranchName>>, StorageError> {
-        load_prefix_leaf_branches_core(object_id, prefix, |key| self.tree_read(key))
+    ) -> Result<Option<PrefixBatchCatalog>, StorageError> {
+        load_prefix_batch_catalog_core(
+            object_id,
+            prefix,
+            |key| self.tree_read(key),
+            |key_prefix| self.tree_scan_prefix(key_prefix),
+        )
     }
 
     fn register_table_prefix_branch(
@@ -299,13 +307,13 @@ impl Storage for OpfsBTreeStorage {
         object_id: ObjectId,
         branch: &BranchName,
         commit: Commit,
-        prefix_leaf_update: Option<PrefixLeafUpdate>,
+        prefix_batch_update: Option<PrefixBatchUpdate>,
     ) -> Result<(), StorageError> {
         append_commit_core(
             object_id,
             branch,
             commit,
-            prefix_leaf_update,
+            prefix_batch_update,
             |key| self.tree_read(key),
             |key, value| self.tree_insert(key, value),
         )
@@ -550,6 +558,8 @@ mod tests {
         let prefix = "dev-070707070707-main";
         let branch1 = BranchName::new(format!("{prefix}-b{:032x}", 1));
         let branch2 = BranchName::new(format!("{prefix}-b{:032x}", 2));
+        let batch1_id = crate::query_manager::types::BatchId::from_uuid(uuid::Uuid::from_u128(1));
+        let batch2_id = crate::query_manager::types::BatchId::from_uuid(uuid::Uuid::from_u128(2));
 
         let commit1 = make_commit(b"first");
         let commit1_id = commit1.id();
@@ -557,10 +567,21 @@ mod tests {
             .append_commit(
                 id,
                 &branch1,
-                commit1,
-                Some(PrefixLeafUpdate {
+                commit1.clone(),
+                Some(PrefixBatchUpdate {
                     prefix: prefix.to_string(),
-                    remove_leaf_branches: HashSet::new(),
+                    batch_meta: PrefixBatchMeta {
+                        batch_id: batch1_id,
+                        batch_ord: 0,
+                        root_commit_id: commit1_id,
+                        head_commit_id: commit1_id,
+                        first_timestamp: commit1.timestamp,
+                        last_timestamp: commit1.timestamp,
+                        parent_batch_ords: Vec::new(),
+                        child_count: 0,
+                    },
+                    remove_leaf_batches: HashSet::new(),
+                    increment_parent_child_counts: Vec::new(),
                 }),
             )
             .unwrap();
@@ -572,10 +593,21 @@ mod tests {
             .append_commit(
                 id,
                 &branch2,
-                commit2,
-                Some(PrefixLeafUpdate {
+                commit2.clone(),
+                Some(PrefixBatchUpdate {
                     prefix: prefix.to_string(),
-                    remove_leaf_branches: HashSet::from([branch1]),
+                    batch_meta: PrefixBatchMeta {
+                        batch_id: batch2_id,
+                        batch_ord: 1,
+                        root_commit_id: commit2_id,
+                        head_commit_id: commit2_id,
+                        first_timestamp: commit2.timestamp,
+                        last_timestamp: commit2.timestamp,
+                        parent_batch_ords: vec![0],
+                        child_count: 0,
+                    },
+                    remove_leaf_batches: HashSet::from([batch1_id]),
+                    increment_parent_child_counts: vec![batch1_id],
                 }),
             )
             .unwrap();
@@ -589,8 +621,11 @@ mod tests {
             Some(branch2)
         );
         assert_eq!(
-            storage.load_prefix_leaf_branches(id, prefix).unwrap(),
-            Some(HashSet::from([branch2]))
+            storage
+                .load_prefix_batch_catalog(id, prefix)
+                .unwrap()
+                .map(|catalog| catalog.leaf_batches.iter().copied().collect::<HashSet<_>>()),
+            Some(HashSet::from([batch2_id]))
         );
 
         storage

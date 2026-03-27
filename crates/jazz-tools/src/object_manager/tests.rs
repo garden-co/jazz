@@ -1,6 +1,6 @@
 use super::*;
 use crate::commit::CommitAckState;
-use crate::query_manager::types::{BatchId, BranchPrefixName, SchemaHash};
+use crate::query_manager::types::{BatchId, BranchPrefixName, ComposedBranchName, SchemaHash};
 use crate::storage::MemoryStorage;
 use uuid::Uuid;
 
@@ -1119,12 +1119,20 @@ fn add_commit_accepts_new_batch_root_merge_and_tracks_prefix_leaves() {
     assert!(!leaf_heads.contains_key(&batch1));
     assert!(!leaf_heads.contains_key(&batch2));
 
-    let stored_leaf_branches = io
-        .load_prefix_leaf_branches(object_id, &prefix.branch_prefix())
+    let stored_catalog = io
+        .load_prefix_batch_catalog(object_id, &prefix.branch_prefix())
         .unwrap()
         .unwrap();
-    assert_eq!(stored_leaf_branches.len(), 1);
-    assert!(stored_leaf_branches.contains(&batch3));
+    let batch3_id = ComposedBranchName::parse(&batch3).unwrap().batch_id;
+    assert_eq!(stored_catalog.leaf_batches.len(), 1);
+    assert!(stored_catalog.leaf_batches.contains(&batch3_id));
+    assert_eq!(
+        stored_catalog
+            .batches
+            .get(&batch3_id)
+            .map(|meta| meta.head_commit_id),
+        Some(merged_head)
+    );
 
     assert_eq!(
         io.load_commit_branch(object_id, head1).unwrap(),
@@ -1197,14 +1205,14 @@ fn get_leaf_head_ids_for_prefix_cold_loads_only_leaf_branches() {
     assert_eq!(leaf_heads.get(&batch3), Some(&merged_head));
 
     let object = reloaded.get(object_id).unwrap();
-    assert_eq!(object.branches.len(), 1);
-    assert!(object.branches.contains_key(&batch3));
+    assert!(object.branches.is_empty());
+    let batch3_id = ComposedBranchName::parse(&batch3).unwrap().batch_id;
     assert_eq!(
         object
-            .leaf_branches_by_prefix
+            .prefix_batches
             .get(&prefix.branch_prefix())
-            .map(|branches| branches.iter().copied().collect::<HashSet<_>>()),
-        Some(HashSet::from([batch3]))
+            .map(|catalog| catalog.leaf_batches.iter().copied().collect::<HashSet<_>>()),
+        Some(HashSet::from([batch3_id]))
     );
 }
 
