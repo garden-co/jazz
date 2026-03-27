@@ -56,7 +56,7 @@ fn index_key_too_large_error(
     }
 }
 
-fn encode_index_branch_key(branch: &str) -> String {
+pub(super) fn encode_index_branch_key(branch: &str) -> String {
     let branch_name = BranchName::new(branch.to_string());
     if let Some(composed_branch) = ComposedBranchName::parse(&branch_name) {
         format!("c{}", composed_branch.batch_id.branch_segment())

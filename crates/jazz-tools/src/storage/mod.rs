@@ -532,7 +532,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 // MemoryStorage - In-memory implementation for testing and main thread
 // ============================================================================
 
-/// Index key: (table, column, branch).
+/// Index key: (table, column, compact branch key).
 type IndexKey = (String, String, String);
 
 /// Index storage: encoded_value -> row_ids. BTreeMap for correct range query ordering.
@@ -937,7 +937,11 @@ impl Storage for MemoryStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         validate_index_value_size(table, column, branch, value)?;
-        let key = (table.to_string(), column.to_string(), branch.to_string());
+        let key = (
+            table.to_string(),
+            column.to_string(),
+            key_codec::encode_index_branch_key(branch),
+        );
         let index = self.indices.entry(key).or_default();
         let encoded = encode_value(value);
         index.entry(encoded).or_default().insert(row_id);
@@ -958,7 +962,11 @@ impl Storage for MemoryStorage {
         ) {
             return Ok(());
         }
-        let key = (table.to_string(), column.to_string(), branch.to_string());
+        let key = (
+            table.to_string(),
+            column.to_string(),
+            key_codec::encode_index_branch_key(branch),
+        );
         if let Some(index) = self.indices.get_mut(&key) {
             let encoded = encode_value(value);
             if let Some(row_ids) = index.get_mut(&encoded) {
@@ -978,7 +986,11 @@ impl Storage for MemoryStorage {
         branch: &str,
         value: &Value,
     ) -> Vec<ObjectId> {
-        let key = (table.to_string(), column.to_string(), branch.to_string());
+        let key = (
+            table.to_string(),
+            column.to_string(),
+            key_codec::encode_index_branch_key(branch),
+        );
         let Some(index) = self.indices.get(&key) else {
             return Vec::new();
         };
@@ -1009,7 +1021,11 @@ impl Storage for MemoryStorage {
         start: Bound<&Value>,
         end: Bound<&Value>,
     ) -> Vec<ObjectId> {
-        let key = (table.to_string(), column.to_string(), branch.to_string());
+        let key = (
+            table.to_string(),
+            column.to_string(),
+            key_codec::encode_index_branch_key(branch),
+        );
         let Some(index) = self.indices.get(&key) else {
             return Vec::new();
         };
@@ -1051,7 +1067,11 @@ impl Storage for MemoryStorage {
     }
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
-        let key = (table.to_string(), column.to_string(), branch.to_string());
+        let key = (
+            table.to_string(),
+            column.to_string(),
+            key_codec::encode_index_branch_key(branch),
+        );
         let Some(index) = self.indices.get(&key) else {
             return Vec::new();
         };
