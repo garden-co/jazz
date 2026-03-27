@@ -704,7 +704,7 @@ describe("Creating and loading CoValues with cursors", () => {
       assertLoaded(snapshot);
 
       expect(snapshot.secret?.$jazz.loadingState).toBe(
-        CoValueLoadingState.UNAUTHORIZED,
+        CoValueLoadingState.UNAVAILABLE,
       );
     });
 
@@ -748,7 +748,7 @@ describe("Creating and loading CoValues with cursors", () => {
       assertLoaded(snapshot);
 
       expect(snapshot.secret?.$jazz.loadingState).toBe(
-        CoValueLoadingState.UNAUTHORIZED,
+        CoValueLoadingState.UNAVAILABLE,
       );
 
       const latest = await Document.load(original.$jazz.id, {

@@ -1,11 +1,6 @@
 import { base58 } from "@scure/base";
 import { cojsonInternals, RawCoID, Stringified } from "cojson";
-import {
-  CoValueCursor,
-  CoValueErrorState,
-  CoValueLoadingState,
-  DecodedCoValueCursor,
-} from "./types.js";
+import { CoValueCursor, DecodedCoValueCursor } from "./types.js";
 import { z } from "zod/v4";
 import type { RefsToResolve } from "../coValues/deepLoading.js";
 
@@ -14,16 +9,6 @@ const cursorSchema = z.object({
   rootId: z.string<RawCoID>(),
   resolveFingerprint: z.record(z.string(), z.any()),
   frontiers: z.record(z.string<RawCoID>(), z.record(z.string(), z.number())),
-  valueErrors: z
-    .record(
-      z.string<RawCoID>(),
-      z.enum([
-        CoValueLoadingState.UNAVAILABLE,
-        CoValueLoadingState.UNAUTHORIZED,
-        CoValueLoadingState.DELETED,
-      ]) satisfies z.ZodEnum<Record<CoValueErrorState, CoValueErrorState>>,
-    )
-    .optional(),
 }) satisfies z.ZodType<DecodedCoValueCursor>;
 
 export class CursorError extends Error {
@@ -48,12 +33,6 @@ export const encodeCursor = (
           !decodedCursor.resolveFingerprint
             ? {}
             : decodedCursor.resolveFingerprint,
-
-        // remove empty valueErrors to reduce the cursor size
-        ...(decodedCursor.valueErrors &&
-        Object.keys(decodedCursor.valueErrors).length === 0
-          ? { valueErrors: undefined }
-          : {}),
       }),
     ),
   )}`;

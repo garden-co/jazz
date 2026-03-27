@@ -28,7 +28,7 @@ export class CoValueCoreSubscription {
     value: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE,
   ) => void;
   private skipRetry?: boolean;
-  private frontier?: CoValueFrontier;
+  private frontier?: CoValueFrontier | typeof CoValueLoadingState.UNAVAILABLE;
 
   constructor(
     localNode: LocalNode,
@@ -48,7 +48,9 @@ export class CoValueCoreSubscription {
     this.source = localNode.getCoValue(id as RawCoID);
 
     if (decodedCursor) {
-      this.frontier = decodedCursor.frontiers[id as RawCoID];
+      this.frontier =
+        decodedCursor.frontiers[id as RawCoID] ??
+        CoValueLoadingState.UNAVAILABLE;
     }
 
     this.initializeSubscription();
@@ -197,11 +199,15 @@ export class CoValueCoreSubscription {
     } else if (isCompletelyDownloaded(value)) {
       const currentContent = value.getCurrentContent();
 
-      this.listener(
-        this.frontier
-          ? currentContent.atFrontier(this.frontier)
-          : currentContent,
-      );
+      if (this.frontier) {
+        this.listener(
+          this.frontier === CoValueLoadingState.UNAVAILABLE
+            ? CoValueLoadingState.UNAVAILABLE
+            : currentContent.atFrontier(this.frontier),
+        );
+      } else {
+        this.listener(currentContent);
+      }
     }
   }
 

@@ -14,7 +14,6 @@ import {
   isRefEncoded,
   CoValueCursor,
   DecodedCoValueCursor,
-  CoValueErrorState,
 } from "../internal.js";
 import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
@@ -312,17 +311,8 @@ export class SubscriptionScope<D extends CoValue> {
   private handleUpdate(
     update: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE,
   ) {
-    const cursorReplayedError =
-      this._cursor?.decoded?.valueErrors?.[this.id as RawCoID];
-
-    if (
-      update === CoValueLoadingState.UNAVAILABLE ||
-      cursorReplayedError === CoValueLoadingState.UNAVAILABLE
-    ) {
-      if (
-        this.value.type === CoValueLoadingState.LOADING ||
-        cursorReplayedError === CoValueLoadingState.UNAVAILABLE
-      ) {
+    if (update === CoValueLoadingState.UNAVAILABLE) {
+      if (this.value.type === CoValueLoadingState.LOADING) {
         const error = new JazzError(this.id, CoValueLoadingState.UNAVAILABLE, [
           {
             code: CoValueLoadingState.UNAVAILABLE,
@@ -341,14 +331,8 @@ export class SubscriptionScope<D extends CoValue> {
       return;
     }
 
-    if (
-      update.core.isDeleted ||
-      cursorReplayedError === CoValueLoadingState.DELETED
-    ) {
-      if (
-        this.value.type !== CoValueLoadingState.DELETED ||
-        cursorReplayedError === CoValueLoadingState.DELETED
-      ) {
+    if (update.core.isDeleted) {
+      if (this.value.type !== CoValueLoadingState.DELETED) {
         const error = new JazzError(this.id, CoValueLoadingState.DELETED, [
           {
             code: CoValueLoadingState.DELETED,
@@ -366,14 +350,8 @@ export class SubscriptionScope<D extends CoValue> {
       return;
     }
 
-    if (
-      !hasAccessToCoValue(update) ||
-      cursorReplayedError === CoValueLoadingState.UNAUTHORIZED
-    ) {
-      if (
-        this.value.type !== CoValueLoadingState.UNAUTHORIZED ||
-        cursorReplayedError === CoValueLoadingState.UNAUTHORIZED
-      ) {
+    if (!hasAccessToCoValue(update)) {
+      if (this.value.type !== CoValueLoadingState.UNAUTHORIZED) {
         const message = `Jazz Authorization Error: The current user (${this.node.getCurrentAgent().id}) is not authorized to access ${this.id}`;
 
         const error = new JazzError(this.id, CoValueLoadingState.UNAUTHORIZED, [
@@ -903,7 +881,6 @@ export class SubscriptionScope<D extends CoValue> {
       this.skipRetry,
       this.bestEffortResolution,
       this.unstable_branch,
-      this._cursor,
     );
     this.childNodes.set(id, child);
     child.setListener((value) => this.handleChildUpdate(id, value));
@@ -1166,7 +1143,7 @@ export class SubscriptionScope<D extends CoValue> {
       this.skipRetry,
       this.bestEffortResolution,
       this.unstable_branch,
-      this._cursor,
+      isAutoloaded ? undefined : this._cursor,
     );
     this.childNodes.set(id, child);
     child.setListener((value) => this.handleChildUpdate(id, value, key));
@@ -1181,14 +1158,9 @@ export class SubscriptionScope<D extends CoValue> {
   }
 
   private *selfAndChildrenFrontiers(): IterableIterator<
-    [RawCoID, CoValueFrontier | CoValueErrorState]
+    [RawCoID, CoValueFrontier]
   > {
-    if (this.value.type === CoValueLoadingState.LOADING) {
-      return;
-    }
-
     if (this.value.type !== CoValueLoadingState.LOADED) {
-      yield [this.id as RawCoID, this.value.type];
       return;
     }
 
@@ -1209,31 +1181,12 @@ export class SubscriptionScope<D extends CoValue> {
   }
 
   createCursor() {
-    const { frontiers, valueErrors } = Array.from(
-      this.selfAndChildrenFrontiers(),
-    ).reduce(
-      (acc, [id, value]) => {
-        if (typeof value === "string") {
-          acc.valueErrors[id] = value;
-        } else {
-          acc.frontiers[id] = value;
-        }
-
-        return acc;
-      },
-      {
-        frontiers: {} as Record<RawCoID, CoValueFrontier>,
-        valueErrors: {} as Record<RawCoID, CoValueErrorState>,
-      },
-    );
-
     return encodeCursor({
       version: 1,
       rootId: this.id as RawCoID,
       // we pass the initial resolve, and not the actual resolve as it may have changed due to autoloading
       resolveFingerprint: this.initialResolve,
-      frontiers,
-      valueErrors,
+      frontiers: Object.fromEntries(this.selfAndChildrenFrontiers()),
     });
   }
 
