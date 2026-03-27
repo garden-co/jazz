@@ -129,6 +129,18 @@ impl ServerState {
 
         reaped
     }
+
+    /// Update the client state TTL. Takes effect on the next sweep tick.
+    pub fn set_client_ttl(&self, ttl: std::time::Duration) {
+        self.client_ttl
+            .store(ttl.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Get the current client state TTL.
+    pub fn get_client_ttl(&self) -> std::time::Duration {
+        let ms = self.client_ttl.load(std::sync::atomic::Ordering::Relaxed);
+        std::time::Duration::from_millis(ms)
+    }
 }
 
 #[cfg(test)]
@@ -415,5 +427,47 @@ mod tests {
             .with_sync_manager(|sm| sm.get_client(bob).is_some())
             .expect("lock");
         assert!(has_bob, "bob should be unaffected");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn set_client_ttl_changes_sweep_behavior() {
+        let state = build_test_state().await;
+        let alice = ClientId::new();
+
+        let _ = state.runtime.add_client(alice, None);
+
+        let conn = add_connection(&state, alice).await;
+        remove_connection(&state, conn).await;
+
+        // Set TTL to 1 second
+        state.set_client_ttl(Duration::from_secs(1));
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        let reaped = state.run_sweep_once().await;
+        assert_eq!(reaped, vec![alice], "alice should be reaped with 1s TTL");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn runtime_ttl_change_takes_effect_on_next_sweep() {
+        let state = build_test_state().await;
+        let alice = ClientId::new();
+
+        let _ = state.runtime.add_client(alice, None);
+
+        let conn = add_connection(&state, alice).await;
+        remove_connection(&state, conn).await;
+
+        // Advance 2 seconds — not past default 5 min TTL
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        let reaped = state.run_sweep_once().await;
+        assert!(reaped.is_empty(), "default TTL: alice should survive");
+
+        // Now change TTL to 1 second — alice has been disconnected for 2s
+        state.set_client_ttl(Duration::from_secs(1));
+
+        let reaped = state.run_sweep_once().await;
+        assert_eq!(reaped, vec![alice], "new TTL: alice should be reaped");
     }
 }
