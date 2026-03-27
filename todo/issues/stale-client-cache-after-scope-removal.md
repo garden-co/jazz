@@ -12,12 +12,12 @@ The bug spans the sync protocol boundary between server-side scope management an
 
 - **Server scope diffing** — `SyncManager::set_client_query_scope()` at `crates/jazz-tools/src/sync_manager/mod.rs:333-375`. Only computes `newly_visible` (objects entering scope). Objects leaving scope are silently dropped — no notification sent.
 - **Server forwarding gate** — `forward_update_to_clients_except()` at `crates/jazz-tools/src/sync_manager/forwarding.rs:47-61`. Line 58: `client.is_in_scope(object_id, &branch_name)` — only forwards `ObjectUpdated` to clients whose query scopes include the object. If a client has no active subscription at the moment of the delete, the object is not in scope, and the delete is never forwarded.
-- **Client-side graph settlement** — `QueryManager::process()` at `crates/jazz-tools/src/query_manager/manager.rs:715-747`. The `row_loader` (line 721) reads from the local object manager, which still has the stale pre-delete version. `is_soft_deleted` returns false because the client never received the delete commit.
+- **Client-side graph settlement** — `QueryManager::process()` at `crates/jazz-tools/src/query_manager/manager.rs` (function starts at line 651, row_loader at lines 721-745). The `row_loader` (line 722) reads from the local object manager via `om.get_or_load()`, which still has the stale pre-delete version. `is_soft_deleted` (line 736) returns false because the client never received the delete commit. The delivery gate (lines 757-770) holds results until `tier_satisfied`, but once `QuerySettled` arrives, it delivers whatever the local graph settled to — with no comparison against server-side results.
 - **Client-side index scan** — `IndexScanNode::scan()` at `crates/jazz-tools/src/query_manager/graph_nodes/index_scan.rs:71-102`. Scans the client's local storage index, which still contains the stale row's entry.
 
 ## Steps to reproduce
 
-The test `"syncs queries and mutations between two TS clients via cloud-server"` at `packages/jazz-tools/src/runtime/cloud-server.integration.test.ts:1253` reproduces this ~11% of the time. The race window is during the delete step (line 1310-1311).
+The test `"syncs queries and mutations between two TS clients via cloud-server"` at `packages/jazz-tools/src/runtime/cloud-server.integration.test.ts:1247` (currently `it.skip`) reproduces this ~11% of the time. The race window is during the delete step (lines 1304-1305).
 
 Deterministic reproduction requires this exact sequence:
 
@@ -83,7 +83,7 @@ Failing runs on `fix/sync-reconnect-on-transport-failure`:
 - Client B's SSE stream connects once (`connection_id=2`) and never reconnects
 - Client A's `deleteDurable()` resolves (server acknowledged via `PersistenceAck`)
 - Both clients keep sending sync POSTs for the full 60s test duration
-- The failure is specifically on the DELETE step (line 1311) — create and update propagate fine
+- The failure is specifically on the DELETE step (line 1305) — create and update propagate fine
 
 ### Why create and update work but delete doesn't
 
@@ -93,15 +93,34 @@ For delete, the object LEAVES scope. `set_client_query_scope` only handles `newl
 
 ### Possible fix directions
 
-1. **Server sends removed-scope objects** — In `set_client_query_scope`, compute `old_scope.difference(&new_scope)` and send `ObjectUpdated` (with current state including delete commit) for objects that left scope. Minimal server change, client automatically picks up the delete.
+1. **~~Server sends removed-scope objects~~** — ~~In `set_client_query_scope`, compute `old_scope.difference(&new_scope)` and send `ObjectUpdated` for objects that left scope.~~
 
-2. **Include result IDs in QuerySettled** — Extend `QuerySettled` to carry the set of object IDs in the result. Client prunes its graph to only include those IDs. Protocol change.
+   **Does not fix this bug.** The one-shot polling pattern destroys the subscription (and its scope) via `drop_client_query_subscription()` (mod.rs:380-391) BEFORE the delete happens. When the next poll creates a new subscription, `old_scope` is already empty — `old_scope.difference(new_scope)` produces nothing. Applying the diff at `drop_client_query_subscription` also doesn't help: at that point the row hasn't been deleted yet, so sending its current state would just re-send the non-deleted version.
 
-3. **Client-side: don't use cached data for fresh subscriptions** — When a one-shot query settles with a server tier, only include objects that were explicitly received via `ObjectUpdated` during this subscription's lifetime. Client-only change but harder to implement correctly.
+   Direction 1 would only help persistent subscriptions whose scope shrinks due to a data or policy change while the subscription is alive. But persistent subscriptions already handle deletes correctly via the forwarding gate (`forward_update_to_clients_except` at forwarding.rs:58 — `is_in_scope` returns true because the subscription is still active).
+
+2. **Include result IDs in QuerySettled** — Extend `QuerySettled` (currently just `query_id + tier + through_seq`, defined at types.rs:257-263) to carry the set of object IDs in the server's result. Client compares its local graph settlement against the server's result set and prunes stale rows not present in the server's list. Protocol change, but directly addresses the root cause: the client has no way to know which objects the server considers valid.
+
+3. **Client-side: don't use cached data for fresh subscriptions** — When a one-shot query settles with a server tier, only include objects that were explicitly received via `ObjectUpdated` during this subscription's lifetime. Client-only change but harder to implement correctly. Risk: breaks local-first semantics for offline-capable queries.
 
 4. **Use persistent subscriptions in waitForRows** — Change the test helper to use `subscribe()` instead of polling `query()`. This keeps client B's subscription alive, so the reactive path handles the delete. But this only fixes the test, not the underlying protocol gap.
 
-Direction 1 seems simplest and most correct — it's a ~10-line change in `set_client_query_scope` and fixes the protocol gap for all consumers.
+Direction 2 is the most correct fix. The fundamental problem is that `QuerySettled` tells the client "your query has settled" without telling it WHAT the result should be. The client then trusts its local cache, which may contain objects the server no longer considers in scope. Adding result IDs to `QuerySettled` closes this information gap cleanly.
+
+### Why the client can't self-correct
+
+The client runs two independent settlement paths that never reconcile:
+
+- **Server-side settlement** (`server_queries.rs:541`): correctly produces an empty result set and computes `scope = empty`. Calls `set_client_query_scope()` with the empty scope. Emits `QuerySettled`.
+- **Client-side settlement** (`manager.rs:747`): `subscription.graph.settle(storage_ref, row_loader)` runs against the **local** storage index (`IndexScanNode::scan` at index_scan.rs:71-102) and local object manager (`om.get_or_load` at manager.rs:722). Finds the stale row. `is_soft_deleted` check (line 736) passes because the delete commit was never received.
+
+The delivery gate (`manager.rs:757-770`) waits for `tier_satisfied` (i.e., `QuerySettled` received), then delivers whatever the local graph settled to. There is no mechanism to compare the local result against the server's result. The client trusts its local state unconditionally once the tier is satisfied.
+
+This means even an infinite number of polls will never converge — each poll creates a fresh subscription, the server correctly says "empty", but that information (the emptiness of the result) is never communicated to the client.
+
+### Why persistent subscriptions don't have this bug
+
+With `subscribe()`, client B keeps an active subscription. The row stays in B's scope (`is_in_scope` returns true at forwarding.rs:58). When A deletes, `forward_update_to_clients_except` forwards the delete commit to B. B's local object manager receives the delete, `is_soft_deleted` returns true, and the row is filtered out on the next settlement. The reactive forwarding path works correctly because the subscription is alive when the delete happens.
 
 ### Related: `sendSyncMessage` silent drop
 
