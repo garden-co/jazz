@@ -36,7 +36,11 @@ export function App({ config }: { config?: Partial<DbConfig> } = {}) {
   const resolvedConfig = defaultConfig(config);
 
   return (
-    <JazzProvider config={resolvedConfig} createJazzClient={createJazzClient} fallback={<p id="joining-chat">Loading...</p>}>
+    <JazzProvider
+      config={resolvedConfig}
+      createJazzClient={createJazzClient}
+      fallback={<p id="joining-chat">Loading...</p>}
+    >
       <AppContent />
     </JazzProvider>
   );

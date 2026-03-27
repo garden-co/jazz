@@ -160,11 +160,7 @@ const userId = session?.user_id;
 ```typescript
 const messages =
   useAll(
-    app.messages
-      .where({ chatId })
-      .include({ sender: true })
-      .orderBy("createdAt", "desc")
-      .limit(20),
+    app.messages.where({ chatId }).include({ sender: true }).orderBy("createdAt", "desc").limit(20),
   ) ?? [];
 ```
 
@@ -362,12 +358,12 @@ Strokes inherit read access from their canvas, which inherits from the chat. The
 | API                                         | Notes                                                     |
 | ------------------------------------------- | --------------------------------------------------------- |
 | `createJazzClient`                          | Passed to JazzProvider — sets up the WASM worker and sync |
-| `JazzProvider`                              | Makes the db available to all child components             |
-| `useDb()`                                   | Returns the db handle for queries and writes               |
+| `JazzProvider`                              | Makes the db available to all child components            |
+| `useDb()`                                   | Returns the db handle for queries and writes              |
 | `useSession()`                              | Current user identity (`user_id`)                         |
-| `useAll(query)`                             | Live query hook — re-renders on changes                    |
-| `db.insert` / `db.delete` / `db.update`    | Synchronous local writes, synced in the background         |
+| `useAll(query)`                             | Live query hook — re-renders on changes                   |
+| `db.insert` / `db.delete` / `db.update`     | Synchronous local writes, synced in the background        |
 | `db.insertDurable`                          | Async write — resolves when confirmed at the given tier   |
-| `db.createFileFromBlob` / `loadFileAsBlob`  | File upload and download                                   |
-| `db.subscribeAll(query, cb, opts, session)` | Manual subscription with optional credential override      |
-| `definePermissions`                         | Policy DSL — row-level security defined in the schema      |
+| `db.createFileFromBlob` / `loadFileAsBlob`  | File upload and download                                  |
+| `db.subscribeAll(query, cb, opts, session)` | Manual subscription with optional credential override     |
+| `definePermissions`                         | Policy DSL — row-level security defined in the schema     |

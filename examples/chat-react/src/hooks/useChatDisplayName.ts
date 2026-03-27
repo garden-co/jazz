@@ -16,9 +16,8 @@ export function useChatDisplayName(chatId: string, chatName?: string): string {
 
   const members = useAll(app.chatMembers.where({ chatId })) ?? [];
   const allProfiles = useAll(app.profiles) ?? [];
-  const messages = useAll(
-    app.messages.where({ chatId }).orderBy("createdAt", "asc").limit(1),
-  ) ?? [];
+  const messages =
+    useAll(app.messages.where({ chatId }).orderBy("createdAt", "asc").limit(1)) ?? [];
 
   if (chatName) return chatName;
 
@@ -40,8 +39,18 @@ export function useChatDisplayName(chatId: string, chatName?: string): string {
 
 function formatChatDate(date: Date): string {
   const months = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
   ];
   const d = date.getDate().toString().padStart(2, "0");
   const mon = months[date.getMonth()];
