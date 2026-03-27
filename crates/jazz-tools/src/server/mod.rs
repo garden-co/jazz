@@ -57,8 +57,6 @@ pub struct ConnectionState {
 impl ServerState {
     /// Record that a connection closed. If this was the last SSE connection
     /// for the given client_id, add it to disconnect_candidates.
-    /// Record that a connection closed. If this was the last SSE connection
-    /// for the given client_id, add it to disconnect_candidates.
     ///
     /// The connections check and candidate insertion are done under the
     /// candidates write lock to prevent a TOCTOU race where a reconnect
@@ -126,7 +124,12 @@ impl ServerState {
                 continue;
             }
             if let Err(e) = self.runtime.remove_client(client_id) {
-                tracing::warn!(%client_id, error = %e, "failed to reap client");
+                tracing::warn!(%client_id, error = %e, "failed to reap client, re-queuing");
+                // Re-insert so the next sweep retries instead of leaking this client.
+                self.disconnect_candidates
+                    .write()
+                    .await
+                    .insert(client_id, Instant::now());
                 continue;
             }
             reaped.push(client_id);

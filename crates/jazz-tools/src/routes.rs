@@ -178,7 +178,12 @@ async fn events_handler(
     // Subscribe to broadcast channel for this client's events
     let mut sync_rx = state.sync_broadcast.subscribe();
 
-    // Store connection state
+    // Store connection state.
+    // Lock ordering note: this takes connections(write) then on_client_connected
+    // takes candidates(write). on_connection_closed uses the reverse nesting
+    // (candidates(write) → connections(read)), which is safe because it only
+    // needs a read lock on connections. Do NOT change on_connection_closed to
+    // take connections(write) without revisiting this ordering.
     {
         let mut connections = state.connections.write().await;
         connections.insert(connection_id, ConnectionState { client_id });
