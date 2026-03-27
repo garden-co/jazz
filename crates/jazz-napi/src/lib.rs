@@ -1123,6 +1123,15 @@ impl NapiRuntime {
         Ok(SchemaHash::compute(schema).to_string())
     }
 
+    #[napi(js_name = "getBatchId")]
+    pub fn get_batch_id(&self) -> napi::Result<String> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        Ok(core.schema_manager().batch_id().to_string())
+    }
+
     #[napi]
     pub fn flush(&self) -> napi::Result<()> {
         let core = self

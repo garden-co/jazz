@@ -438,8 +438,14 @@ mod tests {
         assert_eq!(branches.len(), 2);
 
         // Both schema branches should be included
-        let v1_branch = format!("dev-{}-main", v1_hash.short());
-        let v2_branch = format!("dev-{}-main", v2_hash.short());
+        let v1_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v1_hash)
+            .to_string();
+        let v2_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v2_hash)
+            .to_string();
         assert!(branches.contains(&v1_branch));
         assert!(branches.contains(&v2_branch));
     }
@@ -565,8 +571,14 @@ mod tests {
         let mut storage = MemoryStorage::new();
 
         // Get branch names
-        let v1_branch = format!("dev-{}-main", v1_hash.short());
-        let v2_branch = format!("dev-{}-main", v2_hash.short());
+        let v1_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v1_hash)
+            .to_string();
+        let v2_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v2_hash)
+            .to_string();
 
         // --- Ingest a synced row on the OLD schema branch (v1 format: id, name only) ---
         let v1_table = v1.get(&TableName::new("users")).unwrap();
@@ -710,9 +722,18 @@ mod tests {
         qm.register_lens(lens_v1_v2);
 
         // Get branch names
-        let v1_branch = format!("dev-{}-main", v1_hash.short());
-        let v2_branch = format!("dev-{}-main", v2_hash.short());
-        let v3_branch = format!("dev-{}-main", v3_hash.short());
+        let v1_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v1_hash)
+            .to_string();
+        let v2_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v2_hash)
+            .to_string();
+        let v3_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v3_hash)
+            .to_string();
         let mut storage = MemoryStorage::new();
 
         // --- Ingest row on v1 branch (oldest schema) ---
@@ -896,7 +917,10 @@ mod tests {
         qm.add_live_schema(v1.clone());
         qm.register_lens(lens_v1_v2);
 
-        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v1_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v1_hash)
+            .to_string();
 
         // Insert row on v1 branch with old column name
         let v1_table = v1.get(&TableName::new("users")).unwrap();
@@ -982,8 +1006,14 @@ mod tests {
         let mut storage = MemoryStorage::new();
 
         // Get branch names
-        let v1_branch = format!("dev-{}-main", v1_hash.short());
-        let v2_branch = format!("dev-{}-main", v2_hash.short());
+        let v1_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v1_hash)
+            .to_string();
+        let v2_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v2_hash)
+            .to_string();
 
         // --- Insert row on v1 branch with old column name ---
         let v1_table = v1.get(&TableName::new("users")).unwrap();
@@ -1817,7 +1847,11 @@ mod tests {
 
         // Query across both branches; row should be visible transformed into current (v1) shape.
         let v1_branch = client_b.branch_name().to_string();
-        let v2_branch = format!("dev-{}-main", v2_hash.short());
+        let v2_branch = client_b
+            .query_manager()
+            .schema_context()
+            .branch_name_for_hash(v2_hash)
+            .to_string();
         let query = QueryBuilder::new("users")
             .branches(&[&v1_branch, &v2_branch])
             .build();
@@ -2721,8 +2755,16 @@ mod tests {
         let mut storage = MemoryStorage::new();
 
         // Get branch names
-        let v1_branch = format!("dev-{}-main", v1_hash.short());
-        let v2_branch = format!("dev-{}-main", v2_hash.short());
+        let v1_branch = client
+            .query_manager()
+            .schema_context()
+            .branch_name_for_hash(v1_hash)
+            .to_string();
+        let v2_branch = client
+            .query_manager()
+            .schema_context()
+            .branch_name_for_hash(v2_hash)
+            .to_string();
 
         // Create a row on the v2 branch (simulate receiving via sync)
         // IMPORTANT: When schema goes through encode/decode, columns are sorted alphabetically.

@@ -92,6 +92,7 @@ function makeClient() {
     addClient: () => "00000000-0000-0000-0000-000000000001",
     getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
+    getBatchId: () => "b00000000000000000000000000000000",
   };
 
   const context: AppContext = {
@@ -138,6 +139,7 @@ function makeClientWithContext(context: AppContext): JazzClient {
     addClient: () => "00000000-0000-0000-0000-000000000001",
     getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
+    getBatchId: () => "b00000000000000000000000000000000",
   };
 
   const JazzClientCtor = JazzClient as unknown as {
@@ -519,6 +521,7 @@ describe("JazzClient schema order", () => {
           ],
         ]),
       getSchemaHash: () => "schema-hash",
+      getBatchId: () => "b00000000000000000000000000000000",
     };
     const client = JazzClient.connectWithRuntime(runtime, {
       appId: "test-app",
@@ -588,6 +591,7 @@ describe("JazzClient schema order", () => {
           ],
         ]),
       getSchemaHash: () => "schema-hash",
+      getBatchId: () => "b00000000000000000000000000000000",
     };
     const client = JazzClient.connectWithRuntime(runtime, {
       appId: "test-app",
@@ -673,6 +677,7 @@ describe("JazzClient schema order", () => {
           ],
         ]),
       getSchemaHash: () => "schema-hash",
+      getBatchId: () => "b00000000000000000000000000000000",
     };
     const client = JazzClient.connectWithRuntime(runtime, {
       appId: "test-app",
@@ -768,6 +773,7 @@ describe("JazzClient schema order", () => {
           ],
         ]),
       getSchemaHash: () => "schema-hash",
+      getBatchId: () => "b00000000000000000000000000000000",
     };
     const client = JazzClient.connectWithRuntime(runtime, {
       appId: "test-app",
@@ -895,6 +901,7 @@ describe("JazzClient schema order", () => {
           ],
         ]),
       getSchemaHash: () => "schema-hash",
+      getBatchId: () => "b00000000000000000000000000000000",
     };
     const client = JazzClient.connectWithRuntime(runtime, {
       appId: "test-app",
@@ -1042,6 +1049,7 @@ describe("JazzClient schema order", () => {
           ],
         ]),
       getSchemaHash: () => "schema-hash",
+      getBatchId: () => "b00000000000000000000000000000000",
     };
     const client = JazzClient.connectWithRuntime(runtime, {
       appId: "test-app",
@@ -1154,6 +1162,7 @@ describe("JazzClient schema order", () => {
           ],
         ]),
       getSchemaHash: () => "schema-hash",
+      getBatchId: () => "b00000000000000000000000000000000",
     };
     const client = JazzClient.connectWithRuntime(runtime, {
       appId: "test-app",

@@ -22,8 +22,8 @@ use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
 use super::types::{
-    ComposedBranchName, LoadedRow, OrderedRowDelta, RowDelta, RowDescriptor, Schema, SchemaHash,
-    TableName, TableSchema, Value, build_ordered_delta_with_post_ids,
+    BatchId, ComposedBranchName, LoadedRow, OrderedRowDelta, RowDelta, RowDescriptor, Schema,
+    SchemaHash, TableName, TableSchema, Value, build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -378,8 +378,18 @@ impl QueryManager {
     /// Must be called before queries. Can only be called once.
     /// Creates indices for the current schema's branch.
     pub fn set_current_schema(&mut self, schema: Schema, env: &str, user_branch: &str) {
+        self.set_current_schema_with_batch(schema, env, user_branch, BatchId::new());
+    }
+
+    pub fn set_current_schema_with_batch(
+        &mut self,
+        schema: Schema,
+        env: &str,
+        user_branch: &str,
+        batch_id: BatchId,
+    ) {
         self.schema_context
-            .set_current(schema.clone(), env, user_branch);
+            .set_current_with_batch(schema.clone(), env, user_branch, batch_id);
         self.schema = Arc::new(schema.clone());
 
         // Update branch -> schema hash map
@@ -403,12 +413,7 @@ impl QueryManager {
         }
 
         // Build branch name for this schema
-        let branch = ComposedBranchName::new(
-            &self.schema_context.env,
-            hash,
-            &self.schema_context.user_branch,
-        )
-        .to_branch_name();
+        let branch = self.schema_context.branch_name_for_hash(hash);
 
         // Add to live_schemas (without lens - caller should register lens separately)
         self.schema_context
@@ -435,12 +440,7 @@ impl QueryManager {
             // New schemas activated - register branches and mark for recompile
             for hash in activated {
                 if let Some(_schema) = self.schema_context.live_schemas.get(&hash).cloned() {
-                    let branch = ComposedBranchName::new(
-                        &self.schema_context.env,
-                        hash,
-                        &self.schema_context.user_branch,
-                    )
-                    .to_branch_name();
+                    let branch = self.schema_context.branch_name_for_hash(hash);
 
                     self.branch_schema_map
                         .insert(branch.as_str().to_string(), hash);
@@ -592,14 +592,12 @@ impl QueryManager {
     }
 
     /// Get the current branch name for writes.
-    ///
-    /// Returns the branch for the current schema, or "main" if context isn't initialized.
     pub(super) fn current_branch(&self) -> String {
-        if self.schema_context.is_initialized() {
-            self.schema_context.branch_name().as_str().to_string()
-        } else {
-            "main".to_string()
-        }
+        assert!(
+            self.schema_context.is_initialized(),
+            "schema context not initialized before current_branch()"
+        );
+        self.schema_context.branch_name().as_str().to_string()
     }
 
     /// Get all branches to query for a table (current + live schemas).

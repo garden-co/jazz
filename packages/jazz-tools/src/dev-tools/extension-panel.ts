@@ -626,7 +626,7 @@ class DevToolsJazzClient implements JazzClient {
   getRequestUrl(path: string): string {
     throw new Error("Method not implemented.");
   }
-  getSchemaContext(): { env: string; schema_hash: string; user_branch: string } {
+  getSchemaContext(): { env: string; schema_hash: string; user_branch: string; batch_id: string } {
     throw new Error("Method not implemented.");
   }
 }

@@ -19,7 +19,7 @@ use super::query::{Query, QueryBuilder};
 use super::session::Session;
 #[cfg(test)]
 use super::types::Value;
-use super::types::{ComposedBranchName, Schema, SchemaHash};
+use super::types::{Schema, SchemaHash};
 #[cfg(test)]
 use crate::object::ObjectId;
 
@@ -486,12 +486,7 @@ impl QueryManager {
 
         // Live schema branches
         for &live_hash in self.schema_context.live_schemas.keys() {
-            let live_branch = ComposedBranchName::new(
-                &self.schema_context.env,
-                live_hash,
-                &self.schema_context.user_branch,
-            )
-            .to_branch_name();
+            let live_branch = self.schema_context.branch_name_for_hash(live_hash);
             self.branch_schema_map
                 .insert(live_branch.as_str().to_string(), live_hash);
         }

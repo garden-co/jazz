@@ -92,6 +92,7 @@ declare module "jazz-wasm" {
     addClient(): string;
     getSchema(): unknown;
     getSchemaHash(): string;
+    getBatchId(): string;
     close?(): void;
     setClientRole?(clientId: string, role: string): void;
     onSyncMessageReceivedFromClient?(clientId: string, messageJson: string): void;

@@ -99,6 +99,7 @@ export interface Runtime {
   addClient(): string;
   getSchema(): any;
   getSchemaHash(): string;
+  getBatchId(): string;
   close?(): void | Promise<void>;
   setClientRole?(client_id: string, role: string): void;
   onSyncMessageReceivedFromClient?(client_id: string, payload: Uint8Array | string): void;
@@ -1315,11 +1316,13 @@ export class JazzClient {
     env: string;
     schema_hash: string;
     user_branch: string;
+    batch_id: string;
   } {
     return {
       env: this.context.env ?? "dev",
       schema_hash: this.runtime.getSchemaHash(),
       user_branch: this.context.userBranch ?? "main",
+      batch_id: this.runtime.getBatchId(),
     };
   }
 

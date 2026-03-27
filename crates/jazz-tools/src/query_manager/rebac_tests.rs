@@ -27,8 +27,8 @@ use crate::query_manager::relation_ir::{
 };
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName,
-    TablePolicies, TableSchema, Value,
+    BatchId, ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaHash,
+    TableName, TablePolicies, TableSchema, Value,
 };
 
 /// Helper to create QueryManager with schema on default branch.
@@ -473,7 +473,7 @@ fn rebac_insert_denied_by_simple_policy() {
 fn rebac_insert_denied_by_simple_policy_in_server_mode_known_schema() {
     let schema = rebac_test_schema();
     let schema_hash = SchemaHash::compute(&schema);
-    let branch = ComposedBranchName::new("dev", schema_hash, "main")
+    let branch = ComposedBranchName::new("dev", schema_hash, "main", BatchId::nil())
         .to_branch_name()
         .as_str()
         .to_string();
@@ -558,7 +558,7 @@ fn rebac_insert_denied_by_simple_policy_in_server_mode_known_schema() {
 fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
     let schema = rebac_test_schema();
     let schema_hash = SchemaHash::compute(&schema);
-    let branch = ComposedBranchName::new("dev", schema_hash, "main")
+    let branch = ComposedBranchName::new("dev", schema_hash, "main", BatchId::nil())
         .to_branch_name()
         .as_str()
         .to_string();
@@ -634,7 +634,7 @@ fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
 fn rebac_insert_waits_for_schema_then_denies_for_composed_branch() {
     let schema = rebac_test_schema();
     let schema_hash = SchemaHash::compute(&schema);
-    let branch = ComposedBranchName::new("dev", schema_hash, "main")
+    let branch = ComposedBranchName::new("dev", schema_hash, "main", BatchId::nil())
         .to_branch_name()
         .as_str()
         .to_string();
@@ -726,7 +726,7 @@ fn rebac_insert_waits_for_schema_then_denies_for_composed_branch() {
 fn rebac_insert_denied_when_schema_never_arrives_before_timeout() {
     let schema = rebac_test_schema();
     let schema_hash = SchemaHash::compute(&schema);
-    let branch = ComposedBranchName::new("dev", schema_hash, "main")
+    let branch = ComposedBranchName::new("dev", schema_hash, "main", BatchId::nil())
         .to_branch_name()
         .as_str()
         .to_string();
@@ -1107,7 +1107,7 @@ fn rebac_non_row_object_allowed() {
 fn rebac_non_row_object_allowed_in_server_mode() {
     let schema = rebac_test_schema();
     let schema_hash = SchemaHash::compute(&schema);
-    let branch = ComposedBranchName::new("dev", schema_hash, "main")
+    let branch = ComposedBranchName::new("dev", schema_hash, "main", BatchId::nil())
         .to_branch_name()
         .as_str()
         .to_string();

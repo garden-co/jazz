@@ -440,7 +440,7 @@ mod tests {
         let mut schema_context = SchemaContext::new(v2.clone(), "dev", "main");
         schema_context.add_live_schema(v1.clone(), lens);
 
-        let v1_branch = ComposedBranchName::new("dev", v1_hash, "main")
+        let v1_branch = ComposedBranchName::new("dev", v1_hash, "main", schema_context.batch_id)
             .to_branch_name()
             .as_str()
             .to_string();

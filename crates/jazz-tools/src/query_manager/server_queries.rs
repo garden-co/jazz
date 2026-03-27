@@ -48,10 +48,11 @@ impl QueryManager {
         let full_hash = self.find_schema_by_short_hash(&composed.schema_hash)?;
         let target_schema = self.known_schemas.get(&full_hash)?.clone();
 
-        let mut schema_context = crate::schema_manager::SchemaContext::new(
+        let mut schema_context = crate::schema_manager::SchemaContext::new_with_batch_id(
             target_schema.clone(),
             &composed.env,
             &composed.user_branch,
+            composed.batch_id,
         );
 
         for lens in self.schema_context.lenses.values() {
@@ -79,9 +80,7 @@ impl QueryManager {
         );
 
         for hash in schema_context.live_schemas.keys() {
-            let branch =
-                ComposedBranchName::new(&schema_context.env, *hash, &schema_context.user_branch)
-                    .to_branch_name();
+            let branch = schema_context.branch_name_for_hash(*hash);
             map.insert(branch.as_str().to_string(), *hash);
         }
 

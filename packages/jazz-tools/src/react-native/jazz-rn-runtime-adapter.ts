@@ -23,6 +23,7 @@ export interface JazzRnRuntimeBinding {
   delete_(objectId: string): void;
   flush(): void;
   getSchemaHash(): string;
+  getBatchId(): string;
   insert(table: string, valuesJson: string): string;
   onBatchedTickNeeded(
     callback:
@@ -370,6 +371,10 @@ export class JazzRnRuntimeAdapter implements Runtime {
 
   getSchemaHash(): string {
     return this.binding.getSchemaHash();
+  }
+
+  getBatchId(): string {
+    return this.binding.getBatchId();
   }
 
   setClientRole(client_id: string, role: string): void {

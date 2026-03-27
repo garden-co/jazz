@@ -1168,6 +1168,13 @@ impl WasmRuntime {
         SchemaHash::compute(schema).to_string()
     }
 
+    /// Get the active batch identifier for the current runtime context.
+    #[wasm_bindgen(js_name = getBatchId)]
+    pub fn get_batch_id(&self) -> String {
+        let core = self.core.borrow();
+        core.schema_manager().batch_id().to_string()
+    }
+
     /// Debug helper: expose schema/lens state currently loaded in SchemaManager.
     #[wasm_bindgen(js_name = __debugSchemaState)]
     pub fn debug_schema_state(&self) -> Result<JsValue, JsError> {

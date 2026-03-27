@@ -579,6 +579,10 @@ impl BatchId {
         Self::from_uuid(Uuid::now_v7())
     }
 
+    pub fn nil() -> Self {
+        Self::from_uuid(Uuid::nil())
+    }
+
     pub fn from_uuid(uuid: Uuid) -> Self {
         Self(*uuid.as_bytes())
     }
@@ -614,6 +618,19 @@ impl Default for BatchId {
     }
 }
 
+impl Serialize for BatchId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.branch_segment())
+    }
+}
+
+impl<'de> Deserialize<'de> for BatchId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Self::parse_segment(&s).ok_or_else(|| serde::de::Error::custom("invalid BatchId segment"))
+    }
+}
+
 impl std::fmt::Display for BatchId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.branch_segment())
@@ -641,67 +658,56 @@ impl BranchPrefixName {
         Self::new(env, SchemaHash::compute(schema), user_branch)
     }
 
-    /// Legacy unbatched branch name: `{env}-{schemaHash}-{userBranch}`.
-    pub fn to_branch_name(&self) -> BranchName {
-        BranchName::new(format!(
-            "{}-{}-{}",
-            self.env,
-            self.schema_hash.short(),
-            self.user_branch
-        ))
-    }
-
-    /// Prefix shared by all batches: `{env}-{schemaHash}-{userBranch}-`.
-    pub fn to_batch_prefix(&self) -> String {
+    pub fn branch_prefix(&self) -> String {
         format!(
-            "{}-{}-{}-",
+            "{}-{}-{}",
             self.env,
             self.schema_hash.short(),
             self.user_branch
         )
     }
+
+    /// Prefix shared by all batches: `{env}-{schemaHash}-{userBranch}-`.
+    pub fn to_batch_prefix(&self) -> String {
+        format!("{}-", self.branch_prefix())
+    }
+
+    pub fn with_batch_id(&self, batch_id: BatchId) -> ComposedBranchName {
+        ComposedBranchName::new(&self.env, self.schema_hash, &self.user_branch, batch_id)
+    }
 }
 
-/// A branch name composed of environment, schema hash, and user branch.
-/// Format: `{env}-{schemaHash}-{userBranch}` or `{env}-{schemaHash}-{userBranch}-{batchId}`
-/// Example: `dev-a1b2c3d4e5f6-main`, `prod-f9e8d7c6b5a4-feature-x-b018d6f2...`
+impl std::fmt::Display for BranchPrefixName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.branch_prefix())
+    }
+}
+
+/// A branch name composed of environment, schema hash, user branch, and batch id.
+/// Format: `{env}-{schemaHash}-{userBranch}-{batchId}`
+/// Example: `dev-a1b2c3d4e5f6-main-b018d6f2...`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComposedBranchName {
     pub env: String,
     pub schema_hash: SchemaHash,
     pub user_branch: String,
-    pub batch_id: Option<BatchId>,
+    pub batch_id: BatchId,
 }
 
 impl ComposedBranchName {
     /// Create a new composed branch name.
-    pub fn new(env: &str, schema_hash: SchemaHash, user_branch: &str) -> Self {
+    pub fn new(env: &str, schema_hash: SchemaHash, user_branch: &str, batch_id: BatchId) -> Self {
         Self {
             env: env.to_string(),
             schema_hash,
             user_branch: user_branch.to_string(),
-            batch_id: None,
-        }
-    }
-
-    /// Create a new composed branch name with an explicit batch identifier.
-    pub fn with_batch(
-        env: &str,
-        schema_hash: SchemaHash,
-        user_branch: &str,
-        batch_id: BatchId,
-    ) -> Self {
-        Self {
-            env: env.to_string(),
-            schema_hash,
-            user_branch: user_branch.to_string(),
-            batch_id: Some(batch_id),
+            batch_id,
         }
     }
 
     /// Create from a schema, computing the hash automatically.
-    pub fn from_schema(env: &str, schema: &Schema, user_branch: &str) -> Self {
-        Self::new(env, SchemaHash::compute(schema), user_branch)
+    pub fn from_schema(env: &str, schema: &Schema, user_branch: &str, batch_id: BatchId) -> Self {
+        Self::new(env, SchemaHash::compute(schema), user_branch, batch_id)
     }
 
     pub fn prefix(&self) -> BranchPrefixName {
@@ -710,12 +716,11 @@ impl ComposedBranchName {
 
     /// Convert to a BranchName string.
     pub fn to_branch_name(&self) -> BranchName {
-        let mut branch = self.prefix().to_branch_name().as_str().to_string();
-        if let Some(batch_id) = self.batch_id {
-            branch.push('-');
-            branch.push_str(&batch_id.branch_segment());
-        }
-        BranchName::new(branch)
+        BranchName::new(format!(
+            "{}{}",
+            self.prefix().to_batch_prefix(),
+            self.batch_id.branch_segment()
+        ))
     }
 
     /// Parse a BranchName back into its components.
@@ -744,24 +749,16 @@ impl ComposedBranchName {
             hash_bytes[..6].copy_from_slice(&bytes);
         }
 
-        let (user_branch, batch_id) = match rest.rsplit_once('-') {
-            Some((candidate_user_branch, batch_segment)) => {
-                if let Some(batch_id) = BatchId::parse_segment(batch_segment) {
-                    if candidate_user_branch.is_empty() {
-                        return None;
-                    }
-                    (candidate_user_branch.to_string(), Some(batch_id))
-                } else {
-                    (rest.to_string(), None)
-                }
-            }
-            None => (rest.to_string(), None),
-        };
+        let (user_branch, batch_segment) = rest.rsplit_once('-')?;
+        if user_branch.is_empty() {
+            return None;
+        }
+        let batch_id = BatchId::parse_segment(batch_segment)?;
 
         Some(Self {
             env,
             schema_hash: SchemaHash::from_bytes(hash_bytes),
-            user_branch,
+            user_branch: user_branch.to_string(),
             batch_id,
         })
     }

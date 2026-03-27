@@ -711,12 +711,12 @@ fn batch_id_roundtrips_through_branch_segment() {
 }
 
 #[test]
-fn branch_prefix_name_formats_legacy_and_batch_prefix_shapes() {
+fn branch_prefix_name_formats_prefix_and_batch_prefix_shapes() {
     let hash = SchemaHash::from_bytes([0xab; 32]);
     let prefix = BranchPrefixName::new("dev", hash, "feature-x");
 
     assert_eq!(
-        prefix.to_branch_name().as_str(),
+        prefix.branch_prefix(),
         format!("dev-{}-feature-x", hash.short())
     );
     assert_eq!(
@@ -730,15 +730,16 @@ fn composed_branch_name_format() {
     let schema = SchemaBuilder::new()
         .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
         .build();
+    let batch_id = BatchId::from_uuid(Uuid::from_u128(1));
 
-    let composed = ComposedBranchName::from_schema("dev", &schema, "main");
+    let composed = ComposedBranchName::from_schema("dev", &schema, "main", batch_id);
     let branch_name = composed.to_branch_name();
     let s = branch_name.as_str();
 
-    // Should be in format: dev-XXXXXXXX-main
+    // Should be in format: dev-XXXXXXXX-main-bYYYY...
     assert!(s.starts_with("dev-"));
-    assert!(s.ends_with("-main"));
-    assert_eq!(s.matches('-').count(), 2);
+    assert!(s.contains("-main-"));
+    assert_eq!(s.matches('-').count(), 3);
 }
 
 #[test]
@@ -746,33 +747,34 @@ fn composed_branch_name_parse() {
     let schema = SchemaBuilder::new()
         .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
         .build();
+    let batch_id = BatchId::from_uuid(Uuid::from_u128(2));
 
-    let original = ComposedBranchName::from_schema("prod", &schema, "feature-x");
+    let original = ComposedBranchName::from_schema("prod", &schema, "feature-x", batch_id);
     let branch_name = original.to_branch_name();
     let parsed = ComposedBranchName::parse(&branch_name).unwrap();
 
     assert_eq!(parsed.env, "prod");
     assert_eq!(parsed.user_branch, "feature-x");
-    assert_eq!(parsed.batch_id, None);
+    assert_eq!(parsed.batch_id, batch_id);
     // Note: full hash can't be recovered from 12 chars, but short() should match
     assert_eq!(parsed.schema_hash.short(), original.schema_hash.short());
 }
 
 #[test]
-fn composed_branch_name_with_batch_parse() {
+fn composed_branch_name_parse_with_batch() {
     let schema = SchemaBuilder::new()
         .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
         .build();
     let batch_id = BatchId::from_uuid(Uuid::from_u128(7));
 
     let original =
-        ComposedBranchName::with_batch("prod", SchemaHash::compute(&schema), "feature-x", batch_id);
+        ComposedBranchName::new("prod", SchemaHash::compute(&schema), "feature-x", batch_id);
     let branch_name = original.to_branch_name();
     let parsed = ComposedBranchName::parse(&branch_name).unwrap();
 
     assert_eq!(parsed.env, "prod");
     assert_eq!(parsed.user_branch, "feature-x");
-    assert_eq!(parsed.batch_id, Some(batch_id));
+    assert_eq!(parsed.batch_id, batch_id);
     assert_eq!(parsed.schema_hash.short(), original.schema_hash.short());
 }
 
@@ -780,12 +782,12 @@ fn composed_branch_name_with_batch_parse() {
 fn composed_branch_name_with_batch_keeps_dashes_in_user_branch() {
     let hash = SchemaHash::from_bytes([0xcd; 32]);
     let batch_id = BatchId::from_uuid(Uuid::from_u128(9));
-    let original = ComposedBranchName::with_batch("dev", hash, "feature-x-y", batch_id);
+    let original = ComposedBranchName::new("dev", hash, "feature-x-y", batch_id);
 
     let parsed = ComposedBranchName::parse(&original.to_branch_name()).unwrap();
 
     assert_eq!(parsed.user_branch, "feature-x-y");
-    assert_eq!(parsed.batch_id, Some(batch_id));
+    assert_eq!(parsed.batch_id, batch_id);
 }
 
 #[test]
@@ -803,12 +805,17 @@ fn composed_branch_name_parse_invalid() {
     // Hash not hex
     let name = BranchName::new("dev-gggggggggggg-main");
     assert!(ComposedBranchName::parse(&name).is_none());
+
+    // Missing batch suffix
+    let name = BranchName::new("dev-aabbccddeeff-main");
+    assert!(ComposedBranchName::parse(&name).is_none());
 }
 
 #[test]
 fn composed_branch_name_matches() {
     let hash = SchemaHash::from_bytes([0xab; 32]);
-    let composed = ComposedBranchName::new("dev", hash, "main");
+    let composed =
+        ComposedBranchName::new("dev", hash, "main", BatchId::from_uuid(Uuid::from_u128(3)));
 
     assert!(composed.matches_env_and_branch("dev", "main"));
     assert!(!composed.matches_env_and_branch("prod", "main"));

@@ -38,8 +38,8 @@ use super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
 use super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
 use super::session::Session;
 use super::types::{
-    ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, LoadedRow, Row, RowDelta,
-    RowDescriptor, Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor,
+    BatchId, ColumnDescriptor, ColumnName, ColumnType, LoadedRow, Row, RowDelta, RowDescriptor,
+    Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,37 +436,18 @@ impl QueryGraph {
     /// Compile a query into a graph (without policy filtering).
     pub fn compile(query: &Query, schema: &Schema) -> Option<Self> {
         let schema_context = Self::default_schema_context(schema);
-        let mut query_with_default_branch = query.clone();
-        if query_with_default_branch.branches.is_empty() {
-            query_with_default_branch.branches.push("main".to_string());
-        }
-        Self::try_compile_with_schema_context(
-            &query_with_default_branch,
-            schema,
-            None,
-            &schema_context,
-        )
-        .ok()
+        Self::try_compile_with_schema_context(query, schema, None, &schema_context).ok()
     }
 
     /// Compile a query into a graph with typed errors (without policy filtering).
     pub fn try_compile(query: &Query, schema: &Schema) -> Result<Self, QueryCompileError> {
         let schema_context = Self::default_schema_context(schema);
-        let mut query_with_default_branch = query.clone();
-        if query_with_default_branch.branches.is_empty() {
-            query_with_default_branch.branches.push("main".to_string());
-        }
-        Self::try_compile_with_schema_context(
-            &query_with_default_branch,
-            schema,
-            None,
-            &schema_context,
-        )
+        Self::try_compile_with_schema_context(query, schema, None, &schema_context)
     }
 
-    /// Legacy compile sites default to querying `main` without schema fan-out.
+    /// Fallback compile sites still use a deterministic composed branch.
     fn default_schema_context(schema: &Schema) -> SchemaContext {
-        SchemaContext::with_defaults(schema.clone(), "main")
+        SchemaContext::new_with_batch_id(schema.clone(), "dev", "main", BatchId::nil())
     }
 
     /// Compile relation IR directly into a graph.
@@ -492,7 +473,12 @@ impl QueryGraph {
         session: Option<Session>,
         features: RelationCompileFeatures,
     ) -> Option<Self> {
-        let default_branches = vec!["main".to_string()];
+        let schema_context = Self::default_schema_context(schema);
+        let default_branches: Vec<String> = schema_context
+            .all_branch_names()
+            .into_iter()
+            .map(|branch| branch.as_str().to_string())
+            .collect();
         let branches: &[String] = if branches.is_empty() {
             &default_branches
         } else {
@@ -506,7 +492,6 @@ impl QueryGraph {
             features.select_columns,
         )?;
         validate_execution_plan(&plan, schema).ok()?;
-        let schema_context = Self::default_schema_context(schema);
         Self::compile_execution_plan_with_schema_context(&plan, schema, session, &schema_context)
     }
 
@@ -558,12 +543,7 @@ impl QueryGraph {
         // a shortened hash prefix).
         let mut branch_schema_map: HashMap<String, SchemaHash> = HashMap::new();
         for schema_hash in schema_context.all_live_hashes() {
-            let branch_name = ComposedBranchName::new(
-                &schema_context.env,
-                schema_hash,
-                &schema_context.user_branch,
-            )
-            .to_branch_name();
+            let branch_name = schema_context.branch_name_for_hash(schema_hash);
             branch_schema_map.insert(branch_name.as_str().to_string(), schema_hash);
         }
 
@@ -704,7 +684,7 @@ impl QueryGraph {
             let branch_for_policy = branches
                 .first()
                 .cloned()
-                .unwrap_or_else(|| "main".to_string());
+                .unwrap_or_else(|| schema_context.branch_name().as_str().to_string());
             let policy_node = PolicyFilterNode::new_with_branch(
                 current_descriptor.clone(),
                 policy,
@@ -786,7 +766,7 @@ impl QueryGraph {
                     branches
                         .first()
                         .cloned()
-                        .unwrap_or_else(|| "main".to_string()),
+                        .unwrap_or_else(|| schema_context.branch_name().as_str().to_string()),
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
                     .dependency_tables()
@@ -856,7 +836,7 @@ impl QueryGraph {
                     branches
                         .first()
                         .cloned()
-                        .unwrap_or_else(|| "main".to_string()),
+                        .unwrap_or_else(|| schema_context.branch_name().as_str().to_string()),
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
                     .dependency_tables()
@@ -1291,9 +1271,10 @@ impl QueryGraph {
         let base_table_schema = schema.get(&plan.table)?;
         let base_descriptor = base_table_schema.columns.clone();
         let mut graph = QueryGraph::new(plan.table, base_descriptor.clone());
+        let current_branch = schema_context.branch_name().as_str().to_string();
 
         let join_branches: Vec<&str> = if branches.is_empty() {
-            vec!["main"]
+            vec![current_branch.as_str()]
         } else {
             branches.iter().map(String::as_str).collect()
         };
@@ -1349,7 +1330,7 @@ impl QueryGraph {
             let branch_for_policy = branches
                 .first()
                 .cloned()
-                .unwrap_or_else(|| "main".to_string());
+                .unwrap_or_else(|| schema_context.branch_name().as_str().to_string());
             let policy_node = PolicyFilterNode::new_with_branch(
                 base_descriptor.clone(),
                 policy,
@@ -1446,7 +1427,7 @@ impl QueryGraph {
                 let branch_for_policy = branches
                     .first()
                     .cloned()
-                    .unwrap_or_else(|| "main".to_string());
+                    .unwrap_or_else(|| schema_context.branch_name().as_str().to_string());
                 let policy_node = PolicyFilterNode::new_with_branch(
                     right_descriptor.clone(),
                     policy,
@@ -1565,7 +1546,7 @@ impl QueryGraph {
                     branches
                         .first()
                         .cloned()
-                        .unwrap_or_else(|| "main".to_string()),
+                        .unwrap_or_else(|| schema_context.branch_name().as_str().to_string()),
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
                     .dependency_tables()
@@ -1632,7 +1613,7 @@ impl QueryGraph {
                     branches
                         .first()
                         .cloned()
-                        .unwrap_or_else(|| "main".to_string()),
+                        .unwrap_or_else(|| schema_context.branch_name().as_str().to_string()),
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
                     .dependency_tables()
