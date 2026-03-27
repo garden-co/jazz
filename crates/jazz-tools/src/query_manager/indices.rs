@@ -89,20 +89,20 @@ impl QueryManager {
         Ok(())
     }
 
-    fn register_table_prefix_branch(
+    fn register_table_prefix_batch(
         storage: &mut dyn Storage,
         table: &str,
         branch: &str,
     ) -> Result<(), QueryError> {
-        let branch_name = BranchName::new(branch.to_string());
-        let Some(composed_branch) = ComposedBranchName::parse(&branch_name) else {
+        let Some(composed_branch) = ComposedBranchName::parse(&BranchName::new(branch.to_string()))
+        else {
             return Ok(());
         };
         storage
-            .register_table_prefix_branch(
+            .register_table_prefix_batch(
                 table,
                 &composed_branch.prefix().branch_prefix(),
-                &branch_name,
+                composed_branch.batch_id,
             )
             .map_err(Self::map_index_storage_error)
     }
@@ -132,7 +132,7 @@ impl QueryManager {
         data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        Self::register_table_prefix_branch(storage, table, branch)?;
+        Self::register_table_prefix_batch(storage, table, branch)?;
 
         // Update "_id" index
         storage
@@ -180,7 +180,7 @@ impl QueryManager {
         new_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        Self::register_table_prefix_branch(storage, table, branch)?;
+        Self::register_table_prefix_batch(storage, table, branch)?;
 
         // "_id" index doesn't change on update
 
@@ -237,7 +237,7 @@ impl QueryManager {
         old_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        Self::register_table_prefix_branch(storage, table, branch)?;
+        Self::register_table_prefix_batch(storage, table, branch)?;
 
         // Remove from "_id" index
         storage
@@ -295,7 +295,7 @@ impl QueryManager {
         old_data: Option<&[u8]>,
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        Self::register_table_prefix_branch(storage, table, branch)?;
+        Self::register_table_prefix_batch(storage, table, branch)?;
 
         // Remove from "_id" index (may not be present if already soft-deleted)
         storage
@@ -357,7 +357,7 @@ impl QueryManager {
         new_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        Self::register_table_prefix_branch(storage, table, branch)?;
+        Self::register_table_prefix_batch(storage, table, branch)?;
 
         // Remove from "_id_deleted" index
         storage

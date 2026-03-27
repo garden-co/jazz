@@ -12,9 +12,10 @@ use crate::query_manager::types::{BatchId, Value};
 use super::key_codec::{
     ack_key, branch_tips_key, catalogue_manifest_op_key, catalogue_manifest_op_prefix,
     commit_branch_key, commit_key, commit_prefix, index_entry_key, index_prefix,
-    index_range_scan_bounds, index_value_prefix, obj_meta_key, parse_branch_from_table_prefix_key,
-    parse_uuid_from_index_key, prefix_batch_meta_key, prefix_batch_meta_prefix,
-    prefix_leaf_batches_key, table_prefix_branch_key, table_prefix_branch_prefix,
+    index_range_scan_bounds, index_value_prefix, obj_meta_key,
+    parse_batch_id_from_table_prefix_key, parse_uuid_from_index_key, prefix_batch_meta_key,
+    prefix_batch_meta_prefix, prefix_leaf_batches_key, table_prefix_batch_key,
+    table_prefix_batch_prefix,
 };
 use super::{
     CatalogueManifest, CatalogueManifestOp, LoadedBranch, PrefixBatchUpdate, StorageError,
@@ -145,28 +146,28 @@ fn load_prefix_batch_meta(
     }
 }
 
-pub(super) fn register_table_prefix_branch_core(
+pub(super) fn register_table_prefix_batch_core(
     table: &str,
     prefix: &str,
-    branch: &BranchName,
+    batch_id: BatchId,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
-    let key = table_prefix_branch_key(table, prefix, branch);
+    let key = table_prefix_batch_key(table, prefix, batch_id);
     set(&key, &[])
 }
 
-pub(super) fn load_table_prefix_branches_core(
+pub(super) fn load_table_prefix_batches_core(
     table: &str,
     prefix: &str,
     mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
-) -> Result<HashSet<BranchName>, StorageError> {
-    let key_prefix = table_prefix_branch_prefix(table, prefix);
+) -> Result<HashSet<BatchId>, StorageError> {
+    let key_prefix = table_prefix_batch_prefix(table, prefix);
     let entries = scan_prefix(&key_prefix)?;
-    let mut branches = HashSet::with_capacity(entries.len());
+    let mut batches = HashSet::with_capacity(entries.len());
     for (key, _value) in entries {
-        branches.insert(parse_branch_from_table_prefix_key(&key, &key_prefix)?);
+        batches.insert(parse_batch_id_from_table_prefix_key(&key, &key_prefix)?);
     }
-    Ok(branches)
+    Ok(batches)
 }
 
 pub(super) fn append_commit_core(

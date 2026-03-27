@@ -212,20 +212,20 @@ pub trait Storage {
         prefix: &str,
     ) -> Result<Option<PrefixBatchCatalog>, StorageError>;
 
-    /// Register that a table has data on one batch branch within a shared prefix.
-    fn register_table_prefix_branch(
+    /// Register that a table has data on one batch within a shared prefix.
+    fn register_table_prefix_batch(
         &mut self,
         table: &str,
         prefix: &str,
-        branch: &BranchName,
+        batch_id: BatchId,
     ) -> Result<(), StorageError>;
 
-    /// Load all known table branches for one shared batch prefix.
-    fn load_table_prefix_branches(
+    /// Load all known table batches for one shared batch prefix.
+    fn load_table_prefix_batches(
         &self,
         table: &str,
         prefix: &str,
-    ) -> Result<HashSet<BranchName>, StorageError>;
+    ) -> Result<HashSet<BatchId>, StorageError>;
 
     /// Append a commit to a branch.
     fn append_commit(
@@ -392,21 +392,21 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).load_prefix_batch_catalog(object_id, prefix)
     }
 
-    fn register_table_prefix_branch(
+    fn register_table_prefix_batch(
         &mut self,
         table: &str,
         prefix: &str,
-        branch: &BranchName,
+        batch_id: BatchId,
     ) -> Result<(), StorageError> {
-        (**self).register_table_prefix_branch(table, prefix, branch)
+        (**self).register_table_prefix_batch(table, prefix, batch_id)
     }
 
-    fn load_table_prefix_branches(
+    fn load_table_prefix_batches(
         &self,
         table: &str,
         prefix: &str,
-    ) -> Result<HashSet<BranchName>, StorageError> {
-        (**self).load_table_prefix_branches(table, prefix)
+    ) -> Result<HashSet<BatchId>, StorageError> {
+        (**self).load_table_prefix_batches(table, prefix)
     }
 
     fn append_commit(
@@ -555,8 +555,8 @@ pub struct MemoryStorage {
 
     /// Persistence ack tiers per commit.
     ack_tiers: HashMap<CommitId, HashSet<DurabilityTier>>,
-    /// Known table branches keyed by shared batch prefix.
-    table_branches_by_prefix: HashMap<(String, String), HashSet<BranchName>>,
+    /// Known table batches keyed by shared batch prefix.
+    table_batches_by_prefix: HashMap<(String, String), HashSet<BatchId>>,
     /// Append-only manifest ops keyed by app_id then op object_id.
     catalogue_manifest_ops: HashMap<ObjectId, HashMap<ObjectId, CatalogueManifestOp>>,
 }
@@ -759,26 +759,26 @@ impl Storage for MemoryStorage {
             .and_then(|obj| obj.prefix_batches.get(prefix).cloned()))
     }
 
-    fn register_table_prefix_branch(
+    fn register_table_prefix_batch(
         &mut self,
         table: &str,
         prefix: &str,
-        branch: &BranchName,
+        batch_id: BatchId,
     ) -> Result<(), StorageError> {
-        self.table_branches_by_prefix
+        self.table_batches_by_prefix
             .entry((table.to_string(), prefix.to_string()))
             .or_default()
-            .insert(*branch);
+            .insert(batch_id);
         Ok(())
     }
 
-    fn load_table_prefix_branches(
+    fn load_table_prefix_batches(
         &self,
         table: &str,
         prefix: &str,
-    ) -> Result<HashSet<BranchName>, StorageError> {
+    ) -> Result<HashSet<BatchId>, StorageError> {
         Ok(self
-            .table_branches_by_prefix
+            .table_batches_by_prefix
             .get(&(table.to_string(), prefix.to_string()))
             .cloned()
             .unwrap_or_default())
@@ -1219,29 +1219,29 @@ mod tests {
     }
 
     #[test]
-    fn memory_storage_tracks_table_prefix_branches() {
+    fn memory_storage_tracks_table_prefix_batches() {
         let mut storage = MemoryStorage::new();
         let prefix = "dev-070707070707-main";
-        let branch1 = BranchName::new(format!("{prefix}-b{:032x}", 1));
-        let branch2 = BranchName::new(format!("{prefix}-b{:032x}", 2));
+        let batch1 = BatchId::parse_segment(&format!("b{:032x}", 1)).unwrap();
+        let batch2 = BatchId::parse_segment(&format!("b{:032x}", 2)).unwrap();
 
         storage
-            .register_table_prefix_branch("users", prefix, &branch1)
+            .register_table_prefix_batch("users", prefix, batch1)
             .unwrap();
         storage
-            .register_table_prefix_branch("users", prefix, &branch2)
+            .register_table_prefix_batch("users", prefix, batch2)
             .unwrap();
         storage
-            .register_table_prefix_branch("posts", prefix, &branch1)
+            .register_table_prefix_batch("posts", prefix, batch1)
             .unwrap();
 
         assert_eq!(
-            storage.load_table_prefix_branches("users", prefix).unwrap(),
-            HashSet::from([branch1, branch2])
+            storage.load_table_prefix_batches("users", prefix).unwrap(),
+            HashSet::from([batch1, batch2])
         );
         assert_eq!(
-            storage.load_table_prefix_branches("posts", prefix).unwrap(),
-            HashSet::from([branch1])
+            storage.load_table_prefix_batches("posts", prefix).unwrap(),
+            HashSet::from([batch1])
         );
     }
 

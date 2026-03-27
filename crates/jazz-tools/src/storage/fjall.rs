@@ -15,7 +15,7 @@ use fjall::{
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::Value;
+use crate::query_manager::types::{BatchId, Value};
 use crate::sync_manager::DurabilityTier;
 
 #[cfg(test)]
@@ -28,8 +28,8 @@ use super::{
         create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
         index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
         load_catalogue_manifest_core, load_commit_branch_core, load_object_metadata_core,
-        load_prefix_batch_catalog_core, load_table_prefix_branches_core,
-        register_table_prefix_branch_core, set_branch_tails_core, store_ack_tier_core,
+        load_prefix_batch_catalog_core, load_table_prefix_batches_core,
+        register_table_prefix_batch_core, set_branch_tails_core, store_ack_tier_core,
     },
 };
 
@@ -255,29 +255,29 @@ impl Storage for FjallStorage {
         })
     }
 
-    fn register_table_prefix_branch(
+    fn register_table_prefix_batch(
         &mut self,
         table: &str,
         prefix: &str,
-        branch: &BranchName,
+        batch_id: BatchId,
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let mut tx = inner.db.write_tx();
-            register_table_prefix_branch_core(table, prefix, branch, |key, value| {
+            register_table_prefix_batch_core(table, prefix, batch_id, |key, value| {
                 Self::set_on_tx(&mut tx, &inner.keyspace, key, value)
             })?;
             Self::commit_tx(tx)
         })
     }
 
-    fn load_table_prefix_branches(
+    fn load_table_prefix_batches(
         &self,
         table: &str,
         prefix: &str,
-    ) -> Result<HashSet<BranchName>, StorageError> {
+    ) -> Result<HashSet<BatchId>, StorageError> {
         self.with_inner(|inner| {
             let tx = inner.db.read_tx();
-            load_table_prefix_branches_core(table, prefix, |key_prefix| {
+            load_table_prefix_batches_core(table, prefix, |key_prefix| {
                 Self::scan_prefix(&tx, &inner.keyspace, key_prefix)
             })
         })
@@ -683,14 +683,14 @@ mod tests {
         );
 
         storage
-            .register_table_prefix_branch("users", prefix, &branch1)
+            .register_table_prefix_batch("users", prefix, batch1_id)
             .unwrap();
         storage
-            .register_table_prefix_branch("users", prefix, &branch2)
+            .register_table_prefix_batch("users", prefix, batch2_id)
             .unwrap();
         assert_eq!(
-            storage.load_table_prefix_branches("users", prefix).unwrap(),
-            HashSet::from([branch1, branch2])
+            storage.load_table_prefix_batches("users", prefix).unwrap(),
+            HashSet::from([batch1_id, batch2_id])
         );
     }
 

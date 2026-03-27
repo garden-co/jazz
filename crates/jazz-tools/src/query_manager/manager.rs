@@ -474,9 +474,16 @@ impl QueryManager {
 
             let prefix = composed_branch.prefix().branch_prefix();
             let mut prefix_branches: Vec<String> = storage
-                .load_table_prefix_branches(table, &prefix)?
+                .load_table_prefix_batches(table, &prefix)?
                 .into_iter()
-                .map(|branch| branch.as_str().to_string())
+                .map(|batch_id| {
+                    composed_branch
+                        .prefix()
+                        .with_batch_id(batch_id)
+                        .to_branch_name()
+                        .as_str()
+                        .to_string()
+                })
                 .collect();
 
             if prefix_branches.is_empty() {
