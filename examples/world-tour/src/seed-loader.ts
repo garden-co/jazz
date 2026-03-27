@@ -1,18 +1,7 @@
+import type { Db } from "jazz-tools";
 import { app } from "../schema/app.js";
-import {
-  defaultBandName,
-  venues as seedVenues,
-  descriptions,
-  privateNotes,
-} from "./seed-data.js";
-
-function seededRandom(seed: number): () => number {
-  let s = seed;
-  return () => {
-    s = (s * 16807 + 0) % 2147483647;
-    return (s - 1) / 2147483646;
-  };
-}
+import type { Venue } from "../schema/app.js";
+import { defaultBandName, venues as seedVenues, descriptions, privateNotes } from "./seed-data.js";
 
 function pickWeightedStatus(rand: number): "confirmed" | "tentative" | "cancelled" {
   if (rand < 0.7) return "confirmed";
@@ -21,7 +10,7 @@ function pickWeightedStatus(rand: number): "confirmed" | "tentative" | "cancelle
 }
 
 export async function ensureData(
-  db: any,
+  db: Db,
   userId: string | undefined,
   isMember: boolean,
 ): Promise<void> {
@@ -36,9 +25,7 @@ export async function ensureData(
   }
 
   if (userId && isMember) {
-    const myMembership = await db.all(
-      app.members.where({ userId }),
-    );
+    const myMembership = await db.all(app.members.where({ userId }));
     if (myMembership.length === 0) {
       db.insert(app.members, { bandId, userId });
     }
@@ -46,23 +33,19 @@ export async function ensureData(
 
   const existingVenues = await db.all(app.venues);
   const existingNames = new Set(existingVenues.map((v: any) => v.name));
-  const insertedVenues: { id: string }[] = [];
+  const insertedVenues: Venue[] = [];
   for (const v of seedVenues) {
     if (!existingNames.has(v.name)) {
       try {
         const result = db.insert(app.venues, v);
         if (result?.id) insertedVenues.push(result);
-      } catch {
-        // Permission denied or other error — skip
+      } catch (err) {
+        console.warn("[ensureData] venue insert skipped:", (err as Error).message);
       }
     }
   }
 
   const allVenues = [...existingVenues, ...insertedVenues];
-  console.log("[ensureData] venues:", existingVenues.length, "existing,", insertedVenues.length, "inserted,", allVenues.length, "total");
-  if (allVenues.length > 0) {
-    console.log("[ensureData] sample venue:", JSON.stringify(Object.keys(allVenues[0])), "id:", allVenues[0].id);
-  }
 
   if (!isMember) return;
 
@@ -71,20 +54,10 @@ export async function ensureData(
   const threeWeeks = new Date(today.getTime() + 21 * 24 * 60 * 60 * 1000);
 
   const upcomingStops = await db.all(
-    app.stops
-      .where({ date: { gte: today, lte: threeWeeks } })
-      .limit(12),
+    app.stops.where({ date: { gte: today, lte: threeWeeks } }).limit(12),
   );
 
   const needed = 12 - upcomingStops.length;
-  const myMembers = await db.all(app.members.where({ userId }));
-  console.log("[ensureData] member rows for user:", myMembers.length, "userId:", userId);
-  const allStops = await db.all(app.stops);
-  console.log("[ensureData] total stops in DB:", allStops.length, "upcoming (date filtered):", upcomingStops.length, "needed:", needed);
-  console.log("[ensureData] date range:", today.toISOString(), "to", threeWeeks.toISOString());
-  if (allStops.length > 0) {
-    console.log("[ensureData] first stop date:", allStops[0].date, "status:", allStops[0].status);
-  }
   if (needed <= 0) return;
 
   if (allVenues.length === 0) return;
@@ -111,15 +84,11 @@ export async function ensureData(
     const j = Math.floor(rand() * (i + 1));
     [availableDays[i], availableDays[j]] = [availableDays[j], availableDays[i]];
   }
-  const pickedDays = availableDays.slice(0, needed).sort(
-    (a, b) => a.getTime() - b.getTime(),
-  );
+  const pickedDays = availableDays.slice(0, needed).sort((a, b) => a.getTime() - b.getTime());
 
   // Pick random venues, sort by longitude for a believable west-to-east route
   const shuffledVenues = [...allVenues].sort(() => rand() - 0.5);
-  const pickedVenues = shuffledVenues.slice(0, needed).sort(
-    (a: any, b: any) => (a.lng ?? 0) - (b.lng ?? 0),
-  );
+  const pickedVenues = shuffledVenues.slice(0, needed).sort((a, b) => (a.lng ?? 0) - (b.lng ?? 0));
 
   for (let i = 0; i < pickedDays.length; i++) {
     const day = pickedDays[i];
@@ -135,9 +104,8 @@ export async function ensureData(
       date: day,
       status: pickWeightedStatus(rand()),
       publicDescription: descriptions[Math.floor(rand() * descriptions.length)],
-      privateNotes: rand() > 0.3
-        ? privateNotes[Math.floor(rand() * privateNotes.length)]
-        : undefined,
+      privateNotes:
+        rand() > 0.3 ? privateNotes[Math.floor(rand() * privateNotes.length)] : undefined,
     });
   }
 }

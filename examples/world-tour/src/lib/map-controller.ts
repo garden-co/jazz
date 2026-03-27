@@ -74,7 +74,7 @@ export class MapController {
       zoom: options.zoom ?? 1.8,
       pitch: options.pitch ?? 30,
       bearing: 0,
-          });
+    });
 
     this.ready = new Promise<void>((resolve) => {
       this.map.on("style.load", () => {
@@ -204,7 +204,7 @@ export class MapController {
       // At zoom z, one tile covers 360/2^z degrees of longitude.
       // We want dist / (360/2^z) ≈ 5, so z ≈ log2(5 * 360 / dist)
       const targetTileCrossings = 3;
-      const idealZoom = Math.log2(targetTileCrossings * 360 / Math.max(dist, 1));
+      const idealZoom = Math.log2((targetTileCrossings * 360) / Math.max(dist, 1));
       // Subtract 1 extra to account for tiles needed during the zoom-out/in transitions
       const midZoom = Math.max(2, Math.min(SETTLE_ZOOM - 2, idealZoom - 1));
 
@@ -244,12 +244,7 @@ export class MapController {
     this.tourAbort = null;
   }
 
-  /** Whether a tour animation is currently running. */
-  get isTouring(): boolean {
-    return this.tourAbort !== null && !this.tourAbort.signal.aborted;
-  }
-
-  /** Clean up the map instance. Call when unmounting. */
+  /** Begin slow auto-rotation of the globe. Pauses on user interaction. */
   startRotation(): void {
     if (this.rotating) return;
     this.rotating = true;
@@ -283,7 +278,9 @@ export class MapController {
   destroy(): void {
     this.stopRotation();
     this.stopTour();
+    // map.remove() tears down the canvas and all internal MapLibre listeners
     this.map.remove();
+    this.listeners = {};
   }
 
   // -----------------------------------------------------------------------
@@ -418,83 +415,4 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       { once: true },
     );
   });
-}
-
-// ---------------------------------------------------------------------------
-// Tile prefetcher: a hidden off-canvas map that silently visits each stop
-// location to warm the browser's tile cache before the user hits "Tour".
-// ---------------------------------------------------------------------------
-
-export class TilePrefetcher {
-  private map: maplibregl.Map;
-  private abort: AbortController | null = null;
-
-  constructor(styleUrl?: string) {
-    const container = document.createElement("div");
-    container.style.cssText = "position:absolute;left:-9999px;top:-9999px;width:512px;height:512px;";
-    document.body.appendChild(container);
-
-    this.map = new maplibregl.Map({
-      container,
-      style: styleUrl ?? DEFAULT_STYLE,
-      center: [0, 0],
-      zoom: 1,
-      interactive: false,
-          });
-  }
-
-  // Run the exact same tour animation as the real map, just 3× faster,
-  // so the HTTP tile cache is warm before the user hits Tour.
-  async prefetch(stops: StopMapData[]): Promise<void> {
-    if (stops.length < 2) return;
-
-    this.abort = new AbortController();
-    const signal = this.abort.signal;
-
-    await new Promise<void>((resolve) => {
-      this.map.on("load", () => resolve());
-      if (this.map.loaded()) resolve();
-    });
-
-    const SETTLE_ZOOM = 10;
-    const SPEED = 3;
-
-    this.map.jumpTo({ center: [stops[0].lng, stops[0].lat], zoom: SETTLE_ZOOM });
-    await sleep(500 / SPEED, signal);
-
-    for (let i = 1; i < stops.length; i++) {
-      if (signal.aborted) return;
-
-      const from: [number, number] = [stops[i - 1].lng, stops[i - 1].lat];
-      const to: [number, number] = [stops[i].lng, stops[i].lat];
-      const dLng = Math.abs(to[0] - from[0]);
-      const dLat = Math.abs(to[1] - from[1]);
-      const dist = Math.sqrt(dLng * dLng + dLat * dLat);
-      const midZoom = SETTLE_ZOOM - Math.min(7.5, dist * 0.08);
-      const legDuration = Math.min(10000, Math.max(2000, dist * 80));
-      const frameMs = 50;
-      const steps = Math.round(legDuration / frameMs);
-
-      for (let s = 0; s <= steps; s++) {
-        if (signal.aborted) return;
-        const linear = s / steps;
-        const t = linear * linear * (3 - 2 * linear);
-        const lng = from[0] + (to[0] - from[0]) * t;
-        const lat = from[1] + (to[1] - from[1]) * t;
-        const zoomEase = midZoom + (SETTLE_ZOOM - midZoom) * (1 - Math.sin(linear * Math.PI));
-        this.map.jumpTo({ center: [lng, lat], zoom: zoomEase, pitch: 45 });
-        await sleep(frameMs / SPEED, signal);
-      }
-
-      this.map.jumpTo({ center: to, zoom: SETTLE_ZOOM });
-      await sleep(300 / SPEED, signal);
-    }
-  }
-
-  destroy(): void {
-    this.abort?.abort();
-    const container = this.map.getContainer();
-    this.map.remove();
-    container.remove();
-  }
 }

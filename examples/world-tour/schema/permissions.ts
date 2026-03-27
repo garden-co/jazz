@@ -4,6 +4,9 @@ import { app } from "./app.js";
 export default definePermissions(app, ({ policy, session, anyOf }) => {
   const isBandMember = policy.members.exists.where({ userId: session.user_id });
 
+  // Open inserts for bands, members, and venues allow the demo app to
+  // bootstrap seed data without an external auth provider. In a production
+  // app you'd gate these behind isBandMember or a real identity check.
   policy.bands.allowRead.where({});
   policy.bands.allowInsert.where({});
   policy.bands.allowUpdate.where(isBandMember);
