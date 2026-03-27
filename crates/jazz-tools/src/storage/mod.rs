@@ -9,6 +9,8 @@
 //! Storage instance. Cross-thread communication uses the sync protocol over
 //! postMessage, not shared mutable state.
 
+#[cfg(test)]
+pub mod conformance;
 mod key_codec;
 mod opfs_btree;
 mod storage_core;
@@ -919,224 +921,6 @@ impl Storage for MemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smallvec::smallvec;
-
-    fn make_commit(content: &[u8]) -> Commit {
-        Commit {
-            parents: smallvec![],
-            content: content.to_vec(),
-            timestamp: 12345,
-            author: ObjectId::new(),
-            metadata: None,
-            stored_state: Default::default(),
-            ack_state: Default::default(),
-        }
-    }
-
-    #[test]
-    fn memory_storage_object_lifecycle() {
-        let mut storage = MemoryStorage::new();
-
-        let id = ObjectId::new();
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            crate::metadata::MetadataKey::Table.to_string(),
-            "users".to_string(),
-        );
-
-        // Create object
-        storage.create_object(id, metadata.clone()).unwrap();
-
-        // Load metadata
-        let loaded = storage.load_object_metadata(id).unwrap();
-        assert_eq!(loaded, Some(metadata));
-
-        // Non-existent object
-        let other_id = ObjectId::new();
-        assert_eq!(storage.load_object_metadata(other_id).unwrap(), None);
-    }
-
-    #[test]
-    fn memory_storage_branch_and_commits() {
-        let mut storage = MemoryStorage::new();
-
-        let id = ObjectId::new();
-        let branch = BranchName::new("main");
-
-        storage.create_object(id, HashMap::new()).unwrap();
-
-        // Initially no branch
-        assert_eq!(storage.load_branch(id, &branch).unwrap(), None);
-
-        // Append commit creates branch
-        let commit = make_commit(b"first");
-        let commit_id = commit.id();
-        storage.append_commit(id, &branch, commit).unwrap();
-
-        let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
-        assert_eq!(loaded.commits.len(), 1);
-        assert!(loaded.tails.contains(&commit_id));
-
-        // Delete commit
-        storage.delete_commit(id, &branch, commit_id).unwrap();
-        let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
-        assert_eq!(loaded.commits.len(), 0);
-    }
-
-    #[test]
-    fn memory_storage_index_insert_lookup() {
-        let mut storage = MemoryStorage::new();
-
-        let row1 = ObjectId::new();
-        let row2 = ObjectId::new();
-
-        // Insert two rows with same value
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(25), row1)
-            .unwrap();
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(25), row2)
-            .unwrap();
-
-        // Lookup should return both
-        let results = storage.index_lookup("users", "age", "main", &Value::Integer(25));
-        assert_eq!(results.len(), 2);
-        assert!(results.contains(&row1));
-        assert!(results.contains(&row2));
-
-        // Different value returns empty
-        let results = storage.index_lookup("users", "age", "main", &Value::Integer(30));
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn memory_storage_index_remove() {
-        let mut storage = MemoryStorage::new();
-
-        let row1 = ObjectId::new();
-        let row2 = ObjectId::new();
-
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(25), row1)
-            .unwrap();
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(25), row2)
-            .unwrap();
-
-        // Remove one
-        storage
-            .index_remove("users", "age", "main", &Value::Integer(25), row1)
-            .unwrap();
-
-        let results = storage.index_lookup("users", "age", "main", &Value::Integer(25));
-        assert_eq!(results.len(), 1);
-        assert!(results.contains(&row2));
-    }
-
-    #[test]
-    fn memory_storage_index_range() {
-        let mut storage = MemoryStorage::new();
-
-        let row20 = ObjectId::new();
-        let row25 = ObjectId::new();
-        let row30 = ObjectId::new();
-        let row35 = ObjectId::new();
-
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(20), row20)
-            .unwrap();
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(25), row25)
-            .unwrap();
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(30), row30)
-            .unwrap();
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(35), row35)
-            .unwrap();
-
-        // Range [25, 35) should return 25 and 30
-        let results = storage.index_range(
-            "users",
-            "age",
-            "main",
-            Bound::Included(&Value::Integer(25)),
-            Bound::Excluded(&Value::Integer(35)),
-        );
-        assert_eq!(results.len(), 2);
-        assert!(results.contains(&row25));
-        assert!(results.contains(&row30));
-
-        // Unbounded start, exclusive end
-        let results = storage.index_range(
-            "users",
-            "age",
-            "main",
-            Bound::Unbounded,
-            Bound::Excluded(&Value::Integer(26)),
-        );
-        assert_eq!(results.len(), 2);
-        assert!(results.contains(&row20));
-        assert!(results.contains(&row25));
-
-        // Inclusive start, unbounded end
-        let results = storage.index_range(
-            "users",
-            "age",
-            "main",
-            Bound::Included(&Value::Integer(30)),
-            Bound::Unbounded,
-        );
-        assert_eq!(results.len(), 2);
-        assert!(results.contains(&row30));
-        assert!(results.contains(&row35));
-    }
-
-    #[test]
-    fn memory_storage_index_scan_all() {
-        let mut storage = MemoryStorage::new();
-
-        let row1 = ObjectId::new();
-        let row2 = ObjectId::new();
-        let row3 = ObjectId::new();
-
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(20), row1)
-            .unwrap();
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(25), row2)
-            .unwrap();
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(30), row3)
-            .unwrap();
-
-        let results = storage.index_scan_all("users", "age", "main");
-        assert_eq!(results.len(), 3);
-    }
-
-    #[test]
-    fn memory_storage_index_branch_isolation() {
-        let mut storage = MemoryStorage::new();
-
-        let row1 = ObjectId::new();
-        let row2 = ObjectId::new();
-
-        storage
-            .index_insert("users", "age", "main", &Value::Integer(25), row1)
-            .unwrap();
-        storage
-            .index_insert("users", "age", "feature", &Value::Integer(25), row2)
-            .unwrap();
-
-        // Each branch sees only its own data
-        let main_results = storage.index_lookup("users", "age", "main", &Value::Integer(25));
-        assert_eq!(main_results.len(), 1);
-        assert!(main_results.contains(&row1));
-
-        let feature_results = storage.index_lookup("users", "age", "feature", &Value::Integer(25));
-        assert_eq!(feature_results.len(), 1);
-        assert!(feature_results.contains(&row2));
-    }
 
     #[test]
     fn encode_value_ordering() {
@@ -1154,61 +938,6 @@ mod tests {
         assert!(bool_true < int_neg);
         assert!(int_neg < int_zero);
         assert!(int_zero < int_pos);
-    }
-
-    #[test]
-    fn memory_storage_catalogue_manifest_roundtrip() {
-        let mut storage = MemoryStorage::new();
-        let app_id = ObjectId::new();
-        let schema_object_id = ObjectId::new();
-        let lens_object_id = ObjectId::new();
-        let schema_hash = SchemaHash::from_bytes([0x11; 32]);
-        let source_hash = SchemaHash::from_bytes([0x22; 32]);
-        let target_hash = SchemaHash::from_bytes([0x33; 32]);
-
-        storage
-            .append_catalogue_manifest_op(
-                app_id,
-                CatalogueManifestOp::SchemaSeen {
-                    object_id: schema_object_id,
-                    schema_hash,
-                },
-            )
-            .unwrap();
-        storage
-            .append_catalogue_manifest_op(
-                app_id,
-                CatalogueManifestOp::LensSeen {
-                    object_id: lens_object_id,
-                    source_hash,
-                    target_hash,
-                },
-            )
-            .unwrap();
-
-        // Idempotent append for the same object/op.
-        storage
-            .append_catalogue_manifest_op(
-                app_id,
-                CatalogueManifestOp::SchemaSeen {
-                    object_id: schema_object_id,
-                    schema_hash,
-                },
-            )
-            .unwrap();
-
-        let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
-        assert_eq!(
-            manifest.schema_seen.get(&schema_object_id),
-            Some(&schema_hash)
-        );
-        assert_eq!(
-            manifest.lens_seen.get(&lens_object_id),
-            Some(&CatalogueLensSeen {
-                source_hash,
-                target_hash,
-            })
-        );
     }
 
     #[test]
@@ -1399,5 +1128,14 @@ mod tests {
             },
         );
         assert!(matches!(conflict, Err(StorageError::IoError(_))));
+    }
+
+    mod memory_conformance {
+        use crate::storage::MemoryStorage;
+        use crate::storage::Storage;
+
+        crate::storage_conformance_tests!(memory, || {
+            Box::new(MemoryStorage::new()) as Box<dyn Storage>
+        });
     }
 }
