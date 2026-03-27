@@ -146,6 +146,7 @@ export class SyncStreamController {
   }
 
   notifyTransportFailure(): void {
+    this.abortStream();
     this.detachServer();
     this.scheduleReconnect();
   }
