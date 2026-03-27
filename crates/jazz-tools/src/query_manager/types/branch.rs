@@ -1,4 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use uuid::Uuid;
 
 use crate::object::BranchName;
 
@@ -567,14 +568,109 @@ pub mod hex {
 // Composed Branch Name - Environment-qualified branch naming
 // ============================================================================
 
+/// Device-generated identifier for a batch of writes.
+///
+/// Text form is a single branch-safe segment: `b` + 32 lowercase hex chars.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BatchId(pub [u8; 16]);
+
+impl BatchId {
+    pub fn new() -> Self {
+        Self::from_uuid(Uuid::now_v7())
+    }
+
+    pub fn from_uuid(uuid: Uuid) -> Self {
+        Self(*uuid.as_bytes())
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+
+    pub fn to_uuid(&self) -> Uuid {
+        Uuid::from_bytes(self.0)
+    }
+
+    pub fn branch_segment(&self) -> String {
+        format!("b{}", hex::encode(&self.0))
+    }
+
+    pub fn parse_segment(segment: &str) -> Option<Self> {
+        let raw = segment.strip_prefix('b')?;
+        if raw.len() != 32 || !raw.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+
+        let bytes = hex_decode(raw).ok()?;
+        let mut arr = [0u8; 16];
+        arr.copy_from_slice(&bytes);
+        Some(Self(arr))
+    }
+}
+
+impl Default for BatchId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for BatchId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.branch_segment())
+    }
+}
+
+/// Shared branch prefix across all batches for the same env/schema/user branch.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BranchPrefixName {
+    pub env: String,
+    pub schema_hash: SchemaHash,
+    pub user_branch: String,
+}
+
+impl BranchPrefixName {
+    pub fn new(env: &str, schema_hash: SchemaHash, user_branch: &str) -> Self {
+        Self {
+            env: env.to_string(),
+            schema_hash,
+            user_branch: user_branch.to_string(),
+        }
+    }
+
+    pub fn from_schema(env: &str, schema: &Schema, user_branch: &str) -> Self {
+        Self::new(env, SchemaHash::compute(schema), user_branch)
+    }
+
+    /// Legacy unbatched branch name: `{env}-{schemaHash}-{userBranch}`.
+    pub fn to_branch_name(&self) -> BranchName {
+        BranchName::new(format!(
+            "{}-{}-{}",
+            self.env,
+            self.schema_hash.short(),
+            self.user_branch
+        ))
+    }
+
+    /// Prefix shared by all batches: `{env}-{schemaHash}-{userBranch}-`.
+    pub fn to_batch_prefix(&self) -> String {
+        format!(
+            "{}-{}-{}-",
+            self.env,
+            self.schema_hash.short(),
+            self.user_branch
+        )
+    }
+}
+
 /// A branch name composed of environment, schema hash, and user branch.
-/// Format: `{env}-{schemaHash8}-{userBranch}`
-/// Example: `dev-a1b2c3d4-main`, `prod-f9e8d7c6-feature-x`
+/// Format: `{env}-{schemaHash}-{userBranch}` or `{env}-{schemaHash}-{userBranch}-{batchId}`
+/// Example: `dev-a1b2c3d4e5f6-main`, `prod-f9e8d7c6b5a4-feature-x-b018d6f2...`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComposedBranchName {
     pub env: String,
     pub schema_hash: SchemaHash,
     pub user_branch: String,
+    pub batch_id: Option<BatchId>,
 }
 
 impl ComposedBranchName {
@@ -584,6 +680,22 @@ impl ComposedBranchName {
             env: env.to_string(),
             schema_hash,
             user_branch: user_branch.to_string(),
+            batch_id: None,
+        }
+    }
+
+    /// Create a new composed branch name with an explicit batch identifier.
+    pub fn with_batch(
+        env: &str,
+        schema_hash: SchemaHash,
+        user_branch: &str,
+        batch_id: BatchId,
+    ) -> Self {
+        Self {
+            env: env.to_string(),
+            schema_hash,
+            user_branch: user_branch.to_string(),
+            batch_id: Some(batch_id),
         }
     }
 
@@ -592,14 +704,18 @@ impl ComposedBranchName {
         Self::new(env, SchemaHash::compute(schema), user_branch)
     }
 
-    /// Convert to a BranchName string: "{env}-{hash8}-{userBranch}"
+    pub fn prefix(&self) -> BranchPrefixName {
+        BranchPrefixName::new(&self.env, self.schema_hash, &self.user_branch)
+    }
+
+    /// Convert to a BranchName string.
     pub fn to_branch_name(&self) -> BranchName {
-        BranchName::new(format!(
-            "{}-{}-{}",
-            self.env,
-            self.schema_hash.short(),
-            self.user_branch
-        ))
+        let mut branch = self.prefix().to_branch_name().as_str().to_string();
+        if let Some(batch_id) = self.batch_id {
+            branch.push('-');
+            branch.push_str(&batch_id.branch_segment());
+        }
+        BranchName::new(branch)
     }
 
     /// Parse a BranchName back into its components.
@@ -613,7 +729,7 @@ impl ComposedBranchName {
 
         let env = parts[0].to_string();
         let hash_str = parts[1];
-        let user_branch = parts[2].to_string();
+        let rest = parts[2];
 
         // Validate hash is 12 hex chars (6 bytes)
         if hash_str.len() != 12 || !hash_str.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -628,10 +744,25 @@ impl ComposedBranchName {
             hash_bytes[..6].copy_from_slice(&bytes);
         }
 
+        let (user_branch, batch_id) = match rest.rsplit_once('-') {
+            Some((candidate_user_branch, batch_segment)) => {
+                if let Some(batch_id) = BatchId::parse_segment(batch_segment) {
+                    if candidate_user_branch.is_empty() {
+                        return None;
+                    }
+                    (candidate_user_branch.to_string(), Some(batch_id))
+                } else {
+                    (rest.to_string(), None)
+                }
+            }
+            None => (rest.to_string(), None),
+        };
+
         Some(Self {
             env,
             schema_hash: SchemaHash::from_bytes(hash_bytes),
             user_branch,
+            batch_id,
         })
     }
 
@@ -644,13 +775,7 @@ impl ComposedBranchName {
 
 impl std::fmt::Display for ComposedBranchName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}-{}-{}",
-            self.env,
-            self.schema_hash.short(),
-            self.user_branch
-        )
+        write!(f, "{}", self.to_branch_name())
     }
 }
 

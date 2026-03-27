@@ -699,6 +699,33 @@ fn row_descriptor_content_hash() {
 // ========================================================================
 
 #[test]
+fn batch_id_roundtrips_through_branch_segment() {
+    let batch_id = BatchId::from_uuid(Uuid::from_u128(42));
+
+    let segment = batch_id.branch_segment();
+
+    assert_eq!(segment.len(), 33);
+    assert!(segment.starts_with('b'));
+    assert_eq!(BatchId::parse_segment(&segment), Some(batch_id));
+    assert_eq!(batch_id.to_uuid(), Uuid::from_u128(42));
+}
+
+#[test]
+fn branch_prefix_name_formats_legacy_and_batch_prefix_shapes() {
+    let hash = SchemaHash::from_bytes([0xab; 32]);
+    let prefix = BranchPrefixName::new("dev", hash, "feature-x");
+
+    assert_eq!(
+        prefix.to_branch_name().as_str(),
+        format!("dev-{}-feature-x", hash.short())
+    );
+    assert_eq!(
+        prefix.to_batch_prefix(),
+        format!("dev-{}-feature-x-", hash.short())
+    );
+}
+
+#[test]
 fn composed_branch_name_format() {
     let schema = SchemaBuilder::new()
         .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
@@ -726,8 +753,39 @@ fn composed_branch_name_parse() {
 
     assert_eq!(parsed.env, "prod");
     assert_eq!(parsed.user_branch, "feature-x");
+    assert_eq!(parsed.batch_id, None);
     // Note: full hash can't be recovered from 12 chars, but short() should match
     assert_eq!(parsed.schema_hash.short(), original.schema_hash.short());
+}
+
+#[test]
+fn composed_branch_name_with_batch_parse() {
+    let schema = SchemaBuilder::new()
+        .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+        .build();
+    let batch_id = BatchId::from_uuid(Uuid::from_u128(7));
+
+    let original =
+        ComposedBranchName::with_batch("prod", SchemaHash::compute(&schema), "feature-x", batch_id);
+    let branch_name = original.to_branch_name();
+    let parsed = ComposedBranchName::parse(&branch_name).unwrap();
+
+    assert_eq!(parsed.env, "prod");
+    assert_eq!(parsed.user_branch, "feature-x");
+    assert_eq!(parsed.batch_id, Some(batch_id));
+    assert_eq!(parsed.schema_hash.short(), original.schema_hash.short());
+}
+
+#[test]
+fn composed_branch_name_with_batch_keeps_dashes_in_user_branch() {
+    let hash = SchemaHash::from_bytes([0xcd; 32]);
+    let batch_id = BatchId::from_uuid(Uuid::from_u128(9));
+    let original = ComposedBranchName::with_batch("dev", hash, "feature-x-y", batch_id);
+
+    let parsed = ComposedBranchName::parse(&original.to_branch_name()).unwrap();
+
+    assert_eq!(parsed.user_branch, "feature-x-y");
+    assert_eq!(parsed.batch_id, Some(batch_id));
 }
 
 #[test]
