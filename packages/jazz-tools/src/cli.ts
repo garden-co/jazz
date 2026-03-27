@@ -34,6 +34,9 @@ export interface SchemaExportOptions {
   format: "json";
 }
 
+const PERMISSIONS_LIFECYCLE_NOTE =
+  "Permission-only changes do not create schema hashes or require migrations.";
+
 function parseArgs(): { command: string; options: BuildOptions } {
   const args = process.argv.slice(2);
   const command = args[0] || "";
@@ -71,11 +74,12 @@ async function pathExists(path: string): Promise<boolean> {
 export async function build(options: BuildOptions): Promise<void> {
   const compiled = await loadCompiledSchema(options.schemaDir);
   const tableCount = compiled.schema.tables.length;
-  console.log(`Loaded schema from ${compiled.schemaFile}.`);
+  console.log(`Loaded structural schema from ${compiled.schemaFile}.`);
   if (compiled.permissionsFile) {
-    console.log(`Loaded permissions from ${compiled.permissionsFile}.`);
+    console.log(`Loaded current permissions from ${compiled.permissionsFile}.`);
+    console.log(PERMISSIONS_LIFECYCLE_NOTE);
   }
-  console.log(`Validated ${tableCount} table${tableCount === 1 ? "" : "s"}.`);
+  console.log(`Validated ${tableCount} table${tableCount === 1 ? "" : "s"} in schema.ts.`);
 }
 
 export async function exportSchema(options: SchemaExportOptions): Promise<void> {
@@ -677,6 +681,9 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
   const version = await packageVersion();
   console.log(`Generated: ${filePath}`);
   console.log("");
+  console.log("Migration stubs are only for structural schema changes.");
+  console.log(PERMISSIONS_LIFECYCLE_NOTE);
+  console.log("");
   console.log("Next steps:");
   console.log("1. Fill in migrate.");
   console.log("2. Rename the file by replacing 'unnamed'.");
@@ -793,10 +800,10 @@ if (isMainModule()) {
   } else {
     console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
     console.log("\nCommands:");
-    console.log("  build                 Validate and load root schema.ts");
-    console.log("  schema export         Print the compiled schema representation as JSON");
+    console.log("  build                 Validate root schema.ts and optional permissions.ts");
+    console.log("  schema export         Print the compiled structural schema as JSON");
     console.log(
-      "  migrations create     Generate a typed migration stub from two known schema hashes",
+      "  migrations create     Generate a typed structural migration stub from two known schema hashes",
     );
     console.log("  migrations push       Push a reviewed migration edge to the server");
     console.log("\nBuild options:");

@@ -1,9 +1,17 @@
 ---
 title: Permissions
-description: Fast RLS (ReBAC), simple policies, combinators, and inherited access policies.
+description: Current row-level auth rules, simple policies, combinators, and inherited access policies.
 ---
 
-## Schema Policy Syntax
+## Lifecycle
+
+- `schema.ts` defines the structural data model. It produces schema hashes and is the input to migrations.
+- `permissions.ts` defines the current auth rules for that app. Permission-only changes do not create schema hashes or migration edges.
+- `migrations/` only describe structural compatibility between schema hashes.
+
+Jazz applies the latest published permissions even when data is being read through older schema versions. Older rows are transformed into the current permission schema for auth checks, then projected back into the caller's requested shape.
+
+## Defining Permissions
 
 Define policies in a root `permissions.ts` next to `schema.ts`. This applies to every Jazz app, including Rust backends that consume the compiled schema via the CLI.
 
@@ -94,6 +102,12 @@ Use depth-bounded inherited access when foreign keys can form recursive chains.
 </Tabs>
 
 `maxDepth` must be a positive integer.
+
+## When Permissions Change
+
+Editing only `permissions.ts` updates the active auth rules. It does not require `migrations create` or `migrations push`.
+
+Reach for migrations only when the structure in `schema.ts` changes and older/newer schema hashes need a reviewed compatibility edge.
 
 ## Policy Enforcement and Request Context
 

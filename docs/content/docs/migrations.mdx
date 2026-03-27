@@ -1,6 +1,6 @@
 ---
 title: Migrations
-description: Review and publish typed compatibility edges between schema hashes.
+description: Review and publish typed compatibility edges between structural schema hashes.
 ---
 
 <Callout title="You can skip this first">
@@ -12,6 +12,7 @@ description: Review and publish typed compatibility edges between schema hashes.
 - Traditional migration systems run a linear sequence and require peers to converge before older versions stop writing.
 - Jazz migration lenses are applied at read/write time, so mixed-version clients can keep operating while data is translated between schema hashes.
 - Schemas still auto-publish on connect. Migrations do not: they are always reviewed and pushed explicitly.
+- Migrations are structural only. Permission changes are published separately and do not need migration files.
 
 ## Workflow
 
@@ -31,6 +32,8 @@ All Jazz apps use the same migration workflow, including Rust backends.
 </Tabs>
 
 When Jazz encounters rows whose schema hash is no longer reachable from the current app schema, it logs a warning with the exact short-hash `migrations create <fromHash> <toHash>` command to run next.
+
+If you only edited `permissions.ts`, you should not run `migrations create`. Permission-only changes do not create new schema hashes.
 
 ## Generated Stub
 
