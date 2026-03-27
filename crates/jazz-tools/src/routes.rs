@@ -183,6 +183,8 @@ async fn events_handler(
         let mut connections = state.connections.write().await;
         connections.insert(connection_id, ConnectionState { client_id });
     }
+    // Remove from disconnect candidates if reconnecting
+    state.on_client_connected(client_id).await;
 
     // Clone state for cleanup on drop
     let state_cleanup = state.clone();
@@ -240,16 +242,19 @@ async fn events_handler(
         }
 
         // Cleanup on stream close
-        {
+        let closed_client_id = {
             let mut connections = state_cleanup.connections.write().await;
-            connections.remove(&connection_id_cleanup);
+            let conn = connections.remove(&connection_id_cleanup);
+            conn.map(|c| c.client_id)
+        };
+        if let Some(closed_client_id) = closed_client_id {
+            state_cleanup.on_connection_closed(closed_client_id).await;
+            tracing::debug!(
+                connection_id = connection_id_cleanup,
+                %closed_client_id,
+                "SSE stream closed, client state retained pending TTL"
+            );
         }
-        // Keep logical client state across disconnects so reconnect with the same
-        // client_id can resume query forwarding state.
-        tracing::debug!(
-            "Stream connection {} closed (client state retained for resume)",
-            connection_id_cleanup
-        );
     };
 
     Ok(axum::response::Response::builder()
