@@ -180,10 +180,11 @@ async fn events_handler(
 
     // Store connection state.
     // Lock ordering note: this takes connections(write) then on_client_connected
-    // takes candidates(write). on_connection_closed uses the reverse nesting
-    // (candidates(write) → connections(read)), which is safe because it only
-    // needs a read lock on connections. Do NOT change on_connection_closed to
-    // take connections(write) without revisiting this ordering.
+    // takes candidates(write) — sequential, not nested. on_connection_closed
+    // nests candidates(write) → connections(read), which is safe because
+    // connections(read) doesn't block this path's already-released write.
+    // run_sweep_once holds connections(read) during reap to prevent TOCTOU.
+    // See on_connection_closed doc for the full lock ordering table.
     {
         let mut connections = state.connections.write().await;
         connections.insert(connection_id, ConnectionState { client_id });
