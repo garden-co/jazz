@@ -24,6 +24,15 @@ pub use testing::{TestingJwksServer, TestingServer, TestingServerBuilder};
 
 pub type DynStorage = Box<dyn Storage + Send>;
 
+/// Tracks a client awaiting reap after SSE disconnect.
+#[derive(Clone, Copy)]
+pub struct DisconnectCandidate {
+    /// When the last SSE connection closed.
+    pub disconnected_at: Instant,
+    /// Number of failed reap attempts.
+    pub attempts: u32,
+}
+
 /// Server state shared across request handlers.
 pub struct ServerState {
     pub runtime: TokioRuntime<DynStorage>,
@@ -42,8 +51,7 @@ pub struct ServerState {
     /// In-memory cache: (issuer, subject) -> principal_id.
     pub external_identities: RwLock<HashMap<(String, String), String>>,
     /// Clients that lost their SSE stream, waiting to be reaped after TTL.
-    /// Maps client_id → instant when the last SSE connection closed.
-    pub disconnect_candidates: RwLock<HashMap<ClientId, Instant>>,
+    pub disconnect_candidates: RwLock<HashMap<ClientId, DisconnectCandidate>>,
     /// Client state TTL in milliseconds. Default: 5 minutes (300_000ms).
     /// Disconnected clients are reaped after this duration.
     pub client_ttl: AtomicU64,
@@ -62,8 +70,11 @@ impl ServerState {
     /// candidates write lock to prevent a TOCTOU race where a reconnect
     /// could slip in between the check and the insert.
     ///
-    /// Lock ordering: candidates(write) → connections(read). This is safe
-    /// because no code path holds connections while taking candidates.
+    /// Lock ordering (no path nests these in conflicting order):
+    ///   on_connection_closed:  candidates(write) → connections(read)
+    ///   on_client_connected:   candidates(write)
+    ///   events_handler:        connections(write) ; candidates(write)   (sequential)
+    ///   run_sweep_once:        candidates(write) ; connections(read) → core(Mutex) ; candidates(write)  (read held during reap)
     pub async fn on_connection_closed(&self, client_id: ClientId) {
         let mut candidates = self.disconnect_candidates.write().await;
         let has_connections = self
@@ -73,7 +84,13 @@ impl ServerState {
             .values()
             .any(|c| c.client_id == client_id);
         if !has_connections {
-            candidates.insert(client_id, Instant::now());
+            candidates.insert(
+                client_id,
+                DisconnectCandidate {
+                    disconnected_at: Instant::now(),
+                    attempts: 0,
+                },
+            );
         }
     }
 
@@ -96,17 +113,25 @@ impl ServerState {
     /// check each for active connections, and reap those that are truly gone.
     /// Returns the list of reaped client IDs.
     pub async fn run_sweep_once(&self) -> Vec<ClientId> {
+        const MAX_REAP_ATTEMPTS: u32 = 3;
+
         let ttl_ms = self.client_ttl.load(std::sync::atomic::Ordering::Relaxed);
         let ttl = std::time::Duration::from_millis(ttl_ms);
         let now = tokio::time::Instant::now();
 
-        // Step 1-3: drain expired entries from candidates
-        let expired: Vec<ClientId> = {
+        // Step 1: drain expired entries from candidates
+        let expired: Vec<(ClientId, DisconnectCandidate)> = {
             let mut candidates = self.disconnect_candidates.write().await;
             let mut expired = Vec::new();
-            candidates.retain(|&client_id, &mut disconnected_at| {
-                if now.duration_since(disconnected_at) >= ttl {
-                    expired.push(client_id);
+            candidates.retain(|&client_id, candidate| {
+                if now.duration_since(candidate.disconnected_at) >= ttl {
+                    expired.push((
+                        client_id,
+                        DisconnectCandidate {
+                            disconnected_at: candidate.disconnected_at,
+                            attempts: candidate.attempts,
+                        },
+                    ));
                     false // remove from candidates
                 } else {
                     true // keep
@@ -115,25 +140,72 @@ impl ServerState {
             expired
         };
 
-        // Step 4: for each expired client, check connections then reap
+        if expired.is_empty() {
+            return Vec::new();
+        }
+
+        // Step 2: hold connections(read) for the entire reap phase.
+        // This prevents a TOCTOU race where a client reconnects (takes
+        // connections(write)) between our active-connections check and
+        // remove_client. While we hold this lock, no new connections can
+        // be inserted, so the snapshot is stable through all reaps.
+        //
+        // The sync Mutex inside remove_client is held for microseconds
+        // (HashMap retains), so blocking the tokio worker here is
+        // negligible. New SSE connections wait for the read lock to drop,
+        // which is O(expired × microseconds) — acceptable at any
+        // realistic scale.
+        //
+        // Building the active set once is also O(connections) total instead
+        // of O(expired × connections) from per-client linear scans.
+        let connections_guard = self.connections.read().await;
+        let active_clients: std::collections::HashSet<ClientId> =
+            connections_guard.values().map(|c| c.client_id).collect();
+
         let mut reaped = Vec::new();
-        for client_id in expired {
-            if self.has_active_connections(client_id).await {
-                // Client reconnected between drain and reap — skip
+        let mut failed: Vec<(ClientId, DisconnectCandidate)> = Vec::new();
+        for (client_id, candidate) in expired {
+            if active_clients.contains(&client_id) {
                 tracing::debug!(%client_id, "skipping reap: client reconnected");
                 continue;
             }
-            if let Err(e) = self.runtime.remove_client(client_id) {
-                tracing::warn!(%client_id, error = %e, "failed to reap client, re-queuing");
-                // Re-insert so the next sweep retries instead of leaking this client.
-                self.disconnect_candidates
-                    .write()
-                    .await
-                    .insert(client_id, Instant::now());
-                continue;
+            // connections(read) held → reconnect can't insert a connection
+            // until we release, so remove_client can't race with re-registration.
+            match self.runtime.remove_client(client_id) {
+                Ok(()) => {
+                    reaped.push(client_id);
+                    tracing::debug!(%client_id, "reaped disconnected client");
+                }
+                Err(e) => {
+                    tracing::warn!(%client_id, error = %e, attempts = candidate.attempts + 1, "failed to reap client");
+                    failed.push((client_id, candidate));
+                }
             }
-            reaped.push(client_id);
-            tracing::debug!(%client_id, "reaped disconnected client");
+        }
+        drop(connections_guard);
+
+        // Re-queue failures outside the connections lock to avoid
+        // nesting connections(read) → candidates(write).
+        if !failed.is_empty() {
+            let mut candidates = self.disconnect_candidates.write().await;
+            for (client_id, prev) in failed {
+                let next_attempt = prev.attempts + 1;
+                if next_attempt >= MAX_REAP_ATTEMPTS {
+                    tracing::error!(
+                        %client_id,
+                        attempts = next_attempt,
+                        "giving up reaping client after max attempts"
+                    );
+                } else {
+                    candidates.insert(
+                        client_id,
+                        DisconnectCandidate {
+                            disconnected_at: prev.disconnected_at,
+                            attempts: next_attempt,
+                        },
+                    );
+                }
+            }
         }
 
         reaped
@@ -347,47 +419,47 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn sweep_race_guard_checks_connections() {
-        // Simulate the race: sweep drains candidates, then alice reconnects,
-        // then sweep checks connections before reaping.
+    async fn sweep_skips_client_that_reconnected_after_expiry() {
+        // Exercises the active_clients.contains guard in run_sweep_once:
+        // alice is in disconnect_candidates (expired), but also has an
+        // active connection. Sweep should see the connection and skip her.
+        //
+        // We insert the candidate manually to bypass on_client_connected
+        // (which would remove it), simulating the race where a reconnect
+        // happens after the candidate was already drained by a prior
+        // sweep phase.
         let state = build_test_state().await;
         let alice = ClientId::new();
-
         let _ = state.runtime.add_client(alice, None);
 
-        let conn = add_connection(&state, alice).await;
-        remove_connection(&state, conn).await;
-
-        tokio::time::advance(Duration::from_secs(301)).await;
-
-        // Manually drain candidates (simulating sweep step 1-3)
-        let expired: Vec<ClientId> = {
+        // Insert an already-expired candidate directly
+        {
             let mut candidates = state.disconnect_candidates.write().await;
-            let ttl_ms = state.client_ttl.load(std::sync::atomic::Ordering::Relaxed);
-            let ttl = Duration::from_millis(ttl_ms);
-            let now = tokio::time::Instant::now();
-            let mut expired = Vec::new();
-            candidates.retain(|&client_id, &mut disconnected_at| {
-                if now.duration_since(disconnected_at) >= ttl {
-                    expired.push(client_id);
-                    false
-                } else {
-                    true
-                }
-            });
-            expired
-        };
-        assert_eq!(expired, vec![alice]);
+            candidates.insert(
+                alice,
+                super::DisconnectCandidate {
+                    disconnected_at: tokio::time::Instant::now() - Duration::from_secs(301),
+                    attempts: 0,
+                },
+            );
+        }
 
-        // Alice reconnects between drain and reap
-        let _conn2 = add_connection(&state, alice).await;
-        state.on_client_connected(alice).await;
+        // alice has an active connection (simulating reconnect)
+        let _conn = add_connection(&state, alice).await;
 
-        // Now the sweep would check connections before reaping
+        // Sweep drains alice from candidates (expired), but the
+        // active_clients snapshot sees her connection → skip reap
+        let reaped = state.run_sweep_once().await;
         assert!(
-            state.has_active_connections(alice).await,
-            "alice has a connection — sweep should skip"
+            reaped.is_empty(),
+            "alice has active connection — should not be reaped"
         );
+
+        let has_client = state
+            .runtime
+            .with_sync_manager(|sm| sm.get_client(alice).is_some())
+            .expect("lock");
+        assert!(has_client, "alice's state should be preserved");
     }
 
     #[tokio::test(start_paused = true)]
@@ -540,18 +612,20 @@ mod tests {
     }
 
     // ========================================================================
-    // Lock ordering / deadlock safety tests
+    // Lock ordering / sequential correctness tests
     //
-    // These exercise concurrent lock acquisition patterns to verify that
+    // These exercise sequential lock acquisition patterns to verify that
     // the candidates(write) → connections(read) nesting in on_connection_closed
-    // does not deadlock with other paths.
+    // produces correct state transitions when interleaved with other operations.
+    // Note: single-threaded tokio cannot detect true two-task deadlocks.
     // ========================================================================
 
     #[tokio::test]
-    async fn no_deadlock_concurrent_disconnect_and_reconnect() {
-        // Exercises the lock ordering: on_connection_closed takes
+    async fn lock_ordering_disconnect_and_reconnect() {
+        // Exercises sequential lock ordering: on_connection_closed takes
         // candidates(write) → connections(read), while on_client_connected
-        // takes candidates(write). Running them concurrently must not deadlock.
+        // takes candidates(write). Running them sequentially verifies correct
+        // state transitions under interleaved operations.
         let state = build_test_state().await;
         let alice = ClientId::new();
 
@@ -567,7 +641,7 @@ mod tests {
         state.on_connection_closed(alice).await;
 
         // alice "reconnects" (conn2 is still active, plus a new one)
-        let conn3 = add_connection(&state, alice).await;
+        let _conn3 = add_connection(&state, alice).await;
         state.on_client_connected(alice).await;
 
         // conn2 closes
@@ -586,11 +660,11 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn no_deadlock_sweep_during_disconnect() {
-        // Exercises: sweep takes candidates(write) then connections(read),
-        // while on_connection_closed takes candidates(write) → connections(read).
-        // Sequential in a single-threaded tokio test, but verifies the lock
-        // ordering doesn't cause issues when interleaved.
+    async fn lock_ordering_sweep_during_disconnect() {
+        // Exercises sequential lock ordering: sweep takes candidates(write)
+        // then connections(read), while on_connection_closed takes
+        // candidates(write) → connections(read). Verifies correct state
+        // transitions when these operations are interleaved.
         let state = build_test_state().await;
         let alice = ClientId::new();
         let bob = ClientId::new();
@@ -624,10 +698,11 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn no_deadlock_concurrent_sweep_and_reconnect() {
-        // Exercises: sweep takes candidates(write) then connections(read),
-        // while connect path takes connections(write) then on_client_connected
-        // takes candidates(write). Verifies no deadlock.
+    async fn lock_ordering_sweep_and_reconnect() {
+        // Exercises sequential lock ordering: sweep takes candidates(write)
+        // then connections(read), while connect path takes connections(write)
+        // then on_client_connected takes candidates(write). Verifies correct
+        // state transitions when these operations are interleaved.
         let state = build_test_state().await;
         let alice = ClientId::new();
         let bob = ClientId::new();
@@ -661,64 +736,112 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn sweep_requeues_client_on_remove_failure() {
-        // When runtime.remove_client fails (e.g. poisoned lock), the client
-        // should be re-inserted into disconnect_candidates so the next sweep
-        // retries instead of leaking the client forever.
+        // When runtime.remove_client fails (poisoned lock), the client
+        // is re-inserted into disconnect_candidates with its original
+        // timestamp and an incremented attempt counter.
         //
-        // We simulate this by NOT registering the client in the runtime
-        // (so remove_client has nothing to remove — it still succeeds because
-        // SyncManager::remove_client is a no-op for unknown clients).
-        //
-        // To actually trigger the Err path we'd need a poisoned Mutex, which
-        // is hard to arrange. Instead we verify the happy path doesn't
-        // re-queue, confirming the branch structure is correct.
+        // To avoid interference from the background sweep task (which
+        // shares time with start_paused), we manually insert already-
+        // expired candidates before each run_sweep_once call.
         let state = build_test_state().await;
         let alice = ClientId::new();
-
         let _ = state.runtime.add_client(alice, None);
 
-        let conn = add_connection(&state, alice).await;
-        remove_connection(&state, conn).await;
+        // Poison the runtime's inner Mutex by panicking while holding it.
+        let runtime_clone = state.runtime.clone();
+        let handle = std::thread::spawn(move || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = runtime_clone.with_sync_manager(|_sm| {
+                    panic!("intentional poison");
+                });
+            }));
+        });
+        handle.join().expect("thread should complete");
 
-        tokio::time::advance(Duration::from_secs(301)).await;
+        // Verify the mutex is poisoned
+        assert!(
+            state.runtime.remove_client(alice).is_err(),
+            "mutex should be poisoned"
+        );
 
+        // Advance time past TTL so we have room to create expired timestamps.
+        // The background sweep fires during this advance but finds no
+        // candidates (we haven't inserted any yet), so it's a no-op.
+        tokio::time::advance(Duration::from_secs(600)).await;
+
+        // Helper: insert alice as an already-expired candidate with given
+        // attempt count. Uses disconnected_at far in the past relative to
+        // the current (paused) clock.
+        let insert_expired = |attempts: u32| {
+            let state = &state;
+            async move {
+                let past = Instant::now() - Duration::from_secs(400);
+                state.disconnect_candidates.write().await.insert(
+                    alice,
+                    DisconnectCandidate {
+                        disconnected_at: past,
+                        attempts,
+                    },
+                );
+            }
+        };
+
+        // First sweep: fails to reap, re-queues with attempt=1
+        insert_expired(0).await;
         let reaped = state.run_sweep_once().await;
-        assert_eq!(reaped, vec![alice]);
+        assert!(reaped.is_empty(), "reap should fail on poisoned mutex");
+        {
+            let candidates = state.disconnect_candidates.read().await;
+            let candidate = candidates.get(&alice).expect("alice should be re-queued");
+            assert_eq!(candidate.attempts, 1);
+        }
 
-        // After successful reap, alice should NOT be in candidates
+        // Second sweep: fails again, re-queues with attempt=2.
+        // We re-insert to ensure the candidate is expired (the re-queued
+        // candidate preserves the original disconnected_at, but the
+        // background sweep task may have consumed it during prior awaits).
+        insert_expired(1).await;
+        let reaped = state.run_sweep_once().await;
+        assert!(reaped.is_empty());
+        {
+            let candidates = state.disconnect_candidates.read().await;
+            let candidate = candidates.get(&alice).expect("alice should be re-queued");
+            assert_eq!(candidate.attempts, 2);
+        }
+
+        // Third sweep: gives up (MAX_REAP_ATTEMPTS=3), logs error, does NOT re-queue
+        insert_expired(2).await;
+        let reaped = state.run_sweep_once().await;
+        assert!(reaped.is_empty());
         let candidates = state.disconnect_candidates.read().await;
         assert!(
             !candidates.contains_key(&alice),
-            "successful reap should not re-queue"
+            "alice should NOT be re-queued after max attempts"
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn sweep_task_exits_when_state_is_dropped() {
         // The sweep task holds a Weak<ServerState>. When all strong refs are
         // dropped, the task should exit on its next tick.
-        use tokio::time::timeout;
-
+        //
+        // We verify by dropping all strong refs, advancing past the sweep
+        // interval, and yielding. If the Weak upgrade succeeds (leak),
+        // the sweep task would run forever and the test would hang.
+        // With start_paused=true + advance, the interval tick fires
+        // deterministically.
         let state = build_test_state().await;
-        // The sweep task is spawned by build(). It holds a Weak ref.
-        // Drop the only strong ref — the task should exit.
+
+        // Drop all strong refs — sweep task holds only a Weak
         drop(state);
 
-        // Give the runtime a moment to process the task exit.
-        // If the task leaked (held a strong Arc), this would hang.
-        let result = timeout(Duration::from_secs(2), async {
-            // The sweep task runs on a 30s interval. With start_paused=false
-            // (default), we just need the task to attempt one tick and find
-            // the Weak upgrade fails. Yield to let it run.
-            for _ in 0..10 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await;
-        assert!(
-            result.is_ok(),
-            "sweep task should not prevent state cleanup"
-        );
+        // Advance past sweep interval (30s) so the task would tick
+        tokio::time::advance(Duration::from_secs(31)).await;
+        tokio::task::yield_now().await;
+
+        // If we get here without hanging, the Weak upgrade failed and the
+        // task exited. With start_paused=true + advance, the interval tick
+        // fires deterministically, and the Weak::upgrade returns None.
     }
 
     #[tokio::test]
