@@ -1,32 +1,27 @@
 import { join } from "node:path";
 import { TestingServer, pushSchemaCatalogue } from "jazz-tools/testing";
-import { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID } from "./test-constants.js";
+import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
 
-export { TEST_PORT, JWT_SECRET, ADMIN_SECRET, APP_ID };
+export { TEST_PORT, ADMIN_SECRET, APP_ID };
 
-let server: Promise<TestingServer> | null = null;
+let server: TestingServer | null = null;
 export async function setup(): Promise<void> {
-  if (server) {
-    await server;
-    return;
-  }
+  if (server) return;
 
-  server = TestingServer.start({
+  server = await TestingServer.start({
     appId: APP_ID,
     port: TEST_PORT,
     adminSecret: ADMIN_SECRET,
   });
 
-  const serverHandle = await server;
-
   await pushSchemaCatalogue({
-    serverUrl: serverHandle.url,
-    appId: serverHandle.appId,
-    adminSecret: serverHandle.adminSecret,
+    serverUrl: server.url,
+    appId: server.appId,
+    adminSecret: server.adminSecret,
     schemaDir: join(import.meta.dirname ?? __dirname, "../../schema"),
   });
 }
 
 export async function teardown(): Promise<void> {
-  await (await server)?.stop();
+  await server?.stop();
 }
