@@ -1,7 +1,9 @@
 use super::*;
 use crate::query_manager::policy::PolicyExpr;
 use crate::query_manager::query::QueryBuilder;
-use crate::query_manager::types::{ColumnType, SchemaBuilder, TablePolicies, TableSchema};
+use crate::query_manager::types::{
+    ColumnType, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
+};
 use crate::schema_manager::AppId;
 use crate::storage::MemoryStorage;
 use crate::sync_manager::{
@@ -1859,7 +1861,11 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
             metadata
                 .as_ref()
                 .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
-                .map(|t| t == crate::metadata::ObjectType::CataloguePermissions.as_str())
+                .map(|t| {
+                    t == crate::metadata::ObjectType::CataloguePermissions.as_str()
+                        || t == crate::metadata::ObjectType::CataloguePermissionsBundle.as_str()
+                        || t == crate::metadata::ObjectType::CataloguePermissionsHead.as_str()
+                })
                 .unwrap_or(false)
         } else {
             false
@@ -1877,8 +1883,69 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
             .join(", ")
     );
     assert!(
-        permissions_msg.is_some(),
-        "Catalogue permissions object should be in outbox after add_server + batched_tick."
+        permissions_msg.is_none(),
+        "persist_schema should not implicitly publish permissions catalogue objects"
+    );
+}
+
+#[test]
+fn test_publish_permissions_bundle_then_add_server_sends_head_and_bundle() {
+    let schema = test_schema();
+    let app_id = AppId::from_name("test-app");
+    let schema_hash = SchemaHash::compute(&schema);
+    let sync_manager = SyncManager::new();
+    let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+    let mut core = RuntimeCore::new(
+        schema_manager,
+        MemoryStorage::new(),
+        NoopScheduler,
+        VecSyncSender::new(),
+    );
+
+    core.persist_schema();
+    core.publish_permissions_bundle(
+        schema_hash,
+        std::collections::HashMap::from([(
+            TableName::new("users"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]),
+    );
+
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.batched_tick();
+
+    let messages = core.sync_sender().take();
+    let bundle_msg = messages.iter().find(|m| {
+        if let SyncPayload::ObjectUpdated { metadata, .. } = &m.payload {
+            metadata
+                .as_ref()
+                .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
+                .map(|t| t == crate::metadata::ObjectType::CataloguePermissionsBundle.as_str())
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    });
+    let head_msg = messages.iter().find(|m| {
+        if let SyncPayload::ObjectUpdated { metadata, .. } = &m.payload {
+            metadata
+                .as_ref()
+                .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
+                .map(|t| t == crate::metadata::ObjectType::CataloguePermissionsHead.as_str())
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    });
+
+    assert!(
+        bundle_msg.is_some(),
+        "Explicit permission publication should sync the immutable permissions bundle object"
+    );
+    assert!(
+        head_msg.is_some(),
+        "Explicit permission publication should sync the mutable permissions head object"
     );
 }
 

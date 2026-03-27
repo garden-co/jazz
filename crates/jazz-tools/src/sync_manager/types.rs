@@ -375,9 +375,7 @@ impl SyncPayload {
         };
         matches!(
             metadata.get(crate::metadata::MetadataKey::Type.as_str()).map(|s| s.as_str()),
-            Some(t) if t == crate::metadata::ObjectType::CatalogueSchema.as_str()
-                || t == crate::metadata::ObjectType::CatalogueLens.as_str()
-                || t == crate::metadata::ObjectType::CataloguePermissions.as_str()
+            Some(t) if crate::metadata::ObjectType::is_catalogue_type_str(t)
         )
     }
 

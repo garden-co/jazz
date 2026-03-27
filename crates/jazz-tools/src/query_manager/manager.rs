@@ -1119,9 +1119,7 @@ impl QueryManager {
     ) {
         // Check if this is a catalogue object (schema or lens)
         if let Some(type_str) = update.metadata.get(MetadataKey::Type.as_str())
-            && (type_str == ObjectType::CatalogueSchema.as_str()
-                || type_str == ObjectType::CatalogueLens.as_str()
-                || type_str == ObjectType::CataloguePermissions.as_str())
+            && ObjectType::is_catalogue_type_str(type_str)
         {
             if let Some((app_id, op)) =
                 Self::catalogue_manifest_append(&update.metadata, update.object_id)
