@@ -274,7 +274,11 @@ async function startCloudServer(config: CloudServerConfig): Promise<CloudServerH
   );
 
   child.stderr?.on("data", (chunk: Buffer) => {
-    process.stderr.write(`[cloud-server] ${chunk}`);
+    console.error(`[cloud-server] ${chunk.toString().trimEnd()}`);
+  });
+
+  child.stdout?.on("data", (chunk: Buffer) => {
+    console.error(`[cloud-server:stdout] ${chunk.toString().trimEnd()}`);
   });
 
   const baseUrl = `http://127.0.0.1:${port}`;
