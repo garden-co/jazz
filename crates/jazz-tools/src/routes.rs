@@ -199,8 +199,36 @@ async fn events_handler(
     let client_id_str = client_id.to_string();
     let catalogue_state_hash = state.runtime.catalogue_state_hash().ok();
 
+    // Spawn cleanup task that fires when the stream is dropped.
+    // async_stream drops the generator future on disconnect, so cleanup code
+    // after the yield loop is unreachable. We use a oneshot channel: the
+    // sender lives inside the stream and is dropped when the stream ends,
+    // which wakes the cleanup task via the receiver's error.
+    let (cleanup_tx, cleanup_rx) = tokio::sync::oneshot::channel::<()>();
+
+    tokio::spawn(async move {
+        // Wait for the sender to be dropped (stream ended/cancelled)
+        let _ = cleanup_rx.await;
+        let closed_client_id = {
+            let mut connections = state_cleanup.connections.write().await;
+            let conn = connections.remove(&connection_id_cleanup);
+            conn.map(|c| c.client_id)
+        };
+        if let Some(closed_client_id) = closed_client_id {
+            state_cleanup.on_connection_closed(closed_client_id).await;
+            tracing::debug!(
+                connection_id = connection_id_cleanup,
+                %closed_client_id,
+                "SSE stream closed, client state retained pending TTL"
+            );
+        }
+    });
+
     // Create stream that emits length-prefixed binary frames
     let stream = async_stream::stream! {
+        // Hold the sender so dropping this stream triggers cleanup
+        let _cleanup_guard = cleanup_tx;
+
         // Send Connected frame
         let connected = ServerEvent::Connected {
             connection_id: ConnectionId(connection_id),
@@ -244,21 +272,6 @@ async fn events_handler(
                     yield Ok(encode_frame(&heartbeat));
                 }
             }
-        }
-
-        // Cleanup on stream close
-        let closed_client_id = {
-            let mut connections = state_cleanup.connections.write().await;
-            let conn = connections.remove(&connection_id_cleanup);
-            conn.map(|c| c.client_id)
-        };
-        if let Some(closed_client_id) = closed_client_id {
-            state_cleanup.on_connection_closed(closed_client_id).await;
-            tracing::debug!(
-                connection_id = connection_id_cleanup,
-                %closed_client_id,
-                "SSE stream closed, client state retained pending TTL"
-            );
         }
     };
 
