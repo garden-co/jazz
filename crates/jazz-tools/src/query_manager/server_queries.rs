@@ -15,7 +15,8 @@ use super::policy::{ComplexClause, Operation, PolicyExpr};
 use super::policy_graph::PolicyGraph;
 use super::session::Session;
 use super::types::{
-    ComposedBranchName, LoadedRow, Row, RowDescriptor, Schema, TableName, TableSchema, Value,
+    ComposedBranchName, LoadedRow, Row, RowDescriptor, Schema, SchemaHash, TableName, TableSchema,
+    Value,
 };
 
 enum WriteSchemaResolution {
@@ -34,16 +35,17 @@ struct RowTransformContext<'a> {
     schema_warnings: &'a mut SchemaWarningAccumulator,
 }
 
-struct AuthorizationPolicyRequest<'a> {
-    object_id: ObjectId,
-    branch_name: BranchName,
-    table_name: TableName,
-    policy: &'a PolicyExpr,
-    content: &'a [u8],
-    session: &'a Session,
-    auth_schema: &'a Schema,
-    auth_context: &'a crate::schema_manager::SchemaContext,
-    operation: Operation,
+pub(crate) struct AuthorizationPolicyRequest<'a> {
+    pub(crate) object_id: ObjectId,
+    pub(crate) branch_name: BranchName,
+    pub(crate) table_name: TableName,
+    pub(crate) policy: &'a PolicyExpr,
+    pub(crate) content: &'a [u8],
+    pub(crate) session: &'a Session,
+    pub(crate) auth_schema: &'a Schema,
+    pub(crate) auth_context: &'a crate::schema_manager::SchemaContext,
+    pub(crate) source_branch_schema_map: &'a std::collections::HashMap<String, SchemaHash>,
+    pub(crate) operation: Operation,
 }
 
 struct UpdatePermissionRequest<'a> {
@@ -111,7 +113,7 @@ impl QueryManager {
         map
     }
 
-    fn authorization_schema_for_context(
+    pub(super) fn authorization_schema_for_context(
         &self,
         env: &str,
         user_branch: &str,
@@ -139,7 +141,7 @@ impl QueryManager {
         Some((schema, schema_context))
     }
 
-    fn authorization_schema_for_branch(
+    pub(super) fn authorization_schema_for_branch(
         &self,
         branch_name: &BranchName,
     ) -> Option<(Arc<Schema>, crate::schema_manager::SchemaContext)> {
@@ -148,12 +150,12 @@ impl QueryManager {
         }
 
         if self.schema_context.is_initialized() {
-            return Some((
-                self.authorization_schema
-                    .clone()
-                    .unwrap_or_else(|| self.schema.clone()),
-                self.schema_context.clone(),
-            ));
+            return self
+                .authorization_schema_for_context(
+                    &self.schema_context.env,
+                    &self.schema_context.user_branch,
+                )
+                .or_else(|| Some((self.schema.clone(), self.schema_context.clone())));
         }
 
         None
@@ -164,10 +166,17 @@ impl QueryManager {
         content: &[u8],
         commit_id: CommitId,
         branch_name: BranchName,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<Vec<u8>> {
-        let branch_schema_map = Self::branch_schema_map_for_context(auth_context);
-        let source_hash = match branch_schema_map.get(branch_name.as_str()).copied() {
+        let source_hash = source_branch_schema_map
+            .get(branch_name.as_str())
+            .copied()
+            .or_else(|| {
+                (branch_name.as_str() == auth_context.branch_name().as_str())
+                    .then_some(auth_context.current_hash)
+            });
+        let source_hash = match source_hash {
             Some(source_hash) => source_hash,
             None if ComposedBranchName::parse(&branch_name).is_some() => return None,
             None => return Some(content.to_vec()),
@@ -189,6 +198,7 @@ impl QueryManager {
         storage: &dyn Storage,
         object_id: ObjectId,
         branch_name: BranchName,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<LoadedRow> {
         let branches = vec![branch_name.as_str().to_string()];
@@ -212,6 +222,7 @@ impl QueryManager {
             &tip.1.content,
             tip.0,
             branch_name,
+            source_branch_schema_map,
             auth_context,
         )?;
 
@@ -222,7 +233,7 @@ impl QueryManager {
         ))
     }
 
-    fn evaluate_authorization_policy(
+    pub(super) fn evaluate_authorization_policy(
         &mut self,
         storage: &dyn Storage,
         request: AuthorizationPolicyRequest<'_>,
@@ -236,6 +247,7 @@ impl QueryManager {
             session,
             auth_schema,
             auth_context,
+            source_branch_schema_map,
             operation,
         } = request;
 
@@ -247,6 +259,7 @@ impl QueryManager {
             content,
             CommitId([0; 32]),
             branch_name,
+            source_branch_schema_map,
             auth_context,
         ) else {
             return false;
@@ -256,7 +269,13 @@ impl QueryManager {
         let evaluator = PolicyContextEvaluator::new(auth_schema, session, branch_name.as_str());
         let mut visited = HashSet::new();
         let mut row_loader = |related_id: ObjectId| {
-            self.load_row_for_authorization_context(storage, related_id, branch_name, auth_context)
+            self.load_row_for_authorization_context(
+                storage,
+                related_id,
+                branch_name,
+                source_branch_schema_map,
+                auth_context,
+            )
         };
 
         evaluator.evaluate_row_access(
@@ -272,7 +291,8 @@ impl QueryManager {
         )
     }
 
-    fn provenance_row_matches_current_select_policy(
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn provenance_row_matches_current_select_policy(
         &mut self,
         storage: &dyn Storage,
         object_id: ObjectId,
@@ -280,6 +300,7 @@ impl QueryManager {
         session: Option<&Session>,
         auth_schema: &Schema,
         auth_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
     ) -> bool {
         let branches = vec![branch_name.as_str().to_string()];
         let Some((table, tip_content)) = ({
@@ -334,9 +355,60 @@ impl QueryManager {
                 session,
                 auth_schema,
                 auth_context,
+                source_branch_schema_map,
                 operation: Operation::Select,
             },
         )
+    }
+
+    pub(super) fn authorized_rows_from_graph(
+        &mut self,
+        storage: &dyn Storage,
+        graph: &super::graph::QueryGraph,
+        schema_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
+        session: Option<&Session>,
+    ) -> Vec<Row> {
+        let Some((auth_schema, auth_context)) =
+            self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
+        else {
+            return Vec::new();
+        };
+
+        if auth_schema
+            .values()
+            .all(|table_schema| table_schema.policies.select.using.is_none())
+        {
+            return graph.current_result();
+        }
+
+        let mut authorization_cache: HashMap<(ObjectId, BranchName), bool> = HashMap::new();
+
+        graph
+            .current_output_rows_with_provenance()
+            .into_iter()
+            .filter_map(|(row, provenance)| {
+                provenance
+                    .iter()
+                    .copied()
+                    .all(|(object_id, branch_name)| {
+                        *authorization_cache
+                            .entry((object_id, branch_name))
+                            .or_insert_with(|| {
+                                self.provenance_row_matches_current_select_policy(
+                                    storage,
+                                    object_id,
+                                    branch_name,
+                                    session,
+                                    &auth_schema,
+                                    &auth_context,
+                                    source_branch_schema_map,
+                                )
+                            })
+                    })
+                    .then_some(row)
+            })
+            .collect()
     }
 
     fn authorized_scope_from_graph(
@@ -344,6 +416,7 @@ impl QueryManager {
         storage: &dyn Storage,
         graph: &super::graph::QueryGraph,
         schema_context: &crate::schema_manager::SchemaContext,
+        source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
         session: Option<&Session>,
     ) -> HashSet<(ObjectId, BranchName)> {
         let Some((auth_schema, auth_context)) =
@@ -380,6 +453,7 @@ impl QueryManager {
                                     session,
                                     &auth_schema,
                                     &auth_context,
+                                    source_branch_schema_map,
                                 )
                             })
                     })
@@ -682,6 +756,7 @@ impl QueryManager {
                 storage_ref,
                 &graph,
                 &subscription_context,
+                &branch_schema_map,
                 session_for_policy.as_ref(),
             );
             // Trusted clients (Peer/Admin) also need policy context rows.
@@ -889,6 +964,7 @@ impl QueryManager {
                     storage,
                     &sub.graph,
                     &sub.schema_context,
+                    &branch_schema_map,
                     sub.session.as_ref(),
                 );
                 if trusted_clients.contains(&client_id) {
@@ -1192,6 +1268,7 @@ impl QueryManager {
                 return;
             }
         };
+        let source_branch_schema_map = self.branch_schema_map.clone();
 
         if !self.evaluate_authorization_policy(
             storage,
@@ -1204,6 +1281,7 @@ impl QueryManager {
                 session: &check.session,
                 auth_schema: &auth_schema,
                 auth_context: &auth_context,
+                source_branch_schema_map: &source_branch_schema_map,
                 operation: check.operation,
             },
         ) {
@@ -1261,6 +1339,7 @@ impl QueryManager {
         };
         let using_policy = table_schema.policies.update.using.as_ref();
         let check_policy = table_schema.policies.update.with_check.as_ref();
+        let source_branch_schema_map = self.branch_schema_map.clone();
 
         if using_policy.is_none() && check_policy.is_none() {
             self.sync_manager.approve_permission_check(storage, check);
@@ -1291,6 +1370,7 @@ impl QueryManager {
                     session: &check.session,
                     auth_schema,
                     auth_context,
+                    source_branch_schema_map: &source_branch_schema_map,
                     operation: Operation::Update,
                 },
             ) {
@@ -1323,6 +1403,7 @@ impl QueryManager {
                     session: &check.session,
                     auth_schema,
                     auth_context,
+                    source_branch_schema_map: &source_branch_schema_map,
                     operation: Operation::Update,
                 },
             ) {

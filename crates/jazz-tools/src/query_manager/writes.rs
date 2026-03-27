@@ -8,8 +8,9 @@ use crate::storage::Storage;
 use super::encoding::{decode_column, decode_row, encode_row};
 use super::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
+use super::server_queries::AuthorizationPolicyRequest;
 use super::session::Session;
-use super::types::{ColumnType, LoadedRow, RowDescriptor, TableName, Value};
+use super::types::{ColumnType, LoadedRow, RowDescriptor, Schema, TableName, Value};
 
 impl QueryManager {
     /// Insert a new row into a table.
@@ -64,33 +65,63 @@ impl QueryManager {
         // Encode to binary
         let data = encode_row(&descriptor, values)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+        let object_id = ObjectId::new();
 
         // Check INSERT WITH CHECK policy
-        if let (Some(session), Some(policy)) = (session, insert_policy)
-            && !self.evaluate_policy_for_content_with_context(
-                storage,
-                &policy,
-                &data,
-                &descriptor,
-                session,
-                table,
-                self.current_branch().as_str(),
-            )
-        {
-            return Err(QueryError::PolicyDenied {
-                table: table_name,
-                operation: Operation::Insert,
-            });
+        if let Some(session) = session {
+            if let Some((auth_schema, auth_context)) = self
+                .local_write_authorization_context(self.current_branch().as_str(), Some(session))
+            {
+                let allowed = auth_schema
+                    .get(&table_name)
+                    .and_then(|table_schema| table_schema.policies.insert.with_check.as_ref())
+                    .map(|policy| {
+                        self.evaluate_current_authorization_policy_for_content(
+                            storage,
+                            object_id,
+                            self.current_branch().as_str(),
+                            table_name,
+                            policy,
+                            &data,
+                            session,
+                            Operation::Insert,
+                            &auth_schema,
+                            &auth_context,
+                        )
+                    })
+                    .unwrap_or_else(|| auth_schema.contains_key(&table_name));
+                if !allowed {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Insert,
+                    });
+                }
+            } else if let Some(policy) = insert_policy
+                && !self.evaluate_policy_for_content_with_context(
+                    storage,
+                    &policy,
+                    &data,
+                    &descriptor,
+                    session,
+                    table,
+                    self.current_branch().as_str(),
+                )
+            {
+                return Err(QueryError::PolicyDenied {
+                    table: table_name,
+                    operation: Operation::Insert,
+                });
+            }
         }
 
         // Create object with table metadata
         let mut metadata = HashMap::new();
         metadata.insert(MetadataKey::Table.to_string(), table.to_string());
 
-        let object_id = self
-            .sync_manager
-            .object_manager
-            .create(storage, Some(metadata));
+        let object_id =
+            self.sync_manager
+                .object_manager
+                .create_with_id(storage, object_id, Some(metadata));
         let author = object_id; // Self-authored
 
         // Add commit with row data
@@ -173,33 +204,63 @@ impl QueryManager {
         // Encode to binary
         let data = encode_row(&descriptor, values)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
+        let object_id = ObjectId::new();
 
         // Check INSERT WITH CHECK policy
-        if let (Some(session), Some(policy)) = (session, insert_policy)
-            && !self.evaluate_policy_for_content_with_context(
-                storage,
-                &policy,
-                &data,
-                &descriptor,
-                session,
-                table,
-                branch,
-            )
-        {
-            return Err(QueryError::PolicyDenied {
-                table: table_name,
-                operation: Operation::Insert,
-            });
+        if let Some(session) = session {
+            if let Some((auth_schema, auth_context)) =
+                self.local_write_authorization_context(branch, Some(session))
+            {
+                let allowed = auth_schema
+                    .get(&table_name)
+                    .and_then(|table_schema| table_schema.policies.insert.with_check.as_ref())
+                    .map(|policy| {
+                        self.evaluate_current_authorization_policy_for_content(
+                            storage,
+                            object_id,
+                            branch,
+                            table_name,
+                            policy,
+                            &data,
+                            session,
+                            Operation::Insert,
+                            &auth_schema,
+                            &auth_context,
+                        )
+                    })
+                    .unwrap_or_else(|| auth_schema.contains_key(&table_name));
+                if !allowed {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Insert,
+                    });
+                }
+            } else if let Some(policy) = insert_policy
+                && !self.evaluate_policy_for_content_with_context(
+                    storage,
+                    &policy,
+                    &data,
+                    &descriptor,
+                    session,
+                    table,
+                    branch,
+                )
+            {
+                return Err(QueryError::PolicyDenied {
+                    table: table_name,
+                    operation: Operation::Insert,
+                });
+            }
         }
 
         // Create object with table metadata
         let mut metadata = HashMap::new();
         metadata.insert(MetadataKey::Table.to_string(), table.to_string());
 
-        let object_id = self
-            .sync_manager
-            .object_manager
-            .create(storage, Some(metadata));
+        let object_id =
+            self.sync_manager
+                .object_manager
+                .create_with_id(storage, object_id, Some(metadata));
         let author = object_id; // Self-authored
 
         // Add commit with row data to specified branch
@@ -331,6 +392,48 @@ impl QueryManager {
         let values = decode_row(descriptor, content)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
         self.validate_json_for_values(descriptor, &values)
+    }
+
+    fn local_write_authorization_context(
+        &self,
+        branch: &str,
+        session: Option<&Session>,
+    ) -> Option<(std::sync::Arc<Schema>, crate::schema_manager::SchemaContext)> {
+        self.local_subscription_uses_explicit_authorization(session)
+            .then(|| self.authorization_schema_for_branch(&BranchName::new(branch)))
+            .flatten()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_current_authorization_policy_for_content<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        object_id: ObjectId,
+        branch: &str,
+        table_name: TableName,
+        policy: &crate::query_manager::policy::PolicyExpr,
+        content: &[u8],
+        session: &Session,
+        operation: Operation,
+        auth_schema: &Schema,
+        auth_context: &crate::schema_manager::SchemaContext,
+    ) -> bool {
+        let source_branch_schema_map = self.branch_schema_map.clone();
+        self.evaluate_authorization_policy(
+            storage,
+            AuthorizationPolicyRequest {
+                object_id,
+                branch_name: BranchName::new(branch),
+                table_name,
+                policy,
+                content,
+                session,
+                auth_schema,
+                auth_context,
+                source_branch_schema_map: &source_branch_schema_map,
+                operation,
+            },
+        )
     }
 
     /// Evaluate a policy expression against encoded row content using full policy context.
@@ -763,47 +866,102 @@ impl QueryManager {
         let new_data = encode_row(&descriptor, values)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
 
-        // Check UPDATE USING policy against old row
-        if let (Some(session), Some(policy)) = (session, &using_policy) {
-            let mut visited = HashSet::new();
-            if !self.evaluate_policy_for_content_with_context_for_row(
-                storage,
-                policy,
-                &old_data,
-                &descriptor,
-                session,
-                &table,
-                self.current_branch().as_str(),
-                id,
-                0,
-                &mut visited,
-            ) {
-                return Err(QueryError::PolicyDenied {
-                    table: table_name,
-                    operation: Operation::Update,
-                });
-            }
-        }
+        let current_branch = self.current_branch().to_string();
 
-        // Check UPDATE WITH CHECK policy against new values
-        if let (Some(session), Some(policy)) = (session, check_policy) {
-            let mut visited = HashSet::new();
-            if !self.evaluate_policy_for_content_with_context_for_row(
-                storage,
-                &policy,
-                &new_data,
-                &descriptor,
-                session,
-                &table,
-                self.current_branch().as_str(),
-                id,
-                0,
-                &mut visited,
-            ) {
-                return Err(QueryError::PolicyDenied {
-                    table: table_name,
-                    operation: Operation::Update,
-                });
+        if let Some(session) = session {
+            if let Some((auth_schema, auth_context)) =
+                self.local_write_authorization_context(&current_branch, Some(session))
+            {
+                let Some(auth_table_schema) = auth_schema.get(&table_name) else {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Update,
+                    });
+                };
+
+                if let Some(policy) = auth_table_schema.policies.update.using.as_ref()
+                    && !self.evaluate_current_authorization_policy_for_content(
+                        storage,
+                        id,
+                        &current_branch,
+                        table_name,
+                        policy,
+                        &old_data,
+                        session,
+                        Operation::Update,
+                        &auth_schema,
+                        &auth_context,
+                    )
+                {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Update,
+                    });
+                }
+
+                if let Some(policy) = auth_table_schema.policies.update.with_check.as_ref()
+                    && !self.evaluate_current_authorization_policy_for_content(
+                        storage,
+                        id,
+                        &current_branch,
+                        table_name,
+                        policy,
+                        &new_data,
+                        session,
+                        Operation::Update,
+                        &auth_schema,
+                        &auth_context,
+                    )
+                {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Update,
+                    });
+                }
+            } else {
+                // Check UPDATE USING policy against old row
+                if let Some(policy) = &using_policy {
+                    let mut visited = HashSet::new();
+                    if !self.evaluate_policy_for_content_with_context_for_row(
+                        storage,
+                        policy,
+                        &old_data,
+                        &descriptor,
+                        session,
+                        &table,
+                        &current_branch,
+                        id,
+                        0,
+                        &mut visited,
+                    ) {
+                        return Err(QueryError::PolicyDenied {
+                            table: table_name,
+                            operation: Operation::Update,
+                        });
+                    }
+                }
+
+                // Check UPDATE WITH CHECK policy against new values
+                if let Some(policy) = check_policy {
+                    let mut visited = HashSet::new();
+                    if !self.evaluate_policy_for_content_with_context_for_row(
+                        storage,
+                        &policy,
+                        &new_data,
+                        &descriptor,
+                        session,
+                        &table,
+                        &current_branch,
+                        id,
+                        0,
+                        &mut visited,
+                    ) {
+                        return Err(QueryError::PolicyDenied {
+                            table: table_name,
+                            operation: Operation::Update,
+                        });
+                    }
+                }
             }
         }
 
@@ -924,21 +1082,55 @@ impl QueryManager {
             )
         };
 
-        // Check DELETE USING policy (falls back to UPDATE's USING)
-        if let (Some(session), Some(policy)) = (session, using_policy) {
-            let mut visited = HashSet::new();
-            if !self.evaluate_policy_for_content_with_context_for_row(
-                storage,
-                &policy,
-                &old_data,
-                &descriptor,
-                session,
-                &table,
-                self.current_branch().as_str(),
-                id,
-                0,
-                &mut visited,
-            ) {
+        let current_branch = self.current_branch().to_string();
+
+        if let Some(session) = session {
+            if let Some((auth_schema, auth_context)) =
+                self.local_write_authorization_context(&current_branch, Some(session))
+            {
+                let Some(auth_table_schema) = auth_schema.get(&table_name) else {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Delete,
+                    });
+                };
+
+                if let Some(policy) = auth_table_schema.policies.effective_delete_using()
+                    && !self.evaluate_current_authorization_policy_for_content(
+                        storage,
+                        id,
+                        &current_branch,
+                        table_name,
+                        policy,
+                        &old_data,
+                        session,
+                        Operation::Delete,
+                        &auth_schema,
+                        &auth_context,
+                    )
+                {
+                    return Err(QueryError::PolicyDenied {
+                        table: table_name,
+                        operation: Operation::Delete,
+                    });
+                }
+            } else if let Some(policy) = using_policy
+                && {
+                    let mut visited = HashSet::new();
+                    !self.evaluate_policy_for_content_with_context_for_row(
+                        storage,
+                        &policy,
+                        &old_data,
+                        &descriptor,
+                        session,
+                        &table,
+                        &current_branch,
+                        id,
+                        0,
+                        &mut visited,
+                    )
+                }
+            {
                 return Err(QueryError::PolicyDenied {
                     table: table_name,
                     operation: Operation::Delete,
@@ -970,19 +1162,17 @@ impl QueryManager {
                 id,
                 self.current_branch(),
                 parents,
-                old_data.clone(), // Preserve content for soft deletes
+                old_data.clone(),
                 author,
                 Some(delete_metadata),
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         // Forward delete to all connected servers
+        let branch = self.current_branch();
         tracing::trace!(%id, ?delete_commit_id, "forward delete to servers");
-        {
-            let branch = self.current_branch();
-            self.sync_manager
-                .forward_update_to_servers(id, branch.into());
-        }
+        self.sync_manager
+            .forward_update_to_servers(id, branch.into());
 
         // Update indices: remove from _id and column indices, add to _id_deleted
         self.update_indices_for_soft_delete(storage, &table, id, &old_data, &descriptor)?;

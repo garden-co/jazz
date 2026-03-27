@@ -105,10 +105,16 @@ impl QueryManager {
             ));
         };
 
-        // Compile query graph with schema context
-        let graph =
-            Self::compile_graph(&query, &self.schema, session.clone(), &self.schema_context)
-                .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
+        let uses_explicit_authorization_filtering =
+            self.local_subscription_uses_explicit_authorization(session.as_ref());
+        let compile_schema = self.local_subscription_compile_schema(session.as_ref());
+        let graph = Self::compile_graph(
+            &query,
+            &compile_schema,
+            session.clone(),
+            &self.schema_context,
+        )
+        .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -134,6 +140,8 @@ impl QueryManager {
                 has_pending_local_updates: false,
                 achieved_tiers,
                 current_ordered_ids: Vec::new(),
+                current_visible_rows: HashMap::new(),
+                uses_explicit_authorization_filtering,
                 propagation,
                 reported_schema_warnings: HashSet::new(),
             },
@@ -202,6 +210,8 @@ impl QueryManager {
                 has_pending_local_updates: false,
                 achieved_tiers: HashSet::new(),
                 current_ordered_ids: Vec::new(),
+                current_visible_rows: HashMap::new(),
+                uses_explicit_authorization_filtering: false,
                 propagation: QueryPropagation::Full,
                 reported_schema_warnings: HashSet::new(),
             },
@@ -520,11 +530,18 @@ impl QueryManager {
         };
 
         let descriptor = &subscription.graph.combined_descriptor;
+        let rows: Vec<_> = if subscription.uses_explicit_authorization_filtering {
+            subscription
+                .current_ordered_ids
+                .iter()
+                .filter_map(|id| subscription.current_visible_rows.get(id))
+                .cloned()
+                .collect()
+        } else {
+            subscription.graph.current_result()
+        };
 
-        subscription
-            .graph
-            .current_result()
-            .iter()
+        rows.iter()
             .filter_map(|row| {
                 decode_row(descriptor, &row.data)
                     .ok()
