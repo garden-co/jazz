@@ -8,10 +8,6 @@ Garbage collection of server-side state (sync cursors, query subscriptions, sess
 
 Clients can disappear permanently (uninstall, cleared browser data), leaving orphaned state on the server that accumulates over time.
 
-## Who
-
-Server operators and indirectly all users (storage/performance impact).
-
 ## Rough appetite
 
 medium

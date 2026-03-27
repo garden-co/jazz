@@ -25,6 +25,13 @@ fn test_schema() -> jazz_tools::Schema {
         .build()
 }
 
+fn todo_values(title: &str) -> HashMap<String, Value> {
+    HashMap::from([
+        ("title".to_string(), Value::Text(title.to_string())),
+        ("completed".to_string(), Value::Boolean(false)),
+    ])
+}
+
 /// Two clients update the same todo concurrently (no sync wait between writes).
 /// Both must eventually converge to the same final title.
 ///
@@ -57,13 +64,7 @@ async fn concurrent_updates_resolve_to_lww_winner() {
 
     // Alice creates a todo
     let (todo_id, _) = alice
-        .create(
-            "todos",
-            HashMap::from([
-                ("title".to_string(), Value::Text("original".to_string())),
-                ("completed".to_string(), Value::Boolean(false)),
-            ]),
-        )
+        .create("todos", todo_values("original"))
         .await
         .expect("alice creates todo");
 
@@ -190,26 +191,14 @@ async fn concurrent_creates_both_survive() {
     let bob2 = Arc::clone(&bob);
     let alice_handle = tokio::spawn(async move {
         alice2
-            .create(
-                "todos",
-                HashMap::from([
-                    ("title".to_string(), Value::Text("buy milk".to_string())),
-                    ("completed".to_string(), Value::Boolean(false)),
-                ]),
-            )
+            .create("todos", todo_values("buy milk"))
             .await
             .expect("alice creates");
     });
     let bob_handle = tokio::spawn(async move {
-        bob2.create(
-            "todos",
-            HashMap::from([
-                ("title".to_string(), Value::Text("buy eggs".to_string())),
-                ("completed".to_string(), Value::Boolean(false)),
-            ]),
-        )
-        .await
-        .expect("bob creates");
+        bob2.create("todos", todo_values("buy eggs"))
+            .await
+            .expect("bob creates");
     });
 
     let (alice_res, bob_res) = tokio::join!(alice_handle, bob_handle);
@@ -283,13 +272,7 @@ async fn rapid_concurrent_updates_converge() {
 
     // Alice creates, wait for Bob to see it
     let (todo_id, _) = alice
-        .create(
-            "todos",
-            HashMap::from([
-                ("title".to_string(), Value::Text("start".to_string())),
-                ("completed".to_string(), Value::Boolean(false)),
-            ]),
-        )
+        .create("todos", todo_values("start"))
         .await
         .expect("create");
 
@@ -413,13 +396,7 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
 
     // Alice creates, Bob sees it
     let (todo_id, _) = alice
-        .create(
-            "todos",
-            HashMap::from([
-                ("title".to_string(), Value::Text("original".to_string())),
-                ("completed".to_string(), Value::Boolean(false)),
-            ]),
-        )
+        .create("todos", todo_values("original"))
         .await
         .expect("create");
 
@@ -574,13 +551,7 @@ async fn subscription_reflects_concurrent_update() {
 
     // Alice creates a todo
     let (todo_id, _) = alice
-        .create(
-            "todos",
-            HashMap::from([
-                ("title".to_string(), Value::Text("task".to_string())),
-                ("completed".to_string(), Value::Boolean(false)),
-            ]),
-        )
+        .create("todos", todo_values("task"))
         .await
         .expect("create");
 
@@ -644,13 +615,7 @@ async fn sequential_updates_preserve_latest() {
 
     // Alice creates and updates 3 times
     let (todo_id, _) = alice
-        .create(
-            "todos",
-            HashMap::from([
-                ("title".to_string(), Value::Text("v0".to_string())),
-                ("completed".to_string(), Value::Boolean(false)),
-            ]),
-        )
+        .create("todos", todo_values("v0"))
         .await
         .expect("create");
 
@@ -739,13 +704,7 @@ async fn concurrent_edits_on_different_fields() {
 
     // Alice creates a todo: title="task", completed=false
     let (todo_id, _) = alice
-        .create(
-            "todos",
-            HashMap::from([
-                ("title".to_string(), Value::Text("task".to_string())),
-                ("completed".to_string(), Value::Boolean(false)),
-            ]),
-        )
+        .create("todos", todo_values("task"))
         .await
         .expect("create");
 
@@ -905,13 +864,7 @@ async fn offline_user_wins_on_reconnect() {
         .await;
 
     let (todo_id, _) = alice
-        .create(
-            "todos",
-            HashMap::from([
-                ("title".to_string(), Value::Text("create".to_string())),
-                ("completed".to_string(), Value::Boolean(false)),
-            ]),
-        )
+        .create("todos", todo_values("create"))
         .await
         .expect("alice creates todo");
 
@@ -1117,13 +1070,7 @@ async fn online_user_wins_on_reconnect() {
         .await;
 
     let (todo_id, _) = alice
-        .create(
-            "todos",
-            HashMap::from([
-                ("title".to_string(), Value::Text("create".to_string())),
-                ("completed".to_string(), Value::Boolean(false)),
-            ]),
-        )
+        .create("todos", todo_values("create"))
         .await
         .expect("alice creates todo");
 
