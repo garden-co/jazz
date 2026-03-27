@@ -13,22 +13,12 @@
 - [ ] Wire into `ServerBuilder` and `ClientBuilder` as a selectable backend
 - [ ] Verify CI cross-compilation (linux-musl, macOS arm64)
 
-## redb Mobile Backend — pure-Rust candidate for React Native
+## SQLite Mobile Backend — React Native storage
 
-- [ ] Add `redb` dependency behind a `redb` feature flag
-- [ ] Implement `RedbStorage` struct with `Storage` trait, reusing `storage_core.rs` callbacks
-- [ ] Map key scheme to redb tables + range scans
+- [ ] Add `rusqlite` dependency behind a `sqlite` feature flag
+- [ ] Implement `SqliteStorage` struct with `Storage` trait, reusing `storage_core.rs` callbacks
+- [ ] Map key scheme to a single `kv(key TEXT PRIMARY KEY, value BLOB)` table with prefix range queries
+- [ ] Configure WAL mode + appropriate PRAGMA settings for mobile
 - [ ] Pass the full conformance suite
 - [ ] Verify builds for iOS (xcframework) and Android (JNI/NDK) targets
-- [ ] Add redb engine to `crates/opfs-btree/benches/compare_native.rs` cross-engine benchmark and compare against Fjall, RocksDB, OpfsBTree, BfTree
-
-## heed Mobile Backend — LMDB candidate for React Native
-
-- [ ] Add `heed` dependency behind a `heed` feature flag
-- [ ] Implement `HeedStorage` struct with `Storage` trait, reusing `storage_core.rs` callbacks
-- [ ] Map key scheme to LMDB databases + cursor range scans
-- [ ] Handle map size configuration (sensible default + growth strategy)
-- [ ] Pass the full conformance suite
-- [ ] Verify builds for iOS (xcframework) and Android (JNI/NDK) targets
-- [ ] Add heed/LMDB engine to `crates/opfs-btree/benches/compare_native.rs` cross-engine benchmark and compare against Fjall, RocksDB, OpfsBTree, BfTree
-- [ ] Test under iOS memory pressure (mmap reclaim behavior)
+- [ ] Add SQLite engine to `crates/opfs-btree/benches/compare_native.rs` cross-engine benchmark and compare against Fjall, RocksDB, OpfsBTree, BfTree
