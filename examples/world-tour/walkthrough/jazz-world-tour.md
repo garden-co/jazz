@@ -64,8 +64,8 @@ table("venues", {
 });
 
 table("stops", {
-  bandId: col.ref("bands"),       // foreign key
-  venueId: col.ref("venues"),     // foreign key
+  bandId: col.ref("bands"), // foreign key
+  venueId: col.ref("venues"), // foreign key
   date: col.timestamp(),
   status: col.enum("confirmed", "tentative", "cancelled"),
   publicDescription: col.string(),
@@ -95,10 +95,14 @@ const client = createJazzClient({
 
 const vueApp = createApp({
   render() {
-    return h(JazzProvider, { client }, {
-      default: () => h(App),
-      fallback: () => h("p", "Loading..."),
-    });
+    return h(
+      JazzProvider,
+      { client },
+      {
+        default: () => h(App),
+        fallback: () => h("p", "Loading..."),
+      },
+    );
   },
 });
 
@@ -114,7 +118,7 @@ Any component inside `JazzProvider` can reach the database and the current user 
 ```typescript
 import { useDb, useSession } from "jazz-tools/vue";
 
-const db = useDb();         // full query + write API
+const db = useDb(); // full query + write API
 const session = useSession(); // { user_id, ... } | null
 ```
 
@@ -191,10 +195,7 @@ export default definePermissions(app, ({ policy, session, anyOf }) => {
   });
 
   // Public: anyone can read confirmed stops
-  policy.stops.allowRead.where(anyOf([
-    { status: "confirmed" },
-    isBandMember,
-  ]));
+  policy.stops.allowRead.where(anyOf([{ status: "confirmed" }, isBandMember]));
 
   // Only band members can write
   policy.stops.allowInsert.where(isBandMember);
@@ -217,24 +218,24 @@ Each component owns the Jazz calls it needs. No prop drilling for data, no event
 
 ```html
 <script setup lang="ts">
-import { useDb, useSession } from "jazz-tools/vue";
-import { app } from "../../schema/app.js";
+  import { useDb, useSession } from "jazz-tools/vue";
+  import { app } from "../../schema/app.js";
 
-const db = useDb();
-const session = useSession();
-const canEdit = !!session;
+  const db = useDb();
+  const session = useSession();
+  const canEdit = !!session;
 
-function save() {
-  db.update(app.stops, props.stop.id, {
-    date: new Date(editDate.value),
-    status: editStatus.value,
-    publicDescription: editDescription.value,
-  });
-}
+  function save() {
+    db.update(app.stops, props.stop.id, {
+      date: new Date(editDate.value),
+      status: editStatus.value,
+      publicDescription: editDescription.value,
+    });
+  }
 
-function deleteStop() {
-  db.delete(app.stops, props.stop.id);
-}
+  function deleteStop() {
+    db.delete(app.stops, props.stop.id);
+  }
 </script>
 ```
 
@@ -248,25 +249,28 @@ function deleteStop() {
 
 ```html
 <script setup lang="ts">
-import { useDb, useAll } from "jazz-tools/vue";
-import { app } from "../../schema/app.js";
+  import { useDb, useAll } from "jazz-tools/vue";
+  import { app } from "../../schema/app.js";
 
-const db = useDb();
-const venues = useAll(app.venues); // live venue list, no props needed
+  const db = useDb();
+  const venues = useAll(app.venues); // live venue list, no props needed
 
-function submit() {
-  const venue = db.insert(app.venues, {
-    name: newVenue.name, city: newVenue.city,
-    country: newVenue.country, lat: newVenue.lat, lng: newVenue.lng,
-  });
-  db.insert(app.stops, {
-    bandId: props.bandId,
-    venueId: venue.id, // available immediately, no await
-    date: new Date(stopDate.value),
-    status: stopStatus.value,
-    publicDescription: publicDescription.value,
-  });
-}
+  function submit() {
+    const venue = db.insert(app.venues, {
+      name: newVenue.name,
+      city: newVenue.city,
+      country: newVenue.country,
+      lat: newVenue.lat,
+      lng: newVenue.lng,
+    });
+    db.insert(app.stops, {
+      bandId: props.bandId,
+      venueId: venue.id, // available immediately, no await
+      date: new Date(stopDate.value),
+      status: stopStatus.value,
+      publicDescription: publicDescription.value,
+    });
+  }
 </script>
 ```
 
@@ -282,9 +286,7 @@ No `await`. The insert returns immediately because writes hit the local DB first
 
 ```typescript
 const db = useDb();
-const bandsWithLogo = useAll(
-  app.bands.include({ logoFile: { parts: true } }),
-);
+const bandsWithLogo = useAll(app.bands.include({ logoFile: { parts: true } }));
 
 // Upload: binary file → Jazz file → link to band
 async function onFileSelected(event: Event) {
@@ -308,15 +310,15 @@ logoUrl.value = URL.createObjectURL(blob);
 
 ## Jazz API surface used in World Tour
 
-| API                                       | Notes                                                                |
-| ----------------------------------------- | -------------------------------------------------------------------- |
-| `createJazzClient`                        | Initialises WASM worker + OPFS database, begins syncing              |
-| `JazzProvider`                            | Provides `db` to every component, no prop drilling                   |
-| `useDb()`                                 | Db singleton, callable from any component in the tree                |
-| `useSession()`                            | Current user identity (`user_id`), drives permission-aware UI        |
-| `useAll(query)`                           | **Vue-specific** reactive live query, re-renders on every change     |
-| `db.insert` / `db.update` / `db.delete`  | Synchronous local writes, sync to edge happens in the background     |
-| `db.all(query)`                           | Async read, used for one-time checks (seeding, deduplication)        |
-| `db.createFileFromBlob` / `loadFileAsBlob`| Chunked binary file storage and retrieval                            |
-| `definePermissions`                       | Row-level security policies enforced by the Jazz runtime             |
-| `.where()` / `.include()` / `.orderBy()`  | Fluent, typed query builder with relation eager-loading              |
+| API                                        | Notes                                                            |
+| ------------------------------------------ | ---------------------------------------------------------------- |
+| `createJazzClient`                         | Initialises WASM worker + OPFS database, begins syncing          |
+| `JazzProvider`                             | Provides `db` to every component, no prop drilling               |
+| `useDb()`                                  | Db singleton, callable from any component in the tree            |
+| `useSession()`                             | Current user identity (`user_id`), drives permission-aware UI    |
+| `useAll(query)`                            | **Vue-specific** reactive live query, re-renders on every change |
+| `db.insert` / `db.update` / `db.delete`    | Synchronous local writes, sync to edge happens in the background |
+| `db.all(query)`                            | Async read, used for one-time checks (seeding, deduplication)    |
+| `db.createFileFromBlob` / `loadFileAsBlob` | Chunked binary file storage and retrieval                        |
+| `definePermissions`                        | Row-level security policies enforced by the Jazz runtime         |
+| `.where()` / `.include()` / `.orderBy()`   | Fluent, typed query builder with relation eager-loading          |
