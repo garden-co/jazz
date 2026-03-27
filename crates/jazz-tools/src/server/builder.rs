@@ -111,6 +111,21 @@ impl ServerBuilder {
             client_ttl: Arc::new(AtomicU64::new(300_000)),
         });
 
+        // Spawn periodic client state sweep
+        {
+            let state_for_sweep = state.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    let reaped = state_for_sweep.run_sweep_once().await;
+                    if !reaped.is_empty() {
+                        tracing::info!(count = reaped.len(), "reaped stale disconnected clients");
+                    }
+                }
+            });
+        }
+
         let app = routes::create_router(state.clone());
         Ok(BuiltServer { state, app })
     }
