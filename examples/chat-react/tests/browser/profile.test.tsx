@@ -9,6 +9,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
+import { TEST_PORT, APP_ID } from "./test-constants.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -51,6 +52,7 @@ describe("Profile E2E", () => {
     config: {
       appId?: string;
       dbName?: string;
+      serverUrl?: string;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -58,11 +60,11 @@ describe("Profile E2E", () => {
     const r = createRoot(el);
     mounts.push({ root: r, container: el });
 
-    const appId =
-      config.appId ?? `test-profile-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const appId = config.appId ?? APP_ID;
+    const serverUrl = config.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`;
 
     await act(async () => {
-      r.render(<App config={{ appId, ...config }} />);
+      r.render(<App config={{ appId, serverUrl, ...config }} />);
     });
 
     await waitFor(
