@@ -1,6 +1,7 @@
 import { onDestroy } from "svelte";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
+import { applyDelta } from "../reconcile-array.js";
 import { getJazzContext } from "./context.svelte.js";
 
 /**
@@ -57,7 +58,11 @@ export class QuerySubscription<T extends { id: string }> {
             this.loading = false;
           },
           onDelta: (delta: SubscriptionDelta<T>) => {
-            this.current = delta.all;
+            if (this.current) {
+              applyDelta(this.current, delta);
+            } else {
+              this.current = delta.all;
+            }
           },
           onError: (error: unknown) => {
             this.error = error instanceof Error ? error : new Error(String(error));
