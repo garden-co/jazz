@@ -22,8 +22,8 @@ use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
 use super::types::{
-    ComposedBranchName, LoadedRow, OrderedRowDelta, RowDelta, RowDescriptor, Schema, SchemaHash,
-    TableName, TablePolicies, TableSchema, Value, build_ordered_delta_with_post_ids,
+    ComposedBranchName, LoadedRow, OrderedRowDelta, Row, RowDelta, RowDescriptor, Schema,
+    SchemaHash, TableName, TablePolicies, TableSchema, Value, build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -176,6 +176,10 @@ pub(crate) struct QuerySubscription {
     pub(crate) achieved_tiers: HashSet<DurabilityTier>,
     /// Current ordered IDs for ordered delta construction.
     pub(crate) current_ordered_ids: Vec<ObjectId>,
+    /// Last visible rows delivered to the subscriber when explicit auth filtering is active.
+    pub(crate) current_visible_rows: HashMap<ObjectId, Row>,
+    /// Whether this subscription uses post-settle auth filtering instead of graph policies.
+    pub(crate) uses_explicit_authorization_filtering: bool,
     /// Whether this subscription should be forwarded to upstream servers.
     pub(crate) propagation: QueryPropagation,
     /// Schema mismatch warnings already emitted for the latest settled state.
@@ -564,6 +568,33 @@ impl QueryManager {
         QueryGraph::try_compile_with_schema_context(query, schema, session, schema_context)
     }
 
+    pub(super) fn local_subscription_uses_explicit_authorization(
+        &self,
+        session: Option<&Session>,
+    ) -> bool {
+        session.is_some()
+            && self
+                .authorization_schema
+                .as_ref()
+                .map(|auth_schema| auth_schema.as_ref() != self.schema.as_ref())
+                .unwrap_or(false)
+    }
+
+    pub(super) fn local_subscription_compile_schema(&self, session: Option<&Session>) -> Schema {
+        if self.local_subscription_uses_explicit_authorization(session) {
+            self.schema
+                .iter()
+                .map(|(table_name, table_schema)| {
+                    let mut structural = table_schema.clone();
+                    structural.policies = TablePolicies::default();
+                    (*table_name, structural)
+                })
+                .collect()
+        } else {
+            self.schema.as_ref().clone()
+        }
+    }
+
     /// Mark all subscriptions for recompilation.
     ///
     /// Called when live schemas change to ensure subscriptions pick up new branches.
@@ -581,28 +612,49 @@ impl QueryManager {
     /// Called during process() to rebuild QueryGraphs when schemas change.
     fn recompile_stale_subscriptions(&mut self) {
         let mut failed_local: Vec<(QuerySubscriptionId, String)> = Vec::new();
+        let current_schema = self.schema.clone();
+        let current_schema_context = self.schema_context.clone();
+        let authorization_schema = self.authorization_schema.clone();
 
         // Recompile local subscriptions
         for (sub_id, sub) in &mut self.subscriptions {
             if sub.needs_recompile {
                 // Resolve next branches from current schema context.
-                let next_branches: Vec<String> = self
-                    .schema_context
+                let next_branches: Vec<String> = current_schema_context
                     .all_branch_names()
                     .into_iter()
                     .map(|b| b.as_str().to_string())
                     .collect();
+                let uses_explicit_authorization_filtering = sub.session.is_some()
+                    && authorization_schema
+                        .as_ref()
+                        .map(|auth_schema| auth_schema.as_ref() != current_schema.as_ref())
+                        .unwrap_or(false);
+                let compile_schema = if uses_explicit_authorization_filtering {
+                    current_schema
+                        .iter()
+                        .map(|(table_name, table_schema)| {
+                            let mut structural = table_schema.clone();
+                            structural.policies = TablePolicies::default();
+                            (*table_name, structural)
+                        })
+                        .collect()
+                } else {
+                    current_schema.as_ref().clone()
+                };
 
                 // Recompile the graph
                 match Self::compile_graph(
                     &sub.query,
-                    &self.schema,
+                    &compile_schema,
                     sub.session.clone(),
-                    &self.schema_context,
+                    &current_schema_context,
                 ) {
                     Ok(new_graph) => {
                         sub.graph = new_graph;
                         sub.branches = next_branches;
+                        sub.uses_explicit_authorization_filtering =
+                            uses_explicit_authorization_filtering;
                         sub.needs_recompile = false;
                     }
                     Err(err) => {
@@ -822,14 +874,18 @@ impl QueryManager {
                 "settling subscriptions"
             );
         }
-        let om = &mut self.sync_manager.object_manager;
         let storage_ref: &dyn Storage = storage;
-        let schema_context = &self.schema_context;
-        let branch_schema_map = &self.branch_schema_map;
+        let schema_context = self.schema_context.clone();
+        let branch_schema_map = self.branch_schema_map.clone();
+        let subscription_ids: Vec<_> = self.subscriptions.keys().copied().collect();
 
-        for (sub_id, subscription) in &mut self.subscriptions {
+        for sub_id in subscription_ids {
+            let Some(mut subscription) = self.subscriptions.remove(&sub_id) else {
+                continue;
+            };
+
             let _sub_span = tracing::trace_span!("settle_subscription", sub_id = sub_id.0, table = %subscription.graph.table).entered();
-            let branches = &subscription.branches;
+            let branches = subscription.branches.clone();
             let table = subscription.graph.table.as_str().to_string();
             let mut schema_warnings = SchemaWarningAccumulator::default();
 
@@ -838,102 +894,105 @@ impl QueryManager {
             // For single-branch subscriptions, reads from that branch
             // For multi-branch subscriptions, uses LWW across branches
             // When schema context is present, applies lens transform for old schema branches
-            let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let obj = om.get_or_load(id, storage_ref, branches);
-                if obj.is_none() {
-                    tracing::trace!(%id, "row_loader: object not found");
-                    return None;
-                }
-                let obj = obj?;
-                // Find the newest commit across all subscription branches (LWW)
-                // Also track which branch it came from for schema transformation
-                let mut best: Option<(u64, Vec<u8>, CommitId, String)> = None;
+            let delta = {
+                let om = &mut self.sync_manager.object_manager;
+                let row_loader = |id: ObjectId| -> Option<LoadedRow> {
+                    let obj = om.get_or_load(id, storage_ref, &branches);
+                    if obj.is_none() {
+                        tracing::trace!(%id, "row_loader: object not found");
+                        return None;
+                    }
+                    let obj = obj?;
+                    // Find the newest commit across all subscription branches (LWW)
+                    // Also track which branch it came from for schema transformation
+                    let mut best: Option<(u64, Vec<u8>, CommitId, String)> = None;
 
-                for branch_name in branches {
-                    if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
-                        for &tip_id in &branch.tips {
-                            if let Some(commit) = branch.commits.get(&tip_id) {
-                                match &best {
-                                    None => {
-                                        best = Some((
-                                            commit.timestamp,
-                                            commit.content.clone(),
-                                            tip_id,
-                                            branch_name.clone(),
-                                        ));
+                    for branch_name in &branches {
+                        if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
+                            for &tip_id in &branch.tips {
+                                if let Some(commit) = branch.commits.get(&tip_id) {
+                                    match &best {
+                                        None => {
+                                            best = Some((
+                                                commit.timestamp,
+                                                commit.content.clone(),
+                                                tip_id,
+                                                branch_name.clone(),
+                                            ));
+                                        }
+                                        Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
+                                            best = Some((
+                                                commit.timestamp,
+                                                commit.content.clone(),
+                                                tip_id,
+                                                branch_name.clone(),
+                                            ));
+                                        }
+                                        _ => {}
                                     }
-                                    Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
-                                        best = Some((
-                                            commit.timestamp,
-                                            commit.content.clone(),
-                                            tip_id,
-                                            branch_name.clone(),
-                                        ));
-                                    }
-                                    _ => {}
                                 }
                             }
                         }
                     }
-                }
 
-                // Filter out empty content (hard delete tombstones only)
-                let (_, content, commit_id, source_branch) =
-                    best.filter(|(_, content, _, _)| !content.is_empty())?;
+                    // Filter out empty content (hard delete tombstones only)
+                    let (_, content, commit_id, source_branch) =
+                        best.filter(|(_, content, _, _)| !content.is_empty())?;
 
-                // Apply lens transform if row is from an old schema branch
-                if let Some(&source_hash) = branch_schema_map.get(&source_branch)
-                    && source_hash != schema_context.current_hash
-                {
-                    // Transform the row data using lens
-                    let transformer = LensTransformer::new(schema_context, &table);
-                    match transformer.transform(&content, commit_id, source_hash) {
-                        Ok(result) => {
-                            return Some(LoadedRow::new(
-                                result.data,
-                                commit_id,
-                                [(id, BranchName::new(&source_branch))]
-                                    .into_iter()
-                                    .collect(),
-                            ));
-                        }
-                        Err(err) => {
-                            schema_warnings.record(
-                                &table,
-                                source_hash,
-                                schema_context.current_hash,
-                            );
-                            tracing::debug!(
-                                sub_id = sub_id.0,
-                                row_id = %id,
-                                table = %table,
-                                source_branch = %source_branch,
-                                source_schema = %source_hash.short(),
-                                target_schema = %schema_context.current_hash.short(),
-                                error = %err,
-                                "lens transform failed; row will be counted in aggregated schema warning"
-                            );
-                            return None;
+                    // Apply lens transform if row is from an old schema branch
+                    if let Some(&source_hash) = branch_schema_map.get(&source_branch)
+                        && source_hash != schema_context.current_hash
+                    {
+                        // Transform the row data using lens
+                        let transformer = LensTransformer::new(&schema_context, &table);
+                        match transformer.transform(&content, commit_id, source_hash) {
+                            Ok(result) => {
+                                return Some(LoadedRow::new(
+                                    result.data,
+                                    commit_id,
+                                    [(id, BranchName::new(&source_branch))]
+                                        .into_iter()
+                                        .collect(),
+                                ));
+                            }
+                            Err(err) => {
+                                schema_warnings.record(
+                                    &table,
+                                    source_hash,
+                                    schema_context.current_hash,
+                                );
+                                tracing::debug!(
+                                    sub_id = sub_id.0,
+                                    row_id = %id,
+                                    table = %table,
+                                    source_branch = %source_branch,
+                                    source_schema = %source_hash.short(),
+                                    target_schema = %schema_context.current_hash.short(),
+                                    error = %err,
+                                    "lens transform failed; row will be counted in aggregated schema warning"
+                                );
+                                return None;
+                            }
                         }
                     }
-                }
 
-                Some(LoadedRow::new(
-                    content,
-                    commit_id,
-                    [(id, BranchName::new(&source_branch))]
-                        .into_iter()
-                        .collect(),
-                ))
+                    Some(LoadedRow::new(
+                        content,
+                        commit_id,
+                        [(id, BranchName::new(&source_branch))]
+                            .into_iter()
+                            .collect(),
+                    ))
+                };
+
+                subscription.graph.settle(storage_ref, row_loader)
             };
-
-            let delta = subscription.graph.settle(storage_ref, row_loader);
             let new_schema_warnings = Self::finalize_schema_warnings(
                 &mut subscription.reported_schema_warnings,
                 schema_warnings.warnings_for_query(QueryId(sub_id.0)),
             );
             for warning in &new_schema_warnings {
-                Self::log_schema_warning(warning, Some(*sub_id));
+                Self::log_schema_warning(warning, Some(sub_id));
             }
             if !delta.added.is_empty() || !delta.removed.is_empty() {
                 tracing::debug!(
@@ -956,70 +1015,143 @@ impl QueryManager {
             if !tier_satisfied && !allow_local_while_waiting {
                 // Graph state updated by settle(), but don't deliver yet
                 tracing::trace!("tier not satisfied, holding delivery");
+                self.subscriptions.insert(sub_id, subscription);
                 continue;
             }
 
-            if !subscription.settled_once {
-                // First delivery — full current state snapshot
-                subscription.settled_once = true;
-                let full_result = subscription.graph.current_result_as_delta();
-                let ordered_ids_after: Vec<ObjectId> = subscription
-                    .graph
-                    .current_result()
+            if subscription.uses_explicit_authorization_filtering {
+                let visible_rows = self.authorized_rows_from_graph(
+                    storage_ref,
+                    &subscription.graph,
+                    &schema_context,
+                    &branch_schema_map,
+                    subscription.session.as_ref(),
+                );
+                let visible_rows_by_id: HashMap<_, _> = visible_rows
                     .iter()
-                    .map(|row| row.id)
+                    .cloned()
+                    .map(|row| (row.id, row))
                     .collect();
-                let ordered = build_ordered_delta_with_post_ids(
+                let visible_delta = Self::row_delta_from_rows(
+                    &subscription.current_visible_rows,
                     &subscription.current_ordered_ids,
-                    &ordered_ids_after,
-                    &full_result,
-                    false,
+                    &visible_rows,
                 );
-                subscription.current_ordered_ids = ordered.ordered_ids_after;
-                // Always emit the first snapshot once tier is satisfied, even if empty.
-                // This guarantees one-shot queries can resolve to [] instead of hanging.
-                tracing::debug!(
-                    sub_id = sub_id.0,
-                    added = full_result.added.len(),
-                    "first delivery (snapshot)"
-                );
-                self.update_outbox.push(QueryUpdate {
-                    subscription_id: *sub_id,
-                    delta: full_result,
-                    ordered_delta: ordered.delta,
-                    descriptor: subscription.graph.combined_descriptor.clone(),
-                });
-                subscription.has_pending_local_updates = false;
-            } else if !delta.is_empty() {
-                let ordered_ids_after: Vec<ObjectId> = subscription
-                    .graph
-                    .current_result()
-                    .iter()
-                    .map(|row| row.id)
-                    .collect();
-                let ordered = build_ordered_delta_with_post_ids(
-                    &subscription.current_ordered_ids,
-                    &ordered_ids_after,
-                    &delta,
-                    false,
-                );
-                subscription.current_ordered_ids = ordered.ordered_ids_after;
-                tracing::debug!(
-                    sub_id = sub_id.0,
-                    added = delta.added.len(),
-                    removed = delta.removed.len(),
-                    updated = delta.updated.len(),
-                    "incremental delivery"
-                );
-                // Incremental delivery
-                self.update_outbox.push(QueryUpdate {
-                    subscription_id: *sub_id,
-                    delta: delta.clone(),
-                    ordered_delta: ordered.delta,
-                    descriptor: subscription.graph.combined_descriptor.clone(),
-                });
-                subscription.has_pending_local_updates = false;
+                let ordered_ids_after: Vec<ObjectId> =
+                    visible_rows.iter().map(|row| row.id).collect();
+
+                if !subscription.settled_once {
+                    subscription.settled_once = true;
+                    let ordered = build_ordered_delta_with_post_ids(
+                        &subscription.current_ordered_ids,
+                        &ordered_ids_after,
+                        &visible_delta,
+                        false,
+                    );
+                    subscription.current_ordered_ids = ordered.ordered_ids_after;
+                    subscription.current_visible_rows = visible_rows_by_id;
+                    tracing::debug!(
+                        sub_id = sub_id.0,
+                        added = visible_delta.added.len(),
+                        "first delivery (snapshot)"
+                    );
+                    self.update_outbox.push(QueryUpdate {
+                        subscription_id: sub_id,
+                        delta: visible_delta,
+                        ordered_delta: ordered.delta,
+                        descriptor: subscription.graph.combined_descriptor.clone(),
+                    });
+                    subscription.has_pending_local_updates = false;
+                } else if !visible_delta.is_empty() {
+                    let ordered = build_ordered_delta_with_post_ids(
+                        &subscription.current_ordered_ids,
+                        &ordered_ids_after,
+                        &visible_delta,
+                        false,
+                    );
+                    subscription.current_ordered_ids = ordered.ordered_ids_after;
+                    subscription.current_visible_rows = visible_rows_by_id;
+                    tracing::debug!(
+                        sub_id = sub_id.0,
+                        added = visible_delta.added.len(),
+                        removed = visible_delta.removed.len(),
+                        updated = visible_delta.updated.len(),
+                        "incremental delivery"
+                    );
+                    self.update_outbox.push(QueryUpdate {
+                        subscription_id: sub_id,
+                        delta: visible_delta,
+                        ordered_delta: ordered.delta,
+                        descriptor: subscription.graph.combined_descriptor.clone(),
+                    });
+                    subscription.has_pending_local_updates = false;
+                }
+            } else {
+                subscription.current_visible_rows.clear();
+                if !subscription.settled_once {
+                    // First delivery — full current state snapshot
+                    subscription.settled_once = true;
+                    let full_result = subscription.graph.current_result_as_delta();
+                    let ordered_ids_after: Vec<ObjectId> = subscription
+                        .graph
+                        .current_result()
+                        .iter()
+                        .map(|row| row.id)
+                        .collect();
+                    let ordered = build_ordered_delta_with_post_ids(
+                        &subscription.current_ordered_ids,
+                        &ordered_ids_after,
+                        &full_result,
+                        false,
+                    );
+                    subscription.current_ordered_ids = ordered.ordered_ids_after;
+                    // Always emit the first snapshot once tier is satisfied, even if empty.
+                    // This guarantees one-shot queries can resolve to [] instead of hanging.
+                    tracing::debug!(
+                        sub_id = sub_id.0,
+                        added = full_result.added.len(),
+                        "first delivery (snapshot)"
+                    );
+                    self.update_outbox.push(QueryUpdate {
+                        subscription_id: sub_id,
+                        delta: full_result,
+                        ordered_delta: ordered.delta,
+                        descriptor: subscription.graph.combined_descriptor.clone(),
+                    });
+                    subscription.has_pending_local_updates = false;
+                } else if !delta.is_empty() {
+                    let ordered_ids_after: Vec<ObjectId> = subscription
+                        .graph
+                        .current_result()
+                        .iter()
+                        .map(|row| row.id)
+                        .collect();
+                    let ordered = build_ordered_delta_with_post_ids(
+                        &subscription.current_ordered_ids,
+                        &ordered_ids_after,
+                        &delta,
+                        false,
+                    );
+                    subscription.current_ordered_ids = ordered.ordered_ids_after;
+                    tracing::debug!(
+                        sub_id = sub_id.0,
+                        added = delta.added.len(),
+                        removed = delta.removed.len(),
+                        updated = delta.updated.len(),
+                        "incremental delivery"
+                    );
+                    // Incremental delivery
+                    self.update_outbox.push(QueryUpdate {
+                        subscription_id: sub_id,
+                        delta: delta.clone(),
+                        ordered_delta: ordered.delta,
+                        descriptor: subscription.graph.combined_descriptor.clone(),
+                    });
+                    subscription.has_pending_local_updates = false;
+                }
             }
+
+            self.subscriptions.insert(sub_id, subscription);
         }
 
         // Note: With sync storage, object loading is immediate. No need to request
@@ -1478,6 +1610,67 @@ impl QueryManager {
         table: &str,
     ) -> bool {
         graph.involves_table(table)
+    }
+
+    pub(super) fn row_delta_from_rows(
+        previous_rows: &HashMap<ObjectId, Row>,
+        previous_order: &[ObjectId],
+        next_rows: &[Row],
+    ) -> RowDelta {
+        let next_rows_by_id: HashMap<_, _> =
+            next_rows.iter().cloned().map(|row| (row.id, row)).collect();
+        let previous_indices: HashMap<_, _> = previous_order
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (*id, index))
+            .collect();
+        let next_indices: HashMap<_, _> = next_rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.id, index))
+            .collect();
+
+        let added = next_rows
+            .iter()
+            .filter(|row| !previous_rows.contains_key(&row.id))
+            .cloned()
+            .collect();
+        let removed = previous_order
+            .iter()
+            .filter_map(|id| previous_rows.get(id))
+            .filter(|row| !next_rows_by_id.contains_key(&row.id))
+            .cloned()
+            .collect();
+        let updated = next_rows
+            .iter()
+            .filter_map(|row| {
+                previous_rows.get(&row.id).and_then(|previous| {
+                    (previous.data != row.data || previous.commit_id != row.commit_id)
+                        .then(|| (previous.clone(), row.clone()))
+                })
+            })
+            .collect();
+        let moved = next_rows
+            .iter()
+            .filter(|row| {
+                previous_rows.contains_key(&row.id)
+                    && previous_rows
+                        .get(&row.id)
+                        .map(|previous| {
+                            previous.data == row.data && previous.commit_id == row.commit_id
+                        })
+                        .unwrap_or(false)
+                    && previous_indices.get(&row.id) != next_indices.get(&row.id)
+            })
+            .map(|row| row.id)
+            .collect();
+
+        RowDelta {
+            added,
+            removed,
+            moved,
+            updated,
+        }
     }
     // ========================================================================
     // No-op storage driver (for tests)
