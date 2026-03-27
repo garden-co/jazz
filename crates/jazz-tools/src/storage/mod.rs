@@ -87,6 +87,13 @@ pub struct LoadedBranch {
     pub tails: HashSet<CommitId>,
 }
 
+/// Batch-prefix leaf updates applied when writing the root commit of a new batch branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefixLeafUpdate {
+    pub prefix: String,
+    pub remove_leaf_branches: HashSet<BranchName>,
+}
+
 /// Lens edge stored in the catalogue manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogueLensSeen {
@@ -189,12 +196,42 @@ pub trait Storage {
         branch: &BranchName,
     ) -> Result<Option<LoadedBranch>, StorageError>;
 
+    /// Resolve which branch owns a persisted commit.
+    fn load_commit_branch(
+        &self,
+        object_id: ObjectId,
+        commit_id: CommitId,
+    ) -> Result<Option<BranchName>, StorageError>;
+
+    /// Load the current leaf branches for one shared batch prefix.
+    fn load_prefix_leaf_branches(
+        &self,
+        object_id: ObjectId,
+        prefix: &str,
+    ) -> Result<Option<HashSet<BranchName>>, StorageError>;
+
+    /// Register that a table has data on one batch branch within a shared prefix.
+    fn register_table_prefix_branch(
+        &mut self,
+        table: &str,
+        prefix: &str,
+        branch: &BranchName,
+    ) -> Result<(), StorageError>;
+
+    /// Load all known table branches for one shared batch prefix.
+    fn load_table_prefix_branches(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<HashSet<BranchName>, StorageError>;
+
     /// Append a commit to a branch.
     fn append_commit(
         &mut self,
         object_id: ObjectId,
         branch: &BranchName,
         commit: Commit,
+        prefix_leaf_update: Option<PrefixLeafUpdate>,
     ) -> Result<(), StorageError>;
 
     /// Delete a commit from a branch.
@@ -337,13 +374,47 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).load_branch(object_id, branch)
     }
 
+    fn load_commit_branch(
+        &self,
+        object_id: ObjectId,
+        commit_id: CommitId,
+    ) -> Result<Option<BranchName>, StorageError> {
+        (**self).load_commit_branch(object_id, commit_id)
+    }
+
+    fn load_prefix_leaf_branches(
+        &self,
+        object_id: ObjectId,
+        prefix: &str,
+    ) -> Result<Option<HashSet<BranchName>>, StorageError> {
+        (**self).load_prefix_leaf_branches(object_id, prefix)
+    }
+
+    fn register_table_prefix_branch(
+        &mut self,
+        table: &str,
+        prefix: &str,
+        branch: &BranchName,
+    ) -> Result<(), StorageError> {
+        (**self).register_table_prefix_branch(table, prefix, branch)
+    }
+
+    fn load_table_prefix_branches(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<HashSet<BranchName>, StorageError> {
+        (**self).load_table_prefix_branches(table, prefix)
+    }
+
     fn append_commit(
         &mut self,
         object_id: ObjectId,
         branch: &BranchName,
         commit: Commit,
+        prefix_leaf_update: Option<PrefixLeafUpdate>,
     ) -> Result<(), StorageError> {
-        (**self).append_commit(object_id, branch, commit)
+        (**self).append_commit(object_id, branch, commit, prefix_leaf_update)
     }
 
     fn delete_commit(
@@ -482,6 +553,8 @@ pub struct MemoryStorage {
 
     /// Persistence ack tiers per commit.
     ack_tiers: HashMap<CommitId, HashSet<DurabilityTier>>,
+    /// Known table branches keyed by shared batch prefix.
+    table_branches_by_prefix: HashMap<(String, String), HashSet<BranchName>>,
     /// Append-only manifest ops keyed by app_id then op object_id.
     catalogue_manifest_ops: HashMap<ObjectId, HashMap<ObjectId, CatalogueManifestOp>>,
 }
@@ -491,6 +564,8 @@ pub struct MemoryStorage {
 struct ObjectData {
     metadata: HashMap<String, String>,
     branches: HashMap<BranchName, BranchData>,
+    commit_branches: HashMap<CommitId, BranchName>,
+    leaf_branches_by_prefix: HashMap<String, HashSet<BranchName>>,
 }
 
 /// Internal branch storage structure.
@@ -623,6 +698,8 @@ impl Storage for MemoryStorage {
             ObjectData {
                 metadata,
                 branches: HashMap::new(),
+                commit_branches: HashMap::new(),
+                leaf_branches_by_prefix: HashMap::new(),
             },
         );
         Ok(())
@@ -658,11 +735,59 @@ impl Storage for MemoryStorage {
         }))
     }
 
+    fn load_commit_branch(
+        &self,
+        object_id: ObjectId,
+        commit_id: CommitId,
+    ) -> Result<Option<BranchName>, StorageError> {
+        Ok(self
+            .objects
+            .get(&object_id)
+            .and_then(|obj| obj.commit_branches.get(&commit_id).copied()))
+    }
+
+    fn load_prefix_leaf_branches(
+        &self,
+        object_id: ObjectId,
+        prefix: &str,
+    ) -> Result<Option<HashSet<BranchName>>, StorageError> {
+        Ok(self
+            .objects
+            .get(&object_id)
+            .and_then(|obj| obj.leaf_branches_by_prefix.get(prefix).cloned()))
+    }
+
+    fn register_table_prefix_branch(
+        &mut self,
+        table: &str,
+        prefix: &str,
+        branch: &BranchName,
+    ) -> Result<(), StorageError> {
+        self.table_branches_by_prefix
+            .entry((table.to_string(), prefix.to_string()))
+            .or_default()
+            .insert(*branch);
+        Ok(())
+    }
+
+    fn load_table_prefix_branches(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<HashSet<BranchName>, StorageError> {
+        Ok(self
+            .table_branches_by_prefix
+            .get(&(table.to_string(), prefix.to_string()))
+            .cloned()
+            .unwrap_or_default())
+    }
+
     fn append_commit(
         &mut self,
         object_id: ObjectId,
         branch: &BranchName,
         commit: Commit,
+        prefix_leaf_update: Option<PrefixLeafUpdate>,
     ) -> Result<(), StorageError> {
         let obj = self.objects.entry(object_id).or_default();
         let branch_data = obj.branches.entry(*branch).or_default();
@@ -677,6 +802,18 @@ impl Storage for MemoryStorage {
         // Add this commit as a tip
         branch_data.tails.insert(commit_id);
         branch_data.commits.push(commit);
+        obj.commit_branches.insert(commit_id, *branch);
+
+        if let Some(update) = prefix_leaf_update {
+            let leaf_branches = obj
+                .leaf_branches_by_prefix
+                .entry(update.prefix)
+                .or_default();
+            for removed_branch in update.remove_leaf_branches {
+                leaf_branches.remove(&removed_branch);
+            }
+            leaf_branches.insert(*branch);
+        }
 
         Ok(())
     }
@@ -694,6 +831,9 @@ impl Storage for MemoryStorage {
         {
             branch_data.commits.retain(|c| c.id() != commit_id);
             branch_data.tails.remove(&commit_id);
+        }
+        if let Some(obj) = self.objects.get_mut(&object_id) {
+            obj.commit_branches.remove(&commit_id);
         }
         Ok(())
     }
@@ -971,7 +1111,7 @@ mod tests {
         // Append commit creates branch
         let commit = make_commit(b"first");
         let commit_id = commit.id();
-        storage.append_commit(id, &branch, commit).unwrap();
+        storage.append_commit(id, &branch, commit, None).unwrap();
 
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 1);
@@ -981,6 +1121,91 @@ mod tests {
         storage.delete_commit(id, &branch, commit_id).unwrap();
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 0);
+    }
+
+    #[test]
+    fn memory_storage_tracks_commit_branches_and_prefix_leaves() {
+        let mut storage = MemoryStorage::new();
+        let id = ObjectId::new();
+        storage.create_object(id, HashMap::new()).unwrap();
+
+        let prefix = "dev-070707070707-main";
+        let branch1 = BranchName::new(format!("{prefix}-b{:032x}", 1));
+        let branch2 = BranchName::new(format!("{prefix}-b{:032x}", 2));
+
+        let commit1 = make_commit(b"first");
+        let commit1_id = commit1.id();
+        storage
+            .append_commit(
+                id,
+                &branch1,
+                commit1,
+                Some(PrefixLeafUpdate {
+                    prefix: prefix.to_string(),
+                    remove_leaf_branches: HashSet::new(),
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(
+            storage.load_commit_branch(id, commit1_id).unwrap(),
+            Some(branch1)
+        );
+        assert_eq!(
+            storage.load_prefix_leaf_branches(id, prefix).unwrap(),
+            Some(HashSet::from([branch1]))
+        );
+
+        let mut commit2 = make_commit(b"second");
+        commit2.parents = smallvec![commit1_id];
+        let commit2_id = commit2.id();
+        storage
+            .append_commit(
+                id,
+                &branch2,
+                commit2,
+                Some(PrefixLeafUpdate {
+                    prefix: prefix.to_string(),
+                    remove_leaf_branches: HashSet::from([branch1]),
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(
+            storage.load_commit_branch(id, commit2_id).unwrap(),
+            Some(branch2)
+        );
+        assert_eq!(
+            storage.load_prefix_leaf_branches(id, prefix).unwrap(),
+            Some(HashSet::from([branch2]))
+        );
+    }
+
+    #[test]
+    fn memory_storage_tracks_table_prefix_branches() {
+        let mut storage = MemoryStorage::new();
+        let prefix = "dev-070707070707-main";
+        let branch1 = BranchName::new(format!("{prefix}-b{:032x}", 1));
+        let branch2 = BranchName::new(format!("{prefix}-b{:032x}", 2));
+
+        storage
+            .register_table_prefix_branch("users", prefix, &branch1)
+            .unwrap();
+        storage
+            .register_table_prefix_branch("users", prefix, &branch2)
+            .unwrap();
+        storage
+            .register_table_prefix_branch("posts", prefix, &branch1)
+            .unwrap();
+
+        assert_eq!(
+            storage.load_table_prefix_branches("users", prefix).unwrap(),
+            HashSet::from([branch1, branch2])
+        );
+        assert_eq!(
+            storage.load_table_prefix_branches("posts", prefix).unwrap(),
+            HashSet::from([branch1])
+        );
     }
 
     #[test]

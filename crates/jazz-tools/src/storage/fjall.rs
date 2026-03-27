@@ -19,13 +19,14 @@ use crate::query_manager::types::Value;
 use crate::sync_manager::DurabilityTier;
 
 use super::{
-    CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
+    CatalogueManifest, CatalogueManifestOp, LoadedBranch, PrefixLeafUpdate, Storage, StorageError,
     storage_core::{
         append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
         create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
         index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
-        store_ack_tier_core,
+        load_catalogue_manifest_core, load_commit_branch_core, load_object_metadata_core,
+        load_prefix_leaf_branches_core, load_table_prefix_branches_core,
+        register_table_prefix_branch_core, set_branch_tails_core, store_ack_tier_core,
     },
 };
 
@@ -222,11 +223,66 @@ impl Storage for FjallStorage {
         })
     }
 
+    fn load_commit_branch(
+        &self,
+        object_id: ObjectId,
+        commit_id: CommitId,
+    ) -> Result<Option<BranchName>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            load_commit_branch_core(object_id, commit_id, |key| {
+                Self::read_get(&tx, &inner.keyspace, key)
+            })
+        })
+    }
+
+    fn load_prefix_leaf_branches(
+        &self,
+        object_id: ObjectId,
+        prefix: &str,
+    ) -> Result<Option<HashSet<BranchName>>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            load_prefix_leaf_branches_core(object_id, prefix, |key| {
+                Self::read_get(&tx, &inner.keyspace, key)
+            })
+        })
+    }
+
+    fn register_table_prefix_branch(
+        &mut self,
+        table: &str,
+        prefix: &str,
+        branch: &BranchName,
+    ) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let mut tx = inner.db.write_tx();
+            register_table_prefix_branch_core(table, prefix, branch, |key, value| {
+                Self::set_on_tx(&mut tx, &inner.keyspace, key, value)
+            })?;
+            Self::commit_tx(tx)
+        })
+    }
+
+    fn load_table_prefix_branches(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<HashSet<BranchName>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            load_table_prefix_branches_core(table, prefix, |key_prefix| {
+                Self::scan_prefix(&tx, &inner.keyspace, key_prefix)
+            })
+        })
+    }
+
     fn append_commit(
         &mut self,
         object_id: ObjectId,
         branch: &BranchName,
         commit: Commit,
+        prefix_leaf_update: Option<PrefixLeafUpdate>,
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let tx = RefCell::new(inner.db.write_tx());
@@ -234,6 +290,7 @@ impl Storage for FjallStorage {
                 object_id,
                 branch,
                 commit,
+                prefix_leaf_update,
                 |key| Self::read_get_cell(&tx, &inner.keyspace, key),
                 |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
             )?;
@@ -517,7 +574,7 @@ mod tests {
 
         let commit = make_commit(b"first");
         let commit_id = commit.id();
-        storage.append_commit(id, &branch, commit).unwrap();
+        storage.append_commit(id, &branch, commit, None).unwrap();
 
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 1);
@@ -527,7 +584,7 @@ mod tests {
         let mut commit2 = make_commit(b"second");
         commit2.parents = smallvec![commit_id];
         let commit2_id = commit2.id();
-        storage.append_commit(id, &branch, commit2).unwrap();
+        storage.append_commit(id, &branch, commit2, None).unwrap();
 
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 2);
@@ -538,6 +595,70 @@ mod tests {
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 1);
         assert_eq!(loaded.commits[0].content, b"second");
+    }
+
+    #[test]
+    fn fjall_tracks_commit_branches_and_prefix_leaves() {
+        let (_temp_dir, mut storage) = test_storage();
+        let id = ObjectId::new();
+        storage.create_object(id, HashMap::new()).unwrap();
+
+        let prefix = "dev-070707070707-main";
+        let branch1 = BranchName::new(format!("{prefix}-b{:032x}", 1));
+        let branch2 = BranchName::new(format!("{prefix}-b{:032x}", 2));
+
+        let commit1 = make_commit(b"first");
+        let commit1_id = commit1.id();
+        storage
+            .append_commit(
+                id,
+                &branch1,
+                commit1,
+                Some(PrefixLeafUpdate {
+                    prefix: prefix.to_string(),
+                    remove_leaf_branches: HashSet::new(),
+                }),
+            )
+            .unwrap();
+
+        let mut commit2 = make_commit(b"second");
+        commit2.parents = smallvec![commit1_id];
+        let commit2_id = commit2.id();
+        storage
+            .append_commit(
+                id,
+                &branch2,
+                commit2,
+                Some(PrefixLeafUpdate {
+                    prefix: prefix.to_string(),
+                    remove_leaf_branches: HashSet::from([branch1]),
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(
+            storage.load_commit_branch(id, commit1_id).unwrap(),
+            Some(branch1)
+        );
+        assert_eq!(
+            storage.load_commit_branch(id, commit2_id).unwrap(),
+            Some(branch2)
+        );
+        assert_eq!(
+            storage.load_prefix_leaf_branches(id, prefix).unwrap(),
+            Some(HashSet::from([branch2]))
+        );
+
+        storage
+            .register_table_prefix_branch("users", prefix, &branch1)
+            .unwrap();
+        storage
+            .register_table_prefix_branch("users", prefix, &branch2)
+            .unwrap();
+        assert_eq!(
+            storage.load_table_prefix_branches("users", prefix).unwrap(),
+            HashSet::from([branch1, branch2])
+        );
     }
 
     #[test]
@@ -631,7 +752,7 @@ mod tests {
             storage.create_object(id, metadata.clone()).unwrap();
 
             let commit = make_commit(commit_content);
-            storage.append_commit(id, &branch, commit).unwrap();
+            storage.append_commit(id, &branch, commit, None).unwrap();
 
             storage
                 .index_insert(

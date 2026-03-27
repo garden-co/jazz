@@ -147,6 +147,8 @@ pub struct Object {
     pub id: ObjectId,
     pub metadata: HashMap<String, String>,
     pub branches: HashMap<BranchName, Branch>,
+    pub commit_branches: HashMap<CommitId, BranchName>,
+    pub leaf_branches_by_prefix: HashMap<String, SmolSet<[BranchName; 4]>>,
 }
 
 impl Object {
@@ -155,6 +157,8 @@ impl Object {
             id: ObjectId::new(),
             metadata: metadata.unwrap_or_default(),
             branches: HashMap::new(),
+            commit_branches: HashMap::new(),
+            leaf_branches_by_prefix: HashMap::new(),
         }
     }
 }

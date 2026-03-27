@@ -1,6 +1,18 @@
 use super::*;
 use crate::commit::CommitAckState;
+use crate::query_manager::types::{BatchId, BranchPrefixName, SchemaHash};
 use crate::storage::MemoryStorage;
+use uuid::Uuid;
+
+fn test_batch_prefix() -> BranchPrefixName {
+    BranchPrefixName::new("dev", SchemaHash::from_bytes([7; 32]), "main")
+}
+
+fn test_batch_branch(prefix: &BranchPrefixName, ordinal: u128) -> BranchName {
+    prefix
+        .with_batch_id(BatchId::from_uuid(Uuid::from_u128(ordinal)))
+        .to_branch_name()
+}
 
 #[test]
 fn create_object_without_metadata() {
@@ -1055,6 +1067,148 @@ fn get_or_load_hydrates_missing_branches_into_cached_object() {
 }
 
 #[test]
+fn add_commit_accepts_new_batch_root_merge_and_tracks_prefix_leaves() {
+    let mut io = MemoryStorage::new();
+    let mut manager = ObjectManager::new();
+    let object_id = manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let prefix = test_batch_prefix();
+    let batch1 = test_batch_branch(&prefix, 1);
+    let batch2 = test_batch_branch(&prefix, 2);
+    let batch3 = test_batch_branch(&prefix, 3);
+
+    let head1 = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            batch1,
+            vec![],
+            b"batch-1".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+    let head2 = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            batch2,
+            vec![],
+            b"batch-2".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+    let merged_head = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            batch3,
+            vec![head1, head2],
+            b"batch-3-root".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let leaf_heads = manager
+        .get_leaf_head_ids_for_prefix(object_id, &prefix, &io)
+        .unwrap();
+    assert_eq!(leaf_heads.len(), 1);
+    assert_eq!(leaf_heads.get(&batch3), Some(&merged_head));
+    assert!(!leaf_heads.contains_key(&batch1));
+    assert!(!leaf_heads.contains_key(&batch2));
+
+    let stored_leaf_branches = io
+        .load_prefix_leaf_branches(object_id, &prefix.branch_prefix())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored_leaf_branches.len(), 1);
+    assert!(stored_leaf_branches.contains(&batch3));
+
+    assert_eq!(
+        io.load_commit_branch(object_id, head1).unwrap(),
+        Some(batch1)
+    );
+    assert_eq!(
+        io.load_commit_branch(object_id, head2).unwrap(),
+        Some(batch2)
+    );
+    assert_eq!(
+        io.load_commit_branch(object_id, merged_head).unwrap(),
+        Some(batch3)
+    );
+}
+
+#[test]
+fn get_leaf_head_ids_for_prefix_cold_loads_only_leaf_branches() {
+    let mut io = MemoryStorage::new();
+    let author = ObjectId::new();
+    let prefix = test_batch_prefix();
+    let batch1 = test_batch_branch(&prefix, 11);
+    let batch2 = test_batch_branch(&prefix, 12);
+    let batch3 = test_batch_branch(&prefix, 13);
+
+    let (object_id, merged_head) = {
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(&mut io, None);
+        let head1 = manager
+            .add_commit(
+                &mut io,
+                object_id,
+                batch1,
+                vec![],
+                b"batch-1".to_vec(),
+                author,
+                None,
+            )
+            .unwrap();
+        let head2 = manager
+            .add_commit(
+                &mut io,
+                object_id,
+                batch2,
+                vec![],
+                b"batch-2".to_vec(),
+                author,
+                None,
+            )
+            .unwrap();
+        let merged_head = manager
+            .add_commit(
+                &mut io,
+                object_id,
+                batch3,
+                vec![head1, head2],
+                b"batch-3-root".to_vec(),
+                author,
+                None,
+            )
+            .unwrap();
+        (object_id, merged_head)
+    };
+
+    let mut reloaded = ObjectManager::new();
+    let leaf_heads = reloaded
+        .get_leaf_head_ids_for_prefix(object_id, &prefix, &io)
+        .unwrap();
+
+    assert_eq!(leaf_heads.len(), 1);
+    assert_eq!(leaf_heads.get(&batch3), Some(&merged_head));
+
+    let object = reloaded.get(object_id).unwrap();
+    assert_eq!(object.branches.len(), 1);
+    assert!(object.branches.contains_key(&batch3));
+    assert_eq!(
+        object
+            .leaf_branches_by_prefix
+            .get(&prefix.branch_prefix())
+            .map(|branches| branches.iter().copied().collect::<HashSet<_>>()),
+        Some(HashSet::from([batch3]))
+    );
+}
+
+#[test]
 fn frontier_with_three_way_divergence() {
     let mut io = MemoryStorage::new();
     let mut manager = ObjectManager::new();
@@ -1733,7 +1887,7 @@ fn lww_different_fields_same_object_whole_commit_wins() {
         stored_state: StoredState::default(),
         ack_state: CommitAckState::default(),
     };
-    let alice_id = manager
+    let _alice_id = manager
         .receive_commit(&mut io, object_id, "main", alice_edit)
         .unwrap();
 

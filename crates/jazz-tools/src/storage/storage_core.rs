@@ -10,11 +10,13 @@ use crate::sync_manager::DurabilityTier;
 use crate::query_manager::types::Value;
 
 use super::key_codec::{
-    ack_key, branch_tips_key, catalogue_manifest_op_key, catalogue_manifest_op_prefix, commit_key,
-    commit_prefix, index_entry_key, index_prefix, index_range_scan_bounds, index_value_prefix,
-    obj_meta_key, parse_uuid_from_index_key,
+    ack_key, branch_tips_key, catalogue_manifest_op_key, catalogue_manifest_op_prefix,
+    commit_branch_key, commit_key, commit_prefix, index_entry_key, index_prefix,
+    index_range_scan_bounds, index_value_prefix, obj_meta_key, parse_branch_from_table_prefix_key,
+    parse_uuid_from_index_key, prefix_leaf_branches_key, table_prefix_branch_key,
+    table_prefix_branch_prefix,
 };
-use super::{CatalogueManifest, CatalogueManifestOp, LoadedBranch, StorageError};
+use super::{CatalogueManifest, CatalogueManifestOp, LoadedBranch, PrefixLeafUpdate, StorageError};
 
 fn encode_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, StorageError> {
     serde_json::to_vec(value).map_err(|e| StorageError::IoError(format!("serialize {label}: {e}")))
@@ -89,10 +91,59 @@ pub(super) fn load_branch_core(
     Ok(Some(LoadedBranch { commits, tails }))
 }
 
+pub(super) fn load_commit_branch_core(
+    object_id: ObjectId,
+    commit_id: CommitId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<BranchName>, StorageError> {
+    let key = commit_branch_key(object_id, commit_id);
+    match get(&key)? {
+        Some(data) => Ok(Some(decode_json(&data, "commit branch")?)),
+        None => Ok(None),
+    }
+}
+
+pub(super) fn load_prefix_leaf_branches_core(
+    object_id: ObjectId,
+    prefix: &str,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<HashSet<BranchName>>, StorageError> {
+    let key = prefix_leaf_branches_key(object_id, prefix);
+    match get(&key)? {
+        Some(data) => Ok(Some(decode_json(&data, "prefix leaf branches")?)),
+        None => Ok(None),
+    }
+}
+
+pub(super) fn register_table_prefix_branch_core(
+    table: &str,
+    prefix: &str,
+    branch: &BranchName,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let key = table_prefix_branch_key(table, prefix, branch);
+    set(&key, &[])
+}
+
+pub(super) fn load_table_prefix_branches_core(
+    table: &str,
+    prefix: &str,
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<HashSet<BranchName>, StorageError> {
+    let key_prefix = table_prefix_branch_prefix(table, prefix);
+    let entries = scan_prefix(&key_prefix)?;
+    let mut branches = HashSet::with_capacity(entries.len());
+    for (key, _value) in entries {
+        branches.insert(parse_branch_from_table_prefix_key(&key, &key_prefix)?);
+    }
+    Ok(branches)
+}
+
 pub(super) fn append_commit_core(
     object_id: ObjectId,
     branch: &BranchName,
     commit: Commit,
+    prefix_leaf_update: Option<PrefixLeafUpdate>,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
@@ -101,6 +152,10 @@ pub(super) fn append_commit_core(
     let commit_storage_key = commit_key(object_id, branch, commit_id);
     let commit_json = encode_json(&commit, "commit")?;
     set(&commit_storage_key, &commit_json)?;
+
+    let commit_branch_lookup_key = commit_branch_key(object_id, commit_id);
+    let commit_branch_json = encode_json(branch, "commit branch")?;
+    set(&commit_branch_lookup_key, &commit_branch_json)?;
 
     let tips_key = branch_tips_key(object_id, branch);
     let mut tips: HashSet<CommitId> = match get(&tips_key)? {
@@ -114,7 +169,23 @@ pub(super) fn append_commit_core(
     tips.insert(commit_id);
 
     let tips_json = encode_json(&tips, "tips")?;
-    set(&tips_key, &tips_json)
+    set(&tips_key, &tips_json)?;
+
+    if let Some(update) = prefix_leaf_update {
+        let leaf_key = prefix_leaf_branches_key(object_id, &update.prefix);
+        let mut leaf_branches: HashSet<BranchName> = match get(&leaf_key)? {
+            Some(data) => decode_json(&data, "prefix leaf branches")?,
+            None => HashSet::new(),
+        };
+        for removed_branch in update.remove_leaf_branches {
+            leaf_branches.remove(&removed_branch);
+        }
+        leaf_branches.insert(*branch);
+        let leaf_json = encode_json(&leaf_branches, "prefix leaf branches")?;
+        set(&leaf_key, &leaf_json)?;
+    }
+
+    Ok(())
 }
 
 pub(super) fn delete_commit_core(
@@ -127,6 +198,9 @@ pub(super) fn delete_commit_core(
 ) -> Result<(), StorageError> {
     let commit_storage_key = commit_key(object_id, branch, commit_id);
     delete(&commit_storage_key)?;
+
+    let commit_branch_lookup_key = commit_branch_key(object_id, commit_id);
+    delete(&commit_branch_lookup_key)?;
 
     let tips_key = branch_tips_key(object_id, branch);
     if let Some(data) = get(&tips_key)? {

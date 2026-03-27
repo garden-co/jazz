@@ -4,15 +4,17 @@
 
 use serde_json::json;
 use smallvec::smallvec;
+use uuid::Uuid;
 
 use crate::metadata::MetadataKey;
+use crate::object::{BranchName, ObjectId};
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::manager::{QueryError, QueryManager};
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::session::Session as PolicySession;
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, TableName, TablePolicies,
-    TableSchema, Value,
+    BatchId, ColumnDescriptor, ColumnType, ComposedBranchName, PolicyExpr, RowDescriptor, Schema,
+    TableName, TablePolicies, TableSchema, Value,
 };
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 use crate::storage::FjallStorage;
@@ -76,6 +78,21 @@ fn create_query_manager(
     (qm, MemoryStorage::new())
 }
 
+fn create_query_manager_with_batch(
+    sync_manager: SyncManager,
+    schema: Schema,
+    batch: u128,
+) -> QueryManager {
+    let mut qm = QueryManager::new(sync_manager);
+    qm.set_current_schema_with_batch(
+        schema,
+        "dev",
+        "main",
+        BatchId::from_uuid(Uuid::from_u128(batch)),
+    );
+    qm
+}
+
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 fn create_query_manager_with_fjall(
     sync_manager: SyncManager,
@@ -96,7 +113,6 @@ fn get_branch(qm: &QueryManager) -> String {
     qm.schema_context().branch_name().as_str().to_string()
 }
 
-use crate::object::ObjectId;
 use crate::query_manager::query::Query;
 
 fn json_documents_schema(schema: Option<serde_json::Value>) -> Schema {
@@ -315,6 +331,196 @@ fn insert_and_get() {
     assert_eq!(results[0].0, handle.row_id);
     assert_eq!(results[0].1[0], Value::Text("Alice".into()));
     assert_eq!(results[0].1[1], Value::Integer(100));
+}
+
+#[test]
+fn update_on_fresh_batch_branch_merges_from_prefix_leaf_head() {
+    let schema = test_schema();
+    let mut storage = MemoryStorage::new();
+
+    let mut qm1 = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 1);
+    let handle = qm1
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let branch1 = BranchName::new(get_branch(&qm1));
+    let parent_tip = *qm1
+        .sync_manager
+        .object_manager
+        .get(handle.row_id)
+        .unwrap()
+        .branches
+        .get(&branch1)
+        .unwrap()
+        .tips
+        .iter()
+        .next()
+        .unwrap();
+
+    let mut qm2 = create_query_manager_with_batch(SyncManager::new(), schema, 2);
+    qm2.update(
+        &mut storage,
+        handle.row_id,
+        &[Value::Text("Alicia".into()), Value::Integer(101)],
+    )
+    .unwrap();
+
+    let branch2 = BranchName::new(get_branch(&qm2));
+    let obj = qm2.sync_manager.object_manager.get(handle.row_id).unwrap();
+    let current_branch = obj.branches.get(&branch2).unwrap();
+    assert_eq!(current_branch.tips.len(), 1);
+
+    let current_tip = *current_branch.tips.iter().next().unwrap();
+    let current_commit = current_branch.commits.get(&current_tip).unwrap();
+    assert_eq!(current_commit.parents.as_slice(), &[parent_tip]);
+
+    let prefix = ComposedBranchName::parse(&branch1).unwrap().prefix();
+    let leaf_heads = qm2
+        .sync_manager
+        .object_manager
+        .get_leaf_head_ids_for_prefix(handle.row_id, &prefix, &storage)
+        .unwrap();
+    assert_eq!(leaf_heads.len(), 1);
+    assert_eq!(leaf_heads.get(&branch2), Some(&current_tip));
+
+    let row = qm2.get_row(handle.row_id).unwrap();
+    assert_eq!(row.1[0], Value::Text("Alicia".into()));
+    assert_eq!(row.1[1], Value::Integer(101));
+}
+
+#[test]
+fn delete_on_fresh_batch_branch_merges_from_prefix_leaf_head() {
+    let schema = test_schema();
+    let mut storage = MemoryStorage::new();
+
+    let mut qm1 = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 11);
+    let handle = qm1
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let branch1 = BranchName::new(get_branch(&qm1));
+    let parent_tip = *qm1
+        .sync_manager
+        .object_manager
+        .get(handle.row_id)
+        .unwrap()
+        .branches
+        .get(&branch1)
+        .unwrap()
+        .tips
+        .iter()
+        .next()
+        .unwrap();
+
+    let mut qm2 = create_query_manager_with_batch(SyncManager::new(), schema, 12);
+    qm2.delete(&mut storage, handle.row_id).unwrap();
+
+    let branch2 = BranchName::new(get_branch(&qm2));
+    let obj = qm2.sync_manager.object_manager.get(handle.row_id).unwrap();
+    let current_branch = obj.branches.get(&branch2).unwrap();
+    let current_tip = *current_branch.tips.iter().next().unwrap();
+    let current_commit = current_branch.commits.get(&current_tip).unwrap();
+    assert_eq!(current_commit.parents.as_slice(), &[parent_tip]);
+    assert!(current_commit.is_soft_deleted());
+
+    let prefix = ComposedBranchName::parse(&branch1).unwrap().prefix();
+    let leaf_heads = qm2
+        .sync_manager
+        .object_manager
+        .get_leaf_head_ids_for_prefix(handle.row_id, &prefix, &storage)
+        .unwrap();
+    assert_eq!(leaf_heads.len(), 1);
+    assert_eq!(leaf_heads.get(&branch2), Some(&current_tip));
+
+    assert!(qm2.row_is_deleted(&storage, "users", handle.row_id));
+}
+
+#[test]
+fn hard_delete_on_fresh_batch_branch_merges_from_prefix_leaf_head() {
+    let schema = test_schema();
+    let mut storage = MemoryStorage::new();
+
+    let mut qm1 = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 21);
+    let handle = qm1
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let branch1 = BranchName::new(get_branch(&qm1));
+    let parent_tip = *qm1
+        .sync_manager
+        .object_manager
+        .get(handle.row_id)
+        .unwrap()
+        .branches
+        .get(&branch1)
+        .unwrap()
+        .tips
+        .iter()
+        .next()
+        .unwrap();
+
+    let mut qm2 = create_query_manager_with_batch(SyncManager::new(), schema, 22);
+    qm2.hard_delete(&mut storage, handle.row_id).unwrap();
+
+    let branch2 = BranchName::new(get_branch(&qm2));
+    let obj = qm2.sync_manager.object_manager.get(handle.row_id).unwrap();
+    let current_branch = obj.branches.get(&branch2).unwrap();
+    let current_tip = *current_branch.tips.iter().next().unwrap();
+    let current_commit = current_branch.commits.get(&current_tip).unwrap();
+    assert_eq!(current_commit.parents.as_slice(), &[parent_tip]);
+    assert!(current_commit.is_hard_deleted());
+    assert!(current_commit.content.is_empty());
+
+    let prefix = ComposedBranchName::parse(&branch1).unwrap().prefix();
+    let leaf_heads = qm2
+        .sync_manager
+        .object_manager
+        .get_leaf_head_ids_for_prefix(handle.row_id, &prefix, &storage)
+        .unwrap();
+    assert_eq!(leaf_heads.len(), 1);
+    assert_eq!(leaf_heads.get(&branch2), Some(&current_tip));
+}
+
+#[test]
+fn default_query_on_fresh_batch_branch_reads_registered_prefix_branches() {
+    let schema = test_schema();
+    let mut storage = MemoryStorage::new();
+
+    let mut qm1 = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 31);
+    qm1.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+
+    let mut qm2 = create_query_manager_with_batch(SyncManager::new(), schema, 32);
+    let current_branch = get_branch(&qm2);
+    let explicit_query = qm2.query("users").branch(&current_branch).build();
+    let default_query = qm2.query("users").build();
+
+    let explicit_results = execute_query(&mut qm2, &mut storage, explicit_query).unwrap();
+    assert!(explicit_results.is_empty());
+
+    let default_results = execute_query(&mut qm2, &mut storage, default_query)
+        .expect("default query should fan out to registered batch branches");
+    assert_eq!(default_results.len(), 1);
+    assert_eq!(
+        default_results[0].1,
+        vec![Value::Text("Alice".into()), Value::Integer(100)]
+    );
 }
 
 #[test]

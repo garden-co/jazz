@@ -136,6 +136,14 @@ pub(super) fn branch_tips_key(object_id: ObjectId, branch: &BranchName) -> Strin
     format!("obj:{}:br:{}:tips", format_uuid(object_id), branch)
 }
 
+pub(super) fn commit_branch_key(object_id: ObjectId, commit_id: CommitId) -> String {
+    format!(
+        "obj:{}:commit-branch:{}",
+        format_uuid(object_id),
+        hex::encode(commit_id.0)
+    )
+}
+
 pub(super) fn commit_key(object_id: ObjectId, branch: &BranchName, commit_id: CommitId) -> String {
     format!(
         "obj:{}:br:{}:c:{}",
@@ -147,6 +155,43 @@ pub(super) fn commit_key(object_id: ObjectId, branch: &BranchName, commit_id: Co
 
 pub(super) fn commit_prefix(object_id: ObjectId, branch: &BranchName) -> String {
     format!("obj:{}:br:{}:c:", format_uuid(object_id), branch)
+}
+
+pub(super) fn prefix_leaf_branches_key(object_id: ObjectId, prefix: &str) -> String {
+    format!(
+        "obj:{}:prefix:{}:leaf-branches",
+        format_uuid(object_id),
+        prefix
+    )
+}
+
+pub(super) fn table_prefix_branch_key(table: &str, prefix: &str, branch: &BranchName) -> String {
+    format!(
+        "tblpfx:{}:{}:branch:{}",
+        table,
+        prefix,
+        hex::encode(branch.as_str().as_bytes())
+    )
+}
+
+pub(super) fn table_prefix_branch_prefix(table: &str, prefix: &str) -> String {
+    format!("tblpfx:{}:{}:branch:", table, prefix)
+}
+
+pub(super) fn parse_branch_from_table_prefix_key(
+    key: &str,
+    key_prefix: &str,
+) -> Result<BranchName, StorageError> {
+    let branch_hex = key.strip_prefix(key_prefix).ok_or_else(|| {
+        StorageError::IoError(format!(
+            "invalid table-prefix branch key `{key}` for prefix `{key_prefix}`"
+        ))
+    })?;
+    let branch_bytes = hex::decode(branch_hex)
+        .map_err(|e| StorageError::IoError(format!("decode table-prefix branch key: {e}")))?;
+    let branch = String::from_utf8(branch_bytes)
+        .map_err(|e| StorageError::IoError(format!("table-prefix branch key utf8: {e}")))?;
+    Ok(BranchName::new(branch))
 }
 
 pub(super) fn ack_key(commit_id: CommitId) -> String {

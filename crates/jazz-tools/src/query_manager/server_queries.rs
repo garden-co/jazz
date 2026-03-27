@@ -80,30 +80,6 @@ impl QueryManager {
         map
     }
 
-    pub(super) fn resolved_server_query_branches(
-        query: &crate::query_manager::query::Query,
-        schema_context: &crate::schema_manager::SchemaContext,
-    ) -> Vec<String> {
-        let all_branches = || {
-            schema_context
-                .all_branch_names()
-                .into_iter()
-                .map(|b| b.as_str().to_string())
-                .collect()
-        };
-
-        if query.branches.is_empty() {
-            return all_branches();
-        }
-
-        let current_branch = schema_context.branch_name().as_str().to_string();
-        if query.branches.len() == 1 && query.branches[0] == current_branch {
-            return all_branches();
-        }
-
-        query.branches.clone()
-    }
-
     pub(super) fn query_for_server_compile(
         query: &crate::query_manager::query::Query,
         schema_context: &crate::schema_manager::SchemaContext,
@@ -329,6 +305,31 @@ impl QueryManager {
             // Build QueryGraph with client's session for policy filtering (schema-aware)
             let query_for_compile =
                 Self::query_for_server_compile(&sub.query, &subscription_context);
+            let query_for_compile = match Self::query_with_resolved_branches_for_context(
+                storage,
+                &query_for_compile,
+                &subscription_context,
+            ) {
+                Ok(query) => query,
+                Err(error) => {
+                    tracing::warn!(
+                        %sub.client_id,
+                        query_id = sub.query_id.0,
+                        table = %sub.query.table,
+                        error = %error,
+                        "failed to resolve server query branches; falling back to schema-context defaults"
+                    );
+                    let mut fallback = query_for_compile;
+                    if fallback.branches.is_empty() {
+                        fallback.branches = subscription_context
+                            .all_branch_names()
+                            .into_iter()
+                            .map(|branch| branch.as_str().to_string())
+                            .collect();
+                    }
+                    fallback
+                }
+            };
             let graph = Self::compile_graph(
                 &query_for_compile,
                 &schema_for_compile,
@@ -361,8 +362,7 @@ impl QueryManager {
             let om = &mut self.sync_manager.object_manager;
             let storage_ref: &dyn Storage = storage;
 
-            let branches =
-                Self::resolved_server_query_branches(&query_for_compile, &subscription_context);
+            let branches = query_for_compile.branches.clone();
             let table = sub.query.table.as_str().to_string();
             let include_deleted = sub.query.include_deleted;
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {

@@ -2515,7 +2515,8 @@ fn persistence_ack_survives_reload() {
 
     let commit = make_test_commit(b"persist-test", vec![]);
     let commit_id = commit.id();
-    io.append_commit(obj_id, &"main".into(), commit).unwrap();
+    io.append_commit(obj_id, &"main".into(), commit, None)
+        .unwrap();
 
     // Store ack tier
     io.store_ack_tier(commit_id, DurabilityTier::EdgeServer)

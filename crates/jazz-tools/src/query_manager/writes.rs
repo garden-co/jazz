@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::commit::CommitId;
+use crate::commit::{Commit, CommitId};
 use crate::metadata::{MetadataKey, hard_delete_metadata, soft_delete_metadata};
 use crate::object::{BranchName, ObjectId};
 use crate::storage::Storage;
@@ -9,7 +9,7 @@ use super::encoding::{decode_column, decode_row, encode_row};
 use super::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::session::Session;
-use super::types::{ColumnType, LoadedRow, RowDescriptor, TableName, Value};
+use super::types::{ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, TableName, Value};
 
 pub struct RowBranchWrite<'a> {
     pub table: &'a str,
@@ -25,6 +25,11 @@ struct PreparedUpdateWrite {
     new_data: Vec<u8>,
 }
 
+struct ResolvedWriteHead {
+    commit_id: CommitId,
+    commit: Commit,
+}
+
 pub struct RowBranchDelete<'a> {
     pub table: &'a str,
     pub branch: &'a str,
@@ -33,6 +38,127 @@ pub struct RowBranchDelete<'a> {
 }
 
 impl QueryManager {
+    fn winning_tip_commit(
+        object_manager_branch: &crate::object::Branch,
+    ) -> Option<(CommitId, Commit)> {
+        let mut tips: Vec<_> = object_manager_branch.tips.iter().copied().collect();
+        tips.sort_by_key(|id| {
+            (
+                object_manager_branch
+                    .commits
+                    .get(id)
+                    .map(|commit| commit.timestamp)
+                    .unwrap_or(0),
+                *id,
+            )
+        });
+        let tip_id = *tips.last()?;
+        let commit = object_manager_branch.commits.get(&tip_id)?.clone();
+        Some((tip_id, commit))
+    }
+
+    fn resolve_write_head_on_branch<H: Storage>(
+        &mut self,
+        storage: &H,
+        id: ObjectId,
+        branch: &str,
+    ) -> Option<ResolvedWriteHead> {
+        let branch_name = BranchName::new(branch);
+        let requested_branches = [branch.to_string()];
+        self.sync_manager
+            .object_manager
+            .get_or_load(id, storage, &requested_branches)?;
+
+        if let Some((commit_id, commit)) = self
+            .sync_manager
+            .object_manager
+            .get(id)?
+            .branches
+            .get(&branch_name)
+            .and_then(Self::winning_tip_commit)
+        {
+            return Some(ResolvedWriteHead { commit_id, commit });
+        }
+
+        let composed_branch = ComposedBranchName::parse(&branch_name)?;
+        let leaf_heads = self
+            .sync_manager
+            .object_manager
+            .get_leaf_head_ids_for_prefix(id, &composed_branch.prefix(), storage)
+            .ok()?;
+
+        let object = self.sync_manager.object_manager.get(id)?;
+        let mut resolved: Option<ResolvedWriteHead> = None;
+        for (leaf_branch_name, head_id) in leaf_heads {
+            let Some(commit) = object
+                .branches
+                .get(&leaf_branch_name)
+                .and_then(|object_manager_branch| object_manager_branch.commits.get(&head_id))
+            else {
+                continue;
+            };
+
+            let should_replace = match &resolved {
+                Some(current) => {
+                    (commit.timestamp, head_id) > (current.commit.timestamp, current.commit_id)
+                }
+                None => true,
+            };
+            if should_replace {
+                resolved = Some(ResolvedWriteHead {
+                    commit_id: head_id,
+                    commit: commit.clone(),
+                });
+            }
+        }
+
+        resolved
+    }
+
+    fn write_parents_on_branch<H: Storage>(
+        &mut self,
+        storage: &H,
+        id: ObjectId,
+        branch: &str,
+    ) -> Result<Vec<CommitId>, QueryError> {
+        let branch_name = BranchName::new(branch);
+        let requested_branches = [branch.to_string()];
+        if self
+            .sync_manager
+            .object_manager
+            .get_or_load(id, storage, &requested_branches)
+            .is_none()
+        {
+            return Err(QueryError::ObjectNotFound(id));
+        }
+
+        if let Ok(tips) = self
+            .sync_manager
+            .object_manager
+            .get_tip_ids(id, branch_name)
+        {
+            return Ok(tips.iter().copied().collect());
+        }
+
+        let composed_branch =
+            ComposedBranchName::parse(&branch_name).ok_or(QueryError::ObjectNotFound(id))?;
+        let leaf_heads = self
+            .sync_manager
+            .object_manager
+            .get_leaf_head_ids_for_prefix(id, &composed_branch.prefix(), storage)
+            .map_err(|_| QueryError::ObjectNotFound(id))?;
+
+        let mut parents: Vec<_> = leaf_heads
+            .into_iter()
+            .filter_map(|(leaf_branch_name, head_id)| {
+                (leaf_branch_name != branch_name).then_some(head_id)
+            })
+            .collect();
+        parents.sort();
+        parents.dedup();
+        Ok(parents)
+    }
+
     fn prepare_update_write<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -128,12 +254,7 @@ impl QueryManager {
         id: ObjectId,
         new_data: &[u8],
     ) -> Result<CommitId, QueryError> {
-        let parents = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, branch)
-            .map(|tips| tips.iter().copied().collect())
-            .unwrap_or_default();
+        let parents = self.write_parents_on_branch(storage, id, branch)?;
 
         let commit_id = self
             .sync_manager
@@ -912,11 +1033,11 @@ impl QueryManager {
         session: Option<&Session>,
     ) -> Result<CommitId, QueryError> {
         let _span = tracing::debug_span!("QM::update", %id).entered();
-        // Ensure object is loaded from storage (cold-start: may only exist on disk)
         let branch = self.current_branch();
-        self.sync_manager
-            .object_manager
-            .get_or_load(id, storage, &[branch]);
+        let (old_data, _commit_id) = self
+            .resolve_write_head_on_branch(storage, id, branch.as_str())
+            .map(|resolved| (resolved.commit.content, resolved.commit_id))
+            .ok_or(QueryError::ObjectNotFound(id))?;
 
         // Get table name from object metadata
         let table = self
@@ -924,11 +1045,6 @@ impl QueryManager {
             .object_manager
             .get(id)
             .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
-            .ok_or(QueryError::ObjectNotFound(id))?;
-
-        // Get old data from ObjectManager
-        let (old_data, _commit_id) = self
-            .load_row_from_object(id)
             .ok_or(QueryError::ObjectNotFound(id))?;
         let branch = self.current_branch();
         let prepared = self.prepare_update_write(
@@ -1050,14 +1166,13 @@ impl QueryManager {
         session: Option<&Session>,
     ) -> Result<DeleteHandle, QueryError> {
         let _span = tracing::debug_span!("QM::delete", %id).entered();
-        // Ensure object is loaded from storage (cold-start: may only exist on disk)
         let branch = self.current_branch();
-        self.sync_manager
-            .object_manager
-            .get_or_load(id, storage, &[branch]);
+        let resolved_head = self
+            .resolve_write_head_on_branch(storage, id, branch.as_str())
+            .ok_or(QueryError::ObjectNotFound(id))?;
 
         // Check for hard delete first
-        if self.is_hard_deleted(id) {
+        if resolved_head.commit.content.is_empty() && resolved_head.commit.is_hard_deleted() {
             return Err(QueryError::RowHardDeleted(id));
         }
 
@@ -1072,14 +1187,12 @@ impl QueryManager {
         let table_name = TableName::new(&table);
 
         // Check if already soft-deleted
-        if self.row_is_deleted(storage, &table, id) {
+        if resolved_head.commit.is_soft_deleted() {
             return Err(QueryError::RowAlreadyDeleted(id));
         }
 
         // Get old data from ObjectManager (for index removal and content preservation)
-        let (old_data, _commit_id) = self
-            .load_row_from_object(id)
-            .ok_or(QueryError::ObjectNotFound(id))?;
+        let old_data = resolved_head.commit.content.clone();
 
         let (descriptor, using_policy) = {
             let table_schema = self
@@ -1115,14 +1228,7 @@ impl QueryManager {
         }
 
         // Get parent commit
-        let tips = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, self.current_branch())
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
-
-        let parents: Vec<_> = tips.into_iter().collect();
+        let parents = self.write_parents_on_branch(storage, id, branch.as_str())?;
         let author = id;
 
         // Create delete metadata
@@ -1136,7 +1242,7 @@ impl QueryManager {
             .add_commit(
                 storage,
                 id,
-                self.current_branch(),
+                branch.as_str(),
                 parents,
                 old_data.clone(), // Preserve content for soft deletes
                 author,
@@ -1227,12 +1333,7 @@ impl QueryManager {
             .load_row_from_object_on_branch(id, branch)
             .map(|(data, _)| data)
             .filter(|data| !data.is_empty());
-        let parents = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, branch)
-            .map(|tips| tips.iter().copied().collect())
-            .unwrap_or_default();
+        let parents = self.write_parents_on_branch(storage, id, branch)?;
 
         let delete_commit_id = self
             .sync_manager
@@ -1279,8 +1380,13 @@ impl QueryManager {
         id: ObjectId,
         values: &[Value],
     ) -> Result<InsertResult, QueryError> {
+        let branch = self.current_branch();
+        let resolved_head = self
+            .resolve_write_head_on_branch(storage, id, branch.as_str())
+            .ok_or(QueryError::ObjectNotFound(id))?;
+
         // Check for hard delete first
-        if self.is_hard_deleted(id) {
+        if resolved_head.commit.content.is_empty() && resolved_head.commit.is_hard_deleted() {
             return Err(QueryError::RowHardDeleted(id));
         }
 
@@ -1294,8 +1400,8 @@ impl QueryManager {
 
         let table_name = TableName::new(&table);
 
-        // Verify row is in _id_deleted index (soft-deleted)
-        if !self.row_is_deleted(storage, &table, id) {
+        // Verify row is currently soft-deleted on the visible batch head.
+        if !resolved_head.commit.is_soft_deleted() {
             return Err(QueryError::RowNotDeleted(id));
         }
 
@@ -1325,14 +1431,7 @@ impl QueryManager {
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
 
         // Get parent commit
-        let tips = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, self.current_branch())
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
-
-        let parents: Vec<_> = tips.into_iter().collect();
+        let parents = self.write_parents_on_branch(storage, id, branch.as_str())?;
         let author = id;
 
         // Add commit with row data (no delete metadata = undelete)
@@ -1342,7 +1441,7 @@ impl QueryManager {
             .add_commit(
                 storage,
                 id,
-                self.current_branch(),
+                branch.as_str(),
                 parents,
                 new_data.clone(),
                 author,
@@ -1374,8 +1473,13 @@ impl QueryManager {
         storage: &mut H,
         id: ObjectId,
     ) -> Result<DeleteHandle, QueryError> {
+        let branch = self.current_branch();
+        let resolved_head = self
+            .resolve_write_head_on_branch(storage, id, branch.as_str())
+            .ok_or(QueryError::ObjectNotFound(id))?;
+
         // Check if already hard-deleted
-        if self.is_hard_deleted(id) {
+        if resolved_head.commit.content.is_empty() && resolved_head.commit.is_hard_deleted() {
             return Err(QueryError::RowHardDeleted(id));
         }
 
@@ -1391,10 +1495,8 @@ impl QueryManager {
 
         // Try to get old data (may be empty if already soft-deleted)
         // Treat empty content as no data (tombstone)
-        let old_data = self
-            .load_row_from_object(id)
-            .map(|(data, _)| data)
-            .filter(|data| !data.is_empty());
+        let old_data = (!resolved_head.commit.content.is_empty())
+            .then_some(resolved_head.commit.content.clone());
 
         let table_schema = self
             .schema
@@ -1402,14 +1504,7 @@ impl QueryManager {
             .ok_or(QueryError::TableNotFound(table_name))?;
         let descriptor = table_schema.columns.clone();
         // Get parent commit
-        let tips = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, self.current_branch())
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
-
-        let parents: Vec<_> = tips.into_iter().collect();
+        let parents = self.write_parents_on_branch(storage, id, branch.as_str())?;
         let author = id;
 
         // Create hard delete metadata
@@ -1422,7 +1517,7 @@ impl QueryManager {
             .add_commit(
                 storage,
                 id,
-                self.current_branch(),
+                branch.as_str(),
                 parents,
                 vec![], // Empty content for tombstone
                 author,
@@ -1441,7 +1536,7 @@ impl QueryManager {
         let _ = self.sync_manager.object_manager.truncate_branch(
             storage,
             id,
-            self.current_branch(),
+            branch.as_str(),
             tail_ids,
         );
 
@@ -1464,21 +1559,18 @@ impl QueryManager {
         storage: &mut H,
         id: ObjectId,
     ) -> Result<DeleteHandle, QueryError> {
+        let branch = self.current_branch();
+        let resolved_head = self
+            .resolve_write_head_on_branch(storage, id, branch.as_str())
+            .ok_or(QueryError::ObjectNotFound(id))?;
+
         // Check for hard delete first
-        if self.is_hard_deleted(id) {
+        if resolved_head.commit.content.is_empty() && resolved_head.commit.is_hard_deleted() {
             return Err(QueryError::RowHardDeleted(id));
         }
 
-        // Get table name from object metadata
-        let table = self
-            .sync_manager
-            .object_manager
-            .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
-            .ok_or(QueryError::ObjectNotFound(id))?;
-
-        // Verify row is in _id_deleted index (soft-deleted)
-        if !self.row_is_deleted(storage, &table, id) {
+        // Verify row is currently soft-deleted on the visible batch head.
+        if !resolved_head.commit.is_soft_deleted() {
             return Err(QueryError::RowNotDeleted(id));
         }
 

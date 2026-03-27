@@ -9,7 +9,7 @@ use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::AllObjectUpdate;
 use crate::schema_manager::SchemaContext;
-use crate::storage::{CatalogueManifestOp, Storage};
+use crate::storage::{CatalogueManifestOp, Storage, StorageError};
 use crate::sync_manager::{
     ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
     SyncManager,
@@ -459,6 +459,61 @@ impl QueryManager {
         QueryGraph::try_compile_with_schema_context(query, schema, session, schema_context)
     }
 
+    fn default_query_branches_for_table(
+        storage: &dyn Storage,
+        table: &str,
+        schema_context: &SchemaContext,
+    ) -> Result<Vec<String>, StorageError> {
+        let mut branches = Vec::new();
+
+        for branch_name in schema_context.all_branch_names() {
+            let Some(composed_branch) = ComposedBranchName::parse(&branch_name) else {
+                branches.push(branch_name.as_str().to_string());
+                continue;
+            };
+
+            let prefix = composed_branch.prefix().branch_prefix();
+            let mut prefix_branches: Vec<String> = storage
+                .load_table_prefix_branches(table, &prefix)?
+                .into_iter()
+                .map(|branch| branch.as_str().to_string())
+                .collect();
+
+            if prefix_branches.is_empty() {
+                branches.push(branch_name.as_str().to_string());
+            } else {
+                branches.append(&mut prefix_branches);
+            }
+        }
+
+        branches.sort();
+        branches.dedup();
+        Ok(branches)
+    }
+
+    pub(super) fn resolve_query_branches_for_context(
+        storage: &dyn Storage,
+        query: &Query,
+        schema_context: &SchemaContext,
+    ) -> Result<Vec<String>, StorageError> {
+        if query.branches.is_empty() {
+            Self::default_query_branches_for_table(storage, query.table.as_str(), schema_context)
+        } else {
+            Ok(query.branches.clone())
+        }
+    }
+
+    pub(super) fn query_with_resolved_branches_for_context(
+        storage: &dyn Storage,
+        query: &Query,
+        schema_context: &SchemaContext,
+    ) -> Result<Query, StorageError> {
+        let mut query_for_compile = query.clone();
+        query_for_compile.branches =
+            Self::resolve_query_branches_for_context(storage, query, schema_context)?;
+        Ok(query_for_compile)
+    }
+
     /// Mark all subscriptions for recompilation.
     ///
     /// Called when live schemas change to ensure subscriptions pick up new branches.
@@ -474,23 +529,34 @@ impl QueryManager {
     /// Recompile subscriptions that are marked as stale.
     ///
     /// Called during process() to rebuild QueryGraphs when schemas change.
-    fn recompile_stale_subscriptions(&mut self) {
+    fn recompile_stale_subscriptions(&mut self, storage: &dyn Storage) {
         let mut failed_local: Vec<(QuerySubscriptionId, String)> = Vec::new();
 
         // Recompile local subscriptions
         for (sub_id, sub) in &mut self.subscriptions {
-            if sub.needs_recompile {
-                // Resolve next branches from current schema context.
-                let next_branches: Vec<String> = self
-                    .schema_context
-                    .all_branch_names()
-                    .into_iter()
-                    .map(|b| b.as_str().to_string())
-                    .collect();
+            let next_branches = match Self::resolve_query_branches_for_context(
+                storage,
+                &sub.query,
+                &self.schema_context,
+            ) {
+                Ok(branches) => branches,
+                Err(error) => {
+                    tracing::warn!(
+                        sub_id = sub_id.0,
+                        table = %sub.query.table,
+                        error = %error,
+                        "failed to resolve local query branches; keeping previous branch set"
+                    );
+                    sub.branches.clone()
+                }
+            };
 
-                // Recompile the graph
+            if sub.needs_recompile || sub.branches != next_branches {
+                let mut query_for_compile = sub.query.clone();
+                query_for_compile.branches = next_branches.clone();
+
                 match Self::compile_graph(
-                    &sub.query,
+                    &query_for_compile,
                     &self.schema,
                     sub.session.clone(),
                     &self.schema_context,
@@ -535,10 +601,28 @@ impl QueryManager {
 
         // Recompile server-side subscriptions
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
-            if sub.needs_recompile {
-                let query_for_compile =
-                    Self::query_for_server_compile(&sub.query, &sub.schema_context);
-                // Recompile the graph
+            let compile_query = Self::query_for_server_compile(&sub.query, &sub.schema_context);
+            let query_for_compile = match Self::query_with_resolved_branches_for_context(
+                storage,
+                &compile_query,
+                &sub.schema_context,
+            ) {
+                Ok(query) => query,
+                Err(error) => {
+                    tracing::warn!(
+                        %client_id,
+                        query_id = query_id.0,
+                        table = %sub.query.table,
+                        error = %error,
+                        "failed to resolve server query branches; keeping previous branch set"
+                    );
+                    let mut fallback = compile_query;
+                    fallback.branches = sub.branches.clone();
+                    fallback
+                }
+            };
+
+            if sub.needs_recompile || sub.branches != query_for_compile.branches {
                 match Self::compile_graph(
                     &query_for_compile,
                     &sub.schema_context.current_schema,
@@ -546,10 +630,7 @@ impl QueryManager {
                     &sub.schema_context,
                 ) {
                     Ok(new_graph) => {
-                        sub.branches = Self::resolved_server_query_branches(
-                            &query_for_compile,
-                            &sub.schema_context,
-                        );
+                        sub.branches = query_for_compile.branches.clone();
                         sub.graph = new_graph;
                         sub.needs_recompile = false;
                     }
@@ -600,7 +681,7 @@ impl QueryManager {
         self.schema_context.branch_name().as_str().to_string()
     }
 
-    /// Get all branches to query for a table (current + live schemas).
+    /// Get the schema-context branches (current + one branch per live schema).
     pub fn all_query_branches(&self) -> Vec<String> {
         self.schema_context
             .all_branch_names()
@@ -680,7 +761,8 @@ impl QueryManager {
         // Tests/benchmarks that don't need real storage use NullStorage.
 
         // 6. Recompile any subscriptions marked as stale due to schema changes
-        self.recompile_stale_subscriptions();
+        let storage_ref: &dyn Storage = storage;
+        self.recompile_stale_subscriptions(storage_ref);
 
         // 7a. Process incoming QuerySettled notifications
         let settled_notifications = self.sync_manager.take_pending_query_settled();
@@ -706,7 +788,6 @@ impl QueryManager {
             );
         }
         let om = &mut self.sync_manager.object_manager;
-        let storage_ref: &dyn Storage = storage;
         let schema_context = &self.schema_context;
         let branch_schema_map = &self.branch_schema_map;
 

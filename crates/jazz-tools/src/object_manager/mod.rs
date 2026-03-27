@@ -6,6 +6,7 @@ use smolset::SmolSet;
 
 use crate::commit::{Commit, CommitId, StoredState};
 use crate::object::{Branch, BranchLoadedState, BranchName, Object, ObjectId};
+use crate::query_manager::types::{BranchPrefixName, ComposedBranchName};
 use crate::storage::{Storage, StorageError};
 
 /// Unique identifier for a subscription.
@@ -81,6 +82,14 @@ pub enum TruncateError {
     TailNotFound(CommitId),
     /// Can't truncate past the frontier - tip is not a descendant of any tail.
     TipBeforeTail(CommitId),
+}
+
+#[derive(Debug, Clone)]
+struct PendingBatchRootUpdate {
+    prefix: String,
+    remove_leaf_branches: HashSet<BranchName>,
+    existing_leaf_branches: HashSet<BranchName>,
+    resolved_parent_branches: Vec<(CommitId, BranchName)>,
 }
 
 /// Manages a collection of objects.
@@ -160,6 +169,8 @@ impl ObjectManager {
             id,
             metadata: metadata.clone().unwrap_or_default(),
             branches: HashMap::new(),
+            commit_branches: HashMap::new(),
+            leaf_branches_by_prefix: HashMap::new(),
         };
 
         // Sync storage - returns immediately
@@ -200,6 +211,8 @@ impl ObjectManager {
                 id,
                 metadata,
                 branches: HashMap::new(),
+                commit_branches: HashMap::new(),
+                leaf_branches_by_prefix: HashMap::new(),
             });
         }
 
@@ -211,6 +224,7 @@ impl ObjectManager {
             }
             if let Ok(Some(loaded)) = storage.load_branch(id, &bn) {
                 let mut commits = HashMap::new();
+                let mut commit_ids_for_branch = Vec::with_capacity(loaded.commits.len());
                 // Compute tips correctly: a tip is a commit not referenced
                 // as a parent by any other commit in the branch.
                 let mut all_ids: HashSet<CommitId> = HashSet::new();
@@ -228,7 +242,9 @@ impl ObjectManager {
                     }
                 }
                 for commit in loaded.commits {
-                    commits.insert(commit.id(), commit);
+                    let commit_id = commit.id();
+                    commit_ids_for_branch.push(commit_id);
+                    commits.insert(commit_id, commit);
                 }
                 object.branches.insert(
                     bn,
@@ -243,6 +259,9 @@ impl ObjectManager {
                         loaded_state: BranchLoadedState::AllCommits,
                     },
                 );
+                for commit_id in commit_ids_for_branch {
+                    object.commit_branches.insert(commit_id, bn);
+                }
             }
         }
 
@@ -255,6 +274,72 @@ impl ObjectManager {
     /// Get mutable object by id.
     fn get_mut(&mut self, id: ObjectId) -> Option<&mut Object> {
         self.objects.get_mut(&id)
+    }
+
+    fn resolve_commit_branch<H: Storage>(
+        object: &Object,
+        io: &H,
+        object_id: ObjectId,
+        commit_id: CommitId,
+    ) -> Result<Option<BranchName>, Error> {
+        if let Some(branch_name) = object.commit_branches.get(&commit_id) {
+            return Ok(Some(*branch_name));
+        }
+
+        io.load_commit_branch(object_id, commit_id)
+            .map_err(Error::StorageError)
+    }
+
+    fn plan_batch_root_update<H: Storage>(
+        object: &Object,
+        io: &H,
+        object_id: ObjectId,
+        branch_name: &BranchName,
+        parents: &[CommitId],
+        is_new_branch: bool,
+    ) -> Result<Option<PendingBatchRootUpdate>, Error> {
+        if !is_new_branch {
+            return Ok(None);
+        }
+
+        let Some(composed_branch) = ComposedBranchName::parse(branch_name) else {
+            return Ok(None);
+        };
+
+        let prefix = composed_branch.prefix().branch_prefix();
+        let existing_leaf_branches = object
+            .leaf_branches_by_prefix
+            .get(&prefix)
+            .map(|leaf_branches| leaf_branches.iter().copied().collect())
+            .unwrap_or(
+                io.load_prefix_leaf_branches(object_id, &prefix)
+                    .map_err(Error::StorageError)?
+                    .unwrap_or_default(),
+            );
+
+        let mut remove_leaf_branches = HashSet::new();
+        let mut resolved_parent_branches = Vec::new();
+
+        for parent in parents {
+            let Some(parent_branch) = Self::resolve_commit_branch(object, io, object_id, *parent)?
+            else {
+                continue;
+            };
+            resolved_parent_branches.push((*parent, parent_branch));
+
+            if let Some(parent_composed) = ComposedBranchName::parse(&parent_branch)
+                && parent_composed.prefix().branch_prefix() == prefix
+            {
+                remove_leaf_branches.insert(parent_branch);
+            }
+        }
+
+        Ok(Some(PendingBatchRootUpdate {
+            prefix,
+            remove_leaf_branches,
+            existing_leaf_branches,
+            resolved_parent_branches,
+        }))
     }
 
     /// Get a mutable reference to a specific commit.
@@ -294,35 +379,55 @@ impl ObjectManager {
         let branch_name = branch_name.into();
         let _span = tracing::debug_span!("OM::add_commit", %object_id, %branch_name).entered();
 
-        // Capture previous state BEFORE mutation for AllObjectUpdate
-        // (previous_commit_ids, old_content)
-        let (previous_commit_ids, old_content) = {
+        // Capture previous state BEFORE mutation for AllObjectUpdate and plan
+        // any batch-prefix leaf index changes before we mutate storage/memory.
+        let (previous_commit_ids, old_content, pending_batch_root_update) = {
             let object = self
                 .get(object_id)
                 .ok_or(Error::ObjectNotFound(object_id))?;
+            let branch_exists = object.branches.contains_key(&branch_name);
+            let is_new_batch_branch =
+                !branch_exists && ComposedBranchName::parse(&branch_name).is_some();
 
-            // If parents is non-empty, branch must exist and contain all parents
             if !parents.is_empty() {
-                let branch = object
-                    .branches
-                    .get(&branch_name)
-                    .ok_or(Error::BranchNotFound(branch_name))?;
+                if branch_exists {
+                    let branch = object
+                        .branches
+                        .get(&branch_name)
+                        .ok_or(Error::BranchNotFound(branch_name))?;
 
-                for parent in &parents {
-                    if !branch.commits.contains_key(parent) {
-                        return Err(Error::ParentNotFound(*parent));
-                    }
-                }
-
-                // After truncation, reject commits whose parents are before tails
-                if let Some(tails) = &branch.tails {
                     for parent in &parents {
-                        if !Self::is_descendant_of_any(&branch.commits, *parent, tails) {
+                        if !branch.commits.contains_key(parent) {
                             return Err(Error::ParentNotFound(*parent));
                         }
                     }
+
+                    for parent in &parents {
+                        if let Some(tails) = &branch.tails
+                            && !Self::is_descendant_of_any(&branch.commits, *parent, tails)
+                        {
+                            return Err(Error::ParentNotFound(*parent));
+                        }
+                    }
+                } else if is_new_batch_branch {
+                    for parent in &parents {
+                        if Self::resolve_commit_branch(object, io, object_id, *parent)?.is_none() {
+                            return Err(Error::ParentNotFound(*parent));
+                        }
+                    }
+                } else {
+                    return Err(Error::BranchNotFound(branch_name));
                 }
             }
+
+            let pending_batch_root_update = Self::plan_batch_root_update(
+                object,
+                io,
+                object_id,
+                &branch_name,
+                &parents,
+                !branch_exists,
+            )?;
 
             // Capture previous tips and "winning" tip content before mutation
             if let Some(branch) = object.branches.get(&branch_name) {
@@ -332,10 +437,10 @@ impl ObjectManager {
                     .last()
                     .and_then(|tip_id| branch.commits.get(tip_id))
                     .map(|commit| commit.content.clone());
-                (prev_tips, old_content)
+                (prev_tips, old_content, pending_batch_root_update)
             } else {
                 // New branch - no previous state
-                (vec![], None)
+                (vec![], None, pending_batch_root_update)
             }
         };
 
@@ -354,8 +459,15 @@ impl ObjectManager {
         let commit_id = commit.id();
 
         // Sync storage - returns immediately
+        let prefix_leaf_update =
+            pending_batch_root_update
+                .as_ref()
+                .map(|update| crate::storage::PrefixLeafUpdate {
+                    prefix: update.prefix.clone(),
+                    remove_leaf_branches: update.remove_leaf_branches.clone(),
+                });
         if io
-            .append_commit(object_id, &branch_name, commit.clone())
+            .append_commit(object_id, &branch_name, commit.clone(), prefix_leaf_update)
             .is_ok()
         {
             commit.stored_state = StoredState::Stored;
@@ -366,7 +478,26 @@ impl ObjectManager {
             .get_mut(object_id)
             .expect("object existence already validated");
 
-        // Create branch if it doesn't exist (only valid for parentless commits)
+        if let Some(update) = &pending_batch_root_update {
+            let leaf_branches = object
+                .leaf_branches_by_prefix
+                .entry(update.prefix.clone())
+                .or_insert_with(|| update.existing_leaf_branches.iter().copied().collect());
+            for removed_branch in &update.remove_leaf_branches {
+                leaf_branches.remove(removed_branch);
+            }
+            leaf_branches.insert(branch_name);
+
+            for (parent_commit_id, parent_branch_name) in &update.resolved_parent_branches {
+                object
+                    .commit_branches
+                    .entry(*parent_commit_id)
+                    .or_insert(*parent_branch_name);
+            }
+        }
+
+        // Create branch if it doesn't exist (only valid for parentless commits
+        // or a new batch root merge).
         let branch = object
             .branches
             .entry(branch_name)
@@ -382,6 +513,7 @@ impl ObjectManager {
         branch.tips.insert(commit_id);
 
         branch.commits.insert(commit_id, commit);
+        object.commit_branches.insert(commit_id, branch_name);
 
         tracing::trace!(?commit_id, "commit applied");
 
@@ -522,6 +654,70 @@ impl ObjectManager {
         Ok(&branch.commits)
     }
 
+    pub fn get_leaf_head_ids_for_prefix<H: Storage>(
+        &mut self,
+        object_id: ObjectId,
+        prefix: &BranchPrefixName,
+        storage: &H,
+    ) -> Result<HashMap<BranchName, CommitId>, Error> {
+        let prefix_key = prefix.branch_prefix();
+
+        if self.get(object_id).is_none() && self.get_or_load(object_id, storage, &[]).is_none() {
+            return Err(Error::ObjectNotFound(object_id));
+        }
+
+        let leaf_branches: HashSet<BranchName> = match self
+            .get(object_id)
+            .and_then(|object| object.leaf_branches_by_prefix.get(&prefix_key))
+        {
+            Some(leaf_branches) => leaf_branches.iter().copied().collect(),
+            None => storage
+                .load_prefix_leaf_branches(object_id, &prefix_key)
+                .map_err(Error::StorageError)?
+                .unwrap_or_default(),
+        };
+
+        if let Some(object) = self.get_mut(object_id) {
+            object
+                .leaf_branches_by_prefix
+                .entry(prefix_key.clone())
+                .or_insert_with(|| leaf_branches.iter().copied().collect());
+        }
+
+        let missing_leaf_branches: Vec<String> = {
+            let object = self
+                .get(object_id)
+                .ok_or(Error::ObjectNotFound(object_id))?;
+            leaf_branches
+                .iter()
+                .filter(|branch_name| !object.branches.contains_key(*branch_name))
+                .map(|branch_name| branch_name.as_str().to_string())
+                .collect()
+        };
+
+        if !missing_leaf_branches.is_empty() {
+            self.get_or_load(object_id, storage, &missing_leaf_branches);
+        }
+
+        let object = self
+            .get(object_id)
+            .ok_or(Error::ObjectNotFound(object_id))?;
+        let mut head_ids = HashMap::new();
+        for branch_name in leaf_branches {
+            let branch = object
+                .branches
+                .get(&branch_name)
+                .ok_or(Error::BranchNotFound(branch_name))?;
+            let head_id = Self::tips_by_timestamp(&branch.commits, &branch.tips)
+                .last()
+                .copied()
+                .ok_or(Error::BranchNotFound(branch_name))?;
+            head_ids.insert(branch_name, head_id);
+        }
+
+        Ok(head_ids)
+    }
+
     /// Receive an object from a remote source (with specified ID).
     ///
     /// Unlike `create`, this uses the provided ObjectId rather than generating a new one.
@@ -537,6 +733,8 @@ impl ObjectManager {
             id: object_id,
             metadata: metadata.clone(),
             branches: HashMap::new(),
+            commit_branches: HashMap::new(),
+            leaf_branches_by_prefix: HashMap::new(),
         };
 
         // Sync storage - returns immediately
@@ -560,16 +758,26 @@ impl ObjectManager {
         let branch_name = branch_name.into();
         let commit_id = commit.id();
 
-        // Capture previous state BEFORE mutation for AllObjectUpdate
-        let (previous_commit_ids, old_content, already_exists) = {
+        // Capture previous state BEFORE mutation for AllObjectUpdate and plan
+        // any batch-prefix leaf changes for a new batch root.
+        let (previous_commit_ids, old_content, already_exists, pending_batch_root_update) = {
             let object = self
                 .get(object_id)
                 .ok_or(Error::ObjectNotFound(object_id))?;
+            let branch_exists = object.branches.contains_key(&branch_name);
+            let pending_batch_root_update = Self::plan_batch_root_update(
+                object,
+                io,
+                object_id,
+                &branch_name,
+                &commit.parents,
+                !branch_exists,
+            )?;
 
             if let Some(branch) = object.branches.get(&branch_name) {
                 // Check if commit already exists (idempotent)
                 if branch.commits.contains_key(&commit_id) {
-                    (vec![], None, true)
+                    (vec![], None, true, None)
                 } else {
                     let prev_tips = Self::tips_by_timestamp(&branch.commits, &branch.tips);
                     // Last tip in sorted order is the "winner" (newest by timestamp)
@@ -577,11 +785,11 @@ impl ObjectManager {
                         .last()
                         .and_then(|tip_id| branch.commits.get(tip_id))
                         .map(|commit| commit.content.clone());
-                    (prev_tips, old_content, false)
+                    (prev_tips, old_content, false, pending_batch_root_update)
                 }
             } else {
                 // New branch - no previous state
-                (vec![], None, false)
+                (vec![], None, false, pending_batch_root_update)
             }
         };
 
@@ -592,8 +800,15 @@ impl ObjectManager {
 
         // Sync storage - returns immediately
         let mut commit = commit;
+        let prefix_leaf_update =
+            pending_batch_root_update
+                .as_ref()
+                .map(|update| crate::storage::PrefixLeafUpdate {
+                    prefix: update.prefix.clone(),
+                    remove_leaf_branches: update.remove_leaf_branches.clone(),
+                });
         if io
-            .append_commit(object_id, &branch_name, commit.clone())
+            .append_commit(object_id, &branch_name, commit.clone(), prefix_leaf_update)
             .is_ok()
         {
             commit.stored_state = StoredState::Stored;
@@ -601,6 +816,24 @@ impl ObjectManager {
 
         // Get mutable reference to update
         let object = self.get_mut(object_id).expect("validated above");
+
+        if let Some(update) = &pending_batch_root_update {
+            let leaf_branches = object
+                .leaf_branches_by_prefix
+                .entry(update.prefix.clone())
+                .or_insert_with(|| update.existing_leaf_branches.iter().copied().collect());
+            for removed_branch in &update.remove_leaf_branches {
+                leaf_branches.remove(removed_branch);
+            }
+            leaf_branches.insert(branch_name);
+
+            for (parent_commit_id, parent_branch_name) in &update.resolved_parent_branches {
+                object
+                    .commit_branches
+                    .entry(*parent_commit_id)
+                    .or_insert(*parent_branch_name);
+            }
+        }
 
         // Create branch if needed
         let branch = object
@@ -618,6 +851,7 @@ impl ObjectManager {
         branch.tips.insert(commit_id);
 
         branch.commits.insert(commit_id, commit);
+        object.commit_branches.insert(commit_id, branch_name);
 
         // Notify subscribers
         self.notify_subscribers_of_commit(object_id, branch_name);
@@ -1013,6 +1247,18 @@ impl ObjectManager {
             if let Some(tails) = &branch.tails {
                 size += tails.len() * (32 + 16);
             }
+        }
+
+        for (commit_id, branch_name) in &obj.commit_branches {
+            size += std::mem::size_of_val(commit_id);
+            size += branch_name.0.len() + 24;
+            size += 48;
+        }
+
+        for (prefix, leaf_branches) in &obj.leaf_branches_by_prefix {
+            size += prefix.len() + 24;
+            size += 48;
+            size += leaf_branches.len() * (std::mem::size_of::<BranchName>() + 16);
         }
 
         size

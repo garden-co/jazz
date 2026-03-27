@@ -1,9 +1,11 @@
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 use crate::storage::{Storage, StorageError, validate_index_value_size};
 
 use super::encoding::decode_column;
 use super::manager::{QueryError, QueryManager};
-use super::types::{ColumnDescriptor, ColumnType, RowDescriptor, TableName, Value};
+use super::types::{
+    ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, TableName, Value,
+};
 
 impl QueryManager {
     fn map_index_storage_error(error: StorageError) -> QueryError {
@@ -87,6 +89,24 @@ impl QueryManager {
         Ok(())
     }
 
+    fn register_table_prefix_branch(
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &str,
+    ) -> Result<(), QueryError> {
+        let branch_name = BranchName::new(branch.to_string());
+        let Some(composed_branch) = ComposedBranchName::parse(&branch_name) else {
+            return Ok(());
+        };
+        storage
+            .register_table_prefix_branch(
+                table,
+                &composed_branch.prefix().branch_prefix(),
+                &branch_name,
+            )
+            .map_err(Self::map_index_storage_error)
+    }
+
     fn remove_column_index_values(
         storage: &mut dyn Storage,
         table: &str,
@@ -112,6 +132,8 @@ impl QueryManager {
         data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
+        Self::register_table_prefix_branch(storage, table, branch)?;
+
         // Update "_id" index
         storage
             .index_insert(table, "_id", branch, &Value::Uuid(object_id), object_id)
@@ -158,6 +180,8 @@ impl QueryManager {
         new_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
+        Self::register_table_prefix_branch(storage, table, branch)?;
+
         // "_id" index doesn't change on update
 
         // Update column indices (remove old value, add new value)
@@ -213,6 +237,8 @@ impl QueryManager {
         old_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
+        Self::register_table_prefix_branch(storage, table, branch)?;
+
         // Remove from "_id" index
         storage
             .index_remove(table, "_id", branch, &Value::Uuid(object_id), object_id)
@@ -269,6 +295,8 @@ impl QueryManager {
         old_data: Option<&[u8]>,
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
+        Self::register_table_prefix_branch(storage, table, branch)?;
+
         // Remove from "_id" index (may not be present if already soft-deleted)
         storage
             .index_remove(table, "_id", branch, &Value::Uuid(object_id), object_id)
@@ -329,6 +357,8 @@ impl QueryManager {
         new_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
+        Self::register_table_prefix_branch(storage, table, branch)?;
+
         // Remove from "_id_deleted" index
         storage
             .index_remove(
