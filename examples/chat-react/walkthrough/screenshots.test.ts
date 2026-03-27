@@ -80,7 +80,7 @@ test("capture walkthrough screenshots", async ({ browser }) => {
   await alicePage.locator("button").filter({ hasText: "Done" }).click();
   await alicePage.waitForTimeout(300);
   // Close the settings sheet
-  const sheetClose = alicePage.locator('[data-slot="sheet-content"] .lucide-x').locator('..');
+  const sheetClose = alicePage.locator('[data-slot="sheet-content"] .lucide-x').locator("..");
   await sheetClose.click();
   await alicePage.waitForTimeout(300);
 

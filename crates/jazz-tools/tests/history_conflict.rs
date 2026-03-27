@@ -2,6 +2,7 @@
 
 mod support;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -58,7 +59,10 @@ async fn concurrent_updates_resolve_to_lww_winner() {
     let (todo_id, _) = alice
         .create(
             "todos",
-            vec![Value::Text("original".to_string()), Value::Boolean(false)],
+            HashMap::from([
+                ("title".to_string(), Value::Text("original".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("alice creates todo");
@@ -188,7 +192,10 @@ async fn concurrent_creates_both_survive() {
         alice2
             .create(
                 "todos",
-                vec![Value::Text("buy milk".to_string()), Value::Boolean(false)],
+                HashMap::from([
+                    ("title".to_string(), Value::Text("buy milk".to_string())),
+                    ("completed".to_string(), Value::Boolean(false)),
+                ]),
             )
             .await
             .expect("alice creates");
@@ -196,7 +203,10 @@ async fn concurrent_creates_both_survive() {
     let bob_handle = tokio::spawn(async move {
         bob2.create(
             "todos",
-            vec![Value::Text("buy eggs".to_string()), Value::Boolean(false)],
+            HashMap::from([
+                ("title".to_string(), Value::Text("buy eggs".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("bob creates");
@@ -275,7 +285,10 @@ async fn rapid_concurrent_updates_converge() {
     let (todo_id, _) = alice
         .create(
             "todos",
-            vec![Value::Text("start".to_string()), Value::Boolean(false)],
+            HashMap::from([
+                ("title".to_string(), Value::Text("start".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("create");
@@ -402,7 +415,10 @@ async fn fresh_client_sees_lww_winner_after_conflict() {
     let (todo_id, _) = alice
         .create(
             "todos",
-            vec![Value::Text("original".to_string()), Value::Boolean(false)],
+            HashMap::from([
+                ("title".to_string(), Value::Text("original".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("create");
@@ -560,7 +576,10 @@ async fn subscription_reflects_concurrent_update() {
     let (todo_id, _) = alice
         .create(
             "todos",
-            vec![Value::Text("task".to_string()), Value::Boolean(false)],
+            HashMap::from([
+                ("title".to_string(), Value::Text("task".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("create");
@@ -627,7 +646,10 @@ async fn sequential_updates_preserve_latest() {
     let (todo_id, _) = alice
         .create(
             "todos",
-            vec![Value::Text("v0".to_string()), Value::Boolean(false)],
+            HashMap::from([
+                ("title".to_string(), Value::Text("v0".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("create");
@@ -719,7 +741,10 @@ async fn concurrent_edits_on_different_fields() {
     let (todo_id, _) = alice
         .create(
             "todos",
-            vec![Value::Text("task".to_string()), Value::Boolean(false)],
+            HashMap::from([
+                ("title".to_string(), Value::Text("task".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("create");
@@ -882,7 +907,10 @@ async fn offline_user_wins_on_reconnect() {
     let (todo_id, _) = alice
         .create(
             "todos",
-            vec![Value::Text("create".to_string()), Value::Boolean(false)],
+            HashMap::from([
+                ("title".to_string(), Value::Text("create".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("alice creates todo");
@@ -1091,7 +1119,10 @@ async fn online_user_wins_on_reconnect() {
     let (todo_id, _) = alice
         .create(
             "todos",
-            vec![Value::Text("create".to_string()), Value::Boolean(false)],
+            HashMap::from([
+                ("title".to_string(), Value::Text("create".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("alice creates todo");

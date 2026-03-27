@@ -36,11 +36,7 @@ function ChatHeaderContent({ chatId }: ChatHeaderProps) {
         className="px-3 py-2 flex items-center justify-between border-b"
       >
         <h3 className="text-sm font-semibold truncate">{displayName}</h3>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => setSettingsOpen(true)}
-        >
+        <Button variant="ghost" size="icon" onClick={() => setSettingsOpen(true)}>
           <SettingsIcon />
         </Button>
       </div>
