@@ -490,6 +490,15 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(f(core.storage()))
     }
 
+    /// Run a closure with read access to the SyncManager (for testing/inspection).
+    pub fn with_sync_manager<R>(
+        &self,
+        f: impl FnOnce(&crate::sync_manager::SyncManager) -> R,
+    ) -> Result<R, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(f(core.schema_manager().query_manager().sync_manager()))
+    }
+
     /// Subscribe to a query with explicit schema context (for server use).
     pub fn subscribe_with_schema_context(
         &self,

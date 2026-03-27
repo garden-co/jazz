@@ -87,11 +87,54 @@ impl ServerState {
             .values()
             .any(|c| c.client_id == client_id)
     }
+
+    /// Run one sweep iteration: drain expired disconnect candidates,
+    /// check each for active connections, and reap those that are truly gone.
+    /// Returns the list of reaped client IDs.
+    pub async fn run_sweep_once(&self) -> Vec<ClientId> {
+        let ttl_ms = self.client_ttl.load(std::sync::atomic::Ordering::Relaxed);
+        let ttl = std::time::Duration::from_millis(ttl_ms);
+        let now = tokio::time::Instant::now();
+
+        // Step 1-3: drain expired entries from candidates
+        let expired: Vec<ClientId> = {
+            let mut candidates = self.disconnect_candidates.write().await;
+            let mut expired = Vec::new();
+            candidates.retain(|&client_id, &mut disconnected_at| {
+                if now.duration_since(disconnected_at) >= ttl {
+                    expired.push(client_id);
+                    false // remove from candidates
+                } else {
+                    true // keep
+                }
+            });
+            expired
+        };
+
+        // Step 4: for each expired client, check connections then reap
+        let mut reaped = Vec::new();
+        for client_id in expired {
+            if self.has_active_connections(client_id).await {
+                // Client reconnected between drain and reap — skip
+                tracing::debug!(%client_id, "skipping reap: client reconnected");
+                continue;
+            }
+            if let Err(e) = self.runtime.remove_client(client_id) {
+                tracing::warn!(%client_id, error = %e, "failed to reap client");
+                continue;
+            }
+            reaped.push(client_id);
+            tracing::debug!(%client_id, "reaped disconnected client");
+        }
+
+        reaped
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use super::*;
     use crate::schema_manager::AppId;
@@ -202,5 +245,175 @@ mod tests {
             candidates.contains_key(&alice),
             "both connections closed — alice should be a candidate"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_reaps_expired_candidates() {
+        let state = build_test_state().await;
+        let alice = ClientId::new();
+
+        // Register alice in the runtime so there's state to reap
+        let _ = state.runtime.add_client(alice, None);
+
+        let conn = add_connection(&state, alice).await;
+        remove_connection(&state, conn).await;
+
+        // Advance time past TTL (default 5 min)
+        tokio::time::advance(Duration::from_secs(301)).await;
+
+        let reaped = state.run_sweep_once().await;
+        assert_eq!(reaped, vec![alice]);
+
+        // Verify client state was actually removed
+        let has_client = state
+            .runtime
+            .with_sync_manager(|sm| sm.get_client(alice).is_some())
+            .expect("lock");
+        assert!(!has_client, "alice's ClientState should be gone");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_preserves_candidates_before_ttl() {
+        let state = build_test_state().await;
+        let alice = ClientId::new();
+
+        let _ = state.runtime.add_client(alice, None);
+
+        let conn = add_connection(&state, alice).await;
+        remove_connection(&state, conn).await;
+
+        // Advance time but NOT past TTL
+        tokio::time::advance(Duration::from_secs(60)).await;
+
+        let reaped = state.run_sweep_once().await;
+        assert!(reaped.is_empty());
+
+        let candidates = state.disconnect_candidates.read().await;
+        assert!(
+            candidates.contains_key(&alice),
+            "alice should still be a candidate"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_skips_reconnected_client() {
+        let state = build_test_state().await;
+        let alice = ClientId::new();
+
+        let _ = state.runtime.add_client(alice, None);
+
+        let conn = add_connection(&state, alice).await;
+        remove_connection(&state, conn).await;
+
+        tokio::time::advance(Duration::from_secs(301)).await;
+
+        // Alice reconnects before sweep runs
+        let _conn2 = add_connection(&state, alice).await;
+        state.on_client_connected(alice).await;
+
+        let reaped = state.run_sweep_once().await;
+        assert!(
+            reaped.is_empty(),
+            "alice reconnected — should not be reaped"
+        );
+
+        let has_client = state
+            .runtime
+            .with_sync_manager(|sm| sm.get_client(alice).is_some())
+            .expect("lock");
+        assert!(has_client, "alice's ClientState should be preserved");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_race_guard_checks_connections() {
+        // Simulate the race: sweep drains candidates, then alice reconnects,
+        // then sweep checks connections before reaping.
+        let state = build_test_state().await;
+        let alice = ClientId::new();
+
+        let _ = state.runtime.add_client(alice, None);
+
+        let conn = add_connection(&state, alice).await;
+        remove_connection(&state, conn).await;
+
+        tokio::time::advance(Duration::from_secs(301)).await;
+
+        // Manually drain candidates (simulating sweep step 1-3)
+        let expired: Vec<ClientId> = {
+            let mut candidates = state.disconnect_candidates.write().await;
+            let ttl_ms = state.client_ttl.load(std::sync::atomic::Ordering::Relaxed);
+            let ttl = Duration::from_millis(ttl_ms);
+            let now = tokio::time::Instant::now();
+            let mut expired = Vec::new();
+            candidates.retain(|&client_id, &mut disconnected_at| {
+                if now.duration_since(disconnected_at) >= ttl {
+                    expired.push(client_id);
+                    false
+                } else {
+                    true
+                }
+            });
+            expired
+        };
+        assert_eq!(expired, vec![alice]);
+
+        // Alice reconnects between drain and reap
+        let _conn2 = add_connection(&state, alice).await;
+        state.on_client_connected(alice).await;
+
+        // Now the sweep would check connections before reaping
+        assert!(
+            state.has_active_connections(alice).await,
+            "alice has a connection — sweep should skip"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_reaps_multiple_expired_candidates() {
+        let state = build_test_state().await;
+        let alice = ClientId::new();
+        let bob = ClientId::new();
+
+        let _ = state.runtime.add_client(alice, None);
+        let _ = state.runtime.add_client(bob, None);
+
+        let conn_a = add_connection(&state, alice).await;
+        let conn_b = add_connection(&state, bob).await;
+        remove_connection(&state, conn_a).await;
+        remove_connection(&state, conn_b).await;
+
+        tokio::time::advance(Duration::from_secs(301)).await;
+
+        let mut reaped = state.run_sweep_once().await;
+        reaped.sort_by_key(|c| c.0);
+        let mut expected = vec![alice, bob];
+        expected.sort_by_key(|c| c.0);
+        assert_eq!(reaped, expected);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_does_not_affect_other_clients() {
+        let state = build_test_state().await;
+        let alice = ClientId::new();
+        let bob = ClientId::new();
+
+        let _ = state.runtime.add_client(alice, None);
+        let _ = state.runtime.add_client(bob, None);
+
+        // Only alice disconnects
+        let conn_a = add_connection(&state, alice).await;
+        let _conn_b = add_connection(&state, bob).await;
+        remove_connection(&state, conn_a).await;
+
+        tokio::time::advance(Duration::from_secs(301)).await;
+
+        let reaped = state.run_sweep_once().await;
+        assert_eq!(reaped, vec![alice]);
+
+        let has_bob = state
+            .runtime
+            .with_sync_manager(|sm| sm.get_client(bob).is_some())
+            .expect("lock");
+        assert!(has_bob, "bob should be unaffected");
     }
 }
