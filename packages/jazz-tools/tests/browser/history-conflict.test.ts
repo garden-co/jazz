@@ -72,14 +72,9 @@ describe("History & Conflict Management", () => {
    *            waitForQuery on both → same title
    *
    *
-   * KNOWN BUG: the server does not relay concurrent commits between
-   * browser clients. Each client only ever sees its own update
-   * (alice=alice-edit, bob=bob-edit — verified via 40s polling).
-   * The server scope-based forwarding (forward_update_to_clients_except)
-   * appears to work in Rust E2E tests (in-process RuntimeCore) but not
-   * through the HTTP /sync + /events pipeline.
+   * Both clients must eventually converge to the same title.
    */
-  it.skip("concurrent updates converge in browser", async () => {
+  it("concurrent updates converge in browser", async () => {
     const token = `hc-concurrent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const dbAlice = await createSyncedDb(ctx, "hc-alice-concurrent", token);
     const dbBob = await createSyncedDb(ctx, "hc-bob-concurrent", token);
@@ -297,11 +292,9 @@ describe("History & Conflict Management", () => {
    *                                             │
    *                                             └──► sees same winner
    *
-   * KNOWN BUG: same root cause as "concurrent updates converge" —
-   * server doesn't relay concurrent commits between browser clients
-   * via the HTTP /sync + /events pipeline.
+   * Charlie must see the same converged winner.
    */
-  it.skip("fresh db sees converged state", async () => {
+  it("fresh db sees converged state", async () => {
     const token = `hc-fresh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const dbAlice = await createSyncedDb(ctx, "hc-alice-fresh", token);
     const dbBob = await createSyncedDb(ctx, "hc-bob-fresh", token);
@@ -368,12 +361,12 @@ describe("History & Conflict Management", () => {
 
   /**
    * Alice edits title, Bob edits done — concurrently on the same row.
-   * With whole-object LWW the latest commit wins ALL fields, so one
-   * side's field change is lost. This test documents that behavior.
+   * Atomicity is per-row (not per-column): whole-row LWW means the
+   * latest commit wins ALL fields, so one side's field change is lost.
+   * This test is skipped because convergence on mixed-field edits
+   * cannot hold under row-level LWW semantics.
    *
    *   dbAlice ──update title──► server ◄──update done── dbBob
-   *
-   *   KNOWN BUG: same server relay issue as concurrent-updates test.
    */
   it.skip("concurrent edits on different fields", async () => {
     const token = `hc-fields-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
