@@ -15,7 +15,13 @@
 //!
 //! ```ignore
 //! let runtime = RuntimeCore::new(schema_manager, storage, scheduler, sync_sender);
-//! runtime.insert("users", values)?;
+//! runtime.insert(
+//!     "users",
+//!     std::collections::HashMap::from([
+//!         ("id".to_string(), id),
+//!         ("name".to_string(), name),
+//!     ]),
+//! )?;
 //! runtime.immediate_tick();
 //! let future = runtime.query(query);
 //! let results = future.await?;
@@ -36,7 +42,7 @@ use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{QueryError, QueryUpdate};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{OrderedRowDelta, Schema, TableName, Value};
+use crate::query_manager::types::{OrderedRowDelta, Schema, Value};
 use crate::schema_manager::SchemaManager;
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};

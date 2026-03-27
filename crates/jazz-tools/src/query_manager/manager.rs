@@ -8,7 +8,7 @@ use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::AllObjectUpdate;
-use crate::schema_manager::{LensTransformer, SchemaContext};
+use crate::schema_manager::SchemaContext;
 use crate::storage::{CatalogueManifestOp, Storage};
 use crate::sync_manager::{
     ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
@@ -716,12 +716,8 @@ impl QueryManager {
             let _sub_span = tracing::trace_span!("settle_subscription", sub_id = sub_id.0, table = %subscription.graph.table).entered();
             let branches = &subscription.branches;
             let table = subscription.graph.table.as_str().to_string();
+            let include_deleted = subscription.query.include_deleted;
 
-            // Row loader returns None for empty content (hard delete tombstones)
-            // Soft deletes have preserved content and can be materialized normally
-            // For single-branch subscriptions, reads from that branch
-            // For multi-branch subscriptions, uses LWW across branches
-            // When schema context is present, applies lens transform for old schema branches
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
                 let obj = om.get_or_load(id, storage_ref, branches);
                 if obj.is_none() {
@@ -729,80 +725,22 @@ impl QueryManager {
                     return None;
                 }
                 let obj = obj?;
-                // Find the newest commit across all subscription branches (LWW)
-                // Also track which branch it came from for schema transformation
-                let mut best: Option<(u64, Vec<u8>, CommitId, String)> = None;
-
-                for branch_name in branches {
-                    if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
-                        for &tip_id in &branch.tips {
-                            if let Some(commit) = branch.commits.get(&tip_id) {
-                                match &best {
-                                    None => {
-                                        best = Some((
-                                            commit.timestamp,
-                                            commit.content.clone(),
-                                            tip_id,
-                                            branch_name.clone(),
-                                        ));
-                                    }
-                                    Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
-                                        best = Some((
-                                            commit.timestamp,
-                                            commit.content.clone(),
-                                            tip_id,
-                                            branch_name.clone(),
-                                        ));
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Filter out empty content (hard delete tombstones only)
-                let (_, content, commit_id, source_branch) =
-                    best.filter(|(_, content, _, _)| !content.is_empty())?;
-
-                // Apply lens transform if row is from an old schema branch
-                if let Some(&source_hash) = branch_schema_map.get(&source_branch)
-                    && source_hash != schema_context.current_hash
-                {
-                    // Transform the row data using lens
-                    let transformer = LensTransformer::new(schema_context, &table);
-                    match transformer.transform(&content, commit_id, source_hash) {
-                        Ok(result) => {
-                            return Some(LoadedRow::new(
-                                result.data,
-                                commit_id,
-                                [(id, BranchName::new(&source_branch))]
-                                    .into_iter()
-                                    .collect(),
-                            ));
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                sub_id = sub_id.0,
-                                row_id = %id,
-                                table = %table,
-                                source_branch = %source_branch,
-                                source_schema = %source_hash.short(),
-                                target_schema = %schema_context.current_hash.short(),
-                                error = %err,
-                                "lens transform failed; dropping row from query result"
-                            );
-                            return None;
-                        }
-                    }
+                let resolved = Self::resolve_latest_row_with_schema_transform(
+                    id,
+                    obj,
+                    branches,
+                    &table,
+                    branch_schema_map,
+                    schema_context,
+                )?;
+                if resolved.is_soft_deleted && !include_deleted {
+                    return None;
                 }
 
                 Some(LoadedRow::new(
-                    content,
-                    commit_id,
-                    [(id, BranchName::new(&source_branch))]
-                        .into_iter()
-                        .collect(),
+                    resolved.content,
+                    resolved.commit_id,
+                    [(id, resolved.branch_name)].into_iter().collect(),
                 ))
             };
 
@@ -901,7 +839,7 @@ impl QueryManager {
         self.settle_server_subscriptions(storage_ref);
     }
     /// Load a row's data from a specific branch using LWW (last-writer-wins by timestamp).
-    /// When multiple concurrent tips exist, returns content from the tip with highest timestamp.
+    /// When timestamps tie, CommitId provides a deterministic secondary ordering.
     pub(super) fn load_row_from_object_on_branch(
         &self,
         row_id: ObjectId,
@@ -909,9 +847,14 @@ impl QueryManager {
     ) -> Option<(Vec<u8>, CommitId)> {
         let obj = self.sync_manager.object_manager.get(row_id)?;
         let branch = obj.branches.get(&BranchName::new(branch_name))?;
-        // Sort tips by timestamp (oldest first), take last (newest = LWW winner)
+        // Sort tips by (timestamp, CommitId) ascending, take last (newest = LWW winner)
         let mut tips: Vec<_> = branch.tips.iter().copied().collect();
-        tips.sort_by_key(|id| branch.commits.get(id).map(|c| c.timestamp).unwrap_or(0));
+        tips.sort_by_key(|id| {
+            (
+                branch.commits.get(id).map(|c| c.timestamp).unwrap_or(0),
+                *id,
+            )
+        });
         let tip_id = tips.last()?;
         let commit = branch.commits.get(tip_id)?;
         Some((commit.content.clone(), *tip_id))

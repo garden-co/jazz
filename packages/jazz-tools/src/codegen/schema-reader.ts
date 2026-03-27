@@ -22,6 +22,7 @@ import type {
   PolicyValue,
   Value,
 } from "../drivers/types.js";
+import { toValue } from "../runtime/value-converter.js";
 
 const map: Record<ScalarSqlType, ColumnType> = {
   TEXT: { type: "Text" },
@@ -222,11 +223,15 @@ export function schemaToWasm(schema: Schema): WasmSchema {
 
   for (const table of schema.tables) {
     const columns: ColumnDescriptor[] = table.columns.map((col) => {
+      const columnType = sqlTypeToWasm(col.sqlType);
       const descriptor: ColumnDescriptor = {
         name: col.name,
-        column_type: sqlTypeToWasm(col.sqlType),
+        column_type: columnType,
         nullable: col.nullable,
       };
+      if (col.default !== undefined) {
+        descriptor.default = toValue(col.default, columnType);
+      }
       if (col.references) {
         descriptor.references = col.references;
       }

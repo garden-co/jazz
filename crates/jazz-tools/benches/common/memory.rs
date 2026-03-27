@@ -165,9 +165,8 @@ pub fn reset_stats() {
 /// Reset and return a baseline for delta measurements.
 #[allow(dead_code)]
 pub fn baseline() -> MemoryStats {
-    let stats = get_stats();
     // Don't reset - just capture current state for delta
-    stats
+    get_stats()
 }
 
 /// Get delta from a baseline.
