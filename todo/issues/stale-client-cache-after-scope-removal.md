@@ -93,19 +93,15 @@ For delete, the object LEAVES scope. `set_client_query_scope` only handles `newl
 
 ### Possible fix directions
 
-1. **~~Server sends removed-scope objects~~** — ~~In `set_client_query_scope`, compute `old_scope.difference(&new_scope)` and send `ObjectUpdated` for objects that left scope.~~
+1. **Include result IDs in QuerySettled** — Extend `QuerySettled` (currently just `query_id + tier + through_seq`, defined at types.rs:257-263) to carry the set of object IDs in the server's result. Client compares its local graph settlement against the server's result set and prunes stale rows not present in the server's list. Protocol change, but directly addresses the root cause: the client has no way to know which objects the server considers valid.
+
+2. **~~Server sends removed-scope objects~~** — ~~In `set_client_query_scope`, compute `old_scope.difference(&new_scope)` and send `ObjectUpdated` for objects that left scope.~~
 
    **Does not fix this bug.** The one-shot polling pattern destroys the subscription (and its scope) via `drop_client_query_subscription()` (mod.rs:380-391) BEFORE the delete happens. When the next poll creates a new subscription, `old_scope` is already empty — `old_scope.difference(new_scope)` produces nothing. Applying the diff at `drop_client_query_subscription` also doesn't help: at that point the row hasn't been deleted yet, so sending its current state would just re-send the non-deleted version.
 
-   Direction 1 would only help persistent subscriptions whose scope shrinks due to a data or policy change while the subscription is alive. But persistent subscriptions already handle deletes correctly via the forwarding gate (`forward_update_to_clients_except` at forwarding.rs:58 — `is_in_scope` returns true because the subscription is still active).
+   Direction 2 would only help persistent subscriptions whose scope shrinks due to a data or policy change while the subscription is alive. But persistent subscriptions already handle deletes correctly via the forwarding gate (`forward_update_to_clients_except` at forwarding.rs:58 — `is_in_scope` returns true because the subscription is still active).
 
-2. **Include result IDs in QuerySettled** — Extend `QuerySettled` (currently just `query_id + tier + through_seq`, defined at types.rs:257-263) to carry the set of object IDs in the server's result. Client compares its local graph settlement against the server's result set and prunes stale rows not present in the server's list. Protocol change, but directly addresses the root cause: the client has no way to know which objects the server considers valid.
-
-3. **Client-side: don't use cached data for fresh subscriptions** — When a one-shot query settles with a server tier, only include objects that were explicitly received via `ObjectUpdated` during this subscription's lifetime. Client-only change but harder to implement correctly. Risk: breaks local-first semantics for offline-capable queries.
-
-4. **Use persistent subscriptions in waitForRows** — Change the test helper to use `subscribe()` instead of polling `query()`. This keeps client B's subscription alive, so the reactive path handles the delete. But this only fixes the test, not the underlying protocol gap.
-
-Direction 2 is the most correct fix. The fundamental problem is that `QuerySettled` tells the client "your query has settled" without telling it WHAT the result should be. The client then trusts its local cache, which may contain objects the server no longer considers in scope. Adding result IDs to `QuerySettled` closes this information gap cleanly.
+Direction 1 is the most correct fix. The fundamental problem is that `QuerySettled` tells the client "your query has settled" without telling it WHAT the result should be. The client then trusts its local cache, which may contain objects the server no longer considers in scope. Adding result IDs to `QuerySettled` closes this information gap cleanly.
 
 ### Why the client can't self-correct
 
