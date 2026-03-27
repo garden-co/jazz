@@ -181,12 +181,7 @@ async fn events_handler(
     // Store connection state
     {
         let mut connections = state.connections.write().await;
-        connections.insert(
-            connection_id,
-            ConnectionState {
-                _client_id: client_id,
-            },
-        );
+        connections.insert(connection_id, ConnectionState { client_id });
     }
 
     // Clone state for cleanup on drop

@@ -43,5 +43,5 @@ pub struct ServerState {
 
 /// State for a single SSE connection.
 pub struct ConnectionState {
-    pub _client_id: ClientId,
+    pub client_id: ClientId,
 }
