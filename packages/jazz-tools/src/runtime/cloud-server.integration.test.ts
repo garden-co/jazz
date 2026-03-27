@@ -269,17 +269,9 @@ async function startCloudServer(config: CloudServerConfig): Promise<CloudServerH
     ],
     {
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, RUST_LOG: "jazz_cloud_server=debug,tower_http=debug" },
+      env: process.env,
     },
   );
-
-  child.stderr?.on("data", (chunk: Buffer) => {
-    console.error(`[cloud-server] ${chunk.toString().trimEnd()}`);
-  });
-
-  child.stdout?.on("data", (chunk: Buffer) => {
-    console.error(`[cloud-server:stdout] ${chunk.toString().trimEnd()}`);
-  });
 
   const baseUrl = `http://127.0.0.1:${port}`;
   await waitForHealth(baseUrl);

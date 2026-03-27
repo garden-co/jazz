@@ -494,7 +494,6 @@ async function postSyncBatch(
   logPrefix: string,
 ): Promise<void> {
   let response: Response;
-  const t0 = Date.now();
   try {
     response = await fetchWithTimeout(
       url,
@@ -503,9 +502,7 @@ async function postSyncBatch(
     );
   } catch (e) {
     if ((e as { name?: string })?.name === "AbortError") {
-      console.error(
-        `${logPrefix}Sync POST timeout after ${Date.now() - t0}ms (limit ${SYNC_FETCH_TIMEOUT_MS}ms) url=${url} bodyLen=${body.length}`,
-      );
+      console.error(`${logPrefix}Sync POST timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
       throw new Error(`${logPrefix}Sync POST failed: timeout after ${SYNC_FETCH_TIMEOUT_MS}ms`);
     }
     if (isExpectedFetchAbortError(e)) {
