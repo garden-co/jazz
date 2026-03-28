@@ -102,6 +102,67 @@ pub struct PrefixBatchUpdate {
     pub increment_parent_child_counts: Vec<BatchId>,
 }
 
+/// One active table batch with its visible-row refcount.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TablePrefixBatchEntry {
+    pub batch_id: BatchId,
+    pub ref_count: u64,
+}
+
+/// Compact active-batch manifest for one `(table, prefix)` pair.
+///
+/// Entries stay sorted by raw `BatchId` bytes so lookups can use binary search
+/// and iteration stays deterministic without a `HashMap`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TablePrefixBatchManifest {
+    pub entries: Vec<TablePrefixBatchEntry>,
+}
+
+impl TablePrefixBatchManifest {
+    pub fn branch_refs(&self, prefix: BranchName) -> Vec<QueryBranchRef> {
+        self.entries
+            .iter()
+            .map(|entry| QueryBranchRef::from_prefix_name_and_batch(prefix, entry.batch_id))
+            .collect()
+    }
+
+    pub fn adjust_refcount(&mut self, batch_id: BatchId, delta: i64) {
+        let key = *batch_id.as_bytes();
+        match self
+            .entries
+            .binary_search_by_key(&key, |entry| *entry.batch_id.as_bytes())
+        {
+            Ok(index) => {
+                let current = self.entries[index].ref_count;
+                let next = if delta >= 0 {
+                    current.saturating_add(delta as u64)
+                } else {
+                    current.saturating_sub(delta.unsigned_abs())
+                };
+                if next == 0 {
+                    self.entries.remove(index);
+                } else {
+                    self.entries[index].ref_count = next;
+                }
+            }
+            Err(index) if delta > 0 => {
+                self.entries.insert(
+                    index,
+                    TablePrefixBatchEntry {
+                        batch_id,
+                        ref_count: delta as u64,
+                    },
+                );
+            }
+            Err(_) => {}
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 /// Lens edge stored in the catalogue manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CatalogueLensSeen {
@@ -606,7 +667,7 @@ pub struct MemoryStorage {
     /// Persistence ack tiers per commit.
     ack_tiers: HashMap<CommitId, HashSet<DurabilityTier>>,
     /// Active table batches keyed by shared batch prefix.
-    table_batches_by_prefix: HashMap<(String, BranchName), HashMap<BatchId, u64>>,
+    table_batches_by_prefix: HashMap<(String, BranchName), TablePrefixBatchManifest>,
     /// Append-only manifest ops keyed by app_id then op object_id.
     catalogue_manifest_ops: HashMap<ObjectId, HashMap<ObjectId, CatalogueManifestOp>>,
 }
@@ -937,15 +998,7 @@ impl Storage for MemoryStorage {
         Ok(self
             .table_batches_by_prefix
             .get(&(table.to_string(), prefix))
-            .map(|counts| {
-                let mut branches: Vec<_> = counts
-                    .keys()
-                    .copied()
-                    .map(|batch_id| QueryBranchRef::from_prefix_name_and_batch(prefix, batch_id))
-                    .collect();
-                branches.sort_by_key(|branch| branch.as_str().to_string());
-                branches
-            })
+            .map(|manifest| manifest.branch_refs(prefix))
             .unwrap_or_default())
     }
 
@@ -1104,12 +1157,10 @@ impl Storage for MemoryStorage {
             && matches!(column, "_id" | "_id_deleted")
             && let Some((prefix, batch_id)) = Self::composed_table_batch(branch)
         {
-            *self
-                .table_batches_by_prefix
+            self.table_batches_by_prefix
                 .entry((table.to_string(), prefix))
                 .or_default()
-                .entry(batch_id)
-                .or_insert(0) += 1;
+                .adjust_refcount(batch_id, 1);
         }
         Ok(())
     }
@@ -1146,17 +1197,12 @@ impl Storage for MemoryStorage {
         if removed
             && matches!(column, "_id" | "_id_deleted")
             && let Some((prefix, batch_id)) = Self::composed_table_batch(branch)
-            && let Some(counts) = self
+            && let Some(manifest) = self
                 .table_batches_by_prefix
                 .get_mut(&(table.to_string(), prefix))
         {
-            if let Some(count) = counts.get_mut(&batch_id) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    counts.remove(&batch_id);
-                }
-            }
-            if counts.is_empty() {
+            manifest.adjust_refcount(batch_id, -1);
+            if manifest.is_empty() {
                 self.table_batches_by_prefix
                     .remove(&(table.to_string(), prefix));
             }

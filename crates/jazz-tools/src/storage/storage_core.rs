@@ -18,7 +18,7 @@ use super::key_codec::{
 };
 use super::{
     CatalogueManifest, CatalogueManifestOp, LoadedBranch, LoadedBranchTips, PrefixBatchUpdate,
-    StorageError,
+    StorageError, TablePrefixBatchManifest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,16 +296,11 @@ pub(super) fn load_table_prefix_branches_core(
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
 ) -> Result<Vec<QueryBranchRef>, StorageError> {
     let key = table_prefix_batches_key(table, prefix.as_str());
-    let counts: HashMap<BatchId, u64> = match get(&key)? {
+    let manifest: TablePrefixBatchManifest = match get(&key)? {
         Some(data) => decode_postcard(&data, "table prefix active batches")?,
-        None => HashMap::new(),
+        None => TablePrefixBatchManifest::default(),
     };
-    let mut branches = Vec::with_capacity(counts.len());
-    for batch_id in counts.keys().copied() {
-        branches.push(QueryBranchRef::from_prefix_name_and_batch(prefix, batch_id));
-    }
-    branches.sort_by_key(|branch| branch.as_str().to_string());
-    Ok(branches)
+    Ok(manifest.branch_refs(prefix))
 }
 
 pub(super) fn adjust_table_prefix_batch_refcount_core(
@@ -324,28 +319,16 @@ pub(super) fn adjust_table_prefix_batch_refcount_core(
     };
 
     let key = table_prefix_batches_key(table, prefix_name.as_str());
-    let mut counts: HashMap<BatchId, u64> = match get(&key)? {
+    let mut manifest: TablePrefixBatchManifest = match get(&key)? {
         Some(data) => decode_postcard(&data, "table prefix active batches")?,
-        None => HashMap::new(),
+        None => TablePrefixBatchManifest::default(),
     };
-    let current = counts.get(&batch_id).copied().unwrap_or(0);
+    manifest.adjust_refcount(batch_id, delta);
 
-    let next = if delta >= 0 {
-        current.saturating_add(delta as u64)
-    } else {
-        current.saturating_sub(delta.unsigned_abs())
-    };
-
-    if next == 0 {
-        counts.remove(&batch_id);
-    } else {
-        counts.insert(batch_id, next);
-    }
-
-    if counts.is_empty() {
+    if manifest.is_empty() {
         delete(&key)
     } else {
-        let data = encode_postcard(&counts, "table prefix active batches")?;
+        let data = encode_postcard(&manifest, "table prefix active batches")?;
         set(&key, &data)
     }
 }
