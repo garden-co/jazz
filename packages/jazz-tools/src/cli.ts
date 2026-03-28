@@ -9,18 +9,22 @@ import { register as registerEsm } from "tsx/esm/api";
 import type {
   ColumnDescriptor,
   ColumnType as WasmColumnType,
+  TablePolicies as WireTablePolicies,
   WasmSchema,
 } from "./drivers/types.js";
 import type { DefinedMigration } from "./migrations.js";
 import { schemaDefinitionToAst } from "./migrations.js";
 import type { Lens, SqlType } from "./schema.js";
-import { loadCompiledSchema } from "./schema-loader.js";
+import { loadCompiledSchema, type LoadedSchemaProject } from "./schema-loader.js";
 import {
   encodePublishedMigrationValue,
+  fetchPermissionsHead,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
+  publishStoredPermissions,
   publishStoredMigration,
   type PublishedTableLens,
+  type StoredPermissionsHead,
 } from "./runtime/schema-fetch.js";
 import { toValue } from "./runtime/value-converter.js";
 
@@ -78,6 +82,9 @@ export async function build(options: BuildOptions): Promise<void> {
   if (compiled.permissionsFile) {
     console.log(`Loaded current permissions from ${compiled.permissionsFile}.`);
     console.log(PERMISSIONS_LIFECYCLE_NOTE);
+    console.log(
+      "Use `jazz-tools permissions status` or `jazz-tools permissions push` for auth publication.",
+    );
   }
   console.log(`Validated ${tableCount} table${tableCount === 1 ? "" : "s"} in schema.ts.`);
 }
@@ -95,6 +102,12 @@ export interface MigrationCommandOptions {
   serverUrl: string;
   adminSecret: string;
   migrationsDir: string;
+}
+
+export interface PermissionsCommandOptions {
+  serverUrl: string;
+  adminSecret: string;
+  schemaDir: string;
 }
 
 export interface CreateMigrationOptions extends MigrationCommandOptions {
@@ -146,6 +159,26 @@ function resolveMigrationOptions(args: string[]): MigrationCommandOptions {
     serverUrl,
     adminSecret,
     migrationsDir,
+  };
+}
+
+function resolvePermissionsOptions(args: string[]): PermissionsCommandOptions {
+  const serverUrl = getFlagValue(args, "--server-url") ?? process.env.JAZZ_SERVER_URL;
+  const adminSecret = getFlagValue(args, "--admin-secret") ?? process.env.JAZZ_ADMIN_SECRET;
+  const schemaDir = resolve(process.cwd(), getFlagValue(args, "--schema-dir") ?? process.cwd());
+
+  if (!serverUrl) {
+    throw new Error("Missing server URL. Pass --server-url <url> or set JAZZ_SERVER_URL.");
+  }
+
+  if (!adminSecret) {
+    throw new Error("Missing admin secret. Pass --admin-secret <secret> or set JAZZ_ADMIN_SECRET.");
+  }
+
+  return {
+    serverUrl,
+    adminSecret,
+    schemaDir,
   };
 }
 
@@ -221,11 +254,66 @@ function tableSchemasEqual(
   return left.columns.every((column, index) => columnsEqual(column, right.columns[index]!));
 }
 
+function wasmSchemasEqual(left: WasmSchema, right: WasmSchema): boolean {
+  const leftTableNames = Object.keys(left).sort();
+  const rightTableNames = Object.keys(right).sort();
+
+  if (leftTableNames.length !== rightTableNames.length) {
+    return false;
+  }
+
+  return leftTableNames.every((tableName, index) => {
+    if (tableName !== rightTableNames[index]) {
+      return false;
+    }
+    return tableSchemasEqual(left[tableName], right[tableName]);
+  });
+}
+
 function changedTableNames(fromSchema: WasmSchema, toSchema: WasmSchema): string[] {
   const names = new Set([...Object.keys(fromSchema), ...Object.keys(toSchema)]);
   return [...names].filter(
     (tableName) => !tableSchemasEqual(fromSchema[tableName], toSchema[tableName]),
   );
+}
+
+function ensurePermissionsProject(compiled: LoadedSchemaProject): LoadedSchemaProject & {
+  permissions: NonNullable<LoadedSchemaProject["permissions"]>;
+  permissionsFile: string;
+} {
+  if (!compiled.permissions || !compiled.permissionsFile) {
+    throw new Error(
+      "No permissions.ts found for this app. Create permissions.ts before using permissions commands.",
+    );
+  }
+
+  return compiled as LoadedSchemaProject & {
+    permissions: NonNullable<LoadedSchemaProject["permissions"]>;
+    permissionsFile: string;
+  };
+}
+
+async function resolveStoredStructuralSchemaHash(
+  serverUrl: string,
+  adminSecret: string,
+  wasmSchema: WasmSchema,
+): Promise<string> {
+  const { hashes } = await fetchSchemaHashes(serverUrl, { adminSecret });
+  const storedSchemas = await Promise.all(
+    hashes.map(async (hash) => ({
+      hash,
+      schema: (await fetchStoredWasmSchema(serverUrl, { adminSecret, schemaHash: hash })).schema,
+    })),
+  );
+
+  const match = storedSchemas.find(({ schema }) => wasmSchemasEqual(schema, wasmSchema));
+  if (!match) {
+    throw new Error(
+      "No stored structural schema matches the local schema.ts. Publish the structural schema before pushing permissions.",
+    );
+  }
+
+  return match.hash;
 }
 
 function pickWitnessSchema(schema: WasmSchema, tableNames: readonly string[]): WasmSchema {
@@ -732,6 +820,79 @@ export async function pushMigration(options: PushMigrationOptions): Promise<void
   );
 }
 
+function describePermissionsHead(head: StoredPermissionsHead): string {
+  return `v${head.version} on ${shortSchemaHash(head.schemaHash)}`;
+}
+
+export async function permissionsStatus(options: PermissionsCommandOptions): Promise<void> {
+  const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
+  const localSchemaHash = await resolveStoredStructuralSchemaHash(
+    options.serverUrl,
+    options.adminSecret,
+    compiled.wasmSchema,
+  );
+  const { head } = await fetchPermissionsHead(options.serverUrl, {
+    adminSecret: options.adminSecret,
+  });
+
+  console.log(`Loaded structural schema from ${compiled.schemaFile}.`);
+  console.log(`Loaded current permissions from ${compiled.permissionsFile}.`);
+  console.log(`Local structural schema matches stored hash ${shortSchemaHash(localSchemaHash)}.`);
+  console.log(PERMISSIONS_LIFECYCLE_NOTE);
+
+  if (!head) {
+    console.log("Server has no published permissions head yet.");
+    console.log("Next push will publish version 1.");
+    return;
+  }
+
+  console.log(`Server permissions head is ${describePermissionsHead(head)}.`);
+  if (head.schemaHash === localSchemaHash) {
+    console.log("Current server permissions already target this structural schema.");
+  } else {
+    console.log(
+      `Current server permissions target ${shortSchemaHash(head.schemaHash)}; pushing will retarget the head to ${shortSchemaHash(localSchemaHash)}.`,
+    );
+  }
+  console.log(`Next push will require parent bundle ${head.bundleObjectId}.`);
+}
+
+export async function pushPermissions(options: PermissionsCommandOptions): Promise<void> {
+  const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
+  const localSchemaHash = await resolveStoredStructuralSchemaHash(
+    options.serverUrl,
+    options.adminSecret,
+    compiled.wasmSchema,
+  );
+  const { head: currentHead } = await fetchPermissionsHead(options.serverUrl, {
+    adminSecret: options.adminSecret,
+  });
+  const { head: publishedHead } = await publishStoredPermissions(options.serverUrl, {
+    adminSecret: options.adminSecret,
+    schemaHash: localSchemaHash,
+    permissions: compiled.permissions as Record<string, WireTablePolicies>,
+    expectedParentBundleObjectId: currentHead?.bundleObjectId ?? null,
+  });
+
+  console.log(`Loaded structural schema from ${compiled.schemaFile}.`);
+  console.log(`Loaded current permissions from ${compiled.permissionsFile}.`);
+  console.log(`Resolved structural schema hash ${shortSchemaHash(localSchemaHash)}.`);
+  if (currentHead) {
+    console.log(`Publishing from parent ${describePermissionsHead(currentHead)}.`);
+  } else {
+    console.log("Publishing first permissions head for this app.");
+  }
+
+  const nextHead = publishedHead ?? {
+    schemaHash: localSchemaHash,
+    version: currentHead ? currentHead.version + 1 : 1,
+    parentBundleObjectId: currentHead?.bundleObjectId ?? null,
+    bundleObjectId: currentHead?.bundleObjectId ?? "",
+  };
+  console.log(`Published permissions head ${describePermissionsHead(nextHead)}.`);
+  console.log(PERMISSIONS_LIFECYCLE_NOTE);
+}
+
 function isMainModule(): boolean {
   const entry = process.argv[1];
   if (!entry) {
@@ -797,11 +958,31 @@ if (isMainModule()) {
       console.error(err.message);
       process.exit(1);
     });
+  } else if (command === "permissions") {
+    const subcommand = process.argv[3] ?? "";
+    const options = resolvePermissionsOptions(process.argv.slice(4));
+    const task =
+      subcommand === "status"
+        ? permissionsStatus(options)
+        : subcommand === "push"
+          ? pushPermissions(options)
+          : Promise.reject(
+              new Error("Usage: node dist/cli.js permissions <status|push> [options]"),
+            );
+
+    task.catch((err) => {
+      console.error(err.message);
+      process.exit(1);
+    });
   } else {
     console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
     console.log("\nCommands:");
     console.log("  build                 Validate root schema.ts and optional permissions.ts");
     console.log("  schema export         Print the compiled structural schema as JSON");
+    console.log("  permissions status    Show the current server permissions head for this app");
+    console.log(
+      "  permissions push      Publish the current permissions.ts with head-parent checks",
+    );
     console.log(
       "  migrations create     Generate a typed structural migration stub from two known schema hashes",
     );
@@ -811,6 +992,10 @@ if (isMainModule()) {
     console.log("\nSchema export options:");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
     console.log("  --format json         Output the compiled schema as JSON");
+    console.log("\nPermissions options:");
+    console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
+    console.log("  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL)");
+    console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
     console.log("\nMigration options:");
     console.log("  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL)");
     console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");

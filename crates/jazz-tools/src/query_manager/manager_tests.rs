@@ -6495,6 +6495,74 @@ fn configure_legacy_client_with_current_permissions(qm: &mut QueryManager) {
     qm.set_authorization_schema(current_documents_permission_schema());
 }
 
+fn legacy_join_provenance_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+    );
+    schema.insert(
+        TableName::new("posts"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("owner_name", ColumnType::Text),
+            ColumnDescriptor::new("title", ColumnType::Text),
+        ])
+        .into(),
+    );
+    schema
+}
+
+fn current_join_provenance_permission_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+    );
+    schema.insert(
+        TableName::new("posts"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("owner_name", ColumnType::Text),
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("viewer_name", ColumnType::Text),
+            ]),
+            TablePolicies::new().with_select(PolicyExpr::eq_session(
+                "viewer_name",
+                vec!["user_id".into()],
+            )),
+        ),
+    );
+    schema
+}
+
+fn legacy_join_provenance_to_current_permissions_lens() -> crate::schema_manager::lens::Lens {
+    let legacy_schema = legacy_join_provenance_schema();
+    let current_schema = current_join_provenance_permission_schema();
+    let legacy_hash = crate::query_manager::types::SchemaHash::compute(&legacy_schema);
+    let current_hash = crate::query_manager::types::SchemaHash::compute(&current_schema);
+    let mut transform = crate::schema_manager::lens::LensTransform::new();
+    transform.push(
+        crate::schema_manager::lens::LensOp::AddColumn {
+            table: "posts".to_string(),
+            column: "viewer_name".to_string(),
+            column_type: ColumnType::Text,
+            default: Value::Text("bob".into()),
+        },
+        false,
+    );
+    crate::schema_manager::lens::Lens::new(legacy_hash, current_hash, transform)
+}
+
+fn configure_legacy_join_client_with_current_permissions(qm: &mut QueryManager) {
+    let legacy_schema = legacy_join_provenance_schema();
+    let legacy_hash = crate::query_manager::types::SchemaHash::compute(&legacy_schema);
+    let mut known_schemas = std::collections::HashMap::new();
+    known_schemas.insert(legacy_hash, legacy_schema);
+    qm.set_known_schemas(std::sync::Arc::new(known_schemas));
+    qm.register_lens(legacy_join_provenance_to_current_permissions_lens());
+    qm.set_authorization_schema(current_join_provenance_permission_schema());
+}
+
 #[test]
 fn policy_filters_select_results() {
     let sync_manager = SyncManager::new();
@@ -6848,6 +6916,57 @@ fn local_update_and_delete_use_current_permissions_after_lens_transform() {
         Some(&PolicySession::new("alice")),
     )
     .expect("alice delete should be allowed by transformed current permissions");
+}
+
+#[test]
+fn local_join_query_uses_current_permissions_for_joined_provenance_after_lens_transform() {
+    let sync_manager = SyncManager::new();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, legacy_join_provenance_schema());
+    configure_legacy_join_client_with_current_permissions(&mut qm);
+
+    qm.insert(&mut storage, "users", &[Value::Text("bob".into())])
+        .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Text("bob".into()),
+            Value::Text("Bob private post".into()),
+        ],
+    )
+    .unwrap();
+
+    let query = QueryBuilder::new("users")
+        .join("posts")
+        .on("users.name", "posts.owner_name")
+        .build();
+    let alice_sub = qm
+        .subscribe_with_session(query.clone(), Some(PolicySession::new("alice")), None)
+        .unwrap();
+    let bob_sub = qm
+        .subscribe_with_session(query, Some(PolicySession::new("bob")), None)
+        .unwrap();
+
+    qm.process(&mut storage);
+
+    assert!(
+        qm.get_subscription_results(alice_sub).is_empty(),
+        "Joined provenance rows should be filtered when the transformed current permissions deny them"
+    );
+
+    let bob_results = qm.get_subscription_results(bob_sub);
+    assert_eq!(
+        bob_results.len(),
+        1,
+        "Bob should see the joined row after provenance rows are transformed into the current auth schema"
+    );
+    assert!(
+        bob_results[0]
+            .1
+            .iter()
+            .any(|value| matches!(value, Value::Text(text) if text == "Bob private post")),
+        "Joined result should retain the post payload after current-permissions filtering"
+    );
 }
 
 #[test]

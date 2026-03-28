@@ -11,6 +11,18 @@ description: Current row-level auth rules, simple policies, combinators, and inh
 
 Jazz applies the latest published permissions even when data is being read through older schema versions. Older rows are transformed into the current permission schema for auth checks, then projected back into the caller's requested shape.
 
+## Publishing Permissions
+
+Validate the local files, inspect the current server head, then publish:
+
+```bash
+npx jazz-tools build
+npx jazz-tools permissions status
+npx jazz-tools permissions push
+```
+
+`permissions push` advances a single global permissions head. It fails loudly if the server head has moved since you last checked, so permission versions stay linear.
+
 ## Defining Permissions
 
 Define policies in a root `permissions.ts` next to `schema.ts`. This applies to every Jazz app, including Rust backends that consume the compiled schema via the CLI.
@@ -106,6 +118,8 @@ Use depth-bounded inherited access when foreign keys can form recursive chains.
 ## When Permissions Change
 
 Editing only `permissions.ts` updates the active auth rules. It does not require `migrations create` or `migrations push`.
+
+If you want to inspect the currently published auth bundle before changing it, run `npx jazz-tools permissions status`.
 
 Reach for migrations only when the structure in `schema.ts` changes and older/newer schema hashes need a reviewed compatibility edge.
 

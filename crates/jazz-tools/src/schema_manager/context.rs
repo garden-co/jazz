@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::object::BranchName;
+use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{ComposedBranchName, Schema, SchemaHash};
 
 use super::lens::Lens;
@@ -70,6 +70,11 @@ pub enum SchemaError {
         source: SchemaHash,
         target: SchemaHash,
     },
+    /// Publishing permissions used an outdated parent bundle.
+    StalePermissionsParent {
+        expected: Option<ObjectId>,
+        current: Option<ObjectId>,
+    },
 }
 
 impl std::fmt::Display for SchemaError {
@@ -100,6 +105,13 @@ impl std::fmt::Display for SchemaError {
                     "Lens not found: {} -> {}",
                     source.short(),
                     target.short()
+                )
+            }
+            SchemaError::StalePermissionsParent { expected, current } => {
+                write!(
+                    f,
+                    "stale permissions parent: expected {:?}, current {:?}",
+                    expected, current
                 )
             }
         }

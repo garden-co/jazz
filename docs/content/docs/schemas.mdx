@@ -60,7 +60,7 @@ The `type AppSchema = s.Schema<typeof schema>; export const app: s.App<AppSchema
 
 Most of the time, schema evolution starts with a normal edit to `schema.ts`. New writes use the new schema immediately.
 
-If you only changed `permissions.ts`, stop there. That updates the active permission bundle and does not require a migration.
+If you only changed `permissions.ts`, stop there structurally. That updates the active permission bundle and does not require a migration. Validate with `npx jazz-tools build`, inspect with `npx jazz-tools permissions status`, then publish with `npx jazz-tools permissions push`.
 
 When older rows are no longer reachable from the current schema graph, Jazz logs a warning with the exact hashes you need next. These warnings can appear in browser logs, backend logs, or be forwarded from upstream servers. A typical warning looks like this, wrapped for readability:
 

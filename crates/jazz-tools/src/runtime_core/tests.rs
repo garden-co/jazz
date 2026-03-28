@@ -1909,7 +1909,9 @@ fn test_publish_permissions_bundle_then_add_server_sends_head_and_bundle() {
             TableName::new("users"),
             TablePolicies::new().with_select(PolicyExpr::True),
         )]),
-    );
+        None,
+    )
+    .expect("publish permissions bundle");
 
     let server_id = ServerId::new();
     core.add_server(server_id);

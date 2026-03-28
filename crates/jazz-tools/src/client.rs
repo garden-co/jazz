@@ -756,13 +756,16 @@ mod tests {
         let lens_object_id = runtime.publish_lens(&lens).expect("persist learned lens");
 
         if publish_permissions {
-            runtime.publish_permissions_bundle(
-                learned_hash,
-                HashMap::from([(
-                    TableName::new("todos"),
-                    TablePolicies::new().with_select(PolicyExpr::True),
-                )]),
-            );
+            runtime
+                .publish_permissions_bundle(
+                    learned_hash,
+                    HashMap::from([(
+                        TableName::new("todos"),
+                        TablePolicies::new().with_select(PolicyExpr::True),
+                    )]),
+                    None,
+                )
+                .expect("seed permissions bundle");
         }
 
         let mut storage = runtime.into_storage();

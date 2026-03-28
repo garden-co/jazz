@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 
 use jazz_tools::middleware::AuthConfig;
 use jazz_tools::schema_manager::AppId;
-use jazz_tools::server::ServerBuilder;
+use jazz_tools::server::{CatalogueAuthorityMode, ServerBuilder};
 use tracing::info;
 
 /// Run the Jazz server.
@@ -14,6 +14,7 @@ pub async fn run(
     data_dir: &str,
     in_memory: bool,
     auth_config: AuthConfig,
+    catalogue_authority: CatalogueAuthorityMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id_str)?;
 
@@ -24,7 +25,9 @@ pub async fn run(
         info!("Data directory: {}", data_dir);
     }
 
-    let builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
+    let builder = ServerBuilder::new(app_id)
+        .with_auth_config(auth_config)
+        .with_catalogue_authority(catalogue_authority);
     let built = if in_memory {
         builder.with_in_memory_storage().build().await
     } else {
