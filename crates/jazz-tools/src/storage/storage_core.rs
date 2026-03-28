@@ -13,8 +13,7 @@ use super::key_codec::{
     ack_key, branch_manifest_key, branch_segment_key, catalogue_manifest_op_key,
     catalogue_manifest_op_prefix, commit_branch_key, index_entry_key, index_prefix,
     index_range_scan_bounds, index_value_prefix, obj_meta_key, parse_uuid_from_index_key,
-    prefix_batch_meta_key, prefix_batch_meta_prefix, prefix_leaf_batches_key,
-    table_prefix_batches_key,
+    prefix_batch_catalog_key, table_prefix_batches_key,
 };
 use super::{
     CatalogueManifest, CatalogueManifestOp, LoadedBranch, LoadedBranchTips, PrefixBatchUpdate,
@@ -37,6 +36,12 @@ struct PersistedBranchManifest {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedBranchSegment {
     commits: Vec<Commit>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedPrefixBatchCatalog {
+    batches: Vec<PrefixBatchMeta>,
+    leaf_batch_ords: Vec<u32>,
 }
 
 const MAX_COMMITS_PER_BRANCH_SEGMENT: usize = 32;
@@ -129,6 +134,43 @@ fn load_branch_segment(
     match get(&key)? {
         Some(data) => Ok(Some(decode_postcard(&data, "branch segment")?)),
         None => Ok(None),
+    }
+}
+
+impl PersistedPrefixBatchCatalog {
+    fn from_catalog(catalog: &PrefixBatchCatalog) -> Self {
+        Self {
+            batches: catalog.batch_metas().cloned().collect(),
+            leaf_batch_ords: catalog
+                .leaf_batch_ids()
+                .filter_map(|batch_id| catalog.batch_meta(&batch_id).map(|meta| meta.batch_ord))
+                .collect(),
+        }
+    }
+
+    fn into_catalog(self) -> PrefixBatchCatalog {
+        let mut batches = self.batches;
+        batches.sort_by_key(|meta| meta.batch_ord);
+
+        let mut catalog = PrefixBatchCatalog::default();
+        for meta in batches {
+            catalog.insert_batch_meta(meta);
+        }
+
+        let mut leaf_batch_ords = self.leaf_batch_ords;
+        leaf_batch_ords.sort_unstable();
+        leaf_batch_ords.dedup();
+        for batch_ord in leaf_batch_ords {
+            let Some(batch_id) = catalog
+                .batch_meta_by_ord(batch_ord)
+                .map(|meta| meta.batch_id)
+            else {
+                continue;
+            };
+            catalog.insert_leaf_batch(batch_id);
+        }
+
+        catalog
     }
 }
 
@@ -254,48 +296,28 @@ pub(super) fn load_prefix_batch_catalog_core(
     object_id: ObjectId,
     prefix: &str,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
 ) -> Result<Option<PrefixBatchCatalog>, StorageError> {
-    let leaf_key = prefix_leaf_batches_key(object_id, prefix);
-    let meta_prefix = prefix_batch_meta_prefix(object_id, prefix);
-
-    let leaf_batches: HashSet<BatchId> = match get(&leaf_key)? {
-        Some(data) => decode_json(&data, "prefix leaf batches")?,
-        None => HashSet::new(),
-    };
-    let entries = scan_prefix(&meta_prefix)?;
-    if leaf_batches.is_empty() && entries.is_empty() {
-        return Ok(None);
-    }
-
-    let mut metas = Vec::with_capacity(entries.len());
-    for (_key, data) in entries {
-        let meta: PrefixBatchMeta = decode_json(&data, "prefix batch meta")?;
-        metas.push(meta);
-    }
-    metas.sort_by_key(|meta| meta.batch_ord);
-
-    let mut catalog = PrefixBatchCatalog::default();
-    for meta in metas {
-        catalog.insert_batch_meta(meta);
-    }
-    for batch_id in leaf_batches {
-        catalog.insert_leaf_batch(batch_id);
-    }
-    Ok(Some(catalog))
-}
-
-fn load_prefix_batch_meta(
-    object_id: ObjectId,
-    prefix: &str,
-    batch_id: BatchId,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<PrefixBatchMeta>, StorageError> {
-    let key = prefix_batch_meta_key(object_id, prefix, batch_id);
+    let key = prefix_batch_catalog_key(object_id, prefix);
     match get(&key)? {
-        Some(data) => Ok(Some(decode_json(&data, "prefix batch meta")?)),
+        Some(data) => {
+            let persisted: PersistedPrefixBatchCatalog =
+                decode_postcard(&data, "prefix batch catalog")?;
+            Ok(Some(persisted.into_catalog()))
+        }
         None => Ok(None),
     }
+}
+
+fn persist_prefix_batch_catalog(
+    object_id: ObjectId,
+    prefix: &str,
+    catalog: &PrefixBatchCatalog,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let key = prefix_batch_catalog_key(object_id, prefix);
+    let persisted = PersistedPrefixBatchCatalog::from_catalog(catalog);
+    let data = encode_postcard(&persisted, "prefix batch catalog")?;
+    set(&key, &data)
 }
 
 pub(super) fn load_table_prefix_branches_core(
@@ -390,33 +412,23 @@ pub(super) fn append_commit_core(
     persist_branch_manifest(object_id, branch, &manifest, |key, value| set(key, value))?;
 
     if let Some(update) = prefix_batch_update {
+        let mut catalog =
+            load_prefix_batch_catalog_core(object_id, &update.prefix, |key| get(key))?
+                .unwrap_or_default();
+
         for parent_batch_id in &update.increment_parent_child_counts {
-            if let Some(mut parent_meta) =
-                load_prefix_batch_meta(object_id, &update.prefix, *parent_batch_id, |key| get(key))?
-            {
+            if let Some(parent_meta) = catalog.batch_meta_mut(parent_batch_id) {
                 parent_meta.child_count = parent_meta.child_count.saturating_add(1);
-                let parent_key = prefix_batch_meta_key(object_id, &update.prefix, *parent_batch_id);
-                let parent_json = encode_json(&parent_meta, "prefix batch meta")?;
-                set(&parent_key, &parent_json)?;
             }
         }
-
-        let leaf_key = prefix_leaf_batches_key(object_id, &update.prefix);
-        let mut leaf_batches: HashSet<BatchId> = match get(&leaf_key)? {
-            Some(data) => decode_json(&data, "prefix leaf batches")?,
-            None => HashSet::new(),
-        };
         for removed_batch in update.remove_leaf_batches {
-            leaf_batches.remove(&removed_batch);
+            catalog.remove_leaf_batch(&removed_batch);
         }
-        leaf_batches.insert(update.batch_meta.batch_id);
-        let leaf_json = encode_json(&leaf_batches, "prefix leaf batches")?;
-        set(&leaf_key, &leaf_json)?;
-
-        let batch_key =
-            prefix_batch_meta_key(object_id, &update.prefix, update.batch_meta.batch_id);
-        let batch_json = encode_json(&update.batch_meta, "prefix batch meta")?;
-        set(&batch_key, &batch_json)?;
+        catalog.insert_batch_meta(update.batch_meta.clone());
+        catalog.insert_leaf_batch(update.batch_meta.batch_id);
+        persist_prefix_batch_catalog(object_id, &update.prefix, &catalog, |key, value| {
+            set(key, value)
+        })?;
     }
 
     Ok(())

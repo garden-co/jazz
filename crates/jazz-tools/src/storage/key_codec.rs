@@ -2,7 +2,7 @@ use std::ops::Bound;
 
 use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::{BatchId, ComposedBranchName, QueryBranchRef, Value};
+use crate::query_manager::types::{ComposedBranchName, QueryBranchRef, Value};
 
 use super::{StorageError, encode_value};
 
@@ -190,29 +190,8 @@ pub(super) fn commit_branch_key(object_id: ObjectId, commit_id: CommitId) -> Str
     )
 }
 
-pub(super) fn prefix_leaf_batches_key(object_id: ObjectId, prefix: &str) -> String {
-    format!(
-        "obj:{}:prefix:{}:leaf-batches",
-        format_uuid(object_id),
-        prefix
-    )
-}
-
-pub(super) fn prefix_batch_meta_key(
-    object_id: ObjectId,
-    prefix: &str,
-    batch_id: BatchId,
-) -> String {
-    format!(
-        "obj:{}:prefix:{}:batch:{}",
-        format_uuid(object_id),
-        prefix,
-        batch_id.branch_segment()
-    )
-}
-
-pub(super) fn prefix_batch_meta_prefix(object_id: ObjectId, prefix: &str) -> String {
-    format!("obj:{}:prefix:{}:batch:", format_uuid(object_id), prefix)
+pub(super) fn prefix_batch_catalog_key(object_id: ObjectId, prefix: &str) -> String {
+    format!("obj:{}:prefix:{}:catalog", format_uuid(object_id), prefix)
 }
 
 pub(super) fn table_prefix_batches_key(table: &str, prefix: &str) -> String {

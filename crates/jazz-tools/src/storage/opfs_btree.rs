@@ -363,12 +363,7 @@ impl Storage for OpfsBTreeStorage {
         object_id: ObjectId,
         prefix: &str,
     ) -> Result<Option<PrefixBatchCatalog>, StorageError> {
-        load_prefix_batch_catalog_core(
-            object_id,
-            prefix,
-            |key| self.tree_read(key),
-            |key_prefix| self.tree_scan_prefix(key_prefix),
-        )
+        load_prefix_batch_catalog_core(object_id, prefix, |key| self.tree_read(key))
     }
 
     fn load_table_prefix_branches(
