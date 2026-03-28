@@ -153,7 +153,37 @@ impl QueryManager {
         branch_name: &BranchName,
     ) -> Option<(Arc<Schema>, crate::schema_manager::SchemaContext)> {
         if let Some(composed) = ComposedBranchName::parse(branch_name) {
-            return self.authorization_schema_for_context(&composed.env, &composed.user_branch);
+            if let Some(parts) =
+                self.authorization_schema_for_context(&composed.env, &composed.user_branch)
+            {
+                return Some(parts);
+            }
+
+            if self.authorization_schema_required {
+                return None;
+            }
+
+            let full_hash = self.find_schema_by_short_hash(&composed.schema_hash)?;
+            let target_schema = self.known_schemas.get(&full_hash)?.clone();
+            let mut schema_context = crate::schema_manager::SchemaContext::new(
+                target_schema.clone(),
+                &composed.env,
+                &composed.user_branch,
+            );
+
+            for lens in self.schema_context.lenses.values() {
+                schema_context.register_lens(lens.clone());
+            }
+
+            for (hash, known_schema) in self.known_schemas.iter() {
+                if *hash != full_hash {
+                    schema_context.add_pending_schema(known_schema.clone());
+                }
+            }
+
+            schema_context.try_activate_pending();
+
+            return Some((Arc::new(target_schema), schema_context));
         }
 
         if self.schema_context.is_initialized() {
@@ -169,6 +199,7 @@ impl QueryManager {
     }
 
     fn transform_content_to_authorization_schema(
+        &self,
         table: &str,
         content: &[u8],
         commit_id: CommitId,
@@ -182,6 +213,10 @@ impl QueryManager {
             .or_else(|| {
                 (branch_name.as_str() == auth_context.branch_name().as_str())
                     .then_some(auth_context.current_hash)
+            })
+            .or_else(|| {
+                ComposedBranchName::parse(&branch_name)
+                    .and_then(|composed| self.find_schema_by_short_hash(&composed.schema_hash))
             });
         let source_hash = match source_hash {
             Some(source_hash) => source_hash,
@@ -209,25 +244,28 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<LoadedRow> {
         let branches = vec![branch_name.as_str().to_string()];
-        let object = self
-            .sync_manager
-            .object_manager
-            .get_or_load(object_id, storage, &branches)?;
-        let table = object.metadata.get(MetadataKey::Table.as_str())?.clone();
-        let branch = object.branches.get(&branch_name)?;
-        let tip = branch
-            .tips
-            .iter()
-            .filter_map(|tip_id| branch.commits.get(tip_id).map(|commit| (*tip_id, commit)))
-            .max_by_key(|(_, commit)| commit.timestamp)?;
-        if tip.1.content.is_empty() {
-            return None;
-        }
+        let (table, tip_commit_id, tip_content) = {
+            let object = self
+                .sync_manager
+                .object_manager
+                .get_or_load(object_id, storage, &branches)?;
+            let table = object.metadata.get(MetadataKey::Table.as_str())?.clone();
+            let branch = object.branches.get(&branch_name)?;
+            let tip = branch
+                .tips
+                .iter()
+                .filter_map(|tip_id| branch.commits.get(tip_id).map(|commit| (*tip_id, commit)))
+                .max_by_key(|(_, commit)| commit.timestamp)?;
+            if tip.1.content.is_empty() {
+                return None;
+            }
+            Some((table, tip.0, tip.1.content.clone()))
+        }?;
 
-        let transformed = Self::transform_content_to_authorization_schema(
+        let transformed = self.transform_content_to_authorization_schema(
             &table,
-            &tip.1.content,
-            tip.0,
+            &tip_content,
+            tip_commit_id,
             branch_name,
             source_branch_schema_map,
             auth_context,
@@ -235,7 +273,7 @@ impl QueryManager {
 
         Some(LoadedRow::new(
             transformed,
-            tip.0,
+            tip_commit_id,
             [(object_id, branch_name)].into_iter().collect(),
         ))
     }
@@ -261,7 +299,7 @@ impl QueryManager {
         let Some(table_schema) = auth_schema.get(&table_name) else {
             return false;
         };
-        let Some(transformed) = Self::transform_content_to_authorization_schema(
+        let Some(transformed) = self.transform_content_to_authorization_schema(
             table_name.as_str(),
             content,
             CommitId([0; 32]),
@@ -379,6 +417,9 @@ impl QueryManager {
         let Some((auth_schema, auth_context)) =
             self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
         else {
+            if !self.authorization_schema_required {
+                return graph.current_result();
+            }
             return Vec::new();
         };
 
@@ -429,6 +470,9 @@ impl QueryManager {
         let Some((auth_schema, auth_context)) =
             self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
         else {
+            if !self.authorization_schema_required {
+                return graph.sync_scope_object_ids();
+            }
             return HashSet::new();
         };
 
@@ -704,6 +748,7 @@ impl QueryManager {
                 )
                 .is_none()
                 && self.schema.is_empty()
+                && self.authorization_schema_required
             {
                 deferred.push(sub);
                 continue;
@@ -1206,6 +1251,10 @@ impl QueryManager {
         let (auth_schema, auth_context) = match self.authorization_schema_for_branch(&branch_name) {
             Some(parts) => parts,
             None => {
+                if !self.authorization_schema_required {
+                    self.sync_manager.approve_permission_check(storage, check);
+                    return;
+                }
                 let wait_started_at = check
                     .schema_wait_started_at
                     .get_or_insert_with(Instant::now);

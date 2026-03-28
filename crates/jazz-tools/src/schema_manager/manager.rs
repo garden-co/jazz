@@ -1010,6 +1010,7 @@ impl SchemaManager {
             parent_bundle_object_id,
             bundle_object_id,
         };
+        self.query_manager.require_authorization_schema();
         if let Some(current_head) = self.current_permissions_head
             && current_head.version > head.version
         {
@@ -1060,6 +1061,7 @@ impl SchemaManager {
             parent_bundle_object_id: None,
             bundle_object_id: object_id,
         };
+        self.query_manager.require_authorization_schema();
         self.current_permissions_head = Some(head);
         if self.apply_permissions_head(head) {
             self.pending_permissions_head = None;

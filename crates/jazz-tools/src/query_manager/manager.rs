@@ -340,6 +340,7 @@ pub struct QueryManager {
     pub(super) sync_manager: SyncManager,
     pub(super) schema: Arc<Schema>,
     pub(super) authorization_schema: Option<Arc<Schema>>,
+    pub(super) authorization_schema_required: bool,
 
     /// Pending catalogue updates (schemas/lenses received via sync).
     /// SchemaManager should call take_pending_catalogue_updates() to process these.
@@ -462,6 +463,7 @@ impl QueryManager {
             sync_manager,
             schema: Arc::new(Schema::new()),
             authorization_schema: None,
+            authorization_schema_required: false,
             pending_catalogue_updates: Vec::new(),
             subscriptions: HashMap::new(),
             next_subscription_id: 0,
@@ -485,6 +487,7 @@ impl QueryManager {
             .set_current(schema.clone(), env, user_branch);
         self.schema = Arc::new(schema.clone());
         self.authorization_schema = Some(Arc::new(schema.clone()));
+        self.authorization_schema_required = true;
 
         // Update branch -> schema hash map
         let branch = self.schema_context.branch_name();
@@ -496,7 +499,12 @@ impl QueryManager {
 
     pub fn set_authorization_schema(&mut self, schema: Schema) {
         self.authorization_schema = Some(Arc::new(schema));
+        self.authorization_schema_required = true;
         self.mark_subscriptions_for_recompile();
+    }
+
+    pub fn require_authorization_schema(&mut self) {
+        self.authorization_schema_required = true;
     }
 
     /// Add a live schema (one we can read from but don't write to).

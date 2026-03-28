@@ -168,17 +168,18 @@ fn decode_table_entry_with_version(
 ) -> Result<(TableName, TableSchema), CatalogueEncodingError> {
     let name = read_string(data, offset, "table_name")?;
     let descriptor = decode_row_descriptor_with_version(data, offset, version)?;
-    let policies = if version.has_table_policies() {
-        decode_table_policies(data, offset)?
-    } else {
-        TablePolicies::default()
-    };
+    if version.has_table_policies() {
+        // Legacy schema versions encoded policies inline, but structural schema
+        // decode intentionally drops them now that permissions are catalogued
+        // separately.
+        decode_table_policies(data, offset)?;
+    }
 
     Ok((
         TableName::new(name),
         TableSchema {
             columns: descriptor,
-            policies,
+            policies: TablePolicies::default(),
         },
     ))
 }
