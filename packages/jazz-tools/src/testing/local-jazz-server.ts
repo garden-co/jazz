@@ -46,6 +46,8 @@ export interface LocalJazzServerHandle {
   url: string;
   child: ChildProcess;
   dataDir: string;
+  adminSecret?: string;
+  backendSecret?: string;
   stop: () => Promise<void>;
 }
 
@@ -352,6 +354,8 @@ export async function startLocalJazzServer(
     url: `http://127.0.0.1:${port}`,
     child,
     dataDir,
+    adminSecret: options.adminSecret,
+    backendSecret: options.backendSecret,
     stop,
   };
 }

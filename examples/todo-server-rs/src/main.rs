@@ -32,7 +32,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use axum::Router;
-use jazz_tools::{AppContext, AppId, JazzClient, Schema};
+use jazz_tools::{AppContext, AppId, ClientStorage, JazzClient, Schema};
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -108,6 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         schema,
         server_url,
         data_dir: PathBuf::from(data_dir),
+        storage: ClientStorage::Fjall,
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,

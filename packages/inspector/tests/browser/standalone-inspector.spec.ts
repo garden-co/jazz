@@ -17,6 +17,19 @@ function storedConfig() {
 }
 
 test.describe("connection page", () => {
+  test("prefills connection form from hash fragment", async ({ page }) => {
+    const fragment = new URLSearchParams({
+      url: SERVER_URL,
+      appId: APP_ID,
+      adminSecret: ADMIN_SECRET,
+    }).toString();
+    await page.goto(`/#${fragment}`);
+
+    await expect(page.getByLabel("Server URL")).toHaveValue(SERVER_URL);
+    await expect(page.getByLabel("App ID")).toHaveValue(APP_ID);
+    await expect(page.getByLabel("Admin secret")).toHaveValue(ADMIN_SECRET);
+  });
+
   test("connects to server, shows schema selection and loads data explorer", async ({ page }) => {
     await page.goto("/");
     await page.getByLabel("Server URL").fill(SERVER_URL);

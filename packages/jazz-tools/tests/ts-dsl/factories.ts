@@ -19,7 +19,7 @@ export function insertTodo(db: Db, data: Partial<Todo>): Todo {
     done: data.done ?? false,
     tags: data.tags ?? [],
     projectId: data.projectId ?? insertProject(db).id,
-    ownerId: data.ownerId ?? undefined,
+    ownerId: data.ownerId,
     assigneesIds: data.assigneesIds ?? [],
   });
 }

@@ -731,10 +731,10 @@ describe("NAPI integration", () => {
       { timeout: 15_000 },
     );
 
-    const insertedRow = runtime.insert("todos", [
-      { type: "Text", value: "client-synced-item" },
-      { type: "Boolean", value: false },
-    ]);
+    const insertedRow = runtime.insert("todos", {
+      title: { type: "Text", value: "client-synced-item" },
+      done: { type: "Boolean", value: false },
+    });
 
     await vi.waitFor(
       () => {

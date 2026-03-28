@@ -54,6 +54,45 @@ The `type AppSchema = s.Schema<typeof schema>; export const app: s.App<AppSchema
 
 <AvailableColumnTypes />
 
+## Schema Defaults
+
+You can declare default values directly in the schema definition with `.default(...)`.
+
+```ts
+import { schema as s } from "jazz-tools";
+
+const schema = {
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean().default(false),
+    tags: s.array(s.string()).default([]),
+    ownerId: s.ref("users").optional().default(null),
+  }),
+};
+```
+
+Schema defaults are used in two places:
+
+- For inserts, when a caller omits a field.
+- In auto-generated lens defaults, when a column is added or removed across schema versions.
+
+### Insert behavior
+
+When you use insert new values:
+
+- Omitted fields use the schema default if present.
+- Fields explicitly set to `undefined` are treated the same as omitted.
+- `null` is only allowed for nullable columns, and it is not replaced by the default value.
+
+That means schema defaults affect future inserts, not reads of already-stored rows.
+
+### Schema evolution behavior
+
+Schema defaults also feed Jazz's auto-generated lenses:
+
+- When a column is added across schema versions, Jazz uses the column's default for new rows that predate the new column.
+- When a column is removed across schema versions, Jazz uses the column's default when auto-generating the reverse/default lens behavior for older schemas.
+
 ## Workflow and Schema Evolution
 
 ### Edit `schema.ts` during development
@@ -128,6 +167,8 @@ Migration files live in `migrations/` and are always TypeScript, even for Rust a
 >
   ../examples/docs/todo-server-ts/migrations/20260318-drop-legacy-priority-311995e9a178-73b65d082ab8.ts
 </include>
+
+Backwards defaults define what older-schema clients see for fields dropped in newer schemas. When new clients write rows without that field, the backward lens supplies the configured default to old clients. If the lens is auto-generated, Jazz first looks for schema defaults on the column definition before falling back to heuristic defaults.
 
 ## Permissions
 

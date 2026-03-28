@@ -5,8 +5,8 @@
 //!
 //! # Heuristics
 //!
-//! - New column in new schema → `AddColumn` with `DEFAULT NULL`
-//! - Missing column in new schema → `RemoveColumn`
+//! - New column in new schema → `AddColumn` with schema default when present (otherwise `NULL`)
+//! - Missing column in new schema → `RemoveColumn` with schema default when present (otherwise `NULL`)
 //! - Table added → `AddTable`
 //! - Table removed → `RemoveTable`
 //! - Column type change → Marked as ambiguity (requires manual review)
@@ -191,7 +191,10 @@ fn diff_table(
             }
 
             let new_col = new_cols[*new_col_name];
-            if old_col.column_type == new_col.column_type {
+            if old_col.column_type == new_col.column_type
+                && old_col.nullable == new_col.nullable
+                && old_col.references == new_col.references
+            {
                 // Possible rename - emit as draft
                 transform.push(
                     LensOp::RenameColumn {
@@ -226,7 +229,7 @@ fn diff_table(
                 table: table_name.to_string(),
                 column: old_col_name.to_string(),
                 column_type: old_col.column_type.clone(),
-                default: default_for_type(&old_col.column_type),
+                default: lens_default_for_column(old_col),
             },
             false,
         );
@@ -238,20 +241,32 @@ fn diff_table(
             continue;
         }
         let new_col = new_cols[*new_col_name];
+        let default = lens_default_for_column(new_col);
         transform.push(
             LensOp::AddColumn {
                 table: table_name.to_string(),
                 column: new_col_name.to_string(),
                 column_type: new_col.column_type.clone(),
-                default: default_for_type(&new_col.column_type),
+                default: default.clone(),
             },
-            false,
+            needs_default_review(&default, new_col.nullable),
         );
     }
 }
 
-/// Get a reasonable default value for a column type.
-fn default_for_type(ct: &ColumnType) -> Value {
+/// Prefer an explicit schema default, then fall back to a heuristic.
+fn lens_default_for_column(col: &crate::query_manager::types::ColumnDescriptor) -> Value {
+    col.default
+        .clone()
+        .unwrap_or_else(|| heuristic_default_for_type(&col.column_type, col.nullable))
+}
+
+/// Get a reasonable heuristic default value for a column type.
+fn heuristic_default_for_type(ct: &ColumnType, nullable: bool) -> Value {
+    if nullable {
+        return Value::Null;
+    }
+
     match ct {
         ColumnType::Integer => Value::Integer(0),
         ColumnType::BigInt => Value::BigInt(0),
@@ -272,10 +287,20 @@ fn default_for_type(ct: &ColumnType) -> Value {
     }
 }
 
+/// Check if a default value needs human review.
+fn needs_default_review(value: &Value, nullable: bool) -> bool {
+    // Null for non-nullable columns needs review
+    // Null for nullable columns is fine (it's a valid default)
+    matches!(value, Value::Null) && !nullable
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query_manager::types::{ColumnDescriptor, RowDescriptor, TableName, TableSchema};
+    use crate::object::ObjectId;
+    use crate::query_manager::types::{
+        ColumnDescriptor, RowDescriptor, SchemaBuilder, TableName, TableSchema,
+    };
 
     fn make_schema(tables: Vec<(&str, Vec<(&str, ColumnType)>)>) -> Schema {
         tables
@@ -552,6 +577,81 @@ mod tests {
                 _ => panic!("Expected AddColumn"),
             }
         }
+    }
+
+    #[test]
+    fn diff_add_column_prefers_explicit_schema_default() {
+        let default_org_id = ObjectId::new();
+        let old = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+        let new = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column_with_default("org_id", ColumnType::Uuid, Value::Uuid(default_org_id)),
+            )
+            .build();
+
+        let result = diff_schemas(&old, &new);
+
+        match &result.transform.ops[0] {
+            LensOp::AddColumn { default, .. } => {
+                assert_eq!(*default, Value::Uuid(default_org_id));
+            }
+            _ => panic!("Expected AddColumn"),
+        }
+        assert!(
+            !result.transform.has_drafts(),
+            "an explicit schema default should avoid the UUID draft fallback"
+        );
+    }
+
+    #[test]
+    fn diff_remove_column_prefers_explicit_schema_default() {
+        let old = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column_with_default("role", ColumnType::Text, Value::Text("member".into())),
+            )
+            .build();
+        let new = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+
+        let result = diff_schemas(&old, &new);
+
+        match &result.transform.ops[0] {
+            LensOp::RemoveColumn { default, .. } => {
+                assert_eq!(*default, Value::Text("member".into()));
+            }
+            _ => panic!("Expected RemoveColumn"),
+        }
+    }
+
+    #[test]
+    fn diff_add_non_nullable_uuid_is_draft_without_explicit_default() {
+        let old = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+        let new = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("org_id", ColumnType::Uuid),
+            )
+            .build();
+
+        let result = diff_schemas(&old, &new);
+
+        match &result.transform.ops[0] {
+            LensOp::AddColumn { default, .. } => {
+                assert_eq!(*default, Value::Null);
+            }
+            _ => panic!("Expected AddColumn"),
+        }
+        assert!(result.transform.has_drafts());
     }
 
     #[test]

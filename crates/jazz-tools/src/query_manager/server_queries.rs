@@ -25,14 +25,21 @@ enum WriteSchemaResolution {
     Unresolved,
 }
 
+pub(super) struct ResolvedSchemaRow {
+    pub branch_name: BranchName,
+    pub commit_id: CommitId,
+    pub content: Vec<u8>,
+    pub is_soft_deleted: bool,
+}
+
 const SCHEMA_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
 
-struct RowTransformContext<'a> {
-    table: &'a str,
-    branch_schema_map:
+pub(super) struct RowTransformContext<'a> {
+    pub(super) table: &'a str,
+    pub(super) branch_schema_map:
         &'a std::collections::HashMap<String, crate::query_manager::types::SchemaHash>,
-    schema_context: &'a crate::schema_manager::SchemaContext,
-    schema_warnings: &'a mut SchemaWarningAccumulator,
+    pub(super) schema_context: &'a crate::schema_manager::SchemaContext,
+    pub(super) schema_warnings: &'a mut SchemaWarningAccumulator,
 }
 
 pub(crate) struct AuthorizationPolicyRequest<'a> {
@@ -499,13 +506,72 @@ impl QueryManager {
         normalized
     }
 
-    fn load_row_with_schema_transform(
+    pub(super) fn resolve_latest_row_with_schema_transform(
+        id: ObjectId,
+        obj: &crate::object::Object,
+        branches: &[String],
+        context: &mut RowTransformContext<'_>,
+    ) -> Option<ResolvedSchemaRow> {
+        let mut best: Option<(u64, CommitId, Vec<u8>, BranchName, bool)> = None;
+
+        for branch_name in branches {
+            let branch_name = BranchName::new(branch_name);
+            let Some(branch) = obj.branches.get(&branch_name) else {
+                continue;
+            };
+            for &tip_id in &branch.tips {
+                let Some(commit) = branch.commits.get(&tip_id) else {
+                    continue;
+                };
+                let is_soft_deleted = commit.is_soft_deleted();
+                match &best {
+                    None => {
+                        best = Some((
+                            commit.timestamp,
+                            tip_id,
+                            commit.content.clone(),
+                            branch_name,
+                            is_soft_deleted,
+                        ));
+                    }
+                    Some((best_ts, best_id, _, _, _))
+                        if (commit.timestamp, tip_id) > (*best_ts, *best_id) =>
+                    {
+                        best = Some((
+                            commit.timestamp,
+                            tip_id,
+                            commit.content.clone(),
+                            branch_name,
+                            is_soft_deleted,
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let (_, commit_id, content, branch_name, is_soft_deleted) = best?;
+        if content.is_empty() {
+            return None;
+        }
+        Self::transform_row_with_schema(
+            id,
+            content,
+            commit_id,
+            branch_name,
+            is_soft_deleted,
+            context,
+        )
+    }
+
+    pub(super) fn transform_row_with_schema(
         id: ObjectId,
         content: Vec<u8>,
         commit_id: CommitId,
         branch_name: BranchName,
+        is_soft_deleted: bool,
         context: &mut RowTransformContext<'_>,
-    ) -> Option<LoadedRow> {
+    ) -> Option<ResolvedSchemaRow> {
         let source_hash = context.branch_schema_map.get(branch_name.as_str()).copied();
 
         if let Some(source_hash) = source_hash
@@ -514,11 +580,12 @@ impl QueryManager {
             let transformer = LensTransformer::new(context.schema_context, context.table);
             match transformer.transform(&content, commit_id, source_hash) {
                 Ok(result) => {
-                    return Some(LoadedRow::new(
-                        result.data,
+                    return Some(ResolvedSchemaRow {
+                        branch_name,
                         commit_id,
-                        [(id, branch_name)].into_iter().collect(),
-                    ));
+                        content: result.data,
+                        is_soft_deleted,
+                    });
                 }
                 Err(err) => {
                     context.schema_warnings.record(
@@ -540,11 +607,22 @@ impl QueryManager {
             }
         }
 
-        Some(LoadedRow::new(
-            content,
+        Some(ResolvedSchemaRow {
+            branch_name,
             commit_id,
-            [(id, branch_name)].into_iter().collect(),
-        ))
+            content,
+            is_soft_deleted,
+        })
+    }
+
+    fn branch_has_live_tip(branch: &crate::object::Branch) -> bool {
+        branch.tips.iter().any(|tip_id| {
+            branch
+                .commits
+                .get(tip_id)
+                .map(|commit| !commit.content.is_empty())
+                .unwrap_or(false)
+        })
     }
 
     fn should_sync_policy_context_rows(&self, client_id: ClientId) -> bool {
@@ -592,14 +670,7 @@ impl QueryManager {
                 let Some(branch) = object.branches.get(branch_name) else {
                     continue;
                 };
-                let has_live_tip = branch.tips.iter().any(|tip_id| {
-                    branch
-                        .commits
-                        .get(tip_id)
-                        .map(|commit| !commit.content.is_empty())
-                        .unwrap_or(false)
-                });
-                if has_live_tip {
+                if Self::branch_has_live_tip(branch) {
                     scope.insert((*object_id, *branch_name));
                 }
             }
@@ -687,6 +758,7 @@ impl QueryManager {
                 Self::resolved_server_query_branches(&query_for_compile, &subscription_context);
             let table = sub.query.table.as_str().to_string();
             let mut schema_warnings = SchemaWarningAccumulator::default();
+            let include_deleted = sub.query.include_deleted;
             let mut transform_context = RowTransformContext {
                 table: &table,
                 branch_schema_map: &branch_schema_map,
@@ -697,44 +769,20 @@ impl QueryManager {
                 let om = &mut self.sync_manager.object_manager;
                 let row_loader = |id: ObjectId| -> Option<LoadedRow> {
                     let obj = om.get_or_load(id, storage_ref, &branches)?;
-                    let mut best: Option<(u64, Vec<u8>, CommitId, BranchName)> = None;
-                    for branch_name in &branches {
-                        let branch_name = BranchName::new(branch_name);
-                        if let Some(branch) = obj.branches.get(&branch_name) {
-                            for &tip_id in &branch.tips {
-                                if let Some(commit) = branch.commits.get(&tip_id) {
-                                    match &best {
-                                        None => {
-                                            best = Some((
-                                                commit.timestamp,
-                                                commit.content.clone(),
-                                                tip_id,
-                                                branch_name,
-                                            ));
-                                        }
-                                        Some((best_ts, _, _, _)) if commit.timestamp > *best_ts => {
-                                            best = Some((
-                                                commit.timestamp,
-                                                commit.content.clone(),
-                                                tip_id,
-                                                branch_name,
-                                            ));
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let (_, content, commit_id, branch_name) =
-                        best.filter(|(_, content, _, _)| !content.is_empty())?;
-                    Self::load_row_with_schema_transform(
+                    let resolved = Self::resolve_latest_row_with_schema_transform(
                         id,
-                        content,
-                        commit_id,
-                        branch_name,
+                        obj,
+                        &branches,
                         &mut transform_context,
-                    )
+                    )?;
+                    if resolved.is_soft_deleted && !include_deleted {
+                        return None;
+                    }
+                    Some(LoadedRow::new(
+                        resolved.content,
+                        resolved.commit_id,
+                        [(id, resolved.branch_name)].into_iter().collect(),
+                    ))
                 };
 
                 let _delta = graph.settle(storage_ref, row_loader);
@@ -884,6 +932,7 @@ impl QueryManager {
             };
             let branches = &sub.branches;
             let table = sub.query.table.as_str().to_string();
+            let include_deleted = sub.query.include_deleted;
             let branch_schema_map = Self::branch_schema_map_for_context(&sub.schema_context);
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let mut transform_context = RowTransformContext {
@@ -899,46 +948,20 @@ impl QueryManager {
                     let om = &mut self.sync_manager.object_manager;
                     let row_loader = |id: ObjectId| -> Option<LoadedRow> {
                         let obj = om.get_or_load(id, storage, branches)?;
-                        let mut best: Option<(u64, Vec<u8>, CommitId, BranchName)> = None;
-                        for branch_name in branches {
-                            let branch_name = BranchName::new(branch_name);
-                            if let Some(branch) = obj.branches.get(&branch_name) {
-                                for &tip_id in &branch.tips {
-                                    if let Some(commit) = branch.commits.get(&tip_id) {
-                                        match &best {
-                                            None => {
-                                                best = Some((
-                                                    commit.timestamp,
-                                                    commit.content.clone(),
-                                                    tip_id,
-                                                    branch_name,
-                                                ));
-                                            }
-                                            Some((best_ts, _, _, _))
-                                                if commit.timestamp > *best_ts =>
-                                            {
-                                                best = Some((
-                                                    commit.timestamp,
-                                                    commit.content.clone(),
-                                                    tip_id,
-                                                    branch_name,
-                                                ));
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        let (_, content, commit_id, branch_name) =
-                            best.filter(|(_, content, _, _)| !content.is_empty())?;
-                        Self::load_row_with_schema_transform(
+                        let resolved = Self::resolve_latest_row_with_schema_transform(
                             id,
-                            content,
-                            commit_id,
-                            branch_name,
+                            obj,
+                            branches,
                             &mut transform_context,
-                        )
+                        )?;
+                        if resolved.is_soft_deleted && !include_deleted {
+                            return None;
+                        }
+                        Some(LoadedRow::new(
+                            resolved.content,
+                            resolved.commit_id,
+                            [(id, resolved.branch_name)].into_iter().collect(),
+                        ))
                     };
 
                     let _delta = sub.graph.settle(storage, row_loader);

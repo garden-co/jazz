@@ -1,8 +1,9 @@
-#![cfg(feature = "test-utils")]
+#![cfg(feature = "test")]
 
 mod support;
 
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz_tools::server::TestingServer;
@@ -34,6 +35,108 @@ async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
     .await;
 }
 
+/// Verifies that a fresh client resolves the latest state for a single object
+/// after a long chain of overwrites has already compacted through the server.
+///
+/// Alice creates one todo, updates its `title` 100 times, and waits until the
+/// final title is Edge-settled. Bob then connects from a fresh local state and
+/// queries the table. Bob must observe the final title rather than an earlier
+/// revision from the object's history.
+///
+/// ```text
+/// alice ──create + title update ×100──► server
+///                                          │
+///                          bob connects fresh and queries
+///                                          │
+///                                          └──► latest title only
+/// ```
+#[tokio::test]
+async fn fresh_client_resolves_object_with_deep_update_history() {
+    const DEEP_HISTORY_UPDATES: usize = 100;
+
+    let server = TestingServer::start().await;
+    let schema = test_schema();
+    let writer =
+        JazzClient::connect(server.make_client_context_for_user(schema.clone(), "alice-history"))
+            .await
+            .expect("connect history writer");
+
+    wait_for_edge_query_ready(&writer, Duration::from_secs(30)).await;
+
+    let (todo_id, _) = writer
+        .create(
+            "todos",
+            HashMap::from([
+                ("title".to_string(), Value::Text("revision-000".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
+        )
+        .await
+        .expect("create deep-history todo");
+
+    let final_title = format!("revision-{DEEP_HISTORY_UPDATES:03}");
+    for revision in 1..=DEEP_HISTORY_UPDATES {
+        writer
+            .update(
+                todo_id,
+                vec![(
+                    "title".to_string(),
+                    Value::Text(format!("revision-{revision:03}")),
+                )],
+            )
+            .await
+            .expect("update deep-history todo");
+    }
+
+    let writer_rows = wait_for_query(
+        &writer,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        format!("writer sees final title {final_title}"),
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == todo_id
+                && rows[0].1.first() == Some(&Value::Text(final_title.clone())))
+            .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(writer_rows.len(), 1);
+    assert_eq!(writer_rows[0].1[0], Value::Text(final_title.clone()));
+
+    let fresh_client =
+        JazzClient::connect(server.make_client_context_for_user(schema, "bob-fresh-history"))
+            .await
+            .expect("connect fresh history reader");
+    wait_for_edge_query_ready(&fresh_client, Duration::from_secs(30)).await;
+
+    let fresh_rows = wait_for_query(
+        &fresh_client,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        format!("fresh client sees final title {final_title}"),
+        |rows| {
+            (rows.len() == 1
+                && rows[0].0 == todo_id
+                && rows[0].1.first() == Some(&Value::Text(final_title.clone())))
+            .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(fresh_rows.len(), 1);
+    assert_eq!(fresh_rows[0].0, todo_id);
+    assert_eq!(fresh_rows[0].1[0], Value::Text(final_title));
+
+    writer.shutdown().await.expect("shutdown history writer");
+    fresh_client
+        .shutdown()
+        .await
+        .expect("shutdown fresh history reader");
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn jazz_tools_cli_two_clients_sync_values() {
     let server = TestingServer::start().await;
@@ -50,10 +153,13 @@ async fn jazz_tools_cli_two_clients_sync_values() {
     client_a
         .create(
             "todos",
-            vec![
-                Value::Text("shared-through-server".to_string()),
-                Value::Boolean(false),
-            ],
+            HashMap::from([
+                (
+                    "title".to_string(),
+                    Value::Text("shared-through-server".to_string()),
+                ),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("create from client a");
@@ -125,10 +231,13 @@ async fn jazz_tools_cli_two_different_users_sync_values() {
     client_alice
         .create(
             "todos",
-            vec![
-                Value::Text("shared-across-users".to_string()),
-                Value::Boolean(false),
-            ],
+            HashMap::from([
+                (
+                    "title".to_string(),
+                    Value::Text("shared-across-users".to_string()),
+                ),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("alice creates todo");
@@ -173,7 +282,10 @@ async fn jazz_tools_cli_two_different_users_sync_values() {
     client_bob
         .create(
             "todos",
-            vec![Value::Text("from-bob".to_string()), Value::Boolean(false)],
+            HashMap::from([
+                ("title".to_string(), Value::Text("from-bob".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
         )
         .await
         .expect("bob creates todo");

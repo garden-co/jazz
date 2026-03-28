@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { deriveLocalPrincipalId } from "../../src/runtime/client-session.js";
-import { ADMIN_SECRET, APP_ID, JWT_SECRET, TEST_PORT } from "./test-constants.js";
+import { getTestingServerInfo, getTestingServerJwtForUser } from "./testing-server.js";
 
 import schemaJson from "../../../../benchmarks/realistic/schema/project_board.schema.json";
 import profileJson from "../../../../benchmarks/realistic/profiles/s.json";
@@ -350,9 +350,10 @@ function hash32(input: string): number {
   return hash >>> 0;
 }
 
-function benchmarkAppId(label: string): string {
+async function benchmarkAppId(label: string): Promise<string> {
+  const { appId } = await getTestingServerInfo();
   const segments = ["a", "b", "c", "d"].map((suffix) =>
-    hash32(`${APP_ID}|${browserRunId}|${label}|${suffix}`).toString(16).padStart(8, "0"),
+    hash32(`${appId}|${browserRunId}|${label}|${suffix}`).toString(16).padStart(8, "0"),
   );
   const s0 = segments[0];
   const s1 = segments[1];
@@ -478,16 +479,16 @@ async function createServerDb(
     localAuthToken?: string;
   } = {},
 ): Promise<Db> {
-  const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+  const { serverUrl, adminSecret } = await getTestingServerInfo();
   const config: Parameters<typeof createDb>[0] = {
     appId,
     dbName,
     serverUrl,
-    adminSecret: options.includeAdminSecret === false ? undefined : ADMIN_SECRET,
+    adminSecret: options.includeAdminSecret === false ? undefined : adminSecret,
     logLevel: "warn",
   };
   if (options.includeJwt !== false) {
-    config.jwtToken = await signJwt(sub, JWT_SECRET, claims);
+    config.jwtToken = await getTestingServerJwtForUser(sub, claims);
   }
   if (options.localAuthMode) {
     config.localAuthMode = options.localAuthMode;
@@ -767,9 +768,9 @@ async function runW1(db: Db, config: ProfileConfig, state: SeedState): Promise<S
 async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("W3 start");
   const dbName = uniqueDbName("w3");
-  const appId = benchmarkAppId("w3");
-  const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
-  const token = await signJwt("realistic-user", JWT_SECRET);
+  const appId = await benchmarkAppId("w3");
+  const { serverUrl, adminSecret } = await getTestingServerInfo();
+  const token = await getTestingServerJwtForUser("realistic-user");
   const rng = new Lcg(w3.seed ^ config.seed);
   const offlineWrites = Math.min(w3.offline_write_count, 20);
   let offlineDb: Db | null = null;
@@ -805,7 +806,7 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
       dbName,
       serverUrl,
       jwtToken: token,
-      adminSecret: ADMIN_SECRET,
+      adminSecret,
       logLevel: "warn",
     });
 
@@ -874,7 +875,7 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
 
 async function runW4(config: ProfileConfig): Promise<ScenarioResult> {
   const dbName = uniqueDbName("w4");
-  const appId = benchmarkAppId("w4");
+  const appId = await benchmarkAppId("w4");
   const cycles = Math.min(w4.reopen_cycles, CI_BROWSER_LIMITS.w4Cycles);
   progressLog(`W4 start cycles=${cycles}`);
   let db: Db | null = null;
@@ -936,7 +937,7 @@ async function runW4(config: ProfileConfig): Promise<ScenarioResult> {
 
 async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B1 start");
-  const appId = benchmarkAppId("b1");
+  const appId = await benchmarkAppId("b1");
   const dbName = uniqueDbName("b1");
   const rng = new Lcg(b1.seed ^ config.seed);
   const insertCount = Math.min(b1.insert_count, CI_BROWSER_LIMITS.b1InsertCount);
@@ -1030,7 +1031,7 @@ async function runB1(config: ProfileConfig): Promise<ScenarioResult> {
 
 async function runB2(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B2 start");
-  const appId = benchmarkAppId("b2");
+  const appId = await benchmarkAppId("b2");
   const dbName = uniqueDbName("b2");
   const rng = new Lcg(b2.seed ^ config.seed);
   const requestCount = Math.min(b2.request_count, CI_BROWSER_LIMITS.b2RequestCount);
@@ -1131,7 +1132,7 @@ async function runB2(config: ProfileConfig): Promise<ScenarioResult> {
 }
 
 async function runB3(config: ProfileConfig): Promise<ScenarioResult> {
-  const appId = benchmarkAppId("b3");
+  const appId = await benchmarkAppId("b3");
   const dbName = uniqueDbName("b3");
   const cycles = Math.min(b3.reopen_cycles, CI_BROWSER_LIMITS.b3Cycles);
   const largeConfig = scaledLargeProfile(
@@ -1209,7 +1210,7 @@ async function runB3(config: ProfileConfig): Promise<ScenarioResult> {
 
 async function runB4(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B4 start");
-  const appId = benchmarkAppId("b4");
+  const appId = await benchmarkAppId("b4");
   const dbName = uniqueDbName("b4");
   const subscriberCounts = b4.subscriber_counts.map((x) =>
     Math.max(1, Math.min(CI_BROWSER_LIMITS.b4MaxSubscribers, x)),
@@ -1673,7 +1674,7 @@ async function seedPermissionDataset(
 
 async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B5 start");
-  const appId = benchmarkAppId("b5");
+  const appId = await benchmarkAppId("b5");
   const dbPrefix = uniqueDbName("b5");
   const rng = new Lcg(b5.seed ^ config.seed);
   const permissionSchema = permissionRecursiveSchema(Math.max(1, b5.recursive_depth));
@@ -2034,7 +2035,7 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
 
 async function runB6(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("B6 start");
-  const appId = benchmarkAppId("b6");
+  const appId = await benchmarkAppId("b6");
   const dbName = uniqueDbName("b6");
   const rng = new Lcg(b6.seed ^ config.seed);
   const updateCount = Math.min(b6.update_count, CI_BROWSER_LIMITS.b6UpdateCount);
@@ -2108,7 +2109,7 @@ describe("realistic browser benchmark harness", () => {
         {
           id: "W1",
           run: async (): Promise<ScenarioResult> => {
-            const appId = benchmarkAppId("w1");
+            const appId = await benchmarkAppId("w1");
             const dbName = uniqueDbName("w1");
             let db: Db | null = null;
             try {
@@ -2238,35 +2239,4 @@ function elevateBenchLogLevel(): () => void {
     console.debug = original.debug;
     console.trace = original.trace;
   };
-}
-
-function base64url(input: string | Uint8Array): string {
-  const str = typeof input === "string" ? btoa(input) : btoa(String.fromCharCode(...input));
-  return str.replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-}
-
-async function signJwt(
-  sub: string,
-  secret: string,
-  claims: Record<string, unknown> = {},
-): Promise<string> {
-  const header = { alg: "HS256", typ: "JWT" };
-  const payload = {
-    sub,
-    claims,
-    exp: Math.floor(Date.now() / 1000) + 3600,
-  };
-  const enc = new TextEncoder();
-  const headerB64 = base64url(JSON.stringify(header));
-  const payloadB64 = base64url(JSON.stringify(payload));
-  const data = enc.encode(`${headerB64}.${payloadB64}`);
-  const key = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, data);
-  return `${headerB64}.${payloadB64}.${base64url(new Uint8Array(sig))}`;
 }

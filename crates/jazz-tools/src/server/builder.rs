@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
-use jsonwebtoken::jwk::JwkSet;
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
 
 use crate::middleware::AuthConfig;
+use crate::middleware::auth::{JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache};
 use crate::query_manager::types::Schema;
 use crate::routes;
 use crate::runtime_tokio::TokioRuntime;
@@ -86,9 +87,9 @@ impl ServerBuilder {
     }
 
     pub async fn build(self) -> Result<BuiltServer, String> {
-        let mut auth_config = self.auth_config.clone();
-        preload_jwks(&mut auth_config).await?;
+        let auth_config = self.auth_config.clone();
         validate_catalogue_authority(&auth_config, &self.catalogue_authority)?;
+        let jwks_cache = build_jwks_cache(&auth_config).await?;
         log_auth_config(&auth_config, &self.catalogue_authority);
 
         let (runtime, sync_broadcast) = self.build_runtime()?;
@@ -114,6 +115,7 @@ impl ServerBuilder {
             sync_broadcast,
             auth_config,
             catalogue_authority: self.catalogue_authority.clone(),
+            jwks_cache,
             http_client,
             external_identity_store,
             external_identities: RwLock::new(external_identities),
@@ -123,6 +125,7 @@ impl ServerBuilder {
         Ok(BuiltServer { state, app })
     }
 
+    #[allow(clippy::type_complexity)]
     fn build_runtime(
         &self,
     ) -> Result<
@@ -208,19 +211,34 @@ fn server_sync_manager() -> SyncManager {
         .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer])
 }
 
-async fn preload_jwks(auth_config: &mut AuthConfig) -> Result<(), String> {
-    let Some(jwks_url) = auth_config.jwks_url.as_deref() else {
-        return Ok(());
+async fn build_jwks_cache(auth_config: &AuthConfig) -> Result<Option<JwksCache>, String> {
+    let Some(jwks_url) = auth_config.jwks_url.as_ref() else {
+        return Ok(None);
     };
 
-    let jwks = reqwest::get(jwks_url)
+    let jwks_ttl = std::env::var("JAZZ_JWKS_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(JWKS_CACHE_TTL);
+    let jwks_max_stale = std::env::var("JAZZ_JWKS_MAX_STALE_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(JWKS_MAX_STALE);
+
+    let cache = JwksCache::new(
+        jwks_url.clone(),
+        reqwest::Client::new(),
+        jwks_ttl,
+        jwks_max_stale,
+    );
+    cache
+        .load(false)
         .await
-        .map_err(|e| format!("failed to fetch JWKS from {jwks_url}: {e}"))?
-        .json::<JwkSet>()
-        .await
-        .map_err(|e| format!("failed to decode JWKS from {jwks_url}: {e}"))?;
-    auth_config.jwks_set = Some(jwks);
-    Ok(())
+        .map_err(|e| format!("failed to fetch initial JWKS: {e}"))?;
+
+    Ok(Some(cache))
 }
 
 fn validate_catalogue_authority(
