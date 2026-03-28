@@ -630,54 +630,56 @@ impl QueryGraph {
         let mut graph = QueryGraph::new(plan.table, descriptor.clone());
         let table_str = plan.table.as_str();
 
-        // Phase 1: Build IndexScan nodes (one per disjunct per branch)
-        // For multi-branch queries, we create scans for each branch and union them
+        // Phase 1: Build IndexScan nodes (one per disjunct)
+        // Each scan evaluates across the resolved branch set and emits scoped provenance.
         // Column names are translated for old schema branches
         let mut phase1_outputs: Vec<NodeId> = Vec::new();
         let mut index_columns: Vec<String> = Vec::new();
 
-        for branch in &branches {
-            // Get schema hash for this branch to determine if column translation is needed
-            let branch_schema_hash = branch_schema_map.get(branch.as_str()).copied();
+        for disjunct in &plan.disjuncts {
+            // Find best index condition for this disjunct
+            let (scan_column, scan_condition) = if let Some(cond) = disjunct.best_index_condition()
+            {
+                let column = cond.column().to_string();
+                let scan_cond = condition_to_scan(cond);
+                (column, scan_cond)
+            } else {
+                // No index condition, use "_id" for full scan
+                ("_id".to_string(), ScanCondition::All)
+            };
 
-            for disjunct in &plan.disjuncts {
-                // Find best index condition for this disjunct
-                let (scan_column, scan_condition) =
-                    if let Some(cond) = disjunct.best_index_condition() {
-                        let column = cond.column().to_string();
-                        let scan_cond = condition_to_scan(cond);
-                        (column, scan_cond)
-                    } else {
-                        // No index condition, use "_id" for full scan
-                        ("_id".to_string(), ScanCondition::All)
-                    };
-
-                // Translate column name for old schema branches
-                let translated_column = if let Some(target_hash) = branch_schema_hash {
-                    if target_hash != schema_context.current_hash {
-                        // This branch uses an old schema - translate column name
+            let mut scan_groups: HashMap<String, Vec<QueryBranchRef>> = HashMap::new();
+            for branch in &branches {
+                let translated_column = branch_schema_map
+                    .get(branch.as_str())
+                    .copied()
+                    .filter(|target_hash| *target_hash != schema_context.current_hash)
+                    .and_then(|target_hash| {
                         translate_column_for_index(
                             schema_context,
                             table_str,
                             &scan_column,
                             &target_hash,
                         )
-                        .unwrap_or_else(|| scan_column.clone())
-                    } else {
-                        scan_column.clone()
-                    }
-                } else {
-                    scan_column.clone()
-                };
+                    })
+                    .unwrap_or_else(|| scan_column.clone());
+                scan_groups
+                    .entry(translated_column)
+                    .or_default()
+                    .push(*branch);
+            }
 
+            let mut scan_groups: Vec<_> = scan_groups.into_iter().collect();
+            scan_groups.sort_by_key(|(column, _)| column.clone());
+
+            for (translated_column, scan_branches) in scan_groups {
                 index_columns.push(scan_column.clone());
                 let scan_column_name = ColumnName::new(&translated_column);
-
-                let scan_node = IndexScanNode::new_with_branch(
+                let scan_node = IndexScanNode::new_with_branches(
                     plan.table,
                     scan_column_name,
-                    *branch,
-                    scan_condition,
+                    scan_branches,
+                    scan_condition.clone(),
                     descriptor.clone(),
                 );
                 let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
@@ -686,23 +688,22 @@ impl QueryGraph {
                     .push((scan_id, plan.table, scan_column_name));
                 phase1_outputs.push(scan_id);
             }
+        }
 
-            // If include_deleted is set, also scan _id_deleted index for this branch
-            if plan.include_deleted {
-                let deleted_column = ColumnName::new("_id_deleted");
-                let deleted_scan_node = IndexScanNode::new_with_branch(
-                    plan.table,
-                    deleted_column,
-                    *branch,
-                    ScanCondition::All,
-                    descriptor.clone(),
-                );
-                let deleted_scan_id = graph.add_node(GraphNode::IndexScan(deleted_scan_node));
-                graph
-                    .index_scan_nodes
-                    .push((deleted_scan_id, plan.table, deleted_column));
-                phase1_outputs.push(deleted_scan_id);
-            }
+        if plan.include_deleted {
+            let deleted_column = ColumnName::new("_id_deleted");
+            let deleted_scan_node = IndexScanNode::new_with_branches(
+                plan.table,
+                deleted_column,
+                branches.clone(),
+                ScanCondition::All,
+                descriptor.clone(),
+            );
+            let deleted_scan_id = graph.add_node(GraphNode::IndexScan(deleted_scan_node));
+            graph
+                .index_scan_nodes
+                .push((deleted_scan_id, plan.table, deleted_column));
+            phase1_outputs.push(deleted_scan_id);
         }
 
         // If multiple outputs, add Union node
@@ -1361,33 +1362,19 @@ impl QueryGraph {
         let mut seen_tables: HashSet<String> = HashSet::new();
         seen_tables.insert(plan.table.as_str().to_string());
 
-        // Build pipeline for base table: per-branch IndexScan (+Union) -> Materialize.
-        let mut base_scan_ids = Vec::new();
-        for branch in &join_branches {
-            let id_column = ColumnName::new("_id");
-            let base_scan = IndexScanNode::new_with_branch(
-                plan.table,
-                id_column,
-                *branch,
-                ScanCondition::All,
-                base_descriptor.clone(),
-            );
-            let base_scan_id = graph.add_node(GraphNode::IndexScan(base_scan));
-            graph
-                .index_scan_nodes
-                .push((base_scan_id, plan.table, id_column));
-            base_scan_ids.push(base_scan_id);
-        }
-        let base_scan_output = if base_scan_ids.len() > 1 {
-            let union_node = UnionNode::new();
-            let union_id = graph.add_node(GraphNode::Union(union_node));
-            for scan_id in base_scan_ids {
-                graph.add_edge(union_id, scan_id);
-            }
-            union_id
-        } else {
-            *base_scan_ids.first()?
-        };
+        // Build pipeline for base table: one multi-branch IndexScan -> Materialize.
+        let id_column = ColumnName::new("_id");
+        let base_scan = IndexScanNode::new_with_branches(
+            plan.table,
+            id_column,
+            join_branches.clone(),
+            ScanCondition::All,
+            base_descriptor.clone(),
+        );
+        let base_scan_output = graph.add_node(GraphNode::IndexScan(base_scan));
+        graph
+            .index_scan_nodes
+            .push((base_scan_output, plan.table, id_column));
 
         let base_tuple_desc = TupleDescriptor::single_with_materialization(
             plan.base_scope.as_str(),
@@ -1460,33 +1447,19 @@ impl QueryGraph {
             let right_table_schema = schema.get(&join_spec.table)?;
             let right_descriptor = right_table_schema.columns.clone();
 
-            // Build pipeline for right table: per-branch IndexScan (+Union) -> Materialize.
-            let mut right_scan_ids = Vec::new();
-            for branch in &join_branches {
-                let id_column = ColumnName::new("_id");
-                let right_scan = IndexScanNode::new_with_branch(
-                    join_spec.table,
-                    id_column,
-                    *branch,
-                    ScanCondition::All,
-                    right_descriptor.clone(),
-                );
-                let right_scan_id = graph.add_node(GraphNode::IndexScan(right_scan));
-                graph
-                    .index_scan_nodes
-                    .push((right_scan_id, join_spec.table, id_column));
-                right_scan_ids.push(right_scan_id);
-            }
-            let right_scan_output = if right_scan_ids.len() > 1 {
-                let union_node = UnionNode::new();
-                let union_id = graph.add_node(GraphNode::Union(union_node));
-                for scan_id in right_scan_ids {
-                    graph.add_edge(union_id, scan_id);
-                }
-                union_id
-            } else {
-                *right_scan_ids.first()?
-            };
+            // Build pipeline for right table: one multi-branch IndexScan -> Materialize.
+            let id_column = ColumnName::new("_id");
+            let right_scan = IndexScanNode::new_with_branches(
+                join_spec.table,
+                id_column,
+                join_branches.clone(),
+                ScanCondition::All,
+                right_descriptor.clone(),
+            );
+            let right_scan_output = graph.add_node(GraphNode::IndexScan(right_scan));
+            graph
+                .index_scan_nodes
+                .push((right_scan_output, join_spec.table, id_column));
 
             let right_tuple_desc = TupleDescriptor::single_with_materialization(
                 join_spec.effective_name(),

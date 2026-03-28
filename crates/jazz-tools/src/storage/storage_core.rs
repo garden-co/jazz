@@ -12,10 +12,9 @@ use crate::query_manager::types::{BatchId, QueryBranchRef, Value};
 use super::key_codec::{
     ack_key, branch_manifest_key, branch_segment_key, catalogue_manifest_op_key,
     catalogue_manifest_op_prefix, commit_branch_key, index_entry_key, index_prefix,
-    index_range_scan_bounds, index_value_prefix, obj_meta_key,
-    parse_batch_id_from_table_prefix_key, parse_uuid_from_index_key, prefix_batch_meta_key,
-    prefix_batch_meta_prefix, prefix_leaf_batches_key, table_prefix_batch_key,
-    table_prefix_batch_prefix,
+    index_range_scan_bounds, index_value_prefix, obj_meta_key, parse_uuid_from_index_key,
+    prefix_batch_meta_key, prefix_batch_meta_prefix, prefix_leaf_batches_key,
+    table_prefix_batches_key,
 };
 use super::{
     CatalogueManifest, CatalogueManifestOp, LoadedBranch, LoadedBranchTips, PrefixBatchUpdate,
@@ -294,13 +293,15 @@ fn load_prefix_batch_meta(
 pub(super) fn load_table_prefix_branches_core(
     table: &str,
     prefix: BranchName,
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
 ) -> Result<Vec<QueryBranchRef>, StorageError> {
-    let key_prefix = table_prefix_batch_prefix(table, prefix.as_str());
-    let entries = scan_prefix(&key_prefix)?;
-    let mut branches = Vec::with_capacity(entries.len());
-    for (key, _value) in entries {
-        let batch_id = parse_batch_id_from_table_prefix_key(&key, &key_prefix)?;
+    let key = table_prefix_batches_key(table, prefix.as_str());
+    let counts: HashMap<BatchId, u64> = match get(&key)? {
+        Some(data) => decode_postcard(&data, "table prefix active batches")?,
+        None => HashMap::new(),
+    };
+    let mut branches = Vec::with_capacity(counts.len());
+    for batch_id in counts.keys().copied() {
         branches.push(QueryBranchRef::from_prefix_name_and_batch(prefix, batch_id));
     }
     branches.sort_by_key(|branch| branch.as_str().to_string());
@@ -322,18 +323,12 @@ pub(super) fn adjust_table_prefix_batch_refcount_core(
         return Ok(());
     };
 
-    let key = table_prefix_batch_key(table, prefix_name.as_str(), batch_id);
-    let current = match get(&key)? {
-        Some(data) => {
-            let bytes: [u8; 8] = data.as_slice().try_into().map_err(|_| {
-                StorageError::IoError(format!(
-                    "invalid table-prefix batch refcount at key `{key}`"
-                ))
-            })?;
-            u64::from_be_bytes(bytes)
-        }
-        None => 0,
+    let key = table_prefix_batches_key(table, prefix_name.as_str());
+    let mut counts: HashMap<BatchId, u64> = match get(&key)? {
+        Some(data) => decode_postcard(&data, "table prefix active batches")?,
+        None => HashMap::new(),
     };
+    let current = counts.get(&batch_id).copied().unwrap_or(0);
 
     let next = if delta >= 0 {
         current.saturating_add(delta as u64)
@@ -342,9 +337,16 @@ pub(super) fn adjust_table_prefix_batch_refcount_core(
     };
 
     if next == 0 {
+        counts.remove(&batch_id);
+    } else {
+        counts.insert(batch_id, next);
+    }
+
+    if counts.is_empty() {
         delete(&key)
     } else {
-        set(&key, &next.to_be_bytes())
+        let data = encode_postcard(&counts, "table prefix active batches")?;
+        set(&key, &data)
     }
 }
 

@@ -1,12 +1,13 @@
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::index::ScanCondition;
 use crate::query_manager::types::{
-    ColumnName, QueryBranchRef, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor,
+    ColumnName, QueryBranchRef, RowDescriptor, ScopedObject, TableName, Tuple, TupleDelta,
+    TupleDescriptor,
 };
 
-use super::{SourceContext, SourceNode};
+use super::{SourceContext, SourceNode, tuple_delta::compute_tuple_delta};
 
 /// Source node that scans an index via Storage.
 /// Emits TupleDelta with length-1 tuples based on the scan condition.
@@ -14,7 +15,7 @@ use super::{SourceContext, SourceNode};
 pub struct IndexScanNode {
     pub table: TableName,
     pub column: ColumnName,
-    pub branch: QueryBranchRef,
+    pub branches: Vec<QueryBranchRef>,
     pub condition: ScanCondition,
 
     /// Output tuple descriptor (single element, unmaterialized).
@@ -22,18 +23,18 @@ pub struct IndexScanNode {
 
     /// Current set of tuples (length-1) matching the condition.
     current_tuples: AHashSet<Tuple>,
-    /// Last scanned IDs (for computing deltas).
-    last_scanned_ids: AHashSet<ObjectId>,
+    /// Stable ordered view of the current tuples for delta computation.
+    current_tuple_order: Vec<Tuple>,
     /// Whether this node needs reprocessing.
     dirty: bool,
 }
 
 impl IndexScanNode {
     /// Create a new index scan node.
-    pub fn new_with_branch(
+    pub fn new_with_branches(
         table: impl Into<TableName>,
         column: impl Into<ColumnName>,
-        branch: QueryBranchRef,
+        branches: Vec<QueryBranchRef>,
         condition: ScanCondition,
         row_descriptor: RowDescriptor,
     ) -> Self {
@@ -42,13 +43,23 @@ impl IndexScanNode {
         Self {
             table,
             column: column.into(),
-            branch,
+            branches,
             condition,
             output_descriptor,
             current_tuples: AHashSet::new(),
-            last_scanned_ids: AHashSet::new(),
+            current_tuple_order: Vec::new(),
             dirty: true,
         }
+    }
+
+    pub fn new_with_branch(
+        table: impl Into<TableName>,
+        column: impl Into<ColumnName>,
+        branch: QueryBranchRef,
+        condition: ScanCondition,
+        row_descriptor: RowDescriptor,
+    ) -> Self {
+        Self::new_with_branches(table, column, vec![branch], condition, row_descriptor)
     }
 
     /// Create a new index scan node on the default "main" branch.
@@ -58,10 +69,10 @@ impl IndexScanNode {
         condition: ScanCondition,
         row_descriptor: RowDescriptor,
     ) -> Self {
-        Self::new_with_branch(
+        Self::new_with_branches(
             table,
             column,
-            QueryBranchRef::raw(BranchName::new("main")),
+            vec![QueryBranchRef::raw(BranchName::new("main"))],
             condition,
             row_descriptor,
         )
@@ -71,83 +82,70 @@ impl IndexScanNode {
     pub fn output_tuple_descriptor(&self) -> &TupleDescriptor {
         &self.output_descriptor
     }
+
+    fn merged_scoped_tuples(scoped_rows: Vec<ScopedObject>) -> Vec<Tuple> {
+        let mut provenance_by_id = AHashMap::<ObjectId, AHashSet<(ObjectId, BranchName)>>::new();
+        for (row_id, branch_name) in scoped_rows {
+            provenance_by_id
+                .entry(row_id)
+                .or_default()
+                .insert((row_id, branch_name));
+        }
+
+        let mut tuples: Vec<_> = provenance_by_id
+            .into_iter()
+            .map(|(row_id, provenance)| Tuple::from_id(row_id).with_provenance(provenance))
+            .collect();
+        tuples.sort_by_key(|tuple| tuple.first_id().map(|id| *id.uuid().as_bytes()));
+        tuples
+    }
 }
 
 impl SourceNode for IndexScanNode {
     fn scan(&mut self, ctx: &SourceContext) -> TupleDelta {
-        let new_ids: AHashSet<ObjectId> = match &self.condition {
-            ScanCondition::All => ctx
-                .storage
-                .index_scan_all(self.table.as_str(), self.column.as_str(), &self.branch)
-                .into_iter()
-                .collect(),
-            ScanCondition::Eq(value) => ctx
-                .storage
-                .index_lookup(
-                    self.table.as_str(),
-                    self.column.as_str(),
-                    &self.branch,
-                    value,
-                )
-                .into_iter()
-                .collect(),
+        let scoped_rows = match &self.condition {
+            ScanCondition::All => ctx.storage.index_scan_all_scoped(
+                self.table.as_str(),
+                self.column.as_str(),
+                &self.branches,
+            ),
+            ScanCondition::Eq(value) => ctx.storage.index_lookup_scoped(
+                self.table.as_str(),
+                self.column.as_str(),
+                &self.branches,
+                value,
+            ),
             ScanCondition::Range { min, max } => {
                 let start = min.as_ref();
                 let end = max.as_ref();
-                ctx.storage
-                    .index_range(
-                        self.table.as_str(),
-                        self.column.as_str(),
-                        &self.branch,
-                        start,
-                        end,
-                    )
-                    .into_iter()
-                    .collect()
+                ctx.storage.index_range_scoped(
+                    self.table.as_str(),
+                    self.column.as_str(),
+                    &self.branches,
+                    start,
+                    end,
+                )
             }
         };
-
-        // Diff against last scan
-        let added: Vec<ObjectId> = new_ids
-            .difference(&self.last_scanned_ids)
-            .copied()
-            .collect();
-        let removed: Vec<ObjectId> = self
-            .last_scanned_ids
-            .difference(&new_ids)
-            .copied()
-            .collect();
+        let new_tuple_order = Self::merged_scoped_tuples(scoped_rows);
+        let new_tuples: AHashSet<Tuple> = new_tuple_order.iter().cloned().collect();
+        let delta = compute_tuple_delta(&self.current_tuple_order, &new_tuple_order);
 
         tracing::trace!(
             table = %self.table,
-            branch = %self.branch,
-            scanned = new_ids.len(),
-            added = added.len(),
-            removed = removed.len(),
+            branches = self.branches.len(),
+            scanned = new_tuples.len(),
+            added = delta.added.len(),
+            removed = delta.removed.len(),
+            updated = delta.updated.len(),
             "IndexScan results"
         );
 
-        self.last_scanned_ids = new_ids;
-        let branch = self.branch.branch_name();
-        self.current_tuples = self
-            .last_scanned_ids
-            .iter()
-            .map(|&id| Tuple::from_scoped_id(id, branch))
-            .collect();
+        self.current_tuple_order = new_tuple_order;
+        self.current_tuples = new_tuples;
         self.dirty = false;
 
-        TupleDelta {
-            added: added
-                .into_iter()
-                .map(|id| Tuple::from_scoped_id(id, branch))
-                .collect(),
-            removed: removed
-                .into_iter()
-                .map(|id| Tuple::from_scoped_id(id, branch))
-                .collect(),
-            moved: vec![],
-            updated: vec![],
-        }
+        delta
     }
 
     fn current_tuples(&self) -> &AHashSet<Tuple> {
@@ -250,6 +248,51 @@ mod tests {
 
         assert_eq!(delta.added.len(), 1);
         assert!(contains_id(&delta.added, row1));
+    }
+
+    #[test]
+    fn multi_branch_scan_merges_provenance_and_reports_updates() {
+        let mut storage = MemoryStorage::new();
+        let row = ObjectId::new();
+
+        storage
+            .index_insert("users", "_id", "main", &Value::Uuid(row), row)
+            .unwrap();
+        storage
+            .index_insert("users", "_id", "draft", &Value::Uuid(row), row)
+            .unwrap();
+
+        let branches = vec![
+            QueryBranchRef::from_branch_name("main"),
+            QueryBranchRef::from_branch_name("draft"),
+        ];
+        let mut node = IndexScanNode::new_with_branches(
+            "users",
+            "_id",
+            branches,
+            ScanCondition::All,
+            test_descriptor(),
+        );
+        let first = {
+            let ctx = make_ctx(&storage);
+            node.scan(&ctx)
+        };
+        assert_eq!(first.added.len(), 1);
+        assert_eq!(first.added[0].provenance().len(), 2);
+        assert!(first.updated.is_empty());
+
+        storage
+            .index_remove("users", "_id", "main", &Value::Uuid(row), row)
+            .unwrap();
+
+        let second = {
+            let ctx = make_ctx(&storage);
+            node.scan(&ctx)
+        };
+        assert!(second.added.is_empty());
+        assert!(second.removed.is_empty());
+        assert_eq!(second.updated.len(), 1);
+        assert_eq!(second.updated[0].1.provenance().len(), 1);
     }
 
     #[test]

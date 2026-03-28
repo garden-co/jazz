@@ -215,33 +215,8 @@ pub(super) fn prefix_batch_meta_prefix(object_id: ObjectId, prefix: &str) -> Str
     format!("obj:{}:prefix:{}:batch:", format_uuid(object_id), prefix)
 }
 
-pub(super) fn table_prefix_batch_key(table: &str, prefix: &str, batch_id: BatchId) -> String {
-    format!(
-        "tblpfx:{}:{}:batch:{}",
-        table,
-        prefix,
-        batch_id.branch_segment()
-    )
-}
-
-pub(super) fn table_prefix_batch_prefix(table: &str, prefix: &str) -> String {
-    format!("tblpfx:{}:{}:batch:", table, prefix)
-}
-
-pub(super) fn parse_batch_id_from_table_prefix_key(
-    key: &str,
-    key_prefix: &str,
-) -> Result<BatchId, StorageError> {
-    let batch_segment = key.strip_prefix(key_prefix).ok_or_else(|| {
-        StorageError::IoError(format!(
-            "invalid table-prefix batch key `{key}` for prefix `{key_prefix}`"
-        ))
-    })?;
-    BatchId::parse_segment(batch_segment).ok_or_else(|| {
-        StorageError::IoError(format!(
-            "invalid batch id `{batch_segment}` in table-prefix batch key `{key}`"
-        ))
-    })
+pub(super) fn table_prefix_batches_key(table: &str, prefix: &str) -> String {
+    format!("tblpfx:{}:{}:batches", table, prefix)
 }
 
 pub(super) fn ack_key(commit_id: CommitId) -> String {

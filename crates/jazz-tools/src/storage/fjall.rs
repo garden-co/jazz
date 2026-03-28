@@ -359,8 +359,8 @@ impl Storage for FjallStorage {
     ) -> Result<Vec<QueryBranchRef>, StorageError> {
         self.with_inner(|inner| {
             let tx = inner.db.read_tx();
-            load_table_prefix_branches_core(table, prefix, |key_prefix| {
-                Self::scan_prefix(&tx, &inner.keyspace, key_prefix)
+            load_table_prefix_branches_core(table, prefix, |key| {
+                Self::read_get(&tx, &inner.keyspace, key)
             })
         })
     }

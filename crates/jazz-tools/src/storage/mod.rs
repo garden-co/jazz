@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId, PrefixBatchCatalog, PrefixBatchMeta};
-use crate::query_manager::types::{BatchId, QueryBranchRef, SchemaHash, Value};
+use crate::query_manager::types::{BatchId, QueryBranchRef, SchemaHash, ScopedObject, Value};
 use crate::sync_manager::DurabilityTier;
 
 // ============================================================================
@@ -343,6 +343,60 @@ pub trait Storage {
 
     /// Full scan - returns all row IDs in this index.
     fn index_scan_all(&self, table: &str, column: &str, branch: &QueryBranchRef) -> Vec<ObjectId>;
+
+    /// Lookup exact value across a branch set, returning scoped `(row_id, branch)` pairs.
+    fn index_lookup_scoped(
+        &self,
+        table: &str,
+        column: &str,
+        branches: &[QueryBranchRef],
+        value: &Value,
+    ) -> Vec<ScopedObject> {
+        let mut scoped_ids = HashSet::new();
+        for branch in branches {
+            let branch_name = branch.branch_name();
+            for row_id in self.index_lookup(table, column, branch, value) {
+                scoped_ids.insert((row_id, branch_name));
+            }
+        }
+        scoped_ids.into_iter().collect()
+    }
+
+    /// Range scan across a branch set, returning scoped `(row_id, branch)` pairs.
+    fn index_range_scoped(
+        &self,
+        table: &str,
+        column: &str,
+        branches: &[QueryBranchRef],
+        start: Bound<&Value>,
+        end: Bound<&Value>,
+    ) -> Vec<ScopedObject> {
+        let mut scoped_ids = HashSet::new();
+        for branch in branches {
+            let branch_name = branch.branch_name();
+            for row_id in self.index_range(table, column, branch, start, end) {
+                scoped_ids.insert((row_id, branch_name));
+            }
+        }
+        scoped_ids.into_iter().collect()
+    }
+
+    /// Full scan across a branch set, returning scoped `(row_id, branch)` pairs.
+    fn index_scan_all_scoped(
+        &self,
+        table: &str,
+        column: &str,
+        branches: &[QueryBranchRef],
+    ) -> Vec<ScopedObject> {
+        let mut scoped_ids = HashSet::new();
+        for branch in branches {
+            let branch_name = branch.branch_name();
+            for row_id in self.index_scan_all(table, column, branch) {
+                scoped_ids.insert((row_id, branch_name));
+            }
+        }
+        scoped_ids.into_iter().collect()
+    }
 
     /// Flush buffered data to persistent storage. No-op for in-memory storage.
     fn flush(&self) {}

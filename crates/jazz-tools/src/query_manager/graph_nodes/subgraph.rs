@@ -474,13 +474,15 @@ mod tests {
             .nodes
             .get(scan_id.0 as usize)
             .and_then(|ctx| match &ctx.node {
-                GraphNode::IndexScan(scan) => Some(scan.branch.as_str()),
+                GraphNode::IndexScan(scan) => Some(
+                    scan.branches
+                        .iter()
+                        .map(|branch| branch.as_str())
+                        .collect::<Vec<_>>(),
+                ),
                 _ => None,
             })
             .expect("index scan node must exist");
-        assert_eq!(
-            scan_branch, v1_branch,
-            "subgraph should keep the parent branch list when instantiating"
-        );
+        assert_eq!(scan_branch, vec![v1_branch]);
     }
 }

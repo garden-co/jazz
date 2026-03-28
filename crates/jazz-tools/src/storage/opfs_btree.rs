@@ -376,9 +376,7 @@ impl Storage for OpfsBTreeStorage {
         table: &str,
         prefix: BranchName,
     ) -> Result<Vec<QueryBranchRef>, StorageError> {
-        load_table_prefix_branches_core(table, prefix, |key_prefix| {
-            self.tree_scan_prefix(key_prefix)
-        })
+        load_table_prefix_branches_core(table, prefix, |key| self.tree_read(key))
     }
 
     fn append_commit(
