@@ -8,6 +8,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { definePermissions } from "../permissions/index.js";
+import { publishStoredPermissions, publishStoredSchema } from "./schema-fetch.js";
 import { translateQuery } from "./query-adapter.js";
 import { sendSyncPayload } from "./sync-transport.js";
 import { hasJazzWasmBuild } from "./testing/wasm-runtime-test-utils.js";
@@ -130,18 +131,21 @@ function base64url(input: Buffer | string): string {
   return encoded.replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
 
-function signJwt(sub: string, secret: string): string {
+function signJwt(sub: string, secret: string, options?: { principalId?: string }): string {
   const header = {
     alg: "HS256",
     typ: "JWT",
     kid: JWT_KID,
   };
-  const payload = {
+  const payload: Record<string, unknown> = {
     sub,
     iss: "https://issuer.jazz.ts.test",
     claims: {},
     exp: Math.floor(Date.now() / 1000) + 3600,
   };
+  if (options?.principalId) {
+    payload.jazz_principal_id = options.principalId;
+  }
   const headerB64 = base64url(JSON.stringify(header));
   const payloadB64 = base64url(JSON.stringify(payload));
   const signedPart = `${headerB64}.${payloadB64}`;
@@ -820,6 +824,50 @@ function normalizePermissionsForWasm<T>(permissions: T): T {
   return out as T;
 }
 
+function splitInlinePolicies(schema: WasmSchema): {
+  schema: WasmSchema;
+  permissions: Record<string, unknown>;
+} {
+  const structuralSchema: WasmSchema = {};
+  const permissions: Record<string, unknown> = {};
+
+  for (const [tableName, tableSchema] of Object.entries(schema)) {
+    const { policies, ...rest } = tableSchema as typeof tableSchema & {
+      policies?: unknown;
+    };
+    structuralSchema[tableName] = rest;
+    if (policies) {
+      permissions[tableName] = policies;
+    }
+  }
+
+  return { schema: structuralSchema, permissions };
+}
+
+async function publishInlineSchemaAndPermissions(
+  serverUrl: string,
+  pathPrefix: string,
+  schema: WasmSchema,
+): Promise<void> {
+  const split = splitInlinePolicies(schema);
+  const publishedSchema = await publishStoredSchema(serverUrl, {
+    adminSecret: ADMIN_SECRET,
+    pathPrefix,
+    schema: split.schema,
+  });
+
+  if (Object.keys(split.permissions).length === 0) {
+    return;
+  }
+
+  await publishStoredPermissions(serverUrl, {
+    adminSecret: ADMIN_SECRET,
+    pathPrefix,
+    schemaHash: publishedSchema.hash,
+    permissions: split.permissions as Parameters<typeof publishStoredPermissions>[1]["permissions"],
+  });
+}
+
 function buildSocialSchema(style: SocialPolicyStyle): WasmSchema {
   const schema = makeSocialBaseSchema();
   const socialApp = {
@@ -1124,7 +1172,6 @@ function makeContext(
     env: "test",
     userBranch: "main",
     jwtToken,
-    adminSecret: ADMIN_SECRET,
     backendSecret: BACKEND_SECRET,
   };
 }
@@ -1450,18 +1497,24 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
     const jwks = await JwksServer.start(JWT_SECRET);
     const dataRoot = allocTempDir("jazz-ts-policy-bypass-");
     const server = await startCloudServer({ dataRoot });
-    let seeder: JazzClient | null = null;
+    let bobClient: JazzClient | null = null;
+    let carolClient: JazzClient | null = null;
     let aliceClient: JazzClient | null = null;
 
     try {
       const app = await createApp(server.baseUrl, jwks.url);
+      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, schema);
 
-      // Seed other users' rows via a separate client.
-      seeder = await connectClient(
-        makeContext(app.app_id, server.baseUrl, signJwt("seed-user", JWT_SECRET), schema),
-      );
-
-      await seeder.createDurable(
+      bobClient = await connectClient({
+        ...makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("bob", JWT_SECRET, { principalId: "bob" }),
+          schema,
+        ),
+        adminSecret: undefined,
+      });
+      await bobClient.createDurable(
         "owned_items",
         {
           title: { type: "Text", value: "bob-item" },
@@ -1469,7 +1522,17 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
         },
         { tier: "edge" },
       );
-      await seeder.createDurable(
+
+      carolClient = await connectClient({
+        ...makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("carol", JWT_SECRET, { principalId: "carol" }),
+          schema,
+        ),
+        adminSecret: undefined,
+      });
+      await carolClient.createDurable(
         "owned_items",
         {
           title: { type: "Text", value: "carol-item" },
@@ -1478,13 +1541,16 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
         { tier: "edge" },
       );
 
-      await seeder.shutdown();
-      seeder = null;
-
       // Connect as alice and insert her own row.
-      aliceClient = await connectClient(
-        makeContext(app.app_id, server.baseUrl, signJwt("alice", JWT_SECRET), schema),
-      );
+      aliceClient = await connectClient({
+        ...makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("alice", JWT_SECRET, { principalId: "alice" }),
+          schema,
+        ),
+        adminSecret: undefined,
+      });
       await aliceClient.createDurable(
         "owned_items",
         {
@@ -1533,7 +1599,8 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
 
       expect(subscribeTitles).toEqual(["alice-item"]);
     } finally {
-      if (seeder) await seeder.shutdown();
+      if (bobClient) await bobClient.shutdown();
+      if (carolClient) await carolClient.shutdown();
       if (aliceClient) await aliceClient.shutdown();
       await stopProcess(server.child);
       await jwks.stop();
@@ -1542,9 +1609,9 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
 
   // Server-side defence in depth: even when a query explicitly omits the
   // session, the server should fall back to the connection-level session
-  // (hashed principal ID) and apply the PolicyFilterNode. Because the hashed
-  // ID won't match ownerId values written with the raw JWT sub claim, the
-  // policy filter returns zero rows — fail closed rather than fail open.
+  // established during the JWT-authenticated stream handshake. Bob's
+  // connection principal won't match Alice's ownerId, so the policy filter
+  // returns zero rows — fail closed rather than fail open.
   it("server falls back to connection-level session when query omits session (fail closed)", async () => {
     const schema = buildOwnedItemsSchema();
     const queryAllItems = buildAllRowsQuery(schema, "owned_items");
@@ -1557,11 +1624,18 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
 
     try {
       const app = await createApp(server.baseUrl, jwks.url);
+      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, schema);
 
       // Alice connects and inserts her own row.
-      aliceClient = await connectClient(
-        makeContext(app.app_id, server.baseUrl, signJwt("alice", JWT_SECRET), schema),
-      );
+      aliceClient = await connectClient({
+        ...makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("alice", JWT_SECRET, { principalId: "alice" }),
+          schema,
+        ),
+        adminSecret: undefined,
+      });
       await aliceClient.createDurable(
         "owned_items",
         {
@@ -1573,13 +1647,19 @@ describe("Policy bypass: subscription without session skips PolicyFilterNode", (
 
       // Bob connects and queries WITHOUT a session (explicitly undefined).
       // This sends QuerySubscription { session: None } to the server.
-      bobClient = await connectClient(
-        makeContext(app.app_id, server.baseUrl, signJwt("bob", JWT_SECRET), schema),
-      );
+      bobClient = await connectClient({
+        ...makeContext(
+          app.app_id,
+          server.baseUrl,
+          signJwt("bob", JWT_SECRET, { principalId: "bob" }),
+          schema,
+        ),
+        adminSecret: undefined,
+      });
       const rows = await bobClient.queryInternal(queryAllItems, undefined, { tier: "edge" });
 
       // Server should fall back to Bob's connection-level session.
-      // The hashed principal ID won't match Alice's ownerId, so zero rows.
+      // Bob's principal won't match Alice's ownerId, so zero rows.
       expect(rows).toEqual([]);
     } finally {
       if (aliceClient) await aliceClient.shutdown();

@@ -25,6 +25,7 @@ use crate::runtime_core::{
     QueryFuture, ReadDurabilityOptions, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler,
     SubscriptionDelta, SyncSender,
 };
+use crate::schema_manager::manager::PermissionsHeadSummary;
 use crate::schema_manager::{Lens, QuerySchemaContext, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryPropagation, ServerId};
@@ -230,6 +231,11 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.publish_permissions_bundle(schema_hash, permissions, expected_parent_bundle_object_id)
             .map_err(|error| RuntimeError::WriteError(error.to_string()))
+    }
+
+    pub fn current_permissions_head(&self) -> Result<Option<PermissionsHeadSummary>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.schema_manager().current_permissions_head())
     }
 
     /// Publish a reviewed lens edge to the local catalogue and active schema manager.
@@ -444,6 +450,20 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.ensure_client_with_session(client_id, session);
+        Ok(())
+    }
+
+    /// Ensure a client exists and is marked as Backend without resetting state.
+    pub fn ensure_client_as_backend(&self, client_id: ClientId) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.ensure_client_as_backend(client_id);
+        Ok(())
+    }
+
+    /// Ensure a client exists and is marked as Admin without resetting state.
+    pub fn ensure_client_as_admin(&self, client_id: ClientId) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.ensure_client_as_admin(client_id);
         Ok(())
     }
 
