@@ -291,16 +291,6 @@ fn load_prefix_batch_meta(
     }
 }
 
-pub(super) fn register_table_prefix_batch_core(
-    table: &str,
-    prefix: &str,
-    batch_id: BatchId,
-    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
-) -> Result<(), StorageError> {
-    let key = table_prefix_batch_key(table, prefix, batch_id);
-    set(&key, &[])
-}
-
 pub(super) fn load_table_prefix_batches_core(
     table: &str,
     prefix: &str,
@@ -313,6 +303,50 @@ pub(super) fn load_table_prefix_batches_core(
         batches.insert(parse_batch_id_from_table_prefix_key(&key, &key_prefix)?);
     }
     Ok(batches)
+}
+
+pub(super) fn adjust_table_prefix_batch_refcount_core(
+    table: &str,
+    branch: &str,
+    delta: i64,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+    mut delete: impl FnMut(&str) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let Some(composed_branch) = crate::query_manager::types::ComposedBranchName::parse(
+        &BranchName::new(branch.to_string()),
+    ) else {
+        return Ok(());
+    };
+
+    let key = table_prefix_batch_key(
+        table,
+        &composed_branch.prefix().branch_prefix(),
+        composed_branch.batch_id,
+    );
+    let current = match get(&key)? {
+        Some(data) => {
+            let bytes: [u8; 8] = data.as_slice().try_into().map_err(|_| {
+                StorageError::IoError(format!(
+                    "invalid table-prefix batch refcount at key `{key}`"
+                ))
+            })?;
+            u64::from_be_bytes(bytes)
+        }
+        None => 0,
+    };
+
+    let next = if delta >= 0 {
+        current.saturating_add(delta as u64)
+    } else {
+        current.saturating_sub(delta.unsigned_abs())
+    };
+
+    if next == 0 {
+        delete(&key)
+    } else {
+        set(&key, &next.to_be_bytes())
+    }
 }
 
 pub(super) fn append_commit_core(
@@ -533,10 +567,15 @@ pub(super) fn index_insert_core(
     branch: &str,
     value: &Value,
     row_id: ObjectId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
-) -> Result<(), StorageError> {
+) -> Result<bool, StorageError> {
     let key = index_entry_key(table, column, branch, value, row_id)?;
-    set(&key, &[0x01])
+    if get(&key)?.is_some() {
+        return Ok(false);
+    }
+    set(&key, &[0x01])?;
+    Ok(true)
 }
 
 pub(super) fn index_remove_core(
@@ -545,14 +584,19 @@ pub(super) fn index_remove_core(
     branch: &str,
     value: &Value,
     row_id: ObjectId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
     mut delete: impl FnMut(&str) -> Result<(), StorageError>,
-) -> Result<(), StorageError> {
+) -> Result<bool, StorageError> {
     let key = match index_entry_key(table, column, branch, value, row_id) {
         Ok(key) => key,
-        Err(StorageError::IndexKeyTooLarge { .. }) => return Ok(()),
+        Err(StorageError::IndexKeyTooLarge { .. }) => return Ok(false),
         Err(error) => return Err(error),
     };
-    delete(&key)
+    if get(&key)?.is_none() {
+        return Ok(false);
+    }
+    delete(&key)?;
+    Ok(true)
 }
 
 pub(super) fn index_lookup_core(

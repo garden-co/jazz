@@ -225,15 +225,7 @@ pub trait Storage {
         prefix: &str,
     ) -> Result<Option<PrefixBatchCatalog>, StorageError>;
 
-    /// Register that a table has data on one batch within a shared prefix.
-    fn register_table_prefix_batch(
-        &mut self,
-        table: &str,
-        prefix: &str,
-        batch_id: BatchId,
-    ) -> Result<(), StorageError>;
-
-    /// Load all known table batches for one shared batch prefix.
+    /// Load all currently indexed table batches for one shared batch prefix.
     fn load_table_prefix_batches(
         &self,
         table: &str,
@@ -408,15 +400,6 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).load_prefix_batch_catalog(object_id, prefix)
     }
 
-    fn register_table_prefix_batch(
-        &mut self,
-        table: &str,
-        prefix: &str,
-        batch_id: BatchId,
-    ) -> Result<(), StorageError> {
-        (**self).register_table_prefix_batch(table, prefix, batch_id)
-    }
-
     fn load_table_prefix_batches(
         &self,
         table: &str,
@@ -563,8 +546,8 @@ pub struct MemoryStorage {
 
     /// Persistence ack tiers per commit.
     ack_tiers: HashMap<CommitId, HashSet<DurabilityTier>>,
-    /// Known table batches keyed by shared batch prefix.
-    table_batches_by_prefix: HashMap<(String, String), HashSet<BatchId>>,
+    /// Active table batches keyed by shared batch prefix.
+    table_batches_by_prefix: HashMap<(String, String), HashMap<BatchId, u64>>,
     /// Append-only manifest ops keyed by app_id then op object_id.
     catalogue_manifest_ops: HashMap<ObjectId, HashMap<ObjectId, CatalogueManifestOp>>,
 }
@@ -589,6 +572,16 @@ impl MemoryStorage {
     /// Create a new empty MemoryStorage.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn composed_table_batch(branch: &str) -> Option<(String, BatchId)> {
+        let composed_branch = crate::query_manager::types::ComposedBranchName::parse(
+            &BranchName::new(branch.to_string()),
+        )?;
+        Some((
+            composed_branch.prefix().branch_prefix(),
+            composed_branch.batch_id,
+        ))
     }
 }
 
@@ -798,19 +791,6 @@ impl Storage for MemoryStorage {
             .and_then(|obj| obj.prefix_batches.get(prefix).cloned()))
     }
 
-    fn register_table_prefix_batch(
-        &mut self,
-        table: &str,
-        prefix: &str,
-        batch_id: BatchId,
-    ) -> Result<(), StorageError> {
-        self.table_batches_by_prefix
-            .entry((table.to_string(), prefix.to_string()))
-            .or_default()
-            .insert(batch_id);
-        Ok(())
-    }
-
     fn load_table_prefix_batches(
         &self,
         table: &str,
@@ -819,7 +799,7 @@ impl Storage for MemoryStorage {
         Ok(self
             .table_batches_by_prefix
             .get(&(table.to_string(), prefix.to_string()))
-            .cloned()
+            .map(|counts| counts.keys().copied().collect())
             .unwrap_or_default())
     }
 
@@ -973,7 +953,18 @@ impl Storage for MemoryStorage {
         );
         let index = self.indices.entry(key).or_default();
         let encoded = encode_value(value);
-        index.entry(encoded).or_default().insert(row_id);
+        let inserted = index.entry(encoded).or_default().insert(row_id);
+        if inserted
+            && matches!(column, "_id" | "_id_deleted")
+            && let Some((prefix, batch_id)) = Self::composed_table_batch(branch)
+        {
+            *self
+                .table_batches_by_prefix
+                .entry((table.to_string(), prefix))
+                .or_default()
+                .entry(batch_id)
+                .or_insert(0) += 1;
+        }
         Ok(())
     }
 
@@ -996,13 +987,32 @@ impl Storage for MemoryStorage {
             column.to_string(),
             key_codec::encode_index_branch_key(branch),
         );
+        let mut removed = false;
         if let Some(index) = self.indices.get_mut(&key) {
             let encoded = encode_value(value);
             if let Some(row_ids) = index.get_mut(&encoded) {
-                row_ids.remove(&row_id);
+                removed = row_ids.remove(&row_id);
                 if row_ids.is_empty() {
                     index.remove(&encoded);
                 }
+            }
+        }
+        if removed
+            && matches!(column, "_id" | "_id_deleted")
+            && let Some((prefix, batch_id)) = Self::composed_table_batch(branch)
+            && let Some(counts) = self
+                .table_batches_by_prefix
+                .get_mut(&(table.to_string(), prefix.clone()))
+        {
+            if let Some(count) = counts.get_mut(&batch_id) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    counts.remove(&batch_id);
+                }
+            }
+            if counts.is_empty() {
+                self.table_batches_by_prefix
+                    .remove(&(table.to_string(), prefix));
             }
         }
         Ok(())
@@ -1280,15 +1290,39 @@ mod tests {
         let prefix = "dev-070707070707-main";
         let batch1 = BatchId::parse_segment(&format!("b{:032x}", 1)).unwrap();
         let batch2 = BatchId::parse_segment(&format!("b{:032x}", 2)).unwrap();
+        let users_branch1 = format!("{prefix}-{}", batch1.branch_segment());
+        let users_branch2 = format!("{prefix}-{}", batch2.branch_segment());
+        let posts_branch1 = format!("{prefix}-{}", batch1.branch_segment());
+        let user_row1 = ObjectId::new();
+        let user_row2 = ObjectId::new();
+        let post_row1 = ObjectId::new();
 
         storage
-            .register_table_prefix_batch("users", prefix, batch1)
+            .index_insert(
+                "users",
+                "_id",
+                &users_branch1,
+                &Value::Uuid(user_row1),
+                user_row1,
+            )
             .unwrap();
         storage
-            .register_table_prefix_batch("users", prefix, batch2)
+            .index_insert(
+                "users",
+                "_id_deleted",
+                &users_branch2,
+                &Value::Uuid(user_row2),
+                user_row2,
+            )
             .unwrap();
         storage
-            .register_table_prefix_batch("posts", prefix, batch1)
+            .index_insert(
+                "posts",
+                "_id",
+                &posts_branch1,
+                &Value::Uuid(post_row1),
+                post_row1,
+            )
             .unwrap();
 
         assert_eq!(
@@ -1298,6 +1332,30 @@ mod tests {
         assert_eq!(
             storage.load_table_prefix_batches("posts", prefix).unwrap(),
             HashSet::from([batch1])
+        );
+
+        storage
+            .index_remove(
+                "users",
+                "_id",
+                &users_branch1,
+                &Value::Uuid(user_row1),
+                user_row1,
+            )
+            .unwrap();
+        storage
+            .index_remove(
+                "users",
+                "_id_deleted",
+                &users_branch2,
+                &Value::Uuid(user_row2),
+                user_row2,
+            )
+            .unwrap();
+
+        assert_eq!(
+            storage.load_table_prefix_batches("users", prefix).unwrap(),
+            HashSet::new()
         );
     }
 

@@ -38,12 +38,12 @@ use super::{
     PrefixBatchUpdate, Storage, StorageError,
     key_codec::increment_bytes,
     storage_core::{
-        append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
-        create_object_core, index_insert_core, index_lookup_core, index_range_core,
-        index_remove_core, index_scan_all_core, load_branch_core, load_branch_tips_core,
-        load_catalogue_manifest_core, load_commit_branch_core, load_object_metadata_core,
-        load_prefix_batch_catalog_core, load_table_prefix_batches_core,
-        register_table_prefix_batch_core, replace_branch_core, store_ack_tier_core,
+        adjust_table_prefix_batch_refcount_core, append_catalogue_manifest_op_core,
+        append_catalogue_manifest_ops_core, append_commit_core, create_object_core,
+        index_insert_core, index_lookup_core, index_range_core, index_remove_core,
+        index_scan_all_core, load_branch_core, load_branch_tips_core, load_catalogue_manifest_core,
+        load_commit_branch_core, load_object_metadata_core, load_prefix_batch_catalog_core,
+        load_table_prefix_batches_core, replace_branch_core, store_ack_tier_core,
     },
 };
 
@@ -284,17 +284,6 @@ impl Storage for OpfsBTreeStorage {
         )
     }
 
-    fn register_table_prefix_batch(
-        &mut self,
-        table: &str,
-        prefix: &str,
-        batch_id: BatchId,
-    ) -> Result<(), StorageError> {
-        register_table_prefix_batch_core(table, prefix, batch_id, |key, value| {
-            self.tree_insert(key, value)
-        })
-    }
-
     fn load_table_prefix_batches(
         &self,
         table: &str,
@@ -395,9 +384,26 @@ impl Storage for OpfsBTreeStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         tracing::trace!(table, column, branch, ?row_id, "index_insert");
-        index_insert_core(table, column, branch, value, row_id, |key, bytes| {
-            self.tree_insert(key, bytes)
-        })
+        let inserted = index_insert_core(
+            table,
+            column,
+            branch,
+            value,
+            row_id,
+            |key| self.tree_read(key),
+            |key, bytes| self.tree_insert(key, bytes),
+        )?;
+        if inserted && matches!(column, "_id" | "_id_deleted") {
+            adjust_table_prefix_batch_refcount_core(
+                table,
+                branch,
+                1,
+                |key| self.tree_read(key),
+                |key, bytes| self.tree_insert(key, bytes),
+                |key| self.tree_delete(key),
+            )?;
+        }
+        Ok(())
     }
 
     fn index_remove(
@@ -409,9 +415,26 @@ impl Storage for OpfsBTreeStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         tracing::trace!(table, column, branch, ?row_id, "index_remove");
-        index_remove_core(table, column, branch, value, row_id, |key| {
-            self.tree_delete(key)
-        })
+        let removed = index_remove_core(
+            table,
+            column,
+            branch,
+            value,
+            row_id,
+            |key| self.tree_read(key),
+            |key| self.tree_delete(key),
+        )?;
+        if removed && matches!(column, "_id" | "_id_deleted") {
+            adjust_table_prefix_batch_refcount_core(
+                table,
+                branch,
+                -1,
+                |key| self.tree_read(key),
+                |key, bytes| self.tree_insert(key, bytes),
+                |key| self.tree_delete(key),
+            )?;
+        }
+        Ok(())
     }
 
     fn index_lookup(
@@ -655,15 +678,42 @@ mod tests {
             Some(HashSet::from([batch2_id]))
         );
 
+        let branch1_name = format!("{prefix}-{}", batch1_id.branch_segment());
+        let branch2_name = format!("{prefix}-{}", batch2_id.branch_segment());
+        let row1 = ObjectId::new();
+        let row2 = ObjectId::new();
         storage
-            .register_table_prefix_batch("users", prefix, batch1_id)
+            .index_insert("users", "_id", &branch1_name, &Value::Uuid(row1), row1)
             .unwrap();
         storage
-            .register_table_prefix_batch("users", prefix, batch2_id)
+            .index_insert(
+                "users",
+                "_id_deleted",
+                &branch2_name,
+                &Value::Uuid(row2),
+                row2,
+            )
             .unwrap();
         assert_eq!(
             storage.load_table_prefix_batches("users", prefix).unwrap(),
             HashSet::from([batch1_id, batch2_id])
+        );
+
+        storage
+            .index_remove("users", "_id", &branch1_name, &Value::Uuid(row1), row1)
+            .unwrap();
+        storage
+            .index_remove(
+                "users",
+                "_id_deleted",
+                &branch2_name,
+                &Value::Uuid(row2),
+                row2,
+            )
+            .unwrap();
+        assert_eq!(
+            storage.load_table_prefix_batches("users", prefix).unwrap(),
+            HashSet::new()
         );
     }
 
