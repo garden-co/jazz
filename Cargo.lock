@@ -1744,6 +1744,7 @@ dependencies = [
  "internment",
  "jsonschema",
  "jsonwebtoken",
+ "lz4_flex 0.11.6",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-stdout",

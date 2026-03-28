@@ -45,6 +45,9 @@ struct PersistedPrefixBatchCatalog {
 }
 
 const MAX_COMMITS_PER_BRANCH_SEGMENT: usize = 32;
+const POSTCARD_CODEC_RAW: u8 = 0;
+const POSTCARD_CODEC_LZ4: u8 = 1;
+const MIN_LZ4_POSTCARD_BYTES: usize = 256;
 
 impl StoredBranchRef {
     fn from_branch_name(branch: &BranchName) -> Self {
@@ -82,12 +85,49 @@ fn decode_json<T: DeserializeOwned>(bytes: &[u8], label: &str) -> Result<T, Stor
 }
 
 fn encode_postcard<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, StorageError> {
-    postcard::to_allocvec(value)
-        .map_err(|e| StorageError::IoError(format!("serialize {label} postcard: {e}")))
+    let raw = postcard::to_allocvec(value)
+        .map_err(|e| StorageError::IoError(format!("serialize {label} postcard: {e}")))?;
+
+    if raw.len() < MIN_LZ4_POSTCARD_BYTES {
+        let mut encoded = Vec::with_capacity(1 + raw.len());
+        encoded.push(POSTCARD_CODEC_RAW);
+        encoded.extend_from_slice(&raw);
+        return Ok(encoded);
+    }
+
+    let compressed = lz4_flex::compress_prepend_size(&raw);
+    if compressed.len() >= raw.len() {
+        let mut encoded = Vec::with_capacity(1 + raw.len());
+        encoded.push(POSTCARD_CODEC_RAW);
+        encoded.extend_from_slice(&raw);
+        return Ok(encoded);
+    }
+
+    let mut encoded = Vec::with_capacity(1 + compressed.len());
+    encoded.push(POSTCARD_CODEC_LZ4);
+    encoded.extend_from_slice(&compressed);
+    Ok(encoded)
 }
 
 fn decode_postcard<T: DeserializeOwned>(bytes: &[u8], label: &str) -> Result<T, StorageError> {
-    postcard::from_bytes(bytes)
+    let Some((&codec, payload)) = bytes.split_first() else {
+        return Err(StorageError::IoError(format!(
+            "deserialize {label} postcard: empty payload"
+        )));
+    };
+
+    let decoded = match codec {
+        POSTCARD_CODEC_RAW => payload.to_vec(),
+        POSTCARD_CODEC_LZ4 => lz4_flex::decompress_size_prepended(payload)
+            .map_err(|e| StorageError::IoError(format!("deserialize {label} postcard lz4: {e}")))?,
+        other => {
+            return Err(StorageError::IoError(format!(
+                "deserialize {label} postcard: unknown codec {other}"
+            )));
+        }
+    };
+
+    postcard::from_bytes(&decoded)
         .map_err(|e| StorageError::IoError(format!("deserialize {label} postcard: {e}")))
 }
 
@@ -676,4 +716,42 @@ pub(super) fn index_range_core(
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct SamplePostcardPayload {
+        bytes: Vec<u8>,
+    }
+
+    #[test]
+    fn postcard_codec_keeps_small_payloads_raw() {
+        let payload = SamplePostcardPayload { bytes: vec![7; 32] };
+
+        let encoded = encode_postcard(&payload, "sample").unwrap();
+
+        assert_eq!(encoded.first().copied(), Some(POSTCARD_CODEC_RAW));
+        assert_eq!(
+            decode_postcard::<SamplePostcardPayload>(&encoded, "sample").unwrap(),
+            payload
+        );
+    }
+
+    #[test]
+    fn postcard_codec_compresses_large_payloads() {
+        let payload = SamplePostcardPayload {
+            bytes: vec![9; 4096],
+        };
+
+        let encoded = encode_postcard(&payload, "sample").unwrap();
+
+        assert_eq!(encoded.first().copied(), Some(POSTCARD_CODEC_LZ4));
+        assert_eq!(
+            decode_postcard::<SamplePostcardPayload>(&encoded, "sample").unwrap(),
+            payload
+        );
+    }
 }
