@@ -27,10 +27,12 @@ use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::QueryBuilder;
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{
-    ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName, TableSchema, Value,
+    ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies,
+    TableSchema, Value,
 };
 use jazz_tools::runtime_core::ReadDurabilityOptions;
 use jazz_tools::runtime_tokio::TokioRuntime;
+use jazz_tools::schema_manager::manager::PermissionsHeadSummary;
 use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
 use jazz_tools::storage::FjallStorage;
 use jazz_tools::sync_manager::{
@@ -769,6 +771,22 @@ enum WorkerCommand {
         schema_hash: SchemaHash,
         response: tokio::sync::oneshot::Sender<Result<Option<Schema>, String>>,
     },
+    PublishSchema {
+        app_id: AppId,
+        schema: Schema,
+        response: tokio::sync::oneshot::Sender<Result<ObjectId, String>>,
+    },
+    PublishPermissions {
+        app_id: AppId,
+        schema_hash: SchemaHash,
+        permissions: HashMap<TableName, TablePolicies>,
+        expected_parent_bundle_object_id: Option<ObjectId>,
+        response: tokio::sync::oneshot::Sender<Result<Option<PermissionsHeadSummary>, String>>,
+    },
+    GetPermissionsHead {
+        app_id: AppId,
+        response: tokio::sync::oneshot::Sender<Result<Option<PermissionsHeadSummary>, String>>,
+    },
     GetSchemaHashes {
         app_id: AppId,
         response: tokio::sync::oneshot::Sender<Result<Vec<String>, String>>,
@@ -789,6 +807,9 @@ impl WorkerCommand {
             | WorkerCommand::SyncAsBackend { app_id, .. }
             | WorkerCommand::SyncAsAdmin { app_id, .. }
             | WorkerCommand::GetCatalogueSchema { app_id, .. }
+            | WorkerCommand::PublishSchema { app_id, .. }
+            | WorkerCommand::PublishPermissions { app_id, .. }
+            | WorkerCommand::GetPermissionsHead { app_id, .. }
             | WorkerCommand::GetSchemaHashes { app_id, .. }
             | WorkerCommand::GetCatalogueStateHash { app_id, .. } => *app_id,
         }
@@ -1037,6 +1058,65 @@ impl WorkerPool {
         let worker = self.send_command(command)?;
         match response_rx.await {
             Ok(Ok(schema)) => Ok(schema),
+            Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
+            Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
+        }
+    }
+
+    async fn publish_schema(
+        &self,
+        app_id: AppId,
+        schema: Schema,
+    ) -> Result<ObjectId, WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::PublishSchema {
+            app_id,
+            schema,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        match response_rx.await {
+            Ok(Ok(object_id)) => Ok(object_id),
+            Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
+            Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
+        }
+    }
+
+    async fn publish_permissions(
+        &self,
+        app_id: AppId,
+        schema_hash: SchemaHash,
+        permissions: HashMap<TableName, TablePolicies>,
+        expected_parent_bundle_object_id: Option<ObjectId>,
+    ) -> Result<Option<PermissionsHeadSummary>, WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::PublishPermissions {
+            app_id,
+            schema_hash,
+            permissions,
+            expected_parent_bundle_object_id,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        match response_rx.await {
+            Ok(Ok(head)) => Ok(head),
+            Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
+            Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
+        }
+    }
+
+    async fn get_permissions_head(
+        &self,
+        app_id: AppId,
+    ) -> Result<Option<PermissionsHeadSummary>, WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::GetPermissionsHead {
+            app_id,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        match response_rx.await {
+            Ok(Ok(head)) => Ok(head),
             Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
             Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
         }
@@ -1926,13 +2006,10 @@ async fn run_worker_loop(
                         .get(&app_id)
                         .ok_or_else(|| format!("missing runtime for app {app_id}"))
                         .and_then(|runtime| {
-                            if let Err(err) = runtime.runtime.add_client(client_id, None) {
-                                Err(err.to_string())
-                            } else if let Err(err) = runtime.runtime.set_client_backend(client_id) {
-                                Err(err.to_string())
-                            } else {
-                                Ok(())
-                            }
+                            runtime
+                                .runtime
+                                .ensure_client_as_backend(client_id)
+                                .map_err(|err| err.to_string())
                         });
                     if response.send(result).is_err() {
                         warn!(
@@ -1985,9 +2062,7 @@ async fn run_worker_loop(
                 } => {
                     let result = match app_runtimes.get(&app_id) {
                         Some(runtime) => {
-                            if let Err(err) = runtime.runtime.add_client(client_id, None) {
-                                Err(err.to_string())
-                            } else if let Err(err) = runtime.runtime.set_client_backend(client_id) {
+                            if let Err(err) = runtime.runtime.ensure_client_as_backend(client_id) {
                                 Err(err.to_string())
                             } else if let Err(err) = runtime.runtime.push_sync_inbox(InboxEntry {
                                 source: Source::Client(client_id),
@@ -2017,9 +2092,7 @@ async fn run_worker_loop(
                 } => {
                     let result = match app_runtimes.get(&app_id) {
                         Some(runtime) => {
-                            if let Err(err) = runtime.runtime.add_client(client_id, None) {
-                                Err(err.to_string())
-                            } else if let Err(err) = runtime.runtime.set_client_admin(client_id) {
+                            if let Err(err) = runtime.runtime.ensure_client_as_admin(client_id) {
                                 Err(err.to_string())
                             } else if let Err(err) = runtime.runtime.push_sync_inbox(InboxEntry {
                                 source: Source::Client(client_id),
@@ -2058,6 +2131,71 @@ async fn run_worker_loop(
                         });
                     if response.send(result).is_err() {
                         warn!(worker, app_id = %app_id, "schema response receiver dropped");
+                    }
+                }
+                WorkerCommand::PublishSchema {
+                    app_id,
+                    schema,
+                    response,
+                } => {
+                    let result = app_runtimes
+                        .get(&app_id)
+                        .ok_or_else(|| format!("missing runtime for app {app_id}"))
+                        .and_then(|runtime| {
+                            runtime
+                                .runtime
+                                .publish_schema(schema)
+                                .map_err(|err| err.to_string())
+                        });
+                    if response.send(result).is_err() {
+                        warn!(worker, app_id = %app_id, "publish-schema response receiver dropped");
+                    }
+                }
+                WorkerCommand::PublishPermissions {
+                    app_id,
+                    schema_hash,
+                    permissions,
+                    expected_parent_bundle_object_id,
+                    response,
+                } => {
+                    let result = app_runtimes
+                        .get(&app_id)
+                        .ok_or_else(|| format!("missing runtime for app {app_id}"))
+                        .and_then(|runtime| {
+                            runtime
+                                .runtime
+                                .publish_permissions_bundle(
+                                    schema_hash,
+                                    permissions,
+                                    expected_parent_bundle_object_id,
+                                )
+                                .and_then(|_| runtime.runtime.current_permissions_head())
+                                .map_err(|err| err.to_string())
+                        });
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            "publish-permissions response receiver dropped"
+                        );
+                    }
+                }
+                WorkerCommand::GetPermissionsHead { app_id, response } => {
+                    let result = app_runtimes
+                        .get(&app_id)
+                        .ok_or_else(|| format!("missing runtime for app {app_id}"))
+                        .and_then(|runtime| {
+                            runtime
+                                .runtime
+                                .current_permissions_head()
+                                .map_err(|err| err.to_string())
+                        });
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            "permissions head response receiver dropped"
+                        );
                     }
                 }
                 WorkerCommand::GetSchemaHashes { app_id, response } => {
@@ -2245,6 +2383,42 @@ struct SchemaHashesResponse {
     hashes: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PublishSchemaRequest {
+    schema: Schema,
+    permissions: Option<HashMap<TableName, TablePolicies>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishPermissionsRequest {
+    schema_hash: String,
+    permissions: HashMap<String, TablePolicies>,
+    expected_parent_bundle_object_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishSchemaResponse {
+    object_id: String,
+    hash: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionsHeadView {
+    schema_hash: String,
+    version: u64,
+    parent_bundle_object_id: Option<String>,
+    bundle_object_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionsHeadResponse {
+    head: Option<PermissionsHeadView>,
+}
+
 pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     let data_root = PathBuf::from(&config.data_root);
     std::fs::create_dir_all(data_root.join("apps"))?;
@@ -2373,6 +2547,15 @@ fn create_router(state: Arc<ServerState>) -> Router {
         .route("/apps/:app_id/sync", post(sync_handler))
         .route("/apps/:app_id/schema/:hash", get(schema_catalogue_handler))
         .route("/apps/:app_id/schemas", get(schema_hashes_handler))
+        .route("/apps/:app_id/admin/schemas", post(publish_schema_handler))
+        .route(
+            "/apps/:app_id/admin/permissions/head",
+            get(permissions_head_handler),
+        )
+        .route(
+            "/apps/:app_id/admin/permissions",
+            post(publish_permissions_handler),
+        )
         .route(
             "/apps/:app_id/auth/link-external",
             post(link_external_handler),
@@ -3649,6 +3832,242 @@ async fn sync_handler(
     }
 
     Json(SyncBatchResponse { results }).into_response()
+}
+
+fn permissions_head_view(head: PermissionsHeadSummary) -> PermissionsHeadView {
+    PermissionsHeadView {
+        schema_hash: head.schema_hash.to_string(),
+        version: head.version,
+        parent_bundle_object_id: head
+            .parent_bundle_object_id
+            .map(|object_id: ObjectId| object_id.to_string()),
+        bundle_object_id: head.bundle_object_id.to_string(),
+    }
+}
+
+async fn publish_schema_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+    Json(request): Json<PublishSchemaRequest>,
+) -> impl IntoResponse {
+    let app_id = match parse_app_id(&path.app_id) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let app = match state.get_app(app_id).await {
+        Some(app) => app,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    let cfg = app.config.read().await.clone();
+    match validate_admin_secret(&headers, &cfg, &state.meta_store) {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse::unauthorized("admin secret required")),
+            )
+                .into_response();
+        }
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
+    if request.permissions.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(
+                "inline permissions are no longer supported; publish permissions separately",
+            )),
+        )
+            .into_response();
+    }
+
+    let schema_hash = SchemaHash::compute(&request.schema);
+    match state.workers.publish_schema(app_id, request.schema).await {
+        Ok(object_id) => (
+            StatusCode::CREATED,
+            Json(PublishSchemaResponse {
+                object_id: object_id.to_string(),
+                hash: schema_hash.to_string(),
+            }),
+        )
+            .into_response(),
+        Err(err) => {
+            let (status, message) = worker_dispatch_status_and_message(err);
+            (status, Json(ErrorResponse::internal(message))).into_response()
+        }
+    }
+}
+
+async fn permissions_head_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let app_id = match parse_app_id(&path.app_id) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let app = match state.get_app(app_id).await {
+        Some(app) => app,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    let cfg = app.config.read().await.clone();
+    match validate_admin_secret(&headers, &cfg, &state.meta_store) {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse::unauthorized("admin secret required")),
+            )
+                .into_response();
+        }
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
+    match state.workers.get_permissions_head(app_id).await {
+        Ok(head) => Json(PermissionsHeadResponse {
+            head: head.map(permissions_head_view),
+        })
+        .into_response(),
+        Err(err) => {
+            let (status, message) = worker_dispatch_status_and_message(err);
+            (status, Json(ErrorResponse::internal(message))).into_response()
+        }
+    }
+}
+
+async fn publish_permissions_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+    Json(request): Json<PublishPermissionsRequest>,
+) -> impl IntoResponse {
+    let app_id = match parse_app_id(&path.app_id) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let app = match state.get_app(app_id).await {
+        Some(app) => app,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    let cfg = app.config.read().await.clone();
+    match validate_admin_secret(&headers, &cfg, &state.meta_store) {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse::unauthorized("admin secret required")),
+            )
+                .into_response();
+        }
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
+    let schema_hash = match parse_schema_hash(&request.schema_hash) {
+        Ok(hash) => hash,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let mut permissions = HashMap::new();
+    for (table_name, policies) in request.permissions {
+        permissions.insert(TableName::new(&table_name), policies);
+    }
+
+    let expected_parent_bundle_object_id = match request.expected_parent_bundle_object_id {
+        Some(object_id) => match Uuid::parse_str(&object_id) {
+            Ok(uuid) => Some(ObjectId::from_uuid(uuid)),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::bad_request(
+                        "invalid expectedParentBundleObjectId",
+                    )),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+
+    match state
+        .workers
+        .publish_permissions(
+            app_id,
+            schema_hash,
+            permissions,
+            expected_parent_bundle_object_id,
+        )
+        .await
+    {
+        Ok(head) => (
+            StatusCode::CREATED,
+            Json(PermissionsHeadResponse {
+                head: head.map(permissions_head_view),
+            }),
+        )
+            .into_response(),
+        Err(WorkerDispatchError::RuntimeError { message, .. })
+            if message.contains("stale parent") =>
+        {
+            (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::bad_request(message)),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            let (status, message) = worker_dispatch_status_and_message(err);
+            (status, Json(ErrorResponse::internal(message))).into_response()
+        }
+    }
 }
 
 async fn schema_catalogue_handler(

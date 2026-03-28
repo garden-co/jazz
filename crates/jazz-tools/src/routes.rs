@@ -306,8 +306,7 @@ async fn events_handler(
         if let Err((status, msg)) = validate_backend_secret(backend_secret, &state.auth_config) {
             return Err((status, msg.to_string()));
         }
-        let _ = state.runtime.add_client(client_id, None);
-        let _ = state.runtime.set_client_backend(client_id);
+        let _ = state.runtime.ensure_client_as_backend(client_id);
     } else {
         // Extract session from headers (JWT, local auth, or backend impersonation)
         let session = {
@@ -480,14 +479,7 @@ async fn sync_handler(
     // Admin-authenticated requests (server-to-server catalogue sync) don't need a session.
     // Regular clients must provide JWT or backend secret.
     if is_admin {
-        if let Err(e) = state.runtime.add_client(request.client_id, None) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(e.to_string())),
-            )
-                .into_response();
-        }
-        if let Err(e) = state.runtime.set_client_admin(request.client_id) {
+        if let Err(e) = state.runtime.ensure_client_as_admin(request.client_id) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::internal(e.to_string())),
@@ -503,14 +495,7 @@ async fn sync_handler(
         if let Err((status, msg)) = validate_backend_secret(backend_secret, &state.auth_config) {
             return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
         }
-        if let Err(e) = state.runtime.add_client(request.client_id, None) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(e.to_string())),
-            )
-                .into_response();
-        }
-        if let Err(e) = state.runtime.set_client_backend(request.client_id) {
+        if let Err(e) = state.runtime.ensure_client_as_backend(request.client_id) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::internal(e.to_string())),

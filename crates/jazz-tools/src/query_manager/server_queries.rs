@@ -670,6 +670,10 @@ impl QueryManager {
     }
 
     fn should_sync_policy_context_rows(&self, client_id: ClientId) -> bool {
+        self.client_bypasses_authorization_filtering(client_id)
+    }
+
+    fn client_bypasses_authorization_filtering(&self, client_id: ClientId) -> bool {
         self.sync_manager
             .get_client(client_id)
             .map(|client| {
@@ -845,13 +849,17 @@ impl QueryManager {
 
             // Sync the rows needed for the client to reproduce the current result
             // locally, including any ordered prefix required by pagination.
-            let result_scope = self.authorized_scope_from_graph(
-                storage_ref,
-                &graph,
-                &subscription_context,
-                &branch_schema_map,
-                session_for_policy.as_ref(),
-            );
+            let result_scope = if self.client_bypasses_authorization_filtering(sub.client_id) {
+                graph.sync_scope_object_ids()
+            } else {
+                self.authorized_scope_from_graph(
+                    storage_ref,
+                    &graph,
+                    &subscription_context,
+                    &branch_schema_map,
+                    session_for_policy.as_ref(),
+                )
+            };
             // Trusted clients (Peer/Admin) also need policy context rows.
             let scope = if sync_policy_context_rows {
                 let om = &self.sync_manager.object_manager;
@@ -953,22 +961,6 @@ impl QueryManager {
         let mut schema_warning_notifications: Vec<(ClientId, crate::sync_manager::SchemaWarning)> =
             Vec::new();
 
-        let trusted_clients: HashSet<ClientId> = self
-            .sync_manager
-            .clients
-            .iter()
-            .filter_map(|(client_id, client)| {
-                if matches!(
-                    client.role,
-                    ClientRole::Peer | ClientRole::Admin | ClientRole::Backend
-                ) {
-                    Some(*client_id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
         let subscription_keys: Vec<_> = self.server_subscriptions.keys().copied().collect();
 
         for (client_id, query_id) in subscription_keys {
@@ -1028,14 +1020,18 @@ impl QueryManager {
                 }
 
                 // Check if scope changed
-                let result_scope = self.authorized_scope_from_graph(
-                    storage,
-                    &sub.graph,
-                    &sub.schema_context,
-                    &branch_schema_map,
-                    sub.session.as_ref(),
-                );
-                if trusted_clients.contains(&client_id) {
+                let result_scope = if self.client_bypasses_authorization_filtering(client_id) {
+                    sub.graph.sync_scope_object_ids()
+                } else {
+                    self.authorized_scope_from_graph(
+                        storage,
+                        &sub.graph,
+                        &sub.schema_context,
+                        &branch_schema_map,
+                        sub.session.as_ref(),
+                    )
+                };
+                if self.should_sync_policy_context_rows(client_id) {
                     let om = &self.sync_manager.object_manager;
                     Self::scope_with_policy_context_rows_from_object_manager(
                         &result_scope,
