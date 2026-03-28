@@ -461,7 +461,6 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
 
         let schema: Schema = wasm_schema;
-
         // Parse optional tier
         let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
 
@@ -590,12 +589,11 @@ impl WasmRuntime {
     #[wasm_bindgen]
     pub fn insert(&self, table: &str, values: JsValue) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::insert", tier = self.tier_label, table).entered();
-        let wasm_values: Vec<Value> = serde_wasm_bindgen::from_value(values)?;
-        let groove_values: Vec<Value> = wasm_values;
+        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
 
         let mut core = self.core.borrow_mut();
         let (object_id, row_values) = core
-            .insert(table, groove_values, None)
+            .insert(table, named_values, None)
             .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?;
 
         let row = SubscriptionRow {
@@ -617,13 +615,12 @@ impl WasmRuntime {
         session_json: Option<String>,
     ) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::insertWithSession", tier = self.tier_label, table).entered();
-        let wasm_values: Vec<Value> = serde_wasm_bindgen::from_value(values)?;
-        let groove_values: Vec<Value> = wasm_values;
+        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
         let session = parse_session_json(session_json)?;
 
         let mut core = self.core.borrow_mut();
         let (object_id, row_values) = core
-            .insert(table, groove_values, session.as_ref())
+            .insert(table, named_values, session.as_ref())
             .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?;
 
         let row = SubscriptionRow {
@@ -787,12 +784,11 @@ impl WasmRuntime {
     ) -> Result<js_sys::Promise, JsError> {
         let persistence_tier = parse_tier(tier)?;
 
-        let wasm_values: Vec<Value> = serde_wasm_bindgen::from_value(values)?;
-        let groove_values: Vec<Value> = wasm_values;
+        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
 
         let ((object_id, row_values), receiver) = {
             let mut core = self.core.borrow_mut();
-            core.insert_persisted(table, groove_values, None, persistence_tier)
+            core.insert_persisted(table, named_values, None, persistence_tier)
                 .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?
         };
 
@@ -821,13 +817,12 @@ impl WasmRuntime {
         tier: &str,
     ) -> Result<js_sys::Promise, JsError> {
         let persistence_tier = parse_tier(tier)?;
-        let wasm_values: Vec<Value> = serde_wasm_bindgen::from_value(values)?;
-        let groove_values: Vec<Value> = wasm_values;
+        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
         let session = parse_session_json(session_json)?;
 
         let ((object_id, row_values), receiver) = {
             let mut core = self.core.borrow_mut();
-            core.insert_persisted(table, groove_values, session.as_ref(), persistence_tier)
+            core.insert_persisted(table, named_values, session.as_ref(), persistence_tier)
                 .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?
         };
 
@@ -1298,7 +1293,6 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
 
         let schema: Schema = wasm_schema;
-
         // Parse optional node durability tiers
         let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
 

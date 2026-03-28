@@ -86,6 +86,7 @@ function jsonColumn(schema?: JsonSchemaSource): JsonBuilder {
 
 interface ColumnBuilder {
   optional(): this;
+  default(value: unknown): this;
   _build(name: string): Column;
   _sqlType: SqlType;
   _references: string | undefined;
@@ -95,10 +96,11 @@ export type TypedColumnBuilder<
   Sql extends SqlType = SqlType,
   Optional extends boolean = boolean,
   Ref extends string | undefined = string | undefined,
-> = Omit<ColumnBuilder, "optional"> & {
+> = Omit<ColumnBuilder, "optional" | "default"> & {
   readonly __jazzSqlType: Sql;
   readonly __jazzOptional: Optional;
   readonly __jazzReferences: Ref;
+  default(value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>): ColumnAlias<Sql, Optional, Ref>;
   optional(): ColumnAlias<Sql, true, Ref>;
 };
 
@@ -110,21 +112,40 @@ export type ColumnBuilderOptional<TBuilder extends AnyTypedColumnBuilder> =
 export type ColumnBuilderReferences<TBuilder extends AnyTypedColumnBuilder> =
   TBuilder["__jazzReferences"];
 
-export type StringColumn<Optional extends boolean = false> = TypedColumnBuilder<"TEXT", Optional>;
+export type StringColumn<Optional extends boolean = false> = TypedColumnBuilder<
+  "TEXT",
+  Optional,
+  undefined
+>;
 export type BooleanColumn<Optional extends boolean = false> = TypedColumnBuilder<
   "BOOLEAN",
-  Optional
+  Optional,
+  undefined
 >;
-export type IntColumn<Optional extends boolean = false> = TypedColumnBuilder<"INTEGER", Optional>;
+export type IntColumn<Optional extends boolean = false> = TypedColumnBuilder<
+  "INTEGER",
+  Optional,
+  undefined
+>;
 export type TimestampColumn<Optional extends boolean = false> = TypedColumnBuilder<
   "TIMESTAMP",
-  Optional
+  Optional,
+  undefined
 >;
-export type FloatColumn<Optional extends boolean = false> = TypedColumnBuilder<"REAL", Optional>;
-export type BytesColumn<Optional extends boolean = false> = TypedColumnBuilder<"BYTEA", Optional>;
+export type FloatColumn<Optional extends boolean = false> = TypedColumnBuilder<
+  "REAL",
+  Optional,
+  undefined
+>;
+export type BytesColumn<Optional extends boolean = false> = TypedColumnBuilder<
+  "BYTEA",
+  Optional,
+  undefined
+>;
 export type JsonColumn<Output = JsonValue, Optional extends boolean = false> = TypedColumnBuilder<
   JsonSqlType<Output>,
-  Optional
+  Optional,
+  undefined
 >;
 export type EnumColumn<
   Variants extends readonly string[] = readonly string[],
@@ -134,7 +155,8 @@ export type EnumColumn<
     kind: "ENUM";
     variants: [...Variants];
   },
-  Optional
+  Optional,
+  undefined
 >;
 export type RefColumn<
   TargetTable extends string,
@@ -143,7 +165,7 @@ export type RefColumn<
 export type ArrayColumn<
   ElementSql extends SqlType = SqlType,
   Optional extends boolean = false,
-  Ref extends string | undefined = string | undefined,
+  Ref extends string | undefined = undefined,
 > = TypedColumnBuilder<
   {
     kind: "ARRAY";
@@ -216,6 +238,7 @@ function validateReferenceColumnName(name: string, builder: ColumnBuilder): void
 
 class ScalarBuilder implements ColumnBuilder {
   private _nullable = false;
+  private _default: unknown = undefined;
 
   constructor(public _sqlType: ScalarSqlType) {}
 
@@ -224,11 +247,17 @@ class ScalarBuilder implements ColumnBuilder {
     return this;
   }
 
+  default(value: unknown): this {
+    this._default = value;
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
       sqlType: this._sqlType,
       nullable: this._nullable,
+      ...(this._default === undefined ? {} : { default: this._default }),
     };
   }
 
@@ -239,6 +268,7 @@ class ScalarBuilder implements ColumnBuilder {
 
 class EnumBuilder implements ColumnBuilder {
   private _nullable = false;
+  private _default: unknown = undefined;
   public _sqlType: EnumSqlType;
 
   constructor(...variants: string[]) {
@@ -250,11 +280,17 @@ class EnumBuilder implements ColumnBuilder {
     return this;
   }
 
+  default(value: unknown): this {
+    this._default = value;
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
       sqlType: this._sqlType,
       nullable: this._nullable,
+      ...(this._default === undefined ? {} : { default: this._default }),
     };
   }
 
@@ -265,6 +301,7 @@ class EnumBuilder implements ColumnBuilder {
 
 class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
   private _nullable = false;
+  private _default: unknown = undefined;
   public _sqlType: JsonSqlType<Output>;
 
   constructor(schema?: JsonSchemaSource<Output>) {
@@ -278,11 +315,17 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
     return this;
   }
 
+  default(value: unknown): this {
+    this._default = value;
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
       sqlType: this._sqlType,
       nullable: this._nullable,
+      ...(this._default === undefined ? {} : { default: this._default }),
     };
   }
 
@@ -297,6 +340,7 @@ class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
 
 class RefBuilder implements ColumnBuilder {
   private _nullable = false;
+  private _default: unknown = undefined;
 
   constructor(private _targetTable: string) {}
 
@@ -305,11 +349,17 @@ class RefBuilder implements ColumnBuilder {
     return this;
   }
 
+  default(value: unknown): this {
+    this._default = value;
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
       sqlType: this._sqlType,
       nullable: this._nullable,
+      ...(this._default === undefined ? {} : { default: this._default }),
       references: this._references,
     };
   }
@@ -325,6 +375,7 @@ class RefBuilder implements ColumnBuilder {
 
 class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
   private _nullable = false;
+  private _default: unknown = undefined;
 
   constructor(public _element: T) {}
 
@@ -333,11 +384,17 @@ class ArrayBuilder<T extends ColumnBuilder> implements ColumnBuilder {
     return this;
   }
 
+  default(value: unknown): this {
+    this._default = value;
+    return this;
+  }
+
   _build(name: string): Column {
     return {
       name,
       sqlType: this._sqlType,
       nullable: this._nullable,
+      ...(this._default === undefined ? {} : { default: this._default }),
       references: this._references,
     };
   }

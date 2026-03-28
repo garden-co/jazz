@@ -14,8 +14,7 @@ mod tests {
         TableSchema, Value,
     };
     use crate::schema_manager::{
-        AppId, CopyOnWriteWriter, Lens, LensOp, LensTransform, SchemaContext, SchemaManager,
-        generate_lens,
+        AppId, Lens, LensOp, LensTransform, SchemaContext, SchemaManager, generate_lens,
     };
     use crate::storage::MemoryStorage;
 
@@ -97,84 +96,6 @@ mod tests {
             v2_values[v2_descriptor.column_index("email").unwrap()],
             Value::Null
         ); // Added column with default
-    }
-
-    /// Test copy-on-write update across schema versions.
-    #[test]
-    fn copy_on_write_update() {
-        let v1 = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text),
-            )
-            .build();
-
-        let v2 = SchemaBuilder::new()
-            .table(
-                TableSchema::builder("users")
-                    .column("id", ColumnType::Uuid)
-                    .column("name", ColumnType::Text)
-                    .nullable_column("email", ColumnType::Text),
-            )
-            .build();
-
-        let v1_hash = SchemaHash::compute(&v1);
-        let v2_hash = SchemaHash::compute(&v2);
-        let lens = generate_lens(&v1, &v2);
-
-        let mut ctx = SchemaContext::new(v2.clone(), "dev", "main");
-        ctx.add_live_schema(v1.clone(), lens);
-
-        // Build branch -> schema map
-        let mut branch_map = HashMap::new();
-        let v1_branch = format!("dev-{}-main", v1_hash.short());
-        let v2_branch = format!("dev-{}-main", v2_hash.short());
-        branch_map.insert(v1_branch.clone(), v1_hash);
-        branch_map.insert(v2_branch.clone(), v2_hash);
-
-        let mut writer = CopyOnWriteWriter::new(&ctx, "users", branch_map);
-
-        // Create a row in v1 schema
-        let id = ObjectId::new();
-        let v1_table = v1.get(&TableName::new("users")).unwrap();
-        let v1_values = vec![Value::Uuid(id), Value::Text("Alice".to_string())];
-        let v1_data = encode_row(&v1_table.columns, &v1_values).unwrap();
-
-        // Cache the row (simulating loading from storage)
-        writer.cache_row(id, &v1_branch, v1_data, make_commit_id(1));
-
-        // Get write info - should indicate copy-on-write
-        let write_info = writer.get_write_info(id);
-        assert!(write_info.is_copy_on_write);
-        assert_eq!(write_info.source_branch, Some(v1_branch.clone()));
-
-        // Prepare update
-        let result = writer
-            .prepare_update(id, |vals| {
-                // After transform, we have 3 columns
-                assert_eq!(vals.len(), 3);
-                vec![
-                    vals[0].clone(),
-                    Value::Text("Alice Updated".to_string()),
-                    Value::Text("alice@example.com".to_string()),
-                ]
-            })
-            .unwrap();
-
-        assert!(result.was_transformed);
-        assert_eq!(result.source_schema, v1_hash);
-
-        // Verify result
-        let v2_table = v2.get(&TableName::new("users")).unwrap();
-        let final_values = decode_row(&v2_table.columns, &result.data).unwrap();
-
-        assert_eq!(final_values[0], Value::Uuid(id));
-        assert_eq!(final_values[1], Value::Text("Alice Updated".to_string()));
-        assert_eq!(
-            final_values[2],
-            Value::Text("alice@example.com".to_string())
-        );
     }
 
     /// Test column rename through lens.
@@ -1315,6 +1236,91 @@ mod tests {
         assert_eq!(manager_b.all_branches().len(), 2);
     }
 
+    /// Test catalogue update processing: draft lenses are stored but must not
+    /// activate pending schemas.
+    #[test]
+    fn catalogue_draft_lens_does_not_activate_pending_schema() {
+        let v1 = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("org_id", ColumnType::Uuid),
+            )
+            .build();
+
+        let mut schema_manager =
+            SchemaManager::new(SyncManager::new(), v1.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let v2_object_id = v2_hash.to_object_id();
+        let v2_encoded = encode_schema(&v2);
+        let mut schema_metadata = HashMap::new();
+        schema_metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueSchema.to_string(),
+        );
+        schema_metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        schema_metadata.insert(MetadataKey::SchemaHash.to_string(), v2_hash.to_string());
+
+        schema_manager
+            .process_catalogue_update(v2_object_id, &schema_metadata, &v2_encoded)
+            .unwrap();
+
+        assert!(
+            schema_manager.context().is_pending(&v2_hash),
+            "v2 should be pending before any lens arrives"
+        );
+
+        let lens = generate_lens(&v1, &v2);
+        assert!(lens.is_draft(), "v1 -> v2 should be a draft lens");
+
+        let lens_object_id = lens.object_id();
+        let lens_encoded = encode_lens_transform(&lens.forward);
+        let mut lens_metadata = HashMap::new();
+        lens_metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueLens.to_string(),
+        );
+        lens_metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        lens_metadata.insert(MetadataKey::SourceHash.to_string(), v1_hash.to_string());
+        lens_metadata.insert(MetadataKey::TargetHash.to_string(), v2_hash.to_string());
+
+        schema_manager
+            .process_catalogue_update(lens_object_id, &lens_metadata, &lens_encoded)
+            .unwrap();
+
+        assert!(
+            schema_manager.get_lens(&v1_hash, &v2_hash).is_some(),
+            "draft lens should still be registered"
+        );
+        assert!(
+            schema_manager.context().is_pending(&v2_hash),
+            "draft lens should not activate pending schema v2"
+        );
+        assert!(
+            !schema_manager.context().is_live(&v2_hash),
+            "draft lens should not make v2 live"
+        );
+        assert_eq!(
+            schema_manager.all_branches().len(),
+            1,
+            "only the current schema branch should be active"
+        );
+    }
+
     /// Test pending catalogue updates are queued in QueryManager.
     #[test]
     fn query_manager_queues_catalogue_updates() {
@@ -1861,7 +1867,11 @@ mod tests {
             .insert(
                 &mut io_a,
                 "users",
-                &[id_val.clone(), name.clone(), email.clone()],
+                HashMap::from([
+                    ("id".to_string(), id_val.clone()),
+                    ("name".to_string(), name.clone()),
+                    ("email".to_string(), email.clone()),
+                ]),
             )
             .unwrap();
         client_a.process(&mut io_a);
@@ -2212,14 +2222,12 @@ mod tests {
         // === Now test that row data syncs and is indexed via lazy activation ===
         // Client A creates a document
         let doc_uuid = ObjectId::new();
-        let doc_values = vec![
-            Value::Uuid(doc_uuid),
-            Value::Text("alice".into()),
-            Value::Text("Test Document".into()),
-        ];
-        let handle = client_a
-            .insert(&mut io_a, "documents", &doc_values)
-            .unwrap();
+        let doc_values = HashMap::from([
+            ("id".to_string(), Value::Uuid(doc_uuid)),
+            ("owner_id".to_string(), Value::Text("alice".into())),
+            ("title".to_string(), Value::Text("Test Document".into())),
+        ]);
+        let handle = client_a.insert(&mut io_a, "documents", doc_values).unwrap();
         let doc_id = handle.row_id; // The actual row object ID
         client_a.process(&mut io_a);
 
@@ -2263,7 +2271,7 @@ mod tests {
             .sync_manager_mut()
             .take_outbox();
         let query_b = QueryBuilder::new("documents")
-            .branch(&client_b.branch_name().to_string())
+            .branch(client_b.branch_name().to_string())
             .build();
         let _sub_b = client_b
             .query_manager_mut()
@@ -2431,11 +2439,14 @@ mod tests {
             .insert(
                 &mut io_server,
                 "documents",
-                &[
-                    Value::Uuid(ObjectId::new()),
-                    Value::Text("alice".into()),
-                    Value::Text("Alice's Secret Doc".into()),
-                ],
+                HashMap::from([
+                    ("id".to_string(), Value::Uuid(ObjectId::new())),
+                    ("owner_id".to_string(), Value::Text("alice".into())),
+                    (
+                        "title".to_string(),
+                        Value::Text("Alice's Secret Doc".into()),
+                    ),
+                ]),
             )
             .unwrap()
             .row_id;
@@ -2443,11 +2454,11 @@ mod tests {
             .insert(
                 &mut io_server,
                 "documents",
-                &[
-                    Value::Uuid(ObjectId::new()),
-                    Value::Text("bob".into()),
-                    Value::Text("Bob's Private Doc".into()),
-                ],
+                HashMap::from([
+                    ("id".to_string(), Value::Uuid(ObjectId::new())),
+                    ("owner_id".to_string(), Value::Text("bob".into())),
+                    ("title".to_string(), Value::Text("Bob's Private Doc".into())),
+                ]),
             )
             .unwrap()
             .row_id;
@@ -2457,7 +2468,7 @@ mod tests {
 
         // === Client A subscribes to documents (as alice) ===
         let query_a = QueryBuilder::new("documents")
-            .branch(&client_a.branch_name().to_string())
+            .branch(client_a.branch_name().to_string())
             .build();
 
         let _sub_a = client_a
@@ -2525,7 +2536,7 @@ mod tests {
 
         // === Client B subscribes to documents (as bob) ===
         let query_b = QueryBuilder::new("documents")
-            .branch(&client_b.branch_name().to_string())
+            .branch(client_b.branch_name().to_string())
             .build();
 
         let _sub_b = client_b
@@ -2666,16 +2677,16 @@ mod tests {
         // Transfer to server
         let outbox = client.query_manager_mut().sync_manager_mut().take_outbox();
         for entry in &outbox {
-            if let SyncPayload::ObjectUpdated { object_id, .. } = &entry.payload {
-                if *object_id == schema_obj_id {
-                    server
-                        .query_manager_mut()
-                        .sync_manager_mut()
-                        .push_inbox(InboxEntry {
-                            source: Source::Client(client_id),
-                            payload: entry.payload.clone(),
-                        });
-                }
+            if let SyncPayload::ObjectUpdated { object_id, .. } = &entry.payload
+                && *object_id == schema_obj_id
+            {
+                server
+                    .query_manager_mut()
+                    .sync_manager_mut()
+                    .push_inbox(InboxEntry {
+                        source: Source::Client(client_id),
+                        payload: entry.payload.clone(),
+                    });
             }
         }
 
@@ -2696,10 +2707,10 @@ mod tests {
             .insert(
                 &mut io_server,
                 "notes",
-                &[
-                    Value::Uuid(ObjectId::new()),
-                    Value::Text("Hello World".into()),
-                ],
+                HashMap::from([
+                    ("id".to_string(), Value::Uuid(ObjectId::new())),
+                    ("content".to_string(), Value::Text("Hello World".into())),
+                ]),
             )
             .unwrap()
             .row_id;
@@ -2708,7 +2719,7 @@ mod tests {
 
         // === Client subscribes to notes ===
         let query = QueryBuilder::new("notes")
-            .branch(&client.branch_name().to_string())
+            .branch(client.branch_name().to_string())
             .build();
 
         let _sub_id = client
@@ -2971,8 +2982,11 @@ mod tests {
 
         // Insert a row
         let row_id = ObjectId::new();
-        let values = vec![Value::Uuid(row_id), Value::Text("hello".into())];
-        manager.insert(&mut storage, "items", &values).unwrap();
+        let values = HashMap::from([
+            ("id".to_string(), Value::Uuid(row_id)),
+            ("name".to_string(), Value::Text("hello".into())),
+        ]);
+        manager.insert(&mut storage, "items", values).unwrap();
         manager.process(&mut storage);
 
         // Subscribe with settled_tier=None
@@ -3046,13 +3060,16 @@ mod tests {
 
         // Insert a row on server B
         let row_id = ObjectId::new();
-        let values = vec![Value::Uuid(row_id), Value::Text("srv".into())];
-        server_b.insert(&mut io_b, "items", &values).unwrap();
+        let values = HashMap::from([
+            ("id".to_string(), Value::Uuid(row_id)),
+            ("name".to_string(), Value::Text("srv".into())),
+        ]);
+        server_b.insert(&mut io_b, "items", values).unwrap();
         server_b.process(&mut io_b);
 
         // === Client A subscribes with settled_tier=Worker ===
         let query = QueryBuilder::new("items")
-            .branch(&client_a.branch_name().to_string())
+            .branch(client_a.branch_name().to_string())
             .build();
         let sub_id = client_a
             .query_manager_mut()
@@ -3162,7 +3179,7 @@ mod tests {
 
         // Subscribe with settled_tier=EdgeServer
         let query = QueryBuilder::new("items")
-            .branch(&client_a.branch_name().to_string())
+            .branch(client_a.branch_name().to_string())
             .build();
         let sub_id = client_a
             .query_manager_mut()
@@ -3177,8 +3194,11 @@ mod tests {
 
         // Insert a row locally on A (so there's data to deliver)
         let row_id = ObjectId::new();
-        let values = vec![Value::Uuid(row_id), Value::Text("local".into())];
-        client_a.insert(&mut io_a, "items", &values).unwrap();
+        let values = HashMap::from([
+            ("id".to_string(), Value::Uuid(row_id)),
+            ("name".to_string(), Value::Text("local".into())),
+        ]);
+        client_a.insert(&mut io_a, "items", values).unwrap();
         client_a.process(&mut io_a);
 
         // No delivery yet — tier not satisfied
@@ -3268,7 +3288,7 @@ mod tests {
 
         // Subscribe with settled_tier=Worker
         let query = QueryBuilder::new("items")
-            .branch(&client.branch_name().to_string())
+            .branch(client.branch_name().to_string())
             .build();
         let sub_id = client
             .query_manager_mut()
@@ -3284,8 +3304,11 @@ mod tests {
         // Insert 3 rows before tier is satisfied
         for i in 0..3 {
             let row_id = ObjectId::new();
-            let values = vec![Value::Uuid(row_id), Value::Text(format!("item_{}", i))];
-            client.insert(&mut storage, "items", &values).unwrap();
+            let values = HashMap::from([
+                ("id".to_string(), Value::Uuid(row_id)),
+                ("name".to_string(), Value::Text(format!("item_{}", i))),
+            ]);
+            client.insert(&mut storage, "items", values).unwrap();
             client.process(&mut storage);
         }
 
@@ -3356,13 +3379,16 @@ mod tests {
 
         // Insert a row first
         let row_id = ObjectId::new();
-        let values = vec![Value::Uuid(row_id), Value::Text("one-shot".into())];
-        client.insert(&mut storage, "items", &values).unwrap();
+        let values = HashMap::from([
+            ("id".to_string(), Value::Uuid(row_id)),
+            ("name".to_string(), Value::Text("one-shot".into())),
+        ]);
+        client.insert(&mut storage, "items", values).unwrap();
         client.process(&mut storage);
 
         // Subscribe with settled_tier=Worker (simulating one-shot behavior)
         let query = QueryBuilder::new("items")
-            .branch(&client.branch_name().to_string())
+            .branch(client.branch_name().to_string())
             .build();
         let sub_id = client
             .query_manager_mut()
@@ -3434,7 +3460,7 @@ mod tests {
 
         // No rows inserted. Subscribe with settled_tier=Worker.
         let query = QueryBuilder::new("items")
-            .branch(&client.branch_name().to_string())
+            .branch(client.branch_name().to_string())
             .build();
         let sub_id = client
             .query_manager_mut()

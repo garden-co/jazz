@@ -151,7 +151,7 @@ The SubscriptionManager preserves object identity for unchanged items: if a new 
 
 - **Query Adapter**: translates generated JSON to WasmQueryBuilder format (25 tests)
 - **Row Transformer**: converts WasmRow to typed objects (16 tests)
-- **Value Converter**: JS ↔ WasmValue conversion (`toValueArray`, `toUpdateRecord`) (22 tests)
+- **Value Converter**: JS ↔ WasmValue conversion (`toInsertRecord`, `toUpdateRecord`) (22 tests)
 
 > `packages/jazz-tools/src/runtime/query-adapter.ts`
 > `packages/jazz-tools/src/runtime/row-transformer.ts`

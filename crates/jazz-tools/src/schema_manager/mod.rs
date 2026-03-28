@@ -48,7 +48,6 @@ pub mod manager;
 pub mod rehydrate;
 pub mod transformer;
 pub mod types;
-pub mod writer;
 
 #[cfg(test)]
 mod integration_tests;
@@ -68,4 +67,3 @@ pub use transformer::{
     LensTransformer, TransformError, TransformResult, translate_column_for_index,
 };
 pub use types::AppId;
-pub use writer::{CopyOnWriteWriter, RowWriteInfo, WriteError, WriteResult};

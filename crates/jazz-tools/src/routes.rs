@@ -22,7 +22,7 @@ use crate::jazz_transport::{
 };
 use crate::middleware::auth::{
     derive_local_principal_id, extract_session, parse_local_auth_headers, validate_admin_secret,
-    validate_backend_secret, validate_jwt_identity,
+    validate_backend_secret,
 };
 use crate::object::ObjectId;
 use crate::query_manager::types::{
@@ -317,7 +317,10 @@ async fn events_handler(
                 state.app_id,
                 &state.auth_config,
                 Some(&external_identities),
-            ) {
+                state.jwks_cache.as_ref(),
+            )
+            .await
+            {
                 Ok(s) => s,
                 Err((status, msg)) => {
                     return Err((status, msg.to_string()));
@@ -523,7 +526,10 @@ async fn sync_handler(
                 state.app_id,
                 &state.auth_config,
                 Some(&external_identities),
-            ) {
+                state.jwks_cache.as_ref(),
+            )
+            .await
+            {
                 Ok(Some(s)) => s,
                 Ok(None) => {
                     tracing::error!(
@@ -1336,7 +1342,13 @@ async fn link_external_handler(
         }
     };
 
-    let verified = match validate_jwt_identity(token, &state.auth_config) {
+    let jwt_result = if let Some(ref cache) = state.jwks_cache {
+        crate::middleware::auth::validate_jwt_with_cache(token, cache).await
+    } else {
+        Err(crate::middleware::auth::JwtError::NoKeyConfigured)
+    };
+
+    let verified = match jwt_result {
         Ok(verified) => verified,
         Err(crate::middleware::auth::JwtError::NoKeyConfigured) => {
             return (
@@ -1499,7 +1511,6 @@ mod tests {
             allow_anonymous: true,
             allow_demo: true,
             jwks_url: None,
-            jwks_set: None,
         }
     }
 
@@ -1513,7 +1524,6 @@ mod tests {
             allow_anonymous: true,
             allow_demo: true,
             jwks_url: None,
-            jwks_set: None,
         };
 
         ServerBuilder::new(AppId::from_name("test-app"))
@@ -1725,7 +1735,6 @@ mod tests {
                 allow_anonymous: true,
                 allow_demo: true,
                 jwks_url: None,
-                jwks_set: None,
             })
             .with_in_memory_storage()
             .build()

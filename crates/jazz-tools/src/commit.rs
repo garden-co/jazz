@@ -4,11 +4,12 @@ use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
+use crate::metadata::{DeleteKind, MetadataKey};
 use crate::object::ObjectId;
 use crate::sync_manager::DurabilityTier;
 
 /// BLAKE3 hash identifying a commit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct CommitId(pub [u8; 32]);
 
 /// Persistence acknowledgment state (runtime only, not serialized).
@@ -83,6 +84,22 @@ impl Commit {
         }
 
         CommitId(*hasher.finalize().as_bytes())
+    }
+
+    pub fn is_soft_deleted(&self) -> bool {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.get(MetadataKey::Delete.as_str()))
+            .map(|v| v == DeleteKind::Soft.as_str())
+            .unwrap_or(false)
+    }
+
+    pub fn is_hard_deleted(&self) -> bool {
+        self.metadata
+            .as_ref()
+            .and_then(|m| m.get(MetadataKey::Delete.as_str()))
+            .map(|v| v == DeleteKind::Hard.as_str())
+            .unwrap_or(false)
     }
 }
 

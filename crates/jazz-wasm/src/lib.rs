@@ -28,7 +28,10 @@
 //! const runtime = new WasmRuntime(driver, JSON.stringify(schema), 'my-app', 'dev', 'main');
 //!
 //! // Insert a row
-//! const id = await runtime.insert('todos', [{ type: 'Text', value: 'Buy milk' }]);
+//! const id = await runtime.insert('todos', {
+//!   title: { type: 'Text', value: 'Buy milk' },
+//!   done: { type: 'Boolean', value: false },
+//! });
 //!
 //! // Query with builder
 //! const query = new WasmQueryBuilder('todos').branch('main').build();

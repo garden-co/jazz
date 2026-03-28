@@ -22,7 +22,7 @@ fn latest_catalogue_content<S: Storage + ?Sized>(
         branch_data
             .commits
             .into_iter()
-            .max_by_key(|commit| commit.timestamp)
+            .max_by_key(|commit| (commit.timestamp, commit.id()))
             .map(|commit| commit.content)
             .filter(|content| !content.is_empty())
     }))

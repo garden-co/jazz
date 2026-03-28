@@ -109,6 +109,7 @@ impl MagicColumnsNode {
                         column_type: ColumnType::Boolean,
                         nullable: true,
                         references: None,
+                        default: None,
                     });
                 }
 

@@ -116,7 +116,70 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
     } else {
         hasher.update(&[0]);
     }
+
+    // Schema-level default
+    if let Some(default) = &col.default {
+        hasher.update(&[1]);
+        hash_value(hasher, default);
+    } else {
+        hasher.update(&[0]);
+    }
     hasher.update(&[0]); // delimiter
+}
+
+fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
+    match value {
+        Value::Integer(v) => {
+            hasher.update(&[1]);
+            hasher.update(&v.to_le_bytes());
+        }
+        Value::BigInt(v) => {
+            hasher.update(&[2]);
+            hasher.update(&v.to_le_bytes());
+        }
+        Value::Double(v) => {
+            hasher.update(&[10]);
+            hasher.update(&v.to_le_bytes());
+        }
+        Value::Boolean(v) => {
+            hasher.update(&[3, *v as u8]);
+        }
+        Value::Text(v) => {
+            hasher.update(&[4]);
+            hasher.update(v.as_bytes());
+            hasher.update(&[0]);
+        }
+        Value::Timestamp(v) => {
+            hasher.update(&[5]);
+            hasher.update(&v.to_le_bytes());
+        }
+        Value::Uuid(v) => {
+            hasher.update(&[6]);
+            hasher.update(v.uuid().as_bytes());
+        }
+        Value::Bytea(v) => {
+            hasher.update(&[11]);
+            hasher.update(&(v.len() as u64).to_le_bytes());
+            hasher.update(v);
+        }
+        Value::Array(values) => {
+            hasher.update(&[7]);
+            hasher.update(&(values.len() as u64).to_le_bytes());
+            for inner in values {
+                hash_value(hasher, inner);
+            }
+        }
+        Value::Row { values, .. } => {
+            hasher.update(&[8]);
+            hasher.update(&(values.len() as u64).to_le_bytes());
+            for inner in values {
+                hash_value(hasher, inner);
+            }
+        }
+        Value::Null => {
+            hasher.update(&[9]);
+        }
+    }
 }
 
 /// Hash a ColumnType recursively (for Array and Row types).

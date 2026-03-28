@@ -1,5 +1,6 @@
 use super::*;
 use crate::commit::{Commit, CommitId};
+use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
 use crate::storage::Storage;
@@ -269,8 +270,15 @@ impl SyncManager {
                         } else {
                             stored_metadata
                         };
-                        let new_content = commits.last().map(|c| c.content.clone());
-                        let operation = if old_content.is_some() {
+                        let is_delete = Self::is_deleted_update(commits);
+                        let new_content = if is_delete {
+                            None
+                        } else {
+                            commits.last().map(|c| c.content.clone())
+                        };
+                        let operation = if is_delete {
+                            Operation::Delete
+                        } else if old_content.is_some() {
                             Operation::Update
                         } else {
                             Operation::Insert
@@ -360,22 +368,45 @@ impl SyncManager {
                 session,
                 propagation,
             } => {
-                // Warn if the payload carries a session that differs from the one established
-                // during the SSE handshake — this would indicate a spoofing attempt.
-                if let (Some(payload_session), Some(client_session)) = (session, &client.session)
-                    && payload_session != client_session
-                {
-                    tracing::warn!(
-                        %client_id,
-                        "QuerySubscription payload session does not match client session; using client session"
-                    );
-                }
-                // Prefer the server-established session (set from validated auth headers
-                // during the SSE handshake) over whatever the client claims in the payload.
-                // Fall back to the payload only for anonymous/demo clients whose
-                // client.session is None.  Note: despite the name, client.session is
-                // server-owned state — not a value the client can supply directly.
-                let effective_session = client.session.clone().or_else(|| session.clone());
+                // Build effective session: identity (user_id) comes from the
+                // server-established session (set during the SSE auth handshake) and
+                // cannot be overridden by the payload. However, ephemeral per-subscription
+                // claims supplied in the payload — such as a join_code for invite flows —
+                // are merged in when the user_id matches, so that policy conditions like
+                // `claims.join_code` evaluate correctly for this subscription.
+                let effective_session = match (&client.session, session) {
+                    (Some(client_session), Some(payload_session)) => {
+                        if client_session.user_id != payload_session.user_id {
+                            tracing::warn!(
+                                %client_id,
+                                "QuerySubscription payload session user_id does not match client session; ignoring payload session"
+                            );
+                            Some(client_session.clone())
+                        } else {
+                            // Same user: merge claims. Payload provides ephemeral claims
+                            // (e.g. join_code); client session claims take precedence so
+                            // auth-established values cannot be spoofed.
+                            let merged_claims = if let (
+                                serde_json::Value::Object(client_map),
+                                serde_json::Value::Object(payload_map),
+                            ) =
+                                (&client_session.claims, &payload_session.claims)
+                            {
+                                let mut merged = payload_map.clone();
+                                merged.extend(client_map.clone());
+                                serde_json::Value::Object(merged)
+                            } else {
+                                client_session.claims.clone()
+                            };
+                            Some(Session {
+                                user_id: client_session.user_id.clone(),
+                                claims: merged_claims,
+                            })
+                        }
+                    }
+                    (Some(client_session), None) => Some(client_session.clone()),
+                    (None, payload_session) => payload_session.clone(),
+                };
                 // Track origin for QuerySettled relay
                 self.query_origin
                     .entry(*query_id)
@@ -585,5 +616,16 @@ impl SyncManager {
             }
         }
         persisted
+    }
+
+    /// Soft deletes travel over sync as `ObjectUpdated`; we infer them from the
+    /// newest commit carrying delete metadata on the payload's tip.
+    fn is_deleted_update(commits: &[Commit]) -> bool {
+        commits.last().is_some_and(|commit| {
+            commit
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.contains_key(MetadataKey::Delete.as_str()))
+        })
     }
 }
