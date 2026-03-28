@@ -17,8 +17,10 @@ use crate::storage::{FjallStorage, MemoryStorage, Storage, StorageError};
 use crate::sync_manager::{
     ClientId, Destination, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
+use base64::Engine;
 use bytes::BytesMut;
 use futures::StreamExt;
+use serde::Deserialize;
 use tokio::sync::{RwLock, mpsc, oneshot};
 
 use crate::transport::{AuthConfig, ServerConnection};
@@ -29,12 +31,21 @@ use crate::{
 type DynStorage = Box<dyn Storage + Send>;
 type ClientRuntime = TokioRuntime<DynStorage>;
 
+#[derive(Debug, Deserialize)]
+struct UnverifiedJwtClaims {
+    sub: String,
+    #[serde(default)]
+    claims: serde_json::Value,
+}
+
 /// Jazz client for building applications.
 ///
 /// Combines local storage with server sync.
 pub struct JazzClient {
     /// Schema as declared by the client/app code.
     declared_schema: Schema,
+    /// Session inferred from client auth context for user-scoped operations.
+    default_session: Option<Session>,
     /// Handle to the local runtime.
     runtime: ClientRuntime,
     /// Connection to the server (shared for event processor).
@@ -72,6 +83,35 @@ fn build_client_schema_manager<S: Storage + ?Sized>(
     Ok(schema_manager)
 }
 
+fn session_from_unverified_jwt(token: &str) -> Option<Session> {
+    let payload = token.split('.').nth(1)?;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
+        .ok()?;
+    let claims: UnverifiedJwtClaims = serde_json::from_slice(&payload).ok()?;
+    let user_id = claims.sub.trim();
+    if user_id.is_empty() {
+        return None;
+    }
+
+    Some(Session {
+        user_id: user_id.to_string(),
+        claims: claims.claims,
+    })
+}
+
+fn default_session_from_context(context: &AppContext) -> Option<Session> {
+    if context.backend_secret.is_some() || context.admin_secret.is_some() {
+        return None;
+    }
+
+    context
+        .jwt_token
+        .as_deref()
+        .and_then(session_from_unverified_jwt)
+}
+
 impl JazzClient {
     /// Connect to Jazz with the given configuration.
     ///
@@ -82,6 +122,7 @@ impl JazzClient {
     /// 4. Start syncing
     pub async fn connect(context: AppContext) -> Result<Self> {
         let declared_schema = context.schema.clone();
+        let default_session = default_session_from_context(&context);
         let client_id = match context.storage {
             ClientStorage::Fjall => load_or_create_persistent_client_id(&context)?,
             ClientStorage::Memory => context.client_id.unwrap_or_default(),
@@ -292,6 +333,7 @@ impl JazzClient {
 
         Ok(Self {
             declared_schema,
+            default_session,
             runtime,
             server_connection,
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
@@ -304,7 +346,8 @@ impl JazzClient {
     ///
     /// Returns a stream of row deltas as the data changes.
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
-        self.subscribe_internal(query, None).await
+        self.subscribe_internal(query, self.default_session.clone())
+            .await
     }
 
     /// Internal subscribe with optional session.
@@ -361,7 +404,7 @@ impl JazzClient {
             .runtime
             .query(
                 query,
-                None,
+                self.default_session.clone(),
                 ReadDurabilityOptions {
                     tier: durability_tier,
                     local_updates: LocalUpdates::Immediate,
@@ -630,6 +673,7 @@ mod tests {
     use crate::schema_manager::AppId;
     use crate::storage::{CatalogueManifestOp, FjallStorage};
     use crate::{ColumnType, ObjectId, SchemaBuilder, TableSchema};
+    use serde_json::json;
     use tempfile::TempDir;
 
     fn declared_todo_schema() -> Schema {
@@ -674,10 +718,24 @@ mod tests {
             schema,
             server_url: String::new(),
             data_dir,
+            storage: ClientStorage::default(),
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
         }
+    }
+
+    fn make_test_jwt(sub: &str, claims: serde_json::Value) -> String {
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"alg":"none","typ":"JWT"}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "sub": sub,
+                "claims": claims,
+            }))
+            .expect("serialize jwt payload"),
+        );
+        format!("{header}.{payload}.sig")
     }
 
     fn seed_rehydrated_client_storage(
@@ -776,6 +834,38 @@ mod tests {
         assert_eq!(
             aligned,
             vec![Value::Text("done".to_string()), Value::Boolean(true)]
+        );
+    }
+
+    #[test]
+    fn default_session_from_context_uses_jwt_claims_for_user_clients() {
+        let app_id = AppId::from_name("client-jwt-session");
+        let mut context = make_offline_context(
+            app_id,
+            TempDir::new().expect("tempdir").into_path(),
+            declared_todo_schema(),
+        );
+        context.jwt_token = Some(make_test_jwt("alice", json!({ "join_code": "secret-123" })));
+
+        let session = default_session_from_context(&context).expect("derive session from jwt");
+        assert_eq!(session.user_id, "alice");
+        assert_eq!(session.claims["join_code"], "secret-123");
+    }
+
+    #[test]
+    fn default_session_from_context_skips_backend_capable_clients() {
+        let app_id = AppId::from_name("client-backend-session");
+        let mut context = make_offline_context(
+            app_id,
+            TempDir::new().expect("tempdir").into_path(),
+            declared_todo_schema(),
+        );
+        context.jwt_token = Some(make_test_jwt("alice", json!({ "role": "user" })));
+        context.backend_secret = Some("backend-secret".to_string());
+
+        assert!(
+            default_session_from_context(&context).is_none(),
+            "backend/admin clients should keep using explicit SessionClient scopes"
         );
     }
 
