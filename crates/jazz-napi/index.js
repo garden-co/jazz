@@ -581,4 +581,3 @@ module.exports.TestingServer = nativeBinding.TestingServer
 module.exports.currentTimestamp = nativeBinding.currentTimestamp
 module.exports.generateId = nativeBinding.generateId
 module.exports.parseSchema = nativeBinding.parseSchema
-module.exports.pushSchemaCatalogue = nativeBinding.pushSchemaCatalogue

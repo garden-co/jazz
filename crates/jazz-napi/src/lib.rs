@@ -182,17 +182,6 @@ struct TestingServerStartOptions {
     jwks_url: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PushSchemaCatalogueOptions {
-    server_url: String,
-    app_id: String,
-    admin_secret: String,
-    schema_dir: String,
-    env: Option<String>,
-    user_branch: Option<String>,
-}
-
 /// Scheduler that schedules `batched_tick()` on the Node.js event loop via a
 /// ThreadsafeFunction wrapping a noop JS function. The TSFN callback closure
 /// does the actual work. Debounced: only one tick is pending at a time.
@@ -1294,30 +1283,6 @@ impl TestingServer {
 // ============================================================================
 // Module-level utility functions
 // ============================================================================
-
-/// Push versioned schema and lens catalogue objects to a sync server.
-#[napi(js_name = "pushSchemaCatalogue", ts_return_type = "Promise<void>")]
-pub async fn push_schema_catalogue(
-    #[napi(
-        ts_arg_type = "{ serverUrl: string; appId: string; adminSecret: string; schemaDir: string; env?: string; userBranch?: string }"
-    )]
-    options: JsonValue,
-) -> napi::Result<()> {
-    let opts: PushSchemaCatalogueOptions = serde_json::from_value(options).map_err(|e| {
-        napi::Error::from_reason(format!("Invalid pushSchemaCatalogue options: {e}"))
-    })?;
-
-    jazz_tools::schema_catalogue::push(
-        &opts.server_url,
-        &opts.app_id,
-        opts.env.as_deref().unwrap_or("dev"),
-        opts.user_branch.as_deref().unwrap_or("main"),
-        &opts.admin_secret,
-        &opts.schema_dir,
-    )
-    .await
-    .map_err(|e| napi::Error::from_reason(format!("pushSchemaCatalogue failed: {e}")))
-}
 
 #[napi(js_name = "generateId")]
 pub fn generate_id() -> String {
