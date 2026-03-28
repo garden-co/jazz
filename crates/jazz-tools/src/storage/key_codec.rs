@@ -65,6 +65,22 @@ pub(super) fn encode_index_branch_key(branch: &str) -> String {
     }
 }
 
+fn encode_branch_prefix_storage_id(prefix: &str) -> String {
+    hex::encode(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, prefix.as_bytes()).as_bytes())
+}
+
+pub(super) fn encode_object_branch_key(branch: &BranchName) -> String {
+    if let Some(composed_branch) = ComposedBranchName::parse(branch) {
+        format!(
+            "c{}:{}",
+            encode_branch_prefix_storage_id(&composed_branch.prefix().branch_prefix()),
+            composed_branch.batch_id.branch_segment()
+        )
+    } else {
+        format!("r{}", hex::encode(branch.as_str().as_bytes()))
+    }
+}
+
 fn max_index_value_segment_len(table: &str, column: &str, branch_key: &str) -> Option<usize> {
     INDEX_KEY_MAX_BYTES.checked_sub(index_entry_key_bytes(table, column, branch_key, 0))
 }
@@ -148,7 +164,11 @@ pub(super) fn obj_meta_key(id: ObjectId) -> String {
 }
 
 pub(super) fn branch_tips_key(object_id: ObjectId, branch: &BranchName) -> String {
-    format!("obj:{}:br:{}:tips", format_uuid(object_id), branch)
+    format!(
+        "obj:{}:br:{}:tips",
+        format_uuid(object_id),
+        encode_object_branch_key(branch)
+    )
 }
 
 pub(super) fn commit_branch_key(object_id: ObjectId, commit_id: CommitId) -> String {
@@ -163,13 +183,17 @@ pub(super) fn commit_key(object_id: ObjectId, branch: &BranchName, commit_id: Co
     format!(
         "obj:{}:br:{}:c:{}",
         format_uuid(object_id),
-        branch,
+        encode_object_branch_key(branch),
         hex::encode(commit_id.0)
     )
 }
 
 pub(super) fn commit_prefix(object_id: ObjectId, branch: &BranchName) -> String {
-    format!("obj:{}:br:{}:c:", format_uuid(object_id), branch)
+    format!(
+        "obj:{}:br:{}:c:",
+        format_uuid(object_id),
+        encode_object_branch_key(branch)
+    )
 }
 
 pub(super) fn prefix_leaf_batches_key(object_id: ObjectId, prefix: &str) -> String {
@@ -463,6 +487,20 @@ mod tests {
         .expect("key should encode");
 
         assert!(key.contains(":cb00000000000000000000000000000001:"));
+        assert!(!key.contains(branch.as_str()));
+    }
+
+    #[test]
+    fn composed_object_branch_keys_store_prefix_id_and_batch_only() {
+        let branch = BranchName::new("dev-070707070707-main-b00000000000000000000000000000001");
+        let key = commit_key(
+            ObjectId::from_uuid(uuid::Uuid::nil()),
+            &branch,
+            CommitId([7; 32]),
+        );
+
+        assert!(key.contains(":br:c"));
+        assert!(key.contains(":b00000000000000000000000000000001:c:"));
         assert!(!key.contains(branch.as_str()));
     }
 }

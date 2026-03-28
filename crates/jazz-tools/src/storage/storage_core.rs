@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
 
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId, PrefixBatchCatalog, PrefixBatchMeta};
@@ -20,6 +20,38 @@ use super::key_codec::{
 use super::{
     CatalogueManifest, CatalogueManifestOp, LoadedBranch, PrefixBatchUpdate, StorageError,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+enum StoredBranchRef {
+    Batch { prefix: String, batch_id: BatchId },
+    Raw { name: String },
+}
+
+impl StoredBranchRef {
+    fn from_branch_name(branch: &BranchName) -> Self {
+        if let Some(composed_branch) =
+            crate::query_manager::types::ComposedBranchName::parse(branch)
+        {
+            Self::Batch {
+                prefix: composed_branch.prefix().branch_prefix(),
+                batch_id: composed_branch.batch_id,
+            }
+        } else {
+            Self::Raw {
+                name: branch.as_str().to_string(),
+            }
+        }
+    }
+
+    fn to_branch_name(&self) -> BranchName {
+        match self {
+            Self::Batch { prefix, batch_id } => {
+                BranchName::new(format!("{prefix}-{}", batch_id.branch_segment()))
+            }
+            Self::Raw { name } => BranchName::new(name.clone()),
+        }
+    }
+}
 
 fn encode_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, StorageError> {
     serde_json::to_vec(value).map_err(|e| StorageError::IoError(format!("serialize {label}: {e}")))
@@ -101,7 +133,10 @@ pub(super) fn load_commit_branch_core(
 ) -> Result<Option<BranchName>, StorageError> {
     let key = commit_branch_key(object_id, commit_id);
     match get(&key)? {
-        Some(data) => Ok(Some(decode_json(&data, "commit branch")?)),
+        Some(data) => {
+            let branch_ref: StoredBranchRef = decode_json(&data, "commit branch")?;
+            Ok(Some(branch_ref.to_branch_name()))
+        }
         None => Ok(None),
     }
 }
@@ -185,7 +220,8 @@ pub(super) fn append_commit_core(
     set(&commit_storage_key, &commit_json)?;
 
     let commit_branch_lookup_key = commit_branch_key(object_id, commit_id);
-    let commit_branch_json = encode_json(branch, "commit branch")?;
+    let commit_branch_json =
+        encode_json(&StoredBranchRef::from_branch_name(branch), "commit branch")?;
     set(&commit_branch_lookup_key, &commit_branch_json)?;
 
     let tips_key = branch_tips_key(object_id, branch);

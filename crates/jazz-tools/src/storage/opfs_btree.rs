@@ -7,8 +7,8 @@
 //!
 //! ```text
 //! "obj:{uuid}:meta"                                       → JSON metadata
-//! "obj:{uuid}:br:{branch}:tips"                           → JSON HashSet<CommitId>
-//! "obj:{uuid}:br:{branch}:c:{commit_uuid}"                → JSON Commit
+//! "obj:{uuid}:br:{branch_key}:tips"                       → JSON HashSet<CommitId>
+//! "obj:{uuid}:br:{branch_key}:c:{commit_uuid}"            → JSON Commit
 //! "ack:{commit_hex}"                                      → JSON HashSet<DurabilityTier>
 //! "catman:{app_uuid}:op:{object_uuid}"                    → JSON CatalogueManifestOp
 //! "idx:{table}:{col}:{branch_key}:{hex_encoded_value}:{uuid}" → empty (existence is the signal)
