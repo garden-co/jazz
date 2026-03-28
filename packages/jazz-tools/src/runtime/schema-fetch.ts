@@ -1,9 +1,6 @@
-import type {
-  ColumnType,
-  TablePolicies,
-  Value as WasmValue,
-  WasmSchema,
-} from "../drivers/types.js";
+import type { ColumnType, Value as WasmValue, WasmSchema } from "../drivers/types.js";
+import type { CompiledPermissionsMap } from "../schema-permissions.js";
+import { normalizePermissionsForWasm } from "../schema-permissions.js";
 import { buildEndpointUrl } from "./sync-transport.js";
 
 export interface FetchStoredWasmSchemaOptions {
@@ -71,7 +68,7 @@ export interface PublishStoredSchemaOptions {
   adminSecret: string;
   pathPrefix?: string;
   schema: WasmSchema;
-  permissions?: Record<string, TablePolicies>;
+  permissions?: CompiledPermissionsMap;
 }
 
 export async function publishStoredSchema(
@@ -86,7 +83,9 @@ export async function publishStoredSchema(
     },
     body: JSON.stringify({
       schema: options.schema,
-      permissions: options.permissions,
+      permissions: options.permissions
+        ? normalizePermissionsForWasm(options.permissions)
+        : undefined,
     }),
   });
 
@@ -143,7 +142,7 @@ export interface PublishStoredPermissionsOptions {
   adminSecret: string;
   pathPrefix?: string;
   schemaHash: string;
-  permissions: Record<string, TablePolicies>;
+  permissions: CompiledPermissionsMap;
   expectedParentBundleObjectId?: string | null;
 }
 
@@ -161,7 +160,7 @@ export async function publishStoredPermissions(
       },
       body: JSON.stringify({
         schemaHash: options.schemaHash,
-        permissions: options.permissions,
+        permissions: normalizePermissionsForWasm(options.permissions),
         expectedParentBundleObjectId: options.expectedParentBundleObjectId ?? null,
       }),
     },
