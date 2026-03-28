@@ -2,7 +2,6 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { TablePolicies } from "../drivers/types.js";
 import { loadCompiledSchema } from "../schema-loader.js";
 import {
   fetchPermissionsHead,
@@ -374,7 +373,7 @@ export async function pushSchemaCatalogue(options: PushSchemaCatalogueOptions): 
     await publishStoredPermissions(options.serverUrl, {
       adminSecret: options.adminSecret,
       schemaHash: result.hash,
-      permissions: compiled.permissions as Record<string, TablePolicies>,
+      permissions: compiled.permissions,
       expectedParentBundleObjectId: head?.bundleObjectId ?? null,
     });
   }

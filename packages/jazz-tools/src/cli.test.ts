@@ -80,6 +80,22 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 `;
 }
 
+function rootSchemaWithBooleanTodo(indexImportPath: string = indexPath): string {
+  return `
+import { schema as s } from ${JSON.stringify(indexImportPath)};
+
+const schema = {
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+  }),
+};
+
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+`;
+}
+
 function rootSchemaWithInlinePermissions(dslImportPath: string = dslPath): string {
   return `
 import { table, col } from ${JSON.stringify(dslImportPath)};
@@ -104,6 +120,20 @@ import { app } from ${JSON.stringify(appImportPath)};
 
 export default s.definePermissions(app, ({ policy, session }) => [
   policy.todos.allowRead.where({ ownerId: session.user_id }),
+]);
+`;
+}
+
+function rootBooleanLiteralPermissionsSchema(
+  appImportPath: string = "./schema.ts",
+  importPath: string = indexPath,
+): string {
+  return `
+import { schema as s } from ${JSON.stringify(importPath)};
+import { app } from ${JSON.stringify(appImportPath)};
+
+export default s.definePermissions(app, ({ policy }) => [
+  policy.todos.allowRead.where({ done: true }),
 ]);
 `;
 }
@@ -596,6 +626,75 @@ describe("cli permissions", () => {
     expect(logs).toContain(
       "Permission-only changes do not create schema hashes or require migrations.",
     );
+  });
+
+  it("publishes permission literals using tagged wire values", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithBooleanTodo());
+    await writeFile(join(root, "permissions.ts"), rootBooleanLiteralPermissionsSchema());
+
+    const schemaHash = "abababababababababababababababababababababababababababababababab";
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${schemaHash}`)) {
+        return new Response(
+          JSON.stringify({
+            todos: {
+              columns: [
+                { name: "title", column_type: { type: "Text" }, nullable: false },
+                { name: "done", column_type: { type: "Boolean" }, nullable: false },
+              ],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      if (input.endsWith("/admin/permissions/head")) {
+        return new Response(JSON.stringify({ head: null }), { status: 200 });
+      }
+
+      if (input.endsWith("/admin/permissions")) {
+        const body = JSON.parse(String(init?.body));
+        expect(body.permissions.todos.select.using).toEqual({
+          type: "Cmp",
+          column: "done",
+          op: "Eq",
+          value: {
+            type: "Literal",
+            value: {
+              type: "Boolean",
+              value: true,
+            },
+          },
+        });
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash,
+              version: 1,
+              parentBundleObjectId: null,
+              bundleObjectId: "99999999-9999-9999-9999-999999999999",
+            },
+          }),
+          { status: 201 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pushPermissions({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      schemaDir: root,
+    });
+
+    expect(fetchMock).toHaveBeenCalled();
   });
 });
 

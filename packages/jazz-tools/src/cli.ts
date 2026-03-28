@@ -9,7 +9,6 @@ import { register as registerEsm } from "tsx/esm/api";
 import type {
   ColumnDescriptor,
   ColumnType as WasmColumnType,
-  TablePolicies as WireTablePolicies,
   WasmSchema,
 } from "./drivers/types.js";
 import type { DefinedMigration } from "./migrations.js";
@@ -870,7 +869,7 @@ export async function pushPermissions(options: PermissionsCommandOptions): Promi
   const { head: publishedHead } = await publishStoredPermissions(options.serverUrl, {
     adminSecret: options.adminSecret,
     schemaHash: localSchemaHash,
-    permissions: compiled.permissions as Record<string, WireTablePolicies>,
+    permissions: compiled.permissions,
     expectedParentBundleObjectId: currentHead?.bundleObjectId ?? null,
   });
 
