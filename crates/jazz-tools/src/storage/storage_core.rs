@@ -10,11 +10,12 @@ use crate::sync_manager::DurabilityTier;
 use crate::query_manager::types::{BatchId, Value};
 
 use super::key_codec::{
-    ack_key, branch_state_key, catalogue_manifest_op_key, catalogue_manifest_op_prefix,
-    commit_branch_key, index_entry_key, index_prefix, index_range_scan_bounds, index_value_prefix,
-    obj_meta_key, parse_batch_id_from_table_prefix_key, parse_uuid_from_index_key,
-    prefix_batch_meta_key, prefix_batch_meta_prefix, prefix_leaf_batches_key,
-    table_prefix_batch_key, table_prefix_batch_prefix,
+    ack_key, branch_manifest_key, branch_segment_key, catalogue_manifest_op_key,
+    catalogue_manifest_op_prefix, commit_branch_key, index_entry_key, index_prefix,
+    index_range_scan_bounds, index_value_prefix, obj_meta_key,
+    parse_batch_id_from_table_prefix_key, parse_uuid_from_index_key, prefix_batch_meta_key,
+    prefix_batch_meta_prefix, prefix_leaf_batches_key, table_prefix_batch_key,
+    table_prefix_batch_prefix,
 };
 use super::{
     CatalogueManifest, CatalogueManifestOp, LoadedBranch, PrefixBatchUpdate, StorageError,
@@ -27,10 +28,17 @@ enum StoredBranchRef {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct PersistedBranchState {
-    commits: Vec<Commit>,
+struct PersistedBranchManifest {
+    segment_ids: Vec<u32>,
     tails: HashSet<CommitId>,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedBranchSegment {
+    commits: Vec<Commit>,
+}
+
+const MAX_COMMITS_PER_BRANCH_SEGMENT: usize = 32;
 
 impl StoredBranchRef {
     fn from_branch_name(branch: &BranchName) -> Self {
@@ -67,6 +75,16 @@ fn decode_json<T: DeserializeOwned>(bytes: &[u8], label: &str) -> Result<T, Stor
         .map_err(|e| StorageError::IoError(format!("deserialize {label}: {e}")))
 }
 
+fn encode_postcard<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, StorageError> {
+    postcard::to_allocvec(value)
+        .map_err(|e| StorageError::IoError(format!("serialize {label} postcard: {e}")))
+}
+
+fn decode_postcard<T: DeserializeOwned>(bytes: &[u8], label: &str) -> Result<T, StorageError> {
+    postcard::from_bytes(bytes)
+        .map_err(|e| StorageError::IoError(format!("deserialize {label} postcard: {e}")))
+}
+
 pub(super) fn create_object_core(
     id: ObjectId,
     metadata: HashMap<String, String>,
@@ -88,6 +106,54 @@ pub(super) fn load_object_metadata_core(
     }
 }
 
+fn load_branch_manifest(
+    object_id: ObjectId,
+    branch: &BranchName,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<PersistedBranchManifest>, StorageError> {
+    let key = branch_manifest_key(object_id, branch);
+    match get(&key)? {
+        Some(data) => Ok(Some(decode_postcard(&data, "branch manifest")?)),
+        None => Ok(None),
+    }
+}
+
+fn load_branch_segment(
+    object_id: ObjectId,
+    branch: &BranchName,
+    segment_id: u32,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<PersistedBranchSegment>, StorageError> {
+    let key = branch_segment_key(object_id, branch, segment_id);
+    match get(&key)? {
+        Some(data) => Ok(Some(decode_postcard(&data, "branch segment")?)),
+        None => Ok(None),
+    }
+}
+
+fn persist_branch_manifest(
+    object_id: ObjectId,
+    branch: &BranchName,
+    manifest: &PersistedBranchManifest,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let key = branch_manifest_key(object_id, branch);
+    let data = encode_postcard(manifest, "branch manifest")?;
+    set(&key, &data)
+}
+
+fn persist_branch_segment(
+    object_id: ObjectId,
+    branch: &BranchName,
+    segment_id: u32,
+    segment: &PersistedBranchSegment,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let key = branch_segment_key(object_id, branch, segment_id);
+    let data = encode_postcard(segment, "branch segment")?;
+    set(&key, &data)
+}
+
 pub(super) fn load_branch_core(
     object_id: ObjectId,
     branch: &BranchName,
@@ -98,26 +164,31 @@ pub(super) fn load_branch_core(
         return Ok(None);
     }
 
-    let state_key = branch_state_key(object_id, branch);
-    let Some(state_data) = get(&state_key)? else {
+    let Some(manifest) = load_branch_manifest(object_id, branch, |key| get(key))? else {
         return Ok(None);
     };
-    let state: PersistedBranchState = decode_json(&state_data, "branch state")?;
 
     let mut commits = Vec::new();
-    for mut commit in state.commits {
-        let ack_lookup_key = ack_key(commit.id());
-        if let Some(ack_data) = get(&ack_lookup_key)? {
-            let tiers: HashSet<DurabilityTier> = decode_json(&ack_data, "ack")?;
-            commit.ack_state.confirmed_tiers = tiers;
-        }
+    for segment_id in manifest.segment_ids {
+        let Some(segment) = load_branch_segment(object_id, branch, segment_id, |key| get(key))?
+        else {
+            continue;
+        };
 
-        commits.push(commit);
+        for mut commit in segment.commits {
+            let ack_lookup_key = ack_key(commit.id());
+            if let Some(ack_data) = get(&ack_lookup_key)? {
+                let tiers: HashSet<DurabilityTier> = decode_json(&ack_data, "ack")?;
+                commit.ack_state.confirmed_tiers = tiers;
+            }
+
+            commits.push(commit);
+        }
     }
 
     Ok(Some(LoadedBranch {
         commits,
-        tails: state.tails,
+        tails: manifest.tails,
     }))
 }
 
@@ -209,12 +280,21 @@ pub(super) fn append_commit_core(
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     let commit_id = commit.id();
-
-    let branch_state_key = branch_state_key(object_id, branch);
-    let mut branch_state: PersistedBranchState = match get(&branch_state_key)? {
-        Some(data) => decode_json(&data, "branch state")?,
-        None => PersistedBranchState::default(),
+    let mut manifest = load_branch_manifest(object_id, branch, |key| get(key))?.unwrap_or_default();
+    let mut current_segment_id = manifest.segment_ids.last().copied().unwrap_or(0);
+    let mut current_segment = if manifest.segment_ids.is_empty() {
+        manifest.segment_ids.push(current_segment_id);
+        PersistedBranchSegment::default()
+    } else {
+        load_branch_segment(object_id, branch, current_segment_id, |key| get(key))?
+            .unwrap_or_default()
     };
+
+    if current_segment.commits.len() >= MAX_COMMITS_PER_BRANCH_SEGMENT {
+        current_segment_id = current_segment_id.saturating_add(1);
+        manifest.segment_ids.push(current_segment_id);
+        current_segment = PersistedBranchSegment::default();
+    }
 
     let commit_branch_lookup_key = commit_branch_key(object_id, commit_id);
     let commit_branch_json =
@@ -222,12 +302,18 @@ pub(super) fn append_commit_core(
     set(&commit_branch_lookup_key, &commit_branch_json)?;
 
     for parent in &commit.parents {
-        branch_state.tails.remove(parent);
+        manifest.tails.remove(parent);
     }
-    branch_state.tails.insert(commit_id);
-    branch_state.commits.push(commit);
-    let branch_state_json = encode_json(&branch_state, "branch state")?;
-    set(&branch_state_key, &branch_state_json)?;
+    manifest.tails.insert(commit_id);
+    current_segment.commits.push(commit);
+    persist_branch_segment(
+        object_id,
+        branch,
+        current_segment_id,
+        &current_segment,
+        |key, value| set(key, value),
+    )?;
+    persist_branch_manifest(object_id, branch, &manifest, |key, value| set(key, value))?;
 
     if let Some(update) = prefix_batch_update {
         for parent_batch_id in &update.increment_parent_child_counts {
@@ -262,71 +348,61 @@ pub(super) fn append_commit_core(
     Ok(())
 }
 
-pub(super) fn delete_commit_core(
+pub(super) fn replace_branch_core(
     object_id: ObjectId,
     branch: &BranchName,
-    commit_id: CommitId,
+    commits: Vec<Commit>,
+    tails: HashSet<CommitId>,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
     mut delete: impl FnMut(&str) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
-    let commit_branch_lookup_key = commit_branch_key(object_id, commit_id);
-    delete(&commit_branch_lookup_key)?;
+    let old_manifest = load_branch_manifest(object_id, branch, |key| get(key))?.unwrap_or_default();
+    let mut old_commit_ids = HashSet::new();
+    let old_segment_ids: HashSet<u32> = old_manifest.segment_ids.iter().copied().collect();
+    for segment_id in &old_manifest.segment_ids {
+        if let Some(segment) = load_branch_segment(object_id, branch, *segment_id, |key| get(key))?
+        {
+            old_commit_ids.extend(segment.commits.into_iter().map(|commit| commit.id()));
+        }
+    }
 
-    let branch_state_key = branch_state_key(object_id, branch);
-    if let Some(data) = get(&branch_state_key)? {
-        let mut branch_state: PersistedBranchState = decode_json(&data, "branch state")?;
-        branch_state
-            .commits
-            .retain(|commit| commit.id() != commit_id);
-        branch_state.tails.remove(&commit_id);
-        let branch_state_json = encode_json(&branch_state, "branch state")?;
-        set(&branch_state_key, &branch_state_json)?;
+    let mut segment_ids = Vec::new();
+    for (segment_id, commit_chunk) in commits.chunks(MAX_COMMITS_PER_BRANCH_SEGMENT).enumerate() {
+        let segment_id = segment_id as u32;
+        let segment = PersistedBranchSegment {
+            commits: commit_chunk.to_vec(),
+        };
+        persist_branch_segment(object_id, branch, segment_id, &segment, |key, value| {
+            set(key, value)
+        })?;
+        segment_ids.push(segment_id);
+    }
+
+    for old_segment_id in old_segment_ids {
+        if !segment_ids.contains(&old_segment_id) {
+            let key = branch_segment_key(object_id, branch, old_segment_id);
+            delete(&key)?;
+        }
+    }
+
+    let new_manifest = PersistedBranchManifest { segment_ids, tails };
+    persist_branch_manifest(object_id, branch, &new_manifest, |key, value| {
+        set(key, value)
+    })?;
+
+    let new_commit_ids: HashSet<CommitId> = commits.iter().map(Commit::id).collect();
+    for removed_commit_id in old_commit_ids.difference(&new_commit_ids) {
+        let key = commit_branch_key(object_id, *removed_commit_id);
+        delete(&key)?;
+    }
+    for commit in &commits {
+        let key = commit_branch_key(object_id, commit.id());
+        let value = encode_json(&StoredBranchRef::from_branch_name(branch), "commit branch")?;
+        set(&key, &value)?;
     }
 
     Ok(())
-}
-
-pub(super) fn set_branch_tails_core(
-    object_id: ObjectId,
-    branch: &BranchName,
-    tails: Option<HashSet<CommitId>>,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
-    mut delete: impl FnMut(&str) -> Result<(), StorageError>,
-) -> Result<(), StorageError> {
-    let branch_state_key = branch_state_key(object_id, branch);
-    let branch_state: Option<PersistedBranchState> = get(&branch_state_key)?
-        .map(|data| decode_json(&data, "branch state"))
-        .transpose()?;
-
-    match (branch_state, tails) {
-        (Some(mut branch_state), Some(tails)) => {
-            branch_state.tails = tails;
-            let json = encode_json(&branch_state, "branch state")?;
-            set(&branch_state_key, &json)
-        }
-        (Some(mut branch_state), None) => {
-            if branch_state.commits.is_empty() {
-                delete(&branch_state_key)
-            } else {
-                branch_state.tails.clear();
-                let json = encode_json(&branch_state, "branch state")?;
-                set(&branch_state_key, &json)
-            }
-        }
-        (None, Some(tails)) => {
-            let json = encode_json(
-                &PersistedBranchState {
-                    commits: Vec::new(),
-                    tails,
-                },
-                "branch state",
-            )?;
-            set(&branch_state_key, &json)
-        }
-        (None, None) => Ok(()),
-    }
 }
 
 pub(super) fn store_ack_tier_core(

@@ -25,11 +25,11 @@ use super::{
     Storage, StorageError,
     storage_core::{
         append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
-        create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
-        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_manifest_core, load_commit_branch_core, load_object_metadata_core,
-        load_prefix_batch_catalog_core, load_table_prefix_batches_core,
-        register_table_prefix_batch_core, set_branch_tails_core, store_ack_tier_core,
+        create_object_core, index_insert_core, index_lookup_core, index_range_core,
+        index_remove_core, index_scan_all_core, load_branch_core, load_catalogue_manifest_core,
+        load_commit_branch_core, load_object_metadata_core, load_prefix_batch_catalog_core,
+        load_table_prefix_batches_core, register_table_prefix_batch_core, replace_branch_core,
+        store_ack_tier_core,
     },
 };
 
@@ -301,37 +301,19 @@ impl Storage for FjallStorage {
         })
     }
 
-    fn delete_commit(
+    fn replace_branch(
         &mut self,
         object_id: ObjectId,
         branch: &BranchName,
-        commit_id: CommitId,
+        commits: Vec<Commit>,
+        tails: HashSet<CommitId>,
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let tx = RefCell::new(inner.db.write_tx());
-            delete_commit_core(
+            replace_branch_core(
                 object_id,
                 branch,
-                commit_id,
-                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
-                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
-                |key| Self::delete_on_cell(&tx, &inner.keyspace, key),
-            )?;
-            Self::commit_tx(tx.into_inner())
-        })
-    }
-
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let tx = RefCell::new(inner.db.write_tx());
-            set_branch_tails_core(
-                object_id,
-                branch,
+                commits,
                 tails,
                 |key| Self::read_get_cell(&tx, &inner.keyspace, key),
                 |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
@@ -595,10 +577,41 @@ mod tests {
         assert!(!loaded.tails.contains(&commit_id));
         assert!(loaded.tails.contains(&commit2_id));
 
-        storage.delete_commit(id, &branch, commit_id).unwrap();
+        storage
+            .replace_branch(
+                id,
+                &branch,
+                vec![loaded.commits[1].clone()],
+                [commit2_id].into(),
+            )
+            .unwrap();
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 1);
         assert_eq!(loaded.commits[0].content, b"second");
+        assert_eq!(storage.load_commit_branch(id, commit_id).unwrap(), None);
+    }
+
+    #[test]
+    fn fjall_commit_roundtrip_spans_segments() {
+        let (_temp_dir, mut storage) = test_storage();
+
+        let id = ObjectId::new();
+        let branch = BranchName::new("main");
+        storage.create_object(id, HashMap::new()).unwrap();
+
+        let mut parent_id = None;
+        for idx in 0..40 {
+            let mut commit = make_commit(format!("commit-{idx}").as_bytes());
+            if let Some(parent_id) = parent_id {
+                commit.parents = smallvec![parent_id];
+            }
+            parent_id = Some(commit.id());
+            storage.append_commit(id, &branch, commit, None).unwrap();
+        }
+
+        let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
+        assert_eq!(loaded.commits.len(), 40);
+        assert_eq!(loaded.tails, [parent_id.unwrap()].into());
     }
 
     #[test]

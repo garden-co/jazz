@@ -1093,13 +1093,13 @@ impl ObjectManager {
             return TruncateResult::Success { deleted_commits: 0 };
         }
 
-        // Sync storage: set branch tails
-        let _ = io.set_branch_tails(object_id, &branch_name, Some(tail_ids));
-
-        // Sync storage: delete commits
-        for commit_id in &commits_to_delete {
-            let _ = io.delete_commit(object_id, &branch_name, *commit_id);
-        }
+        let retained_commits: Vec<Commit> = branch
+            .commits
+            .iter()
+            .filter(|(commit_id, _)| !commits_to_delete.contains(commit_id))
+            .map(|(_, commit)| commit.clone())
+            .collect();
+        let _ = io.replace_branch(object_id, &branch_name, retained_commits, tail_ids.clone());
 
         // Update in-memory state
         let object = self
@@ -1113,6 +1113,7 @@ impl ObjectManager {
         // Remove deleted commits from memory
         for commit_id in &commits_to_delete {
             branch.commits.remove(commit_id);
+            object.commit_branches.remove(commit_id);
         }
 
         TruncateResult::Success {

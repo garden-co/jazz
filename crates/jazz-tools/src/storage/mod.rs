@@ -236,20 +236,15 @@ pub trait Storage {
         prefix_batch_update: Option<PrefixBatchUpdate>,
     ) -> Result<(), StorageError>;
 
-    /// Delete a commit from a branch.
-    fn delete_commit(
+    /// Replace the persisted state for a branch.
+    ///
+    /// Used for operations like truncation that rewrite the visible history.
+    fn replace_branch(
         &mut self,
         object_id: ObjectId,
         branch: &BranchName,
-        commit_id: CommitId,
-    ) -> Result<(), StorageError>;
-
-    /// Set or clear the branch truncation tails.
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
+        commits: Vec<Commit>,
+        tails: HashSet<CommitId>,
     ) -> Result<(), StorageError>;
 
     // ================================================================
@@ -419,22 +414,14 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).append_commit(object_id, branch, commit, prefix_batch_update)
     }
 
-    fn delete_commit(
+    fn replace_branch(
         &mut self,
         object_id: ObjectId,
         branch: &BranchName,
-        commit_id: CommitId,
+        commits: Vec<Commit>,
+        tails: HashSet<CommitId>,
     ) -> Result<(), StorageError> {
-        (**self).delete_commit(object_id, branch, commit_id)
-    }
-
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError> {
-        (**self).set_branch_tails(object_id, branch, tails)
+        (**self).replace_branch(object_id, branch, commits, tails)
     }
 
     fn store_ack_tier(
@@ -825,38 +812,28 @@ impl Storage for MemoryStorage {
         Ok(())
     }
 
-    fn delete_commit(
+    fn replace_branch(
         &mut self,
         object_id: ObjectId,
         branch: &BranchName,
-        commit_id: CommitId,
+        commits: Vec<Commit>,
+        tails: HashSet<CommitId>,
     ) -> Result<(), StorageError> {
-        if let Some(branch_data) = self
-            .objects
-            .get_mut(&object_id)
-            .and_then(|obj| obj.branches.get_mut(branch))
-        {
-            branch_data.commits.retain(|c| c.id() != commit_id);
-            branch_data.tails.remove(&commit_id);
-        }
         if let Some(obj) = self.objects.get_mut(&object_id) {
-            obj.commit_branches.remove(&commit_id);
-        }
-        Ok(())
-    }
+            let branch_data = obj.branches.entry(*branch).or_default();
+            let old_commit_ids: HashSet<CommitId> =
+                branch_data.commits.iter().map(Commit::id).collect();
+            let new_commit_ids: HashSet<CommitId> = commits.iter().map(Commit::id).collect();
 
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError> {
-        if let Some(branch_data) = self
-            .objects
-            .get_mut(&object_id)
-            .and_then(|obj| obj.branches.get_mut(branch))
-        {
-            branch_data.tails = tails.unwrap_or_default();
+            for removed_commit_id in old_commit_ids.difference(&new_commit_ids) {
+                obj.commit_branches.remove(removed_commit_id);
+            }
+            for commit in &commits {
+                obj.commit_branches.insert(commit.id(), *branch);
+            }
+
+            branch_data.commits = commits;
+            branch_data.tails = tails;
         }
         Ok(())
     }
@@ -1144,10 +1121,12 @@ mod tests {
         assert_eq!(loaded.commits.len(), 1);
         assert!(loaded.tails.contains(&commit_id));
 
-        // Delete commit
-        storage.delete_commit(id, &branch, commit_id).unwrap();
+        storage
+            .replace_branch(id, &branch, Vec::new(), HashSet::new())
+            .unwrap();
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 0);
+        assert_eq!(storage.load_commit_branch(id, commit_id).unwrap(), None);
     }
 
     #[test]

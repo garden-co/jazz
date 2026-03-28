@@ -163,9 +163,21 @@ pub(super) fn obj_meta_key(id: ObjectId) -> String {
     format!("obj:{}:meta", format_uuid(id))
 }
 
-pub(super) fn branch_state_key(object_id: ObjectId, branch: &BranchName) -> String {
+pub(super) fn branch_manifest_key(object_id: ObjectId, branch: &BranchName) -> String {
     format!(
-        "obj:{}:br:{}:state",
+        "obj:{}:br:{}:manifest",
+        format_uuid(object_id),
+        encode_object_branch_key(branch)
+    )
+}
+
+pub(super) fn branch_segment_key(
+    object_id: ObjectId,
+    branch: &BranchName,
+    segment_id: u32,
+) -> String {
+    format!(
+        "obj:{}:br:{}:seg:{segment_id:08x}",
         format_uuid(object_id),
         encode_object_branch_key(branch)
     )
@@ -476,10 +488,10 @@ mod tests {
     #[test]
     fn composed_object_branch_keys_store_prefix_id_and_batch_only() {
         let branch = BranchName::new("dev-070707070707-main-b00000000000000000000000000000001");
-        let key = branch_state_key(ObjectId::from_uuid(uuid::Uuid::nil()), &branch);
+        let key = branch_manifest_key(ObjectId::from_uuid(uuid::Uuid::nil()), &branch);
 
         assert!(key.contains(":br:c"));
-        assert!(key.contains(":b00000000000000000000000000000001:state"));
+        assert!(key.contains(":b00000000000000000000000000000001:manifest"));
         assert!(!key.contains(branch.as_str()));
     }
 }
