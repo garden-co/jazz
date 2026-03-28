@@ -805,7 +805,7 @@ impl QueryManager {
             let include_deleted = subscription.query.include_deleted;
 
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let obj = om.get_or_load(id, storage_ref, branches);
+                let obj = om.get_or_load_tips(id, storage_ref, branches);
                 if obj.is_none() {
                     tracing::trace!(%id, "row_loader: object not found");
                     return None;

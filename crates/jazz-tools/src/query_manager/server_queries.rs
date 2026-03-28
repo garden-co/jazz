@@ -366,7 +366,7 @@ impl QueryManager {
             let table = sub.query.table.as_str().to_string();
             let include_deleted = sub.query.include_deleted;
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let obj = om.get_or_load(id, storage_ref, &branches)?;
+                let obj = om.get_or_load_tips(id, storage_ref, &branches)?;
                 let resolved = Self::resolve_latest_row_with_schema_transform(
                     id,
                     obj,
@@ -510,7 +510,7 @@ impl QueryManager {
 
             // Row loader for this subscription
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let obj = om.get_or_load(id, storage, branches)?;
+                let obj = om.get_or_load_tips(id, storage, branches)?;
                 let resolved = Self::resolve_latest_row_with_schema_transform(
                     id,
                     obj,
@@ -1225,7 +1225,7 @@ impl QueryManager {
         // Settle each active policy check
         for (pending_id, state) in &mut self.active_policy_checks {
             let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let obj = om.get_or_load(id, storage_ref, &branches)?;
+                let obj = om.get_or_load_tips(id, storage_ref, &branches)?;
                 let branch = obj.branches.get(&BranchName::new(&current_branch))?;
                 let tip_id = branch.tips.iter().next()?;
                 let commit = branch.commits.get(tip_id)?;

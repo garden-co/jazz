@@ -14,12 +14,12 @@ fn latest_catalogue_content<S: Storage + ?Sized>(
 ) -> Result<Option<Vec<u8>>, String> {
     let branch = BranchName::new("main");
     let loaded = storage
-        .load_branch(object_id, &branch)
+        .load_branch_tips(object_id, &branch)
         .map_err(|err| format!("failed to load catalogue object branch {object_id}: {err:?}"))?;
 
     Ok(loaded.and_then(|branch_data| {
         branch_data
-            .commits
+            .tips
             .into_iter()
             .max_by_key(|commit| (commit.timestamp, commit.id()))
             .map(|commit| commit.content)

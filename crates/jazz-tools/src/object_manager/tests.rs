@@ -1067,6 +1067,54 @@ fn get_or_load_hydrates_missing_branches_into_cached_object() {
 }
 
 #[test]
+fn get_or_load_tips_loads_only_frontier_and_full_load_upgrades_it() {
+    let mut io = MemoryStorage::new();
+    let author = ObjectId::new();
+
+    let object_id = {
+        let mut mgr = ObjectManager::new();
+        let oid = mgr.create(&mut io, None);
+        let first = mgr
+            .add_commit(&mut io, oid, "main", vec![], b"A".to_vec(), author, None)
+            .unwrap();
+        mgr.add_commit(
+            &mut io,
+            oid,
+            "main",
+            vec![first],
+            b"B".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+        oid
+    };
+
+    let mut mgr2 = ObjectManager::new();
+    let loaded = mgr2
+        .get_or_load_tips(object_id, &io, &["main".to_string()])
+        .expect("object should load from storage");
+    let branch = loaded
+        .branches
+        .get(&BranchName::new("main"))
+        .expect("main branch should be present");
+    assert_eq!(branch.loaded_state, BranchLoadedState::TipsOnly);
+    assert_eq!(branch.commits.len(), 1);
+    assert_eq!(branch.tips.len(), 1);
+
+    let loaded = mgr2
+        .get_or_load(object_id, &io, &["main".to_string()])
+        .expect("full branch should upgrade from storage");
+    let branch = loaded
+        .branches
+        .get(&BranchName::new("main"))
+        .expect("main branch should still be present");
+    assert_eq!(branch.loaded_state, BranchLoadedState::AllCommits);
+    assert_eq!(branch.commits.len(), 2);
+    assert_eq!(branch.tips.len(), 1);
+}
+
+#[test]
 fn add_commit_accepts_new_batch_root_merge_and_tracks_prefix_leaves() {
     let mut io = MemoryStorage::new();
     let mut manager = ObjectManager::new();

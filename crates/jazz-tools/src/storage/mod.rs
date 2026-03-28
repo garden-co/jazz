@@ -87,6 +87,12 @@ pub struct LoadedBranch {
     pub tails: HashSet<CommitId>,
 }
 
+/// Tip commits loaded from storage without replaying full branch history.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LoadedBranchTips {
+    pub tips: Vec<Commit>,
+}
+
 /// Batch catalog updates applied when appending one commit on a composed batch branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrefixBatchUpdate {
@@ -197,6 +203,13 @@ pub trait Storage {
         object_id: ObjectId,
         branch: &BranchName,
     ) -> Result<Option<LoadedBranch>, StorageError>;
+
+    /// Load only the visible tip commits for a branch.
+    fn load_branch_tips(
+        &self,
+        object_id: ObjectId,
+        branch: &BranchName,
+    ) -> Result<Option<LoadedBranchTips>, StorageError>;
 
     /// Resolve which branch owns a persisted commit.
     fn load_commit_branch(
@@ -369,6 +382,14 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         branch: &BranchName,
     ) -> Result<Option<LoadedBranch>, StorageError> {
         (**self).load_branch(object_id, branch)
+    }
+
+    fn load_branch_tips(
+        &self,
+        object_id: ObjectId,
+        branch: &BranchName,
+    ) -> Result<Option<LoadedBranchTips>, StorageError> {
+        (**self).load_branch_tips(object_id, branch)
     }
 
     fn load_commit_branch(
@@ -722,6 +743,37 @@ impl Storage for MemoryStorage {
             commits,
             tails: branch_data.tails.clone(),
         }))
+    }
+
+    fn load_branch_tips(
+        &self,
+        object_id: ObjectId,
+        branch: &BranchName,
+    ) -> Result<Option<LoadedBranchTips>, StorageError> {
+        let Some(obj) = self.objects.get(&object_id) else {
+            return Ok(None);
+        };
+        let Some(branch_data) = obj.branches.get(branch) else {
+            return Ok(None);
+        };
+
+        let mut tips = Vec::new();
+        for tip_id in &branch_data.tails {
+            let Some(commit) = branch_data
+                .commits
+                .iter()
+                .find(|commit| commit.id() == *tip_id)
+            else {
+                continue;
+            };
+            let mut commit = commit.clone();
+            if let Some(tiers) = self.ack_tiers.get(tip_id) {
+                commit.ack_state.confirmed_tiers = tiers.clone();
+            }
+            tips.push(commit);
+        }
+
+        Ok(Some(LoadedBranchTips { tips }))
     }
 
     fn load_commit_branch(
@@ -1120,6 +1172,9 @@ mod tests {
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 1);
         assert!(loaded.tails.contains(&commit_id));
+        let loaded_tips = storage.load_branch_tips(id, &branch).unwrap().unwrap();
+        assert_eq!(loaded_tips.tips.len(), 1);
+        assert_eq!(loaded_tips.tips[0].id(), commit_id);
 
         storage
             .replace_branch(id, &branch, Vec::new(), HashSet::new())
@@ -1127,6 +1182,8 @@ mod tests {
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 0);
         assert_eq!(storage.load_commit_branch(id, commit_id).unwrap(), None);
+        let loaded_tips = storage.load_branch_tips(id, &branch).unwrap().unwrap();
+        assert!(loaded_tips.tips.is_empty());
     }
 
     #[test]

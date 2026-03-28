@@ -18,7 +18,8 @@ use super::key_codec::{
     table_prefix_batch_prefix,
 };
 use super::{
-    CatalogueManifest, CatalogueManifestOp, LoadedBranch, PrefixBatchUpdate, StorageError,
+    CatalogueManifest, CatalogueManifestOp, LoadedBranch, LoadedBranchTips, PrefixBatchUpdate,
+    StorageError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +32,7 @@ enum StoredBranchRef {
 struct PersistedBranchManifest {
     segment_ids: Vec<u32>,
     tails: HashSet<CommitId>,
+    tip_commits: Vec<Commit>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +156,21 @@ fn persist_branch_segment(
     set(&key, &data)
 }
 
+fn tip_commits_for_branch(commits: &[Commit]) -> Vec<Commit> {
+    let mut parent_ids = HashSet::new();
+    for commit in commits {
+        for parent in &commit.parents {
+            parent_ids.insert(*parent);
+        }
+    }
+
+    commits
+        .iter()
+        .filter(|commit| !parent_ids.contains(&commit.id()))
+        .cloned()
+        .collect()
+}
+
 pub(super) fn load_branch_core(
     object_id: ObjectId,
     branch: &BranchName,
@@ -190,6 +207,33 @@ pub(super) fn load_branch_core(
         commits,
         tails: manifest.tails,
     }))
+}
+
+pub(super) fn load_branch_tips_core(
+    object_id: ObjectId,
+    branch: &BranchName,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<LoadedBranchTips>, StorageError> {
+    let meta_key = obj_meta_key(object_id);
+    if get(&meta_key)?.is_none() {
+        return Ok(None);
+    }
+
+    let Some(manifest) = load_branch_manifest(object_id, branch, |key| get(key))? else {
+        return Ok(None);
+    };
+
+    let mut tips = Vec::with_capacity(manifest.tip_commits.len());
+    for mut commit in manifest.tip_commits {
+        let ack_lookup_key = ack_key(commit.id());
+        if let Some(ack_data) = get(&ack_lookup_key)? {
+            let tiers: HashSet<DurabilityTier> = decode_json(&ack_data, "ack")?;
+            commit.ack_state.confirmed_tiers = tiers;
+        }
+        tips.push(commit);
+    }
+
+    Ok(Some(LoadedBranchTips { tips }))
 }
 
 pub(super) fn load_commit_branch_core(
@@ -305,6 +349,10 @@ pub(super) fn append_commit_core(
         manifest.tails.remove(parent);
     }
     manifest.tails.insert(commit_id);
+    manifest
+        .tip_commits
+        .retain(|tip| !commit.parents.contains(&tip.id()));
+    manifest.tip_commits.push(commit.clone());
     current_segment.commits.push(commit);
     persist_branch_segment(
         object_id,
@@ -386,7 +434,11 @@ pub(super) fn replace_branch_core(
         }
     }
 
-    let new_manifest = PersistedBranchManifest { segment_ids, tails };
+    let new_manifest = PersistedBranchManifest {
+        segment_ids,
+        tails,
+        tip_commits: tip_commits_for_branch(&commits),
+    };
     persist_branch_manifest(object_id, branch, &new_manifest, |key, value| {
         set(key, value)
     })?;

@@ -34,16 +34,16 @@ use crate::sync_manager::DurabilityTier;
 #[cfg(test)]
 use super::PrefixBatchMeta;
 use super::{
-    CatalogueManifest, CatalogueManifestOp, LoadedBranch, PrefixBatchCatalog, PrefixBatchUpdate,
-    Storage, StorageError,
+    CatalogueManifest, CatalogueManifestOp, LoadedBranch, LoadedBranchTips, PrefixBatchCatalog,
+    PrefixBatchUpdate, Storage, StorageError,
     key_codec::increment_bytes,
     storage_core::{
         append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
         create_object_core, index_insert_core, index_lookup_core, index_range_core,
-        index_remove_core, index_scan_all_core, load_branch_core, load_catalogue_manifest_core,
-        load_commit_branch_core, load_object_metadata_core, load_prefix_batch_catalog_core,
-        load_table_prefix_batches_core, register_table_prefix_batch_core, replace_branch_core,
-        store_ack_tier_core,
+        index_remove_core, index_scan_all_core, load_branch_core, load_branch_tips_core,
+        load_catalogue_manifest_core, load_commit_branch_core, load_object_metadata_core,
+        load_prefix_batch_catalog_core, load_table_prefix_batches_core,
+        register_table_prefix_batch_core, replace_branch_core, store_ack_tier_core,
     },
 };
 
@@ -253,6 +253,14 @@ impl Storage for OpfsBTreeStorage {
         branch: &BranchName,
     ) -> Result<Option<LoadedBranch>, StorageError> {
         load_branch_core(object_id, branch, |key| self.tree_read(key))
+    }
+
+    fn load_branch_tips(
+        &self,
+        object_id: ObjectId,
+        branch: &BranchName,
+    ) -> Result<Option<LoadedBranchTips>, StorageError> {
+        load_branch_tips_core(object_id, branch, |key| self.tree_read(key))
     }
 
     fn load_commit_branch(
@@ -514,6 +522,9 @@ mod tests {
         assert_eq!(loaded.commits.len(), 1);
         assert!(loaded.tails.contains(&commit_id));
         assert_eq!(loaded.commits[0].content, b"first");
+        let loaded_tips = storage.load_branch_tips(id, &branch).unwrap().unwrap();
+        assert_eq!(loaded_tips.tips.len(), 1);
+        assert_eq!(loaded_tips.tips[0].id(), commit_id);
 
         let mut commit2 = make_commit(b"second");
         commit2.parents = smallvec![commit_id];
@@ -560,6 +571,9 @@ mod tests {
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 40);
         assert_eq!(loaded.tails, [parent_id.unwrap()].into());
+        let loaded_tips = storage.load_branch_tips(id, &branch).unwrap().unwrap();
+        assert_eq!(loaded_tips.tips.len(), 1);
+        assert_eq!(loaded_tips.tips[0].id(), parent_id.unwrap());
     }
 
     #[test]

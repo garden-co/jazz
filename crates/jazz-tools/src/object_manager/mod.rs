@@ -9,7 +9,7 @@ use crate::object::{
     Branch, BranchLoadedState, BranchName, Object, ObjectId, PrefixBatchCatalog, PrefixBatchMeta,
 };
 use crate::query_manager::types::{BatchId, BranchPrefixName, ComposedBranchName};
-use crate::storage::{PrefixBatchUpdate, Storage, StorageError};
+use crate::storage::{LoadedBranch, LoadedBranchTips, PrefixBatchUpdate, Storage, StorageError};
 
 /// Unique identifier for a subscription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -120,6 +120,57 @@ impl ObjectManager {
         Self::default()
     }
 
+    fn branch_from_loaded(loaded: LoadedBranch) -> Branch {
+        let mut commits = HashMap::new();
+        let mut all_ids: HashSet<CommitId> = HashSet::new();
+        let mut parent_ids: HashSet<CommitId> = HashSet::new();
+
+        for commit in loaded.commits {
+            let commit_id = commit.id();
+            all_ids.insert(commit_id);
+            for parent in &commit.parents {
+                parent_ids.insert(*parent);
+            }
+            commits.insert(commit_id, commit);
+        }
+
+        let mut tips: SmolSet<[CommitId; 2]> = SmolSet::new();
+        for commit_id in &all_ids {
+            if !parent_ids.contains(commit_id) {
+                tips.insert(*commit_id);
+            }
+        }
+
+        Branch {
+            commits,
+            tips,
+            tails: if loaded.tails.is_empty() {
+                None
+            } else {
+                Some(loaded.tails.into_iter().collect())
+            },
+            loaded_state: BranchLoadedState::AllCommits,
+        }
+    }
+
+    fn branch_from_loaded_tips(loaded: LoadedBranchTips) -> Branch {
+        let mut commits = HashMap::new();
+        let mut tips: SmolSet<[CommitId; 2]> = SmolSet::new();
+
+        for commit in loaded.tips {
+            let commit_id = commit.id();
+            tips.insert(commit_id);
+            commits.insert(commit_id, commit);
+        }
+
+        Branch {
+            commits,
+            tips,
+            tails: None,
+            loaded_state: BranchLoadedState::TipsOnly,
+        }
+    }
+
     /// Get next monotonic timestamp (microseconds since epoch).
     /// Guarantees each call returns a value greater than the previous.
     fn next_timestamp(&mut self) -> u64 {
@@ -187,16 +238,15 @@ impl ObjectManager {
         self.objects.get(&id)
     }
 
-    /// Get an object, loading from storage if not in memory (lazy cold-start load).
-    pub fn get_or_load(
+    fn get_or_load_with_mode(
         &mut self,
         id: ObjectId,
         storage: &dyn Storage,
         branches: &[String],
+        full_history: bool,
     ) -> Option<&Object> {
-        let _span = tracing::trace_span!("OM::get_or_load", %id).entered();
+        let _span = tracing::trace_span!("OM::get_or_load", %id, full_history).entered();
         if let std::collections::hash_map::Entry::Vacant(entry) = self.objects.entry(id) {
-            // Load metadata
             let metadata = match storage.load_object_metadata(id) {
                 Ok(Some(m)) => m,
                 Ok(None) => {
@@ -221,46 +271,29 @@ impl ObjectManager {
         let object = self.objects.get_mut(&id)?;
         for branch_name in branches {
             let bn = BranchName::new(branch_name);
-            if object.branches.contains_key(&bn) {
+            let needs_load = match object.branches.get(&bn).map(|branch| branch.loaded_state) {
+                Some(BranchLoadedState::AllCommits) => false,
+                Some(BranchLoadedState::TipsOnly) => full_history,
+                Some(BranchLoadedState::TipIdsOnly | BranchLoadedState::NotLoaded) => true,
+                None => true,
+            };
+            if !needs_load {
                 continue;
             }
-            if let Ok(Some(loaded)) = storage.load_branch(id, &bn) {
-                let mut commits = HashMap::new();
-                let mut commit_ids_for_branch = Vec::with_capacity(loaded.commits.len());
-                // Compute tips correctly: a tip is a commit not referenced
-                // as a parent by any other commit in the branch.
-                let mut all_ids: HashSet<CommitId> = HashSet::new();
-                let mut parent_ids: HashSet<CommitId> = HashSet::new();
-                for commit in &loaded.commits {
-                    all_ids.insert(commit.id());
-                    for parent in &commit.parents {
-                        parent_ids.insert(*parent);
+
+            if full_history {
+                if let Ok(Some(loaded)) = storage.load_branch(id, &bn) {
+                    let branch = Self::branch_from_loaded(loaded);
+                    let commit_ids_for_branch: Vec<_> = branch.commits.keys().copied().collect();
+                    object.branches.insert(bn, branch);
+                    for commit_id in commit_ids_for_branch {
+                        object.commit_branches.insert(commit_id, bn);
                     }
                 }
-                let mut tips: SmolSet<[CommitId; 2]> = SmolSet::new();
-                for cid in &all_ids {
-                    if !parent_ids.contains(cid) {
-                        tips.insert(*cid);
-                    }
-                }
-                for commit in loaded.commits {
-                    let commit_id = commit.id();
-                    commit_ids_for_branch.push(commit_id);
-                    commits.insert(commit_id, commit);
-                }
-                object.branches.insert(
-                    bn,
-                    Branch {
-                        commits,
-                        tips,
-                        tails: if loaded.tails.is_empty() {
-                            None
-                        } else {
-                            Some(loaded.tails.into_iter().collect())
-                        },
-                        loaded_state: BranchLoadedState::AllCommits,
-                    },
-                );
+            } else if let Ok(Some(loaded)) = storage.load_branch_tips(id, &bn) {
+                let branch = Self::branch_from_loaded_tips(loaded);
+                let commit_ids_for_branch: Vec<_> = branch.commits.keys().copied().collect();
+                object.branches.insert(bn, branch);
                 for commit_id in commit_ids_for_branch {
                     object.commit_branches.insert(commit_id, bn);
                 }
@@ -271,6 +304,26 @@ impl ObjectManager {
         let commit_count: usize = object.branches.values().map(|b| b.commits.len()).sum();
         tracing::trace!(%id, branch_count, commit_count, "get_or_load: loaded from storage");
         self.objects.get(&id)
+    }
+
+    /// Get an object, loading full branch history from storage if needed.
+    pub fn get_or_load(
+        &mut self,
+        id: ObjectId,
+        storage: &dyn Storage,
+        branches: &[String],
+    ) -> Option<&Object> {
+        self.get_or_load_with_mode(id, storage, branches, true)
+    }
+
+    /// Get an object, loading only branch tip commits from storage if needed.
+    pub fn get_or_load_tips(
+        &mut self,
+        id: ObjectId,
+        storage: &dyn Storage,
+        branches: &[String],
+    ) -> Option<&Object> {
+        self.get_or_load_with_mode(id, storage, branches, false)
     }
 
     /// Get mutable object by id.
@@ -435,6 +488,8 @@ impl ObjectManager {
     ) -> Result<CommitId, Error> {
         let branch_name = branch_name.into();
         let _span = tracing::debug_span!("OM::add_commit", %object_id, %branch_name).entered();
+        let requested_branches = [branch_name.as_str().to_string()];
+        let _ = self.get_or_load(object_id, io, &requested_branches);
 
         // Capture previous state BEFORE mutation for AllObjectUpdate and validate
         // parent visibility before we mutate storage/memory.
@@ -785,6 +840,8 @@ impl ObjectManager {
     ) -> Result<CommitId, Error> {
         let branch_name = branch_name.into();
         let commit_id = commit.id();
+        let requested_branches = [branch_name.as_str().to_string()];
+        let _ = self.get_or_load(object_id, io, &requested_branches);
 
         // Capture previous state BEFORE mutation for AllObjectUpdate.
         let (previous_commit_ids, old_content, already_exists) = {
@@ -1051,6 +1108,8 @@ impl ObjectManager {
         tail_ids: HashSet<CommitId>,
     ) -> TruncateResult {
         let branch_name = branch_name.into();
+        let requested_branches = [branch_name.as_str().to_string()];
+        let _ = self.get_or_load(object_id, io, &requested_branches);
 
         // Validate object exists
         let object = match self.get(object_id) {
