@@ -4,7 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { build, createMigration, exportSchema, pushMigration } from "./cli.js";
+import {
+  build,
+  createMigration,
+  exportSchema,
+  permissionsStatus,
+  pushMigration,
+  pushPermissions,
+} from "./cli.js";
 
 const dslPath = fileURLToPath(new URL("./dsl.ts", import.meta.url));
 const indexPath = fileURLToPath(new URL("./index.ts", import.meta.url));
@@ -139,6 +146,20 @@ export default {
   todos: 123,
 };
 `;
+}
+
+function storedRootSchema() {
+  return {
+    projects: {
+      columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+    },
+    todos: {
+      columns: [
+        { name: "title", column_type: { type: "Text" }, nullable: false },
+        { name: "ownerId", column_type: { type: "Text" }, nullable: false },
+      ],
+    },
+  };
 }
 
 describe("cli build", () => {
@@ -457,6 +478,124 @@ export default s.defineMigration({
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("cli permissions", () => {
+  it("reports the current permissions head against the matching stored structural schema", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const schemaHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${schemaHash}`)) {
+        return new Response(JSON.stringify(storedRootSchema()), { status: 200 });
+      }
+
+      if (input.endsWith("/admin/permissions/head")) {
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash,
+              version: 3,
+              parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+              bundleObjectId: "22222222-2222-2222-2222-222222222222",
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs } = await captureConsoleLogs(() =>
+      permissionsStatus({
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+      }),
+    );
+
+    expect(logs).toContain(`Loaded structural schema from ${join(root, "schema.ts")}.`);
+    expect(logs).toContain(`Loaded current permissions from ${join(root, "permissions.ts")}.`);
+    expect(logs).toContain(
+      `Local structural schema matches stored hash ${schemaHash.slice(0, 12)}.`,
+    );
+    expect(logs).toContain(`Server permissions head is v3 on ${schemaHash.slice(0, 12)}.`);
+    expect(logs).toContain(
+      "Next push will require parent bundle 22222222-2222-2222-2222-222222222222.",
+    );
+  });
+
+  it("publishes permissions with the current head bundle as the expected parent", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+
+    const schemaHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    const currentHead = {
+      schemaHash,
+      version: 2,
+      parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
+      bundleObjectId: "22222222-2222-2222-2222-222222222222",
+    };
+
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${schemaHash}`)) {
+        return new Response(JSON.stringify(storedRootSchema()), { status: 200 });
+      }
+
+      if (input.endsWith("/admin/permissions/head")) {
+        return new Response(JSON.stringify({ head: currentHead }), { status: 200 });
+      }
+
+      if (input.endsWith("/admin/permissions")) {
+        const body = JSON.parse(String(init?.body));
+        expect(body.schemaHash).toBe(schemaHash);
+        expect(body.expectedParentBundleObjectId).toBe(currentHead.bundleObjectId);
+        expect(Object.keys(body.permissions)).toContain("todos");
+        return new Response(
+          JSON.stringify({
+            head: {
+              schemaHash,
+              version: 3,
+              parentBundleObjectId: currentHead.bundleObjectId,
+              bundleObjectId: "33333333-3333-3333-3333-333333333333",
+            },
+          }),
+          { status: 201 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs } = await captureConsoleLogs(() =>
+      pushPermissions({
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+      }),
+    );
+
+    expect(logs).toContain(`Resolved structural schema hash ${schemaHash.slice(0, 12)}.`);
+    expect(logs).toContain(`Publishing from parent v2 on ${schemaHash.slice(0, 12)}.`);
+    expect(logs).toContain(`Published permissions head v3 on ${schemaHash.slice(0, 12)}.`);
+    expect(logs).toContain(
+      "Permission-only changes do not create schema hashes or require migrations.",
+    );
   });
 });
 

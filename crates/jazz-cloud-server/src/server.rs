@@ -567,6 +567,14 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
   </body>
 </html>
 "##;
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CatalogueAuthorityMode {
+    #[default]
+    Local,
+    Forward,
+}
 type ClientSyncUpdate = (ClientId, u64, SyncPayload);
 type ClientSendSeqMap = Arc<Mutex<HashMap<ClientId, u64>>>;
 
@@ -617,6 +625,7 @@ pub struct ServerConfig {
     pub internal_api_secret: String,
     pub secret_hash_key: String,
     pub worker_threads: usize,
+    pub catalogue_authority: CatalogueAuthorityMode,
 }
 
 struct WorkerPool {
@@ -2135,6 +2144,10 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
     });
 
     info!(
+        catalogue_authority = match &config.catalogue_authority {
+            CatalogueAuthorityMode::Local => "local",
+            CatalogueAuthorityMode::Forward => "forward",
+        },
         workers = state.workers.worker_count(),
         data_root = %state.data_root.display(),
         app_count = state.app_count().await,

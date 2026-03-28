@@ -35,13 +35,25 @@ use super::types::AppId;
 #[derive(Clone, Debug, PartialEq)]
 struct PermissionsBundleState {
     schema_hash: SchemaHash,
+    version: u64,
+    parent_bundle_object_id: Option<ObjectId>,
     permissions: HashMap<TableName, TablePolicies>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PermissionsHeadState {
     schema_hash: SchemaHash,
+    version: u64,
+    parent_bundle_object_id: Option<ObjectId>,
     bundle_object_id: ObjectId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PermissionsHeadSummary {
+    pub schema_hash: SchemaHash,
+    pub version: u64,
+    pub parent_bundle_object_id: Option<ObjectId>,
+    pub bundle_object_id: ObjectId,
 }
 
 /// SchemaManager coordinates schema evolution with query execution.
@@ -451,6 +463,10 @@ impl SchemaManager {
         {
             hasher.update(b"permissions");
             hasher.update(head.schema_hash.as_bytes());
+            hasher.update(&head.version.to_le_bytes());
+            if let Some(parent_bundle_object_id) = head.parent_bundle_object_id {
+                hasher.update(parent_bundle_object_id.uuid().as_bytes());
+            }
             let encoded = encode_permissions(&bundle.permissions);
             hash_len_prefixed(&mut hasher, &encoded);
         }
@@ -476,6 +492,16 @@ impl SchemaManager {
     /// Get mutable reference to the internal QueryManager.
     pub fn query_manager_mut(&mut self) -> &mut QueryManager {
         &mut self.query_manager
+    }
+
+    pub fn current_permissions_head(&self) -> Option<PermissionsHeadSummary> {
+        self.current_permissions_head
+            .map(|head| PermissionsHeadSummary {
+                schema_hash: head.schema_hash,
+                version: head.version,
+                parent_bundle_object_id: head.parent_bundle_object_id,
+                bundle_object_id: head.bundle_object_id,
+            })
     }
 
     // =========================================================================
@@ -609,7 +635,12 @@ impl SchemaManager {
         let bundle_metadata = self.permissions_bundle_metadata();
         let head_object_id = self.permissions_head_object_id();
         let head_metadata = self.permissions_head_metadata();
-        let bundle_content = encode_permissions_bundle(bundle.schema_hash, &bundle.permissions);
+        let bundle_content = encode_permissions_bundle(
+            bundle.schema_hash,
+            bundle.version,
+            bundle.parent_bundle_object_id,
+            &bundle.permissions,
+        );
         self.query_manager
             .sync_manager_mut()
             .create_object_with_content(
@@ -619,7 +650,12 @@ impl SchemaManager {
                 bundle_content,
             );
 
-        let head_content = encode_permissions_head(head.schema_hash, head.bundle_object_id);
+        let head_content = encode_permissions_head(
+            head.schema_hash,
+            head.version,
+            head.parent_bundle_object_id,
+            head.bundle_object_id,
+        );
         self.query_manager
             .sync_manager_mut()
             .create_object_with_content(storage, head_object_id, head_metadata, head_content);
@@ -632,9 +668,26 @@ impl SchemaManager {
         storage: &mut H,
         schema_hash: SchemaHash,
         permissions: HashMap<TableName, TablePolicies>,
-    ) -> Option<ObjectId> {
+        expected_parent_bundle_object_id: Option<ObjectId>,
+    ) -> Result<Option<ObjectId>, SchemaError> {
+        let current_parent_bundle_object_id = self
+            .current_permissions_head
+            .map(|head| head.bundle_object_id);
+        if current_parent_bundle_object_id != expected_parent_bundle_object_id {
+            return Err(SchemaError::StalePermissionsParent {
+                expected: expected_parent_bundle_object_id,
+                current: current_parent_bundle_object_id,
+            });
+        }
+
+        let version = self
+            .current_permissions_head
+            .map(|head| head.version + 1)
+            .unwrap_or(1);
         let bundle_state = PermissionsBundleState {
             schema_hash,
+            version,
+            parent_bundle_object_id: current_parent_bundle_object_id,
             permissions,
         };
         let bundle_object_id = self.permissions_bundle_object_id(&bundle_state);
@@ -642,6 +695,8 @@ impl SchemaManager {
             .insert(bundle_object_id, bundle_state);
         let head = PermissionsHeadState {
             schema_hash,
+            version,
+            parent_bundle_object_id: current_parent_bundle_object_id,
             bundle_object_id,
         };
         self.current_permissions_head = Some(head);
@@ -650,7 +705,7 @@ impl SchemaManager {
         } else {
             self.pending_permissions_head = Some(head);
         }
-        self.persist_current_permissions(storage)
+        Ok(self.persist_current_permissions(storage))
     }
 
     /// Register a reviewed lens in memory, activate any newly reachable schemas,
@@ -729,6 +784,8 @@ impl SchemaManager {
             format!("jazz-catalogue-permissions-bundle:{}:", self.app_id.uuid()).into_bytes();
         identity.extend_from_slice(&encode_permissions_bundle(
             bundle.schema_hash,
+            bundle.version,
+            bundle.parent_bundle_object_id,
             &bundle.permissions,
         ));
         ObjectId::from_uuid(Uuid::new_v5(&Uuid::NAMESPACE_DNS, &identity))
@@ -879,12 +936,15 @@ impl SchemaManager {
             return Ok(());
         }
 
-        let (schema_hash, permissions) = decode_permissions_bundle(content)
-            .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
+        let (schema_hash, version, parent_bundle_object_id, permissions) =
+            decode_permissions_bundle(content)
+                .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
         self.known_permissions_bundles.insert(
             object_id,
             PermissionsBundleState {
                 schema_hash,
+                version,
+                parent_bundle_object_id,
                 permissions,
             },
         );
@@ -907,12 +967,20 @@ impl SchemaManager {
             return Ok(());
         }
 
-        let (schema_hash, bundle_object_id) = decode_permissions_head(content)
-            .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
+        let (schema_hash, version, parent_bundle_object_id, bundle_object_id) =
+            decode_permissions_head(content)
+                .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
         let head = PermissionsHeadState {
             schema_hash,
+            version,
+            parent_bundle_object_id,
             bundle_object_id,
         };
+        if let Some(current_head) = self.current_permissions_head
+            && current_head.version > head.version
+        {
+            return Ok(());
+        }
         self.current_permissions_head = Some(head);
         if self.apply_permissions_head(head) {
             self.pending_permissions_head = None;
@@ -947,11 +1015,15 @@ impl SchemaManager {
             object_id,
             PermissionsBundleState {
                 schema_hash,
+                version: 1,
+                parent_bundle_object_id: None,
                 permissions,
             },
         );
         let head = PermissionsHeadState {
             schema_hash,
+            version: 1,
+            parent_bundle_object_id: None,
             bundle_object_id: object_id,
         };
         self.current_permissions_head = Some(head);
@@ -1046,6 +1118,12 @@ impl SchemaManager {
             return false;
         };
         if bundle.schema_hash != head.schema_hash {
+            return false;
+        }
+        if bundle.version != head.version {
+            return false;
+        }
+        if bundle.parent_bundle_object_id != head.parent_bundle_object_id {
             return false;
         }
         let Some(schema) = self.schema_for_permissions_hash(head.schema_hash) else {
@@ -1634,11 +1712,15 @@ mod tests {
         )]);
         let bundle = PermissionsBundleState {
             schema_hash,
+            version: 3,
+            parent_bundle_object_id: Some(ObjectId::new()),
             permissions: permissions.clone(),
         };
         let bundle_object_id = manager.permissions_bundle_object_id(&bundle);
         let head = PermissionsHeadState {
             schema_hash,
+            version: bundle.version,
+            parent_bundle_object_id: bundle.parent_bundle_object_id,
             bundle_object_id,
         };
 
@@ -1646,7 +1728,12 @@ mod tests {
             .process_catalogue_update(
                 manager.permissions_head_object_id(),
                 &manager.permissions_head_metadata(),
-                &encode_permissions_head(schema_hash, bundle_object_id),
+                &encode_permissions_head(
+                    schema_hash,
+                    bundle.version,
+                    bundle.parent_bundle_object_id,
+                    bundle_object_id,
+                ),
             )
             .expect("head should process");
         assert_eq!(manager.current_permissions_head, Some(head));
@@ -1656,7 +1743,12 @@ mod tests {
             .process_catalogue_update(
                 bundle_object_id,
                 &manager.permissions_bundle_metadata(),
-                &encode_permissions_bundle(schema_hash, &permissions),
+                &encode_permissions_bundle(
+                    schema_hash,
+                    bundle.version,
+                    bundle.parent_bundle_object_id,
+                    &permissions,
+                ),
             )
             .expect("bundle should process");
 
@@ -1669,6 +1761,33 @@ mod tests {
                 .map(|state| state.permissions.clone()),
             Some(permissions)
         );
+    }
+
+    #[test]
+    fn publish_permissions_bundle_rejects_stale_parent() {
+        let schema = make_schema_v2();
+        let schema_hash = SchemaHash::compute(&schema);
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let mut storage = crate::storage::MemoryStorage::new();
+        let permissions = HashMap::from([(
+            TableName::new("users"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+
+        manager
+            .publish_permissions_bundle(&mut storage, schema_hash, permissions.clone(), None)
+            .expect("initial permissions publish should succeed");
+
+        let stale =
+            manager.publish_permissions_bundle(&mut storage, schema_hash, permissions, None);
+        assert!(matches!(
+            stale,
+            Err(SchemaError::StalePermissionsParent {
+                expected: None,
+                current: Some(_),
+            })
+        ));
     }
 
     #[test]

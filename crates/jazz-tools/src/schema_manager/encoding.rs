@@ -20,8 +20,8 @@ use super::lens::{LensOp, LensTransform};
 const SCHEMA_VERSION: u8 = 4;
 const LENS_VERSION: u8 = 2;
 const PERMISSIONS_VERSION: u8 = 1;
-const PERMISSIONS_BUNDLE_VERSION: u8 = 1;
-const PERMISSIONS_HEAD_VERSION: u8 = 1;
+const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
+const PERMISSIONS_HEAD_VERSION: u8 = 2;
 
 /// Encoding errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -814,20 +814,37 @@ pub fn decode_permissions(
 
 pub fn encode_permissions_bundle(
     schema_hash: SchemaHash,
+    version: u64,
+    parent_bundle_object_id: Option<ObjectId>,
     permissions: &HashMap<TableName, TablePolicies>,
 ) -> Vec<u8> {
     let encoded_permissions = encode_permissions(permissions);
-    let mut buf = Vec::with_capacity(1 + 32 + 4 + encoded_permissions.len());
+    let mut buf = Vec::with_capacity(1 + 32 + 8 + 1 + 16 + 4 + encoded_permissions.len());
     buf.push(PERMISSIONS_BUNDLE_VERSION);
     buf.extend_from_slice(schema_hash.as_bytes());
+    write_u64(&mut buf, version);
+    match parent_bundle_object_id {
+        Some(parent_bundle_object_id) => {
+            buf.push(1);
+            buf.extend_from_slice(parent_bundle_object_id.uuid().as_bytes());
+        }
+        None => buf.push(0),
+    }
     write_u32(&mut buf, encoded_permissions.len() as u32);
     buf.extend_from_slice(&encoded_permissions);
     buf
 }
 
+type DecodedPermissionsBundle = (
+    SchemaHash,
+    u64,
+    Option<ObjectId>,
+    HashMap<TableName, TablePolicies>,
+);
+
 pub fn decode_permissions_bundle(
     data: &[u8],
-) -> Result<(SchemaHash, HashMap<TableName, TablePolicies>), CatalogueEncodingError> {
+) -> Result<DecodedPermissionsBundle, CatalogueEncodingError> {
     if data.is_empty() {
         return Err(CatalogueEncodingError::TruncatedData {
             expected: 1,
@@ -836,13 +853,19 @@ pub fn decode_permissions_bundle(
     }
 
     let version = data[0];
-    if version != PERMISSIONS_BUNDLE_VERSION {
-        return Err(CatalogueEncodingError::UnsupportedVersion {
+    match version {
+        1 => decode_permissions_bundle_v1(data),
+        PERMISSIONS_BUNDLE_VERSION => decode_permissions_bundle_v2(data),
+        _ => Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
             expected: PERMISSIONS_BUNDLE_VERSION,
-        });
+        }),
     }
+}
 
+fn decode_permissions_bundle_v1(
+    data: &[u8],
+) -> Result<DecodedPermissionsBundle, CatalogueEncodingError> {
     let mut offset = 1;
     let schema_hash = SchemaHash::from_bytes(
         read_bytes(data, &mut offset, 32)?
@@ -852,20 +875,63 @@ pub fn decode_permissions_bundle(
     let payload_len = read_u32(data, &mut offset)? as usize;
     let payload = read_bytes(data, &mut offset, payload_len)?;
     let permissions = decode_permissions(payload)?;
-    Ok((schema_hash, permissions))
+    Ok((schema_hash, 1, None, permissions))
 }
 
-pub fn encode_permissions_head(schema_hash: SchemaHash, bundle_object_id: ObjectId) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(1 + 32 + 16);
+fn decode_permissions_bundle_v2(
+    data: &[u8],
+) -> Result<DecodedPermissionsBundle, CatalogueEncodingError> {
+    let mut offset = 1;
+    let schema_hash = SchemaHash::from_bytes(
+        read_bytes(data, &mut offset, 32)?
+            .try_into()
+            .expect("schema hash length should be exact"),
+    );
+    let version = read_u64(data, &mut offset)?;
+    let has_parent = read_u8(data, &mut offset)? != 0;
+    let parent_bundle_object_id = if has_parent {
+        let parent_uuid =
+            uuid::Uuid::from_slice(read_bytes(data, &mut offset, 16)?).map_err(|err| {
+                CatalogueEncodingError::DecodeError {
+                    message: format!("invalid parent permissions bundle object id: {err}"),
+                }
+            })?;
+        Some(ObjectId::from_uuid(parent_uuid))
+    } else {
+        None
+    };
+    let payload_len = read_u32(data, &mut offset)? as usize;
+    let payload = read_bytes(data, &mut offset, payload_len)?;
+    let permissions = decode_permissions(payload)?;
+    Ok((schema_hash, version, parent_bundle_object_id, permissions))
+}
+
+pub fn encode_permissions_head(
+    schema_hash: SchemaHash,
+    version: u64,
+    parent_bundle_object_id: Option<ObjectId>,
+    bundle_object_id: ObjectId,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + 32 + 8 + 1 + 16 + 16);
     buf.push(PERMISSIONS_HEAD_VERSION);
     buf.extend_from_slice(schema_hash.as_bytes());
+    write_u64(&mut buf, version);
+    match parent_bundle_object_id {
+        Some(parent_bundle_object_id) => {
+            buf.push(1);
+            buf.extend_from_slice(parent_bundle_object_id.uuid().as_bytes());
+        }
+        None => buf.push(0),
+    }
     buf.extend_from_slice(bundle_object_id.uuid().as_bytes());
     buf
 }
 
+type DecodedPermissionsHead = (SchemaHash, u64, Option<ObjectId>, ObjectId);
+
 pub fn decode_permissions_head(
     data: &[u8],
-) -> Result<(SchemaHash, ObjectId), CatalogueEncodingError> {
+) -> Result<DecodedPermissionsHead, CatalogueEncodingError> {
     if data.is_empty() {
         return Err(CatalogueEncodingError::TruncatedData {
             expected: 1,
@@ -874,13 +940,19 @@ pub fn decode_permissions_head(
     }
 
     let version = data[0];
-    if version != PERMISSIONS_HEAD_VERSION {
-        return Err(CatalogueEncodingError::UnsupportedVersion {
+    match version {
+        1 => decode_permissions_head_v1(data),
+        PERMISSIONS_HEAD_VERSION => decode_permissions_head_v2(data),
+        _ => Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
             expected: PERMISSIONS_HEAD_VERSION,
-        });
+        }),
     }
+}
 
+fn decode_permissions_head_v1(
+    data: &[u8],
+) -> Result<DecodedPermissionsHead, CatalogueEncodingError> {
     let mut offset = 1;
     let schema_hash = SchemaHash::from_bytes(
         read_bytes(data, &mut offset, 32)?
@@ -893,7 +965,43 @@ pub fn decode_permissions_head(
                 message: format!("invalid permissions bundle object id: {err}"),
             }
         })?;
-    Ok((schema_hash, ObjectId::from_uuid(bundle_uuid)))
+    Ok((schema_hash, 1, None, ObjectId::from_uuid(bundle_uuid)))
+}
+
+fn decode_permissions_head_v2(
+    data: &[u8],
+) -> Result<DecodedPermissionsHead, CatalogueEncodingError> {
+    let mut offset = 1;
+    let schema_hash = SchemaHash::from_bytes(
+        read_bytes(data, &mut offset, 32)?
+            .try_into()
+            .expect("schema hash length should be exact"),
+    );
+    let version = read_u64(data, &mut offset)?;
+    let has_parent = read_u8(data, &mut offset)? != 0;
+    let parent_bundle_object_id = if has_parent {
+        let parent_uuid =
+            uuid::Uuid::from_slice(read_bytes(data, &mut offset, 16)?).map_err(|err| {
+                CatalogueEncodingError::DecodeError {
+                    message: format!("invalid parent permissions bundle object id: {err}"),
+                }
+            })?;
+        Some(ObjectId::from_uuid(parent_uuid))
+    } else {
+        None
+    };
+    let bundle_uuid =
+        uuid::Uuid::from_slice(read_bytes(data, &mut offset, 16)?).map_err(|err| {
+            CatalogueEncodingError::DecodeError {
+                message: format!("invalid permissions bundle object id: {err}"),
+            }
+        })?;
+    Ok((
+        schema_hash,
+        version,
+        parent_bundle_object_id,
+        ObjectId::from_uuid(bundle_uuid),
+    ))
 }
 
 fn encode_operation_policy(
@@ -1508,9 +1616,18 @@ fn write_u32(buf: &mut Vec<u8>, n: u32) {
     buf.extend_from_slice(&n.to_le_bytes());
 }
 
+fn write_u64(buf: &mut Vec<u8>, n: u64) {
+    buf.extend_from_slice(&n.to_le_bytes());
+}
+
 fn read_u32(data: &[u8], offset: &mut usize) -> Result<u32, CatalogueEncodingError> {
     let bytes = read_bytes(data, offset, 4)?;
     Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+}
+
+fn read_u64(data: &[u8], offset: &mut usize) -> Result<u64, CatalogueEncodingError> {
+    let bytes = read_bytes(data, offset, 8)?;
+    Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
 }
 
 fn read_u8(data: &[u8], offset: &mut usize) -> Result<u8, CatalogueEncodingError> {
@@ -1911,16 +2028,21 @@ mod tests {
                 .table(TableSchema::builder("todos").column("title", ColumnType::Text))
                 .build(),
         );
+        let version = 7;
+        let parent_bundle_object_id = Some(ObjectId::new());
         let permissions = HashMap::from([(
             TableName::new("todos"),
             TablePolicies::new().with_select(PolicyExpr::True),
         )]);
 
-        let encoded = encode_permissions_bundle(schema_hash, &permissions);
-        let (decoded_hash, decoded_permissions) =
+        let encoded =
+            encode_permissions_bundle(schema_hash, version, parent_bundle_object_id, &permissions);
+        let (decoded_hash, decoded_version, decoded_parent_bundle_object_id, decoded_permissions) =
             decode_permissions_bundle(&encoded).expect("bundle should decode");
 
         assert_eq!(decoded_hash, schema_hash);
+        assert_eq!(decoded_version, version);
+        assert_eq!(decoded_parent_bundle_object_id, parent_bundle_object_id);
         assert_eq!(decoded_permissions, permissions);
     }
 
@@ -1931,13 +2053,26 @@ mod tests {
                 .table(TableSchema::builder("todos").column("title", ColumnType::Text))
                 .build(),
         );
+        let version = 7;
+        let parent_bundle_object_id = Some(ObjectId::new());
         let bundle_object_id = ObjectId::new();
 
-        let encoded = encode_permissions_head(schema_hash, bundle_object_id);
-        let (decoded_hash, decoded_bundle_object_id) =
-            decode_permissions_head(&encoded).expect("head should decode");
+        let encoded = encode_permissions_head(
+            schema_hash,
+            version,
+            parent_bundle_object_id,
+            bundle_object_id,
+        );
+        let (
+            decoded_hash,
+            decoded_version,
+            decoded_parent_bundle_object_id,
+            decoded_bundle_object_id,
+        ) = decode_permissions_head(&encoded).expect("head should decode");
 
         assert_eq!(decoded_hash, schema_hash);
+        assert_eq!(decoded_version, version);
+        assert_eq!(decoded_parent_bundle_object_id, parent_bundle_object_id);
         assert_eq!(decoded_bundle_object_id, bundle_object_id);
     }
 

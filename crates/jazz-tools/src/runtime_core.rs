@@ -344,14 +344,16 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         &mut self,
         schema_hash: SchemaHash,
         permissions: HashMap<TableName, TablePolicies>,
-    ) -> Option<ObjectId> {
+        expected_parent_bundle_object_id: Option<ObjectId>,
+    ) -> Result<Option<ObjectId>, crate::schema_manager::SchemaError> {
         let id = self.schema_manager.publish_permissions_bundle(
             &mut self.storage,
             schema_hash,
             permissions,
-        );
+            expected_parent_bundle_object_id,
+        )?;
         self.immediate_tick();
-        id
+        Ok(id)
     }
 
     /// Publish a reviewed lens edge to the active schema manager and catalogue.

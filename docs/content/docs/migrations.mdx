@@ -35,6 +35,8 @@ When Jazz encounters rows whose schema hash is no longer reachable from the curr
 
 If you only edited `permissions.ts`, you should not run `migrations create`. Permission-only changes do not create new schema hashes.
 
+Use `npx jazz-tools permissions status` / `npx jazz-tools permissions push` for permission-only rollouts instead.
+
 ## Generated Stub
 
 `migrations create` writes a copy-pastable file with short `fromHash`, `toHash`, and minimal typed `from` / `to` witnesses. You only need to fill in `migrate`, then rename the file.

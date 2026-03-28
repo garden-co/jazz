@@ -224,9 +224,11 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
             crate::query_manager::types::TableName,
             crate::query_manager::types::TablePolicies,
         >,
+        expected_parent_bundle_object_id: Option<ObjectId>,
     ) -> Result<Option<ObjectId>, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        Ok(core.publish_permissions_bundle(schema_hash, permissions))
+        core.publish_permissions_bundle(schema_hash, permissions, expected_parent_bundle_object_id)
+            .map_err(|error| RuntimeError::WriteError(error.to_string()))
     }
 
     /// Publish a reviewed lens edge to the local catalogue and active schema manager.

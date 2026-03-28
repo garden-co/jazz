@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TablePolicies } from "../drivers/types.js";
 import { loadCompiledSchema } from "../schema-loader.js";
-import { publishStoredSchema } from "../runtime/schema-fetch.js";
+import {
+  fetchPermissionsHead,
+  publishStoredPermissions,
+  publishStoredSchema,
+} from "../runtime/schema-fetch.js";
 
 const DEFAULT_APP_ID = "00000000-0000-0000-0000-000000000001";
 const DEFAULT_PORT = 1625;
@@ -357,8 +361,19 @@ export async function pushSchemaCatalogue(options: PushSchemaCatalogueOptions): 
   const result = await publishStoredSchema(options.serverUrl, {
     adminSecret: options.adminSecret,
     schema: compiled.wasmSchema,
-    permissions: compiled.permissions as Record<string, TablePolicies>,
   });
+
+  if (compiled.permissions) {
+    const { head } = await fetchPermissionsHead(options.serverUrl, {
+      adminSecret: options.adminSecret,
+    });
+    await publishStoredPermissions(options.serverUrl, {
+      adminSecret: options.adminSecret,
+      schemaHash: result.hash,
+      permissions: compiled.permissions as Record<string, TablePolicies>,
+      expectedParentBundleObjectId: head?.bundleObjectId ?? null,
+    });
+  }
 
   if (options.enableLogs === true) {
     console.log(

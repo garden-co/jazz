@@ -144,7 +144,7 @@ pub fn rehydrate_schema_manager_from_manifest<S: Storage + ?Sized>(
         latest_catalogue_content(storage, permissions_head_object_id)?
     {
         match decode_permissions_head(&head_content) {
-            Ok((_schema_hash, bundle_object_id)) => {
+            Ok((_schema_hash, _version, _parent_bundle_object_id, bundle_object_id)) => {
                 match latest_catalogue_content(storage, bundle_object_id)? {
                     Some(bundle_content) => {
                         let bundle_metadata = permissions_bundle_metadata_for_rehydrate(app_id);
