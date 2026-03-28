@@ -163,9 +163,9 @@ pub(super) fn obj_meta_key(id: ObjectId) -> String {
     format!("obj:{}:meta", format_uuid(id))
 }
 
-pub(super) fn branch_tips_key(object_id: ObjectId, branch: &BranchName) -> String {
+pub(super) fn branch_state_key(object_id: ObjectId, branch: &BranchName) -> String {
     format!(
-        "obj:{}:br:{}:tips",
+        "obj:{}:br:{}:state",
         format_uuid(object_id),
         encode_object_branch_key(branch)
     )
@@ -176,23 +176,6 @@ pub(super) fn commit_branch_key(object_id: ObjectId, commit_id: CommitId) -> Str
         "obj:{}:commit-branch:{}",
         format_uuid(object_id),
         hex::encode(commit_id.0)
-    )
-}
-
-pub(super) fn commit_key(object_id: ObjectId, branch: &BranchName, commit_id: CommitId) -> String {
-    format!(
-        "obj:{}:br:{}:c:{}",
-        format_uuid(object_id),
-        encode_object_branch_key(branch),
-        hex::encode(commit_id.0)
-    )
-}
-
-pub(super) fn commit_prefix(object_id: ObjectId, branch: &BranchName) -> String {
-    format!(
-        "obj:{}:br:{}:c:",
-        format_uuid(object_id),
-        encode_object_branch_key(branch)
     )
 }
 
@@ -493,14 +476,10 @@ mod tests {
     #[test]
     fn composed_object_branch_keys_store_prefix_id_and_batch_only() {
         let branch = BranchName::new("dev-070707070707-main-b00000000000000000000000000000001");
-        let key = commit_key(
-            ObjectId::from_uuid(uuid::Uuid::nil()),
-            &branch,
-            CommitId([7; 32]),
-        );
+        let key = branch_state_key(ObjectId::from_uuid(uuid::Uuid::nil()), &branch);
 
         assert!(key.contains(":br:c"));
-        assert!(key.contains(":b00000000000000000000000000000001:c:"));
+        assert!(key.contains(":b00000000000000000000000000000001:state"));
         assert!(!key.contains(branch.as_str()));
     }
 }

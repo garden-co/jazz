@@ -217,12 +217,9 @@ impl Storage for FjallStorage {
     ) -> Result<Option<LoadedBranch>, StorageError> {
         self.with_inner(|inner| {
             let tx = inner.db.read_tx();
-            load_branch_core(
-                object_id,
-                branch,
-                |key| Self::read_get(&tx, &inner.keyspace, key),
-                |prefix| Self::scan_prefix(&tx, &inner.keyspace, prefix),
-            )
+            load_branch_core(object_id, branch, |key| {
+                Self::read_get(&tx, &inner.keyspace, key)
+            })
         })
     }
 
@@ -336,6 +333,7 @@ impl Storage for FjallStorage {
                 object_id,
                 branch,
                 tails,
+                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
                 |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
                 |key| Self::delete_on_cell(&tx, &inner.keyspace, key),
             )?;

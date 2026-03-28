@@ -7,8 +7,7 @@
 //!
 //! ```text
 //! "obj:{uuid}:meta"                                       → JSON metadata
-//! "obj:{uuid}:br:{branch_key}:tips"                       → JSON HashSet<CommitId>
-//! "obj:{uuid}:br:{branch_key}:c:{commit_uuid}"            → JSON Commit
+//! "obj:{uuid}:br:{branch_key}:state"                      → JSON persisted branch state
 //! "ack:{commit_hex}"                                      → JSON HashSet<DurabilityTier>
 //! "catman:{app_uuid}:op:{object_uuid}"                    → JSON CatalogueManifestOp
 //! "idx:{table}:{col}:{branch_key}:{hex_encoded_value}:{uuid}" → empty (existence is the signal)
@@ -252,12 +251,7 @@ impl Storage for OpfsBTreeStorage {
         object_id: ObjectId,
         branch: &BranchName,
     ) -> Result<Option<LoadedBranch>, StorageError> {
-        load_branch_core(
-            object_id,
-            branch,
-            |key| self.tree_read(key),
-            |prefix| self.tree_scan_prefix(prefix),
-        )
+        load_branch_core(object_id, branch, |key| self.tree_read(key))
     }
 
     fn load_commit_branch(
@@ -345,6 +339,7 @@ impl Storage for OpfsBTreeStorage {
             object_id,
             branch,
             tails,
+            |key| self.tree_read(key),
             |key, value| self.tree_insert(key, value),
             |key| self.tree_delete(key),
         )
