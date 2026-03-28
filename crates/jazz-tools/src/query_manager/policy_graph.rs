@@ -19,7 +19,7 @@ use super::index::ScanCondition;
 use super::policy::PolicyExpr;
 use super::session::Session;
 use super::types::ColumnName;
-use super::types::{LoadedRow, Schema, TableName, TupleDescriptor, Value};
+use super::types::{LoadedRow, QueryBranchRef, Schema, TableName, TupleDescriptor, Value};
 
 /// A one-shot graph for evaluating a policy condition.
 ///
@@ -69,10 +69,11 @@ impl PolicyGraph {
 
         // IndexScan node: scan _id index for exact match
         let id_column = ColumnName::new("_id");
+        let branch_ref = QueryBranchRef::from_branch_name(branch.to_string());
         let scan_node = IndexScanNode::new_with_branch(
             *table,
             id_column,
-            branch,
+            branch_ref,
             ScanCondition::Eq(Value::Uuid(object_id)),
             descriptor.clone(),
         );
@@ -157,10 +158,11 @@ impl PolicyGraph {
 
         // IndexScan node: full table scan (check all rows)
         let id_column = ColumnName::new("_id");
+        let branch_ref = QueryBranchRef::from_branch_name(branch.to_string());
         let scan_node = IndexScanNode::new_with_branch(
             *table,
             id_column,
-            branch,
+            branch_ref,
             ScanCondition::All,
             descriptor.clone(),
         );
@@ -208,9 +210,9 @@ impl PolicyGraph {
         schema: &Schema,
         branch: &str,
     ) -> Option<Self> {
-        let branches = vec![branch.to_string()];
+        let branches = vec![QueryBranchRef::from_branch_name(branch.to_string())];
         let schema_context = SchemaContext::with_defaults(schema.clone(), "main");
-        let mut graph = QueryGraph::compile_relation_ir_with_schema_context(
+        let mut graph = QueryGraph::compile_relation_ir_with_branch_refs_and_schema_context(
             rel,
             schema,
             &branches,

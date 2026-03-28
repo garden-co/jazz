@@ -13,7 +13,9 @@ use super::manager::{PolicyCheckState, QueryManager, ServerQuerySubscription};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::policy_graph::PolicyGraph;
 use super::session::Session;
-use super::types::{LoadedRow, RowDescriptor, Schema, TableName, TableSchema, Value};
+use super::types::{
+    LoadedRow, QueryBranchRef, RowDescriptor, Schema, TableName, TableSchema, Value,
+};
 
 enum WriteSchemaResolution {
     Resolved(Box<TableSchema>),
@@ -95,7 +97,7 @@ impl QueryManager {
     pub(super) fn resolve_latest_row_with_schema_transform(
         id: ObjectId,
         obj: &crate::object::Object,
-        branches: &[String],
+        branches: &[QueryBranchRef],
         table: &str,
         branch_schema_map: &std::collections::HashMap<
             String,
@@ -105,8 +107,8 @@ impl QueryManager {
     ) -> Option<ResolvedSchemaRow> {
         let mut best: Option<(u64, CommitId, Vec<u8>, BranchName, bool)> = None;
 
-        for branch_name in branches {
-            let branch_name = BranchName::new(branch_name);
+        for branch_ref in branches {
+            let branch_name = branch_ref.branch_name();
             let Some(branch) = obj.branches.get(&branch_name) else {
                 continue;
             };
@@ -234,7 +236,7 @@ impl QueryManager {
     fn scope_with_policy_context_rows_from_object_manager(
         base_scope: &HashSet<(ObjectId, BranchName)>,
         graph: &super::graph::QueryGraph,
-        branches: &[String],
+        branches: &[QueryBranchRef],
         object_manager: &crate::object_manager::ObjectManager,
     ) -> HashSet<(ObjectId, BranchName)> {
         let mut scope = base_scope.clone();
@@ -248,7 +250,8 @@ impl QueryManager {
             return scope;
         }
 
-        let branch_names: Vec<BranchName> = branches.iter().map(BranchName::new).collect();
+        let branch_names: Vec<BranchName> =
+            branches.iter().map(QueryBranchRef::branch_name).collect();
         for (object_id, object) in &object_manager.objects {
             let Some(table_name) = object.metadata.get(MetadataKey::Table.as_str()) else {
                 continue;
@@ -305,12 +308,12 @@ impl QueryManager {
             // Build QueryGraph with client's session for policy filtering (schema-aware)
             let query_for_compile =
                 Self::query_for_server_compile(&sub.query, &subscription_context);
-            let query_for_compile = match Self::query_with_resolved_branches_for_context(
+            let branches = match Self::resolve_query_branches_for_context(
                 storage,
                 &query_for_compile,
                 &subscription_context,
             ) {
-                Ok(query) => query,
+                Ok(branches) => branches,
                 Err(error) => {
                     tracing::warn!(
                         %sub.client_id,
@@ -319,19 +322,24 @@ impl QueryManager {
                         error = %error,
                         "failed to resolve server query branches; falling back to schema-context defaults"
                     );
-                    let mut fallback = query_for_compile;
-                    if fallback.branches.is_empty() {
-                        fallback.branches = subscription_context
+                    if query_for_compile.branches.is_empty() {
+                        subscription_context
                             .all_branch_names()
                             .into_iter()
-                            .map(|branch| branch.as_str().to_string())
-                            .collect();
+                            .map(QueryBranchRef::from_branch_name)
+                            .collect()
+                    } else {
+                        query_for_compile
+                            .branches
+                            .iter()
+                            .map(|branch| QueryBranchRef::from_branch_name(BranchName::new(branch)))
+                            .collect()
                     }
-                    fallback
                 }
             };
             let graph = Self::compile_graph(
                 &query_for_compile,
+                &branches,
                 &schema_for_compile,
                 session_for_policy.clone(),
                 &subscription_context,
@@ -362,11 +370,11 @@ impl QueryManager {
             let om = &mut self.sync_manager.object_manager;
             let storage_ref: &dyn Storage = storage;
 
-            let branches = query_for_compile.branches.clone();
+            let requested_branches = Self::branch_names_for_query_branches(&branches);
             let table = sub.query.table.as_str().to_string();
             let include_deleted = sub.query.include_deleted;
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let obj = om.get_or_load_tips(id, storage_ref, &branches)?;
+                let obj = om.get_or_load_tips(id, storage_ref, &requested_branches)?;
                 let resolved = Self::resolve_latest_row_with_schema_transform(
                     id,
                     obj,
@@ -504,13 +512,14 @@ impl QueryManager {
 
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
             let branches = &sub.branches;
+            let requested_branches = Self::branch_names_for_query_branches(branches);
             let table = sub.query.table.as_str().to_string();
             let include_deleted = sub.query.include_deleted;
             let branch_schema_map = Self::branch_schema_map_for_context(&sub.schema_context);
 
             // Row loader for this subscription
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let obj = om.get_or_load_tips(id, storage, branches)?;
+                let obj = om.get_or_load_tips(id, storage, &requested_branches)?;
                 let resolved = Self::resolve_latest_row_with_schema_transform(
                     id,
                     obj,

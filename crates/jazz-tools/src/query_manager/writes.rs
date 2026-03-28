@@ -9,7 +9,9 @@ use super::encoding::{decode_column, decode_row, encode_row};
 use super::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::session::Session;
-use super::types::{ColumnType, ComposedBranchName, LoadedRow, RowDescriptor, TableName, Value};
+use super::types::{
+    ColumnType, ComposedBranchName, LoadedRow, QueryBranchRef, RowDescriptor, TableName, Value,
+};
 
 pub struct RowBranchWrite<'a> {
     pub table: &'a str,
@@ -294,6 +296,10 @@ impl QueryManager {
         branches: &[String],
     ) -> Option<(String, String, Vec<u8>, CommitId)> {
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
+        let branch_refs: Vec<QueryBranchRef> = branches
+            .iter()
+            .map(|branch| QueryBranchRef::from_branch_name(BranchName::new(branch)))
+            .collect();
         let obj = self
             .sync_manager
             .object_manager
@@ -302,7 +308,7 @@ impl QueryManager {
         Self::resolve_latest_row_with_schema_transform(
             id,
             obj,
-            branches,
+            &branch_refs,
             &table,
             &branch_schema_map,
             &self.schema_context,
@@ -884,10 +890,11 @@ impl QueryManager {
 
         match &col.column_type {
             crate::query_manager::types::ColumnType::Uuid => {
+                let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
                 let candidate_ids = storage.index_lookup(
                     source_table_name.as_str(),
                     col.name.as_str(),
-                    branch,
+                    &branch_ref,
                     &Value::Uuid(target_row_id),
                 );
                 for source_row_id in candidate_ids {
@@ -909,8 +916,12 @@ impl QueryManager {
             crate::query_manager::types::ColumnType::Array { element }
                 if **element == crate::query_manager::types::ColumnType::Uuid =>
             {
-                let candidate_ids =
-                    storage.index_scan_all(source_table_name.as_str(), col.name.as_str(), branch);
+                let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
+                let candidate_ids = storage.index_scan_all(
+                    source_table_name.as_str(),
+                    col.name.as_str(),
+                    &branch_ref,
+                );
                 for source_row_id in candidate_ids {
                     let Some(source_content) =
                         self.load_row_content_on_branch(storage, source_row_id, branch)
@@ -1616,7 +1627,8 @@ impl QueryManager {
         branch: &str,
         row_id: ObjectId,
     ) -> bool {
-        let ids = storage.index_lookup(table, "_id", branch, &Value::Uuid(row_id));
+        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
+        let ids = storage.index_lookup(table, "_id", &branch_ref, &Value::Uuid(row_id));
         ids.contains(&row_id)
     }
 
@@ -1633,7 +1645,8 @@ impl QueryManager {
         branch: &str,
         row_id: ObjectId,
     ) -> bool {
-        let ids = storage.index_lookup(table, "_id_deleted", branch, &Value::Uuid(row_id));
+        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
+        let ids = storage.index_lookup(table, "_id_deleted", &branch_ref, &Value::Uuid(row_id));
         ids.contains(&row_id)
     }
 

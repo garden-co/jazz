@@ -35,11 +35,13 @@ use super::index::ScanCondition;
 use super::magic_columns::{MagicColumnKind, magic_column_kind};
 use super::query::{ArraySubquerySpec, Condition, Conjunction, Query, QueryBuilder};
 use super::relation_ir::{ProjectColumn, ProjectExpr, RelExpr};
-use super::relation_ir_query_plan::{ExecutionQueryPlan, lower_relation_to_execution_plan};
+use super::relation_ir_query_plan::{
+    ExecutionQueryPlan, lower_relation_to_execution_plan_with_branch_refs,
+};
 use super::session::Session;
 use super::types::{
-    BatchId, ColumnDescriptor, ColumnName, ColumnType, LoadedRow, Row, RowDelta, RowDescriptor,
-    Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor,
+    BatchId, ColumnDescriptor, ColumnName, ColumnType, LoadedRow, QueryBranchRef, Row, RowDelta,
+    RowDescriptor, Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -457,7 +459,20 @@ impl QueryGraph {
         branches: &[String],
         session: Option<Session>,
     ) -> Option<Self> {
-        Self::compile_relation_ir_with_features(
+        let branch_refs: Vec<QueryBranchRef> = branches
+            .iter()
+            .map(|branch| QueryBranchRef::from_branch_name(BranchName::new(branch)))
+            .collect();
+        Self::compile_relation_ir_with_branch_refs(relation, schema, &branch_refs, session)
+    }
+
+    pub(crate) fn compile_relation_ir_with_branch_refs(
+        relation: &RelExpr,
+        schema: &Schema,
+        branches: &[QueryBranchRef],
+        session: Option<Session>,
+    ) -> Option<Self> {
+        Self::compile_relation_ir_with_branch_refs_and_features(
             relation,
             schema,
             branches,
@@ -466,6 +481,7 @@ impl QueryGraph {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn compile_relation_ir_with_features(
         relation: &RelExpr,
         schema: &Schema,
@@ -473,18 +489,38 @@ impl QueryGraph {
         session: Option<Session>,
         features: RelationCompileFeatures,
     ) -> Option<Self> {
+        let branch_refs: Vec<QueryBranchRef> = branches
+            .iter()
+            .map(|branch| QueryBranchRef::from_branch_name(BranchName::new(branch)))
+            .collect();
+        Self::compile_relation_ir_with_branch_refs_and_features(
+            relation,
+            schema,
+            &branch_refs,
+            session,
+            features,
+        )
+    }
+
+    pub(crate) fn compile_relation_ir_with_branch_refs_and_features(
+        relation: &RelExpr,
+        schema: &Schema,
+        branches: &[QueryBranchRef],
+        session: Option<Session>,
+        features: RelationCompileFeatures,
+    ) -> Option<Self> {
         let schema_context = Self::default_schema_context(schema);
-        let default_branches: Vec<String> = schema_context
+        let default_branches: Vec<QueryBranchRef> = schema_context
             .all_branch_names()
             .into_iter()
-            .map(|branch| branch.as_str().to_string())
+            .map(QueryBranchRef::from_branch_name)
             .collect();
-        let branches: &[String] = if branches.is_empty() {
+        let branches: &[QueryBranchRef] = if branches.is_empty() {
             &default_branches
         } else {
             branches
         };
-        let plan = lower_relation_to_execution_plan(
+        let plan = lower_relation_to_execution_plan_with_branch_refs(
             relation,
             branches,
             features.include_deleted,
@@ -503,6 +539,26 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<Self> {
+        let branch_refs: Vec<QueryBranchRef> = branches
+            .iter()
+            .map(|branch| QueryBranchRef::from_branch_name(BranchName::new(branch)))
+            .collect();
+        Self::compile_relation_ir_with_branch_refs_and_schema_context(
+            relation,
+            schema,
+            &branch_refs,
+            session,
+            schema_context,
+        )
+    }
+
+    pub(crate) fn compile_relation_ir_with_branch_refs_and_schema_context(
+        relation: &RelExpr,
+        schema: &Schema,
+        branches: &[QueryBranchRef],
+        session: Option<Session>,
+        schema_context: &SchemaContext,
+    ) -> Option<Self> {
         Self::compile_relation_ir_with_schema_context_and_features(
             relation,
             schema,
@@ -516,12 +572,12 @@ impl QueryGraph {
     pub(crate) fn compile_relation_ir_with_schema_context_and_features(
         relation: &RelExpr,
         schema: &Schema,
-        branches: &[String],
+        branches: &[QueryBranchRef],
         session: Option<Session>,
         schema_context: &SchemaContext,
         features: RelationCompileFeatures,
     ) -> Option<Self> {
-        let plan = lower_relation_to_execution_plan(
+        let plan = lower_relation_to_execution_plan_with_branch_refs(
             relation,
             branches,
             features.include_deleted,
@@ -548,11 +604,11 @@ impl QueryGraph {
         }
 
         // Expand branches to include all live schema branches if not specified
-        let branches: Vec<String> = if plan.branches.is_empty() {
+        let branches: Vec<QueryBranchRef> = if plan.branches.is_empty() {
             schema_context
                 .all_branch_names()
                 .into_iter()
-                .map(|b| b.as_str().to_string())
+                .map(QueryBranchRef::from_branch_name)
                 .collect()
         } else {
             plan.branches.clone()
@@ -582,7 +638,7 @@ impl QueryGraph {
 
         for branch in &branches {
             // Get schema hash for this branch to determine if column translation is needed
-            let branch_schema_hash = branch_schema_map.get(branch).copied();
+            let branch_schema_hash = branch_schema_map.get(branch.as_str()).copied();
 
             for disjunct in &plan.disjuncts {
                 // Find best index condition for this disjunct
@@ -620,7 +676,7 @@ impl QueryGraph {
                 let scan_node = IndexScanNode::new_with_branch(
                     plan.table,
                     scan_column_name,
-                    branch,
+                    *branch,
                     scan_condition,
                     descriptor.clone(),
                 );
@@ -637,7 +693,7 @@ impl QueryGraph {
                 let deleted_scan_node = IndexScanNode::new_with_branch(
                     plan.table,
                     deleted_column,
-                    branch,
+                    *branch,
                     ScanCondition::All,
                     descriptor.clone(),
                 );
@@ -683,7 +739,7 @@ impl QueryGraph {
         if let (Some(session), Some(policy)) = (&session, select_policy) {
             let branch_for_policy = branches
                 .first()
-                .cloned()
+                .map(|branch| branch.as_str().to_string())
                 .unwrap_or_else(|| schema_context.branch_name().as_str().to_string());
             let policy_node = PolicyFilterNode::new_with_branch(
                 current_descriptor.clone(),
@@ -765,7 +821,7 @@ impl QueryGraph {
                     schema.clone(),
                     branches
                         .first()
-                        .cloned()
+                        .map(|branch| branch.as_str().to_string())
                         .unwrap_or_else(|| schema_context.branch_name().as_str().to_string()),
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
@@ -835,7 +891,7 @@ impl QueryGraph {
                     schema.clone(),
                     branches
                         .first()
-                        .cloned()
+                        .map(|branch| branch.as_str().to_string())
                         .unwrap_or_else(|| schema_context.branch_name().as_str().to_string()),
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
@@ -930,20 +986,40 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Result<Self, QueryCompileError> {
-        let branches: Vec<String> = if query.branches.is_empty() {
+        let branches: Vec<QueryBranchRef> = if query.branches.is_empty() {
             schema_context
                 .all_branch_names()
                 .into_iter()
-                .map(|b| b.as_str().to_string())
+                .map(QueryBranchRef::from_branch_name)
                 .collect()
         } else {
-            query.branches.clone()
+            query
+                .branches
+                .iter()
+                .map(|branch| QueryBranchRef::from_branch_name(BranchName::new(branch)))
+                .collect()
         };
+        Self::try_compile_with_schema_context_and_branches(
+            query,
+            &branches,
+            schema,
+            session,
+            schema_context,
+        )
+    }
+
+    pub fn try_compile_with_schema_context_and_branches(
+        query: &Query,
+        branches: &[QueryBranchRef],
+        schema: &Schema,
+        session: Option<Session>,
+        schema_context: &SchemaContext,
+    ) -> Result<Self, QueryCompileError> {
         ensure_relation_tables_exist(&query.relation_ir, schema)?;
 
-        let plan = lower_relation_to_execution_plan(
+        let plan = lower_relation_to_execution_plan_with_branch_refs(
             &query.relation_ir,
-            &branches,
+            branches,
             query.include_deleted,
             query.array_subqueries.clone(),
             query.select_columns.clone(),
@@ -972,7 +1048,7 @@ impl QueryGraph {
         spec: &crate::query_manager::query::ArraySubquerySpec,
         outer_descriptor: &RowDescriptor,
         schema: &Schema,
-        branches: &[String],
+        branches: &[QueryBranchRef],
         schema_context: &SchemaContext,
     ) -> Option<(ArraySubqueryNode, RowDescriptor)> {
         // Get inner table descriptor
@@ -994,7 +1070,7 @@ impl QueryGraph {
         // Build base query for subgraph, inheriting branches from outer query.
         let mut base_builder = QueryBuilder::new(spec.table);
         if !branches.is_empty() {
-            let branch_refs: Vec<&str> = branches.iter().map(String::as_str).collect();
+            let branch_refs: Vec<&str> = branches.iter().map(QueryBranchRef::as_str).collect();
             base_builder = base_builder.branches(&branch_refs);
         }
         for join_spec in &spec.joins {
@@ -1144,7 +1220,7 @@ impl QueryGraph {
         spec: &crate::query_manager::query::RecursiveSpec,
         current_descriptor: &RowDescriptor,
         schema: &Schema,
-        branches: &[String],
+        branches: &[QueryBranchRef],
         schema_context: &SchemaContext,
     ) -> Option<(RecursiveRelationNode, RowDescriptor, TableName)> {
         let step_table_schema = schema.get(&spec.table)?;
@@ -1169,7 +1245,7 @@ impl QueryGraph {
         // Build step query for each recursive level.
         let mut step_builder = QueryBuilder::new(spec.table);
         if !branches.is_empty() {
-            let branch_refs: Vec<&str> = branches.iter().map(String::as_str).collect();
+            let branch_refs: Vec<&str> = branches.iter().map(QueryBranchRef::as_str).collect();
             step_builder = step_builder.branches(&branch_refs);
         }
         for join_spec in &spec.joins {
@@ -1264,19 +1340,19 @@ impl QueryGraph {
     fn compile_join_plan(
         plan: &ExecutionQueryPlan,
         schema: &Schema,
-        branches: &[String],
+        branches: &[QueryBranchRef],
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<Self> {
         let base_table_schema = schema.get(&plan.table)?;
         let base_descriptor = base_table_schema.columns.clone();
         let mut graph = QueryGraph::new(plan.table, base_descriptor.clone());
-        let current_branch = schema_context.branch_name().as_str().to_string();
+        let current_branch = QueryBranchRef::from_branch_name(schema_context.branch_name());
 
-        let join_branches: Vec<&str> = if branches.is_empty() {
-            vec![current_branch.as_str()]
+        let join_branches: Vec<QueryBranchRef> = if branches.is_empty() {
+            vec![current_branch]
         } else {
-            branches.iter().map(String::as_str).collect()
+            branches.to_vec()
         };
 
         // Track all table names and descriptors for TupleDescriptor
@@ -1329,7 +1405,7 @@ impl QueryGraph {
         {
             let branch_for_policy = branches
                 .first()
-                .cloned()
+                .map(|branch| branch.as_str().to_string())
                 .unwrap_or_else(|| schema_context.branch_name().as_str().to_string());
             let policy_node = PolicyFilterNode::new_with_branch(
                 base_descriptor.clone(),
@@ -1426,7 +1502,7 @@ impl QueryGraph {
             {
                 let branch_for_policy = branches
                     .first()
-                    .cloned()
+                    .map(|branch| branch.as_str().to_string())
                     .unwrap_or_else(|| schema_context.branch_name().as_str().to_string());
                 let policy_node = PolicyFilterNode::new_with_branch(
                     right_descriptor.clone(),
@@ -1545,7 +1621,7 @@ impl QueryGraph {
                     schema.clone(),
                     branches
                         .first()
-                        .cloned()
+                        .map(|branch| branch.as_str().to_string())
                         .unwrap_or_else(|| schema_context.branch_name().as_str().to_string()),
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node
@@ -1612,7 +1688,7 @@ impl QueryGraph {
                     schema.clone(),
                     branches
                         .first()
-                        .cloned()
+                        .map(|branch| branch.as_str().to_string())
                         .unwrap_or_else(|| schema_context.branch_name().as_str().to_string()),
                 )?;
                 let dependency_tables: Vec<TableName> = magic_node

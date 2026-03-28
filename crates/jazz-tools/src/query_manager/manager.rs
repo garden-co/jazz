@@ -22,8 +22,9 @@ use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
 use super::types::{
-    BatchId, ComposedBranchName, LoadedRow, OrderedRowDelta, RowDelta, RowDescriptor, Schema,
-    SchemaHash, TableName, TableSchema, Value, build_ordered_delta_with_post_ids,
+    BatchId, ComposedBranchName, LoadedRow, OrderedRowDelta, QueryBranchRef, RowDelta,
+    RowDescriptor, Schema, SchemaHash, TableName, TableSchema, Value,
+    build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -158,7 +159,7 @@ pub(crate) struct QuerySubscription {
     /// Compiled query graph.
     pub(crate) graph: QueryGraph,
     /// Branches to read from (updated on recompile).
-    pub(crate) branches: Vec<String>,
+    pub(crate) branches: Vec<QueryBranchRef>,
     /// Session for policy filtering (if any).
     pub(crate) session: Option<Session>,
     /// Flag indicating this subscription needs recompilation due to schema change.
@@ -242,7 +243,7 @@ pub(super) struct ServerQuerySubscription {
     /// Client's session for permission evaluation.
     pub(super) session: Option<Session>,
     /// Resolved branches (from query.branches or schema context at creation time).
-    pub(super) branches: Vec<String>,
+    pub(super) branches: Vec<QueryBranchRef>,
     /// Last computed scope (for detecting changes).
     pub(super) last_scope: HashSet<(ObjectId, BranchName)>,
     /// Flag indicating this subscription needs recompilation due to schema change.
@@ -320,6 +321,13 @@ pub struct QueryManager {
 }
 
 impl QueryManager {
+    pub(super) fn branch_names_for_query_branches(branches: &[QueryBranchRef]) -> Vec<String> {
+        branches
+            .iter()
+            .map(|branch| branch.as_str().to_string())
+            .collect()
+    }
+
     pub fn server_subscription_telemetry(&self) -> Vec<ServerSubscriptionTelemetryGroup> {
         let mut groups: HashMap<String, ServerSubscriptionTelemetryGroup> = HashMap::new();
 
@@ -337,7 +345,7 @@ impl QueryManager {
                     count: 1,
                     table: subscription.query.table.as_str().to_string(),
                     query,
-                    branches: subscription.branches.clone(),
+                    branches: Self::branch_names_for_query_branches(&subscription.branches),
                     propagation: subscription.propagation,
                 });
         }
@@ -452,48 +460,44 @@ impl QueryManager {
 
     pub(super) fn compile_graph(
         query: &Query,
+        branches: &[QueryBranchRef],
         schema: &Schema,
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Result<QueryGraph, QueryCompileError> {
-        QueryGraph::try_compile_with_schema_context(query, schema, session, schema_context)
+        QueryGraph::try_compile_with_schema_context_and_branches(
+            query,
+            branches,
+            schema,
+            session,
+            schema_context,
+        )
     }
 
     fn default_query_branches_for_table(
         storage: &dyn Storage,
         table: &str,
         schema_context: &SchemaContext,
-    ) -> Result<Vec<String>, StorageError> {
+    ) -> Result<Vec<QueryBranchRef>, StorageError> {
         let mut branches = Vec::new();
 
         for branch_name in schema_context.all_branch_names() {
             let Some(composed_branch) = ComposedBranchName::parse(&branch_name) else {
-                branches.push(branch_name.as_str().to_string());
+                branches.push(QueryBranchRef::from_branch_name(branch_name));
                 continue;
             };
 
-            let prefix = composed_branch.prefix().branch_prefix();
-            let mut prefix_branches: Vec<String> = storage
-                .load_table_prefix_batches(table, &prefix)?
-                .into_iter()
-                .map(|batch_id| {
-                    composed_branch
-                        .prefix()
-                        .with_batch_id(batch_id)
-                        .to_branch_name()
-                        .as_str()
-                        .to_string()
-                })
-                .collect();
+            let prefix = BranchName::new(composed_branch.prefix().branch_prefix());
+            let mut prefix_branches = storage.load_table_prefix_branches(table, prefix)?;
 
             if prefix_branches.is_empty() {
-                branches.push(branch_name.as_str().to_string());
+                branches.push(QueryBranchRef::from_branch_name(branch_name));
             } else {
                 branches.append(&mut prefix_branches);
             }
         }
 
-        branches.sort();
+        branches.sort_by_key(|branch| branch.as_str().to_string());
         branches.dedup();
         Ok(branches)
     }
@@ -502,23 +506,16 @@ impl QueryManager {
         storage: &dyn Storage,
         query: &Query,
         schema_context: &SchemaContext,
-    ) -> Result<Vec<String>, StorageError> {
+    ) -> Result<Vec<QueryBranchRef>, StorageError> {
         if query.branches.is_empty() {
             Self::default_query_branches_for_table(storage, query.table.as_str(), schema_context)
         } else {
-            Ok(query.branches.clone())
+            Ok(query
+                .branches
+                .iter()
+                .map(|branch| QueryBranchRef::from_branch_name(BranchName::new(branch)))
+                .collect())
         }
-    }
-
-    pub(super) fn query_with_resolved_branches_for_context(
-        storage: &dyn Storage,
-        query: &Query,
-        schema_context: &SchemaContext,
-    ) -> Result<Query, StorageError> {
-        let mut query_for_compile = query.clone();
-        query_for_compile.branches =
-            Self::resolve_query_branches_for_context(storage, query, schema_context)?;
-        Ok(query_for_compile)
     }
 
     /// Mark all subscriptions for recompilation.
@@ -559,11 +556,9 @@ impl QueryManager {
             };
 
             if sub.needs_recompile || sub.branches != next_branches {
-                let mut query_for_compile = sub.query.clone();
-                query_for_compile.branches = next_branches.clone();
-
                 match Self::compile_graph(
-                    &query_for_compile,
+                    &sub.query,
+                    &next_branches,
                     &self.schema,
                     sub.session.clone(),
                     &self.schema_context,
@@ -609,12 +604,12 @@ impl QueryManager {
         // Recompile server-side subscriptions
         for ((client_id, query_id), sub) in &mut self.server_subscriptions {
             let compile_query = Self::query_for_server_compile(&sub.query, &sub.schema_context);
-            let query_for_compile = match Self::query_with_resolved_branches_for_context(
+            let next_branches = match Self::resolve_query_branches_for_context(
                 storage,
                 &compile_query,
                 &sub.schema_context,
             ) {
-                Ok(query) => query,
+                Ok(branches) => branches,
                 Err(error) => {
                     tracing::warn!(
                         %client_id,
@@ -623,21 +618,20 @@ impl QueryManager {
                         error = %error,
                         "failed to resolve server query branches; keeping previous branch set"
                     );
-                    let mut fallback = compile_query;
-                    fallback.branches = sub.branches.clone();
-                    fallback
+                    sub.branches.clone()
                 }
             };
 
-            if sub.needs_recompile || sub.branches != query_for_compile.branches {
+            if sub.needs_recompile || sub.branches != next_branches {
                 match Self::compile_graph(
-                    &query_for_compile,
+                    &compile_query,
+                    &next_branches,
                     &sub.schema_context.current_schema,
                     sub.session.clone(),
                     &sub.schema_context,
                 ) {
                     Ok(new_graph) => {
-                        sub.branches = query_for_compile.branches.clone();
+                        sub.branches = next_branches;
                         sub.graph = new_graph;
                         sub.needs_recompile = false;
                     }
@@ -801,11 +795,12 @@ impl QueryManager {
         for (sub_id, subscription) in &mut self.subscriptions {
             let _sub_span = tracing::trace_span!("settle_subscription", sub_id = sub_id.0, table = %subscription.graph.table).entered();
             let branches = &subscription.branches;
+            let requested_branches = Self::branch_names_for_query_branches(branches);
             let table = subscription.graph.table.as_str().to_string();
             let include_deleted = subscription.query.include_deleted;
 
             let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let obj = om.get_or_load_tips(id, storage_ref, branches);
+                let obj = om.get_or_load_tips(id, storage_ref, &requested_branches);
                 if obj.is_none() {
                     tracing::trace!(%id, "row_loader: object not found");
                     return None;
@@ -1300,14 +1295,14 @@ fn propagation_label(propagation: QueryPropagation) -> &'static str {
     }
 }
 
-fn subscription_group_key(query: &str, branches: &[String], propagation: &str) -> String {
+fn subscription_group_key(query: &str, branches: &[QueryBranchRef], propagation: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(query.as_bytes());
     hasher.update([0]);
     hasher.update(propagation.as_bytes());
     hasher.update([0]);
     for branch in branches {
-        hasher.update(branch.as_bytes());
+        hasher.update(branch.as_str().as_bytes());
         hasher.update([0]);
     }
     hex::encode(hasher.finalize())

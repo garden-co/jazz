@@ -28,7 +28,9 @@ use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::{BatchId, Value};
+#[cfg(test)]
+use crate::query_manager::types::BatchId;
+use crate::query_manager::types::{QueryBranchRef, Value};
 use crate::sync_manager::DurabilityTier;
 
 #[cfg(test)]
@@ -43,7 +45,7 @@ use super::{
         index_insert_core, index_lookup_core, index_range_core, index_remove_core,
         index_scan_all_core, load_branch_core, load_branch_tips_core, load_catalogue_manifest_core,
         load_commit_branch_core, load_object_metadata_core, load_prefix_batch_catalog_core,
-        load_table_prefix_batches_core, replace_branch_core, store_ack_tier_core,
+        load_table_prefix_branches_core, replace_branch_core, store_ack_tier_core,
     },
 };
 
@@ -178,6 +180,91 @@ impl OpfsBTreeStorage {
         self.with_tree_mut(|tree| tree.get(key.as_bytes()).map_err(map_storage_err))
     }
 
+    #[cfg(test)]
+    #[allow(clippy::needless_pass_by_value)]
+    fn branch_ref(branch: impl Into<String>) -> QueryBranchRef {
+        QueryBranchRef::from_branch_name(BranchName::new(branch.into()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_table_prefix_batches(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<HashSet<BatchId>, StorageError> {
+        Ok(self
+            .load_table_prefix_branches(table, BranchName::new(prefix))?
+            .into_iter()
+            .filter_map(|branch| branch.batch_id())
+            .collect())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index_insert(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        <Self as Storage>::index_insert(
+            self,
+            table,
+            column,
+            &Self::branch_ref(branch),
+            value,
+            row_id,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index_remove(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        <Self as Storage>::index_remove(
+            self,
+            table,
+            column,
+            &Self::branch_ref(branch),
+            value,
+            row_id,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+    ) -> Vec<ObjectId> {
+        <Self as Storage>::index_lookup(self, table, column, &Self::branch_ref(branch), value)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index_range(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: Bound<&Value>,
+        end: Bound<&Value>,
+    ) -> Vec<ObjectId> {
+        <Self as Storage>::index_range(self, table, column, &Self::branch_ref(branch), start, end)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+        <Self as Storage>::index_scan_all(self, table, column, &Self::branch_ref(branch))
+    }
+
     fn tree_delete(&self, key: &str) -> Result<(), StorageError> {
         self.with_tree_mut(|tree| tree.delete(key.as_bytes()).map_err(map_storage_err))
     }
@@ -284,12 +371,12 @@ impl Storage for OpfsBTreeStorage {
         )
     }
 
-    fn load_table_prefix_batches(
+    fn load_table_prefix_branches(
         &self,
         table: &str,
-        prefix: &str,
-    ) -> Result<HashSet<BatchId>, StorageError> {
-        load_table_prefix_batches_core(table, prefix, |key_prefix| {
+        prefix: BranchName,
+    ) -> Result<Vec<QueryBranchRef>, StorageError> {
+        load_table_prefix_branches_core(table, prefix, |key_prefix| {
             self.tree_scan_prefix(key_prefix)
         })
     }
@@ -379,11 +466,11 @@ impl Storage for OpfsBTreeStorage {
         &mut self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
-        tracing::trace!(table, column, branch, ?row_id, "index_insert");
+        tracing::trace!(table, column, branch = %branch, ?row_id, "index_insert");
         let inserted = index_insert_core(
             table,
             column,
@@ -410,11 +497,11 @@ impl Storage for OpfsBTreeStorage {
         &mut self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
-        tracing::trace!(table, column, branch, ?row_id, "index_remove");
+        tracing::trace!(table, column, branch = %branch, ?row_id, "index_remove");
         let removed = index_remove_core(
             table,
             column,
@@ -441,10 +528,10 @@ impl Storage for OpfsBTreeStorage {
         &self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         value: &Value,
     ) -> Vec<ObjectId> {
-        tracing::trace!(table, column, branch, "index_lookup");
+        tracing::trace!(table, column, branch = %branch, "index_lookup");
         index_lookup_core(table, column, branch, value, |prefix| {
             self.tree_scan_keys(prefix)
         })
@@ -454,7 +541,7 @@ impl Storage for OpfsBTreeStorage {
         &self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         start: Bound<&Value>,
         end: Bound<&Value>,
     ) -> Vec<ObjectId> {
@@ -463,7 +550,7 @@ impl Storage for OpfsBTreeStorage {
         })
     }
 
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+    fn index_scan_all(&self, table: &str, column: &str, branch: &QueryBranchRef) -> Vec<ObjectId> {
         index_scan_all_core(table, column, branch, |prefix| self.tree_scan_keys(prefix))
     }
 

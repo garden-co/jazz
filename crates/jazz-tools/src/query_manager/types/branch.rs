@@ -683,6 +683,95 @@ impl std::fmt::Display for BranchPrefixName {
     }
 }
 
+/// Internal branch reference used by query compilation and index access.
+///
+/// Composed batch branches keep their shared prefix and batch id in structured
+/// form, while also caching the full interned branch name for object lookups
+/// and row provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum QueryBranchRef {
+    Raw {
+        branch_name: BranchName,
+    },
+    Batch {
+        prefix_name: BranchName,
+        batch_id: BatchId,
+        branch_name: BranchName,
+    },
+}
+
+impl QueryBranchRef {
+    pub fn raw(branch_name: impl Into<BranchName>) -> Self {
+        Self::Raw {
+            branch_name: branch_name.into(),
+        }
+    }
+
+    pub fn from_prefix_and_batch(prefix: &BranchPrefixName, batch_id: BatchId) -> Self {
+        let prefix_name = BranchName::new(prefix.branch_prefix());
+        let branch_name = prefix.with_batch_id(batch_id).to_branch_name();
+        Self::Batch {
+            prefix_name,
+            batch_id,
+            branch_name,
+        }
+    }
+
+    pub fn from_prefix_name_and_batch(prefix_name: BranchName, batch_id: BatchId) -> Self {
+        let branch_name = BranchName::new(format!("{}-{}", prefix_name.as_str(), batch_id));
+        Self::Batch {
+            prefix_name,
+            batch_id,
+            branch_name,
+        }
+    }
+
+    pub fn from_branch_name(branch_name: impl Into<BranchName>) -> Self {
+        let branch_name = branch_name.into();
+        if let Some(composed_branch) = ComposedBranchName::parse(&branch_name) {
+            Self::Batch {
+                prefix_name: BranchName::new(composed_branch.prefix().branch_prefix()),
+                batch_id: composed_branch.batch_id,
+                branch_name,
+            }
+        } else {
+            Self::Raw { branch_name }
+        }
+    }
+
+    pub fn branch_name(&self) -> BranchName {
+        match self {
+            Self::Raw { branch_name } | Self::Batch { branch_name, .. } => *branch_name,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Raw { branch_name } | Self::Batch { branch_name, .. } => branch_name.as_str(),
+        }
+    }
+
+    pub fn prefix_name(&self) -> Option<BranchName> {
+        match self {
+            Self::Batch { prefix_name, .. } => Some(*prefix_name),
+            Self::Raw { .. } => None,
+        }
+    }
+
+    pub fn batch_id(&self) -> Option<BatchId> {
+        match self {
+            Self::Batch { batch_id, .. } => Some(*batch_id),
+            Self::Raw { .. } => None,
+        }
+    }
+}
+
+impl std::fmt::Display for QueryBranchRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// A branch name composed of environment, schema hash, user branch, and batch id.
 /// Format: `{env}-{schemaHash}-{userBranch}-{batchId}`
 /// Example: `dev-a1b2c3d4e5f6-main-b018d6f2...`

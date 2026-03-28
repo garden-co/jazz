@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId, PrefixBatchCatalog, PrefixBatchMeta};
-use crate::query_manager::types::{BatchId, SchemaHash, Value};
+use crate::query_manager::types::{BatchId, QueryBranchRef, SchemaHash, Value};
 use crate::sync_manager::DurabilityTier;
 
 // ============================================================================
@@ -70,7 +70,7 @@ impl std::error::Error for StorageError {}
 pub(crate) fn validate_index_value_size(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     value: &Value,
 ) -> Result<(), StorageError> {
     key_codec::validate_index_entry_size(table, column, branch, value)
@@ -226,11 +226,11 @@ pub trait Storage {
     ) -> Result<Option<PrefixBatchCatalog>, StorageError>;
 
     /// Load all currently indexed table batches for one shared batch prefix.
-    fn load_table_prefix_batches(
+    fn load_table_prefix_branches(
         &self,
         table: &str,
-        prefix: &str,
-    ) -> Result<HashSet<BatchId>, StorageError>;
+        prefix: BranchName,
+    ) -> Result<Vec<QueryBranchRef>, StorageError>;
 
     /// Append a commit to a branch.
     fn append_commit(
@@ -307,7 +307,7 @@ pub trait Storage {
         &mut self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError>;
@@ -317,27 +317,32 @@ pub trait Storage {
         &mut self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError>;
 
     /// Lookup exact value - returns all row IDs with this value.
-    fn index_lookup(&self, table: &str, column: &str, branch: &str, value: &Value)
-    -> Vec<ObjectId>;
+    fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &QueryBranchRef,
+        value: &Value,
+    ) -> Vec<ObjectId>;
 
     /// Range scan - returns row IDs matching the range bounds.
     fn index_range(
         &self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         start: Bound<&Value>,
         end: Bound<&Value>,
     ) -> Vec<ObjectId>;
 
     /// Full scan - returns all row IDs in this index.
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId>;
+    fn index_scan_all(&self, table: &str, column: &str, branch: &QueryBranchRef) -> Vec<ObjectId>;
 
     /// Flush buffered data to persistent storage. No-op for in-memory storage.
     fn flush(&self) {}
@@ -400,12 +405,12 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).load_prefix_batch_catalog(object_id, prefix)
     }
 
-    fn load_table_prefix_batches(
+    fn load_table_prefix_branches(
         &self,
         table: &str,
-        prefix: &str,
-    ) -> Result<HashSet<BatchId>, StorageError> {
-        (**self).load_table_prefix_batches(table, prefix)
+        prefix: BranchName,
+    ) -> Result<Vec<QueryBranchRef>, StorageError> {
+        (**self).load_table_prefix_branches(table, prefix)
     }
 
     fn append_commit(
@@ -463,7 +468,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         &mut self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
@@ -474,7 +479,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         &mut self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
@@ -485,7 +490,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         &self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         value: &Value,
     ) -> Vec<ObjectId> {
         (**self).index_lookup(table, column, branch, value)
@@ -495,14 +500,14 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         &self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         start: Bound<&Value>,
         end: Bound<&Value>,
     ) -> Vec<ObjectId> {
         (**self).index_range(table, column, branch, start, end)
     }
 
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+    fn index_scan_all(&self, table: &str, column: &str, branch: &QueryBranchRef) -> Vec<ObjectId> {
         (**self).index_scan_all(table, column, branch)
     }
 
@@ -547,7 +552,7 @@ pub struct MemoryStorage {
     /// Persistence ack tiers per commit.
     ack_tiers: HashMap<CommitId, HashSet<DurabilityTier>>,
     /// Active table batches keyed by shared batch prefix.
-    table_batches_by_prefix: HashMap<(String, String), HashMap<BatchId, u64>>,
+    table_batches_by_prefix: HashMap<(String, BranchName), HashMap<BatchId, u64>>,
     /// Append-only manifest ops keyed by app_id then op object_id.
     catalogue_manifest_ops: HashMap<ObjectId, HashMap<ObjectId, CatalogueManifestOp>>,
 }
@@ -574,14 +579,93 @@ impl MemoryStorage {
         Self::default()
     }
 
-    fn composed_table_batch(branch: &str) -> Option<(String, BatchId)> {
-        let composed_branch = crate::query_manager::types::ComposedBranchName::parse(
-            &BranchName::new(branch.to_string()),
-        )?;
-        Some((
-            composed_branch.prefix().branch_prefix(),
-            composed_branch.batch_id,
-        ))
+    #[cfg(test)]
+    #[allow(clippy::needless_pass_by_value)]
+    fn branch_ref(branch: impl Into<String>) -> QueryBranchRef {
+        QueryBranchRef::from_branch_name(BranchName::new(branch.into()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_table_prefix_batches(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<HashSet<BatchId>, StorageError> {
+        Ok(self
+            .load_table_prefix_branches(table, BranchName::new(prefix))?
+            .into_iter()
+            .filter_map(|branch| branch.batch_id())
+            .collect())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index_insert(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        <Self as Storage>::index_insert(
+            self,
+            table,
+            column,
+            &Self::branch_ref(branch),
+            value,
+            row_id,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index_remove(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        <Self as Storage>::index_remove(
+            self,
+            table,
+            column,
+            &Self::branch_ref(branch),
+            value,
+            row_id,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+    ) -> Vec<ObjectId> {
+        <Self as Storage>::index_lookup(self, table, column, &Self::branch_ref(branch), value)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index_range(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: Bound<&Value>,
+        end: Bound<&Value>,
+    ) -> Vec<ObjectId> {
+        <Self as Storage>::index_range(self, table, column, &Self::branch_ref(branch), start, end)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+        <Self as Storage>::index_scan_all(self, table, column, &Self::branch_ref(branch))
+    }
+
+    fn composed_table_batch(branch: &QueryBranchRef) -> Option<(BranchName, BatchId)> {
+        Some((branch.prefix_name()?, branch.batch_id()?))
     }
 }
 
@@ -791,15 +875,23 @@ impl Storage for MemoryStorage {
             .and_then(|obj| obj.prefix_batches.get(prefix).cloned()))
     }
 
-    fn load_table_prefix_batches(
+    fn load_table_prefix_branches(
         &self,
         table: &str,
-        prefix: &str,
-    ) -> Result<HashSet<BatchId>, StorageError> {
+        prefix: BranchName,
+    ) -> Result<Vec<QueryBranchRef>, StorageError> {
         Ok(self
             .table_batches_by_prefix
-            .get(&(table.to_string(), prefix.to_string()))
-            .map(|counts| counts.keys().copied().collect())
+            .get(&(table.to_string(), prefix))
+            .map(|counts| {
+                let mut branches: Vec<_> = counts
+                    .keys()
+                    .copied()
+                    .map(|batch_id| QueryBranchRef::from_prefix_name_and_batch(prefix, batch_id))
+                    .collect();
+                branches.sort_by_key(|branch| branch.as_str().to_string());
+                branches
+            })
             .unwrap_or_default())
     }
 
@@ -941,7 +1033,7 @@ impl Storage for MemoryStorage {
         &mut self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
@@ -972,7 +1064,7 @@ impl Storage for MemoryStorage {
         &mut self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
@@ -1002,7 +1094,7 @@ impl Storage for MemoryStorage {
             && let Some((prefix, batch_id)) = Self::composed_table_batch(branch)
             && let Some(counts) = self
                 .table_batches_by_prefix
-                .get_mut(&(table.to_string(), prefix.clone()))
+                .get_mut(&(table.to_string(), prefix))
         {
             if let Some(count) = counts.get_mut(&batch_id) {
                 *count = count.saturating_sub(1);
@@ -1022,7 +1114,7 @@ impl Storage for MemoryStorage {
         &self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         value: &Value,
     ) -> Vec<ObjectId> {
         let key = (
@@ -1056,7 +1148,7 @@ impl Storage for MemoryStorage {
         &self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         start: Bound<&Value>,
         end: Bound<&Value>,
     ) -> Vec<ObjectId> {
@@ -1105,7 +1197,7 @@ impl Storage for MemoryStorage {
             .collect()
     }
 
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+    fn index_scan_all(&self, table: &str, column: &str, branch: &QueryBranchRef) -> Vec<ObjectId> {
         let key = (
             table.to_string(),
             column.to_string(),

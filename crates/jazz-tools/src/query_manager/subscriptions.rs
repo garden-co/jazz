@@ -91,24 +91,38 @@ impl QueryManager {
         let _span =
             tracing::debug_span!("QM::subscribe", table = %query.table, ?durability_tier).entered();
         // Determine branches
-        let branches: Vec<String> = if !query.branches.is_empty() {
-            query.branches.clone()
-        } else if self.schema_context.is_initialized() {
-            self.schema_context
-                .all_branch_names()
-                .into_iter()
-                .map(|b| b.as_str().to_string())
-                .collect()
-        } else {
-            return Err(QueryError::QueryCompilationError(
-                "schema context not initialized - call set_current_schema() first".into(),
-            ));
-        };
+        let branches: Vec<crate::query_manager::types::QueryBranchRef> =
+            if !query.branches.is_empty() {
+                query
+                    .branches
+                    .iter()
+                    .map(|branch| {
+                        crate::query_manager::types::QueryBranchRef::from_branch_name(
+                            crate::object::BranchName::new(branch),
+                        )
+                    })
+                    .collect()
+            } else if self.schema_context.is_initialized() {
+                self.schema_context
+                    .all_branch_names()
+                    .into_iter()
+                    .map(crate::query_manager::types::QueryBranchRef::from_branch_name)
+                    .collect()
+            } else {
+                return Err(QueryError::QueryCompilationError(
+                    "schema context not initialized - call set_current_schema() first".into(),
+                ));
+            };
 
         // Compile query graph with schema context
-        let graph =
-            Self::compile_graph(&query, &self.schema, session.clone(), &self.schema_context)
-                .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
+        let graph = Self::compile_graph(
+            &query,
+            &branches,
+            &self.schema,
+            session.clone(),
+            &self.schema_context,
+        )
+        .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -161,18 +175,27 @@ impl QueryManager {
         session: Option<Session>,
     ) -> Result<QuerySubscriptionId, QueryError> {
         // Determine branches from query or context
-        let branches: Vec<String> = if !query.branches.is_empty() {
-            query.branches.clone()
-        } else {
-            schema_context
-                .all_branch_names()
-                .into_iter()
-                .map(|b| b.as_str().to_string())
-                .collect()
-        };
+        let branches: Vec<crate::query_manager::types::QueryBranchRef> =
+            if !query.branches.is_empty() {
+                query
+                    .branches
+                    .iter()
+                    .map(|branch| {
+                        crate::query_manager::types::QueryBranchRef::from_branch_name(
+                            crate::object::BranchName::new(branch),
+                        )
+                    })
+                    .collect()
+            } else {
+                schema_context
+                    .all_branch_names()
+                    .into_iter()
+                    .map(crate::query_manager::types::QueryBranchRef::from_branch_name)
+                    .collect()
+            };
 
         // Compile query graph with explicit schema context
-        let graph = Self::compile_graph(&query, schema, session.clone(), schema_context)
+        let graph = Self::compile_graph(&query, &branches, schema, session.clone(), schema_context)
             .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);

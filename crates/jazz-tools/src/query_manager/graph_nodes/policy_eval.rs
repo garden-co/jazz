@@ -9,7 +9,7 @@ use crate::query_manager::policy_graph::PolicyGraph;
 use crate::query_manager::relation_ir::RelExpr;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ColumnType, LoadedRow, Row, RowDescriptor, Schema, TableName, Value,
+    ColumnType, LoadedRow, QueryBranchRef, Row, RowDescriptor, Schema, TableName, Value,
 };
 use crate::storage::Storage;
 
@@ -125,14 +125,18 @@ impl<'a> PolicyContextEvaluator<'a> {
         }
 
         let candidate_ids = match &col.column_type {
-            ColumnType::Uuid => io.index_lookup(
-                source_table_name.as_str(),
-                col.name.as_str(),
-                self.branch,
-                &Value::Uuid(row.id),
-            ),
+            ColumnType::Uuid => {
+                let branch_ref = QueryBranchRef::from_branch_name(self.branch.to_string());
+                io.index_lookup(
+                    source_table_name.as_str(),
+                    col.name.as_str(),
+                    &branch_ref,
+                    &Value::Uuid(row.id),
+                )
+            }
             ColumnType::Array { element } if **element == ColumnType::Uuid => {
-                io.index_scan_all(source_table_name.as_str(), col.name.as_str(), self.branch)
+                let branch_ref = QueryBranchRef::from_branch_name(self.branch.to_string());
+                io.index_scan_all(source_table_name.as_str(), col.name.as_str(), &branch_ref)
             }
             _ => return false,
         };

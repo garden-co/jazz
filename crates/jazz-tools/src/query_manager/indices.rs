@@ -6,7 +6,7 @@ use crate::storage::{Storage, StorageError, validate_index_value_size};
 
 use super::encoding::decode_column;
 use super::manager::{QueryError, QueryManager};
-use super::types::{ColumnDescriptor, ColumnType, RowDescriptor, TableName, Value};
+use super::types::{ColumnDescriptor, ColumnType, QueryBranchRef, RowDescriptor, TableName, Value};
 
 #[derive(Debug, Clone)]
 struct IndexSourceState {
@@ -60,8 +60,9 @@ impl QueryManager {
         branch: &str,
         value: &Value,
     ) -> Result<(), QueryError> {
+        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
         for index_value in Self::expand_index_values(column, value) {
-            validate_index_value_size(table, column.name.as_str(), branch, &index_value)
+            validate_index_value_size(table, column.name.as_str(), &branch_ref, &index_value)
                 .map_err(Self::map_index_storage_error)?;
         }
         Ok(())
@@ -89,9 +90,16 @@ impl QueryManager {
         value: &Value,
         object_id: ObjectId,
     ) -> Result<(), QueryError> {
+        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
         for index_value in Self::expand_index_values(column, value) {
             storage
-                .index_insert(table, column.name.as_str(), branch, &index_value, object_id)
+                .index_insert(
+                    table,
+                    column.name.as_str(),
+                    &branch_ref,
+                    &index_value,
+                    object_id,
+                )
                 .map_err(Self::map_index_storage_error)?;
         }
         Ok(())
@@ -105,9 +113,16 @@ impl QueryManager {
         value: &Value,
         object_id: ObjectId,
     ) -> Result<(), QueryError> {
+        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
         for index_value in Self::expand_index_values(column, value) {
             storage
-                .index_remove(table, column.name.as_str(), branch, &index_value, object_id)
+                .index_remove(
+                    table,
+                    column.name.as_str(),
+                    &branch_ref,
+                    &index_value,
+                    object_id,
+                )
                 .map_err(Self::map_index_storage_error)?;
         }
         Ok(())
@@ -121,8 +136,15 @@ impl QueryManager {
         data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
+        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
         storage
-            .index_insert(table, "_id", branch, &Value::Uuid(object_id), object_id)
+            .index_insert(
+                table,
+                "_id",
+                &branch_ref,
+                &Value::Uuid(object_id),
+                object_id,
+            )
             .map_err(Self::map_index_storage_error)?;
 
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
@@ -144,8 +166,15 @@ impl QueryManager {
         data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
+        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
         storage
-            .index_remove(table, "_id", branch, &Value::Uuid(object_id), object_id)
+            .index_remove(
+                table,
+                "_id",
+                &branch_ref,
+                &Value::Uuid(object_id),
+                object_id,
+            )
             .map_err(Self::map_index_storage_error)?;
 
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
@@ -165,11 +194,12 @@ impl QueryManager {
         branch: &str,
         object_id: ObjectId,
     ) -> Result<(), QueryError> {
+        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
         storage
             .index_insert(
                 table,
                 "_id_deleted",
-                branch,
+                &branch_ref,
                 &Value::Uuid(object_id),
                 object_id,
             )
@@ -182,11 +212,12 @@ impl QueryManager {
         branch: &str,
         object_id: ObjectId,
     ) -> Result<(), QueryError> {
+        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
         storage
             .index_remove(
                 table,
                 "_id_deleted",
-                branch,
+                &branch_ref,
                 &Value::Uuid(object_id),
                 object_id,
             )

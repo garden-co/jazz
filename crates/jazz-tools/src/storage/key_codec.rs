@@ -2,7 +2,7 @@ use std::ops::Bound;
 
 use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::{BatchId, ComposedBranchName, Value};
+use crate::query_manager::types::{BatchId, ComposedBranchName, QueryBranchRef, Value};
 
 use super::{StorageError, encode_value};
 
@@ -44,24 +44,23 @@ fn index_value_prefix_bytes(
 fn index_key_too_large_error(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     key_bytes: usize,
 ) -> StorageError {
     StorageError::IndexKeyTooLarge {
         table: table.to_string(),
         column: column.to_string(),
-        branch: branch.to_string(),
+        branch: branch.as_str().to_string(),
         key_bytes,
         max_key_bytes: INDEX_KEY_MAX_BYTES,
     }
 }
 
-pub(super) fn encode_index_branch_key(branch: &str) -> String {
-    let branch_name = BranchName::new(branch.to_string());
-    if let Some(composed_branch) = ComposedBranchName::parse(&branch_name) {
-        format!("c{}", composed_branch.batch_id.branch_segment())
+pub(super) fn encode_index_branch_key(branch: &QueryBranchRef) -> String {
+    if let Some(batch_id) = branch.batch_id() {
+        format!("c{}", batch_id.branch_segment())
     } else {
-        format!("r{}", hex::encode(branch.as_bytes()))
+        format!("r{}", hex::encode(branch.as_str().as_bytes()))
     }
 }
 
@@ -104,7 +103,7 @@ fn overflow_index_value_segment(
 fn encode_index_value_segment(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     value: &Value,
 ) -> Result<String, StorageError> {
     let encoded_value = encode_value(value);
@@ -148,7 +147,7 @@ fn encode_index_value_segment(
 pub(super) fn validate_index_entry_size(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     value: &Value,
 ) -> Result<(), StorageError> {
     encode_index_value_segment(table, column, branch, value).map(|_| ())
@@ -264,7 +263,7 @@ pub(super) fn catalogue_manifest_op_prefix(app_id: ObjectId) -> String {
 pub(super) fn index_entry_key(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     value: &Value,
     row_id: ObjectId,
 ) -> Result<String, StorageError> {
@@ -282,7 +281,7 @@ pub(super) fn index_entry_key(
 pub(super) fn index_value_prefix(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     value: &Value,
 ) -> Result<String, StorageError> {
     let value_segment = encode_index_value_segment(table, column, branch, value)?;
@@ -297,7 +296,7 @@ pub(super) fn index_value_prefix(
     ))
 }
 
-pub(super) fn index_prefix(table: &str, column: &str, branch: &str) -> String {
+pub(super) fn index_prefix(table: &str, column: &str, branch: &QueryBranchRef) -> String {
     format!(
         "idx:{}:{}:{}:",
         table,
@@ -310,7 +309,7 @@ pub(super) fn index_prefix(table: &str, column: &str, branch: &str) -> String {
 pub(super) fn index_range_scan_bounds(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     start: Bound<&Value>,
     end: Bound<&Value>,
 ) -> Option<(String, String)> {
@@ -408,11 +407,17 @@ pub(super) fn increment_string(s: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query_manager::types::QueryBranchRef;
+
+    fn branch_ref(name: &str) -> QueryBranchRef {
+        QueryBranchRef::from_branch_name(BranchName::new(name))
+    }
 
     #[test]
     fn short_text_index_segments_stay_inline() {
+        let branch = branch_ref("main");
         let segment =
-            encode_index_value_segment("todos", "title", "main", &Value::Text("hello".into()))
+            encode_index_value_segment("todos", "title", &branch, &Value::Text("hello".into()))
                 .expect("short text should fit inline");
         assert_eq!(
             segment,
@@ -425,7 +430,8 @@ mod tests {
     fn oversized_text_index_segments_preserve_real_prefix() {
         let value = Value::Text("x".repeat(40_000));
         let encoded_hex = hex::encode(encode_value(&value));
-        let segment = encode_index_value_segment("todos", "title", "main", &value)
+        let branch = branch_ref("main");
+        let segment = encode_index_value_segment("todos", "title", &branch, &value)
             .expect("oversized text should use overflow segment");
         let (prefix, suffix) = segment
             .split_once(OVERFLOW_INDEX_VALUE_MARKER)
@@ -443,11 +449,12 @@ mod tests {
 
     #[test]
     fn oversized_text_segments_sort_by_prefix() {
+        let branch = branch_ref("main");
         let a =
-            encode_index_value_segment("todos", "title", "main", &Value::Text("a".repeat(40_000)))
+            encode_index_value_segment("todos", "title", &branch, &Value::Text("a".repeat(40_000)))
                 .expect("a segment");
         let b =
-            encode_index_value_segment("todos", "title", "main", &Value::Text("b".repeat(40_000)))
+            encode_index_value_segment("todos", "title", &branch, &Value::Text("b".repeat(40_000)))
                 .expect("b segment");
         assert!(a < b, "overflow segments should preserve prefix ordering");
     }
@@ -456,10 +463,11 @@ mod tests {
     fn range_bounds_support_oversized_text_values() {
         let min = Value::Text("a".repeat(40_000));
         let max = Value::Text("b".repeat(40_000));
+        let branch = branch_ref("main");
         let bounds = index_range_scan_bounds(
             "todos",
             "title",
-            "main",
+            &branch,
             Bound::Included(&min),
             Bound::Included(&max),
         );
@@ -472,10 +480,11 @@ mod tests {
     #[test]
     fn composed_branch_index_keys_only_store_batch_segment() {
         let branch = BranchName::new("dev-070707070707-main-b00000000000000000000000000000001");
+        let branch_ref = QueryBranchRef::from_branch_name(branch);
         let key = index_entry_key(
             "users",
             "name",
-            branch.as_str(),
+            &branch_ref,
             &Value::Text("Alice".into()),
             ObjectId::from_uuid(uuid::Uuid::nil()),
         )

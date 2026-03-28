@@ -3,7 +3,7 @@ use ahash::AHashSet;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::index::ScanCondition;
 use crate::query_manager::types::{
-    ColumnName, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor,
+    ColumnName, QueryBranchRef, RowDescriptor, TableName, Tuple, TupleDelta, TupleDescriptor,
 };
 
 use super::{SourceContext, SourceNode};
@@ -14,7 +14,7 @@ use super::{SourceContext, SourceNode};
 pub struct IndexScanNode {
     pub table: TableName,
     pub column: ColumnName,
-    pub branch: String,
+    pub branch: QueryBranchRef,
     pub condition: ScanCondition,
 
     /// Output tuple descriptor (single element, unmaterialized).
@@ -33,7 +33,7 @@ impl IndexScanNode {
     pub fn new_with_branch(
         table: impl Into<TableName>,
         column: impl Into<ColumnName>,
-        branch: impl Into<String>,
+        branch: QueryBranchRef,
         condition: ScanCondition,
         row_descriptor: RowDescriptor,
     ) -> Self {
@@ -42,7 +42,7 @@ impl IndexScanNode {
         Self {
             table,
             column: column.into(),
-            branch: branch.into(),
+            branch,
             condition,
             output_descriptor,
             current_tuples: AHashSet::new(),
@@ -58,7 +58,13 @@ impl IndexScanNode {
         condition: ScanCondition,
         row_descriptor: RowDescriptor,
     ) -> Self {
-        Self::new_with_branch(table, column, "main", condition, row_descriptor)
+        Self::new_with_branch(
+            table,
+            column,
+            QueryBranchRef::raw(BranchName::new("main")),
+            condition,
+            row_descriptor,
+        )
     }
 
     /// Get the output tuple descriptor.
@@ -122,7 +128,7 @@ impl SourceNode for IndexScanNode {
         );
 
         self.last_scanned_ids = new_ids;
-        let branch = BranchName::new(&self.branch);
+        let branch = self.branch.branch_name();
         self.current_tuples = self
             .last_scanned_ids
             .iter()
@@ -161,7 +167,7 @@ impl SourceNode for IndexScanNode {
 mod tests {
     use super::*;
     use crate::query_manager::types::{ColumnDescriptor, ColumnType, Value};
-    use crate::storage::{MemoryStorage, Storage};
+    use crate::storage::MemoryStorage;
     use std::ops::Bound;
 
     fn make_ctx(storage: &dyn crate::storage::Storage) -> SourceContext<'_> {

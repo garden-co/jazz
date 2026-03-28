@@ -7,7 +7,7 @@ use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId, PrefixBatchCatalog, PrefixBatchMeta};
 use crate::sync_manager::DurabilityTier;
 
-use crate::query_manager::types::{BatchId, Value};
+use crate::query_manager::types::{BatchId, QueryBranchRef, Value};
 
 use super::key_codec::{
     ack_key, branch_manifest_key, branch_segment_key, catalogue_manifest_op_key,
@@ -291,39 +291,38 @@ fn load_prefix_batch_meta(
     }
 }
 
-pub(super) fn load_table_prefix_batches_core(
+pub(super) fn load_table_prefix_branches_core(
     table: &str,
-    prefix: &str,
+    prefix: BranchName,
     mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
-) -> Result<HashSet<BatchId>, StorageError> {
-    let key_prefix = table_prefix_batch_prefix(table, prefix);
+) -> Result<Vec<QueryBranchRef>, StorageError> {
+    let key_prefix = table_prefix_batch_prefix(table, prefix.as_str());
     let entries = scan_prefix(&key_prefix)?;
-    let mut batches = HashSet::with_capacity(entries.len());
+    let mut branches = Vec::with_capacity(entries.len());
     for (key, _value) in entries {
-        batches.insert(parse_batch_id_from_table_prefix_key(&key, &key_prefix)?);
+        let batch_id = parse_batch_id_from_table_prefix_key(&key, &key_prefix)?;
+        branches.push(QueryBranchRef::from_prefix_name_and_batch(prefix, batch_id));
     }
-    Ok(batches)
+    branches.sort_by_key(|branch| branch.as_str().to_string());
+    Ok(branches)
 }
 
 pub(super) fn adjust_table_prefix_batch_refcount_core(
     table: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     delta: i64,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
     mut delete: impl FnMut(&str) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
-    let Some(composed_branch) = crate::query_manager::types::ComposedBranchName::parse(
-        &BranchName::new(branch.to_string()),
-    ) else {
+    let Some(prefix_name) = branch.prefix_name() else {
+        return Ok(());
+    };
+    let Some(batch_id) = branch.batch_id() else {
         return Ok(());
     };
 
-    let key = table_prefix_batch_key(
-        table,
-        &composed_branch.prefix().branch_prefix(),
-        composed_branch.batch_id,
-    );
+    let key = table_prefix_batch_key(table, prefix_name.as_str(), batch_id);
     let current = match get(&key)? {
         Some(data) => {
             let bytes: [u8; 8] = data.as_slice().try_into().map_err(|_| {
@@ -564,7 +563,7 @@ pub(super) fn load_catalogue_manifest_core(
 pub(super) fn index_insert_core(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     value: &Value,
     row_id: ObjectId,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
@@ -581,7 +580,7 @@ pub(super) fn index_insert_core(
 pub(super) fn index_remove_core(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     value: &Value,
     row_id: ObjectId,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
@@ -602,7 +601,7 @@ pub(super) fn index_remove_core(
 pub(super) fn index_lookup_core(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     value: &Value,
     mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
 ) -> Vec<ObjectId> {
@@ -639,7 +638,7 @@ pub(super) fn index_lookup_core(
 pub(super) fn index_scan_all_core(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
 ) -> Vec<ObjectId> {
     let prefix = index_prefix(table, column, branch);
@@ -655,7 +654,7 @@ pub(super) fn index_scan_all_core(
 pub(super) fn index_range_core(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     start: Bound<&Value>,
     end: Bound<&Value>,
     mut scan_key_range: impl FnMut(&str, &str) -> Result<Vec<String>, StorageError>,

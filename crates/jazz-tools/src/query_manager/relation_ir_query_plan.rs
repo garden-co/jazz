@@ -6,7 +6,7 @@ use super::relation_ir::{
     ColumnRef, JoinKind, OrderDirection, PredicateCmpOp, PredicateExpr, ProjectColumn, ProjectExpr,
     RelExpr, RowIdRef, ValueRef,
 };
-use super::types::TableName;
+use super::types::{QueryBranchRef, TableName};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct QueryEnvelope<'a> {
@@ -40,7 +40,7 @@ struct RuntimeCorePlan {
 pub(crate) struct ExecutionQueryPlan {
     pub table: TableName,
     pub base_scope: String,
-    pub branches: Vec<String>,
+    pub branches: Vec<QueryBranchRef>,
     pub disjuncts: Vec<Conjunction>,
     pub joins: Vec<JoinSpec>,
     pub recursive: Option<RecursiveSpec>,
@@ -755,9 +755,30 @@ fn unwrap_query_envelope(expr: &RelExpr) -> QueryEnvelope<'_> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn lower_relation_to_execution_plan(
     relation: &RelExpr,
     branches: &[String],
+    include_deleted: bool,
+    array_subqueries: Vec<ArraySubquerySpec>,
+    select_columns: Option<Vec<String>>,
+) -> Option<ExecutionQueryPlan> {
+    let branch_refs: Vec<QueryBranchRef> = branches
+        .iter()
+        .map(|branch| QueryBranchRef::from_branch_name(crate::object::BranchName::new(branch)))
+        .collect();
+    lower_relation_to_execution_plan_with_branch_refs(
+        relation,
+        &branch_refs,
+        include_deleted,
+        array_subqueries,
+        select_columns,
+    )
+}
+
+pub(crate) fn lower_relation_to_execution_plan_with_branch_refs(
+    relation: &RelExpr,
+    branches: &[QueryBranchRef],
     include_deleted: bool,
     array_subqueries: Vec<ArraySubquerySpec>,
     select_columns: Option<Vec<String>>,
