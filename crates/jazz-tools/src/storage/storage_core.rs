@@ -268,12 +268,20 @@ pub(super) fn load_prefix_batch_catalog_core(
         return Ok(None);
     }
 
-    let mut catalog = PrefixBatchCatalog::default();
+    let mut metas = Vec::with_capacity(entries.len());
     for (_key, data) in entries {
         let meta: PrefixBatchMeta = decode_json(&data, "prefix batch meta")?;
-        catalog.batches.insert(meta.batch_id, meta);
+        metas.push(meta);
     }
-    catalog.leaf_batches = leaf_batches.into_iter().collect();
+    metas.sort_by_key(|meta| meta.batch_ord);
+
+    let mut catalog = PrefixBatchCatalog::default();
+    for meta in metas {
+        catalog.insert_batch_meta(meta);
+    }
+    for batch_id in leaf_batches {
+        catalog.insert_leaf_batch(batch_id);
+    }
     Ok(Some(catalog))
 }
 

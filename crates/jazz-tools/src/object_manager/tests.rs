@@ -1172,12 +1172,11 @@ fn add_commit_accepts_new_batch_root_merge_and_tracks_prefix_leaves() {
         .unwrap()
         .unwrap();
     let batch3_id = ComposedBranchName::parse(&batch3).unwrap().batch_id;
-    assert_eq!(stored_catalog.leaf_batches.len(), 1);
-    assert!(stored_catalog.leaf_batches.contains(&batch3_id));
+    assert_eq!(stored_catalog.leaf_batch_count(), 1);
+    assert!(stored_catalog.contains_leaf_batch(&batch3_id));
     assert_eq!(
         stored_catalog
-            .batches
-            .get(&batch3_id)
+            .batch_meta(&batch3_id)
             .map(|meta| meta.head_commit_id),
         Some(merged_head)
     );
@@ -1259,7 +1258,7 @@ fn get_leaf_head_ids_for_prefix_cold_loads_only_leaf_branches() {
         object
             .prefix_batches
             .get(&prefix.branch_prefix())
-            .map(|catalog| catalog.leaf_batches.iter().copied().collect::<HashSet<_>>()),
+            .map(|catalog| catalog.leaf_batch_ids().collect::<HashSet<_>>()),
         Some(HashSet::from([batch3_id]))
     );
 }

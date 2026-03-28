@@ -759,7 +759,7 @@ mod tests {
             storage
                 .load_prefix_batch_catalog(id, prefix)
                 .unwrap()
-                .map(|catalog| catalog.leaf_batches.iter().copied().collect::<HashSet<_>>()),
+                .map(|catalog| catalog.leaf_batch_ids().collect::<HashSet<_>>()),
             Some(HashSet::from([batch2_id]))
         );
 

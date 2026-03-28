@@ -1027,17 +1027,15 @@ impl Storage for MemoryStorage {
         if let Some(update) = prefix_batch_update {
             let catalog = obj.prefix_batches.entry(update.prefix).or_default();
             for parent_batch_id in update.increment_parent_child_counts {
-                if let Some(parent_meta) = catalog.batches.get_mut(&parent_batch_id) {
+                if let Some(parent_meta) = catalog.batch_meta_mut(&parent_batch_id) {
                     parent_meta.child_count = parent_meta.child_count.saturating_add(1);
                 }
             }
             for removed_batch in update.remove_leaf_batches {
-                catalog.leaf_batches.remove(&removed_batch);
+                catalog.remove_leaf_batch(&removed_batch);
             }
-            catalog.leaf_batches.insert(update.batch_meta.batch_id);
-            catalog
-                .batches
-                .insert(update.batch_meta.batch_id, update.batch_meta);
+            catalog.insert_batch_meta(update.batch_meta.clone());
+            catalog.insert_leaf_batch(update.batch_meta.batch_id);
         }
 
         Ok(())
@@ -1433,7 +1431,7 @@ mod tests {
             storage
                 .load_prefix_batch_catalog(id, prefix)
                 .unwrap()
-                .map(|catalog| catalog.leaf_batches.iter().copied().collect::<HashSet<_>>()),
+                .map(|catalog| catalog.leaf_batch_ids().collect::<HashSet<_>>()),
             Some(HashSet::from([batch1_id]))
         );
 
@@ -1471,7 +1469,7 @@ mod tests {
             storage
                 .load_prefix_batch_catalog(id, prefix)
                 .unwrap()
-                .map(|catalog| catalog.leaf_batches.iter().copied().collect::<HashSet<_>>()),
+                .map(|catalog| catalog.leaf_batch_ids().collect::<HashSet<_>>()),
             Some(HashSet::from([batch2_id]))
         );
     }

@@ -8,7 +8,7 @@ use crate::commit::{Commit, CommitId, StoredState};
 use crate::object::{
     Branch, BranchLoadedState, BranchName, Object, ObjectId, PrefixBatchCatalog, PrefixBatchMeta,
 };
-use crate::query_manager::types::{BatchId, BranchPrefixName, ComposedBranchName};
+use crate::query_manager::types::{BranchPrefixName, ComposedBranchName};
 use crate::storage::{LoadedBranch, LoadedBranchTips, PrefixBatchUpdate, Storage, StorageError};
 
 /// Unique identifier for a subscription.
@@ -372,8 +372,7 @@ impl ObjectManager {
         let prefix = composed_branch.prefix().branch_prefix();
         let mut updated_catalog = Self::load_prefix_batch_catalog(object, io, object_id, &prefix)?;
         let existing_meta = updated_catalog
-            .batches
-            .get(&composed_branch.batch_id)
+            .batch_meta(&composed_branch.batch_id)
             .cloned();
         let mut resolved_parent_branches = Vec::new();
         let mut same_prefix_parent_batches = Vec::new();
@@ -402,8 +401,7 @@ impl ObjectManager {
                     .iter()
                     .filter_map(|batch_id| {
                         updated_catalog
-                            .batches
-                            .get(batch_id)
+                            .batch_meta(batch_id)
                             .map(|meta| meta.batch_ord)
                     })
                     .collect();
@@ -425,19 +423,15 @@ impl ObjectManager {
             };
 
         for parent_batch_id in &increment_parent_child_counts {
-            if let Some(parent_meta) = updated_catalog.batches.get_mut(parent_batch_id) {
+            if let Some(parent_meta) = updated_catalog.batch_meta_mut(parent_batch_id) {
                 parent_meta.child_count = parent_meta.child_count.saturating_add(1);
             }
         }
         for removed_batch in &remove_leaf_batches {
-            updated_catalog.leaf_batches.remove(removed_batch);
+            updated_catalog.remove_leaf_batch(removed_batch);
         }
-        updated_catalog
-            .leaf_batches
-            .insert(composed_branch.batch_id);
-        updated_catalog
-            .batches
-            .insert(composed_branch.batch_id, batch_meta.clone());
+        updated_catalog.insert_leaf_batch(composed_branch.batch_id);
+        updated_catalog.insert_batch_meta(batch_meta.clone());
 
         Ok(Some(PendingBatchCatalogUpdate {
             prefix,
@@ -789,10 +783,10 @@ impl ObjectManager {
         }
 
         let mut head_ids = HashMap::new();
-        for batch_id in &catalog.leaf_batches {
-            if let Some(batch_meta) = catalog.batches.get(batch_id) {
+        for batch_id in catalog.leaf_batch_ids() {
+            if let Some(batch_meta) = catalog.batch_meta(&batch_id) {
                 head_ids.insert(
-                    prefix.with_batch_id(*batch_id).to_branch_name(),
+                    prefix.with_batch_id(batch_id).to_branch_name(),
                     batch_meta.head_commit_id,
                 );
             }
@@ -1336,8 +1330,8 @@ impl ObjectManager {
         for (prefix, catalog) in &obj.prefix_batches {
             size += prefix.len() + 24;
             size += 48;
-            size += catalog.leaf_batches.len() * (std::mem::size_of::<BatchId>() + 16);
-            for batch_meta in catalog.batches.values() {
+            size += catalog.leaf_batch_count() * (std::mem::size_of::<u32>() + 16);
+            for batch_meta in catalog.batch_metas() {
                 size += std::mem::size_of::<PrefixBatchMeta>() + 48;
                 size += batch_meta.parent_batch_ords.capacity() * std::mem::size_of::<u32>();
             }

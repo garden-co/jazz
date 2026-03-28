@@ -158,18 +158,89 @@ pub struct PrefixBatchMeta {
 /// In-memory per-prefix batch catalog.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PrefixBatchCatalog {
-    pub batches: HashMap<BatchId, PrefixBatchMeta>,
-    pub leaf_batches: SmolSet<[BatchId; 4]>,
+    batch_ord_by_id: HashMap<BatchId, u32>,
+    batches_by_ord: Vec<PrefixBatchMeta>,
+    leaf_batch_ords: SmolSet<[u32; 4]>,
 }
 
 impl PrefixBatchCatalog {
     pub fn next_batch_ord(&self) -> u32 {
-        self.batches
-            .values()
-            .map(|meta| meta.batch_ord)
-            .max()
-            .map(|max_ord| max_ord.saturating_add(1))
-            .unwrap_or(0)
+        self.batches_by_ord.len() as u32
+    }
+
+    pub fn batch_meta(&self, batch_id: &BatchId) -> Option<&PrefixBatchMeta> {
+        let batch_ord = *self.batch_ord_by_id.get(batch_id)?;
+        self.batch_meta_by_ord(batch_ord)
+    }
+
+    pub fn batch_meta_mut(&mut self, batch_id: &BatchId) -> Option<&mut PrefixBatchMeta> {
+        let batch_ord = *self.batch_ord_by_id.get(batch_id)?;
+        self.batch_meta_by_ord_mut(batch_ord)
+    }
+
+    pub fn batch_meta_by_ord(&self, batch_ord: u32) -> Option<&PrefixBatchMeta> {
+        self.batches_by_ord.get(batch_ord as usize)
+    }
+
+    pub fn batch_meta_by_ord_mut(&mut self, batch_ord: u32) -> Option<&mut PrefixBatchMeta> {
+        self.batches_by_ord.get_mut(batch_ord as usize)
+    }
+
+    pub fn insert_batch_meta(&mut self, meta: PrefixBatchMeta) {
+        let batch_ord = meta.batch_ord as usize;
+        if let Some(existing_ord) = self.batch_ord_by_id.insert(meta.batch_id, meta.batch_ord) {
+            debug_assert_eq!(
+                existing_ord, meta.batch_ord,
+                "batch {} changed ord from {} to {}",
+                meta.batch_id, existing_ord, meta.batch_ord
+            );
+        }
+        match batch_ord.cmp(&self.batches_by_ord.len()) {
+            std::cmp::Ordering::Less => {
+                let replaced_batch_id = self.batches_by_ord[batch_ord].batch_id;
+                if replaced_batch_id != meta.batch_id {
+                    self.batch_ord_by_id.remove(&replaced_batch_id);
+                }
+                self.batches_by_ord[batch_ord] = meta;
+            }
+            std::cmp::Ordering::Equal => self.batches_by_ord.push(meta),
+            std::cmp::Ordering::Greater => {
+                panic!("non-dense batch_ord insertion: {}", meta.batch_ord)
+            }
+        }
+    }
+
+    pub fn insert_leaf_batch(&mut self, batch_id: BatchId) {
+        if let Some(batch_ord) = self.batch_ord_by_id.get(&batch_id).copied() {
+            self.leaf_batch_ords.insert(batch_ord);
+        }
+    }
+
+    pub fn remove_leaf_batch(&mut self, batch_id: &BatchId) {
+        if let Some(batch_ord) = self.batch_ord_by_id.get(batch_id).copied() {
+            self.leaf_batch_ords.remove(&batch_ord);
+        }
+    }
+
+    pub fn contains_leaf_batch(&self, batch_id: &BatchId) -> bool {
+        self.batch_ord_by_id
+            .get(batch_id)
+            .map(|batch_ord| self.leaf_batch_ords.contains(batch_ord))
+            .unwrap_or(false)
+    }
+
+    pub fn leaf_batch_ids(&self) -> impl Iterator<Item = BatchId> + '_ {
+        self.leaf_batch_ords
+            .iter()
+            .filter_map(|batch_ord| self.batch_meta_by_ord(*batch_ord).map(|meta| meta.batch_id))
+    }
+
+    pub fn leaf_batch_count(&self) -> usize {
+        self.leaf_batch_ords.len()
+    }
+
+    pub fn batch_metas(&self) -> impl Iterator<Item = &PrefixBatchMeta> {
+        self.batches_by_ord.iter()
     }
 }
 
