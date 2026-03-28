@@ -697,7 +697,22 @@ impl MemoryStorage {
     #[cfg(test)]
     #[allow(clippy::needless_pass_by_value)]
     fn branch_ref(branch: impl Into<String>) -> QueryBranchRef {
-        QueryBranchRef::from_branch_name(BranchName::new(branch.into()))
+        let branch = branch.into();
+        let branch_name = BranchName::new(branch.clone());
+        if crate::query_manager::types::ComposedBranchName::parse(&branch_name).is_some() {
+            return QueryBranchRef::from_branch_name(branch_name);
+        }
+
+        let prefix = crate::query_manager::types::BranchPrefixName::new(
+            "dev",
+            SchemaHash::from_bytes([7; 32]),
+            &branch,
+        );
+        let batch_id = BatchId::from_uuid(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            branch.as_bytes(),
+        ));
+        QueryBranchRef::from_prefix_and_batch(&prefix, batch_id)
     }
 
     #[cfg(test)]
@@ -709,7 +724,7 @@ impl MemoryStorage {
         Ok(self
             .load_table_prefix_branches(table, BranchName::new(prefix))?
             .into_iter()
-            .filter_map(|branch| branch.batch_id())
+            .map(|branch| branch.batch_id())
             .collect())
     }
 
@@ -779,8 +794,8 @@ impl MemoryStorage {
         <Self as Storage>::index_scan_all(self, table, column, &Self::branch_ref(branch))
     }
 
-    fn composed_table_batch(branch: &QueryBranchRef) -> Option<(BranchName, BatchId)> {
-        Some((branch.prefix_name()?, branch.batch_id()?))
+    fn composed_table_batch(branch: &QueryBranchRef) -> (BranchName, BatchId) {
+        (branch.prefix_name(), branch.batch_id())
     }
 }
 
@@ -1151,10 +1166,8 @@ impl Storage for MemoryStorage {
         let index = self.indices.entry(key).or_default();
         let encoded = encode_value(value);
         let inserted = index.entry(encoded).or_default().insert(row_id);
-        if inserted
-            && matches!(column, "_id" | "_id_deleted")
-            && let Some((prefix, batch_id)) = Self::composed_table_batch(branch)
-        {
+        if inserted && matches!(column, "_id" | "_id_deleted") {
+            let (prefix, batch_id) = Self::composed_table_batch(branch);
             self.table_batches_by_prefix
                 .entry((table.to_string(), prefix))
                 .or_default()
@@ -1192,17 +1205,17 @@ impl Storage for MemoryStorage {
                 }
             }
         }
-        if removed
-            && matches!(column, "_id" | "_id_deleted")
-            && let Some((prefix, batch_id)) = Self::composed_table_batch(branch)
-            && let Some(manifest) = self
+        if removed && matches!(column, "_id" | "_id_deleted") {
+            let (prefix, batch_id) = Self::composed_table_batch(branch);
+            if let Some(manifest) = self
                 .table_batches_by_prefix
                 .get_mut(&(table.to_string(), prefix))
-        {
-            manifest.adjust_refcount(batch_id, -1);
-            if manifest.is_empty() {
-                self.table_batches_by_prefix
-                    .remove(&(table.to_string(), prefix));
+            {
+                manifest.adjust_refcount(batch_id, -1);
+                if manifest.is_empty() {
+                    self.table_batches_by_prefix
+                        .remove(&(table.to_string(), prefix));
+                }
             }
         }
         Ok(())

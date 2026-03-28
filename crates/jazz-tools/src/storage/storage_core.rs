@@ -21,9 +21,9 @@ use super::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-enum StoredBranchRef {
-    Batch { prefix: String, batch_id: BatchId },
-    Raw { name: String },
+struct StoredBranchRef {
+    prefix: String,
+    batch_id: BatchId,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,27 +51,20 @@ const MIN_LZ4_POSTCARD_BYTES: usize = 256;
 
 impl StoredBranchRef {
     fn from_branch_name(branch: &BranchName) -> Self {
-        if let Some(composed_branch) =
-            crate::query_manager::types::ComposedBranchName::parse(branch)
-        {
-            Self::Batch {
-                prefix: composed_branch.prefix().branch_prefix(),
-                batch_id: composed_branch.batch_id,
-            }
-        } else {
-            Self::Raw {
-                name: branch.as_str().to_string(),
-            }
+        let composed_branch = crate::query_manager::types::ComposedBranchName::parse(branch)
+            .expect("stored commit branches must use composed batch format");
+        Self {
+            prefix: composed_branch.prefix().branch_prefix(),
+            batch_id: composed_branch.batch_id,
         }
     }
 
     fn to_branch_name(&self) -> BranchName {
-        match self {
-            Self::Batch { prefix, batch_id } => {
-                BranchName::new(format!("{prefix}-{}", batch_id.branch_segment()))
-            }
-            Self::Raw { name } => BranchName::new(name.clone()),
-        }
+        BranchName::new(format!(
+            "{}-{}",
+            self.prefix,
+            self.batch_id.branch_segment()
+        ))
     }
 }
 
@@ -381,19 +374,12 @@ pub(super) fn adjust_table_prefix_batch_refcount_core(
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
     mut delete: impl FnMut(&str) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
-    let Some(prefix_name) = branch.prefix_name() else {
-        return Ok(());
-    };
-    let Some(batch_id) = branch.batch_id() else {
-        return Ok(());
-    };
-
-    let key = table_prefix_batches_key(table, prefix_name.as_str());
+    let key = table_prefix_batches_key(table, branch.prefix_name().as_str());
     let mut manifest: TablePrefixBatchManifest = match get(&key)? {
         Some(data) => decode_postcard(&data, "table prefix active batches")?,
         None => TablePrefixBatchManifest::default(),
     };
-    manifest.adjust_refcount(batch_id, delta);
+    manifest.adjust_refcount(branch.batch_id(), delta);
 
     if manifest.is_empty() {
         delete(&key)

@@ -57,11 +57,7 @@ fn index_key_too_large_error(
 }
 
 pub(super) fn encode_index_branch_key(branch: &QueryBranchRef) -> String {
-    if let Some(batch_id) = branch.batch_id() {
-        format!("c{}", batch_id.branch_segment())
-    } else {
-        format!("r{}", hex::encode(branch.as_str().as_bytes()))
-    }
+    format!("c{}", branch.batch_id().branch_segment())
 }
 
 fn encode_branch_prefix_storage_id(prefix: &str) -> String {
@@ -363,13 +359,17 @@ mod tests {
     use super::*;
     use crate::query_manager::types::QueryBranchRef;
 
-    fn branch_ref(name: &str) -> QueryBranchRef {
-        QueryBranchRef::from_branch_name(BranchName::new(name))
+    fn batch_branch_name(ord: u128) -> String {
+        format!("dev-070707070707-main-b{ord:032x}")
+    }
+
+    fn branch_ref(ord: u128) -> QueryBranchRef {
+        QueryBranchRef::from_branch_name(BranchName::new(batch_branch_name(ord)))
     }
 
     #[test]
     fn short_text_index_segments_stay_inline() {
-        let branch = branch_ref("main");
+        let branch = branch_ref(1);
         let segment =
             encode_index_value_segment("todos", "title", &branch, &Value::Text("hello".into()))
                 .expect("short text should fit inline");
@@ -384,7 +384,7 @@ mod tests {
     fn oversized_text_index_segments_preserve_real_prefix() {
         let value = Value::Text("x".repeat(40_000));
         let encoded_hex = hex::encode(encode_value(&value));
-        let branch = branch_ref("main");
+        let branch = branch_ref(1);
         let segment = encode_index_value_segment("todos", "title", &branch, &value)
             .expect("oversized text should use overflow segment");
         let (prefix, suffix) = segment
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn oversized_text_segments_sort_by_prefix() {
-        let branch = branch_ref("main");
+        let branch = branch_ref(1);
         let a =
             encode_index_value_segment("todos", "title", &branch, &Value::Text("a".repeat(40_000)))
                 .expect("a segment");
@@ -417,7 +417,7 @@ mod tests {
     fn range_bounds_support_oversized_text_values() {
         let min = Value::Text("a".repeat(40_000));
         let max = Value::Text("b".repeat(40_000));
-        let branch = branch_ref("main");
+        let branch = branch_ref(1);
         let bounds = index_range_scan_bounds(
             "todos",
             "title",

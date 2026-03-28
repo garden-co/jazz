@@ -17,6 +17,8 @@ use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 #[cfg(test)]
 use crate::query_manager::types::BatchId;
+#[cfg(test)]
+use crate::query_manager::types::SchemaHash;
 use crate::query_manager::types::{QueryBranchRef, Value};
 use crate::sync_manager::DurabilityTier;
 
@@ -142,7 +144,22 @@ impl FjallStorage {
     #[cfg(test)]
     #[allow(clippy::needless_pass_by_value)]
     fn branch_ref(branch: impl Into<String>) -> QueryBranchRef {
-        QueryBranchRef::from_branch_name(BranchName::new(branch.into()))
+        let branch = branch.into();
+        let branch_name = BranchName::new(branch.clone());
+        if crate::query_manager::types::ComposedBranchName::parse(&branch_name).is_some() {
+            return QueryBranchRef::from_branch_name(branch_name);
+        }
+
+        let prefix = crate::query_manager::types::BranchPrefixName::new(
+            "dev",
+            SchemaHash::from_bytes([7; 32]),
+            &branch,
+        );
+        let batch_id = BatchId::from_uuid(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            branch.as_bytes(),
+        ));
+        QueryBranchRef::from_prefix_and_batch(&prefix, batch_id)
     }
 
     #[cfg(test)]
@@ -154,7 +171,7 @@ impl FjallStorage {
         Ok(self
             .load_table_prefix_branches(table, BranchName::new(prefix))?
             .into_iter()
-            .filter_map(|branch| branch.batch_id())
+            .map(|branch| branch.batch_id())
             .collect())
     }
 

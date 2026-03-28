@@ -62,22 +62,6 @@ impl IndexScanNode {
         Self::new_with_branches(table, column, vec![branch], condition, row_descriptor)
     }
 
-    /// Create a new index scan node on the default "main" branch.
-    pub fn new(
-        table: impl Into<TableName>,
-        column: impl Into<ColumnName>,
-        condition: ScanCondition,
-        row_descriptor: RowDescriptor,
-    ) -> Self {
-        Self::new_with_branches(
-            table,
-            column,
-            vec![QueryBranchRef::raw(BranchName::new("main"))],
-            condition,
-            row_descriptor,
-        )
-    }
-
     /// Get the output tuple descriptor.
     pub fn output_tuple_descriptor(&self) -> &TupleDescriptor {
         &self.output_descriptor
@@ -184,24 +168,39 @@ mod tests {
         tuples.iter().any(|t| t.ids().contains(&id))
     }
 
+    fn test_branch_name(ord: u128) -> String {
+        format!("dev-070707070707-main-b{ord:032x}")
+    }
+
+    fn test_branch_ref(ord: u128) -> QueryBranchRef {
+        QueryBranchRef::from_branch_name(test_branch_name(ord))
+    }
+
     #[test]
     fn scan_all_returns_all_rows() {
         let mut storage = MemoryStorage::new();
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
+        let branch = test_branch_name(1);
 
         storage
-            .index_insert("users", "_id", "main", &Value::Uuid(row1), row1)
+            .index_insert("users", "_id", &branch, &Value::Uuid(row1), row1)
             .unwrap();
         storage
-            .index_insert("users", "_id", "main", &Value::Uuid(row2), row2)
+            .index_insert("users", "_id", &branch, &Value::Uuid(row2), row2)
             .unwrap();
         storage
-            .index_insert("users", "_id", "main", &Value::Uuid(row3), row3)
+            .index_insert("users", "_id", &branch, &Value::Uuid(row3), row3)
             .unwrap();
 
-        let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
+        let mut node = IndexScanNode::new_with_branch(
+            "users",
+            "_id",
+            test_branch_ref(1),
+            ScanCondition::All,
+            test_descriptor(),
+        );
         let ctx = make_ctx(&storage);
         let delta = node.scan(&ctx);
 
@@ -217,12 +216,13 @@ mod tests {
         let mut storage = MemoryStorage::new();
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
+        let branch = test_branch_name(1);
 
         storage
             .index_insert(
                 "users",
                 "email",
-                "main",
+                &branch,
                 &Value::Text("alice@example.com".into()),
                 row1,
             )
@@ -231,15 +231,16 @@ mod tests {
             .index_insert(
                 "users",
                 "email",
-                "main",
+                &branch,
                 &Value::Text("bob@example.com".into()),
                 row2,
             )
             .unwrap();
 
-        let mut node = IndexScanNode::new(
+        let mut node = IndexScanNode::new_with_branch(
             "users",
             "email",
+            test_branch_ref(1),
             ScanCondition::Eq(Value::Text("alice@example.com".into())),
             test_descriptor(),
         );
@@ -254,18 +255,17 @@ mod tests {
     fn multi_branch_scan_merges_provenance_and_reports_updates() {
         let mut storage = MemoryStorage::new();
         let row = ObjectId::new();
+        let branch1 = test_branch_name(1);
+        let branch2 = test_branch_name(2);
 
         storage
-            .index_insert("users", "_id", "main", &Value::Uuid(row), row)
+            .index_insert("users", "_id", &branch1, &Value::Uuid(row), row)
             .unwrap();
         storage
-            .index_insert("users", "_id", "draft", &Value::Uuid(row), row)
+            .index_insert("users", "_id", &branch2, &Value::Uuid(row), row)
             .unwrap();
 
-        let branches = vec![
-            QueryBranchRef::from_branch_name("main"),
-            QueryBranchRef::from_branch_name("draft"),
-        ];
+        let branches = vec![test_branch_ref(1), test_branch_ref(2)];
         let mut node = IndexScanNode::new_with_branches(
             "users",
             "_id",
@@ -282,7 +282,7 @@ mod tests {
         assert!(first.updated.is_empty());
 
         storage
-            .index_remove("users", "_id", "main", &Value::Uuid(row), row)
+            .index_remove("users", "_id", &branch1, &Value::Uuid(row), row)
             .unwrap();
 
         let second = {
@@ -301,20 +301,22 @@ mod tests {
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
         let row3 = ObjectId::new();
+        let branch = test_branch_name(1);
 
         storage
-            .index_insert("users", "score", "main", &Value::Integer(10), row1)
+            .index_insert("users", "score", &branch, &Value::Integer(10), row1)
             .unwrap();
         storage
-            .index_insert("users", "score", "main", &Value::Integer(20), row2)
+            .index_insert("users", "score", &branch, &Value::Integer(20), row2)
             .unwrap();
         storage
-            .index_insert("users", "score", "main", &Value::Integer(30), row3)
+            .index_insert("users", "score", &branch, &Value::Integer(30), row3)
             .unwrap();
 
-        let mut node = IndexScanNode::new(
+        let mut node = IndexScanNode::new_with_branch(
             "users",
             "score",
+            test_branch_ref(1),
             ScanCondition::Range {
                 min: Bound::Included(Value::Integer(15)),
                 max: Bound::Included(Value::Integer(25)),
@@ -333,12 +335,19 @@ mod tests {
         let mut storage = MemoryStorage::new();
         let row1 = ObjectId::new();
         let row2 = ObjectId::new();
+        let branch = test_branch_name(1);
 
         storage
-            .index_insert("users", "_id", "main", &Value::Uuid(row1), row1)
+            .index_insert("users", "_id", &branch, &Value::Uuid(row1), row1)
             .unwrap();
 
-        let mut node = IndexScanNode::new("users", "_id", ScanCondition::All, test_descriptor());
+        let mut node = IndexScanNode::new_with_branch(
+            "users",
+            "_id",
+            test_branch_ref(1),
+            ScanCondition::All,
+            test_descriptor(),
+        );
         let ctx = make_ctx(&storage);
         let delta1 = node.scan(&ctx);
         assert_eq!(delta1.added.len(), 1);
@@ -346,7 +355,7 @@ mod tests {
 
         // Add another row
         storage
-            .index_insert("users", "_id", "main", &Value::Uuid(row2), row2)
+            .index_insert("users", "_id", &branch, &Value::Uuid(row2), row2)
             .unwrap();
 
         let ctx = make_ctx(&storage);
@@ -357,7 +366,7 @@ mod tests {
 
         // Remove first row
         storage
-            .index_remove("users", "_id", "main", &Value::Uuid(row1), row1)
+            .index_remove("users", "_id", &branch, &Value::Uuid(row1), row1)
             .unwrap();
 
         let ctx = make_ctx(&storage);
@@ -370,7 +379,13 @@ mod tests {
     #[test]
     fn output_descriptor_has_unmaterialized_state() {
         let desc = test_descriptor();
-        let node = IndexScanNode::new("users", "_id", ScanCondition::All, desc);
+        let node = IndexScanNode::new_with_branch(
+            "users",
+            "_id",
+            test_branch_ref(1),
+            ScanCondition::All,
+            desc,
+        );
         let output = node.output_tuple_descriptor();
 
         assert_eq!(output.element_count(), 1);

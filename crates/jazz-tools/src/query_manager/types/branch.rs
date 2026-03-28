@@ -689,28 +689,17 @@ impl std::fmt::Display for BranchPrefixName {
 /// form, while also caching the full interned branch name for object lookups
 /// and row provenance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum QueryBranchRef {
-    Raw {
-        branch_name: BranchName,
-    },
-    Batch {
-        prefix_name: BranchName,
-        batch_id: BatchId,
-        branch_name: BranchName,
-    },
+pub struct QueryBranchRef {
+    prefix_name: BranchName,
+    batch_id: BatchId,
+    branch_name: BranchName,
 }
 
 impl QueryBranchRef {
-    pub fn raw(branch_name: impl Into<BranchName>) -> Self {
-        Self::Raw {
-            branch_name: branch_name.into(),
-        }
-    }
-
     pub fn from_prefix_and_batch(prefix: &BranchPrefixName, batch_id: BatchId) -> Self {
         let prefix_name = BranchName::new(prefix.branch_prefix());
         let branch_name = prefix.with_batch_id(batch_id).to_branch_name();
-        Self::Batch {
+        Self {
             prefix_name,
             batch_id,
             branch_name,
@@ -719,7 +708,7 @@ impl QueryBranchRef {
 
     pub fn from_prefix_name_and_batch(prefix_name: BranchName, batch_id: BatchId) -> Self {
         let branch_name = BranchName::new(format!("{}-{}", prefix_name.as_str(), batch_id));
-        Self::Batch {
+        Self {
             prefix_name,
             batch_id,
             branch_name,
@@ -728,41 +717,29 @@ impl QueryBranchRef {
 
     pub fn from_branch_name(branch_name: impl Into<BranchName>) -> Self {
         let branch_name = branch_name.into();
-        if let Some(composed_branch) = ComposedBranchName::parse(&branch_name) {
-            Self::Batch {
-                prefix_name: BranchName::new(composed_branch.prefix().branch_prefix()),
-                batch_id: composed_branch.batch_id,
-                branch_name,
-            }
-        } else {
-            Self::Raw { branch_name }
+        let composed_branch = ComposedBranchName::parse(&branch_name)
+            .expect("branch names must use composed batch format");
+        Self {
+            prefix_name: BranchName::new(composed_branch.prefix().branch_prefix()),
+            batch_id: composed_branch.batch_id,
+            branch_name,
         }
     }
 
     pub fn branch_name(&self) -> BranchName {
-        match self {
-            Self::Raw { branch_name } | Self::Batch { branch_name, .. } => *branch_name,
-        }
+        self.branch_name
     }
 
     pub fn as_str(&self) -> &str {
-        match self {
-            Self::Raw { branch_name } | Self::Batch { branch_name, .. } => branch_name.as_str(),
-        }
+        self.branch_name.as_str()
     }
 
-    pub fn prefix_name(&self) -> Option<BranchName> {
-        match self {
-            Self::Batch { prefix_name, .. } => Some(*prefix_name),
-            Self::Raw { .. } => None,
-        }
+    pub fn prefix_name(&self) -> BranchName {
+        self.prefix_name
     }
 
-    pub fn batch_id(&self) -> Option<BatchId> {
-        match self {
-            Self::Batch { batch_id, .. } => Some(*batch_id),
-            Self::Raw { .. } => None,
-        }
+    pub fn batch_id(&self) -> BatchId {
+        self.batch_id
     }
 }
 
