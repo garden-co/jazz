@@ -93,7 +93,7 @@ impl QueryManager {
             let object = self.sync_manager.object_manager.get(id)?;
             leaf_heads
                 .keys()
-                .filter(|leaf_branch_name| !object.branches.contains_key(*leaf_branch_name))
+                .filter(|leaf_branch_name| !object.branches.contains_key(leaf_branch_name))
                 .map(|leaf_branch_name| leaf_branch_name.as_str().to_string())
                 .collect()
         };

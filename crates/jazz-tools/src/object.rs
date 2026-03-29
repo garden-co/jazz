@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::Index;
 
 use internment::Intern;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -6,7 +7,7 @@ use smolset::SmolSet;
 use uuid::Uuid;
 
 use crate::commit::{Commit, CommitId};
-use crate::query_manager::types::BatchId;
+use crate::query_manager::types::{BatchId, ComposedBranchName, QueryBranchRef};
 
 /// Interned UUIDv7 identifying an object.
 /// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
@@ -142,6 +143,116 @@ pub struct Branch {
     pub loaded_state: BranchLoadedState,
 }
 
+#[derive(Debug, Clone, Default)]
+struct PrefixBranchStore {
+    branches_by_batch: HashMap<BatchId, Branch>,
+}
+
+/// Per-object branch storage organized by `(prefix, batch)` instead of full branch name.
+#[derive(Debug, Clone, Default)]
+pub struct ObjectBranches {
+    branches_by_prefix: HashMap<BranchName, PrefixBranchStore>,
+    branch_count: usize,
+}
+
+impl ObjectBranches {
+    fn split_branch_name(branch_name: &BranchName) -> Option<(BranchName, BatchId)> {
+        let composed = ComposedBranchName::parse(branch_name)?;
+        Some((
+            BranchName::new(composed.prefix().branch_prefix()),
+            composed.batch_id,
+        ))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.branch_count == 0
+    }
+
+    pub fn len(&self) -> usize {
+        self.branch_count
+    }
+
+    pub fn contains_key(&self, branch_name: &BranchName) -> bool {
+        self.get(branch_name).is_some()
+    }
+
+    pub fn get(&self, branch_name: &BranchName) -> Option<&Branch> {
+        let (prefix_name, batch_id) = Self::split_branch_name(branch_name)?;
+        self.branches_by_prefix
+            .get(&prefix_name)?
+            .branches_by_batch
+            .get(&batch_id)
+    }
+
+    pub fn get_mut(&mut self, branch_name: &BranchName) -> Option<&mut Branch> {
+        let (prefix_name, batch_id) = Self::split_branch_name(branch_name)?;
+        self.branches_by_prefix
+            .get_mut(&prefix_name)?
+            .branches_by_batch
+            .get_mut(&batch_id)
+    }
+
+    pub fn insert(&mut self, branch_name: BranchName, branch: Branch) -> Option<Branch> {
+        let (prefix_name, batch_id) =
+            Self::split_branch_name(&branch_name).expect("branch storage requires composed names");
+        let prefix_store = self.branches_by_prefix.entry(prefix_name).or_default();
+        let previous = prefix_store.branches_by_batch.insert(batch_id, branch);
+        if previous.is_none() {
+            self.branch_count += 1;
+        }
+        previous
+    }
+
+    pub fn get_or_insert_with(
+        &mut self,
+        branch_name: BranchName,
+        default: impl FnOnce() -> Branch,
+    ) -> &mut Branch {
+        let (prefix_name, batch_id) =
+            Self::split_branch_name(&branch_name).expect("branch storage requires composed names");
+        let prefix_store = self.branches_by_prefix.entry(prefix_name).or_default();
+        match prefix_store.branches_by_batch.entry(batch_id) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                self.branch_count += 1;
+                entry.insert(default())
+            }
+        }
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &Branch> {
+        self.branches_by_prefix
+            .values()
+            .flat_map(|prefix_store| prefix_store.branches_by_batch.values())
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (BranchName, &Branch)> + '_ {
+        self.branches_by_prefix
+            .iter()
+            .flat_map(|(prefix_name, prefix_store)| {
+                prefix_store
+                    .branches_by_batch
+                    .iter()
+                    .map(move |(batch_id, branch)| {
+                        (
+                            QueryBranchRef::from_prefix_name_and_batch(*prefix_name, *batch_id)
+                                .branch_name(),
+                            branch,
+                        )
+                    })
+            })
+    }
+}
+
+impl Index<&BranchName> for ObjectBranches {
+    type Output = Branch;
+
+    fn index(&self, branch_name: &BranchName) -> &Self::Output {
+        self.get(branch_name)
+            .unwrap_or_else(|| panic!("branch not found: {branch_name}"))
+    }
+}
+
 /// Persisted metadata for one batch under a shared branch prefix.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrefixBatchMeta {
@@ -249,7 +360,7 @@ impl PrefixBatchCatalog {
 pub struct Object {
     pub id: ObjectId,
     pub metadata: HashMap<String, String>,
-    pub branches: HashMap<BranchName, Branch>,
+    pub branches: ObjectBranches,
     pub commit_branches: HashMap<CommitId, BranchName>,
     pub prefix_batches: HashMap<String, PrefixBatchCatalog>,
 }
@@ -259,7 +370,7 @@ impl Object {
         Self {
             id: ObjectId::new(),
             metadata: metadata.unwrap_or_default(),
-            branches: HashMap::new(),
+            branches: ObjectBranches::default(),
             commit_branches: HashMap::new(),
             prefix_batches: HashMap::new(),
         }

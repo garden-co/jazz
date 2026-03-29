@@ -50,10 +50,10 @@ impl SyncManager {
             };
 
             sent_metadata.insert(object_id);
-            for (branch_name, branch) in &object.branches {
+            for (branch_name, branch) in object.branches.iter() {
                 sent_tips.push((
                     object_id,
-                    *branch_name,
+                    branch_name,
                     branch.tips.iter().copied().collect::<HashSet<_>>(),
                 ));
             }
@@ -75,11 +75,11 @@ impl SyncManager {
         let mut to_sync: Vec<BranchSyncData> = Vec::new();
 
         for (object_id, object) in &self.object_manager.objects {
-            for (branch_name, branch) in &object.branches {
+            for (branch_name, branch) in object.branches.iter() {
                 to_sync.push((
                     *object_id,
                     object.metadata.clone(),
-                    *branch_name,
+                    branch_name,
                     branch.tips.iter().copied().collect(),
                 ));
             }
@@ -99,11 +99,11 @@ impl SyncManager {
             let Some(object) = self.object_manager.objects.get(&object_id) else {
                 continue;
             };
-            for (branch_name, branch) in &object.branches {
+            for (branch_name, branch) in object.branches.iter() {
                 to_sync.push((
                     object_id,
                     object.metadata.clone(),
-                    *branch_name,
+                    branch_name,
                     branch.tips.iter().copied().collect(),
                 ));
             }

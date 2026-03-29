@@ -6,7 +6,8 @@ use smolset::SmolSet;
 
 use crate::commit::{Commit, CommitId, StoredState};
 use crate::object::{
-    Branch, BranchLoadedState, BranchName, Object, ObjectId, PrefixBatchCatalog, PrefixBatchMeta,
+    Branch, BranchLoadedState, BranchName, Object, ObjectBranches, ObjectId, PrefixBatchCatalog,
+    PrefixBatchMeta,
 };
 use crate::query_manager::types::{BranchPrefixName, ComposedBranchName, QueryBranchRef};
 use crate::storage::{LoadedBranch, LoadedBranchTips, PrefixBatchUpdate, Storage, StorageError};
@@ -255,7 +256,7 @@ impl ObjectManager {
         let object = Object {
             id,
             metadata: metadata.clone().unwrap_or_default(),
-            branches: HashMap::new(),
+            branches: ObjectBranches::default(),
             commit_branches: HashMap::new(),
             prefix_batches: HashMap::new(),
         };
@@ -296,7 +297,7 @@ impl ObjectManager {
             entry.insert(Object {
                 id,
                 metadata,
-                branches: HashMap::new(),
+                branches: ObjectBranches::default(),
                 commit_branches: HashMap::new(),
                 prefix_batches: HashMap::new(),
             });
@@ -636,13 +637,10 @@ impl ObjectManager {
 
         // Create branch if it doesn't exist (only valid for parentless commits
         // or a new batch root merge).
-        let branch = object
-            .branches
-            .entry(branch_name)
-            .or_insert_with(|| Branch {
-                loaded_state: BranchLoadedState::AllCommits,
-                ..Default::default()
-            });
+        let branch = object.branches.get_or_insert_with(branch_name, || Branch {
+            loaded_state: BranchLoadedState::AllCommits,
+            ..Default::default()
+        });
 
         // Update tips: remove parents, add new commit
         for parent in &parents {
@@ -849,7 +847,7 @@ impl ObjectManager {
         let object = Object {
             id: object_id,
             metadata: metadata.clone(),
-            branches: HashMap::new(),
+            branches: ObjectBranches::default(),
             commit_branches: HashMap::new(),
             prefix_batches: HashMap::new(),
         };
@@ -953,13 +951,10 @@ impl ObjectManager {
         }
 
         // Create branch if needed
-        let branch = object
-            .branches
-            .entry(branch_name)
-            .or_insert_with(|| Branch {
-                loaded_state: BranchLoadedState::AllCommits,
-                ..Default::default()
-            });
+        let branch = object.branches.get_or_insert_with(branch_name, || Branch {
+            loaded_state: BranchLoadedState::AllCommits,
+            ..Default::default()
+        });
 
         // Update tips: remove any parents that are tips, add this commit as tip
         for parent in &commit.parents {
@@ -1362,7 +1357,7 @@ impl ObjectManager {
         }
 
         // Branches
-        for (name, branch) in &obj.branches {
+        for (name, branch) in obj.branches.iter() {
             size += name.0.len() + 24; // BranchName (String) + overhead
             size += 48; // HashMap entry overhead
 
