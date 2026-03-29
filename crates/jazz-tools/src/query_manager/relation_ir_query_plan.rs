@@ -763,9 +763,20 @@ pub(crate) fn lower_relation_to_execution_plan(
     array_subqueries: Vec<ArraySubquerySpec>,
     select_columns: Option<Vec<String>>,
 ) -> Option<ExecutionQueryPlan> {
+    let schema_context = crate::schema_manager::SchemaContext::new_with_batch_id(
+        crate::query_manager::types::Schema::new(),
+        "dev",
+        "main",
+        crate::query_manager::types::BatchId::nil(),
+    );
     let branch_refs: Vec<QueryBranchRef> = branches
         .iter()
-        .map(|branch| QueryBranchRef::from_branch_name(crate::object::BranchName::new(branch)))
+        .map(|branch| {
+            crate::query_manager::manager::QueryManager::resolve_query_branch_ref_for_context(
+                &schema_context,
+                branch,
+            )
+        })
         .collect();
     lower_relation_to_execution_plan_with_branch_refs(
         relation,

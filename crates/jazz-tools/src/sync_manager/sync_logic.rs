@@ -123,6 +123,9 @@ impl SyncManager {
         branch_name: BranchName,
         tips: HashSet<CommitId>,
     ) {
+        let Some(branch_name) = Self::normalize_branch_name(branch_name) else {
+            return;
+        };
         let _span = tracing::debug_span!("queue_tips_to_server", %server_id, %object_id, %branch_name, tips = tips.len()).entered();
         // Skip objects marked as nosync (local-only, e.g., index nodes)
         if metadata
@@ -160,6 +163,7 @@ impl SyncManager {
             server.sent_metadata.insert(object_id);
         }
         server.sent_tips.insert((object_id, branch_name), tips);
+        let payload_branch_name = Self::display_branch_name(branch_name);
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Server(server_id),
@@ -173,7 +177,7 @@ impl SyncManager {
                 } else {
                     None
                 },
-                branch_name,
+                branch_name: payload_branch_name,
                 commits,
             },
         });
@@ -186,6 +190,9 @@ impl SyncManager {
         object_id: ObjectId,
         branch_name: BranchName,
     ) {
+        let Some(branch_name) = Self::normalize_branch_name(branch_name) else {
+            return;
+        };
         // Get current tips from object manager
         let Some(object) = self.object_manager.get(object_id) else {
             return;
@@ -231,6 +238,9 @@ impl SyncManager {
         tips: HashSet<CommitId>,
         require_scope: bool,
     ) {
+        let Some(branch_name) = Self::normalize_branch_name(branch_name) else {
+            return;
+        };
         // Skip objects marked as nosync (local-only, e.g., index nodes)
         if metadata
             .get(crate::metadata::MetadataKey::NoSync.as_str())
@@ -277,6 +287,7 @@ impl SyncManager {
             client.sent_metadata.insert(object_id);
         }
         client.sent_tips.insert((object_id, branch_name), tips);
+        let payload_branch_name = Self::display_branch_name(branch_name);
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
@@ -290,7 +301,7 @@ impl SyncManager {
                 } else {
                     None
                 },
-                branch_name,
+                branch_name: payload_branch_name,
                 commits,
             },
         });
@@ -305,10 +316,13 @@ impl SyncManager {
         already_sent: &HashSet<CommitId>,
         new_tips: &HashSet<CommitId>,
     ) -> Vec<Commit> {
+        let Some(branch_name) = Self::normalize_branch_name(*branch_name) else {
+            return Vec::new();
+        };
         let Some(object) = self.object_manager.get(object_id) else {
             return Vec::new();
         };
-        let Some(branch) = object.branches.get(branch_name) else {
+        let Some(branch) = object.branches.get(&branch_name) else {
             return Vec::new();
         };
 

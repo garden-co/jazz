@@ -224,6 +224,8 @@ pub(super) struct PolicyCheckState {
     pub(super) graphs: Vec<PolicyGraph>,
     /// Table name for error messages.
     pub(super) table: TableName,
+    /// Branch whose visible state the policy graphs should read.
+    pub(super) branch: BranchName,
     /// The original pending permission check.
     pub(super) pending_check: PendingPermissionCheck,
 }
@@ -328,6 +330,21 @@ impl QueryManager {
             .collect()
     }
 
+    pub(super) fn resolve_query_branch_ref_for_context(
+        schema_context: &SchemaContext,
+        branch: &str,
+    ) -> QueryBranchRef {
+        QueryBranchRef::from_branch_name(schema_context.resolve_query_branch_name(branch))
+    }
+
+    pub(super) fn resolve_query_branch_ref(&self, branch: &str) -> QueryBranchRef {
+        Self::resolve_query_branch_ref_for_context(&self.schema_context, branch)
+    }
+
+    pub(super) fn resolve_branch_name(&self, branch: &str) -> BranchName {
+        self.schema_context.resolve_query_branch_name(branch)
+    }
+
     pub fn server_subscription_telemetry(&self) -> Vec<ServerSubscriptionTelemetryGroup> {
         let mut groups: HashMap<String, ServerSubscriptionTelemetryGroup> = HashMap::new();
 
@@ -384,9 +401,10 @@ impl QueryManager {
     /// Set the current schema (the one this client writes to).
     ///
     /// Must be called before queries. Can only be called once.
-    /// Creates indices for the current schema's branch.
+    /// Uses the deterministic nil batch for callers that do not manage
+    /// explicit batch identities themselves.
     pub fn set_current_schema(&mut self, schema: Schema, env: &str, user_branch: &str) {
-        self.set_current_schema_with_batch(schema, env, user_branch, BatchId::new());
+        self.set_current_schema_with_batch(schema, env, user_branch, BatchId::nil());
     }
 
     pub fn set_current_schema_with_batch(
@@ -513,7 +531,7 @@ impl QueryManager {
             Ok(query
                 .branches
                 .iter()
-                .map(|branch| QueryBranchRef::from_branch_name(BranchName::new(branch)))
+                .map(|branch| Self::resolve_query_branch_ref_for_context(schema_context, branch))
                 .collect())
         }
     }
@@ -674,12 +692,12 @@ impl QueryManager {
     }
 
     /// Get the current branch name for writes.
-    pub(super) fn current_branch(&self) -> String {
+    pub(super) fn current_branch(&self) -> BranchName {
         assert!(
             self.schema_context.is_initialized(),
             "schema context not initialized before current_branch()"
         );
-        self.schema_context.branch_name().as_str().to_string()
+        self.schema_context.branch_name()
     }
 
     /// Get the schema-context branches (current + one branch per live schema).
@@ -927,7 +945,8 @@ impl QueryManager {
         branch_name: &str,
     ) -> Option<(Vec<u8>, CommitId)> {
         let obj = self.sync_manager.object_manager.get(row_id)?;
-        let branch = obj.branches.get(&BranchName::new(branch_name))?;
+        let branch_name = self.resolve_branch_name(branch_name);
+        let branch = obj.branches.get(&branch_name)?;
         // Sort tips by (timestamp, CommitId) ascending, take last (newest = LWW winner)
         let mut tips: Vec<_> = branch.tips.iter().copied().collect();
         tips.sort_by_key(|id| {
@@ -943,15 +962,19 @@ impl QueryManager {
 
     /// Load a row's data from ObjectManager using the default branch.
     pub(super) fn load_row_from_object(&self, row_id: ObjectId) -> Option<(Vec<u8>, CommitId)> {
-        self.load_row_from_object_on_branch(row_id, &self.current_branch())
+        let branch = self.current_branch();
+        self.load_row_from_object_on_branch(row_id, branch.as_str())
     }
 
-    /// Load content from a catalogue object's "main" branch.
+    /// Load content from a catalogue object's deterministic batch branch.
     ///
     /// Used for loading schema/lens data from catalogue objects.
     pub(super) fn load_object_content(&self, object_id: ObjectId) -> Option<Vec<u8>> {
-        self.load_row_from_object_on_branch(object_id, "main")
-            .map(|(content, _)| content)
+        self.load_row_from_object_on_branch(
+            object_id,
+            crate::schema_manager::catalogue_branch_name().as_str(),
+        )
+        .map(|(content, _)| content)
     }
 
     fn parse_schema_hash_hex(hex_str: &str) -> Option<SchemaHash> {
@@ -1041,7 +1064,8 @@ impl QueryManager {
         };
 
         let table_name = TableName::new(&table);
-        let branch = update.branch_name.as_str();
+        let resolved_branch_name = self.resolve_branch_name(update.branch_name.as_str());
+        let branch = resolved_branch_name.as_str();
 
         // Look up the correct schema for this branch
         let schema_hash = match self.branch_schema_map.get(branch) {
@@ -1120,7 +1144,7 @@ impl QueryManager {
         }
 
         let Some((head_commit_id, head_commit)) =
-            self.tip_commit_on_branch(update.object_id, branch)
+            self.tip_commit_on_branch(update.object_id, &resolved_branch_name)
         else {
             return;
         };
@@ -1129,7 +1153,7 @@ impl QueryManager {
             let _ = self.reconcile_indices_after_hard_delete_commit(
                 storage,
                 &table,
-                branch,
+                &resolved_branch_name,
                 update.object_id,
                 head_commit_id,
                 &descriptor,
@@ -1143,7 +1167,7 @@ impl QueryManager {
             let _ = self.reconcile_indices_after_soft_delete_commit(
                 storage,
                 &table,
-                branch,
+                &resolved_branch_name,
                 update.object_id,
                 head_commit_id,
                 &descriptor,
@@ -1156,7 +1180,7 @@ impl QueryManager {
         if let Err(error) = self.reconcile_indices_after_live_commit(
             storage,
             &table,
-            branch,
+            &resolved_branch_name,
             update.object_id,
             head_commit_id,
             &head_commit.content,

@@ -14,6 +14,10 @@ fn test_batch_branch(prefix: &BranchPrefixName, ordinal: u128) -> BranchName {
         .to_branch_name()
 }
 
+fn compat_branch(branch_name: &str) -> BranchName {
+    ObjectManager::test_compat_branch_name(&BranchName::new(branch_name))
+}
+
 #[test]
 fn create_object_without_metadata() {
     let mut io = MemoryStorage::new();
@@ -89,9 +93,9 @@ fn add_commit_creates_branch_for_parentless_commit() {
         .expect("should succeed");
 
     let object = manager.get(object_id).unwrap();
-    assert!(object.branches.contains_key(&BranchName::new("main")));
+    assert!(object.branches.contains_key(&compat_branch("main")));
 
-    let branch = &object.branches[&BranchName::new("main")];
+    let branch = &object.branches[&compat_branch("main")];
     assert!(branch.commits.contains_key(&commit_id));
 }
 
@@ -113,10 +117,7 @@ fn add_commit_rejects_unknown_branch_with_parents() {
         None,
     );
 
-    assert_eq!(
-        result,
-        Err(Error::BranchNotFound(BranchName::new("nonexistent")))
-    );
+    assert_eq!(result, Err(Error::ParentNotFound(fake_parent)));
 }
 
 #[test]
@@ -1043,7 +1044,7 @@ fn get_or_load_hydrates_missing_branches_into_cached_object() {
     let loaded_main = mgr2
         .get_or_load(object_id, &io, &["main".to_string()])
         .expect("object should load on main branch");
-    assert!(loaded_main.branches.contains_key(&BranchName::new("main")));
+    assert!(loaded_main.branches.contains_key(&compat_branch("main")));
     assert!(
         !loaded_main
             .branches
@@ -1056,13 +1057,13 @@ fn get_or_load_hydrates_missing_branches_into_cached_object() {
     assert!(
         loaded_with_fallback
             .branches
-            .contains_key(&BranchName::new("dev-other-main"))
+            .contains_key(&compat_branch("dev-other-main"))
     );
     // Main branch was already cached, so it's also returned
     assert!(
         loaded_with_fallback
             .branches
-            .contains_key(&BranchName::new("main"))
+            .contains_key(&compat_branch("main"))
     );
 }
 
@@ -1096,7 +1097,7 @@ fn get_or_load_tips_loads_only_frontier_and_full_load_upgrades_it() {
         .expect("object should load from storage");
     let branch = loaded
         .branches
-        .get(&BranchName::new("main"))
+        .get(&compat_branch("main"))
         .expect("main branch should be present");
     assert_eq!(branch.loaded_state, BranchLoadedState::TipsOnly);
     assert_eq!(branch.commits.len(), 1);
@@ -1107,7 +1108,7 @@ fn get_or_load_tips_loads_only_frontier_and_full_load_upgrades_it() {
         .expect("full branch should upgrade from storage");
     let branch = loaded
         .branches
-        .get(&BranchName::new("main"))
+        .get(&compat_branch("main"))
         .expect("main branch should still be present");
     assert_eq!(branch.loaded_state, BranchLoadedState::AllCommits);
     assert_eq!(branch.commits.len(), 2);
@@ -1462,7 +1463,7 @@ fn lww_selects_highest_timestamp_tip() {
 
     // tips_by_timestamp sorts oldest-first → last element is the LWW winner
     let object = manager.get(object_id).unwrap();
-    let branch = &object.branches[&BranchName::new("main")];
+    let branch = &object.branches[&compat_branch("main")];
     let sorted = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
     assert_eq!(
         *sorted.last().unwrap(),
@@ -1529,7 +1530,7 @@ fn lww_deterministic_on_equal_timestamps() {
 
     // Call tips_by_timestamp multiple times — must always return same order
     let object = manager.get(object_id).unwrap();
-    let branch = &object.branches[&BranchName::new("main")];
+    let branch = &object.branches[&compat_branch("main")];
     let first_result = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
     for _ in 0..10 {
         let result = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
@@ -1735,7 +1736,7 @@ fn truncate_with_diverged_tips() {
 
     // Tails set correctly
     let object = manager.get(object_id).unwrap();
-    let branch = &object.branches[&BranchName::new("main")];
+    let branch = &object.branches[&compat_branch("main")];
     let tails = branch.tails.as_ref().expect("tails should be set");
     assert!(tails.contains(&a1));
     assert!(tails.contains(&b1));
@@ -1889,7 +1890,7 @@ fn lww_offline_edit_wins_when_later() {
 
     // LWW: bob wins because ts=700 > ts=500
     let object = manager.get(object_id).unwrap();
-    let branch = &object.branches[&BranchName::new("main")];
+    let branch = &object.branches[&compat_branch("main")];
     let sorted = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
     assert_eq!(
         *sorted.last().unwrap(),
@@ -1966,7 +1967,7 @@ fn lww_different_fields_same_object_whole_commit_wins() {
 
     // LWW: bob wins (ts=300 > ts=200)
     let object = manager.get(object_id).unwrap();
-    let branch = &object.branches[&BranchName::new("main")];
+    let branch = &object.branches[&compat_branch("main")];
     let sorted = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
     let winner = *sorted.last().unwrap();
     assert_eq!(winner, bob_id, "bob (ts=300) should be LWW winner");

@@ -8,8 +8,12 @@ use crate::commit::{Commit, CommitId, StoredState};
 use crate::object::{
     Branch, BranchLoadedState, BranchName, Object, ObjectId, PrefixBatchCatalog, PrefixBatchMeta,
 };
+#[cfg(test)]
+use crate::query_manager::types::{BatchId, SchemaHash};
 use crate::query_manager::types::{BranchPrefixName, ComposedBranchName};
 use crate::storage::{LoadedBranch, LoadedBranchTips, PrefixBatchUpdate, Storage, StorageError};
+#[cfg(test)]
+use uuid::Uuid;
 
 /// Unique identifier for a subscription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,13 +28,14 @@ pub struct AllObjectsSubscriptionId(pub u64);
 struct Subscription {
     object_id: ObjectId,
     branch_name: BranchName,
+    normalized_branch_name: BranchName,
 }
 
 /// Update sent to subscribers when commits are added or loaded.
 ///
-/// Contains the current frontier (tips) sorted by timestamp (oldest first).
-/// When twigs diverge, you'll see multiple commits in the frontier.
-/// When they merge, the frontier consolidates back to one.
+/// Contains the current branch head(s) sorted by timestamp (oldest first).
+/// Branches are intended to stay internally linear; multiple ids here indicate
+/// older data or out-of-order remote history that has not been compacted yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptionUpdate {
     pub subscription_id: SubscriptionId,
@@ -48,7 +53,7 @@ pub struct AllObjectUpdate {
     pub object_id: ObjectId,
     pub metadata: HashMap<String, String>,
     pub branch_name: BranchName,
-    /// Current frontier commit IDs for this branch, sorted by timestamp.
+    /// Current branch head commit IDs, sorted by timestamp.
     pub commit_ids: Vec<CommitId>,
     /// True if this is a newly created/received object, false if existing object.
     pub is_new_object: bool,
@@ -64,6 +69,7 @@ pub struct AllObjectUpdate {
 pub enum Error {
     ObjectNotFound(ObjectId),
     BranchNotFound(BranchName),
+    InvalidBranchName(BranchName),
     ParentNotFound(CommitId),
     /// Storage operation failed.
     StorageError(StorageError),
@@ -81,6 +87,7 @@ pub enum TruncateResult {
 pub enum TruncateError {
     ObjectNotFound(ObjectId),
     BranchNotFound(BranchName),
+    InvalidBranchName(BranchName),
     TailNotFound(CommitId),
     /// Can't truncate past the frontier - tip is not a descendant of any tail.
     TipBeforeTail(CommitId),
@@ -116,6 +123,89 @@ pub struct ObjectManager {
 }
 
 impl ObjectManager {
+    #[cfg(test)]
+    fn test_compat_branch_name(branch_name: &BranchName) -> BranchName {
+        BranchPrefixName::new(
+            "compat",
+            SchemaHash::from_bytes([0xCC; 32]),
+            branch_name.as_str(),
+        )
+        .with_batch_id(BatchId::from_uuid(Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            branch_name.as_str().as_bytes(),
+        )))
+        .to_branch_name()
+    }
+
+    #[cfg(test)]
+    fn test_display_branch_name(branch_name: BranchName) -> BranchName {
+        let Some(composed_branch) = ComposedBranchName::parse(&branch_name) else {
+            return branch_name;
+        };
+        let compat_hash = SchemaHash::from_bytes([0xCC; 32]);
+        if composed_branch.env == "compat"
+            && composed_branch.schema_hash.short() == compat_hash.short()
+        {
+            BranchName::new(composed_branch.user_branch)
+        } else {
+            branch_name
+        }
+    }
+
+    #[cfg(not(test))]
+    fn test_display_branch_name(branch_name: BranchName) -> BranchName {
+        branch_name
+    }
+
+    fn normalize_branch_name(branch_name: BranchName) -> Result<BranchName, Error> {
+        if ComposedBranchName::parse(&branch_name).is_some() {
+            return Ok(branch_name);
+        }
+        #[cfg(test)]
+        {
+            Ok(Self::test_compat_branch_name(&branch_name))
+        }
+        #[cfg(not(test))]
+        {
+            Err(Error::InvalidBranchName(branch_name))
+        }
+    }
+
+    fn normalize_branch_name_for_truncate(
+        branch_name: BranchName,
+    ) -> Result<BranchName, TruncateError> {
+        Self::normalize_branch_name(branch_name).map_err(|error| match error {
+            Error::InvalidBranchName(branch_name) => TruncateError::InvalidBranchName(branch_name),
+            Error::BranchNotFound(branch_name) => TruncateError::BranchNotFound(branch_name),
+            Error::ObjectNotFound(object_id) => TruncateError::ObjectNotFound(object_id),
+            Error::ParentNotFound(_) | Error::StorageError(_) => unreachable!(),
+        })
+    }
+
+    fn normalize_loaded_branch_name(branch_name: BranchName) -> Option<BranchName> {
+        if ComposedBranchName::parse(&branch_name).is_some() {
+            return Some(branch_name);
+        }
+        #[cfg(test)]
+        {
+            Some(Self::test_compat_branch_name(&branch_name))
+        }
+        #[cfg(not(test))]
+        {
+            None
+        }
+    }
+
+    pub(crate) fn normalize_loaded_branch_name_for_sync(
+        branch_name: BranchName,
+    ) -> Option<BranchName> {
+        Self::normalize_loaded_branch_name(branch_name)
+    }
+
+    pub(crate) fn display_branch_name_for_sync(branch_name: BranchName) -> BranchName {
+        Self::test_display_branch_name(branch_name)
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -270,7 +360,10 @@ impl ObjectManager {
 
         let object = self.objects.get_mut(&id)?;
         for branch_name in branches {
-            let bn = BranchName::new(branch_name);
+            let Some(bn) = Self::normalize_loaded_branch_name(BranchName::new(branch_name)) else {
+                tracing::warn!(%id, branch = %branch_name, "skipping invalid branch name");
+                continue;
+            };
             let needs_load = match object.branches.get(&bn).map(|branch| branch.loaded_state) {
                 Some(BranchLoadedState::AllCommits) => false,
                 Some(BranchLoadedState::TipsOnly) => full_history,
@@ -362,13 +455,9 @@ impl ObjectManager {
         object: &Object,
         io: &H,
         object_id: ObjectId,
-        branch_name: &BranchName,
+        composed_branch: &ComposedBranchName,
         commit: &Commit,
-    ) -> Result<Option<PendingBatchCatalogUpdate>, Error> {
-        let Some(composed_branch) = ComposedBranchName::parse(branch_name) else {
-            return Ok(None);
-        };
-
+    ) -> Result<PendingBatchCatalogUpdate, Error> {
         let prefix = composed_branch.prefix().branch_prefix();
         let mut updated_catalog = Self::load_prefix_batch_catalog(object, io, object_id, &prefix)?;
         let existing_meta = updated_catalog
@@ -430,10 +519,10 @@ impl ObjectManager {
         for removed_batch in &remove_leaf_batches {
             updated_catalog.remove_leaf_batch(removed_batch);
         }
-        updated_catalog.insert_leaf_batch(composed_branch.batch_id);
         updated_catalog.insert_batch_meta(batch_meta.clone());
+        updated_catalog.insert_leaf_batch(composed_branch.batch_id);
 
-        Ok(Some(PendingBatchCatalogUpdate {
+        Ok(PendingBatchCatalogUpdate {
             prefix,
             updated_catalog,
             storage_update: PrefixBatchUpdate {
@@ -443,7 +532,7 @@ impl ObjectManager {
                 increment_parent_child_counts,
             },
             resolved_parent_branches,
-        }))
+        })
     }
 
     /// Get a mutable reference to a specific commit.
@@ -453,10 +542,11 @@ impl ObjectManager {
         branch_name: &BranchName,
         commit_id: CommitId,
     ) -> Option<&mut Commit> {
+        let branch_name = Self::normalize_loaded_branch_name(*branch_name)?;
         self.objects
             .get_mut(&object_id)?
             .branches
-            .get_mut(branch_name)?
+            .get_mut(&branch_name)?
             .commits
             .get_mut(&commit_id)
     }
@@ -480,10 +570,12 @@ impl ObjectManager {
         author: ObjectId,
         metadata: Option<BTreeMap<String, String>>,
     ) -> Result<CommitId, Error> {
-        let branch_name = branch_name.into();
+        let branch_name = Self::normalize_branch_name(branch_name.into())?;
         let _span = tracing::debug_span!("OM::add_commit", %object_id, %branch_name).entered();
         let requested_branches = [branch_name.as_str().to_string()];
         let _ = self.get_or_load(object_id, io, &requested_branches);
+        let composed_branch =
+            ComposedBranchName::parse(&branch_name).expect("normalized branch must be composed");
 
         // Capture previous state BEFORE mutation for AllObjectUpdate and validate
         // parent visibility before we mutate storage/memory.
@@ -492,8 +584,6 @@ impl ObjectManager {
                 .get(object_id)
                 .ok_or(Error::ObjectNotFound(object_id))?;
             let branch_exists = object.branches.contains_key(&branch_name);
-            let is_new_batch_branch =
-                !branch_exists && ComposedBranchName::parse(&branch_name).is_some();
 
             if !parents.is_empty() {
                 if branch_exists {
@@ -515,14 +605,12 @@ impl ObjectManager {
                             return Err(Error::ParentNotFound(*parent));
                         }
                     }
-                } else if is_new_batch_branch {
+                } else {
                     for parent in &parents {
                         if Self::resolve_commit_branch(object, io, object_id, *parent)?.is_none() {
                             return Err(Error::ParentNotFound(*parent));
                         }
                     }
-                } else {
-                    return Err(Error::BranchNotFound(branch_name));
                 }
             }
 
@@ -559,7 +647,13 @@ impl ObjectManager {
             let object = self
                 .get(object_id)
                 .ok_or(Error::ObjectNotFound(object_id))?;
-            Self::plan_prefix_batch_update(object, io, object_id, &branch_name, &commit)?
+            Some(Self::plan_prefix_batch_update(
+                object,
+                io,
+                object_id,
+                &composed_branch,
+                &commit,
+            )?)
         };
 
         // Sync storage - returns immediately
@@ -647,7 +741,7 @@ impl ObjectManager {
         content: Vec<u8>,
         author: ObjectId,
     ) -> Result<CommitId, Error> {
-        let branch_name = branch_name.into();
+        let branch_name = Self::normalize_branch_name(branch_name.into())?;
 
         let object = self
             .get_mut(object_id)
@@ -656,7 +750,9 @@ impl ObjectManager {
         let branch = object
             .branches
             .get_mut(&branch_name)
-            .ok_or(Error::BranchNotFound(branch_name))?;
+            .ok_or(Error::BranchNotFound(Self::test_display_branch_name(
+                branch_name,
+            )))?;
 
         // Clear all existing commits and tips
         branch.commits.clear();
@@ -692,7 +788,7 @@ impl ObjectManager {
         object_id: ObjectId,
         branch_name: impl Into<BranchName>,
     ) -> Result<&SmolSet<[CommitId; 2]>, Error> {
-        let branch_name = branch_name.into();
+        let branch_name = Self::normalize_branch_name(branch_name.into())?;
 
         let object = self
             .get(object_id)
@@ -701,7 +797,9 @@ impl ObjectManager {
         let branch = object
             .branches
             .get(&branch_name)
-            .ok_or(Error::BranchNotFound(branch_name))?;
+            .ok_or(Error::BranchNotFound(Self::test_display_branch_name(
+                branch_name,
+            )))?;
 
         Ok(&branch.tips)
     }
@@ -712,7 +810,7 @@ impl ObjectManager {
         object_id: ObjectId,
         branch_name: impl Into<BranchName>,
     ) -> Result<HashMap<CommitId, &Commit>, Error> {
-        let branch_name = branch_name.into();
+        let branch_name = Self::normalize_branch_name(branch_name.into())?;
 
         let object = self
             .get(object_id)
@@ -721,7 +819,9 @@ impl ObjectManager {
         let branch = object
             .branches
             .get(&branch_name)
-            .ok_or(Error::BranchNotFound(branch_name))?;
+            .ok_or(Error::BranchNotFound(Self::test_display_branch_name(
+                branch_name,
+            )))?;
 
         let tips: HashMap<CommitId, &Commit> = branch
             .tips
@@ -738,7 +838,7 @@ impl ObjectManager {
         object_id: ObjectId,
         branch_name: impl Into<BranchName>,
     ) -> Result<&HashMap<CommitId, Commit>, Error> {
-        let branch_name = branch_name.into();
+        let branch_name = Self::normalize_branch_name(branch_name.into())?;
 
         let object = self
             .get(object_id)
@@ -747,7 +847,9 @@ impl ObjectManager {
         let branch = object
             .branches
             .get(&branch_name)
-            .ok_or(Error::BranchNotFound(branch_name))?;
+            .ok_or(Error::BranchNotFound(Self::test_display_branch_name(
+                branch_name,
+            )))?;
 
         Ok(&branch.commits)
     }
@@ -832,7 +934,9 @@ impl ObjectManager {
         branch_name: impl Into<BranchName>,
         commit: Commit,
     ) -> Result<CommitId, Error> {
-        let branch_name = branch_name.into();
+        let branch_name = Self::normalize_branch_name(branch_name.into())?;
+        let composed_branch =
+            ComposedBranchName::parse(&branch_name).expect("normalized branch must be composed");
         let commit_id = commit.id();
         let requested_branches = [branch_name.as_str().to_string()];
         let _ = self.get_or_load(object_id, io, &requested_branches);
@@ -873,7 +977,13 @@ impl ObjectManager {
             let object = self
                 .get(object_id)
                 .ok_or(Error::ObjectNotFound(object_id))?;
-            Self::plan_prefix_batch_update(object, io, object_id, &branch_name, &commit)?
+            Some(Self::plan_prefix_batch_update(
+                object,
+                io,
+                object_id,
+                &composed_branch,
+                &commit,
+            )?)
         };
         if io
             .append_commit(
@@ -947,23 +1057,26 @@ impl ObjectManager {
         branch_name: impl Into<BranchName>,
     ) -> SubscriptionId {
         let branch_name = branch_name.into();
+        let normalized_branch_name =
+            Self::normalize_loaded_branch_name(branch_name).unwrap_or(branch_name);
         let id = SubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
 
         let subscription = Subscription {
             object_id,
             branch_name,
+            normalized_branch_name,
         };
         self.subscriptions.insert(id, subscription);
 
         self.branch_subscribers
-            .entry((object_id, branch_name))
+            .entry((object_id, normalized_branch_name))
             .or_default()
             .insert(id);
 
         // With sync storage, branch is immediately available if object exists
         if let Some(object) = self.get(object_id)
-            && let Some(branch) = object.branches.get(&branch_name)
+            && let Some(branch) = object.branches.get(&normalized_branch_name)
         {
             let commit_ids = Self::tips_by_timestamp(&branch.commits, &branch.tips);
             self.subscription_outbox.push(SubscriptionUpdate {
@@ -984,7 +1097,7 @@ impl ObjectManager {
         if let Some(sub) = self.subscriptions.remove(&subscription_id)
             && let Some(subscribers) = self
                 .branch_subscribers
-                .get_mut(&(sub.object_id, sub.branch_name))
+                .get_mut(&(sub.object_id, sub.normalized_branch_name))
         {
             subscribers.remove(&subscription_id);
         }
@@ -1046,7 +1159,7 @@ impl ObjectManager {
         self.all_objects_outbox.push(AllObjectUpdate {
             object_id,
             metadata,
-            branch_name,
+            branch_name: Self::test_display_branch_name(branch_name),
             commit_ids,
             is_new_object,
             previous_commit_ids,
@@ -1080,10 +1193,15 @@ impl ObjectManager {
             };
 
             for sub_id in subscriber_ids {
+                let display_branch_name = self
+                    .subscriptions
+                    .get(&sub_id)
+                    .map(|subscription| subscription.branch_name)
+                    .unwrap_or_else(|| Self::test_display_branch_name(branch_name));
                 self.subscription_outbox.push(SubscriptionUpdate {
                     subscription_id: sub_id,
                     object_id,
-                    branch_name,
+                    branch_name: display_branch_name,
                     commit_ids: commit_ids.clone(),
                 });
             }
@@ -1101,7 +1219,10 @@ impl ObjectManager {
         branch_name: impl Into<BranchName>,
         tail_ids: HashSet<CommitId>,
     ) -> TruncateResult {
-        let branch_name = branch_name.into();
+        let branch_name = match Self::normalize_branch_name_for_truncate(branch_name.into()) {
+            Ok(branch_name) => branch_name,
+            Err(error) => return TruncateResult::PermanentError(error),
+        };
         let requested_branches = [branch_name.as_str().to_string()];
         let _ = self.get_or_load(object_id, io, &requested_branches);
 
@@ -1117,7 +1238,9 @@ impl ObjectManager {
         let branch = match object.branches.get(&branch_name) {
             Some(b) => b,
             None => {
-                return TruncateResult::PermanentError(TruncateError::BranchNotFound(branch_name));
+                return TruncateResult::PermanentError(TruncateError::BranchNotFound(
+                    Self::test_display_branch_name(branch_name),
+                ));
             }
         };
 

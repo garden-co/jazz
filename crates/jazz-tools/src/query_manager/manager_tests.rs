@@ -74,7 +74,7 @@ fn create_query_manager(
     schema: Schema,
 ) -> (QueryManager, MemoryStorage) {
     let mut qm = QueryManager::new(sync_manager);
-    qm.set_current_schema(schema, "dev", "main");
+    qm.set_current_schema_with_batch(schema, "dev", "main", BatchId::nil());
     (qm, MemoryStorage::new())
 }
 
@@ -99,7 +99,7 @@ fn create_query_manager_with_fjall(
     schema: Schema,
 ) -> (QueryManager, tempfile::TempDir, FjallStorage) {
     let mut qm = QueryManager::new(sync_manager);
-    qm.set_current_schema(schema, "dev", "main");
+    qm.set_current_schema_with_batch(schema, "dev", "main", BatchId::nil());
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.fjall");
@@ -1690,42 +1690,114 @@ fn synced_update_updates_column_indices() {
 }
 
 #[test]
-#[should_panic(expected = "missing old_content for historical sync update")]
-fn synced_update_missing_old_content_panics_fail_fast() {
+fn synced_update_missing_old_content_reconciles_from_current_head() {
+    use crate::commit::{Commit, StoredState};
     use crate::object::BranchName;
     use crate::object_manager::AllObjectUpdate;
+    use crate::query_manager::encoding::encode_row;
+    use std::collections::HashMap;
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
     let branch = get_branch(&qm);
 
-    let handle = qm
-        .insert(
-            &mut storage,
-            "users",
-            &[Value::Text("Alice".into()), Value::Integer(100)],
-        )
+    let row_id = crate::object::ObjectId::new();
+    let author = row_id;
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_object(&mut storage, row_id, metadata.clone());
+    qm.sync_manager_mut().object_manager.subscribe_all();
+
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let initial_data = encode_row(
+        &descriptor,
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    let commit1 = Commit {
+        parents: smallvec![],
+        content: initial_data,
+        timestamp: 1000,
+        author,
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+    let commit1_id = qm
+        .sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut storage, row_id, &branch, commit1)
         .unwrap();
     qm.process(&mut storage);
 
-    let mut metadata = std::collections::HashMap::new();
-    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    let updated_data = encode_row(
+        &descriptor,
+        &[Value::Text("Bob".into()), Value::Integer(200)],
+    )
+    .unwrap();
+    let commit2 = Commit {
+        parents: smallvec![commit1_id],
+        content: updated_data,
+        timestamp: 2000,
+        author,
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+    let commit2_id = qm
+        .sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut storage, row_id, &branch, commit2)
+        .unwrap();
 
     // Simulate a historical sync update where ObjectManager couldn't provide
-    // old_content. We should fail-fast rather than accept index staleness.
+    // old_content. QueryManager should reconcile indices from the current head.
     qm.handle_object_update(
         &mut storage,
         AllObjectUpdate {
-            object_id: handle.row_id,
+            object_id: row_id,
             metadata,
             branch_name: BranchName::new(&branch),
-            commit_ids: vec![],
+            commit_ids: vec![commit2_id],
             is_new_object: false,
-            previous_commit_ids: vec![handle.row_commit_id],
+            previous_commit_ids: vec![commit1_id],
             old_content: None,
         },
     );
+
+    let query = qm
+        .query("users")
+        .filter_eq("name", Value::Text("Alice".into()))
+        .build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(results.len(), 0);
+
+    let query = qm
+        .query("users")
+        .filter_eq("name", Value::Text("Bob".into()))
+        .build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(results.len(), 1);
+
+    let query = qm
+        .query("users")
+        .filter_eq("score", Value::Integer(100))
+        .build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(results.len(), 0);
+
+    let query = qm
+        .query("users")
+        .filter_eq("score", Value::Integer(200))
+        .build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(results.len(), 1);
 }
 
 #[test]

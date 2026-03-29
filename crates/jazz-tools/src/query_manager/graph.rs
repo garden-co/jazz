@@ -459,9 +459,15 @@ impl QueryGraph {
         branches: &[String],
         session: Option<Session>,
     ) -> Option<Self> {
+        let schema_context = Self::default_schema_context(schema);
         let branch_refs: Vec<QueryBranchRef> = branches
             .iter()
-            .map(|branch| QueryBranchRef::from_branch_name(BranchName::new(branch)))
+            .map(|branch| {
+                super::manager::QueryManager::resolve_query_branch_ref_for_context(
+                    &schema_context,
+                    branch,
+                )
+            })
             .collect();
         Self::compile_relation_ir_with_branch_refs(relation, schema, &branch_refs, session)
     }
@@ -489,9 +495,15 @@ impl QueryGraph {
         session: Option<Session>,
         features: RelationCompileFeatures,
     ) -> Option<Self> {
+        let schema_context = Self::default_schema_context(schema);
         let branch_refs: Vec<QueryBranchRef> = branches
             .iter()
-            .map(|branch| QueryBranchRef::from_branch_name(BranchName::new(branch)))
+            .map(|branch| {
+                super::manager::QueryManager::resolve_query_branch_ref_for_context(
+                    &schema_context,
+                    branch,
+                )
+            })
             .collect();
         Self::compile_relation_ir_with_branch_refs_and_features(
             relation,
@@ -541,7 +553,12 @@ impl QueryGraph {
     ) -> Option<Self> {
         let branch_refs: Vec<QueryBranchRef> = branches
             .iter()
-            .map(|branch| QueryBranchRef::from_branch_name(BranchName::new(branch)))
+            .map(|branch| {
+                super::manager::QueryManager::resolve_query_branch_ref_for_context(
+                    schema_context,
+                    branch,
+                )
+            })
             .collect();
         Self::compile_relation_ir_with_branch_refs_and_schema_context(
             relation,
@@ -997,7 +1014,12 @@ impl QueryGraph {
             query
                 .branches
                 .iter()
-                .map(|branch| QueryBranchRef::from_branch_name(BranchName::new(branch)))
+                .map(|branch| {
+                    super::manager::QueryManager::resolve_query_branch_ref_for_context(
+                        schema_context,
+                        branch,
+                    )
+                })
                 .collect()
         };
         Self::try_compile_with_schema_context_and_branches(

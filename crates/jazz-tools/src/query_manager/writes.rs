@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::commit::{Commit, CommitId};
 use crate::metadata::{MetadataKey, hard_delete_metadata, soft_delete_metadata};
-use crate::object::{BranchName, ObjectId};
+use crate::object::ObjectId;
 use crate::storage::Storage;
 
 use super::encoding::{decode_column, decode_row, encode_row};
@@ -65,8 +65,8 @@ impl QueryManager {
         id: ObjectId,
         branch: &str,
     ) -> Option<ResolvedWriteHead> {
-        let branch_name = BranchName::new(branch);
-        let requested_branches = [branch.to_string()];
+        let branch_name = self.resolve_branch_name(branch);
+        let requested_branches = [branch_name.as_str().to_string()];
         self.sync_manager
             .object_manager
             .get_or_load(id, storage, &requested_branches)?;
@@ -137,8 +137,8 @@ impl QueryManager {
         id: ObjectId,
         branch: &str,
     ) -> Result<Vec<CommitId>, QueryError> {
-        let branch_name = BranchName::new(branch);
-        let requested_branches = [branch.to_string()];
+        let branch_name = self.resolve_branch_name(branch);
+        let requested_branches = [branch_name.as_str().to_string()];
         if self
             .sync_manager
             .object_manager
@@ -208,8 +208,9 @@ impl QueryManager {
             });
         }
 
+        let branch_name = self.resolve_branch_name(branch);
         self.validate_json_for_values(&descriptor, values)?;
-        Self::validate_write_index_values_on_branch(table, branch, values, &descriptor)?;
+        Self::validate_write_index_values_on_branch(table, &branch_name, values, &descriptor)?;
 
         let new_data = encode_row(&descriptor, values)
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
@@ -298,7 +299,7 @@ impl QueryManager {
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
         let branch_refs: Vec<QueryBranchRef> = branches
             .iter()
-            .map(|branch| QueryBranchRef::from_branch_name(BranchName::new(branch)))
+            .map(|branch| self.resolve_query_branch_ref(branch))
             .collect();
         let obj = self
             .sync_manager
@@ -364,13 +365,9 @@ impl QueryManager {
             });
         }
 
+        let branch = self.current_branch();
         self.validate_json_for_values(&descriptor, values)?;
-        Self::validate_write_index_values_on_branch(
-            table,
-            self.current_branch().as_str(),
-            values,
-            &descriptor,
-        )?;
+        Self::validate_write_index_values_on_branch(table, &branch, values, &descriptor)?;
 
         // Encode to binary
         let data = encode_row(&descriptor, values)
@@ -385,7 +382,7 @@ impl QueryManager {
                 &descriptor,
                 session,
                 table,
-                self.current_branch().as_str(),
+                branch.as_str(),
             )
         {
             return Err(QueryError::PolicyDenied {
@@ -405,14 +402,13 @@ impl QueryManager {
         let author = object_id; // Self-authored
 
         // Add commit with row data
-        let branch = self.current_branch();
         let row_commit_id = self
             .sync_manager
             .object_manager
             .add_commit(
                 storage,
                 object_id,
-                &branch,
+                branch,
                 vec![],
                 data.clone(),
                 author,
@@ -423,13 +419,13 @@ impl QueryManager {
         // Forward new row to all connected servers
         tracing::trace!(%object_id, ?row_commit_id, "forward to servers");
         self.sync_manager
-            .forward_update_to_servers(object_id, branch.clone().into());
+            .forward_update_to_servers(object_id, branch);
 
         // Publish the new visible row state on this batch.
         self.reconcile_indices_after_live_commit(
             storage,
             table,
-            branch.as_str(),
+            &branch,
             object_id,
             row_commit_id,
             &data,
@@ -441,7 +437,7 @@ impl QueryManager {
         self.mark_subscriptions_dirty_local(table);
         tracing::trace!(table, "mark_subscriptions_dirty");
 
-        tracing::debug!(%object_id, ?row_commit_id, branch = self.current_branch(), "row created");
+        tracing::debug!(%object_id, ?row_commit_id, branch = %branch, "row created");
         Ok(InsertResult {
             row_id: object_id,
             row_commit_id,
@@ -471,6 +467,8 @@ impl QueryManager {
         values: &[Value],
         session: Option<&Session>,
     ) -> Result<InsertResult, QueryError> {
+        let branch_name = self.resolve_branch_name(branch);
+        let branch = branch_name.as_str();
         let table_name = TableName::new(table);
         let table_schema = self
             .schema
@@ -487,7 +485,7 @@ impl QueryManager {
         }
 
         self.validate_json_for_values(&descriptor, values)?;
-        Self::validate_write_index_values_on_branch(table, branch, values, &descriptor)?;
+        Self::validate_write_index_values_on_branch(table, &branch_name, values, &descriptor)?;
 
         // Encode to binary
         let data = encode_row(&descriptor, values)
@@ -538,12 +536,12 @@ impl QueryManager {
 
         // Forward new row to all connected servers
         self.sync_manager
-            .forward_update_to_servers(object_id, branch.into());
+            .forward_update_to_servers(object_id, branch_name);
 
         self.reconcile_indices_after_live_commit(
             storage,
             table,
-            branch,
+            &branch_name,
             object_id,
             row_commit_id,
             &data,
@@ -773,23 +771,25 @@ impl QueryManager {
             return true;
         }
 
+        let branch_name = self.resolve_branch_name(branch);
         let mut graphs = self.create_policy_graphs_for_complex_clauses(
             &graph_clauses,
             content,
             descriptor,
             &table_name,
             session,
+            &branch_name,
         );
         if graphs.is_empty() {
             return true;
         }
 
-        let branches = vec![branch.to_string()];
+        let branches = vec![branch_name.as_str().to_string()];
         let storage_ref: &dyn Storage = storage;
         let om = &mut self.sync_manager.object_manager;
         let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
             let obj = om.get_or_load(id, storage_ref, &branches)?;
-            let branch_state = obj.branches.get(&BranchName::new(branch))?;
+            let branch_state = obj.branches.get(&branch_name)?;
             let tip_id = branch_state.tips.iter().next()?;
             let commit = branch_state.commits.get(tip_id)?;
             if commit.content.is_empty() {
@@ -798,7 +798,7 @@ impl QueryManager {
             Some(LoadedRow::new(
                 commit.content.clone(),
                 *tip_id,
-                [(id, BranchName::new(branch))].into_iter().collect(),
+                [(id, branch_name)].into_iter().collect(),
             ))
         };
 
@@ -890,7 +890,7 @@ impl QueryManager {
 
         match &col.column_type {
             crate::query_manager::types::ColumnType::Uuid => {
-                let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
+                let branch_ref = self.resolve_query_branch_ref(branch);
                 let candidate_ids = storage.index_lookup(
                     source_table_name.as_str(),
                     col.name.as_str(),
@@ -916,7 +916,7 @@ impl QueryManager {
             crate::query_manager::types::ColumnType::Array { element }
                 if **element == crate::query_manager::types::ColumnType::Uuid =>
             {
-                let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
+                let branch_ref = self.resolve_query_branch_ref(branch);
                 let candidate_ids = storage.index_scan_all(
                     source_table_name.as_str(),
                     col.name.as_str(),
@@ -1029,12 +1029,13 @@ impl QueryManager {
         row_id: ObjectId,
         branch: &str,
     ) -> Option<Vec<u8>> {
-        let branches = vec![branch.to_string()];
+        let branch_name = self.resolve_branch_name(branch);
+        let branches = vec![branch_name.as_str().to_string()];
         let obj = self
             .sync_manager
             .object_manager
             .get_or_load(row_id, storage, &branches)?;
-        let branch_state = obj.branches.get(&BranchName::new(branch))?;
+        let branch_state = obj.branches.get(&branch_name)?;
         let tip_id = branch_state.tips.iter().next()?;
         let commit = branch_state.commits.get(tip_id)?;
         if commit.content.is_empty() {
@@ -1097,7 +1098,7 @@ impl QueryManager {
         self.reconcile_indices_after_live_commit(
             storage,
             &prepared.table_name.0,
-            branch.as_str(),
+            &branch,
             id,
             commit_id,
             &prepared.new_data,
@@ -1132,6 +1133,7 @@ impl QueryManager {
             old_data_for_policy: _old_data_for_policy,
         } = write;
         let prepared = self.prepare_update_write(storage, write, session)?;
+        let branch_name = self.resolve_branch_name(branch);
 
         let commit_id =
             self.commit_prepared_update_write(storage, branch, id, &prepared.new_data)?;
@@ -1139,7 +1141,7 @@ impl QueryManager {
         self.reconcile_indices_after_live_commit(
             storage,
             table,
-            branch,
+            &branch_name,
             id,
             commit_id,
             &prepared.new_data,
@@ -1225,7 +1227,7 @@ impl QueryManager {
                 &descriptor,
                 session,
                 &table,
-                self.current_branch().as_str(),
+                branch.as_str(),
                 id,
                 0,
                 &mut visited,
@@ -1263,15 +1265,13 @@ impl QueryManager {
         // Forward delete to all connected servers
         tracing::trace!(%id, ?delete_commit_id, "forward delete to servers");
         {
-            let branch = self.current_branch();
-            self.sync_manager
-                .forward_update_to_servers(id, branch.into());
+            self.sync_manager.forward_update_to_servers(id, branch);
         }
 
         self.reconcile_indices_after_soft_delete_commit(
             storage,
             &table,
-            branch.as_str(),
+            &branch,
             id,
             delete_commit_id,
             &descriptor,
@@ -1301,6 +1301,7 @@ impl QueryManager {
             id,
             old_data_for_policy,
         } = delete;
+        let branch_name = self.resolve_branch_name(branch);
         // Check for hard delete first (checks default branch)
         if self.is_hard_deleted(id) {
             return Err(QueryError::RowHardDeleted(id));
@@ -1360,13 +1361,12 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
-        self.sync_manager
-            .forward_update_to_servers(id, branch.into());
+        self.sync_manager.forward_update_to_servers(id, branch_name);
 
         self.reconcile_indices_after_soft_delete_commit(
             storage,
             table,
-            branch,
+            &branch_name,
             id,
             delete_commit_id,
             &descriptor,
@@ -1430,12 +1430,7 @@ impl QueryManager {
         }
 
         self.validate_json_for_values(&descriptor, values)?;
-        Self::validate_write_index_values_on_branch(
-            &table,
-            self.current_branch().as_str(),
-            values,
-            &descriptor,
-        )?;
+        Self::validate_write_index_values_on_branch(&table, &branch, values, &descriptor)?;
 
         // Encode new row data
         let new_data = encode_row(&descriptor, values)
@@ -1463,7 +1458,7 @@ impl QueryManager {
         self.reconcile_indices_after_live_commit(
             storage,
             &table,
-            branch.as_str(),
+            &branch,
             id,
             row_commit_id,
             &new_data,
@@ -1541,7 +1536,7 @@ impl QueryManager {
         self.reconcile_indices_after_hard_delete_commit(
             storage,
             &table,
-            branch.as_str(),
+            &branch,
             id,
             delete_commit_id,
             &descriptor,
@@ -1627,14 +1622,15 @@ impl QueryManager {
         branch: &str,
         row_id: ObjectId,
     ) -> bool {
-        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
+        let branch_ref = self.resolve_query_branch_ref(branch);
         let ids = storage.index_lookup(table, "_id", &branch_ref, &Value::Uuid(row_id));
         ids.contains(&row_id)
     }
 
     /// Check if a row is indexed on the default branch (appears in the _id index).
     pub fn row_is_indexed(&self, storage: &dyn Storage, table: &str, row_id: ObjectId) -> bool {
-        self.row_is_indexed_on_branch(storage, table, &self.current_branch(), row_id)
+        let branch = self.current_branch();
+        self.row_is_indexed_on_branch(storage, table, branch.as_str(), row_id)
     }
 
     /// Check if a row is soft-deleted on a specific branch.
@@ -1645,14 +1641,15 @@ impl QueryManager {
         branch: &str,
         row_id: ObjectId,
     ) -> bool {
-        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
+        let branch_ref = self.resolve_query_branch_ref(branch);
         let ids = storage.index_lookup(table, "_id_deleted", &branch_ref, &Value::Uuid(row_id));
         ids.contains(&row_id)
     }
 
     /// Check if a row is soft-deleted (appears in _id_deleted but not _id).
     pub fn row_is_deleted(&self, storage: &dyn Storage, table: &str, row_id: ObjectId) -> bool {
-        self.row_is_deleted_on_branch(storage, table, &self.current_branch(), row_id)
+        let branch = self.current_branch();
+        self.row_is_deleted_on_branch(storage, table, branch.as_str(), row_id)
     }
 
     /// Check if a row has a hard delete tombstone (empty content + delete: hard metadata).
@@ -1660,7 +1657,8 @@ impl QueryManager {
         let Some(obj) = self.sync_manager.object_manager.get(id) else {
             return false;
         };
-        let Some(branch) = obj.branches.get(&BranchName::new(self.current_branch())) else {
+        let current_branch = self.current_branch();
+        let Some(branch) = obj.branches.get(&current_branch) else {
             return false;
         };
         let Some(tip_id) = branch.tips.iter().next() else {

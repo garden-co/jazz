@@ -97,6 +97,14 @@ impl Default for SyncManager {
 }
 
 impl SyncManager {
+    fn normalize_branch_name(branch_name: BranchName) -> Option<BranchName> {
+        ObjectManager::normalize_loaded_branch_name_for_sync(branch_name)
+    }
+
+    fn display_branch_name(branch_name: BranchName) -> BranchName {
+        ObjectManager::display_branch_name_for_sync(branch_name)
+    }
+
     pub fn new() -> Self {
         Self::with_object_manager(ObjectManager::new())
     }
@@ -271,7 +279,7 @@ impl SyncManager {
     /// Create an object with initial content for catalogue storage.
     ///
     /// Creates an object with the specified ID, metadata, and content.
-    /// The content is stored as a commit on the "main" branch.
+    /// The content is stored on the deterministic catalogue batch branch.
     ///
     /// Used for storing schemas and lenses in the catalogue.
     pub fn create_object_with_content<H: Storage>(
@@ -289,11 +297,21 @@ impl SyncManager {
                 .create_with_id(storage, object_id, Some(metadata));
         }
 
-        // Add content as a commit on the "main" branch
+        let branch_name = crate::schema_manager::catalogue_branch_name();
+        let requested_branches = [branch_name.as_str().to_string()];
+        if self
+            .object_manager
+            .get_or_load_tips(object_id, storage, &requested_branches)
+            .and_then(|object| object.branches.get(&branch_name))
+            .is_some_and(|branch| !branch.commits.is_empty())
+        {
+            return;
+        }
+
         let _ = self.object_manager.add_commit(
             storage,
             object_id,
-            "main",
+            branch_name,
             Vec::new(), // No parents - root commit
             content,
             ObjectId::from_uuid(uuid::Uuid::nil()), // System author
@@ -340,6 +358,13 @@ impl SyncManager {
         let Some(client) = self.clients.get_mut(&client_id) else {
             return;
         };
+
+        let scope: HashSet<(ObjectId, BranchName)> = scope
+            .into_iter()
+            .filter_map(|(object_id, branch_name)| {
+                Self::normalize_branch_name(branch_name).map(|normalized| (object_id, normalized))
+            })
+            .collect();
 
         // Collect all objects currently in any query scope
         let old_scope: HashSet<(ObjectId, BranchName)> = client

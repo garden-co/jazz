@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tracing::{info, warn};
 
 use crate::metadata::{MetadataKey, ObjectType};
-use crate::object::{BranchName, ObjectId};
+use crate::object::ObjectId;
 use crate::storage::{CatalogueManifest, Storage};
 
 use super::{AppId, SchemaManager};
@@ -12,7 +12,7 @@ fn latest_catalogue_content<S: Storage + ?Sized>(
     storage: &S,
     object_id: ObjectId,
 ) -> Result<Option<Vec<u8>>, String> {
-    let branch = BranchName::new("main");
+    let branch = super::catalogue_branch_name();
     let loaded = storage
         .load_branch_tips(object_id, &branch)
         .map_err(|err| format!("failed to load catalogue object branch {object_id}: {err:?}"))?;

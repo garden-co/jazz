@@ -213,13 +213,15 @@ impl SyncManager {
                             .as_ref()
                             .map(|meta| meta.metadata.clone())
                             .unwrap_or_default();
+                        let normalized_branch_name =
+                            Self::normalize_branch_name(branch_name).unwrap_or(branch_name);
                         let (stored_metadata, old_content) = self
                             .object_manager
                             .get(object_id)
                             .map(|obj| {
                                 let old = obj
                                     .branches
-                                    .get(&branch_name)
+                                    .get(&normalized_branch_name)
                                     .and_then(|branch| {
                                         branch
                                             .tips
@@ -298,13 +300,15 @@ impl SyncManager {
                             });
                             return;
                         };
+                        let normalized_branch_name =
+                            Self::normalize_branch_name(branch_name).unwrap_or(branch_name);
                         let (metadata, old_content) = self
                             .object_manager
                             .get(object_id)
                             .map(|obj| {
                                 let old = obj
                                     .branches
-                                    .get(&branch_name)
+                                    .get(&normalized_branch_name)
                                     .and_then(|branch| {
                                         branch
                                             .tips
@@ -545,6 +549,9 @@ impl SyncManager {
         branch_name: BranchName,
         commits: Vec<Commit>,
     ) -> HashSet<CommitId> {
+        let Some(normalized_branch_name) = Self::normalize_branch_name(branch_name) else {
+            return HashSet::new();
+        };
         if let Some(meta) = metadata.as_ref() {
             self.track_catalogue_object(object_id, &meta.metadata);
         }
@@ -566,12 +573,12 @@ impl SyncManager {
             let already_exists = self
                 .object_manager
                 .get(object_id)
-                .and_then(|obj| obj.branches.get(&branch_name))
+                .and_then(|obj| obj.branches.get(&normalized_branch_name))
                 .is_some_and(|branch| branch.commits.contains_key(&commit_id));
 
             if self
                 .object_manager
-                .receive_commit(storage, object_id, branch_name, commit)
+                .receive_commit(storage, object_id, normalized_branch_name, commit)
                 .is_ok()
                 && !already_exists
             {

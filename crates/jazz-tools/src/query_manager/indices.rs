@@ -16,6 +16,10 @@ struct IndexSourceState {
 }
 
 impl QueryManager {
+    fn branch_ref(branch: &BranchName) -> QueryBranchRef {
+        QueryBranchRef::from_branch_name(*branch)
+    }
+
     fn map_index_storage_error(error: StorageError) -> QueryError {
         match error {
             StorageError::IndexKeyTooLarge {
@@ -57,10 +61,10 @@ impl QueryManager {
     fn validate_column_index_values(
         table: &str,
         column: &ColumnDescriptor,
-        branch: &str,
+        branch: &BranchName,
         value: &Value,
     ) -> Result<(), QueryError> {
-        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
+        let branch_ref = Self::branch_ref(branch);
         for index_value in Self::expand_index_values(column, value) {
             validate_index_value_size(table, column.name.as_str(), &branch_ref, &index_value)
                 .map_err(Self::map_index_storage_error)?;
@@ -70,7 +74,7 @@ impl QueryManager {
 
     pub(super) fn validate_write_index_values_on_branch(
         table: &str,
-        branch: &str,
+        branch: &BranchName,
         values: &[Value],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
@@ -86,11 +90,11 @@ impl QueryManager {
         storage: &mut dyn Storage,
         table: &str,
         column: &ColumnDescriptor,
-        branch: &str,
+        branch: &BranchName,
         value: &Value,
         object_id: ObjectId,
     ) -> Result<(), QueryError> {
-        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
+        let branch_ref = Self::branch_ref(branch);
         for index_value in Self::expand_index_values(column, value) {
             storage
                 .index_insert(
@@ -109,11 +113,11 @@ impl QueryManager {
         storage: &mut dyn Storage,
         table: &str,
         column: &ColumnDescriptor,
-        branch: &str,
+        branch: &BranchName,
         value: &Value,
         object_id: ObjectId,
     ) -> Result<(), QueryError> {
-        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
+        let branch_ref = Self::branch_ref(branch);
         for index_value in Self::expand_index_values(column, value) {
             storage
                 .index_remove(
@@ -131,12 +135,12 @@ impl QueryManager {
     fn insert_live_row_indices_on_branch(
         storage: &mut dyn Storage,
         table: &str,
-        branch: &str,
+        branch: &BranchName,
         object_id: ObjectId,
         data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
+        let branch_ref = Self::branch_ref(branch);
         storage
             .index_insert(
                 table,
@@ -161,12 +165,12 @@ impl QueryManager {
     fn remove_live_row_indices_on_branch(
         storage: &mut dyn Storage,
         table: &str,
-        branch: &str,
+        branch: &BranchName,
         object_id: ObjectId,
         data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
+        let branch_ref = Self::branch_ref(branch);
         storage
             .index_remove(
                 table,
@@ -191,10 +195,10 @@ impl QueryManager {
     fn insert_deleted_row_index_on_branch(
         storage: &mut dyn Storage,
         table: &str,
-        branch: &str,
+        branch: &BranchName,
         object_id: ObjectId,
     ) -> Result<(), QueryError> {
-        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
+        let branch_ref = Self::branch_ref(branch);
         storage
             .index_insert(
                 table,
@@ -209,10 +213,10 @@ impl QueryManager {
     fn remove_deleted_row_index_on_branch(
         storage: &mut dyn Storage,
         table: &str,
-        branch: &str,
+        branch: &BranchName,
         object_id: ObjectId,
     ) -> Result<(), QueryError> {
-        let branch_ref = QueryBranchRef::from_branch_name(BranchName::new(branch));
+        let branch_ref = Self::branch_ref(branch);
         storage
             .index_remove(
                 table,
@@ -235,14 +239,14 @@ impl QueryManager {
             Self::remove_deleted_row_index_on_branch(
                 storage,
                 table,
-                source_state.branch.as_str(),
+                &source_state.branch,
                 object_id,
             )
         } else {
             Self::remove_live_row_indices_on_branch(
                 storage,
                 table,
-                source_state.branch.as_str(),
+                &source_state.branch,
                 object_id,
                 &source_state.data,
                 descriptor,
@@ -253,10 +257,10 @@ impl QueryManager {
     pub(super) fn tip_commit_on_branch(
         &self,
         object_id: ObjectId,
-        branch: &str,
+        branch: &BranchName,
     ) -> Option<(CommitId, Commit)> {
         let object = self.sync_manager.object_manager.get(object_id)?;
-        let branch = object.branches.get(&BranchName::new(branch))?;
+        let branch = object.branches.get(branch)?;
         let mut tips: Vec<_> = branch.tips.iter().copied().collect();
         tips.sort_by_key(|id| {
             (
@@ -295,21 +299,20 @@ impl QueryManager {
         &mut self,
         storage: &dyn Storage,
         object_id: ObjectId,
-        branch: &str,
+        branch: &BranchName,
         head_commit_id: CommitId,
     ) -> Result<Vec<IndexSourceState>, QueryError> {
-        let requested_branches = [branch.to_string()];
+        let requested_branches = [branch.as_str().to_string()];
         self.sync_manager
             .object_manager
             .get_or_load(object_id, storage, &requested_branches)
             .ok_or(QueryError::ObjectNotFound(object_id))?;
 
-        let branch_name = BranchName::new(branch);
         let head_commit = self
             .sync_manager
             .object_manager
             .get(object_id)
-            .and_then(|object| object.branches.get(&branch_name))
+            .and_then(|object| object.branches.get(branch))
             .and_then(|object_branch| object_branch.commits.get(&head_commit_id))
             .cloned()
             .ok_or(QueryError::ObjectNotFound(object_id))?;
@@ -360,7 +363,7 @@ impl QueryManager {
         &mut self,
         storage: &mut dyn Storage,
         table: &str,
-        branch: &str,
+        branch: &BranchName,
         object_id: ObjectId,
         head_commit_id: CommitId,
         new_data: &[u8],
@@ -382,7 +385,7 @@ impl QueryManager {
         &mut self,
         storage: &mut dyn Storage,
         table: &str,
-        branch: &str,
+        branch: &BranchName,
         object_id: ObjectId,
         head_commit_id: CommitId,
         descriptor: &RowDescriptor,
@@ -401,7 +404,7 @@ impl QueryManager {
         &mut self,
         storage: &mut dyn Storage,
         table: &str,
-        branch: &str,
+        branch: &BranchName,
         object_id: ObjectId,
         head_commit_id: CommitId,
         descriptor: &RowDescriptor,

@@ -9,6 +9,9 @@ impl SyncManager {
     ///
     /// Call this after local writes to sync changes to connected servers.
     pub fn forward_update_to_servers(&mut self, object_id: ObjectId, branch_name: BranchName) {
+        let Some(branch_name) = Self::normalize_branch_name(branch_name) else {
+            return;
+        };
         let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
         if !server_ids.is_empty() {
             tracing::trace!(%object_id, %branch_name, servers = server_ids.len(), "forwarding to servers");
@@ -50,6 +53,9 @@ impl SyncManager {
         branch_name: BranchName,
         except: ClientId,
     ) {
+        let Some(branch_name) = Self::normalize_branch_name(branch_name) else {
+            return;
+        };
         let is_catalogue = self.object_is_catalogue(object_id);
         let client_ids: Vec<ClientId> = self
             .clients
@@ -100,6 +106,9 @@ impl SyncManager {
         branch_name: BranchName,
         tails: HashSet<CommitId>,
     ) {
+        let Some(branch_name) = Self::normalize_branch_name(branch_name) else {
+            return;
+        };
         // Skip objects marked as nosync (local-only, e.g., index nodes)
         let Some(object) = self.object_manager.get(object_id) else {
             return;
@@ -114,13 +123,14 @@ impl SyncManager {
         }
 
         let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
+        let payload_branch_name = Self::display_branch_name(branch_name);
 
         for server_id in server_ids {
             self.outbox.push(OutboxEntry {
                 destination: Destination::Server(server_id),
                 payload: SyncPayload::ObjectTruncated {
                     object_id,
-                    branch_name,
+                    branch_name: payload_branch_name,
                     tails: tails.clone(),
                 },
             });
@@ -150,6 +160,9 @@ impl SyncManager {
         tails: HashSet<CommitId>,
         except: ClientId,
     ) {
+        let Some(branch_name) = Self::normalize_branch_name(branch_name) else {
+            return;
+        };
         // Skip objects marked as nosync (local-only, e.g., index nodes)
         let Some(object) = self.object_manager.get(object_id) else {
             return;
@@ -172,13 +185,14 @@ impl SyncManager {
             })
             .map(|(id, _)| *id)
             .collect();
+        let payload_branch_name = Self::display_branch_name(branch_name);
 
         for client_id in client_ids {
             self.outbox.push(OutboxEntry {
                 destination: Destination::Client(client_id),
                 payload: SyncPayload::ObjectTruncated {
                     object_id,
-                    branch_name,
+                    branch_name: payload_branch_name,
                     tails: tails.clone(),
                 },
             });

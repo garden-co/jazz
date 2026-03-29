@@ -244,6 +244,21 @@ impl SchemaContext {
             .to_branch_name()
     }
 
+    /// Resolve a user-facing query branch into the composed storage branch name.
+    ///
+    /// Queries may still refer to branches like `main` or `draft`; internally we
+    /// always execute against a composed branch keyed by the current schema hash
+    /// and batch id for this schema context.
+    pub fn resolve_query_branch_name(&self, branch: &str) -> BranchName {
+        let branch_name = BranchName::new(branch);
+        if ComposedBranchName::parse(&branch_name).is_some() {
+            branch_name
+        } else {
+            ComposedBranchName::new(&self.env, self.current_hash, branch, self.batch_id)
+                .to_branch_name()
+        }
+    }
+
     /// Get branch names for all live schemas (current + live).
     pub fn all_branch_names(&self) -> Vec<BranchName> {
         let mut names = vec![self.branch_name()];

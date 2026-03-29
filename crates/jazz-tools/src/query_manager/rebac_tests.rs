@@ -1322,6 +1322,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
     let mut storage = MemoryStorage::new();
+    let branch = get_branch(&qm);
 
     // Add a client with session for non-admin user
     let client_id = ClientId::new();
@@ -1341,7 +1342,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
 
     // Register query scope
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, branch.clone().into()));
     qm.sync_manager_mut()
         .set_client_query_scope(client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
@@ -1369,7 +1370,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
                 id: obj_id,
                 metadata,
             }),
-            branch_name: "main".into(),
+            branch_name: branch.clone().into(),
             commits: vec![commit.clone()],
         },
     });
@@ -1403,7 +1404,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
     let tips = qm
         .sync_manager_mut()
         .object_manager
-        .get_tip_ids(obj_id, "main");
+        .get_tip_ids(obj_id, &branch);
     assert!(
         tips.is_err(),
         "Denied insert should not create tips on branch main"

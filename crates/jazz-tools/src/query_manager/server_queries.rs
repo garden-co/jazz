@@ -14,7 +14,8 @@ use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::policy_graph::PolicyGraph;
 use super::session::Session;
 use super::types::{
-    LoadedRow, QueryBranchRef, RowDescriptor, Schema, TableName, TableSchema, Value,
+    ComposedBranchName, LoadedRow, QueryBranchRef, RowDescriptor, Schema, TableName, TableSchema,
+    Value,
 };
 
 enum WriteSchemaResolution {
@@ -332,7 +333,12 @@ impl QueryManager {
                         query_for_compile
                             .branches
                             .iter()
-                            .map(|branch| QueryBranchRef::from_branch_name(BranchName::new(branch)))
+                            .map(|branch| {
+                                Self::resolve_query_branch_ref_for_context(
+                                    &subscription_context,
+                                    branch,
+                                )
+                            })
                             .collect()
                     }
                 }
@@ -626,6 +632,26 @@ impl QueryManager {
                 .unwrap_or(WriteSchemaResolution::Unresolved);
         }
 
+        if let Some(composed) = ComposedBranchName::parse(&branch_name) {
+            let Some(schema_hash) = self.find_schema_by_short_hash(&composed.schema_hash) else {
+                return WriteSchemaResolution::PendingSchema;
+            };
+
+            self.branch_schema_map
+                .insert(branch_name.as_str().to_string(), schema_hash);
+
+            let Some(schema) = self.schema_for_write_hash(schema_hash) else {
+                return WriteSchemaResolution::PendingSchema;
+            };
+
+            return schema
+                .get(&table_name)
+                .cloned()
+                .map(Box::new)
+                .map(WriteSchemaResolution::Resolved)
+                .unwrap_or(WriteSchemaResolution::Unresolved);
+        }
+
         // When the write targets the current initialized branch, self.schema is authoritative.
         if self.schema_context.is_initialized()
             && branch_name.as_str() == self.schema_context.branch_name().as_str()
@@ -687,7 +713,7 @@ impl QueryManager {
         let branch_name = match &check.payload {
             SyncPayload::ObjectUpdated { branch_name, .. } => *branch_name,
             SyncPayload::ObjectTruncated { branch_name, .. } => *branch_name,
-            _ => BranchName::new(self.current_branch()),
+            _ => self.current_branch(),
         };
 
         // Look up table schema for the write branch.
@@ -903,6 +929,7 @@ impl QueryManager {
             &table_schema.columns,
             &table_name,
             &check.session,
+            &branch_name,
         );
 
         if graphs.is_empty() {
@@ -918,6 +945,7 @@ impl QueryManager {
             PolicyCheckState {
                 graphs,
                 table: table_name,
+                branch: branch_name,
                 pending_check: check,
             },
         );
@@ -1031,6 +1059,12 @@ impl QueryManager {
             return;
         }
 
+        let branch_name = match &check.payload {
+            SyncPayload::ObjectUpdated { branch_name, .. } => *branch_name,
+            SyncPayload::ObjectTruncated { branch_name, .. } => *branch_name,
+            _ => self.current_branch(),
+        };
+
         let row_context = match &check.payload {
             SyncPayload::ObjectUpdated {
                 object_id,
@@ -1094,6 +1128,7 @@ impl QueryManager {
                 &table_schema.columns,
                 &table_name,
                 &check.session,
+                &branch_name,
             );
             graphs.extend(clause_graphs);
         }
@@ -1111,6 +1146,7 @@ impl QueryManager {
             PolicyCheckState {
                 graphs,
                 table: table_name,
+                branch: branch_name,
                 pending_check: check,
             },
         );
@@ -1124,9 +1160,9 @@ impl QueryManager {
         descriptor: &RowDescriptor,
         _table: &TableName,
         session: &Session,
+        branch: &BranchName,
     ) -> Vec<PolicyGraph> {
         let mut graphs = Vec::new();
-        let branch = self.current_branch();
 
         for clause in clauses {
             match clause {
@@ -1187,7 +1223,7 @@ impl QueryManager {
                         parent_policy,
                         session,
                         &self.schema,
-                        &branch,
+                        branch.as_str(),
                         1,
                     ) {
                         graphs.push(graph);
@@ -1200,13 +1236,15 @@ impl QueryManager {
                         condition,
                         session,
                         &self.schema,
-                        &branch,
+                        branch.as_str(),
                     ) {
                         graphs.push(graph);
                     }
                 }
                 ComplexClause::ExistsRel { rel } => {
-                    if let Some(graph) = PolicyGraph::for_exists_rel(rel, &self.schema, &branch) {
+                    if let Some(graph) =
+                        PolicyGraph::for_exists_rel(rel, &self.schema, branch.as_str())
+                    {
                         graphs.push(graph);
                     }
                 }
@@ -1226,27 +1264,25 @@ impl QueryManager {
         let mut to_reject = Vec::new();
 
         // Create row loader for settling
-        let current_branch = self.current_branch();
-        let branches = vec![current_branch.clone()];
         let om = &mut self.sync_manager.object_manager;
         let storage_ref: &dyn Storage = storage;
 
         // Settle each active policy check
         for (pending_id, state) in &mut self.active_policy_checks {
+            let branch = state.branch;
+            let branches = vec![branch.as_str().to_string()];
             let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
                 let obj = om.get_or_load_tips(id, storage_ref, &branches)?;
-                let branch = obj.branches.get(&BranchName::new(&current_branch))?;
-                let tip_id = branch.tips.iter().next()?;
-                let commit = branch.commits.get(tip_id)?;
+                let branch_state = obj.branches.get(&branch)?;
+                let tip_id = branch_state.tips.iter().next()?;
+                let commit = branch_state.commits.get(tip_id)?;
                 if commit.content.is_empty() {
                     return None;
                 }
                 Some(LoadedRow::new(
                     commit.content.clone(),
                     *tip_id,
-                    [(id, BranchName::new(&current_branch))]
-                        .into_iter()
-                        .collect(),
+                    [(id, branch)].into_iter().collect(),
                 ))
             };
 

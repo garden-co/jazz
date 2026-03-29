@@ -4,6 +4,17 @@ use crate::query_manager::policy::Operation;
 use crate::storage::MemoryStorage;
 use smallvec::smallvec;
 
+fn catalogue_branch() -> BranchName {
+    crate::schema_manager::catalogue_branch_name()
+}
+
+fn normalized_test_branch(branch_name: &str) -> BranchName {
+    crate::object_manager::ObjectManager::normalize_loaded_branch_name_for_sync(BranchName::new(
+        branch_name,
+    ))
+    .expect("test branch should normalize")
+}
+
 // ========================================================================
 // Phase 1: Foundation Tests
 // ========================================================================
@@ -343,7 +354,7 @@ fn client_receives_existing_catalogue_on_connect() {
         } => {
             assert_eq!(*id, client_id);
             assert_eq!(*synced_object_id, object_id);
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name, &catalogue_branch());
             assert_eq!(commits.len(), 1);
             assert!(
                 metadata.is_some(),
@@ -373,7 +384,7 @@ fn live_catalogue_updates_broadcast_without_query_scope() {
     );
     sm.create_object_with_content(&mut io, object_id, metadata, b"lens".to_vec());
 
-    sm.forward_update_to_clients(object_id, "main".into());
+    sm.forward_update_to_clients(object_id, catalogue_branch());
 
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 2);
@@ -406,7 +417,7 @@ fn remotely_received_catalogue_replays_to_later_clients() {
                 id: object_id,
                 metadata,
             }),
-            branch_name: "main".into(),
+            branch_name: catalogue_branch(),
             commits: vec![Commit {
                 parents: smallvec![],
                 content: b"schema".to_vec(),
@@ -723,7 +734,7 @@ fn admin_writes_catalogue_directly() {
                 id: obj_id,
                 metadata: cat_metadata,
             }),
-            branch_name: "main".into(),
+            branch_name: catalogue_branch(),
             commits: vec![commit.clone()],
         },
     });
@@ -735,7 +746,10 @@ fn admin_writes_catalogue_directly() {
     assert_eq!(pending.len(), 0);
 
     // Commit should be applied directly
-    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    let tips = sm
+        .object_manager
+        .get_tip_ids(obj_id, catalogue_branch())
+        .unwrap();
     assert!(tips.contains(&commit.id()));
 }
 
@@ -885,7 +899,7 @@ fn backend_catalogue_writes_are_denied() {
                 id: obj_id,
                 metadata: cat_metadata,
             }),
-            branch_name: "main".into(),
+            branch_name: catalogue_branch(),
             commits: vec![commit],
         },
     });
@@ -1060,7 +1074,7 @@ fn user_catalogue_write_rejected() {
                 id: obj_id,
                 metadata: cat_metadata,
             }),
-            branch_name: "main".into(),
+            branch_name: catalogue_branch(),
             commits: vec![commit],
         },
     });
@@ -1081,7 +1095,7 @@ fn user_catalogue_write_rejected() {
         } => {
             assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name, &catalogue_branch());
         }
         other => panic!(
             "Expected CatalogueWriteDenied error to source client, got {:?}",
@@ -2055,7 +2069,8 @@ fn set_query_scope_stores_session() {
 
     let client = sm.get_client(client_id).expect("client should exist");
     let query = client.queries.get(&QueryId(1)).expect("query should exist");
-    assert_eq!(query.scope, scope);
+    let expected_scope = HashSet::from([(obj_id, normalized_test_branch("main"))]);
+    assert_eq!(query.scope, expected_scope);
     let session = query
         .session
         .as_ref()

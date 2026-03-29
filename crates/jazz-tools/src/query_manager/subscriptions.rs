@@ -96,11 +96,7 @@ impl QueryManager {
                 query
                     .branches
                     .iter()
-                    .map(|branch| {
-                        crate::query_manager::types::QueryBranchRef::from_branch_name(
-                            crate::object::BranchName::new(branch),
-                        )
-                    })
+                    .map(|branch| self.resolve_query_branch_ref(branch))
                     .collect()
             } else if self.schema_context.is_initialized() {
                 self.schema_context
@@ -175,24 +171,22 @@ impl QueryManager {
         session: Option<Session>,
     ) -> Result<QuerySubscriptionId, QueryError> {
         // Determine branches from query or context
-        let branches: Vec<crate::query_manager::types::QueryBranchRef> =
-            if !query.branches.is_empty() {
-                query
-                    .branches
-                    .iter()
-                    .map(|branch| {
-                        crate::query_manager::types::QueryBranchRef::from_branch_name(
-                            crate::object::BranchName::new(branch),
-                        )
-                    })
-                    .collect()
-            } else {
-                schema_context
-                    .all_branch_names()
-                    .into_iter()
-                    .map(crate::query_manager::types::QueryBranchRef::from_branch_name)
-                    .collect()
-            };
+        let branches: Vec<crate::query_manager::types::QueryBranchRef> = if !query
+            .branches
+            .is_empty()
+        {
+            query
+                .branches
+                .iter()
+                .map(|branch| Self::resolve_query_branch_ref_for_context(schema_context, branch))
+                .collect()
+        } else {
+            schema_context
+                .all_branch_names()
+                .into_iter()
+                .map(crate::query_manager::types::QueryBranchRef::from_branch_name)
+                .collect()
+        };
 
         // Compile query graph with explicit schema context
         let graph = Self::compile_graph(&query, &branches, schema, session.clone(), schema_context)
