@@ -5,6 +5,8 @@
 "jazz-rn": patch
 ---
 
-Adopt the namespaced TypeScript schema API (`import { schema as s } from "jazz-tools"`), split current `permissions.ts` from the structural schema and migration lifecycle, and rename the local schema preflight command to `jazz-tools validate`.
+Schema authoring no longer has a build/codegen step. Apps now define their schema directly in TypeScript with the namespaced API (`import { schema as s } from "jazz-tools"`), and `jazz-tools validate` is just an optional local preflight check.
+
+Current `permissions.ts` is now separate from the structural schema and migration lifecycle, instead of being versioned as part of schema identity.
 
 Runtime permission enforcement now follows the latest published permissions head independently of client schema hashes, with learned schemas, migration lenses, and permissions rehydrated from the local catalogue on restart.
