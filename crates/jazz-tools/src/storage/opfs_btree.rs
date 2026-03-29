@@ -736,7 +736,7 @@ mod tests {
                     prefix: prefix.to_string(),
                     batch_meta: PrefixBatchMeta {
                         batch_id: batch1_id,
-                        batch_ord: 0,
+                        batch_ord: crate::query_manager::types::BatchOrd(0),
                         root_commit_id: commit1_id,
                         head_commit_id: commit1_id,
                         first_timestamp: commit1.timestamp,
@@ -744,7 +744,7 @@ mod tests {
                         parent_batch_ords: Vec::new(),
                         child_count: 0,
                     },
-                    remove_leaf_batches: HashSet::new(),
+                    remove_leaf_batch_ords: smolset::SmolSet::new(),
                     increment_parent_child_counts: Vec::new(),
                 }),
             )
@@ -762,16 +762,18 @@ mod tests {
                     prefix: prefix.to_string(),
                     batch_meta: PrefixBatchMeta {
                         batch_id: batch2_id,
-                        batch_ord: 1,
+                        batch_ord: crate::query_manager::types::BatchOrd(1),
                         root_commit_id: commit2_id,
                         head_commit_id: commit2_id,
                         first_timestamp: commit2.timestamp,
                         last_timestamp: commit2.timestamp,
-                        parent_batch_ords: vec![0],
+                        parent_batch_ords: vec![crate::query_manager::types::BatchOrd(0)],
                         child_count: 0,
                     },
-                    remove_leaf_batches: HashSet::from([batch1_id]),
-                    increment_parent_child_counts: vec![batch1_id],
+                    remove_leaf_batch_ords: [crate::query_manager::types::BatchOrd(0)]
+                        .into_iter()
+                        .collect(),
+                    increment_parent_child_counts: vec![crate::query_manager::types::BatchOrd(0)],
                 }),
             )
             .unwrap();

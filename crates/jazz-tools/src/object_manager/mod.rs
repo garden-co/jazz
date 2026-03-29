@@ -10,7 +10,7 @@ use crate::object::{
     PrefixBatchMeta,
 };
 use crate::query_manager::types::{
-    BatchBranchKey, BranchPrefixName, ComposedBranchName, QueryBranchRef,
+    BatchBranchKey, BatchOrd, BranchPrefixName, ComposedBranchName, QueryBranchRef,
 };
 use crate::storage::{LoadedBranch, LoadedBranchTips, PrefixBatchUpdate, Storage, StorageError};
 
@@ -433,13 +433,13 @@ impl ObjectManager {
             }
         }
 
-        let (batch_meta, remove_leaf_batches, increment_parent_child_counts) =
+        let (batch_meta, remove_leaf_batch_ords, increment_parent_child_counts) =
             if let Some(mut batch_meta) = existing_meta {
                 batch_meta.head_commit_id = commit.id();
                 batch_meta.last_timestamp = commit.timestamp;
-                (batch_meta, HashSet::new(), Vec::new())
+                (batch_meta, SmolSet::new(), Vec::new())
             } else {
-                let parent_batch_ords = same_prefix_parent_batches
+                let parent_batch_ords: Vec<BatchOrd> = same_prefix_parent_batches
                     .iter()
                     .filter_map(|batch_id| {
                         updated_catalog
@@ -454,26 +454,26 @@ impl ObjectManager {
                     head_commit_id: commit.id(),
                     first_timestamp: commit.timestamp,
                     last_timestamp: commit.timestamp,
-                    parent_batch_ords,
+                    parent_batch_ords: parent_batch_ords.clone(),
                     child_count: 0,
                 };
                 (
                     batch_meta,
-                    same_prefix_parent_batches.iter().copied().collect(),
-                    same_prefix_parent_batches,
+                    parent_batch_ords.iter().copied().collect(),
+                    parent_batch_ords,
                 )
             };
 
-        for parent_batch_id in &increment_parent_child_counts {
-            if let Some(parent_meta) = updated_catalog.batch_meta_mut(parent_batch_id) {
+        for parent_batch_ord in &increment_parent_child_counts {
+            if let Some(parent_meta) = updated_catalog.batch_meta_by_ord_mut(*parent_batch_ord) {
                 parent_meta.child_count = parent_meta.child_count.saturating_add(1);
             }
         }
-        for removed_batch in &remove_leaf_batches {
-            updated_catalog.remove_leaf_batch(removed_batch);
+        for removed_batch_ord in &remove_leaf_batch_ords {
+            updated_catalog.remove_leaf_batch_ord(*removed_batch_ord);
         }
         updated_catalog.insert_batch_meta(batch_meta.clone());
-        updated_catalog.insert_leaf_batch(composed_branch.batch_id);
+        updated_catalog.insert_leaf_batch_ord(batch_meta.batch_ord);
 
         Ok(PendingBatchCatalogUpdate {
             prefix,
@@ -481,7 +481,7 @@ impl ObjectManager {
             storage_update: PrefixBatchUpdate {
                 prefix: composed_branch.prefix().branch_prefix(),
                 batch_meta,
-                remove_leaf_batches,
+                remove_leaf_batch_ords,
                 increment_parent_child_counts,
             },
             resolved_parent_branches,

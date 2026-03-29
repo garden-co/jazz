@@ -574,6 +574,22 @@ pub mod hex {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BatchId(pub [u8; 16]);
 
+/// Dense per-prefix ordinal for a batch in hot in-memory/storage catalogs.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
+pub struct BatchOrd(pub u32);
+
+impl BatchOrd {
+    pub fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    pub fn as_usize(self) -> usize {
+        self.0 as usize
+    }
+}
+
 impl BatchId {
     pub fn new() -> Self {
         Self::from_uuid(Uuid::now_v7())

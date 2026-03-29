@@ -22,11 +22,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
 
 use serde::{Deserialize, Serialize};
+use smolset::SmolSet;
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId, PrefixBatchCatalog, PrefixBatchMeta};
 use crate::query_manager::types::{
-    BatchBranchKey, BatchId, QueryBranchRef, SchemaHash, ScopedObject, Value,
+    BatchBranchKey, BatchId, BatchOrd, QueryBranchRef, SchemaHash, ScopedObject, Value,
 };
 use crate::sync_manager::DurabilityTier;
 
@@ -96,12 +97,12 @@ pub struct LoadedBranchTips {
 }
 
 /// Batch catalog updates applied when appending one commit on a composed batch branch.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PrefixBatchUpdate {
     pub prefix: String,
     pub batch_meta: PrefixBatchMeta,
-    pub remove_leaf_batches: HashSet<BatchId>,
-    pub increment_parent_child_counts: Vec<BatchId>,
+    pub remove_leaf_batch_ords: SmolSet<[BatchOrd; 4]>,
+    pub increment_parent_child_counts: Vec<BatchOrd>,
 }
 
 /// One active table batch with its visible-row refcount.
@@ -111,57 +112,83 @@ pub(crate) struct TablePrefixBatchEntry {
     pub ref_count: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct TablePrefixBatchLookupEntry {
+    batch_id: BatchId,
+    batch_ord: BatchOrd,
+}
+
 /// Compact active-batch manifest for one `(table, prefix)` pair.
 ///
-/// Entries stay sorted by raw `BatchId` bytes so lookups can use binary search
-/// and iteration stays deterministic without a `HashMap`.
+/// Batch ords are dense positions in `entries_by_ord`. A compact sorted lookup
+/// table maps `BatchId -> BatchOrd` for binary-search membership updates.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TablePrefixBatchManifest {
-    pub entries: Vec<TablePrefixBatchEntry>,
+    pub entries_by_ord: Vec<TablePrefixBatchEntry>,
+    #[serde(skip)]
+    lookup_by_id: Vec<TablePrefixBatchLookupEntry>,
 }
 
 impl TablePrefixBatchManifest {
+    fn rebuild_lookup(&mut self) {
+        self.lookup_by_id = self
+            .entries_by_ord
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| TablePrefixBatchLookupEntry {
+                batch_id: entry.batch_id,
+                batch_ord: BatchOrd(index as u32),
+            })
+            .collect();
+        self.lookup_by_id
+            .sort_by_key(|entry| *entry.batch_id.as_bytes());
+    }
+
+    fn lookup_ord(&self, batch_id: &BatchId) -> Option<BatchOrd> {
+        let key = *batch_id.as_bytes();
+        self.lookup_by_id
+            .binary_search_by_key(&key, |entry| *entry.batch_id.as_bytes())
+            .ok()
+            .map(|index| self.lookup_by_id[index].batch_ord)
+    }
+
     pub fn branch_refs(&self, prefix: BranchName) -> Vec<QueryBranchRef> {
-        self.entries
+        self.entries_by_ord
             .iter()
             .map(|entry| QueryBranchRef::from_prefix_name_and_batch(prefix, entry.batch_id))
             .collect()
     }
 
     pub fn adjust_refcount(&mut self, batch_id: BatchId, delta: i64) {
-        let key = *batch_id.as_bytes();
-        match self
-            .entries
-            .binary_search_by_key(&key, |entry| *entry.batch_id.as_bytes())
-        {
-            Ok(index) => {
-                let current = self.entries[index].ref_count;
-                let next = if delta >= 0 {
-                    current.saturating_add(delta as u64)
-                } else {
-                    current.saturating_sub(delta.unsigned_abs())
-                };
-                if next == 0 {
-                    self.entries.remove(index);
-                } else {
-                    self.entries[index].ref_count = next;
-                }
+        if self.lookup_by_id.len() != self.entries_by_ord.len() {
+            self.rebuild_lookup();
+        }
+
+        if let Some(batch_ord) = self.lookup_ord(&batch_id) {
+            let index = batch_ord.as_usize();
+            let current = self.entries_by_ord[index].ref_count;
+            let next = if delta >= 0 {
+                current.saturating_add(delta as u64)
+            } else {
+                current.saturating_sub(delta.unsigned_abs())
+            };
+            if next == 0 {
+                self.entries_by_ord.remove(index);
+                self.rebuild_lookup();
+            } else {
+                self.entries_by_ord[index].ref_count = next;
             }
-            Err(index) if delta > 0 => {
-                self.entries.insert(
-                    index,
-                    TablePrefixBatchEntry {
-                        batch_id,
-                        ref_count: delta as u64,
-                    },
-                );
-            }
-            Err(_) => {}
+        } else if delta > 0 {
+            self.entries_by_ord.push(TablePrefixBatchEntry {
+                batch_id,
+                ref_count: delta as u64,
+            });
+            self.rebuild_lookup();
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries_by_ord.is_empty()
     }
 }
 
@@ -1046,16 +1073,16 @@ impl Storage for MemoryStorage {
 
         if let Some(update) = prefix_batch_update {
             let catalog = obj.prefix_batches.entry(update.prefix).or_default();
-            for parent_batch_id in update.increment_parent_child_counts {
-                if let Some(parent_meta) = catalog.batch_meta_mut(&parent_batch_id) {
+            for parent_batch_ord in update.increment_parent_child_counts {
+                if let Some(parent_meta) = catalog.batch_meta_by_ord_mut(parent_batch_ord) {
                     parent_meta.child_count = parent_meta.child_count.saturating_add(1);
                 }
             }
-            for removed_batch in update.remove_leaf_batches {
-                catalog.remove_leaf_batch(&removed_batch);
+            for removed_batch_ord in update.remove_leaf_batch_ords {
+                catalog.remove_leaf_batch_ord(removed_batch_ord);
             }
             catalog.insert_batch_meta(update.batch_meta.clone());
-            catalog.insert_leaf_batch(update.batch_meta.batch_id);
+            catalog.insert_leaf_batch_ord(update.batch_meta.batch_ord);
         }
 
         Ok(())
@@ -1446,7 +1473,7 @@ mod tests {
                     prefix: prefix.to_string(),
                     batch_meta: PrefixBatchMeta {
                         batch_id: batch1_id,
-                        batch_ord: 0,
+                        batch_ord: crate::query_manager::types::BatchOrd(0),
                         root_commit_id: commit1_id,
                         head_commit_id: commit1_id,
                         first_timestamp: commit1.timestamp,
@@ -1454,7 +1481,7 @@ mod tests {
                         parent_batch_ords: Vec::new(),
                         child_count: 0,
                     },
-                    remove_leaf_batches: HashSet::new(),
+                    remove_leaf_batch_ords: smolset::SmolSet::new(),
                     increment_parent_child_counts: Vec::new(),
                 }),
             )
@@ -1484,16 +1511,18 @@ mod tests {
                     prefix: prefix.to_string(),
                     batch_meta: PrefixBatchMeta {
                         batch_id: batch2_id,
-                        batch_ord: 1,
+                        batch_ord: crate::query_manager::types::BatchOrd(1),
                         root_commit_id: commit2_id,
                         head_commit_id: commit2_id,
                         first_timestamp: commit2.timestamp,
                         last_timestamp: commit2.timestamp,
-                        parent_batch_ords: vec![0],
+                        parent_batch_ords: vec![crate::query_manager::types::BatchOrd(0)],
                         child_count: 0,
                     },
-                    remove_leaf_batches: HashSet::from([batch1_id]),
-                    increment_parent_child_counts: vec![batch1_id],
+                    remove_leaf_batch_ords: [crate::query_manager::types::BatchOrd(0)]
+                        .into_iter()
+                        .collect(),
+                    increment_parent_child_counts: vec![crate::query_manager::types::BatchOrd(0)],
                 }),
             )
             .unwrap();

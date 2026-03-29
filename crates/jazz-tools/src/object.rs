@@ -7,7 +7,9 @@ use smolset::SmolSet;
 use uuid::Uuid;
 
 use crate::commit::{Commit, CommitId};
-use crate::query_manager::types::{BatchBranchKey, BatchId, ComposedBranchName, QueryBranchRef};
+use crate::query_manager::types::{
+    BatchBranchKey, BatchId, BatchOrd, ComposedBranchName, QueryBranchRef,
+};
 
 /// Interned UUIDv7 identifying an object.
 /// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
@@ -257,86 +259,121 @@ impl Index<&BranchName> for ObjectBranches {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrefixBatchMeta {
     pub batch_id: BatchId,
-    pub batch_ord: u32,
+    pub batch_ord: BatchOrd,
     pub root_commit_id: CommitId,
     pub head_commit_id: CommitId,
     pub first_timestamp: u64,
     pub last_timestamp: u64,
-    pub parent_batch_ords: Vec<u32>,
+    pub parent_batch_ords: Vec<BatchOrd>,
     pub child_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BatchOrdLookupEntry {
+    batch_id: BatchId,
+    batch_ord: BatchOrd,
 }
 
 /// In-memory per-prefix batch catalog.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PrefixBatchCatalog {
-    batch_ord_by_id: HashMap<BatchId, u32>,
+    lookup_by_id: Vec<BatchOrdLookupEntry>,
     batches_by_ord: Vec<PrefixBatchMeta>,
-    leaf_batch_ords: SmolSet<[u32; 4]>,
+    leaf_batch_ords: SmolSet<[BatchOrd; 4]>,
 }
 
 impl PrefixBatchCatalog {
-    pub fn next_batch_ord(&self) -> u32 {
-        self.batches_by_ord.len() as u32
+    fn lookup_index(&self, batch_id: &BatchId) -> Result<usize, usize> {
+        let key = *batch_id.as_bytes();
+        self.lookup_by_id
+            .binary_search_by_key(&key, |entry| *entry.batch_id.as_bytes())
+    }
+
+    fn remove_lookup(&mut self, batch_id: &BatchId) {
+        if let Ok(index) = self.lookup_index(batch_id) {
+            self.lookup_by_id.remove(index);
+        }
+    }
+
+    fn upsert_lookup(&mut self, batch_id: BatchId, batch_ord: BatchOrd) {
+        match self.lookup_index(&batch_id) {
+            Ok(index) => self.lookup_by_id[index].batch_ord = batch_ord,
+            Err(index) => self.lookup_by_id.insert(
+                index,
+                BatchOrdLookupEntry {
+                    batch_id,
+                    batch_ord,
+                },
+            ),
+        }
+    }
+
+    pub fn next_batch_ord(&self) -> BatchOrd {
+        BatchOrd(self.batches_by_ord.len() as u32)
+    }
+
+    pub fn batch_ord(&self, batch_id: &BatchId) -> Option<BatchOrd> {
+        self.lookup_index(batch_id)
+            .ok()
+            .map(|index| self.lookup_by_id[index].batch_ord)
     }
 
     pub fn batch_meta(&self, batch_id: &BatchId) -> Option<&PrefixBatchMeta> {
-        let batch_ord = *self.batch_ord_by_id.get(batch_id)?;
+        let batch_ord = self.batch_ord(batch_id)?;
         self.batch_meta_by_ord(batch_ord)
     }
 
     pub fn batch_meta_mut(&mut self, batch_id: &BatchId) -> Option<&mut PrefixBatchMeta> {
-        let batch_ord = *self.batch_ord_by_id.get(batch_id)?;
+        let batch_ord = self.batch_ord(batch_id)?;
         self.batch_meta_by_ord_mut(batch_ord)
     }
 
-    pub fn batch_meta_by_ord(&self, batch_ord: u32) -> Option<&PrefixBatchMeta> {
-        self.batches_by_ord.get(batch_ord as usize)
+    pub fn batch_meta_by_ord(&self, batch_ord: BatchOrd) -> Option<&PrefixBatchMeta> {
+        self.batches_by_ord.get(batch_ord.as_usize())
     }
 
-    pub fn batch_meta_by_ord_mut(&mut self, batch_ord: u32) -> Option<&mut PrefixBatchMeta> {
-        self.batches_by_ord.get_mut(batch_ord as usize)
+    pub fn batch_meta_by_ord_mut(&mut self, batch_ord: BatchOrd) -> Option<&mut PrefixBatchMeta> {
+        self.batches_by_ord.get_mut(batch_ord.as_usize())
     }
 
     pub fn insert_batch_meta(&mut self, meta: PrefixBatchMeta) {
-        let batch_ord = meta.batch_ord as usize;
-        if let Some(existing_ord) = self.batch_ord_by_id.insert(meta.batch_id, meta.batch_ord) {
+        let batch_id = meta.batch_id;
+        let batch_ord_value = meta.batch_ord;
+        let batch_ord = meta.batch_ord.as_usize();
+        if let Some(existing_ord) = self.batch_ord(&batch_id) {
             debug_assert_eq!(
-                existing_ord, meta.batch_ord,
+                existing_ord, batch_ord_value,
                 "batch {} changed ord from {} to {}",
-                meta.batch_id, existing_ord, meta.batch_ord
+                batch_id, existing_ord.0, batch_ord_value.0
             );
         }
         match batch_ord.cmp(&self.batches_by_ord.len()) {
             std::cmp::Ordering::Less => {
                 let replaced_batch_id = self.batches_by_ord[batch_ord].batch_id;
-                if replaced_batch_id != meta.batch_id {
-                    self.batch_ord_by_id.remove(&replaced_batch_id);
+                if replaced_batch_id != batch_id {
+                    self.remove_lookup(&replaced_batch_id);
                 }
                 self.batches_by_ord[batch_ord] = meta;
             }
             std::cmp::Ordering::Equal => self.batches_by_ord.push(meta),
             std::cmp::Ordering::Greater => {
-                panic!("non-dense batch_ord insertion: {}", meta.batch_ord)
+                panic!("non-dense batch_ord insertion: {}", batch_ord_value.0)
             }
         }
+        self.upsert_lookup(batch_id, batch_ord_value);
     }
 
-    pub fn insert_leaf_batch(&mut self, batch_id: BatchId) {
-        if let Some(batch_ord) = self.batch_ord_by_id.get(&batch_id).copied() {
-            self.leaf_batch_ords.insert(batch_ord);
-        }
+    pub fn insert_leaf_batch_ord(&mut self, batch_ord: BatchOrd) {
+        self.leaf_batch_ords.insert(batch_ord);
     }
 
-    pub fn remove_leaf_batch(&mut self, batch_id: &BatchId) {
-        if let Some(batch_ord) = self.batch_ord_by_id.get(batch_id).copied() {
-            self.leaf_batch_ords.remove(&batch_ord);
-        }
+    pub fn remove_leaf_batch_ord(&mut self, batch_ord: BatchOrd) {
+        self.leaf_batch_ords.remove(&batch_ord);
     }
 
     pub fn contains_leaf_batch(&self, batch_id: &BatchId) -> bool {
-        self.batch_ord_by_id
-            .get(batch_id)
-            .map(|batch_ord| self.leaf_batch_ords.contains(batch_ord))
+        self.batch_ord(batch_id)
+            .map(|batch_ord| self.leaf_batch_ords.contains(&batch_ord))
             .unwrap_or(false)
     }
 
@@ -344,6 +381,10 @@ impl PrefixBatchCatalog {
         self.leaf_batch_ords
             .iter()
             .filter_map(|batch_ord| self.batch_meta_by_ord(*batch_ord).map(|meta| meta.batch_id))
+    }
+
+    pub fn leaf_batch_ords(&self) -> impl Iterator<Item = BatchOrd> + '_ {
+        self.leaf_batch_ords.iter().copied()
     }
 
     pub fn leaf_batch_count(&self) -> usize {

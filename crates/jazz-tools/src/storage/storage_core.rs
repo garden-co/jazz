@@ -7,7 +7,7 @@ use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId, PrefixBatchCatalog, PrefixBatchMeta};
 use crate::sync_manager::DurabilityTier;
 
-use crate::query_manager::types::{BatchId, QueryBranchRef, Value};
+use crate::query_manager::types::{BatchId, BatchOrd, QueryBranchRef, Value};
 
 use super::key_codec::{
     ack_key, branch_manifest_key, branch_segment_key, catalogue_manifest_op_key,
@@ -41,7 +41,7 @@ struct PersistedBranchSegment {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedPrefixBatchCatalog {
     batches: Vec<PrefixBatchMeta>,
-    leaf_batch_ords: Vec<u32>,
+    leaf_batch_ords: Vec<BatchOrd>,
 }
 
 const MAX_COMMITS_PER_BRANCH_SEGMENT: usize = 32;
@@ -171,10 +171,7 @@ impl PersistedPrefixBatchCatalog {
     fn from_catalog(catalog: &PrefixBatchCatalog) -> Self {
         Self {
             batches: catalog.batch_metas().cloned().collect(),
-            leaf_batch_ords: catalog
-                .leaf_batch_ids()
-                .filter_map(|batch_id| catalog.batch_meta(&batch_id).map(|meta| meta.batch_ord))
-                .collect(),
+            leaf_batch_ords: catalog.leaf_batch_ords().collect(),
         }
     }
 
@@ -191,13 +188,9 @@ impl PersistedPrefixBatchCatalog {
         leaf_batch_ords.sort_unstable();
         leaf_batch_ords.dedup();
         for batch_ord in leaf_batch_ords {
-            let Some(batch_id) = catalog
-                .batch_meta_by_ord(batch_ord)
-                .map(|meta| meta.batch_id)
-            else {
-                continue;
-            };
-            catalog.insert_leaf_batch(batch_id);
+            if catalog.batch_meta_by_ord(batch_ord).is_some() {
+                catalog.insert_leaf_batch_ord(batch_ord);
+            }
         }
 
         catalog
@@ -439,16 +432,16 @@ pub(super) fn append_commit_core(
             load_prefix_batch_catalog_core(object_id, &update.prefix, |key| get(key))?
                 .unwrap_or_default();
 
-        for parent_batch_id in &update.increment_parent_child_counts {
-            if let Some(parent_meta) = catalog.batch_meta_mut(parent_batch_id) {
+        for parent_batch_ord in &update.increment_parent_child_counts {
+            if let Some(parent_meta) = catalog.batch_meta_by_ord_mut(*parent_batch_ord) {
                 parent_meta.child_count = parent_meta.child_count.saturating_add(1);
             }
         }
-        for removed_batch in update.remove_leaf_batches {
-            catalog.remove_leaf_batch(&removed_batch);
+        for removed_batch_ord in update.remove_leaf_batch_ords {
+            catalog.remove_leaf_batch_ord(removed_batch_ord);
         }
         catalog.insert_batch_meta(update.batch_meta.clone());
-        catalog.insert_leaf_batch(update.batch_meta.batch_id);
+        catalog.insert_leaf_batch_ord(update.batch_meta.batch_ord);
         persist_prefix_batch_catalog(object_id, &update.prefix, &catalog, |key, value| {
             set(key, value)
         })?;
