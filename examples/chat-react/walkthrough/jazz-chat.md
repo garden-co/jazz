@@ -50,7 +50,7 @@ Writes are **instant locally**. Row-level **policies** are enforced on the serve
 
 ## The schema
 
-**[`schema/current.ts`](../schema/current.ts)** defines the tables. `jazz-tools build` generates SQL and typed TypeScript helpers.
+**[`schema/current.ts`](../schema/current.ts)** defines the tables. You can optionally run `jazz-tools validate` as a local check via the root `schema.ts` wrapper.
 
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.8rem;margin-top:0.4rem">
 

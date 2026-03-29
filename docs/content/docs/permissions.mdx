@@ -13,10 +13,10 @@ Jazz applies the latest published permissions even when data is being read throu
 
 ## Publishing Permissions
 
-Validate the local files, inspect the current server head, then publish:
+Optionally validate the local files, inspect the current server head, then publish:
 
 ```bash
-npx jazz-tools build
+npx jazz-tools validate
 npx jazz-tools permissions status
 npx jazz-tools permissions push
 ```

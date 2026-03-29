@@ -5,12 +5,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  build,
   createMigration,
   exportSchema,
   permissionsStatus,
   pushMigration,
   pushPermissions,
+  validate,
 } from "./cli.js";
 
 const dslPath = fileURLToPath(new URL("./dsl.ts", import.meta.url));
@@ -192,12 +192,12 @@ function storedRootSchema() {
   };
 }
 
-describe("cli build", () => {
+describe("cli validate", () => {
   it("validates root schema.ts without generating SQL or app artifacts", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
 
-    await build({ schemaDir: root });
+    await validate({ schemaDir: root });
 
     expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
     expect(await fileExists(join(root, "schema", "app.ts"))).toBe(false);
@@ -208,7 +208,7 @@ describe("cli build", () => {
     const { root, schemaDir } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
 
-    await build({ schemaDir });
+    await validate({ schemaDir });
 
     expect(await fileExists(join(schemaDir, "current.sql"))).toBe(false);
     expect(await fileExists(join(schemaDir, "app.ts"))).toBe(false);
@@ -219,7 +219,7 @@ describe("cli build", () => {
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
     await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
 
-    const { logs } = await captureConsoleLogs(() => build({ schemaDir: root }));
+    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
 
     expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
     expect(await fileExists(join(root, "permissions.test.ts"))).toBe(false);
@@ -235,14 +235,14 @@ describe("cli build", () => {
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
     await writeFile(join(root, "permissions.ts"), permissionsSchemaNamedExport());
 
-    await build({ schemaDir: root });
+    await validate({ schemaDir: root });
   });
 
   it("fails when schema.ts uses inline table permissions", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithInlinePermissions());
 
-    await expect(build({ schemaDir: root })).rejects.toThrow(
+    await expect(validate({ schemaDir: root })).rejects.toThrow(
       /inline table permissions are no longer supported/i,
     );
   });
@@ -252,7 +252,7 @@ describe("cli build", () => {
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
     await writeFile(join(root, "permissions.ts"), permissionsSchemaMissingExport());
 
-    await expect(build({ schemaDir: root })).rejects.toThrow(/missing permissions export/i);
+    await expect(validate({ schemaDir: root })).rejects.toThrow(/missing permissions export/i);
   });
 
   it("fails when permissions.ts references unknown tables", async () => {
@@ -260,7 +260,7 @@ describe("cli build", () => {
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
     await writeFile(join(root, "permissions.ts"), permissionsSchemaUnknownTable());
 
-    await expect(build({ schemaDir: root })).rejects.toThrow(
+    await expect(validate({ schemaDir: root })).rejects.toThrow(
       /permissions\.ts defines permissions for unknown table\(s\): ghosts/i,
     );
   });
@@ -270,7 +270,7 @@ describe("cli build", () => {
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
     await writeFile(join(root, "permissions.ts"), permissionsSchemaInvalidShape());
 
-    await expect(build({ schemaDir: root })).rejects.toThrow(/invalid permissions export/i);
+    await expect(validate({ schemaDir: root })).rejects.toThrow(/invalid permissions export/i);
   });
 });
 
@@ -706,18 +706,18 @@ function runBin(args: string[]): SpawnSyncReturns<string> {
 }
 
 describe("bin integration", () => {
-  it("routes build through the TypeScript CLI for a root schema.ts project", async () => {
+  it("routes validate through the TypeScript CLI for a root schema.ts project", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
 
-    const result = runBin(["build", "--schema-dir", root]);
+    const result = runBin(["validate", "--schema-dir", root]);
 
     expect(result.status).toBe(0);
     expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
     expect(await fileExists(join(root, "schema", "app.ts"))).toBe(false);
   });
 
-  it("loads root permissions.ts through the bin entry point", async () => {
+  it("loads root permissions.ts through the validate command", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
     await writeFile(
@@ -725,7 +725,7 @@ describe("bin integration", () => {
       rootPermissionsSchema("./schema.ts", distIndexPath),
     );
 
-    const result = runBin(["build", "--schema-dir", root]);
+    const result = runBin(["validate", "--schema-dir", root]);
 
     expect(result.status).toBe(0);
     expect(await fileExists(join(root, "permissions.test.ts"))).toBe(false);
@@ -734,10 +734,21 @@ describe("bin integration", () => {
   it("fails when no root schema.ts can be found", async () => {
     const { root } = await createWorkspace();
 
-    const result = runBin(["build", "--schema-dir", root]);
+    const result = runBin(["validate", "--schema-dir", root]);
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("Schema file not found");
+  });
+
+  it("keeps build as a compatibility alias", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+
+    const result = runBin(["build", "--schema-dir", root]);
+
+    expect(result.status).toBe(0);
+    expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
+    expect(await fileExists(join(root, "schema", "app.ts"))).toBe(false);
   });
 
   it("routes schema export through the TypeScript CLI", async () => {

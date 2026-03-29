@@ -102,7 +102,13 @@ if (command === "mcp") {
   const { runServer } = await import(mcpPath);
   await runServer();
   // runServer resolves when stdin closes; process exits naturally.
-} else if (command === "build" || command === "migrations" || command === "schema") {
+} else if (
+  command === "validate" ||
+  command === "build" ||
+  command === "migrations" ||
+  command === "permissions" ||
+  command === "schema"
+) {
   const tsCliPath = join(here, "..", "dist", "cli.js");
   if (!existsSync(tsCliPath)) {
     fail(`TypeScript schema CLI missing: ${tsCliPath}`);
