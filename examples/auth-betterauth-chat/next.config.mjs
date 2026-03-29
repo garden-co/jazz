@@ -1,14 +1,21 @@
 import { withJazz } from "jazz-tools/dev/next";
-import { APP_ORIGIN, DEFAULT_ADMIN_SECRET, DEFAULT_APP_ID } from "./constants.ts";
+
+const ADMIN_SECRET = process.env.ADMIN_SECRET!;
+const APP_ID = process.env.NEXT_PUBLIC_APP_ID!;
+const SYNC_SERVER_URL = process.env.NEXT_PUBLIC_SYNC_SERVER_URL!;
+
 
 export default withJazz(
-  { reactStrictMode: true },
   {
-    adminSecret: DEFAULT_ADMIN_SECRET,
+    reactStrictMode: true,
+    serverExternalPackages: ["jazz-napi", "jazz-tools/backend"],
+  },
+  {
+    adminSecret: ADMIN_SECRET,
     server: {
-      appId: DEFAULT_APP_ID,
-      adminSecret: DEFAULT_ADMIN_SECRET,
-      jwksUrl: `${APP_ORIGIN}/api/auth/jwks`,
+      appId: APP_ID,
+      adminSecret: ADMIN_SECRET,
+      jwksUrl: `${SYNC_SERVER_URL}/api/auth/jwks`,
     },
   },
 );
