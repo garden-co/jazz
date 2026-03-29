@@ -7,7 +7,7 @@ use smolset::SmolSet;
 use uuid::Uuid;
 
 use crate::commit::{Commit, CommitId};
-use crate::query_manager::types::{BatchId, ComposedBranchName, QueryBranchRef};
+use crate::query_manager::types::{BatchBranchKey, BatchId, ComposedBranchName, QueryBranchRef};
 
 /// Interned UUIDv7 identifying an object.
 /// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
@@ -361,7 +361,7 @@ pub struct Object {
     pub id: ObjectId,
     pub metadata: HashMap<String, String>,
     pub branches: ObjectBranches,
-    pub commit_branches: HashMap<CommitId, BranchName>,
+    pub commit_branches: HashMap<CommitId, BatchBranchKey>,
     pub prefix_batches: HashMap<String, PrefixBatchCatalog>,
 }
 

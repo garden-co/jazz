@@ -286,7 +286,13 @@ impl QueryManager {
         self.sync_manager
             .object_manager
             .get(object_id)
-            .and_then(|object| object.commit_branches.get(&commit_id).copied())
+            .and_then(|object| {
+                object
+                    .commit_branches
+                    .get(&commit_id)
+                    .copied()
+                    .map(|branch| branch.branch_name())
+            })
             .or_else(|| {
                 storage
                     .load_commit_branch(object_id, commit_id)

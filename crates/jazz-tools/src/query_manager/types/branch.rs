@@ -685,33 +685,27 @@ impl std::fmt::Display for BranchPrefixName {
 
 /// Internal branch reference used by query compilation and index access.
 ///
-/// Composed batch branches keep their shared prefix and batch id in structured
-/// form, while also caching the full interned branch name for object lookups
-/// and row provenance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct QueryBranchRef {
+/// `BatchBranchKey` is the compact identity form used in hot in-memory maps.
+/// `QueryBranchRef` adds a cached interned full branch name for APIs that still
+/// operate on string-shaped branch ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BatchBranchKey {
     prefix_name: BranchName,
     batch_id: BatchId,
-    branch_name: BranchName,
 }
 
-impl QueryBranchRef {
+impl BatchBranchKey {
     pub fn from_prefix_and_batch(prefix: &BranchPrefixName, batch_id: BatchId) -> Self {
-        let prefix_name = BranchName::new(prefix.branch_prefix());
-        let branch_name = prefix.with_batch_id(batch_id).to_branch_name();
         Self {
-            prefix_name,
+            prefix_name: BranchName::new(prefix.branch_prefix()),
             batch_id,
-            branch_name,
         }
     }
 
     pub fn from_prefix_name_and_batch(prefix_name: BranchName, batch_id: BatchId) -> Self {
-        let branch_name = BranchName::new(format!("{}-{}", prefix_name.as_str(), batch_id));
         Self {
             prefix_name,
             batch_id,
-            branch_name,
         }
     }
 
@@ -722,8 +716,60 @@ impl QueryBranchRef {
         Self {
             prefix_name: BranchName::new(composed_branch.prefix().branch_prefix()),
             batch_id: composed_branch.batch_id,
-            branch_name,
         }
+    }
+
+    pub fn branch_name(&self) -> BranchName {
+        BranchName::new(format!("{}-{}", self.prefix_name.as_str(), self.batch_id))
+    }
+
+    pub fn prefix_name(&self) -> BranchName {
+        self.prefix_name
+    }
+
+    pub fn batch_id(&self) -> BatchId {
+        self.batch_id
+    }
+
+    pub fn as_query_branch_ref(&self) -> QueryBranchRef {
+        QueryBranchRef::from_batch_branch_key(*self)
+    }
+}
+
+impl std::fmt::Display for BatchBranchKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}-{}", self.prefix_name.as_str(), self.batch_id)
+    }
+}
+
+/// Internal branch reference used by query compilation and index access.
+///
+/// Composed batch branches keep their shared prefix and batch id in structured
+/// form, while also caching the full interned branch name for object lookups
+/// and row provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct QueryBranchRef {
+    key: BatchBranchKey,
+    branch_name: BranchName,
+}
+
+impl QueryBranchRef {
+    pub fn from_prefix_and_batch(prefix: &BranchPrefixName, batch_id: BatchId) -> Self {
+        let key = BatchBranchKey::from_prefix_and_batch(prefix, batch_id);
+        let branch_name = prefix.with_batch_id(batch_id).to_branch_name();
+        Self { key, branch_name }
+    }
+
+    pub fn from_prefix_name_and_batch(prefix_name: BranchName, batch_id: BatchId) -> Self {
+        let key = BatchBranchKey::from_prefix_name_and_batch(prefix_name, batch_id);
+        let branch_name = key.branch_name();
+        Self { key, branch_name }
+    }
+
+    pub fn from_branch_name(branch_name: impl Into<BranchName>) -> Self {
+        let branch_name = branch_name.into();
+        let key = BatchBranchKey::from_branch_name(branch_name);
+        Self { branch_name, key }
     }
 
     pub fn branch_name(&self) -> BranchName {
@@ -734,12 +780,23 @@ impl QueryBranchRef {
         self.branch_name.as_str()
     }
 
+    pub fn batch_branch_key(&self) -> BatchBranchKey {
+        self.key
+    }
+
     pub fn prefix_name(&self) -> BranchName {
-        self.prefix_name
+        self.key.prefix_name()
     }
 
     pub fn batch_id(&self) -> BatchId {
-        self.batch_id
+        self.key.batch_id()
+    }
+
+    pub fn from_batch_branch_key(key: BatchBranchKey) -> Self {
+        Self {
+            branch_name: key.branch_name(),
+            key,
+        }
     }
 }
 

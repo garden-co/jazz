@@ -1,7 +1,7 @@
 use super::*;
 use crate::commit::{Commit, StoredState};
 use crate::query_manager::policy::Operation;
-use crate::query_manager::types::{BatchId, BranchPrefixName, SchemaHash};
+use crate::query_manager::types::{BatchBranchKey, BatchId, BranchPrefixName, SchemaHash};
 use crate::storage::MemoryStorage;
 use smallvec::smallvec;
 use uuid::Uuid;
@@ -2113,7 +2113,7 @@ fn set_query_scope_stores_session() {
 
     let client = sm.get_client(client_id).expect("client should exist");
     let query = client.queries.get(&QueryId(1)).expect("query should exist");
-    let expected_scope = HashSet::from([(obj_id, main_branch())]);
+    let expected_scope = HashSet::from([(obj_id, BatchBranchKey::from_branch_name(main_branch()))]);
     assert_eq!(query.scope, expected_scope);
     let session = query
         .session

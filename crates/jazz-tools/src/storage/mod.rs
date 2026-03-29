@@ -25,7 +25,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId, PrefixBatchCatalog, PrefixBatchMeta};
-use crate::query_manager::types::{BatchId, QueryBranchRef, SchemaHash, ScopedObject, Value};
+use crate::query_manager::types::{
+    BatchBranchKey, BatchId, QueryBranchRef, SchemaHash, ScopedObject, Value,
+};
 use crate::sync_manager::DurabilityTier;
 
 // ============================================================================
@@ -677,7 +679,7 @@ pub struct MemoryStorage {
 struct ObjectData {
     metadata: HashMap<String, String>,
     branches: HashMap<BranchName, BranchData>,
-    commit_branches: HashMap<CommitId, BranchName>,
+    commit_branches: HashMap<CommitId, BatchBranchKey>,
     prefix_batches: HashMap<String, PrefixBatchCatalog>,
 }
 
@@ -992,7 +994,7 @@ impl Storage for MemoryStorage {
             .objects
             .get(&object_id)
             .and_then(|obj| obj.commit_branches.get(&commit_id).copied())
-            .map(QueryBranchRef::from_branch_name))
+            .map(QueryBranchRef::from_batch_branch_key))
     }
 
     fn load_prefix_batch_catalog(
@@ -1028,6 +1030,7 @@ impl Storage for MemoryStorage {
         let obj = self.objects.entry(object_id).or_default();
         let branch_name = branch.branch_name();
         let branch_data = obj.branches.entry(branch_name).or_default();
+        let branch_key = branch.batch_branch_key();
 
         let commit_id = commit.id();
 
@@ -1039,7 +1042,7 @@ impl Storage for MemoryStorage {
         // Add this commit as a tip
         branch_data.tails.insert(commit_id);
         branch_data.commits.push(commit);
-        obj.commit_branches.insert(commit_id, branch_name);
+        obj.commit_branches.insert(commit_id, branch_key);
 
         if let Some(update) = prefix_batch_update {
             let catalog = obj.prefix_batches.entry(update.prefix).or_default();
@@ -1068,6 +1071,7 @@ impl Storage for MemoryStorage {
         if let Some(obj) = self.objects.get_mut(&object_id) {
             let branch_name = branch.branch_name();
             let branch_data = obj.branches.entry(branch_name).or_default();
+            let branch_key = branch.batch_branch_key();
             let old_commit_ids: HashSet<CommitId> =
                 branch_data.commits.iter().map(Commit::id).collect();
             let new_commit_ids: HashSet<CommitId> = commits.iter().map(Commit::id).collect();
@@ -1076,7 +1080,7 @@ impl Storage for MemoryStorage {
                 obj.commit_branches.remove(removed_commit_id);
             }
             for commit in &commits {
-                obj.commit_branches.insert(commit.id(), branch_name);
+                obj.commit_branches.insert(commit.id(), branch_key);
             }
 
             branch_data.commits = commits;

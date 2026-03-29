@@ -791,6 +791,22 @@ fn composed_branch_name_with_batch_keeps_dashes_in_user_branch() {
 }
 
 #[test]
+fn batch_branch_key_roundtrips_through_branch_name_and_query_ref() {
+    use crate::object::BranchName;
+
+    let prefix = BranchPrefixName::new("dev", SchemaHash::from_bytes([0xef; 32]), "main");
+    let batch_id = BatchId::from_uuid(Uuid::from_u128(17));
+    let branch_name = prefix.with_batch_id(batch_id).to_branch_name();
+
+    let key = BatchBranchKey::from_branch_name(branch_name);
+
+    assert_eq!(key.prefix_name(), BranchName::new(prefix.branch_prefix()));
+    assert_eq!(key.batch_id(), batch_id);
+    assert_eq!(key.branch_name(), branch_name);
+    assert_eq!(key.as_query_branch_ref().branch_name(), branch_name);
+}
+
+#[test]
 fn composed_branch_name_parse_invalid() {
     use crate::object::BranchName;
 

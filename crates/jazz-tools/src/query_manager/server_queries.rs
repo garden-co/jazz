@@ -14,8 +14,8 @@ use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::policy_graph::PolicyGraph;
 use super::session::Session;
 use super::types::{
-    ComposedBranchName, LoadedRow, QueryBranchRef, RowDescriptor, Schema, TableName, TableSchema,
-    Value,
+    BatchBranchKey, ComposedBranchName, LoadedRow, QueryBranchRef, RowDescriptor, Schema,
+    TableName, TableSchema, Value,
 };
 
 enum WriteSchemaResolution {
@@ -34,6 +34,17 @@ pub(super) struct ResolvedSchemaRow {
 const SCHEMA_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl QueryManager {
+    fn compact_scope(
+        scope: HashSet<(ObjectId, BranchName)>,
+    ) -> HashSet<(ObjectId, BatchBranchKey)> {
+        scope
+            .into_iter()
+            .map(|(object_id, branch_name)| {
+                (object_id, BatchBranchKey::from_branch_name(branch_name))
+            })
+            .collect()
+    }
+
     pub(super) fn build_server_subscription_context(
         &self,
         ctx: &crate::schema_manager::QuerySchemaContext,
@@ -445,7 +456,7 @@ impl QueryManager {
                     schema_context: subscription_context,
                     session: session_for_policy,
                     branches,
-                    last_scope: scope,
+                    last_scope: Self::compact_scope(scope),
                     needs_recompile: false,
                     settled_once: false,
                     propagation: sub.propagation,
@@ -493,7 +504,7 @@ impl QueryManager {
         let mut scope_updates: Vec<(
             ClientId,
             QueryId,
-            HashSet<(ObjectId, BranchName)>,
+            HashSet<(ObjectId, BatchBranchKey)>,
             Option<Session>,
         )> = Vec::new();
         let mut settled_notifications: Vec<(ClientId, QueryId)> = Vec::new();
@@ -557,14 +568,14 @@ impl QueryManager {
                 // Check if scope changed
                 let result_scope = sub.graph.sync_scope_object_ids();
                 if trusted_clients.contains(client_id) {
-                    Self::scope_with_policy_context_rows_from_object_manager(
+                    Self::compact_scope(Self::scope_with_policy_context_rows_from_object_manager(
                         &result_scope,
                         &sub.graph,
                         branches,
                         om,
-                    )
+                    ))
                 } else {
-                    result_scope
+                    Self::compact_scope(result_scope)
                 }
             };
             if new_scope != sub.last_scope {
@@ -581,7 +592,7 @@ impl QueryManager {
         // Apply scope updates
         for (client_id, query_id, new_scope, session) in scope_updates {
             self.sync_manager
-                .set_client_query_scope(client_id, query_id, new_scope, session);
+                .set_client_query_scope_keys(client_id, query_id, new_scope, session);
         }
 
         // Emit QuerySettled notifications

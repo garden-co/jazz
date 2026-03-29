@@ -9,7 +9,9 @@ use crate::object::{
     Branch, BranchLoadedState, BranchName, Object, ObjectBranches, ObjectId, PrefixBatchCatalog,
     PrefixBatchMeta,
 };
-use crate::query_manager::types::{BranchPrefixName, ComposedBranchName, QueryBranchRef};
+use crate::query_manager::types::{
+    BatchBranchKey, BranchPrefixName, ComposedBranchName, QueryBranchRef,
+};
 use crate::storage::{LoadedBranch, LoadedBranchTips, PrefixBatchUpdate, Storage, StorageError};
 
 /// Unique identifier for a subscription.
@@ -25,7 +27,7 @@ pub struct AllObjectsSubscriptionId(pub u64);
 struct Subscription {
     object_id: ObjectId,
     branch_name: BranchName,
-    normalized_branch_name: BranchName,
+    normalized_branch_key: BatchBranchKey,
 }
 
 /// Update sent to subscribers when commits are added or loaded.
@@ -107,8 +109,8 @@ pub struct ObjectManager {
     pub objects: HashMap<ObjectId, Object>,
     next_subscription_id: u64,
     subscriptions: HashMap<SubscriptionId, Subscription>,
-    /// Index: (ObjectId, BranchName) → set of SubscriptionIds
-    branch_subscribers: HashMap<(ObjectId, BranchName), HashSet<SubscriptionId>>,
+    /// Index: (ObjectId, BatchBranchKey) → set of SubscriptionIds
+    branch_subscribers: HashMap<(ObjectId, BatchBranchKey), HashSet<SubscriptionId>>,
     pub subscription_outbox: Vec<SubscriptionUpdate>,
     /// Global (all-objects) subscriptions.
     all_object_subscriptions: HashSet<AllObjectsSubscriptionId>,
@@ -326,7 +328,9 @@ impl ObjectManager {
                     let commit_ids_for_branch: Vec<_> = branch.commits.keys().copied().collect();
                     object.branches.insert(bn, branch);
                     for commit_id in commit_ids_for_branch {
-                        object.commit_branches.insert(commit_id, bn);
+                        object
+                            .commit_branches
+                            .insert(commit_id, BatchBranchKey::from_branch_name(bn));
                     }
                 }
             } else if let Ok(Some(loaded)) = storage.load_branch_tips(id, &branch_ref) {
@@ -334,7 +338,9 @@ impl ObjectManager {
                 let commit_ids_for_branch: Vec<_> = branch.commits.keys().copied().collect();
                 object.branches.insert(bn, branch);
                 for commit_id in commit_ids_for_branch {
-                    object.commit_branches.insert(commit_id, bn);
+                    object
+                        .commit_branches
+                        .insert(commit_id, BatchBranchKey::from_branch_name(bn));
                 }
             }
         }
@@ -376,8 +382,8 @@ impl ObjectManager {
         object_id: ObjectId,
         commit_id: CommitId,
     ) -> Result<Option<BranchName>, Error> {
-        if let Some(branch_name) = object.commit_branches.get(&commit_id) {
-            return Ok(Some(*branch_name));
+        if let Some(branch_key) = object.commit_branches.get(&commit_id) {
+            return Ok(Some(branch_key.branch_name()));
         }
 
         io.load_commit_branch(object_id, commit_id)
@@ -631,7 +637,7 @@ impl ObjectManager {
                 object
                     .commit_branches
                     .entry(*parent_commit_id)
-                    .or_insert(*parent_branch_name);
+                    .or_insert(BatchBranchKey::from_branch_name(*parent_branch_name));
             }
         }
 
@@ -649,7 +655,9 @@ impl ObjectManager {
         branch.tips.insert(commit_id);
 
         branch.commits.insert(commit_id, commit);
-        object.commit_branches.insert(commit_id, branch_name);
+        object
+            .commit_branches
+            .insert(commit_id, BatchBranchKey::from_branch_name(branch_name));
 
         tracing::trace!(?commit_id, "commit applied");
 
@@ -946,7 +954,7 @@ impl ObjectManager {
                 object
                     .commit_branches
                     .entry(*parent_commit_id)
-                    .or_insert(*parent_branch_name);
+                    .or_insert(BatchBranchKey::from_branch_name(*parent_branch_name));
             }
         }
 
@@ -963,7 +971,9 @@ impl ObjectManager {
         branch.tips.insert(commit_id);
 
         branch.commits.insert(commit_id, commit);
-        object.commit_branches.insert(commit_id, branch_name);
+        object
+            .commit_branches
+            .insert(commit_id, BatchBranchKey::from_branch_name(branch_name));
 
         // Notify subscribers
         self.notify_subscribers_of_commit(object_id, branch_name);
@@ -990,20 +1000,21 @@ impl ObjectManager {
         branch_name: impl Into<BranchName>,
     ) -> SubscriptionId {
         let branch_name = branch_name.into();
-        let normalized_branch_name =
-            Self::normalize_loaded_branch_name(branch_name).unwrap_or(branch_name);
+        let normalized_branch_name = Self::normalize_loaded_branch_name(branch_name)
+            .expect("subscriptions require composed batch branches");
+        let normalized_branch_key = BatchBranchKey::from_branch_name(normalized_branch_name);
         let id = SubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
 
         let subscription = Subscription {
             object_id,
             branch_name,
-            normalized_branch_name,
+            normalized_branch_key,
         };
         self.subscriptions.insert(id, subscription);
 
         self.branch_subscribers
-            .entry((object_id, normalized_branch_name))
+            .entry((object_id, normalized_branch_key))
             .or_default()
             .insert(id);
 
@@ -1030,7 +1041,7 @@ impl ObjectManager {
         if let Some(sub) = self.subscriptions.remove(&subscription_id)
             && let Some(subscribers) = self
                 .branch_subscribers
-                .get_mut(&(sub.object_id, sub.normalized_branch_name))
+                .get_mut(&(sub.object_id, sub.normalized_branch_key))
         {
             subscribers.remove(&subscription_id);
         }
@@ -1112,7 +1123,7 @@ impl ObjectManager {
 
     /// Notify subscribers about a commit change - sends current frontier sorted by timestamp.
     fn notify_subscribers_of_commit(&mut self, object_id: ObjectId, branch_name: BranchName) {
-        let key = (object_id, branch_name);
+        let key = (object_id, BatchBranchKey::from_branch_name(branch_name));
         if let Some(subscriber_ids) = self.branch_subscribers.get(&key).cloned() {
             // Get current tips from the branch
             let commit_ids = if let Some(object) = self.get(object_id) {
@@ -1380,9 +1391,11 @@ impl ObjectManager {
             }
         }
 
-        for (commit_id, branch_name) in &obj.commit_branches {
+        for (commit_id, branch_key) in &obj.commit_branches {
             size += std::mem::size_of_val(commit_id);
-            size += branch_name.0.len() + 24;
+            size += branch_key.prefix_name().0.len()
+                + std::mem::size_of::<crate::query_manager::types::BatchId>()
+                + 24;
             size += 48;
         }
 

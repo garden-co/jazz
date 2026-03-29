@@ -9,6 +9,7 @@ use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
+use crate::query_manager::types::BatchBranchKey;
 use crate::schema_manager::QuerySchemaContext;
 
 /// Error returned when a policy denies an operation.
@@ -131,16 +132,18 @@ pub enum ClientRole {
 #[derive(Debug, Clone, Default)]
 pub struct ServerState {
     /// What we've pushed to this server: (object, branch) → set of commit tips.
-    pub sent_tips: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
+    pub sent_tips: HashMap<(ObjectId, BatchBranchKey), HashSet<CommitId>>,
     /// Object IDs for which we've sent metadata.
     pub sent_metadata: HashSet<ObjectId>,
 }
+
+pub type ScopedBranchKey = (ObjectId, BatchBranchKey);
 
 /// A query's scope and session for policy filtering.
 #[derive(Debug, Clone, Default)]
 pub struct QueryScope {
     /// The scope of objects/branches this query covers.
-    pub scope: HashSet<(ObjectId, BranchName)>,
+    pub scope: HashSet<ScopedBranchKey>,
     /// The session to use for policy filtering (captured at registration time).
     pub session: Option<Session>,
 }
@@ -155,7 +158,7 @@ pub struct ClientState {
     /// Active queries from this client.
     pub queries: HashMap<QueryId, QueryScope>,
     /// What we've sent to this client.
-    pub sent_tips: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
+    pub sent_tips: HashMap<ScopedBranchKey, HashSet<CommitId>>,
     /// Object IDs for which we've sent metadata.
     pub sent_metadata: HashSet<ObjectId>,
 }
@@ -171,9 +174,10 @@ impl ClientState {
 
     /// Check if an object/branch is in any of this client's query scopes.
     pub fn is_in_scope(&self, object_id: ObjectId, branch_name: &BranchName) -> bool {
+        let branch_key = BatchBranchKey::from_branch_name(*branch_name);
         self.queries
             .values()
-            .any(|q| q.scope.contains(&(object_id, *branch_name)))
+            .any(|q| q.scope.contains(&(object_id, branch_key)))
     }
 }
 

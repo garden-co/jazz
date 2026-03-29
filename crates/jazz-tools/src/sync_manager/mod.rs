@@ -355,19 +355,33 @@ impl SyncManager {
         scope: HashSet<(ObjectId, BranchName)>,
         session: Option<Session>,
     ) {
+        let scope = scope
+            .into_iter()
+            .filter_map(|(object_id, branch_name)| {
+                Self::normalize_branch_name(branch_name).map(|normalized| {
+                    (
+                        object_id,
+                        crate::query_manager::types::BatchBranchKey::from_branch_name(normalized),
+                    )
+                })
+            })
+            .collect();
+        self.set_client_query_scope_keys(client_id, query_id, scope, session);
+    }
+
+    pub(super) fn set_client_query_scope_keys(
+        &mut self,
+        client_id: ClientId,
+        query_id: QueryId,
+        scope: HashSet<ScopedBranchKey>,
+        session: Option<Session>,
+    ) {
         let Some(client) = self.clients.get_mut(&client_id) else {
             return;
         };
 
-        let scope: HashSet<(ObjectId, BranchName)> = scope
-            .into_iter()
-            .filter_map(|(object_id, branch_name)| {
-                Self::normalize_branch_name(branch_name).map(|normalized| (object_id, normalized))
-            })
-            .collect();
-
         // Collect all objects currently in any query scope
-        let old_scope: HashSet<(ObjectId, BranchName)> = client
+        let old_scope: HashSet<ScopedBranchKey> = client
             .queries
             .values()
             .flat_map(|q| q.scope.iter().cloned())
@@ -383,19 +397,19 @@ impl SyncManager {
         );
 
         // Collect all objects now in any query scope
-        let new_scope: HashSet<(ObjectId, BranchName)> = client
+        let new_scope: HashSet<ScopedBranchKey> = client
             .queries
             .values()
             .flat_map(|q| q.scope.iter().cloned())
             .collect();
 
         // Find newly visible (object, branch) pairs
-        let newly_visible: Vec<(ObjectId, BranchName)> =
+        let newly_visible: Vec<ScopedBranchKey> =
             new_scope.difference(&old_scope).cloned().collect();
 
         // Queue initial syncs for newly visible objects
-        for (object_id, branch_name) in newly_visible {
-            self.queue_initial_sync_to_client(client_id, object_id, branch_name);
+        for (object_id, branch_key) in newly_visible {
+            self.queue_initial_sync_to_client(client_id, object_id, branch_key.branch_name());
         }
     }
 

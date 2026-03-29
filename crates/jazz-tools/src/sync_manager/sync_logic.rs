@@ -1,6 +1,7 @@
 use super::*;
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
+use crate::query_manager::types::BatchBranchKey;
 use std::collections::{HashMap, HashSet};
 
 impl SyncManager {
@@ -64,7 +65,10 @@ impl SyncManager {
         };
         server.sent_metadata.extend(sent_metadata);
         for (object_id, branch_name, tips) in sent_tips {
-            server.sent_tips.insert((object_id, branch_name), tips);
+            server.sent_tips.insert(
+                (object_id, BatchBranchKey::from_branch_name(branch_name)),
+                tips,
+            );
         }
     }
 
@@ -142,9 +146,10 @@ impl SyncManager {
                 return;
             };
             let include_metadata = !server.sent_metadata.contains(&object_id);
+            let branch_key = BatchBranchKey::from_branch_name(branch_name);
             let already_sent = server
                 .sent_tips
-                .get(&(object_id, branch_name))
+                .get(&(object_id, branch_key))
                 .cloned()
                 .unwrap_or_default();
             (include_metadata, already_sent)
@@ -162,7 +167,10 @@ impl SyncManager {
         if include_metadata {
             server.sent_metadata.insert(object_id);
         }
-        server.sent_tips.insert((object_id, branch_name), tips);
+        server.sent_tips.insert(
+            (object_id, BatchBranchKey::from_branch_name(branch_name)),
+            tips,
+        );
         let payload_branch_name = Self::display_branch_name(branch_name);
 
         self.outbox.push(OutboxEntry {
@@ -260,10 +268,11 @@ impl SyncManager {
             let in_scope = !require_scope || client.is_in_scope(object_id, &branch_name);
 
             let include_metadata = !client.sent_metadata.contains(&object_id);
+            let branch_key = BatchBranchKey::from_branch_name(branch_name);
 
             let already_sent = client
                 .sent_tips
-                .get(&(object_id, branch_name))
+                .get(&(object_id, branch_key))
                 .cloned()
                 .unwrap_or_default();
 
@@ -286,7 +295,10 @@ impl SyncManager {
         if include_metadata {
             client.sent_metadata.insert(object_id);
         }
-        client.sent_tips.insert((object_id, branch_name), tips);
+        client.sent_tips.insert(
+            (object_id, BatchBranchKey::from_branch_name(branch_name)),
+            tips,
+        );
         let payload_branch_name = Self::display_branch_name(branch_name);
 
         self.outbox.push(OutboxEntry {

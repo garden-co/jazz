@@ -22,8 +22,8 @@ use super::policy_graph::PolicyGraph;
 use super::query::Query;
 use super::session::Session;
 use super::types::{
-    BatchId, ComposedBranchName, LoadedRow, OrderedRowDelta, QueryBranchRef, RowDelta,
-    RowDescriptor, Schema, SchemaHash, TableName, TableSchema, Value,
+    BatchBranchKey, BatchId, ComposedBranchName, LoadedRow, OrderedRowDelta, QueryBranchRef,
+    RowDelta, RowDescriptor, Schema, SchemaHash, TableName, TableSchema, Value,
     build_ordered_delta_with_post_ids,
 };
 
@@ -247,7 +247,7 @@ pub(super) struct ServerQuerySubscription {
     /// Resolved branches (from query.branches or schema context at creation time).
     pub(super) branches: Vec<QueryBranchRef>,
     /// Last computed scope (for detecting changes).
-    pub(super) last_scope: HashSet<(ObjectId, BranchName)>,
+    pub(super) last_scope: HashSet<(ObjectId, BatchBranchKey)>,
     /// Flag indicating this subscription needs recompilation due to schema change.
     pub(super) needs_recompile: bool,
     /// Flag indicating this server subscription has settled at least once.
