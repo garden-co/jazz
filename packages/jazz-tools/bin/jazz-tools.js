@@ -102,9 +102,10 @@ if (command === "mcp") {
   const { runServer } = await import(mcpPath);
   await runServer();
   // runServer resolves when stdin closes; process exits naturally.
+} else if (command === "build") {
+  fail("`jazz-tools build` has been renamed to `jazz-tools validate`.");
 } else if (
   command === "validate" ||
-  command === "build" ||
   command === "migrations" ||
   command === "permissions" ||
   command === "schema"
