@@ -740,15 +740,14 @@ describe("bin integration", () => {
     expect(result.stderr).toContain("Schema file not found");
   });
 
-  it("keeps build as a compatibility alias", async () => {
+  it("rejects the removed build alias with a validate hint", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
 
     const result = runBin(["build", "--schema-dir", root]);
 
-    expect(result.status).toBe(0);
-    expect(await fileExists(join(root, "schema", "current.sql"))).toBe(false);
-    expect(await fileExists(join(root, "schema", "app.ts"))).toBe(false);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("renamed to `jazz-tools validate`");
   });
 
   it("routes schema export through the TypeScript CLI", async () => {

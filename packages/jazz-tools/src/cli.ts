@@ -88,9 +88,6 @@ export async function validate(options: BuildOptions): Promise<void> {
   console.log(`Validated ${tableCount} table${tableCount === 1 ? "" : "s"} in schema.ts.`);
 }
 
-// Backwards-compatible alias while docs and call sites move to `validate`.
-export const build = validate;
-
 export async function exportSchema(options: SchemaExportOptions): Promise<void> {
   if (options.format !== "json") {
     throw new Error(`Unsupported schema export format: ${options.format}`);
@@ -906,7 +903,7 @@ function isMainModule(): boolean {
 if (isMainModule()) {
   const command = process.argv[2] ?? "";
 
-  if (command === "validate" || command === "build") {
+  if (command === "validate") {
     const { options } = parseArgs();
     validate(options).catch((err) => {
       console.error(err.message);

@@ -37,7 +37,7 @@ npm run build              # Validate schema.ts + production build
 
 ## Schema
 
-Defined in `schema.ts` using the Jazz typed schema DSL. Running `pnpm build` validates `schema.ts`; the app imports the typed `app` export directly from that file.
+Defined in `schema.ts` using the Jazz typed schema DSL. Running `pnpm build` runs `jazz-tools validate` before the production build; the app imports the typed `app` export directly from that file.
 
 - **instruments** — name, sound (BYTEA), display_order
 - **jams** — created_at, transport_start (nullable), bpm, beat_count
