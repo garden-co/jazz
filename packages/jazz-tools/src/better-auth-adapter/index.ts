@@ -94,6 +94,10 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           });
 
           return config.db().all(qb, { tier: durabilityTier }) as Promise<JazzRowRecord[]>;
+        } else {
+          console.warn(
+            `Query not supported yet by Jazz engine: ${JSON.stringify(options.where?.map((c) => ({ ...c, value: typeof c.value === "string" ? "..." : c.value })))}`,
+          );
         }
 
         const qb = createQueryBuilder(table, wasmSchema);

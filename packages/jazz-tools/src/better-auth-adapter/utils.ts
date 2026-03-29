@@ -17,7 +17,7 @@ export function isQuerySupported(tableSchema: WasmSchema[string], where?: Cleane
 
   const getSupportedOperators = (fieldName: string): ReadonlySet<string> | undefined => {
     if (fieldName === "id") {
-      return new Set(["eq", "ne", "gt", "gte", "lt", "lte"]);
+      return new Set(["eq", "ne"]);
     }
 
     const column = columnByName.get(fieldName);
