@@ -2528,6 +2528,15 @@ mod tests {
         let filtered_query = QueryBuilder::new("users")
             .filter_eq("name", QueryValue::Text("Alice".to_string()))
             .build();
+        let schema_context = state
+            .runtime
+            .with_schema_manager(|schema_manager| {
+                schema_manager
+                    .query_manager()
+                    .schema_context()
+                    .query_context()
+            })
+            .expect("query schema context");
 
         for (index, query, propagation) in [
             (1_u64, repeated_query.clone(), QueryPropagation::Full),
@@ -2544,6 +2553,7 @@ mod tests {
                     payload: SyncPayload::QuerySubscription {
                         query_id: QueryId(index),
                         query: Box::new(query),
+                        schema_context: schema_context.clone(),
                         session: None,
                         propagation,
                     },

@@ -19,7 +19,10 @@ use crate::query_manager::types::{
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 use crate::storage::FjallStorage;
 use crate::storage::{MemoryStorage, Storage};
-use crate::sync_manager::SyncManager;
+use crate::sync_manager::{
+    ClientId, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation, SyncManager,
+    SyncPayload,
+};
 
 fn test_schema() -> Schema {
     let mut schema = Schema::new();
@@ -790,6 +793,48 @@ fn recursive_hop_query_subscriptions_receive_expansion_updates() {
     assert!(
         added_names.contains(&"team-3".to_string()),
         "team-3 should be added when edge team-2 -> team-3 is inserted"
+    );
+}
+
+#[test]
+fn process_ignores_non_write_pending_permission_checks_without_schema_context() {
+    let mut qm = QueryManager::new(SyncManager::new());
+    let mut storage = MemoryStorage::new();
+
+    qm.sync_manager_mut()
+        .requeue_pending_permission_checks(vec![PendingPermissionCheck {
+            id: PendingUpdateId(1),
+            client_id: ClientId::new(),
+            payload: SyncPayload::QuerySubscription {
+                query_id: QueryId(1),
+                query: Box::new(QueryBuilder::new("users").build()),
+                schema_context: crate::schema_manager::QuerySchemaContext::new(
+                    "dev",
+                    crate::query_manager::types::SchemaHash::from_bytes([1; 32]),
+                    "main",
+                    BatchId::nil(),
+                ),
+                session: None,
+                propagation: QueryPropagation::Full,
+            },
+            session: PolicySession::new("alice"),
+            schema_wait_started_at: None,
+            metadata: std::collections::HashMap::from([(
+                MetadataKey::Table.as_str().to_string(),
+                "users".to_string(),
+            )]),
+            old_content: None,
+            new_content: None,
+            operation: crate::query_manager::policy::Operation::Insert,
+        }]);
+
+    qm.process(&mut storage);
+
+    assert!(
+        qm.sync_manager_mut()
+            .take_pending_permission_checks()
+            .is_empty(),
+        "unexpected payload should be dropped instead of retrying or panicking"
     );
 }
 

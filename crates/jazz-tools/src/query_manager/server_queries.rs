@@ -1191,15 +1191,25 @@ impl QueryManager {
             }
         };
 
-        let branch_name = match &check.payload {
-            SyncPayload::ObjectUpdated { branch_name, .. } => *branch_name,
-            SyncPayload::ObjectTruncated { branch_name, .. } => *branch_name,
-            _ => self.current_branch(),
-        };
-        let object_id = match &check.payload {
-            SyncPayload::ObjectUpdated { object_id, .. } => *object_id,
-            SyncPayload::ObjectTruncated { object_id, .. } => *object_id,
-            _ => ObjectId::new(),
+        let (object_id, branch_name) = match &check.payload {
+            SyncPayload::ObjectUpdated {
+                object_id,
+                branch_name,
+                ..
+            }
+            | SyncPayload::ObjectTruncated {
+                object_id,
+                branch_name,
+                ..
+            } => (*object_id, *branch_name),
+            payload => {
+                tracing::error!(
+                    operation = ?check.operation,
+                    payload = payload.variant_name(),
+                    "dropping unexpected non-write payload in pending permission check"
+                );
+                return;
+            }
         };
 
         let branch_table_schema = match self.resolve_write_table_schema(table_name, branch_name) {
