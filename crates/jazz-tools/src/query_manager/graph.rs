@@ -410,33 +410,45 @@ impl QueryGraph {
     /// 1. Come from an IndexScanNode (source of all objects)
     /// 2. Survive all filtering/joins to appear in the output
     ///
-    /// After calling `settle()`, this method returns the (ObjectId, BranchName) pairs
-    /// for all rows currently in the query result.
-    pub fn contributing_object_ids(&self) -> HashSet<(ObjectId, BranchName)> {
+    /// After calling `settle()`, this method returns the compact `(ObjectId, BatchBranchKey)`
+    /// pairs for all rows currently in the query result.
+    pub fn contributing_object_keys(&self) -> HashSet<super::types::ScopedObject> {
         self.scope_from_tuples(&self.current_output_tuples())
+    }
+
+    /// Returns ObjectIds contributing to current result set along with full branch names.
+    pub fn contributing_object_ids(&self) -> HashSet<(ObjectId, BranchName)> {
+        self.contributing_object_keys()
+            .into_iter()
+            .map(|(object_id, branch_key)| (object_id, branch_key.branch_name()))
+            .collect()
     }
 
     /// Returns ObjectIds that must be synced for the client to reproduce the
     /// current query result locally.
-    pub fn sync_scope_object_ids(&self) -> HashSet<(ObjectId, BranchName)> {
+    pub fn sync_scope_object_keys(&self) -> HashSet<super::types::ScopedObject> {
         if let Some(node_id) = self.pagination_node
             && let Some(GraphNode::LimitOffset(limit_offset)) = self.get_node(node_id)
         {
             return self.scope_from_tuples(limit_offset.sync_input_tuples());
         }
 
-        self.contributing_object_ids()
+        self.contributing_object_keys()
     }
 
-    fn scope_from_tuples(&self, tuples: &[Tuple]) -> HashSet<(ObjectId, BranchName)> {
+    /// Returns ObjectIds that must be synced for the client to reproduce the
+    /// current query result locally, with full branch names at the API boundary.
+    pub fn sync_scope_object_ids(&self) -> HashSet<(ObjectId, BranchName)> {
+        self.sync_scope_object_keys()
+            .into_iter()
+            .map(|(object_id, branch_key)| (object_id, branch_key.branch_name()))
+            .collect()
+    }
+
+    fn scope_from_tuples(&self, tuples: &[Tuple]) -> HashSet<super::types::ScopedObject> {
         tuples
             .iter()
-            .flat_map(|tuple| {
-                tuple
-                    .provenance()
-                    .iter()
-                    .map(|(object_id, branch_key)| (*object_id, branch_key.branch_name()))
-            })
+            .flat_map(|tuple| tuple.provenance().iter().copied())
             .collect()
     }
 

@@ -34,17 +34,6 @@ pub(super) struct ResolvedSchemaRow {
 const SCHEMA_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl QueryManager {
-    fn compact_scope(
-        scope: HashSet<(ObjectId, BranchName)>,
-    ) -> HashSet<(ObjectId, BatchBranchKey)> {
-        scope
-            .into_iter()
-            .map(|(object_id, branch_name)| {
-                (object_id, BatchBranchKey::from_branch_name(branch_name))
-            })
-            .collect()
-    }
-
     pub(super) fn build_server_subscription_context(
         &self,
         ctx: &crate::schema_manager::QuerySchemaContext,
@@ -246,11 +235,11 @@ impl QueryManager {
     }
 
     fn scope_with_policy_context_rows_from_object_manager(
-        base_scope: &HashSet<(ObjectId, BranchName)>,
+        base_scope: &HashSet<(ObjectId, BatchBranchKey)>,
         graph: &super::graph::QueryGraph,
         branches: &[QueryBranchRef],
         object_manager: &crate::object_manager::ObjectManager,
-    ) -> HashSet<(ObjectId, BranchName)> {
+    ) -> HashSet<(ObjectId, BatchBranchKey)> {
         let mut scope = base_scope.clone();
 
         let policy_tables: HashSet<TableName> = graph
@@ -262,8 +251,10 @@ impl QueryManager {
             return scope;
         }
 
-        let branch_names: Vec<BranchName> =
-            branches.iter().map(QueryBranchRef::branch_name).collect();
+        let branch_keys: Vec<BatchBranchKey> = branches
+            .iter()
+            .map(QueryBranchRef::batch_branch_key)
+            .collect();
         for (object_id, object) in &object_manager.objects {
             let Some(table_name) = object.metadata.get(MetadataKey::Table.as_str()) else {
                 continue;
@@ -275,12 +266,12 @@ impl QueryManager {
                 continue;
             }
 
-            for branch_name in &branch_names {
-                let Some(branch) = object.branches.get(branch_name) else {
+            for branch_key in &branch_keys {
+                let Some(branch) = object.branches.get(&branch_key.branch_name()) else {
                     continue;
                 };
                 if Self::branch_has_live_tip(branch) {
-                    scope.insert((*object_id, *branch_name));
+                    scope.insert((*object_id, *branch_key));
                 }
             }
         }
@@ -416,7 +407,7 @@ impl QueryManager {
 
             // Sync the rows needed for the client to reproduce the current result
             // locally, including any ordered prefix required by pagination.
-            let result_scope = graph.sync_scope_object_ids();
+            let result_scope = graph.sync_scope_object_keys();
             // Trusted clients (Peer/Admin) also need policy context rows.
             let scope = if sync_policy_context_rows {
                 Self::scope_with_policy_context_rows_from_object_manager(
@@ -430,7 +421,7 @@ impl QueryManager {
             };
 
             // Set scope in SyncManager (triggers initial sync)
-            self.sync_manager.set_client_query_scope(
+            self.sync_manager.set_client_query_scope_keys(
                 sub.client_id,
                 sub.query_id,
                 scope.clone(),
@@ -458,7 +449,7 @@ impl QueryManager {
                     schema_context: subscription_context,
                     session: session_for_policy,
                     branches,
-                    last_scope: Self::compact_scope(scope),
+                    last_scope: scope,
                     needs_recompile: false,
                     settled_once: false,
                     propagation: sub.propagation,
@@ -570,16 +561,16 @@ impl QueryManager {
                 }
 
                 // Check if scope changed
-                let result_scope = sub.graph.sync_scope_object_ids();
+                let result_scope = sub.graph.sync_scope_object_keys();
                 if trusted_clients.contains(client_id) {
-                    Self::compact_scope(Self::scope_with_policy_context_rows_from_object_manager(
+                    Self::scope_with_policy_context_rows_from_object_manager(
                         &result_scope,
                         &sub.graph,
                         branches,
                         om,
-                    ))
+                    )
                 } else {
-                    Self::compact_scope(result_scope)
+                    result_scope
                 }
             };
             if new_scope != sub.last_scope {
