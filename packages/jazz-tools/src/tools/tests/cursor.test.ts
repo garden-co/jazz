@@ -37,7 +37,7 @@ describe("`encodeCursor` and `decodeAndValidateCursor`", () => {
 
   it("roundtrips a valid cursor", () => {
     const decodedCursor = buildCursor({
-      resolveFingerprint: { profile: { name: true }, friends: { $each: true } },
+      resolveFingerprint: { profile: { name: {} }, friends: { $each: {} } },
       frontiers: {
         co_zRoot: { [sessionA]: 3, [sessionB]: 9 },
         co_zChild: { [sessionA]: 1 },
@@ -112,8 +112,8 @@ describe("`encodeCursor` and `decodeAndValidateCursor`", () => {
 
     const canonicalExpected = buildCursor({
       resolveFingerprint: {
-        profile: { name: true, email: true },
-        friends: { $each: true },
+        profile: { name: {}, email: {} },
+        friends: { $each: {} },
       },
       frontiers: {
         co_zRoot: { [sessionA]: 3, [sessionB]: 9 },
@@ -140,7 +140,22 @@ describe("`encodeCursor` and `decodeAndValidateCursor`", () => {
 
   it("accepts resolve as subset of cursor resolveFingerprint", () => {
     const decodedCursor = buildCursor({
-      resolveFingerprint: { pet: true, friends: true },
+      resolveFingerprint: { pet: {}, friends: {} },
+    });
+    const encoded = encodeCursor(decodedCursor);
+
+    const decoded = decodeAndValidateCursor({
+      cursor: encoded,
+      rootId,
+      resolve: { pet: true },
+    });
+
+    expect(decoded).toEqual(decodedCursor);
+  });
+
+  it("accepts deep `true` in resolve as subset of cursor resolveFingerprint", () => {
+    const decodedCursor = buildCursor({
+      resolveFingerprint: { pet: { animalFriends: {} }, friends: {} },
     });
     const encoded = encodeCursor(decodedCursor);
 
@@ -186,7 +201,7 @@ describe("`encodeCursor` and `decodeAndValidateCursor`", () => {
       }),
     ).toThrowError(
       new CursorError(
-        'Invalid cursor: resolve query mismatch. Expected {"profile":{"email":true}} to be a subset of {"profile":{"name":true}}',
+        'Invalid cursor: resolve query mismatch. Expected {"profile":{"email":{}}} to be a subset of {"profile":{"name":{}}}',
       ),
     );
   });
@@ -205,7 +220,7 @@ describe("`encodeCursor` and `decodeAndValidateCursor`", () => {
       }),
     ).toThrowError(
       new CursorError(
-        'Invalid cursor: resolve query mismatch. Expected {"profile":{"name":true,"email":true}} to be a subset of {"profile":{"name":true}}',
+        'Invalid cursor: resolve query mismatch. Expected {"profile":{"name":{},"email":{}}} to be a subset of {"profile":{"name":{}}}',
       ),
     );
   });

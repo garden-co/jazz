@@ -19,6 +19,27 @@ export class CursorError extends Error {
   }
 }
 
+export const normalizeResolveForFingerprint = (
+  resolve: RefsToResolve<any>,
+): RefsToResolve<any> => {
+  if (resolve === true) {
+    return {};
+  }
+
+  if (typeof resolve === "object") {
+    return Object.fromEntries(
+      Object.entries(resolve)
+        .filter(([k]) => k !== "$onError")
+        .map(([k, v]) => [
+          k,
+          normalizeResolveForFingerprint(v as RefsToResolve<any>),
+        ]),
+    );
+  }
+
+  return resolve;
+};
+
 export const encodeCursor = (
   decodedCursor: Omit<DecodedCoValueCursor, "resolveFingerprint"> & {
     resolveFingerprint: DecodedCoValueCursor["resolveFingerprint"] | boolean;
@@ -29,11 +50,9 @@ export const encodeCursor = (
     textEncoder.encode(
       cojsonInternals.stableStringify({
         ...decodedCursor,
-        resolveFingerprint:
-          decodedCursor.resolveFingerprint === true ||
-          !decodedCursor.resolveFingerprint
-            ? {}
-            : decodedCursor.resolveFingerprint,
+        resolveFingerprint: normalizeResolveForFingerprint(
+          decodedCursor.resolveFingerprint,
+        ),
       }),
     ),
   )}`;
@@ -73,7 +92,7 @@ export const decodeAndValidateCursor = ({
     throw new CursorError("Invalid cursor: root CoValue ID mismatch");
   }
 
-  const normalizedResolve = resolve === true ? {} : resolve;
+  const normalizedResolve = normalizeResolveForFingerprint(resolve);
 
   if (
     !isSubsetOfRefsToResolve(
