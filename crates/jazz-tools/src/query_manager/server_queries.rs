@@ -406,7 +406,9 @@ impl QueryManager {
                 Some(LoadedRow::new(
                     resolved.content,
                     resolved.commit_id,
-                    [(id, resolved.branch_name)].into_iter().collect(),
+                    [(id, BatchBranchKey::from_branch_name(resolved.branch_name))]
+                        .into_iter()
+                        .collect(),
                 ))
             };
 
@@ -551,7 +553,9 @@ impl QueryManager {
                 Some(LoadedRow::new(
                     resolved.content,
                     resolved.commit_id,
-                    [(id, resolved.branch_name)].into_iter().collect(),
+                    [(id, BatchBranchKey::from_branch_name(resolved.branch_name))]
+                        .into_iter()
+                        .collect(),
                 ))
             };
 
@@ -1293,7 +1297,9 @@ impl QueryManager {
                 Some(LoadedRow::new(
                     commit.content.clone(),
                     *tip_id,
-                    [(id, branch)].into_iter().collect(),
+                    [(id, BatchBranchKey::from_branch_name(branch))]
+                        .into_iter()
+                        .collect(),
                 ))
             };
 

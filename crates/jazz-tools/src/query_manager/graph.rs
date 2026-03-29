@@ -431,7 +431,12 @@ impl QueryGraph {
     fn scope_from_tuples(&self, tuples: &[Tuple]) -> HashSet<(ObjectId, BranchName)> {
         tuples
             .iter()
-            .flat_map(|tuple| tuple.provenance().iter().copied())
+            .flat_map(|tuple| {
+                tuple
+                    .provenance()
+                    .iter()
+                    .map(|(object_id, branch_key)| (*object_id, branch_key.branch_name()))
+            })
             .collect()
     }
 

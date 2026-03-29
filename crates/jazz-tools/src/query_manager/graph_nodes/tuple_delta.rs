@@ -199,7 +199,8 @@ fn has_tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
 mod tests {
     use super::*;
     use crate::commit::CommitId;
-    use crate::object::{BranchName, ObjectId};
+    use crate::object::ObjectId;
+    use crate::query_manager::types::{BatchBranchKey, BatchId, BranchPrefixName, SchemaHash};
 
     fn id_tuple(ids: &[ObjectId]) -> Tuple {
         Tuple::new(ids.iter().copied().map(TupleElement::Id).collect())
@@ -258,9 +259,17 @@ mod tests {
     #[test]
     fn compute_tuple_delta_reports_provenance_only_updates() {
         let id = ObjectId::new();
-        let branch = BranchName::new("main");
+        let branch = BranchPrefixName::new("dev", SchemaHash::from_bytes([7; 32]), "main")
+            .with_batch_id(BatchId::nil())
+            .to_branch_name();
         let old = vec![id_tuple(&[id])];
-        let new = vec![id_tuple(&[id]).with_provenance([(id, branch)].into_iter().collect())];
+        let new = vec![
+            id_tuple(&[id]).with_provenance(
+                [(id, BatchBranchKey::from_branch_name(branch))]
+                    .into_iter()
+                    .collect(),
+            ),
+        ];
 
         let delta = compute_tuple_delta(&old, &new);
 

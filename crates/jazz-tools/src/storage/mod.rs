@@ -417,9 +417,9 @@ pub trait Storage {
     ) -> Vec<ScopedObject> {
         let mut scoped_ids = HashSet::new();
         for branch in branches {
-            let branch_name = branch.branch_name();
+            let branch_key = branch.batch_branch_key();
             for row_id in self.index_lookup(table, column, branch, value) {
-                scoped_ids.insert((row_id, branch_name));
+                scoped_ids.insert((row_id, branch_key));
             }
         }
         scoped_ids.into_iter().collect()
@@ -436,9 +436,9 @@ pub trait Storage {
     ) -> Vec<ScopedObject> {
         let mut scoped_ids = HashSet::new();
         for branch in branches {
-            let branch_name = branch.branch_name();
+            let branch_key = branch.batch_branch_key();
             for row_id in self.index_range(table, column, branch, start, end) {
-                scoped_ids.insert((row_id, branch_name));
+                scoped_ids.insert((row_id, branch_key));
             }
         }
         scoped_ids.into_iter().collect()
@@ -453,9 +453,9 @@ pub trait Storage {
     ) -> Vec<ScopedObject> {
         let mut scoped_ids = HashSet::new();
         for branch in branches {
-            let branch_name = branch.branch_name();
+            let branch_key = branch.batch_branch_key();
             for row_id in self.index_scan_all(table, column, branch) {
-                scoped_ids.insert((row_id, branch_name));
+                scoped_ids.insert((row_id, branch_key));
             }
         }
         scoped_ids.into_iter().collect()

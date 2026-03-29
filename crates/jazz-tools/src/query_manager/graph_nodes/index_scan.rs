@@ -1,6 +1,6 @@
 use ahash::{AHashMap, AHashSet};
 
-use crate::object::{BranchName, ObjectId};
+use crate::object::ObjectId;
 use crate::query_manager::index::ScanCondition;
 use crate::query_manager::types::{
     ColumnName, QueryBranchRef, RowDescriptor, ScopedObject, TableName, Tuple, TupleDelta,
@@ -68,7 +68,7 @@ impl IndexScanNode {
     }
 
     fn merged_scoped_tuples(scoped_rows: Vec<ScopedObject>) -> Vec<Tuple> {
-        let mut provenance_by_id = AHashMap::<ObjectId, AHashSet<(ObjectId, BranchName)>>::new();
+        let mut provenance_by_id = AHashMap::<ObjectId, AHashSet<ScopedObject>>::new();
         for (row_id, branch_name) in scoped_rows {
             provenance_by_id
                 .entry(row_id)

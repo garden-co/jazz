@@ -839,7 +839,9 @@ impl QueryManager {
                 Some(LoadedRow::new(
                     resolved.content,
                     resolved.commit_id,
-                    [(id, resolved.branch_name)].into_iter().collect(),
+                    [(id, BatchBranchKey::from_branch_name(resolved.branch_name))]
+                        .into_iter()
+                        .collect(),
                 ))
             };
 

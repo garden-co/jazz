@@ -10,7 +10,8 @@ use super::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::session::Session;
 use super::types::{
-    ColumnType, ComposedBranchName, LoadedRow, QueryBranchRef, RowDescriptor, TableName, Value,
+    BatchBranchKey, ColumnType, ComposedBranchName, LoadedRow, QueryBranchRef, RowDescriptor,
+    TableName, Value,
 };
 
 pub struct RowBranchWrite<'a> {
@@ -798,7 +799,9 @@ impl QueryManager {
             Some(LoadedRow::new(
                 commit.content.clone(),
                 *tip_id,
-                [(id, branch_name)].into_iter().collect(),
+                [(id, BatchBranchKey::from_branch_name(branch_name))]
+                    .into_iter()
+                    .collect(),
             ))
         };
 

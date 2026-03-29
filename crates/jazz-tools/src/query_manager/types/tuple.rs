@@ -4,6 +4,7 @@ use ahash::AHashSet;
 
 use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
+use crate::query_manager::types::BatchBranchKey;
 
 use super::encoding::{decode_row, encode_row};
 use super::*;
@@ -83,7 +84,7 @@ impl TupleElement {
 #[derive(Clone, Debug)]
 pub struct Tuple(pub Vec<TupleElement>, pub TupleProvenance);
 
-pub type ScopedObject = (ObjectId, BranchName);
+pub type ScopedObject = (ObjectId, BatchBranchKey);
 pub type TupleProvenance = AHashSet<ScopedObject>;
 
 #[derive(Clone, Debug)]
@@ -123,7 +124,9 @@ impl Tuple {
     pub fn from_scoped_id(id: ObjectId, branch: BranchName) -> Self {
         Self::new_with_provenance(
             vec![TupleElement::Id(id)],
-            [(id, branch)].into_iter().collect(),
+            [(id, BatchBranchKey::from_branch_name(branch))]
+                .into_iter()
+                .collect(),
         )
     }
 
