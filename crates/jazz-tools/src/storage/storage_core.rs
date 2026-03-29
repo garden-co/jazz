@@ -7,7 +7,7 @@ use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId, PrefixBatchCatalog, PrefixBatchMeta};
 use crate::sync_manager::DurabilityTier;
 
-use crate::query_manager::types::{BatchId, BatchOrd, QueryBranchRef, Value};
+use crate::query_manager::types::{BatchBranchKey, BatchId, BatchOrd, QueryBranchRef, Value};
 
 use super::key_codec::{
     ack_key, branch_manifest_key, branch_segment_key, catalogue_manifest_op_key,
@@ -343,17 +343,17 @@ fn persist_prefix_batch_catalog(
     set(&key, &data)
 }
 
-pub(super) fn load_table_prefix_branches_core(
+pub(super) fn load_table_prefix_batch_keys_core(
     table: &str,
     prefix: BranchName,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Vec<QueryBranchRef>, StorageError> {
+) -> Result<Vec<BatchBranchKey>, StorageError> {
     let key = table_prefix_batches_key(table, prefix.as_str());
     let manifest: TablePrefixBatchManifest = match get(&key)? {
         Some(data) => decode_postcard(&data, "table prefix active batches")?,
         None => TablePrefixBatchManifest::default(),
     };
-    Ok(manifest.branch_refs(prefix))
+    Ok(manifest.branch_keys(prefix))
 }
 
 pub(super) fn adjust_table_prefix_batch_refcount_core(

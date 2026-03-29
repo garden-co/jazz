@@ -152,10 +152,10 @@ impl TablePrefixBatchManifest {
             .map(|index| self.lookup_by_id[index].batch_ord)
     }
 
-    pub fn branch_refs(&self, prefix: BranchName) -> Vec<QueryBranchRef> {
+    pub fn branch_keys(&self, prefix: BranchName) -> Vec<BatchBranchKey> {
         self.entries_by_ord
             .iter()
-            .map(|entry| QueryBranchRef::from_prefix_name_and_batch(prefix, entry.batch_id))
+            .map(|entry| BatchBranchKey::from_prefix_name_and_batch(prefix, entry.batch_id))
             .collect()
     }
 
@@ -316,11 +316,24 @@ pub trait Storage {
     ) -> Result<Option<PrefixBatchCatalog>, StorageError>;
 
     /// Load all currently indexed table batches for one shared batch prefix.
+    fn load_table_prefix_batch_keys(
+        &self,
+        table: &str,
+        prefix: BranchName,
+    ) -> Result<Vec<BatchBranchKey>, StorageError>;
+
     fn load_table_prefix_branches(
         &self,
         table: &str,
         prefix: BranchName,
-    ) -> Result<Vec<QueryBranchRef>, StorageError>;
+    ) -> Result<Vec<QueryBranchRef>, StorageError> {
+        self.load_table_prefix_batch_keys(table, prefix)
+            .map(|keys| {
+                keys.into_iter()
+                    .map(QueryBranchRef::from_batch_branch_key)
+                    .collect()
+            })
+    }
 
     /// Append a commit to a branch.
     fn append_commit(
@@ -549,12 +562,12 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).load_prefix_batch_catalog(object_id, prefix)
     }
 
-    fn load_table_prefix_branches(
+    fn load_table_prefix_batch_keys(
         &self,
         table: &str,
         prefix: BranchName,
-    ) -> Result<Vec<QueryBranchRef>, StorageError> {
-        (**self).load_table_prefix_branches(table, prefix)
+    ) -> Result<Vec<BatchBranchKey>, StorageError> {
+        (**self).load_table_prefix_batch_keys(table, prefix)
     }
 
     fn append_commit(
@@ -1035,15 +1048,15 @@ impl Storage for MemoryStorage {
             .and_then(|obj| obj.prefix_batches.get(prefix).cloned()))
     }
 
-    fn load_table_prefix_branches(
+    fn load_table_prefix_batch_keys(
         &self,
         table: &str,
         prefix: BranchName,
-    ) -> Result<Vec<QueryBranchRef>, StorageError> {
+    ) -> Result<Vec<BatchBranchKey>, StorageError> {
         Ok(self
             .table_batches_by_prefix
             .get(&(table.to_string(), prefix))
-            .map(|manifest| manifest.branch_refs(prefix))
+            .map(|manifest| manifest.branch_keys(prefix))
             .unwrap_or_default())
     }
 

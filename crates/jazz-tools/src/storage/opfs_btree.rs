@@ -32,7 +32,7 @@ use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::BatchId;
 #[cfg(test)]
 use crate::query_manager::types::SchemaHash;
-use crate::query_manager::types::{QueryBranchRef, Value};
+use crate::query_manager::types::{BatchBranchKey, QueryBranchRef, Value};
 use crate::sync_manager::DurabilityTier;
 
 #[cfg(test)]
@@ -47,7 +47,7 @@ use super::{
         index_insert_core, index_lookup_core, index_range_core, index_remove_core,
         index_scan_all_core, load_branch_core, load_branch_tips_core, load_catalogue_manifest_core,
         load_commit_branch_core, load_object_metadata_core, load_prefix_batch_catalog_core,
-        load_table_prefix_branches_core, replace_branch_core, store_ack_tier_core,
+        load_table_prefix_batch_keys_core, replace_branch_core, store_ack_tier_core,
     },
 };
 
@@ -383,12 +383,12 @@ impl Storage for OpfsBTreeStorage {
         load_prefix_batch_catalog_core(object_id, prefix, |key| self.tree_read(key))
     }
 
-    fn load_table_prefix_branches(
+    fn load_table_prefix_batch_keys(
         &self,
         table: &str,
         prefix: BranchName,
-    ) -> Result<Vec<QueryBranchRef>, StorageError> {
-        load_table_prefix_branches_core(table, prefix, |key| self.tree_read(key))
+    ) -> Result<Vec<BatchBranchKey>, StorageError> {
+        load_table_prefix_batch_keys_core(table, prefix, |key| self.tree_read(key))
     }
 
     fn append_commit(

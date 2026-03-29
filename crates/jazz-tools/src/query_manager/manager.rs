@@ -497,27 +497,35 @@ impl QueryManager {
         table: &str,
         schema_context: &SchemaContext,
     ) -> Result<Vec<QueryBranchRef>, StorageError> {
-        let mut branches = Vec::new();
+        let mut branch_keys = Vec::new();
 
         for branch_name in schema_context.all_branch_names() {
             let Some(composed_branch) = ComposedBranchName::parse(&branch_name) else {
-                branches.push(QueryBranchRef::from_branch_name(branch_name));
+                branch_keys.push(BatchBranchKey::from_branch_name(branch_name));
                 continue;
             };
 
             let prefix = BranchName::new(composed_branch.prefix().branch_prefix());
-            let mut prefix_branches = storage.load_table_prefix_branches(table, prefix)?;
+            let mut prefix_branches = storage.load_table_prefix_batch_keys(table, prefix)?;
 
             if prefix_branches.is_empty() {
-                branches.push(QueryBranchRef::from_branch_name(branch_name));
+                branch_keys.push(BatchBranchKey::from_branch_name(branch_name));
             } else {
-                branches.append(&mut prefix_branches);
+                branch_keys.append(&mut prefix_branches);
             }
         }
 
-        branches.sort_by_key(|branch| branch.as_str().to_string());
-        branches.dedup();
-        Ok(branches)
+        branch_keys.sort_by(|left, right| {
+            left.prefix_name()
+                .as_str()
+                .cmp(right.prefix_name().as_str())
+                .then_with(|| left.batch_id().as_bytes().cmp(right.batch_id().as_bytes()))
+        });
+        branch_keys.dedup();
+        Ok(branch_keys
+            .into_iter()
+            .map(QueryBranchRef::from_batch_branch_key)
+            .collect())
     }
 
     pub(super) fn resolve_query_branches_for_context(
