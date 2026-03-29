@@ -1,7 +1,7 @@
 <!-- #region reading-conditional-query-svelte -->
 <script lang="ts">
   import { QuerySubscription } from 'jazz-tools/svelte';
-  import { app } from '../schema/app.js';
+  import { app } from '../schema.js';
 
   let filter = $state<string | null>(null);
 

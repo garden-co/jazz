@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getDb, QuerySubscription } from 'jazz-tools/svelte';
-  import { app } from '../schema/app.js';
+  import { app } from '../schema.js';
 
   const { id }: { id: string } = $props();
 

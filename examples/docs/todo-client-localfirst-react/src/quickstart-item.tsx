@@ -1,5 +1,5 @@
 import { useDb, useAll } from "jazz-tools/react";
-import { app } from "../schema/app.js";
+import { app } from "../schema.js";
 
 export function TodoItem({ id }: { id: string }) {
   const db = useDb();

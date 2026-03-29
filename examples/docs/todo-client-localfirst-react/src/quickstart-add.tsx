@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useDb } from "jazz-tools/react";
-import { app } from "../schema/app.js";
+import { app } from "../schema.js";
 
 export function AddTodo() {
   const db = useDb();

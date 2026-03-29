@@ -14,6 +14,14 @@ fn verify_jwt_and_extract_claims(_token: &str) -> (String, serde_json::Value) {
     ("replace-with-verified-sub".to_string(), json!({}))
 }
 
+fn todo_values(title: impl Into<String>, description: impl Into<String>) -> Vec<Value> {
+    vec![
+        Value::Text(title.into()),
+        Value::Boolean(false),
+        Value::Text(description.into()),
+    ]
+}
+
 // #region backend-request-session-rust
 pub fn requester_session_from_headers(headers: &HeaderMap) -> Result<Session, StatusCode> {
     let auth = headers
@@ -348,13 +356,7 @@ pub async fn clear_nullable_fields(
 
 // #region writing-crud-rust
 pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz_tools::Result<()> {
-    let values = vec![
-        Value::Text("Write docs".to_string()),
-        Value::Boolean(false),
-        Value::Text(String::new()),
-        Value::Null,
-        Value::Null,
-    ];
+    let values = todo_values("Write docs", "");
 
     let _new_row = client.create("todos", values).await?;
     client
@@ -372,20 +374,18 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
 // JazzClient.create/update/delete use the default durability tier
 // (edge for server-connected clients, worker for browser clients).
 //
-// Explicit tier control is available on RuntimeCore via
-// insert_persisted / update_persisted / delete_persisted,
-// but not yet exposed on JazzClient.
-pub async fn write_todo_with_defaults(client: &JazzClient) -> jazz_tools::Result<ObjectId> {
-    let values = vec![
-        Value::Text("Write docs".to_string()),
-        Value::Boolean(false),
-        Value::Text(String::new()),
-        Value::Null,
-        Value::Null,
-    ];
+// Writes apply locally first, then sync asynchronously to higher tiers.
+pub async fn write_todo_with_default_durability(
+    client: &JazzClient,
+) -> jazz_tools::Result<ObjectId> {
+    let (id, _row_values) = client
+        .create(
+            "todos",
+            todo_values("Write docs with default durability behavior", ""),
+        )
+        .await?;
 
     // Uses the default tier (edge for server-connected clients).
-    let (id, _row_values) = client.create("todos", values).await?;
     Ok(id)
 }
 // #endregion writing-durability-tier-rust

@@ -1,6 +1,6 @@
 import { Suspense } from "react";
 import { useAllSuspense } from "jazz-tools/react";
-import { app } from "../schema/app.js";
+import { app } from "../schema.js";
 
 // #region reading-concurrent-rendering-react
 function TodoList() {

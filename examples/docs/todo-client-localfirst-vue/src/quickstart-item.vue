@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useDb, useAll } from "jazz-tools/vue";
-import { app } from "../schema/app.js";
+import { app } from "../schema.js";
 
 const props = defineProps<{ id: string }>();
 

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getDb } from 'jazz-tools/svelte';
-  import { app } from '../schema/app.js';
+  import { app } from '../schema.js';
 
   const db = getDb();
   let title = $state('');

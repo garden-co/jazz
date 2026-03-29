@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getDb, getSession } from 'jazz-tools/svelte';
-  import { app } from '../schema/app.js';
+  import { app } from '../schema.js';
 
   // #region db-access-svelte
   // Callable anywhere — component, store, or utility module

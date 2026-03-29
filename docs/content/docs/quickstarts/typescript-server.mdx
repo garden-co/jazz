@@ -6,6 +6,9 @@ reviewedAt: "14cd73f0"
 
 import { Callout } from "fumadocs-ui/components/callout";
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+import SchemaSetup from "../../partials/schema-setup.mdx";
+import ServerAuthConfig from "../../partials/server-auth-config.mdx";
+import QuickstartSchemaTypesSummary from "../../partials/schema-types-summary.mdx";
 
 ## Create a project
 
@@ -27,24 +30,17 @@ pnpm add -D typescript tsx
 
 ## Define your schema
 
-Create a file at `schema/current.ts` describing the structure of your app's data.
+Create `schema.ts` at the root of your project. This is the source of truth for your data model.
 
-<include cwd lang="ts" meta='title="schema/current.ts"'>
-  ../examples/docs/todo-server-ts/schema/current.ts
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-server-ts/schema.ts
 </include>
 
-### Run codegen
+<QuickstartSchemaTypesSummary />
 
-```bash title="Terminal"
-npx jazz-tools@alpha build
-```
+### Validate schema
 
-This generates `schema/app.ts`, which exports a typed `app` object with a property for each table (e.g. `app.todos`). Import `app` whenever you need to query or write data.
-
-<Callout type="info" title="Generated code">
-  Never edit `schema/app.ts` by hand. Edit `schema/current.ts` and re-run `npx jazz-tools@alpha
-  build`.
-</Callout>
+<SchemaSetup />
 
 [Learn more about schemas](/docs/schemas/defining-tables).
 
@@ -52,22 +48,22 @@ This generates `schema/app.ts`, which exports a typed `app` object with a proper
 
 The server rejects all reads and writes unless you define [permissions](/docs/auth/permissions). For this quickstart, allow everything:
 
-```ts title="schema/permissions.ts"
-import { definePermissions } from "jazz-tools/permissions";
-import { app } from "./app.js";
+```ts title="permissions.ts"
+import { schema as s } from "jazz-tools";
+import { app } from "./schema.js";
 
-export default definePermissions(app, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.always(),
-]);
+export default s.definePermissions(app, ({ policy }) => {
+  policy.todos.allowRead.always();
+  policy.todos.allowInsert.always();
+  policy.todos.allowUpdate.always();
+  policy.todos.allowDelete.always();
+});
 ```
 
-Re-run codegen so the build picks up the new file:
+Run validation again so the schema and permissions files are checked together:
 
 ```bash title="Terminal"
-npx jazz-tools@alpha build
+npx jazz-tools validate
 ```
 
 ## Set up your server
@@ -75,7 +71,7 @@ npx jazz-tools@alpha build
 Generate an app ID:
 
 ```bash title="Terminal"
-npx jazz-tools@alpha create app
+npx jazz-tools create app
 # outputs a UUID like: 019d0ba1-519a-7e01-b0eb-0059ee898e4d
 ```
 
@@ -85,9 +81,15 @@ Create `src/index.ts`. This quickstart puts everything in one file; a real app w
   ../examples/docs/todo-server-ts/src/quickstart-snippets.ts#quickstart-server-setup-ts
 </include>
 
+- `appId` identifies the app namespace for storage and sync.
+- `app` is your typed schema export (`app.wasmSchema` is loaded for runtime setup).
+- `context.db()` gives you a high-level `Db` using the context's configured runtime/auth.
+- `serverUrl` + `backendSecret` enable backend-authenticated handles via `context.asBackend()` and `context.forRequest(req)`.
+- Runtime storage path controls where local server state persists.
+
 Each route handler calls `context.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
 
-You can also use `context.db()` to get a database handle that bypasses permission checks.
+You can also use `context.db()` to get a database handle that runs as the server's configured runtime identity.
 
 <Accordions type="single">
   <Accordion title="What does the driver do?">
@@ -166,6 +168,10 @@ curl -X DELETE http://localhost:3000/api/todos/<id> \
 <Callout type="info">
   `forRequest` extracts the caller's identity from the `Authorization` header. The dummy token above is an unsigned JWT with `{"sub": "test-user"}`&hairsp;—&hairsp;fine for local development. In production, your auth provider issues signed JWTs and the server validates them via JWKS. See [Authentication](/docs/auth/authentication) for how to set that up.
 </Callout>
+
+## Authentication
+
+<ServerAuthConfig />
 
 ## Next steps
 

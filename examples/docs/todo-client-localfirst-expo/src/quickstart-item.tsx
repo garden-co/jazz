@@ -1,6 +1,6 @@
 import { Pressable, Switch, Text, View } from "react-native";
 import { useDb, useAll } from "jazz-tools/react-native";
-import { app } from "../schema/app";
+import { app } from "../schema";
 
 export function TodoItem({ id }: { id: string }) {
   const db = useDb();
