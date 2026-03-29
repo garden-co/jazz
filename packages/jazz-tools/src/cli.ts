@@ -74,7 +74,7 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-export async function build(options: BuildOptions): Promise<void> {
+export async function validate(options: BuildOptions): Promise<void> {
   const compiled = await loadCompiledSchema(options.schemaDir);
   const tableCount = compiled.schema.tables.length;
   console.log(`Loaded structural schema from ${compiled.schemaFile}.`);
@@ -87,6 +87,9 @@ export async function build(options: BuildOptions): Promise<void> {
   }
   console.log(`Validated ${tableCount} table${tableCount === 1 ? "" : "s"} in schema.ts.`);
 }
+
+// Backwards-compatible alias while docs and call sites move to `validate`.
+export const build = validate;
 
 export async function exportSchema(options: SchemaExportOptions): Promise<void> {
   if (options.format !== "json") {
@@ -903,9 +906,9 @@ function isMainModule(): boolean {
 if (isMainModule()) {
   const command = process.argv[2] ?? "";
 
-  if (command === "build") {
+  if (command === "validate" || command === "build") {
     const { options } = parseArgs();
-    build(options).catch((err) => {
+    validate(options).catch((err) => {
       console.error(err.message);
       process.exit(1);
     });
@@ -976,7 +979,7 @@ if (isMainModule()) {
   } else {
     console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
     console.log("\nCommands:");
-    console.log("  build                 Validate root schema.ts and optional permissions.ts");
+    console.log("  validate              Validate root schema.ts and optional permissions.ts");
     console.log("  schema export         Print the compiled structural schema as JSON");
     console.log("  permissions status    Show the current server permissions head for this app");
     console.log(
@@ -986,7 +989,7 @@ if (isMainModule()) {
       "  migrations create     Generate a typed structural migration stub from two known schema hashes",
     );
     console.log("  migrations push       Push a reviewed migration edge to the server");
-    console.log("\nBuild options:");
+    console.log("\nValidation options:");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
     console.log("\nSchema export options:");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
