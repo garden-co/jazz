@@ -13,6 +13,7 @@
 ### Medium
 
 - [**duplicated-sync-transport-state-machines**](todo/issues/duplicated-sync-transport-state-machines.md) — Main-thread client and worker each implement similar reconnect/auth/streaming logic, creating divergence risk and duplicated bug-fix cost.
+- [**id-and-string-in-operator-support**](todo/issues/id-and-string-in-operator-support.md) — The public query surface documents `id: { in: [...] }` as supported, but the core Jazz query path does not have clear end-to-end coverage for it. We also need string-column `in` support in the core path so batch string lookups can stay queryable instead of degrading into client-side filtering in optimization-sensitive integrations.
 - [**intentional-index-staleness-fallback**](todo/issues/intentional-index-staleness-fallback.md) — Update paths tolerate stale indexing when old row content is missing, making query correctness probabilistic under some sync histories.
 - [**policy-error-reasons**](todo/issues/policy-error-reasons.md) — Policy-denied errors (e.g. `WriteError("policy denied INSERT on table todos")`) include
 
