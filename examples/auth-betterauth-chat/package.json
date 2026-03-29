@@ -7,7 +7,8 @@
     "dev": "next dev",
     "build": "node ../../packages/jazz-tools/dist/cli.js validate && next build",
     "start": "next start",
-    "sync-server": "tsx scripts/sync-server.ts",
+    "sync-server": "tsx --env-file .env scripts/sync-server.ts",
+    "test": "vitest run",
     "test:e2e": "playwright test"
   },
   "dependencies": {
@@ -22,7 +23,9 @@
     "@types/node": "^20.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "dotenv": "^17.3.1",
     "tsx": "^4.21.0",
-    "typescript": "catalog:default"
+    "typescript": "catalog:default",
+    "vitest": "catalog:default"
   }
 }

@@ -1,27 +1,39 @@
 import { join } from "node:path";
 import type { FullConfig } from "@playwright/test";
 import { pushSchemaCatalogue, TestingServer } from "jazz-tools/testing";
-import { APP_ORIGIN, DEFAULT_ADMIN_SECRET, DEFAULT_APP_ID } from "../constants";
+
+const APP_ID = process.env.NEXT_PUBLIC_APP_ID!;
+const ADMIN_SECRET = process.env.ADMIN_SECRET!;
+const BACKEND_SECRET = process.env.BACKEND_SECRET!;
+const APP_ORIGIN = process.env.NEXT_PUBLIC_APP_ORIGIN!;
 
 async function globalSetup(_config: FullConfig): Promise<() => Promise<void>> {
   console.log(`JWKS URL: ${APP_ORIGIN}/api/auth/jwks`);
 
-  const jazzServer = await TestingServer.start({
-    appId: DEFAULT_APP_ID,
+  const server = await TestingServer.start({
+    appId: APP_ID,
     port: 1625,
-    adminSecret: DEFAULT_ADMIN_SECRET,
+    adminSecret: ADMIN_SECRET,
+    backendSecret: BACKEND_SECRET,
     jwksUrl: `${APP_ORIGIN}/api/auth/jwks`,
   });
 
   await pushSchemaCatalogue({
-    serverUrl: jazzServer.url,
-    appId: DEFAULT_APP_ID,
-    adminSecret: DEFAULT_ADMIN_SECRET,
-    schemaDir: join(import.meta.dirname ?? __dirname, ".."),
+    serverUrl: server.url,
+    appId: APP_ID,
+    adminSecret: server.adminSecret,
+    schemaDir: join(import.meta.dirname ?? __dirname, "../schema-better-auth"),
+  });
+
+  await pushSchemaCatalogue({
+    serverUrl: server.url,
+    appId: APP_ID,
+    adminSecret: server.adminSecret,
+    schemaDir: join(import.meta.dirname ?? __dirname, "../schema"),
   });
 
   return async () => {
-    await jazzServer.stop();
+    await server.stop();
   };
 }
 

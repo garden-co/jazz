@@ -5,6 +5,8 @@ A small Next.js example that shows how to integrate [Better Auth](https://www.be
 What it demonstrates:
 
 - A single Next.js app that serves both the UI and Better Auth routes
+- Better Auth tables stored in Jazz through `jazz-tools/better-auth-adapter`
+- A Jazz backend context using in-memory storage while syncing auth rows to the local sync server
 - Better Auth's built-in `jwt` plugin to issue ES256 JWTs and expose a JWKS endpoint
 - The `admin` plugin to assign roles (`admin` / `member`) to users
 - Fetching the JWT from the Better Auth session and passing it to `JazzProvider`
@@ -45,15 +47,15 @@ Open `http://127.0.0.1:3000`.
 
 ## How the Better Auth integration works
 
-### Server — `server/auth.ts` and `app/api/auth/[...all]/route.ts`
+### Server — `src/lib/create-better-auth.ts`, `src/lib/auth-jazz-context.ts`, and `app/api/auth/[...all]/route.ts`
 
 `createBetterAuth` wires up the Better Auth instance with four plugins:
 
 ```ts
-import { nextCookies } from "better-auth/next-js";
+import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 
 betterAuth({
-  database: memoryAdapter(authMemoryDb),
+  database: jazzAdapter(authJazzContext, { durabilityTier: "worker" }),
   emailAndPassword: { enabled: true, autoSignIn: true, minPasswordLength: 1 },
   plugins: [
     nextCookies(),
@@ -75,6 +77,11 @@ betterAuth({
 });
 ```
 
+`authJazzContext` is a server-side Jazz context configured with `driver: { type: "memory" }`,
+the example app schema, and the same `serverUrl` / backend secret as the local sync server. That
+keeps Better Auth state out of Better Auth's in-process memory adapter while still avoiding local
+on-disk storage in the Next app.
+
 - **`nextCookies` integration** — lets Better Auth session cookies participate in Next.js route
   handlers and server actions.
 - **`admin` plugin** — tracks a `role` field on each user, defaults new accounts to `"member"`.
@@ -85,7 +92,8 @@ betterAuth({
   which Jazz surfaces as `session.user_id` on the client.
 
 The JWKS endpoint (`/api/auth/jwks`) is automatically provided by the `jwt` plugin and is what
-the Jazz sync server polls to verify every incoming token.
+the Jazz sync server polls to verify every incoming token. The same sync server also accepts the
+backend secret used by the Better Auth Jazz context so auth rows can sync through Jazz too.
 
 ### Client — `src/lib/auth-client.ts`
 
