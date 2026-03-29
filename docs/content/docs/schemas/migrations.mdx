@@ -15,7 +15,7 @@ Traditional migration systems run a linear sequence and require peers to converg
 ## Workflow
 
 1. Edit `schema.ts` when you are changing data shape.
-2. Optionally run `npx jazz-tools validate` to catch local authoring errors.
+2. Optionally run `npx jazz-tools@alpha validate` to catch local authoring errors.
 3. Once Jazz reports an old and new structural hash pair, generate a migration stub:
 
 <include cwd lang="bash">
@@ -24,11 +24,13 @@ Traditional migration systems run a linear sequence and require peers to converg
 
 4. Review the generated file, rename it to something meaningful, then publish the reviewed edge.
 
-Permission-only changes in `permissions.ts` do not need migrations.
+Permission-only changes in `permissions.ts` do not need migrations, but they do still require
+`npx jazz-tools@alpha permissions push`.
 
 ## Generated stub
 
-`npx jazz-tools migrations create <fromHash> <toHash>` generates a `s.defineMigration(...)` stub with the structural diff already filled in.
+`npx jazz-tools@alpha migrations create <fromHash> <toHash>` generates a
+`s.defineMigration(...)` stub with the structural diff already filled in.
 
 Here's a generated stub for adding a `description` column:
 

@@ -6,7 +6,6 @@ reviewedAt: "14cd73f0"
 
 import { Callout } from "fumadocs-ui/components/callout";
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
-import SchemaSetup from "../../partials/schema-setup.mdx";
 import QuickstartSchemaTypesSummary from "../../partials/schema-types-summary.mdx";
 
 ## Create a project
@@ -148,11 +147,7 @@ Create `schema.ts` at the root of your project. This is the source of truth for 
 
 <QuickstartSchemaTypesSummary />
 
-### Validate schema
-
-<SchemaSetup />
-
-[Learn more about schemas](/docs/schemas/defining-tables).
+[Learn more about schemas, optional validation, and migrations](/docs/schemas/defining-tables).
 
 ## Set up your app
 
@@ -331,14 +326,14 @@ So far, your to-do list only works locally. To sync across devices, you need a s
 Generate an app ID:
 
 ```bash title="Terminal"
-npx jazz-tools create app
+npx jazz-tools@alpha create app
 # outputs a UUID like: 019d0ba1-519a-7e01-b0eb-0059ee898e4d
 ```
 
 Start the server with that ID and an admin secret (required for clients to push schemas). The default port is 1625, but you can use `--port` to change it:
 
 ```bash title="Terminal"
-npx jazz-tools server <your-app-id> --admin-secret secret
+npx jazz-tools@alpha server <your-app-id> --admin-secret secret
 ```
 
 ### Add permissions
@@ -357,12 +352,6 @@ export default s.definePermissions(app, ({ policy }) => {
 });
 ```
 
-Validate locally so `schema.ts` and `permissions.ts` are checked together:
-
-```bash title="Terminal"
-npx jazz-tools validate
-```
-
 ### Connect the client
 
 Update your client config to use the same app ID, and add `serverUrl`:
@@ -376,9 +365,10 @@ Update your client config to use the same app ID, and add `serverUrl`:
 ```
 
 Clients learn the structural schema when they connect. If you later change `permissions.ts`,
-publish the new permissions bundle explicitly with `npx jazz-tools permissions push`.
-If you change `schema.ts` structurally after data already exists, create and push a migration edge
-before old and new clients mix on the same shared server.
+publish the new permissions bundle explicitly with `npx jazz-tools@alpha permissions push`.
+If you change `schema.ts` structurally after data already exists, create and push a
+[reviewed migration edge](/docs/schemas/migrations) before old and new clients mix on the same
+shared server.
 
 For production deployment and hosting options, see [Server Setup](/docs/reference/server-setup).
 

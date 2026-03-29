@@ -6,7 +6,6 @@ reviewedAt: "14cd73f0"
 
 import { Callout } from "fumadocs-ui/components/callout";
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
-import SchemaSetup from "../../partials/schema-setup.mdx";
 import ServerAuthConfig from "../../partials/server-auth-config.mdx";
 import QuickstartSchemaTypesSummary from "../../partials/schema-types-summary.mdx";
 
@@ -38,11 +37,7 @@ Create `schema.ts` at the root of your project. This is the source of truth for 
 
 <QuickstartSchemaTypesSummary />
 
-### Validate schema
-
-<SchemaSetup />
-
-[Learn more about schemas](/docs/schemas/defining-tables).
+[Learn more about schemas, optional validation, and migrations](/docs/schemas/defining-tables).
 
 ### Add permissions
 
@@ -60,18 +55,12 @@ export default s.definePermissions(app, ({ policy }) => {
 });
 ```
 
-Run validation again so the schema and permissions files are checked together:
-
-```bash title="Terminal"
-npx jazz-tools validate
-```
-
 ## Set up your server
 
 Generate an app ID:
 
 ```bash title="Terminal"
-npx jazz-tools create app
+npx jazz-tools@alpha create app
 # outputs a UUID like: 019d0ba1-519a-7e01-b0eb-0059ee898e4d
 ```
 
@@ -83,13 +72,12 @@ Create `src/index.ts`. This quickstart puts everything in one file; a real app w
 
 - `appId` identifies the app namespace for storage and sync.
 - `app` is your typed schema export (`app.wasmSchema` is loaded for runtime setup).
-- `context.db()` gives you a high-level `Db` using the context's configured runtime/auth.
-- `serverUrl` + `backendSecret` enable backend-authenticated handles via `context.asBackend()` and `context.forRequest(req)`.
+- `permissions` is the server-side policy bundle evaluated for request-scoped reads and writes.
+- `serverUrl` + `backendSecret` let request-scoped handles sync through a Jazz server and enable explicit backend mode via `context.asBackend()`.
 - Runtime storage path controls where local server state persists.
 
 Each route handler calls `context.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
-
-You can also use `context.db()` to get a database handle that runs as the server's configured runtime identity.
+For the unscoped `context.db()` helper and explicit backend mode, see [Server Setup](/docs/reference/server-setup).
 
 <Accordions type="single">
   <Accordion title="What does the driver do?">

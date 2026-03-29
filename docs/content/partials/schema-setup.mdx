@@ -1,17 +1,18 @@
 import { Callout } from "fumadocs-ui/components/callout";
 
-Run the schema CLI from your app root:
+Run an optional schema sanity check from your app root:
 
-`npx jazz-tools validate`
+`npx jazz-tools@alpha validate`
 
 This validates `schema.ts` and the optional `permissions.ts`, then compiles them into Jazz's
 internal schema representation.
 
-When Jazz later reports an old and new schema hash pair, create and review a migration edge with:
+When Jazz later reports an old and new schema hash pair, create and review a migration edge as
+described in [Migrations](/docs/schemas/migrations):
 
 ```bash
-npx jazz-tools migrations create <fromHash> <toHash>
-npx jazz-tools migrations push <fromHash> <toHash>
+npx jazz-tools@alpha migrations create <fromHash> <toHash>
+npx jazz-tools@alpha migrations push <fromHash> <toHash>
 ```
 
 <Callout title="Source of truth">

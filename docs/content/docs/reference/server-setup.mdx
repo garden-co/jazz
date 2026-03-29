@@ -100,10 +100,17 @@ For React Native/Expo clients, make sure `serverUrl` points to a host your runti
 
 ### Backend identity pattern
 
-On the client side, queries automatically run as the logged-in user. On a backend, create the context once at startup, then choose whether a request should run as the server or as the caller.
+On the client side, queries automatically run as the logged-in user. On a backend, create the
+context once at startup, then choose whether work should run as an unscoped local runtime, as an
+explicit backend connection, or as the caller.
 
-- `context.db()` returns a `Db` that runs queries as the configured runtime identity, useful for admin tasks or background jobs that aren't tied to a specific user.
-- `context.forRequest(req)` returns a `Db` that runs queries as the authenticated user who made the request, so permission policies apply to them rather than the server.
+- `context.db()` returns the shared high-level `Db` for the context with no per-request user
+  session attached, useful for local-only jobs or server-owned work that is not impersonating a
+  caller.
+- `context.asBackend()` returns a `Db` that uses `backendSecret` for sync/auth when this process
+  talks to a Jazz server.
+- `context.forRequest(req)` returns a `Db` that runs queries as the authenticated user who made
+  the request, so permission policies apply to them rather than the process itself.
 
 In TypeScript backends, create the context once with both `app` and `permissions`, then call `context.forRequest(req)` when you need a bearer-JWT-scoped high-level `Db`.
 
