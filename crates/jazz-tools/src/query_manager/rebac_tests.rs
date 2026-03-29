@@ -321,6 +321,7 @@ fn rebac_insert_allowed_by_simple_policy() {
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
     let mut qm = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
     let mut storage = MemoryStorage::new();
 
     // Add a client with session
@@ -337,7 +338,7 @@ fn rebac_insert_allowed_by_simple_policy() {
 
     // Register a query scope so the update is in-scope
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, branch.clone().into()));
     qm.sync_manager_mut()
         .set_client_query_scope(client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
@@ -364,7 +365,7 @@ fn rebac_insert_allowed_by_simple_policy() {
                 id: obj_id,
                 metadata: document_metadata(),
             }),
-            branch_name: "main".into(),
+            branch_name: branch.clone().into(),
             commits: vec![commit.clone()],
         },
     });
@@ -376,7 +377,7 @@ fn rebac_insert_allowed_by_simple_policy() {
     let tips = qm
         .sync_manager_mut()
         .object_manager
-        .get_tip_ids(obj_id, "main")
+        .get_tip_ids(obj_id, &branch)
         .unwrap();
     assert!(
         tips.contains(&commit.id()),
@@ -390,6 +391,7 @@ fn rebac_insert_denied_by_simple_policy() {
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
     let mut qm = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
     let mut storage = MemoryStorage::new();
 
     // Add a client with session
@@ -406,7 +408,7 @@ fn rebac_insert_denied_by_simple_policy() {
 
     // Register a query scope
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, branch.clone().into()));
     qm.sync_manager_mut()
         .set_client_query_scope(client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
@@ -433,7 +435,7 @@ fn rebac_insert_denied_by_simple_policy() {
                 id: obj_id,
                 metadata: document_metadata(),
             }),
-            branch_name: "main".into(),
+            branch_name: branch.clone().into(),
             commits: vec![commit.clone()],
         },
     });
@@ -462,7 +464,7 @@ fn rebac_insert_denied_by_simple_policy() {
     let tips = qm
         .sync_manager_mut()
         .object_manager
-        .get_tip_ids(obj_id, "main");
+        .get_tip_ids(obj_id, &branch);
     assert!(
         tips.is_err() || !tips.unwrap().contains(&commit.id()),
         "Insert should be denied when owner doesn't match session"
@@ -974,6 +976,7 @@ fn rebac_table_without_policy_allows_all_writes() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
     let mut storage = MemoryStorage::new();
 
     // Add a client with session
@@ -992,7 +995,7 @@ fn rebac_table_without_policy_allows_all_writes() {
 
     // Register a query scope
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, branch.clone().into()));
     qm.sync_manager_mut()
         .set_client_query_scope(client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
@@ -1020,7 +1023,7 @@ fn rebac_table_without_policy_allows_all_writes() {
                 id: obj_id,
                 metadata,
             }),
-            branch_name: "main".into(),
+            branch_name: branch.clone().into(),
             commits: vec![commit.clone()],
         },
     });
@@ -1032,7 +1035,7 @@ fn rebac_table_without_policy_allows_all_writes() {
     let tips = qm
         .sync_manager_mut()
         .object_manager
-        .get_tip_ids(obj_id, "main")
+        .get_tip_ids(obj_id, &branch)
         .unwrap();
     assert!(
         tips.contains(&commit.id()),
@@ -1046,6 +1049,7 @@ fn rebac_non_row_object_allowed() {
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
     let mut qm = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
     let mut storage = MemoryStorage::new();
 
     // Add a client with session
@@ -1062,7 +1066,7 @@ fn rebac_non_row_object_allowed() {
 
     // Register a query scope
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, branch.clone().into()));
     qm.sync_manager_mut()
         .set_client_query_scope(client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
@@ -1083,7 +1087,7 @@ fn rebac_non_row_object_allowed() {
         payload: SyncPayload::ObjectUpdated {
             object_id: obj_id,
             metadata: None, // No metadata = not a row
-            branch_name: "main".into(),
+            branch_name: branch.clone().into(),
             commits: vec![commit.clone()],
         },
     });
@@ -1095,7 +1099,7 @@ fn rebac_non_row_object_allowed() {
     let tips = qm
         .sync_manager_mut()
         .object_manager
-        .get_tip_ids(obj_id, "main")
+        .get_tip_ids(obj_id, &branch)
         .unwrap();
     assert!(
         tips.contains(&commit.id()),
@@ -1177,6 +1181,7 @@ fn rebac_two_clients_different_sessions() {
     let sync_manager = SyncManager::new();
     let schema = rebac_test_schema();
     let mut qm = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
     let mut storage = MemoryStorage::new();
 
     // Client 1: alice
@@ -1203,12 +1208,12 @@ fn rebac_two_clients_different_sessions() {
 
     // Register query scopes
     let mut scope1 = HashSet::new();
-    scope1.insert((obj1, "main".into()));
+    scope1.insert((obj1, branch.clone().into()));
     qm.sync_manager_mut()
         .set_client_query_scope(client1, QueryId(1), scope1, None);
 
     let mut scope2 = HashSet::new();
-    scope2.insert((obj2, "main".into()));
+    scope2.insert((obj2, branch.clone().into()));
     qm.sync_manager_mut()
         .set_client_query_scope(client2, QueryId(2), scope2, None);
 
@@ -1247,7 +1252,7 @@ fn rebac_two_clients_different_sessions() {
                 id: obj1,
                 metadata: document_metadata(),
             }),
-            branch_name: "main".into(),
+            branch_name: branch.clone().into(),
             commits: vec![commit1.clone()],
         },
     });
@@ -1260,7 +1265,7 @@ fn rebac_two_clients_different_sessions() {
                 id: obj2,
                 metadata: document_metadata(),
             }),
-            branch_name: "main".into(),
+            branch_name: branch.clone().into(),
             commits: vec![commit2.clone()],
         },
     });
@@ -1272,7 +1277,7 @@ fn rebac_two_clients_different_sessions() {
     let tips1 = qm
         .sync_manager_mut()
         .object_manager
-        .get_tip_ids(obj1, "main")
+        .get_tip_ids(obj1, &branch)
         .unwrap();
     assert!(
         tips1.contains(&commit1.id()),
@@ -1282,7 +1287,7 @@ fn rebac_two_clients_different_sessions() {
     let tips2 = qm
         .sync_manager_mut()
         .object_manager
-        .get_tip_ids(obj2, "main")
+        .get_tip_ids(obj2, &branch)
         .unwrap();
     assert!(
         tips2.contains(&commit2.id()),
@@ -1445,6 +1450,7 @@ fn rebac_update_denied_by_using_policy() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
     let mut storage = MemoryStorage::new();
 
     // Create Alice's document first (as server/no session)
@@ -1470,7 +1476,7 @@ fn rebac_update_denied_by_using_policy() {
         .add_commit(
             &mut storage,
             obj_id,
-            "main",
+            branch.clone(),
             vec![],
             alice_content,
             author,
@@ -1486,7 +1492,7 @@ fn rebac_update_denied_by_using_policy() {
 
     // Register query scope for Bob
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, branch.clone().into()));
     qm.sync_manager_mut()
         .set_client_query_scope(bob_client, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
@@ -1520,7 +1526,7 @@ fn rebac_update_denied_by_using_policy() {
                 id: obj_id,
                 metadata,
             }),
-            branch_name: "main".into(),
+            branch_name: branch.clone().into(),
             commits: vec![update_commit.clone()],
         },
     });
@@ -1550,7 +1556,7 @@ fn rebac_update_denied_by_using_policy() {
     let tips = qm
         .sync_manager_mut()
         .object_manager
-        .get_tip_ids(obj_id, "main")
+        .get_tip_ids(obj_id, &branch)
         .unwrap();
     assert!(
         !tips.contains(&update_commit.id()),
@@ -1621,6 +1627,7 @@ fn rebac_inherits_filters_select_query_results() {
 
     let sync_manager = SyncManager::new();
     let mut qm = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
     let mut storage = MemoryStorage::new();
 
     // Create Alice's folder
@@ -1645,7 +1652,7 @@ fn rebac_inherits_filters_select_query_results() {
         .add_commit(
             &mut storage,
             folder_id,
-            "main",
+            branch.clone(),
             vec![],
             folder_content,
             author,
@@ -1675,7 +1682,7 @@ fn rebac_inherits_filters_select_query_results() {
         .add_commit(
             &mut storage,
             doc_id,
-            "main",
+            branch.clone(),
             vec![],
             doc_content,
             author,

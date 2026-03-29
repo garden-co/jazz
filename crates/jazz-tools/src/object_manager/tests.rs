@@ -14,8 +14,17 @@ fn test_batch_branch(prefix: &BranchPrefixName, ordinal: u128) -> BranchName {
         .to_branch_name()
 }
 
-fn compat_branch(branch_name: &str) -> BranchName {
-    ObjectManager::test_compat_branch_name(&BranchName::new(branch_name))
+fn test_branch(user_branch: &str) -> BranchName {
+    BranchPrefixName::new("dev", SchemaHash::from_bytes([7; 32]), user_branch)
+        .with_batch_id(BatchId::from_uuid(Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            user_branch.as_bytes(),
+        )))
+        .to_branch_name()
+}
+
+fn main_branch() -> BranchName {
+    test_branch("main")
 }
 
 #[test]
@@ -63,7 +72,7 @@ fn add_commit_rejects_unknown_object() {
     let result = manager.add_commit(
         &mut io,
         fake_object_id,
-        "main",
+        main_branch(),
         vec![],
         b"content".to_vec(),
         author,
@@ -84,7 +93,7 @@ fn add_commit_creates_branch_for_parentless_commit() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"initial".to_vec(),
             author,
@@ -93,9 +102,9 @@ fn add_commit_creates_branch_for_parentless_commit() {
         .expect("should succeed");
 
     let object = manager.get(object_id).unwrap();
-    assert!(object.branches.contains_key(&compat_branch("main")));
+    assert!(object.branches.contains_key(&main_branch()));
 
-    let branch = &object.branches[&compat_branch("main")];
+    let branch = &object.branches[&main_branch()];
     assert!(branch.commits.contains_key(&commit_id));
 }
 
@@ -110,7 +119,7 @@ fn add_commit_rejects_unknown_branch_with_parents() {
     let result = manager.add_commit(
         &mut io,
         object_id,
-        "nonexistent",
+        test_branch("nonexistent"),
         vec![fake_parent],
         b"content".to_vec(),
         author,
@@ -132,7 +141,7 @@ fn add_commit_rejects_unknown_parent() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"initial".to_vec(),
             author,
@@ -144,7 +153,7 @@ fn add_commit_rejects_unknown_parent() {
     let result = manager.add_commit(
         &mut io,
         object_id,
-        "main",
+        main_branch(),
         vec![fake_parent],
         b"child".to_vec(),
         author,
@@ -165,7 +174,7 @@ fn add_commit_with_valid_parent_succeeds() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"initial".to_vec(),
             author,
@@ -177,7 +186,7 @@ fn add_commit_with_valid_parent_succeeds() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![parent_id],
             b"child".to_vec(),
             author,
@@ -185,7 +194,7 @@ fn add_commit_with_valid_parent_succeeds() {
         )
         .expect("should succeed");
 
-    let commits = manager.get_commits(object_id, "main").unwrap();
+    let commits = manager.get_commits(object_id, main_branch()).unwrap();
     assert!(commits.contains_key(&child_id));
     assert_eq!(commits[&child_id].parents.as_slice(), &[parent_id]);
 }
@@ -203,7 +212,7 @@ fn parentless_commit_becomes_tip() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"initial".to_vec(),
             author,
@@ -211,7 +220,7 @@ fn parentless_commit_becomes_tip() {
         )
         .unwrap();
 
-    let tip_ids = manager.get_tip_ids(object_id, "main").unwrap();
+    let tip_ids = manager.get_tip_ids(object_id, main_branch()).unwrap();
     assert_eq!(tip_ids.len(), 1);
     assert!(tip_ids.contains(&commit_id));
 }
@@ -227,7 +236,7 @@ fn child_commit_replaces_parent_in_tips() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"initial".to_vec(),
             author,
@@ -239,7 +248,7 @@ fn child_commit_replaces_parent_in_tips() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![parent_id],
             b"child".to_vec(),
             author,
@@ -247,7 +256,7 @@ fn child_commit_replaces_parent_in_tips() {
         )
         .unwrap();
 
-    let tip_ids = manager.get_tip_ids(object_id, "main").unwrap();
+    let tip_ids = manager.get_tip_ids(object_id, main_branch()).unwrap();
     assert_eq!(tip_ids.len(), 1);
     assert!(!tip_ids.contains(&parent_id));
     assert!(tip_ids.contains(&child_id));
@@ -264,7 +273,7 @@ fn diverging_twigs_create_multiple_tips() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"root".to_vec(),
             author,
@@ -276,7 +285,7 @@ fn diverging_twigs_create_multiple_tips() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![root],
             b"twig_a".to_vec(),
             author,
@@ -288,7 +297,7 @@ fn diverging_twigs_create_multiple_tips() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![root],
             b"twig_b".to_vec(),
             author,
@@ -296,7 +305,7 @@ fn diverging_twigs_create_multiple_tips() {
         )
         .unwrap();
 
-    let tip_ids = manager.get_tip_ids(object_id, "main").unwrap();
+    let tip_ids = manager.get_tip_ids(object_id, main_branch()).unwrap();
     assert_eq!(tip_ids.len(), 2);
     assert!(tip_ids.contains(&twig_a));
     assert!(tip_ids.contains(&twig_b));
@@ -313,7 +322,7 @@ fn merge_commit_consolidates_tips() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"root".to_vec(),
             author,
@@ -325,7 +334,7 @@ fn merge_commit_consolidates_tips() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![root],
             b"twig_a".to_vec(),
             author,
@@ -337,7 +346,7 @@ fn merge_commit_consolidates_tips() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![root],
             b"twig_b".to_vec(),
             author,
@@ -350,7 +359,7 @@ fn merge_commit_consolidates_tips() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![twig_a, twig_b],
             b"merge".to_vec(),
             author,
@@ -358,7 +367,7 @@ fn merge_commit_consolidates_tips() {
         )
         .unwrap();
 
-    let tip_ids = manager.get_tip_ids(object_id, "main").unwrap();
+    let tip_ids = manager.get_tip_ids(object_id, main_branch()).unwrap();
     assert_eq!(tip_ids.len(), 1);
     assert!(tip_ids.contains(&merge));
 }
@@ -374,7 +383,7 @@ fn multiple_roots_create_multiple_tips() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"root1".to_vec(),
             author,
@@ -386,7 +395,7 @@ fn multiple_roots_create_multiple_tips() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"root2".to_vec(),
             author,
@@ -394,7 +403,7 @@ fn multiple_roots_create_multiple_tips() {
         )
         .unwrap();
 
-    let tip_ids = manager.get_tip_ids(object_id, "main").unwrap();
+    let tip_ids = manager.get_tip_ids(object_id, main_branch()).unwrap();
     assert_eq!(tip_ids.len(), 2);
     assert!(tip_ids.contains(&root1));
     assert!(tip_ids.contains(&root2));
@@ -407,7 +416,7 @@ fn get_tip_ids_rejects_unknown_object() {
     let manager = ObjectManager::new();
     let fake_id = ObjectId::new();
 
-    let result = manager.get_tip_ids(fake_id, "main");
+    let result = manager.get_tip_ids(fake_id, main_branch());
     assert_eq!(result, Err(Error::ObjectNotFound(fake_id)));
 }
 
@@ -417,10 +426,10 @@ fn get_tip_ids_rejects_unknown_branch() {
     let mut manager = ObjectManager::new();
     let object_id = manager.create(&mut io, None);
 
-    let result = manager.get_tip_ids(object_id, "nonexistent");
+    let result = manager.get_tip_ids(object_id, test_branch("nonexistent"));
     assert_eq!(
         result,
-        Err(Error::BranchNotFound(BranchName::new("nonexistent")))
+        Err(Error::BranchNotFound(test_branch("nonexistent")))
     );
 }
 
@@ -435,7 +444,7 @@ fn get_tips_returns_commit_structs() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"initial".to_vec(),
             author,
@@ -443,7 +452,7 @@ fn get_tips_returns_commit_structs() {
         )
         .unwrap();
 
-    let tips = manager.get_tips(object_id, "main").unwrap();
+    let tips = manager.get_tips(object_id, main_branch()).unwrap();
     assert_eq!(tips.len(), 1);
     assert!(tips.contains_key(&commit_id));
     assert_eq!(tips[&commit_id].content, b"initial".to_vec());
@@ -460,7 +469,7 @@ fn get_commits_returns_all_commits() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"first".to_vec(),
             author,
@@ -472,7 +481,7 @@ fn get_commits_returns_all_commits() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![c1],
             b"second".to_vec(),
             author,
@@ -484,7 +493,7 @@ fn get_commits_returns_all_commits() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![c2],
             b"third".to_vec(),
             author,
@@ -492,7 +501,7 @@ fn get_commits_returns_all_commits() {
         )
         .unwrap();
 
-    let commits = manager.get_commits(object_id, "main").unwrap();
+    let commits = manager.get_commits(object_id, main_branch()).unwrap();
     assert_eq!(commits.len(), 3);
     assert!(commits.contains_key(&c1));
     assert!(commits.contains_key(&c2));
@@ -504,7 +513,7 @@ fn get_commits_rejects_unknown_object() {
     let manager = ObjectManager::new();
     let fake_id = ObjectId::new();
 
-    let result = manager.get_commits(fake_id, "main");
+    let result = manager.get_commits(fake_id, main_branch());
     assert!(matches!(result, Err(Error::ObjectNotFound(id)) if id == fake_id));
 }
 
@@ -514,9 +523,9 @@ fn get_commits_rejects_unknown_branch() {
     let mut manager = ObjectManager::new();
     let object_id = manager.create(&mut io, None);
 
-    let result = manager.get_commits(object_id, "nonexistent");
+    let result = manager.get_commits(object_id, test_branch("nonexistent"));
     assert!(
-        matches!(result, Err(Error::BranchNotFound(ref name)) if name.as_str() == "nonexistent")
+        matches!(result, Err(Error::BranchNotFound(ref name)) if *name == test_branch("nonexistent"))
     );
 }
 
@@ -533,7 +542,7 @@ fn subscribe_to_loaded_branch_gets_immediate_update_with_frontier() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"first".to_vec(),
             author,
@@ -544,7 +553,7 @@ fn subscribe_to_loaded_branch_gets_immediate_update_with_frontier() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![c1],
             b"second".to_vec(),
             author,
@@ -555,13 +564,13 @@ fn subscribe_to_loaded_branch_gets_immediate_update_with_frontier() {
     // Clear any updates from add_commit (no subscribers yet)
     manager.take_subscription_updates();
 
-    let sub_id = manager.subscribe(object_id, "main");
+    let sub_id = manager.subscribe(object_id, main_branch());
 
     let updates = manager.take_subscription_updates();
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].subscription_id, sub_id);
     assert_eq!(updates[0].object_id, object_id);
-    assert_eq!(updates[0].branch_name, BranchName::new("main"));
+    assert_eq!(updates[0].branch_name, main_branch());
     // Only the current frontier (tip), not all commits
     assert_eq!(updates[0].commit_ids, vec![c2]);
 }
@@ -580,7 +589,7 @@ fn add_commit_notifies_subscriber() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"initial".to_vec(),
             author,
@@ -589,7 +598,7 @@ fn add_commit_notifies_subscriber() {
         .unwrap();
 
     // Subscribe after initial commit
-    let sub_id = manager.subscribe(object_id, "main");
+    let sub_id = manager.subscribe(object_id, main_branch());
     manager.take_subscription_updates(); // Clear initial update
 
     // Add another commit
@@ -597,7 +606,7 @@ fn add_commit_notifies_subscriber() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![c1],
             b"second".to_vec(),
             author,
@@ -622,7 +631,7 @@ fn multiple_subscribers_each_get_updates() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"initial".to_vec(),
             author,
@@ -630,15 +639,15 @@ fn multiple_subscribers_each_get_updates() {
         )
         .unwrap();
 
-    let sub1 = manager.subscribe(object_id, "main");
-    let sub2 = manager.subscribe(object_id, "main");
+    let sub1 = manager.subscribe(object_id, main_branch());
+    let sub2 = manager.subscribe(object_id, main_branch());
     manager.take_subscription_updates(); // Clear initial updates
 
     let c2 = manager
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![c1],
             b"second".to_vec(),
             author,
@@ -669,7 +678,7 @@ fn unsubscribe_stops_updates() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"initial".to_vec(),
             author,
@@ -677,7 +686,7 @@ fn unsubscribe_stops_updates() {
         )
         .unwrap();
 
-    let sub_id = manager.subscribe(object_id, "main");
+    let sub_id = manager.subscribe(object_id, main_branch());
     manager.take_subscription_updates();
 
     manager.unsubscribe(sub_id);
@@ -687,7 +696,7 @@ fn unsubscribe_stops_updates() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![c1],
             b"second".to_vec(),
             author,
@@ -710,7 +719,7 @@ fn unsubscribe_clears_pending_updates() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"initial".to_vec(),
             author,
@@ -718,7 +727,7 @@ fn unsubscribe_clears_pending_updates() {
         )
         .unwrap();
 
-    let sub_id = manager.subscribe(object_id, "main");
+    let sub_id = manager.subscribe(object_id, main_branch());
     // Don't take updates yet - they're pending
 
     manager.unsubscribe(sub_id);
@@ -738,7 +747,7 @@ fn subscribe_tips_only_gets_only_tips() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"first".to_vec(),
             author,
@@ -749,7 +758,7 @@ fn subscribe_tips_only_gets_only_tips() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![c1],
             b"second".to_vec(),
             author,
@@ -757,7 +766,7 @@ fn subscribe_tips_only_gets_only_tips() {
         )
         .unwrap();
 
-    let _sub_id = manager.subscribe(object_id, "main");
+    let _sub_id = manager.subscribe(object_id, main_branch());
 
     let updates = manager.take_subscription_updates();
     assert_eq!(updates.len(), 1);
@@ -778,7 +787,7 @@ fn frontier_evolves_through_diamond_graph() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"root".to_vec(),
             author,
@@ -786,7 +795,7 @@ fn frontier_evolves_through_diamond_graph() {
         )
         .unwrap();
 
-    let _sub_id = manager.subscribe(object_id, "main");
+    let _sub_id = manager.subscribe(object_id, main_branch());
 
     let updates = manager.take_subscription_updates();
     assert_eq!(updates.len(), 1);
@@ -796,7 +805,7 @@ fn frontier_evolves_through_diamond_graph() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![root],
             b"a".to_vec(),
             author,
@@ -811,7 +820,7 @@ fn frontier_evolves_through_diamond_graph() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![root],
             b"b".to_vec(),
             author,
@@ -828,7 +837,7 @@ fn frontier_evolves_through_diamond_graph() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![a, b],
             b"merge".to_vec(),
             author,
@@ -846,9 +855,9 @@ fn subscription_ids_are_unique() {
     let mut manager = ObjectManager::new();
     let object_id = manager.create(&mut io, None);
 
-    let sub1 = manager.subscribe(object_id, "main");
-    let sub2 = manager.subscribe(object_id, "main");
-    let sub3 = manager.subscribe(object_id, "other");
+    let sub1 = manager.subscribe(object_id, main_branch());
+    let sub2 = manager.subscribe(object_id, main_branch());
+    let sub3 = manager.subscribe(object_id, test_branch("other"));
 
     assert_ne!(sub1, sub2);
     assert_ne!(sub2, sub3);
@@ -866,7 +875,7 @@ fn frontier_with_extended_divergence() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"root".to_vec(),
             author,
@@ -874,14 +883,14 @@ fn frontier_with_extended_divergence() {
         )
         .unwrap();
 
-    let _sub_id = manager.subscribe(object_id, "main");
+    let _sub_id = manager.subscribe(object_id, main_branch());
     manager.take_subscription_updates();
 
     let a1 = manager
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![root],
             b"a1".to_vec(),
             author,
@@ -895,7 +904,7 @@ fn frontier_with_extended_divergence() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![root],
             b"b1".to_vec(),
             author,
@@ -911,7 +920,7 @@ fn frontier_with_extended_divergence() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![a1],
             b"a2".to_vec(),
             author,
@@ -927,7 +936,7 @@ fn frontier_with_extended_divergence() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![b1],
             b"b2".to_vec(),
             author,
@@ -943,7 +952,7 @@ fn frontier_with_extended_divergence() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![a2],
             b"a3".to_vec(),
             author,
@@ -959,7 +968,7 @@ fn frontier_with_extended_divergence() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![a3, b2],
             b"merge".to_vec(),
             author,
@@ -985,20 +994,36 @@ fn get_or_load_computes_correct_tips_for_multi_commit_branch() {
         let mut mgr = ObjectManager::new();
         let oid = mgr.create(&mut io, None);
         let a = mgr
-            .add_commit(&mut io, oid, "main", vec![], b"A".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                oid,
+                main_branch(),
+                vec![],
+                b"A".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
-        mgr.add_commit(&mut io, oid, "main", vec![a], b"B".to_vec(), author, None)
-            .unwrap();
+        mgr.add_commit(
+            &mut io,
+            oid,
+            main_branch(),
+            vec![a],
+            b"B".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
         oid
     };
 
     // --- Session 2: new ObjectManager, load from storage ---
     let mut mgr2 = ObjectManager::new();
-    let loaded = mgr2.get_or_load(object_id, &io, &["main".to_string()]);
+    let loaded = mgr2.get_or_load(object_id, &io, &[main_branch().as_str().to_string()]);
     assert!(loaded.is_some(), "object should load from storage");
 
     // Verify only one tip (B), not two
-    let tips = mgr2.get_tip_ids(object_id, "main".to_string()).unwrap();
+    let tips = mgr2.get_tip_ids(object_id, main_branch()).unwrap();
     assert_eq!(tips.len(), 1, "should have exactly 1 tip after loading A→B");
 
     // Adding a new commit should succeed — this failed before the fix
@@ -1008,7 +1033,7 @@ fn get_or_load_computes_correct_tips_for_multi_commit_branch() {
     mgr2.add_commit(
         &mut io,
         object_id,
-        "main",
+        main_branch(),
         vec![tip],
         b"C".to_vec(),
         author,
@@ -1025,12 +1050,20 @@ fn get_or_load_hydrates_missing_branches_into_cached_object() {
     let object_id = {
         let mut mgr = ObjectManager::new();
         let oid = mgr.create(&mut io, None);
-        mgr.add_commit(&mut io, oid, "main", vec![], b"main".to_vec(), author, None)
-            .unwrap();
         mgr.add_commit(
             &mut io,
             oid,
-            "dev-other-main",
+            main_branch(),
+            vec![],
+            b"main".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+        mgr.add_commit(
+            &mut io,
+            oid,
+            test_branch("dev-other-main"),
             vec![],
             b"other".to_vec(),
             author,
@@ -1042,29 +1075,29 @@ fn get_or_load_hydrates_missing_branches_into_cached_object() {
 
     let mut mgr2 = ObjectManager::new();
     let loaded_main = mgr2
-        .get_or_load(object_id, &io, &["main".to_string()])
+        .get_or_load(object_id, &io, &[main_branch().as_str().to_string()])
         .expect("object should load on main branch");
-    assert!(loaded_main.branches.contains_key(&compat_branch("main")));
+    assert!(loaded_main.branches.contains_key(&main_branch()));
     assert!(
         !loaded_main
             .branches
-            .contains_key(&BranchName::new("dev-other-main"))
+            .contains_key(&test_branch("dev-other-main"))
     );
 
     let loaded_with_fallback = mgr2
-        .get_or_load(object_id, &io, &["dev-other-main".to_string()])
+        .get_or_load(
+            object_id,
+            &io,
+            &[test_branch("dev-other-main").as_str().to_string()],
+        )
         .expect("object should load on dev-other-main branch");
     assert!(
         loaded_with_fallback
             .branches
-            .contains_key(&compat_branch("dev-other-main"))
+            .contains_key(&test_branch("dev-other-main"))
     );
     // Main branch was already cached, so it's also returned
-    assert!(
-        loaded_with_fallback
-            .branches
-            .contains_key(&compat_branch("main"))
-    );
+    assert!(loaded_with_fallback.branches.contains_key(&main_branch()));
 }
 
 #[test]
@@ -1076,12 +1109,20 @@ fn get_or_load_tips_loads_only_frontier_and_full_load_upgrades_it() {
         let mut mgr = ObjectManager::new();
         let oid = mgr.create(&mut io, None);
         let first = mgr
-            .add_commit(&mut io, oid, "main", vec![], b"A".to_vec(), author, None)
+            .add_commit(
+                &mut io,
+                oid,
+                main_branch(),
+                vec![],
+                b"A".to_vec(),
+                author,
+                None,
+            )
             .unwrap();
         mgr.add_commit(
             &mut io,
             oid,
-            "main",
+            main_branch(),
             vec![first],
             b"B".to_vec(),
             author,
@@ -1093,22 +1134,22 @@ fn get_or_load_tips_loads_only_frontier_and_full_load_upgrades_it() {
 
     let mut mgr2 = ObjectManager::new();
     let loaded = mgr2
-        .get_or_load_tips(object_id, &io, &["main".to_string()])
+        .get_or_load_tips(object_id, &io, &[main_branch().as_str().to_string()])
         .expect("object should load from storage");
     let branch = loaded
         .branches
-        .get(&compat_branch("main"))
+        .get(&main_branch())
         .expect("main branch should be present");
     assert_eq!(branch.loaded_state, BranchLoadedState::TipsOnly);
     assert_eq!(branch.commits.len(), 1);
     assert_eq!(branch.tips.len(), 1);
 
     let loaded = mgr2
-        .get_or_load(object_id, &io, &["main".to_string()])
+        .get_or_load(object_id, &io, &[main_branch().as_str().to_string()])
         .expect("full branch should upgrade from storage");
     let branch = loaded
         .branches
-        .get(&compat_branch("main"))
+        .get(&main_branch())
         .expect("main branch should still be present");
     assert_eq!(branch.loaded_state, BranchLoadedState::AllCommits);
     assert_eq!(branch.commits.len(), 2);
@@ -1275,7 +1316,7 @@ fn frontier_with_three_way_divergence() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"root".to_vec(),
             author,
@@ -1283,14 +1324,14 @@ fn frontier_with_three_way_divergence() {
         )
         .unwrap();
 
-    let _sub_id = manager.subscribe(object_id, "main");
+    let _sub_id = manager.subscribe(object_id, main_branch());
     manager.take_subscription_updates();
 
     let a1 = manager
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![root],
             b"a1".to_vec(),
             author,
@@ -1304,7 +1345,7 @@ fn frontier_with_three_way_divergence() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![root],
             b"b1".to_vec(),
             author,
@@ -1318,7 +1359,7 @@ fn frontier_with_three_way_divergence() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![root],
             b"c1".to_vec(),
             author,
@@ -1338,7 +1379,7 @@ fn frontier_with_three_way_divergence() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![a1],
             b"a2".to_vec(),
             author,
@@ -1355,7 +1396,7 @@ fn frontier_with_three_way_divergence() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![c1],
             b"c2".to_vec(),
             author,
@@ -1372,7 +1413,7 @@ fn frontier_with_three_way_divergence() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![a2, b1],
             b"merge_ab".to_vec(),
             author,
@@ -1388,7 +1429,7 @@ fn frontier_with_three_way_divergence() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![merge_ab, c2],
             b"merge_all".to_vec(),
             author,
@@ -1420,7 +1461,7 @@ fn lww_selects_highest_timestamp_tip() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"root".to_vec(),
             alice,
@@ -1449,21 +1490,21 @@ fn lww_selects_highest_timestamp_tip() {
     };
 
     let alice_id = manager
-        .receive_commit(&mut io, object_id, "main", alice_edit)
+        .receive_commit(&mut io, object_id, main_branch(), alice_edit)
         .unwrap();
     let bob_id = manager
-        .receive_commit(&mut io, object_id, "main", bob_edit)
+        .receive_commit(&mut io, object_id, main_branch(), bob_edit)
         .unwrap();
 
     // Both should be tips (diverged frontier)
-    let tips = manager.get_tip_ids(object_id, "main").unwrap();
+    let tips = manager.get_tip_ids(object_id, main_branch()).unwrap();
     assert_eq!(tips.len(), 2);
     assert!(tips.contains(&alice_id));
     assert!(tips.contains(&bob_id));
 
     // tips_by_timestamp sorts oldest-first → last element is the LWW winner
     let object = manager.get(object_id).unwrap();
-    let branch = &object.branches[&compat_branch("main")];
+    let branch = &object.branches[&main_branch()];
     let sorted = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
     assert_eq!(
         *sorted.last().unwrap(),
@@ -1491,7 +1532,7 @@ fn lww_deterministic_on_equal_timestamps() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"root".to_vec(),
             author,
@@ -1519,18 +1560,18 @@ fn lww_deterministic_on_equal_timestamps() {
     };
 
     manager
-        .receive_commit(&mut io, object_id, "main", edit_x)
+        .receive_commit(&mut io, object_id, main_branch(), edit_x)
         .unwrap();
     manager
-        .receive_commit(&mut io, object_id, "main", edit_y)
+        .receive_commit(&mut io, object_id, main_branch(), edit_y)
         .unwrap();
 
-    let tips = manager.get_tip_ids(object_id, "main").unwrap();
+    let tips = manager.get_tip_ids(object_id, main_branch()).unwrap();
     assert_eq!(tips.len(), 2);
 
     // Call tips_by_timestamp multiple times — must always return same order
     let object = manager.get(object_id).unwrap();
-    let branch = &object.branches[&compat_branch("main")];
+    let branch = &object.branches[&main_branch()];
     let first_result = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
     for _ in 0..10 {
         let result = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
@@ -1560,7 +1601,7 @@ fn receive_commit_idempotent_during_conflict() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"root".to_vec(),
             alice,
@@ -1588,24 +1629,24 @@ fn receive_commit_idempotent_during_conflict() {
     };
 
     let alice_id = manager
-        .receive_commit(&mut io, object_id, "main", alice_edit)
+        .receive_commit(&mut io, object_id, main_branch(), alice_edit)
         .unwrap();
     let bob_id = manager
-        .receive_commit(&mut io, object_id, "main", bob_edit.clone())
+        .receive_commit(&mut io, object_id, main_branch(), bob_edit.clone())
         .unwrap();
 
     // Subscribe and drain initial updates
-    let _sub_id = manager.subscribe(object_id, "main");
+    let _sub_id = manager.subscribe(object_id, main_branch());
     manager.take_subscription_updates();
 
     // Replay bob's commit — should be a no-op
     let replayed_id = manager
-        .receive_commit(&mut io, object_id, "main", bob_edit)
+        .receive_commit(&mut io, object_id, main_branch(), bob_edit)
         .unwrap();
     assert_eq!(replayed_id, bob_id, "idempotent: same CommitId on replay");
 
     // Tips unchanged
-    let tips = manager.get_tip_ids(object_id, "main").unwrap();
+    let tips = manager.get_tip_ids(object_id, main_branch()).unwrap();
     assert_eq!(tips.len(), 2);
     assert!(tips.contains(&alice_id));
     assert!(tips.contains(&bob_id));
@@ -1636,7 +1677,7 @@ fn truncate_with_diverged_tips() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"root".to_vec(),
             alice,
@@ -1655,7 +1696,7 @@ fn truncate_with_diverged_tips() {
         ack_state: CommitAckState::default(),
     };
     let a1 = manager
-        .receive_commit(&mut io, object_id, "main", a1_commit)
+        .receive_commit(&mut io, object_id, main_branch(), a1_commit)
         .unwrap();
 
     let a2_commit = Commit {
@@ -1668,7 +1709,7 @@ fn truncate_with_diverged_tips() {
         ack_state: CommitAckState::default(),
     };
     let a2 = manager
-        .receive_commit(&mut io, object_id, "main", a2_commit)
+        .receive_commit(&mut io, object_id, main_branch(), a2_commit)
         .unwrap();
 
     // Bob's chain: root → b1 → b2
@@ -1682,7 +1723,7 @@ fn truncate_with_diverged_tips() {
         ack_state: CommitAckState::default(),
     };
     let b1 = manager
-        .receive_commit(&mut io, object_id, "main", b1_commit)
+        .receive_commit(&mut io, object_id, main_branch(), b1_commit)
         .unwrap();
 
     let b2_commit = Commit {
@@ -1695,14 +1736,14 @@ fn truncate_with_diverged_tips() {
         ack_state: CommitAckState::default(),
     };
     let b2 = manager
-        .receive_commit(&mut io, object_id, "main", b2_commit)
+        .receive_commit(&mut io, object_id, main_branch(), b2_commit)
         .unwrap();
 
     // Verify pre-truncation state: 5 commits, 2 tips
-    let commits_before = manager.get_commits(object_id, "main").unwrap();
+    let commits_before = manager.get_commits(object_id, main_branch()).unwrap();
     assert_eq!(commits_before.len(), 5); // root, a1, a2, b1, b2
 
-    let tips_before = manager.get_tip_ids(object_id, "main").unwrap();
+    let tips_before = manager.get_tip_ids(object_id, main_branch()).unwrap();
     assert_eq!(tips_before.len(), 2);
     assert!(tips_before.contains(&a2));
     assert!(tips_before.contains(&b2));
@@ -1712,7 +1753,7 @@ fn truncate_with_diverged_tips() {
     tail_ids.insert(a1);
     tail_ids.insert(b1);
 
-    let result = manager.truncate_branch(&mut io, object_id, "main", tail_ids);
+    let result = manager.truncate_branch(&mut io, object_id, main_branch(), tail_ids);
     assert_eq!(
         result,
         TruncateResult::Success { deleted_commits: 1 },
@@ -1720,7 +1761,7 @@ fn truncate_with_diverged_tips() {
     );
 
     // Post-truncation: 4 commits remain (a1, a2, b1, b2), root gone
-    let commits_after = manager.get_commits(object_id, "main").unwrap();
+    let commits_after = manager.get_commits(object_id, main_branch()).unwrap();
     assert_eq!(commits_after.len(), 4);
     assert!(!commits_after.contains_key(&root), "root should be deleted");
     assert!(commits_after.contains_key(&a1));
@@ -1729,14 +1770,14 @@ fn truncate_with_diverged_tips() {
     assert!(commits_after.contains_key(&b2));
 
     // Tips unchanged
-    let tips_after = manager.get_tip_ids(object_id, "main").unwrap();
+    let tips_after = manager.get_tip_ids(object_id, main_branch()).unwrap();
     assert_eq!(tips_after.len(), 2);
     assert!(tips_after.contains(&a2));
     assert!(tips_after.contains(&b2));
 
     // Tails set correctly
     let object = manager.get(object_id).unwrap();
-    let branch = &object.branches[&compat_branch("main")];
+    let branch = &object.branches[&main_branch()];
     let tails = branch.tails.as_ref().expect("tails should be set");
     assert!(tails.contains(&a1));
     assert!(tails.contains(&b1));
@@ -1760,7 +1801,7 @@ fn truncate_rejects_when_tip_not_descendant_of_tail() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"root".to_vec(),
             alice,
@@ -1788,21 +1829,21 @@ fn truncate_rejects_when_tip_not_descendant_of_tail() {
     };
 
     let alice_id = manager
-        .receive_commit(&mut io, object_id, "main", alice_edit)
+        .receive_commit(&mut io, object_id, main_branch(), alice_edit)
         .unwrap();
     let bob_id = manager
-        .receive_commit(&mut io, object_id, "main", bob_edit)
+        .receive_commit(&mut io, object_id, main_branch(), bob_edit)
         .unwrap();
 
     // Verify 2 tips
-    let tips = manager.get_tip_ids(object_id, "main").unwrap();
+    let tips = manager.get_tip_ids(object_id, main_branch()).unwrap();
     assert_eq!(tips.len(), 2);
 
     // Truncate with only alice as tail — bob is not a descendant of alice
     let mut tail_ids = HashSet::new();
     tail_ids.insert(alice_id);
 
-    let result = manager.truncate_branch(&mut io, object_id, "main", tail_ids);
+    let result = manager.truncate_branch(&mut io, object_id, main_branch(), tail_ids);
 
     // Should fail: bob_id is a tip but is not a descendant of alice_id
     assert_eq!(
@@ -1812,7 +1853,7 @@ fn truncate_rejects_when_tip_not_descendant_of_tail() {
     );
 
     // State unchanged — commits still intact
-    let commits = manager.get_commits(object_id, "main").unwrap();
+    let commits = manager.get_commits(object_id, main_branch()).unwrap();
     assert_eq!(commits.len(), 3); // root, alice, bob
 }
 
@@ -1838,7 +1879,7 @@ fn lww_offline_edit_wins_when_later() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"root".to_vec(),
             alice,
@@ -1860,7 +1901,7 @@ fn lww_offline_edit_wins_when_later() {
             ack_state: CommitAckState::default(),
         };
         let id = manager
-            .receive_commit(&mut io, object_id, "main", commit)
+            .receive_commit(&mut io, object_id, main_branch(), commit)
             .unwrap();
         alice_ids.push(id);
         parent = id;
@@ -1879,18 +1920,18 @@ fn lww_offline_edit_wins_when_later() {
         ack_state: CommitAckState::default(),
     };
     let b1 = manager
-        .receive_commit(&mut io, object_id, "main", bob_commit)
+        .receive_commit(&mut io, object_id, main_branch(), bob_commit)
         .unwrap();
 
     // Two tips: a4 and b1 (diverged from a1)
-    let tips = manager.get_tip_ids(object_id, "main").unwrap();
+    let tips = manager.get_tip_ids(object_id, main_branch()).unwrap();
     assert_eq!(tips.len(), 2);
     assert!(tips.contains(&a4));
     assert!(tips.contains(&b1));
 
     // LWW: bob wins because ts=700 > ts=500
     let object = manager.get(object_id).unwrap();
-    let branch = &object.branches[&compat_branch("main")];
+    let branch = &object.branches[&main_branch()];
     let sorted = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
     assert_eq!(
         *sorted.last().unwrap(),
@@ -1925,7 +1966,7 @@ fn lww_different_fields_same_object_whole_commit_wins() {
         .add_commit(
             &mut io,
             object_id,
-            "main",
+            main_branch(),
             vec![],
             b"title=task,completed=false".to_vec(),
             alice,
@@ -1944,7 +1985,7 @@ fn lww_different_fields_same_object_whole_commit_wins() {
         ack_state: CommitAckState::default(),
     };
     let _alice_id = manager
-        .receive_commit(&mut io, object_id, "main", alice_edit)
+        .receive_commit(&mut io, object_id, main_branch(), alice_edit)
         .unwrap();
 
     // Bob edits completed only (his snapshot has title=task)
@@ -1958,16 +1999,16 @@ fn lww_different_fields_same_object_whole_commit_wins() {
         ack_state: CommitAckState::default(),
     };
     let bob_id = manager
-        .receive_commit(&mut io, object_id, "main", bob_edit)
+        .receive_commit(&mut io, object_id, main_branch(), bob_edit)
         .unwrap();
 
     // Two tips
-    let tips = manager.get_tip_ids(object_id, "main").unwrap();
+    let tips = manager.get_tip_ids(object_id, main_branch()).unwrap();
     assert_eq!(tips.len(), 2);
 
     // LWW: bob wins (ts=300 > ts=200)
     let object = manager.get(object_id).unwrap();
-    let branch = &object.branches[&compat_branch("main")];
+    let branch = &object.branches[&main_branch()];
     let sorted = ObjectManager::tips_by_timestamp(&branch.commits, &branch.tips);
     let winner = *sorted.last().unwrap();
     assert_eq!(winner, bob_id, "bob (ts=300) should be LWW winner");
