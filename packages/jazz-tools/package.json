@@ -22,6 +22,10 @@
       "types": "./dist/backend/index.d.ts",
       "default": "./dist/backend/index.js"
     },
+    "./better-auth-adapter": {
+      "types": "./dist/better-auth-adapter/index.d.ts",
+      "default": "./dist/better-auth-adapter/index.js"
+    },
     "./react": {
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
@@ -98,6 +102,7 @@
     "web-streams-polyfill": "^4.2.0"
   },
   "devDependencies": {
+    "@better-auth/test-utils": "^1.5.5",
     "@sveltejs/package": "^2.0.0",
     "@sveltejs/vite-plugin-svelte": "catalog:default",
     "@types/node": "^22.0.0",
@@ -105,6 +110,7 @@
     "@types/react-dom": "^19.0.0",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
+    "better-auth": "^1.5.5",
     "fake-indexeddb": "^5.0.2",
     "jsdom": "^26.0.0",
     "react-dom": "^19.0.0",
@@ -117,6 +123,7 @@
     "zod": "^4.3.6"
   },
   "peerDependencies": {
+    "better-auth": "^1.5.5",
     "expo": ">=54",
     "react": "^18 || ^19",
     "react-native": ">=0.76",
@@ -124,6 +131,9 @@
     "vue": "^3.5.0"
   },
   "peerDependenciesMeta": {
+    "better-auth": {
+      "optional": true
+    },
     "expo": {
       "optional": true
     },
