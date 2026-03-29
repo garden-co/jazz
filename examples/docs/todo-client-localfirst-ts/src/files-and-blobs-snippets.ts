@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools";
-import { app } from "../schema/app.js";
+import { app } from "../schema.js";
 
 const EXAMPLE_OWNER_ID = "local:example-owner";
 

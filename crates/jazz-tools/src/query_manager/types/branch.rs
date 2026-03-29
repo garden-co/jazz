@@ -56,361 +56,9 @@ impl SchemaHash {
 
             // Hash row descriptor (columns sorted by name)
             hash_row_descriptor(&mut hasher, &table_schema.columns);
-            hash_table_policies(&mut hasher, &table_schema.policies);
         }
 
         Self(*hasher.finalize().as_bytes())
-    }
-}
-
-fn hash_table_policies(hasher: &mut blake3::Hasher, policies: &TablePolicies) {
-    if *policies == TablePolicies::default() {
-        return;
-    }
-
-    // Marker so schemas without policies keep prior hash behavior.
-    hasher.update(&[255]);
-    hash_operation_policy(hasher, b'S', &policies.select);
-    hash_operation_policy(hasher, b'I', &policies.insert);
-    hash_operation_policy(hasher, b'U', &policies.update);
-    hash_operation_policy(hasher, b'D', &policies.delete);
-}
-
-fn hash_operation_policy(hasher: &mut blake3::Hasher, op_tag: u8, policy: &OperationPolicy) {
-    hasher.update(&[op_tag]);
-    match &policy.using {
-        Some(expr) => {
-            hasher.update(&[1]);
-            hash_policy_expr(hasher, expr);
-        }
-        None => {
-            hasher.update(&[0]);
-        }
-    }
-    match &policy.with_check {
-        Some(expr) => {
-            hasher.update(&[1]);
-            hash_policy_expr(hasher, expr);
-        }
-        None => {
-            hasher.update(&[0]);
-        }
-    }
-}
-
-fn hash_policy_expr(hasher: &mut blake3::Hasher, expr: &PolicyExpr) {
-    use crate::query_manager::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
-
-    match expr {
-        PolicyExpr::Cmp { column, op, value } => {
-            hasher.update(&[1]);
-            hasher.update(column.as_bytes());
-            hasher.update(&[0]);
-            match op {
-                CmpOp::Eq => {
-                    hasher.update(&[1]);
-                }
-                CmpOp::Ne => {
-                    hasher.update(&[2]);
-                }
-                CmpOp::Lt => {
-                    hasher.update(&[3]);
-                }
-                CmpOp::Le => {
-                    hasher.update(&[4]);
-                }
-                CmpOp::Gt => {
-                    hasher.update(&[5]);
-                }
-                CmpOp::Ge => {
-                    hasher.update(&[6]);
-                }
-            }
-            match value {
-                PolicyValue::Literal(v) => {
-                    hasher.update(&[1]);
-                    hash_value(hasher, v);
-                }
-                PolicyValue::SessionRef(path) => {
-                    hasher.update(&[2]);
-                    for part in path {
-                        hasher.update(part.as_bytes());
-                        hasher.update(&[0]);
-                    }
-                }
-            }
-        }
-        PolicyExpr::SessionCmp { path, op, value } => {
-            hasher.update(&[16]);
-            for part in path {
-                hasher.update(part.as_bytes());
-                hasher.update(&[0]);
-            }
-            match op {
-                CmpOp::Eq => hasher.update(&[1]),
-                CmpOp::Ne => hasher.update(&[2]),
-                CmpOp::Lt => hasher.update(&[3]),
-                CmpOp::Le => hasher.update(&[4]),
-                CmpOp::Gt => hasher.update(&[5]),
-                CmpOp::Ge => hasher.update(&[6]),
-            };
-            hash_value(hasher, value);
-        }
-        PolicyExpr::IsNull { column } => {
-            hasher.update(&[2]);
-            hasher.update(column.as_bytes());
-            hasher.update(&[0]);
-        }
-        PolicyExpr::SessionIsNull { path } => {
-            hasher.update(&[17]);
-            for part in path {
-                hasher.update(part.as_bytes());
-                hasher.update(&[0]);
-            }
-        }
-        PolicyExpr::IsNotNull { column } => {
-            hasher.update(&[3]);
-            hasher.update(column.as_bytes());
-            hasher.update(&[0]);
-        }
-        PolicyExpr::SessionIsNotNull { path } => {
-            hasher.update(&[18]);
-            for part in path {
-                hasher.update(part.as_bytes());
-                hasher.update(&[0]);
-            }
-        }
-        PolicyExpr::Contains { column, value } => {
-            hasher.update(&[14]);
-            hasher.update(column.as_bytes());
-            hasher.update(&[0]);
-            match value {
-                PolicyValue::Literal(v) => {
-                    hasher.update(&[1]);
-                    hash_value(hasher, v);
-                }
-                PolicyValue::SessionRef(path) => {
-                    hasher.update(&[2]);
-                    for part in path {
-                        hasher.update(part.as_bytes());
-                        hasher.update(&[0]);
-                    }
-                }
-            }
-        }
-        PolicyExpr::SessionContains { path, value } => {
-            hasher.update(&[19]);
-            for part in path {
-                hasher.update(part.as_bytes());
-                hasher.update(&[0]);
-            }
-            hash_value(hasher, value);
-        }
-        PolicyExpr::In {
-            column,
-            session_path,
-        } => {
-            hasher.update(&[4]);
-            hasher.update(column.as_bytes());
-            hasher.update(&[0]);
-            for part in session_path {
-                hasher.update(part.as_bytes());
-                hasher.update(&[0]);
-            }
-        }
-        PolicyExpr::InList { column, values } => {
-            hasher.update(&[15]);
-            hasher.update(column.as_bytes());
-            hasher.update(&[0]);
-            hasher.update(&(values.len() as u64).to_le_bytes());
-            for value in values {
-                match value {
-                    PolicyValue::Literal(v) => {
-                        hasher.update(&[1]);
-                        hash_value(hasher, v);
-                    }
-                    PolicyValue::SessionRef(path) => {
-                        hasher.update(&[2]);
-                        for part in path {
-                            hasher.update(part.as_bytes());
-                            hasher.update(&[0]);
-                        }
-                    }
-                }
-            }
-        }
-        PolicyExpr::SessionInList { path, values } => {
-            hasher.update(&[20]);
-            for part in path {
-                hasher.update(part.as_bytes());
-                hasher.update(&[0]);
-            }
-            hasher.update(&(values.len() as u64).to_le_bytes());
-            for value in values {
-                hash_value(hasher, value);
-            }
-        }
-        PolicyExpr::Exists { table, condition } => {
-            hasher.update(&[5]);
-            hasher.update(table.as_bytes());
-            hasher.update(&[0]);
-            hash_policy_expr(hasher, condition);
-        }
-        PolicyExpr::ExistsRel { rel } => {
-            hasher.update(&[12]);
-            if let Ok(encoded) = serde_json::to_vec(rel) {
-                hasher.update(&(encoded.len() as u64).to_le_bytes());
-                hasher.update(&encoded);
-            } else {
-                hasher.update(&0u64.to_le_bytes());
-            }
-        }
-        PolicyExpr::Inherits {
-            operation,
-            via_column,
-            max_depth,
-        } => {
-            hasher.update(&[6]);
-            match operation {
-                Operation::Select => {
-                    hasher.update(&[1]);
-                }
-                Operation::Insert => {
-                    hasher.update(&[2]);
-                }
-                Operation::Update => {
-                    hasher.update(&[3]);
-                }
-                Operation::Delete => {
-                    hasher.update(&[4]);
-                }
-            }
-            hasher.update(via_column.as_bytes());
-            hasher.update(&[0]);
-            match max_depth {
-                Some(depth) => {
-                    hasher.update(&[1]);
-                    hasher.update(&(*depth as u64).to_le_bytes());
-                }
-                None => {
-                    hasher.update(&[0]);
-                }
-            }
-        }
-        PolicyExpr::InheritsReferencing {
-            operation,
-            source_table,
-            via_column,
-            max_depth,
-        } => {
-            hasher.update(&[13]);
-            match operation {
-                Operation::Select => {
-                    hasher.update(&[1]);
-                }
-                Operation::Insert => {
-                    hasher.update(&[2]);
-                }
-                Operation::Update => {
-                    hasher.update(&[3]);
-                }
-                Operation::Delete => {
-                    hasher.update(&[4]);
-                }
-            }
-            hasher.update(source_table.as_bytes());
-            hasher.update(&[0]);
-            hasher.update(via_column.as_bytes());
-            hasher.update(&[0]);
-            match max_depth {
-                Some(depth) => {
-                    hasher.update(&[1]);
-                    hasher.update(&(*depth as u64).to_le_bytes());
-                }
-                None => {
-                    hasher.update(&[0]);
-                }
-            }
-        }
-        PolicyExpr::And(exprs) => {
-            hasher.update(&[7]);
-            hasher.update(&(exprs.len() as u64).to_le_bytes());
-            for inner in exprs {
-                hash_policy_expr(hasher, inner);
-            }
-        }
-        PolicyExpr::Or(exprs) => {
-            hasher.update(&[8]);
-            hasher.update(&(exprs.len() as u64).to_le_bytes());
-            for inner in exprs {
-                hash_policy_expr(hasher, inner);
-            }
-        }
-        PolicyExpr::Not(inner) => {
-            hasher.update(&[9]);
-            hash_policy_expr(hasher, inner);
-        }
-        PolicyExpr::True => {
-            hasher.update(&[10]);
-        }
-        PolicyExpr::False => {
-            hasher.update(&[11]);
-        }
-    }
-}
-
-fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
-    match value {
-        Value::Integer(v) => {
-            hasher.update(&[1]);
-            hasher.update(&v.to_le_bytes());
-        }
-        Value::BigInt(v) => {
-            hasher.update(&[2]);
-            hasher.update(&v.to_le_bytes());
-        }
-        Value::Double(v) => {
-            hasher.update(&[10]);
-            hasher.update(&v.to_le_bytes());
-        }
-        Value::Boolean(v) => {
-            hasher.update(&[3, *v as u8]);
-        }
-        Value::Text(v) => {
-            hasher.update(&[4]);
-            hasher.update(v.as_bytes());
-            hasher.update(&[0]);
-        }
-        Value::Timestamp(v) => {
-            hasher.update(&[5]);
-            hasher.update(&v.to_le_bytes());
-        }
-        Value::Uuid(v) => {
-            hasher.update(&[6]);
-            hasher.update(v.uuid().as_bytes());
-        }
-        Value::Bytea(v) => {
-            hasher.update(&[10]);
-            hasher.update(&(v.len() as u64).to_le_bytes());
-            hasher.update(v);
-        }
-        Value::Array(values) => {
-            hasher.update(&[7]);
-            hasher.update(&(values.len() as u64).to_le_bytes());
-            for inner in values {
-                hash_value(hasher, inner);
-            }
-        }
-        Value::Row { values, .. } => {
-            hasher.update(&[8]);
-            hasher.update(&(values.len() as u64).to_le_bytes());
-            for inner in values {
-                hash_value(hasher, inner);
-            }
-        }
-        Value::Null => {
-            hasher.update(&[9]);
-        }
     }
 }
 
@@ -478,6 +126,61 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
         hasher.update(&[0]);
     }
     hasher.update(&[0]); // delimiter
+}
+
+fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
+    match value {
+        Value::Integer(v) => {
+            hasher.update(&[1]);
+            hasher.update(&v.to_le_bytes());
+        }
+        Value::BigInt(v) => {
+            hasher.update(&[2]);
+            hasher.update(&v.to_le_bytes());
+        }
+        Value::Double(v) => {
+            hasher.update(&[10]);
+            hasher.update(&v.to_le_bytes());
+        }
+        Value::Boolean(v) => {
+            hasher.update(&[3, *v as u8]);
+        }
+        Value::Text(v) => {
+            hasher.update(&[4]);
+            hasher.update(v.as_bytes());
+            hasher.update(&[0]);
+        }
+        Value::Timestamp(v) => {
+            hasher.update(&[5]);
+            hasher.update(&v.to_le_bytes());
+        }
+        Value::Uuid(v) => {
+            hasher.update(&[6]);
+            hasher.update(v.uuid().as_bytes());
+        }
+        Value::Bytea(v) => {
+            hasher.update(&[11]);
+            hasher.update(&(v.len() as u64).to_le_bytes());
+            hasher.update(v);
+        }
+        Value::Array(values) => {
+            hasher.update(&[7]);
+            hasher.update(&(values.len() as u64).to_le_bytes());
+            for inner in values {
+                hash_value(hasher, inner);
+            }
+        }
+        Value::Row { values, .. } => {
+            hasher.update(&[8]);
+            hasher.update(&(values.len() as u64).to_le_bytes());
+            for inner in values {
+                hash_value(hasher, inner);
+            }
+        }
+        Value::Null => {
+            hasher.update(&[9]);
+        }
+    }
 }
 
 /// Hash a ColumnType recursively (for Array and Row types).

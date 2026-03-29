@@ -4,7 +4,6 @@
 //! to the current schema using lenses.
 
 use crate::commit::CommitId;
-use crate::object::ObjectId;
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::types::SchemaHash;
 
@@ -171,43 +170,6 @@ impl<'a> LensTransformer<'a> {
             was_transformed: true,
         })
     }
-
-    /// Create a lens-aware loader function for MaterializeNode.
-    ///
-    /// This returns a closure that loads row data and applies lens transforms.
-    ///
-    /// # Arguments
-    /// * `base_loader` - Base loader function that fetches raw row data
-    /// * `branch_schema_map` - Maps branch names to schema hashes
-    ///
-    /// The returned loader will:
-    /// 1. Call base_loader to get raw row data
-    /// 2. Determine which schema the row is from (based on branch)
-    /// 3. Apply lens transforms if needed
-    pub fn make_loader<F>(
-        &self,
-        mut base_loader: F,
-        branch_schema_map: &'a std::collections::HashMap<String, SchemaHash>,
-    ) -> impl FnMut(ObjectId) -> Option<(Vec<u8>, CommitId)> + '_
-    where
-        F: FnMut(ObjectId) -> Option<(Vec<u8>, CommitId, String)> + 'a,
-    {
-        move |id: ObjectId| {
-            let (data, commit_id, branch) = base_loader(id)?;
-
-            // Look up schema for this branch
-            let source_hash = branch_schema_map.get(&branch)?;
-
-            // Transform if needed
-            match self.transform(&data, commit_id, *source_hash) {
-                Ok(result) => Some((result.data, result.commit_id)),
-                Err(_) => {
-                    // On error, return original data (best effort)
-                    Some((data, commit_id))
-                }
-            }
-        }
-    }
 }
 
 /// Translate a column name through the lens chain.
@@ -246,6 +208,7 @@ pub fn translate_column_for_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::object::ObjectId;
     use crate::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
     use crate::schema_manager::auto_lens::generate_lens;
     use crate::schema_manager::lens::{Lens, LensOp, LensTransform};

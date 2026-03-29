@@ -12,7 +12,7 @@ use crate::schema_manager::SchemaContext;
 use crate::storage::{CatalogueManifestOp, Storage, StorageError};
 use crate::sync_manager::{
     ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
-    SyncManager,
+    SchemaWarning, SyncManager,
 };
 
 use super::graph::{QueryCompileError, QueryGraph};
@@ -20,10 +20,11 @@ use super::graph_nodes::output::QuerySubscriptionId;
 use super::policy::Operation;
 use super::policy_graph::PolicyGraph;
 use super::query::Query;
+use super::server_queries::RowTransformContext;
 use super::session::Session;
 use super::types::{
-    BatchBranchKey, BatchId, ComposedBranchName, LoadedRow, OrderedRowDelta, QueryBranchRef,
-    RowDelta, RowDescriptor, Schema, SchemaHash, TableName, TableSchema, Value,
+    BatchBranchKey, BatchId, ComposedBranchName, LoadedRow, OrderedRowDelta, QueryBranchRef, Row,
+    RowDelta, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
     build_ordered_delta_with_post_ids,
 };
 
@@ -177,8 +178,14 @@ pub(crate) struct QuerySubscription {
     pub(crate) achieved_tiers: HashSet<DurabilityTier>,
     /// Current ordered IDs for ordered delta construction.
     pub(crate) current_ordered_ids: Vec<ObjectId>,
+    /// Last visible rows delivered to the subscriber when explicit auth filtering is active.
+    pub(crate) current_visible_rows: HashMap<ObjectId, Row>,
+    /// Whether this subscription uses post-settle auth filtering instead of graph policies.
+    pub(crate) uses_explicit_authorization_filtering: bool,
     /// Whether this subscription should be forwarded to upstream servers.
     pub(crate) propagation: QueryPropagation,
+    /// Schema mismatch warnings already emitted for the latest settled state.
+    pub(crate) reported_schema_warnings: HashSet<SchemaWarningKey>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -255,6 +262,62 @@ pub(super) struct ServerQuerySubscription {
     pub(super) settled_once: bool,
     /// Whether this subscription should be propagated to upstream servers.
     pub(super) propagation: QueryPropagation,
+    /// Schema mismatch warnings already emitted for the latest settled state.
+    pub(super) reported_schema_warnings: HashSet<SchemaWarningKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct SchemaWarningKey {
+    pub(crate) table_name: String,
+    pub(crate) from_hash: SchemaHash,
+    pub(crate) to_hash: SchemaHash,
+}
+
+impl SchemaWarningKey {
+    fn from_warning(warning: &SchemaWarning) -> Self {
+        Self {
+            table_name: warning.table_name.clone(),
+            from_hash: warning.from_hash,
+            to_hash: warning.to_hash,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct SchemaWarningAccumulator {
+    counts: HashMap<SchemaWarningKey, usize>,
+}
+
+impl SchemaWarningAccumulator {
+    pub(super) fn record(&mut self, table_name: &str, from_hash: SchemaHash, to_hash: SchemaHash) {
+        let key = SchemaWarningKey {
+            table_name: table_name.to_string(),
+            from_hash,
+            to_hash,
+        };
+        *self.counts.entry(key).or_default() += 1;
+    }
+
+    pub(super) fn warnings_for_query(&self, query_id: QueryId) -> Vec<SchemaWarning> {
+        let mut warnings: Vec<SchemaWarning> = self
+            .counts
+            .iter()
+            .map(|(key, row_count)| SchemaWarning {
+                query_id,
+                table_name: key.table_name.clone(),
+                row_count: *row_count,
+                from_hash: key.from_hash,
+                to_hash: key.to_hash,
+            })
+            .collect();
+        warnings.sort_by(|a, b| {
+            a.table_name
+                .cmp(&b.table_name)
+                .then_with(|| a.from_hash.to_string().cmp(&b.from_hash.to_string()))
+                .then_with(|| a.to_hash.to_string().cmp(&b.to_hash.to_string()))
+        });
+        warnings
+    }
 }
 
 /// A catalogue object update received via sync.
@@ -280,6 +343,8 @@ pub struct CatalogueUpdate {
 pub struct QueryManager {
     pub(super) sync_manager: SyncManager,
     pub(super) schema: Arc<Schema>,
+    pub(super) authorization_schema: Option<Arc<Schema>>,
+    pub(super) authorization_schema_required: bool,
 
     /// Pending catalogue updates (schemas/lenses received via sync).
     /// SchemaManager should call take_pending_catalogue_updates() to process these.
@@ -345,6 +410,45 @@ impl QueryManager {
         self.schema_context.resolve_query_branch_name(branch)
     }
 
+    pub(super) fn finalize_schema_warnings(
+        reported: &mut HashSet<SchemaWarningKey>,
+        warnings: Vec<SchemaWarning>,
+    ) -> Vec<SchemaWarning> {
+        let current_keys: HashSet<SchemaWarningKey> = warnings
+            .iter()
+            .map(SchemaWarningKey::from_warning)
+            .collect();
+        let new_warnings = warnings
+            .into_iter()
+            .filter(|warning| !reported.contains(&SchemaWarningKey::from_warning(warning)))
+            .collect();
+        *reported = current_keys;
+        new_warnings
+    }
+
+    pub(super) fn log_schema_warning(
+        warning: &SchemaWarning,
+        subscription_id: Option<QuerySubscriptionId>,
+    ) {
+        fn short_hash(hash: &impl ToString) -> String {
+            hash.to_string().chars().take(12).collect()
+        }
+
+        tracing::warn!(
+            sub_id = subscription_id.map(|id| id.0),
+            query_id = warning.query_id.0,
+            table = warning.table_name,
+            row_count = warning.row_count,
+            from_hash = %warning.from_hash,
+            to_hash = %warning.to_hash,
+            "Detected {} rows of {} with differing schema versions. To ensure data visibility and forward/backward compatibility please create a new migration with `npx jazz-tools migrations create {} {}`",
+            warning.row_count,
+            warning.table_name,
+            short_hash(&warning.from_hash),
+            short_hash(&warning.to_hash),
+        );
+    }
+
     pub fn server_subscription_telemetry(&self) -> Vec<ServerSubscriptionTelemetryGroup> {
         let mut groups: HashMap<String, ServerSubscriptionTelemetryGroup> = HashMap::new();
 
@@ -384,6 +488,8 @@ impl QueryManager {
         Self {
             sync_manager,
             schema: Arc::new(Schema::new()),
+            authorization_schema: None,
+            authorization_schema_required: false,
             pending_catalogue_updates: Vec::new(),
             subscriptions: HashMap::new(),
             next_subscription_id: 0,
@@ -417,6 +523,8 @@ impl QueryManager {
         self.schema_context
             .set_current_with_batch(schema.clone(), env, user_branch, batch_id);
         self.schema = Arc::new(schema.clone());
+        self.authorization_schema = Some(Arc::new(schema.clone()));
+        self.authorization_schema_required = true;
 
         // Update branch -> schema hash map
         let branch = self.schema_context.branch_name();
@@ -424,6 +532,16 @@ impl QueryManager {
             branch.as_str().to_string(),
             self.schema_context.current_hash,
         );
+    }
+
+    pub fn set_authorization_schema(&mut self, schema: Schema) {
+        self.authorization_schema = Some(Arc::new(schema));
+        self.authorization_schema_required = true;
+        self.mark_subscriptions_for_recompile();
+    }
+
+    pub fn require_authorization_schema(&mut self) {
+        self.authorization_schema_required = true;
     }
 
     /// Add a live schema (one we can read from but don't write to).
@@ -544,6 +662,33 @@ impl QueryManager {
         }
     }
 
+    pub(super) fn local_subscription_uses_explicit_authorization(
+        &self,
+        session: Option<&Session>,
+    ) -> bool {
+        session.is_some()
+            && self
+                .authorization_schema
+                .as_ref()
+                .map(|auth_schema| auth_schema.as_ref() != self.schema.as_ref())
+                .unwrap_or(false)
+    }
+
+    pub(super) fn local_subscription_compile_schema(&self, session: Option<&Session>) -> Schema {
+        if self.local_subscription_uses_explicit_authorization(session) {
+            self.schema
+                .iter()
+                .map(|(table_name, table_schema)| {
+                    let mut structural = table_schema.clone();
+                    structural.policies = TablePolicies::default();
+                    (*table_name, structural)
+                })
+                .collect()
+        } else {
+            self.schema.as_ref().clone()
+        }
+    }
+
     /// Mark all subscriptions for recompilation.
     ///
     /// Called when live schemas change to ensure subscriptions pick up new branches.
@@ -561,13 +706,16 @@ impl QueryManager {
     /// Called during process() to rebuild QueryGraphs when schemas change.
     fn recompile_stale_subscriptions(&mut self, storage: &dyn Storage) {
         let mut failed_local: Vec<(QuerySubscriptionId, String)> = Vec::new();
+        let current_schema = self.schema.clone();
+        let current_schema_context = self.schema_context.clone();
+        let authorization_schema = self.authorization_schema.clone();
 
         // Recompile local subscriptions
         for (sub_id, sub) in &mut self.subscriptions {
             let next_branches = match Self::resolve_query_branches_for_context(
                 storage,
                 &sub.query,
-                &self.schema_context,
+                &current_schema_context,
             ) {
                 Ok(branches) => branches,
                 Err(error) => {
@@ -580,18 +728,37 @@ impl QueryManager {
                     sub.branches.clone()
                 }
             };
+            let uses_explicit_authorization_filtering = sub.session.is_some()
+                && authorization_schema
+                    .as_ref()
+                    .map(|auth_schema| auth_schema.as_ref() != current_schema.as_ref())
+                    .unwrap_or(false);
+            let compile_schema = if uses_explicit_authorization_filtering {
+                current_schema
+                    .iter()
+                    .map(|(table_name, table_schema)| {
+                        let mut structural = table_schema.clone();
+                        structural.policies = TablePolicies::default();
+                        (*table_name, structural)
+                    })
+                    .collect()
+            } else {
+                current_schema.as_ref().clone()
+            };
 
             if sub.needs_recompile || sub.branches != next_branches {
                 match Self::compile_graph(
                     &sub.query,
                     &next_branches,
-                    &self.schema,
+                    &compile_schema,
                     sub.session.clone(),
-                    &self.schema_context,
+                    &current_schema_context,
                 ) {
                     Ok(new_graph) => {
                         sub.graph = new_graph;
                         sub.branches = next_branches;
+                        sub.uses_explicit_authorization_filtering =
+                            uses_explicit_authorization_filtering;
                         sub.needs_recompile = false;
                     }
                     Err(err) => {
@@ -647,12 +814,22 @@ impl QueryManager {
                     sub.branches.clone()
                 }
             };
+            let compile_schema: Schema = sub
+                .schema_context
+                .current_schema
+                .iter()
+                .map(|(table_name, table_schema)| {
+                    let mut structural = table_schema.clone();
+                    structural.policies = TablePolicies::default();
+                    (*table_name, structural)
+                })
+                .collect();
 
             if sub.needs_recompile || sub.branches != next_branches {
                 match Self::compile_graph(
                     &compile_query,
                     &next_branches,
-                    &sub.schema_context.current_schema,
+                    &compile_schema,
                     sub.session.clone(),
                     &sub.schema_context,
                 ) {
@@ -814,46 +991,71 @@ impl QueryManager {
                 "settling subscriptions"
             );
         }
-        let om = &mut self.sync_manager.object_manager;
-        let schema_context = &self.schema_context;
-        let branch_schema_map = &self.branch_schema_map;
+        let storage_ref: &dyn Storage = storage;
+        let schema_context = self.schema_context.clone();
+        let branch_schema_map = self.branch_schema_map.clone();
+        let subscription_ids: Vec<_> = self.subscriptions.keys().copied().collect();
 
-        for (sub_id, subscription) in &mut self.subscriptions {
-            let _sub_span = tracing::trace_span!("settle_subscription", sub_id = sub_id.0, table = %subscription.graph.table).entered();
-            let branches = &subscription.branches;
-            let requested_branches = Self::branch_names_for_query_branches(branches);
-            let table = subscription.graph.table.as_str().to_string();
-            let include_deleted = subscription.query.include_deleted;
-
-            let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let obj = om.get_or_load_tips(id, storage_ref, &requested_branches);
-                if obj.is_none() {
-                    tracing::trace!(%id, "row_loader: object not found");
-                    return None;
-                }
-                let obj = obj?;
-                let resolved = Self::resolve_latest_row_with_schema_transform(
-                    id,
-                    obj,
-                    branches,
-                    &table,
-                    branch_schema_map,
-                    schema_context,
-                )?;
-                if resolved.is_soft_deleted && !include_deleted {
-                    return None;
-                }
-
-                Some(LoadedRow::new(
-                    resolved.content,
-                    resolved.commit_id,
-                    [(id, BatchBranchKey::from_branch_name(resolved.branch_name))]
-                        .into_iter()
-                        .collect(),
-                ))
+        for sub_id in subscription_ids {
+            let Some(mut subscription) = self.subscriptions.remove(&sub_id) else {
+                continue;
             };
 
-            let delta = subscription.graph.settle(storage_ref, row_loader);
+            let _sub_span = tracing::trace_span!("settle_subscription", sub_id = sub_id.0, table = %subscription.graph.table).entered();
+            let branches = subscription.branches.clone();
+            let requested_branches = Self::branch_names_for_query_branches(&branches);
+            let table = subscription.graph.table.as_str().to_string();
+            let mut schema_warnings = SchemaWarningAccumulator::default();
+            let include_deleted = subscription.query.include_deleted;
+
+            // Row loader returns None for empty content (hard delete tombstones)
+            // Soft deletes have preserved content and can be materialized normally
+            // For single-branch subscriptions, reads from that branch
+            // For multi-branch subscriptions, uses LWW across branches
+            // When schema context is present, applies lens transform for old schema branches
+            let delta = {
+                let om = &mut self.sync_manager.object_manager;
+                let mut transform_context = RowTransformContext {
+                    table: &table,
+                    branch_schema_map: &branch_schema_map,
+                    schema_context: &schema_context,
+                    schema_warnings: &mut schema_warnings,
+                };
+                let row_loader = |id: ObjectId| -> Option<LoadedRow> {
+                    let obj = om.get_or_load_tips(id, storage_ref, &requested_branches);
+                    if obj.is_none() {
+                        tracing::trace!(%id, "row_loader: object not found");
+                        return None;
+                    }
+                    let obj = obj?;
+                    let resolved = Self::resolve_latest_row_with_schema_transform(
+                        id,
+                        obj,
+                        &branches,
+                        &mut transform_context,
+                    )?;
+                    if resolved.is_soft_deleted && !include_deleted {
+                        return None;
+                    }
+
+                    Some(LoadedRow::new(
+                        resolved.content,
+                        resolved.commit_id,
+                        [(id, BatchBranchKey::from_branch_name(resolved.branch_name))]
+                            .into_iter()
+                            .collect(),
+                    ))
+                };
+
+                subscription.graph.settle(storage_ref, row_loader)
+            };
+            let new_schema_warnings = Self::finalize_schema_warnings(
+                &mut subscription.reported_schema_warnings,
+                schema_warnings.warnings_for_query(QueryId(sub_id.0)),
+            );
+            for warning in &new_schema_warnings {
+                Self::log_schema_warning(warning, Some(sub_id));
+            }
             if !delta.added.is_empty() || !delta.removed.is_empty() {
                 tracing::debug!(
                     sub_id = sub_id.0,
@@ -875,70 +1077,143 @@ impl QueryManager {
             if !tier_satisfied && !allow_local_while_waiting {
                 // Graph state updated by settle(), but don't deliver yet
                 tracing::trace!("tier not satisfied, holding delivery");
+                self.subscriptions.insert(sub_id, subscription);
                 continue;
             }
 
-            if !subscription.settled_once {
-                // First delivery — full current state snapshot
-                subscription.settled_once = true;
-                let full_result = subscription.graph.current_result_as_delta();
-                let ordered_ids_after: Vec<ObjectId> = subscription
-                    .graph
-                    .current_result()
+            if subscription.uses_explicit_authorization_filtering {
+                let visible_rows = self.authorized_rows_from_graph(
+                    storage_ref,
+                    &subscription.graph,
+                    &schema_context,
+                    &branch_schema_map,
+                    subscription.session.as_ref(),
+                );
+                let visible_rows_by_id: HashMap<_, _> = visible_rows
                     .iter()
-                    .map(|row| row.id)
+                    .cloned()
+                    .map(|row| (row.id, row))
                     .collect();
-                let ordered = build_ordered_delta_with_post_ids(
+                let visible_delta = Self::row_delta_from_rows(
+                    &subscription.current_visible_rows,
                     &subscription.current_ordered_ids,
-                    &ordered_ids_after,
-                    &full_result,
-                    false,
+                    &visible_rows,
                 );
-                subscription.current_ordered_ids = ordered.ordered_ids_after;
-                // Always emit the first snapshot once tier is satisfied, even if empty.
-                // This guarantees one-shot queries can resolve to [] instead of hanging.
-                tracing::debug!(
-                    sub_id = sub_id.0,
-                    added = full_result.added.len(),
-                    "first delivery (snapshot)"
-                );
-                self.update_outbox.push(QueryUpdate {
-                    subscription_id: *sub_id,
-                    delta: full_result,
-                    ordered_delta: ordered.delta,
-                    descriptor: subscription.graph.combined_descriptor.clone(),
-                });
-                subscription.has_pending_local_updates = false;
-            } else if !delta.is_empty() {
-                let ordered_ids_after: Vec<ObjectId> = subscription
-                    .graph
-                    .current_result()
-                    .iter()
-                    .map(|row| row.id)
-                    .collect();
-                let ordered = build_ordered_delta_with_post_ids(
-                    &subscription.current_ordered_ids,
-                    &ordered_ids_after,
-                    &delta,
-                    false,
-                );
-                subscription.current_ordered_ids = ordered.ordered_ids_after;
-                tracing::debug!(
-                    sub_id = sub_id.0,
-                    added = delta.added.len(),
-                    removed = delta.removed.len(),
-                    updated = delta.updated.len(),
-                    "incremental delivery"
-                );
-                // Incremental delivery
-                self.update_outbox.push(QueryUpdate {
-                    subscription_id: *sub_id,
-                    delta: delta.clone(),
-                    ordered_delta: ordered.delta,
-                    descriptor: subscription.graph.combined_descriptor.clone(),
-                });
-                subscription.has_pending_local_updates = false;
+                let ordered_ids_after: Vec<ObjectId> =
+                    visible_rows.iter().map(|row| row.id).collect();
+
+                if !subscription.settled_once {
+                    subscription.settled_once = true;
+                    let ordered = build_ordered_delta_with_post_ids(
+                        &subscription.current_ordered_ids,
+                        &ordered_ids_after,
+                        &visible_delta,
+                        false,
+                    );
+                    subscription.current_ordered_ids = ordered.ordered_ids_after;
+                    subscription.current_visible_rows = visible_rows_by_id;
+                    tracing::debug!(
+                        sub_id = sub_id.0,
+                        added = visible_delta.added.len(),
+                        "first delivery (snapshot)"
+                    );
+                    self.update_outbox.push(QueryUpdate {
+                        subscription_id: sub_id,
+                        delta: visible_delta,
+                        ordered_delta: ordered.delta,
+                        descriptor: subscription.graph.combined_descriptor.clone(),
+                    });
+                    subscription.has_pending_local_updates = false;
+                } else if !visible_delta.is_empty() {
+                    let ordered = build_ordered_delta_with_post_ids(
+                        &subscription.current_ordered_ids,
+                        &ordered_ids_after,
+                        &visible_delta,
+                        false,
+                    );
+                    subscription.current_ordered_ids = ordered.ordered_ids_after;
+                    subscription.current_visible_rows = visible_rows_by_id;
+                    tracing::debug!(
+                        sub_id = sub_id.0,
+                        added = visible_delta.added.len(),
+                        removed = visible_delta.removed.len(),
+                        updated = visible_delta.updated.len(),
+                        "incremental delivery"
+                    );
+                    self.update_outbox.push(QueryUpdate {
+                        subscription_id: sub_id,
+                        delta: visible_delta,
+                        ordered_delta: ordered.delta,
+                        descriptor: subscription.graph.combined_descriptor.clone(),
+                    });
+                    subscription.has_pending_local_updates = false;
+                }
+            } else {
+                subscription.current_visible_rows.clear();
+                if !subscription.settled_once {
+                    // First delivery — full current state snapshot
+                    subscription.settled_once = true;
+                    let full_result = subscription.graph.current_result_as_delta();
+                    let ordered_ids_after: Vec<ObjectId> = subscription
+                        .graph
+                        .current_result()
+                        .iter()
+                        .map(|row| row.id)
+                        .collect();
+                    let ordered = build_ordered_delta_with_post_ids(
+                        &subscription.current_ordered_ids,
+                        &ordered_ids_after,
+                        &full_result,
+                        false,
+                    );
+                    subscription.current_ordered_ids = ordered.ordered_ids_after;
+                    // Always emit the first snapshot once tier is satisfied, even if empty.
+                    // This guarantees one-shot queries can resolve to [] instead of hanging.
+                    tracing::debug!(
+                        sub_id = sub_id.0,
+                        added = full_result.added.len(),
+                        "first delivery (snapshot)"
+                    );
+                    self.update_outbox.push(QueryUpdate {
+                        subscription_id: sub_id,
+                        delta: full_result,
+                        ordered_delta: ordered.delta,
+                        descriptor: subscription.graph.combined_descriptor.clone(),
+                    });
+                    subscription.has_pending_local_updates = false;
+                } else if !delta.is_empty() {
+                    let ordered_ids_after: Vec<ObjectId> = subscription
+                        .graph
+                        .current_result()
+                        .iter()
+                        .map(|row| row.id)
+                        .collect();
+                    let ordered = build_ordered_delta_with_post_ids(
+                        &subscription.current_ordered_ids,
+                        &ordered_ids_after,
+                        &delta,
+                        false,
+                    );
+                    subscription.current_ordered_ids = ordered.ordered_ids_after;
+                    tracing::debug!(
+                        sub_id = sub_id.0,
+                        added = delta.added.len(),
+                        removed = delta.removed.len(),
+                        updated = delta.updated.len(),
+                        "incremental delivery"
+                    );
+                    // Incremental delivery
+                    self.update_outbox.push(QueryUpdate {
+                        subscription_id: sub_id,
+                        delta: delta.clone(),
+                        ordered_delta: ordered.delta,
+                        descriptor: subscription.graph.combined_descriptor.clone(),
+                    });
+                    subscription.has_pending_local_updates = false;
+                }
             }
+
+            self.subscriptions.insert(sub_id, subscription);
         }
 
         // Note: With sync storage, object loading is immediate. No need to request
@@ -1015,6 +1290,14 @@ impl QueryManager {
                     schema_hash,
                 }
             }
+            t if t == ObjectType::CataloguePermissions.as_str() => {
+                let schema_hash_hex = metadata.get(MetadataKey::SchemaHash.as_str())?;
+                let schema_hash = Self::parse_schema_hash_hex(schema_hash_hex)?;
+                CatalogueManifestOp::PermissionsSeen {
+                    object_id,
+                    schema_hash,
+                }
+            }
             t if t == ObjectType::CatalogueLens.as_str() => {
                 let source_hex = metadata.get(MetadataKey::SourceHash.as_str())?;
                 let target_hex = metadata.get(MetadataKey::TargetHash.as_str())?;
@@ -1040,8 +1323,7 @@ impl QueryManager {
     ) {
         // Check if this is a catalogue object (schema or lens)
         if let Some(type_str) = update.metadata.get(MetadataKey::Type.as_str())
-            && (type_str == ObjectType::CatalogueSchema.as_str()
-                || type_str == ObjectType::CatalogueLens.as_str())
+            && ObjectType::is_catalogue_type_str(type_str)
         {
             if let Some((app_id, op)) =
                 Self::catalogue_manifest_append(&update.metadata, update.object_id)
@@ -1283,6 +1565,67 @@ impl QueryManager {
         table: &str,
     ) -> bool {
         graph.involves_table(table)
+    }
+
+    pub(super) fn row_delta_from_rows(
+        previous_rows: &HashMap<ObjectId, Row>,
+        previous_order: &[ObjectId],
+        next_rows: &[Row],
+    ) -> RowDelta {
+        let next_rows_by_id: HashMap<_, _> =
+            next_rows.iter().cloned().map(|row| (row.id, row)).collect();
+        let previous_indices: HashMap<_, _> = previous_order
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (*id, index))
+            .collect();
+        let next_indices: HashMap<_, _> = next_rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.id, index))
+            .collect();
+
+        let added = next_rows
+            .iter()
+            .filter(|row| !previous_rows.contains_key(&row.id))
+            .cloned()
+            .collect();
+        let removed = previous_order
+            .iter()
+            .filter_map(|id| previous_rows.get(id))
+            .filter(|row| !next_rows_by_id.contains_key(&row.id))
+            .cloned()
+            .collect();
+        let updated = next_rows
+            .iter()
+            .filter_map(|row| {
+                previous_rows.get(&row.id).and_then(|previous| {
+                    (previous.data != row.data || previous.commit_id != row.commit_id)
+                        .then(|| (previous.clone(), row.clone()))
+                })
+            })
+            .collect();
+        let moved = next_rows
+            .iter()
+            .filter(|row| {
+                previous_rows.contains_key(&row.id)
+                    && previous_rows
+                        .get(&row.id)
+                        .map(|previous| {
+                            previous.data == row.data && previous.commit_id == row.commit_id
+                        })
+                        .unwrap_or(false)
+                    && previous_indices.get(&row.id) != next_indices.get(&row.id)
+            })
+            .map(|row| row.id)
+            .collect();
+
+        RowDelta {
+            added,
+            removed,
+            moved,
+            updated,
+        }
     }
     // ========================================================================
     // No-op storage driver (for tests)

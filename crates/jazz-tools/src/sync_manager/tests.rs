@@ -146,6 +146,50 @@ fn local_commit_syncs_to_server() {
 }
 
 #[test]
+fn schema_warning_from_server_relays_to_interested_clients() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+    let query_id = QueryId(42);
+
+    sm.add_client(client_id);
+    sm.take_outbox();
+    sm.query_origin
+        .entry(query_id)
+        .or_default()
+        .insert(client_id);
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::SchemaWarning(SchemaWarning {
+            query_id,
+            table_name: "todos".to_string(),
+            row_count: 3,
+            from_hash: crate::query_manager::types::SchemaHash([0xAA; 32]),
+            to_hash: crate::query_manager::types::SchemaHash([0xBB; 32]),
+        }),
+    );
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload: SyncPayload::SchemaWarning(warning),
+        } => {
+            assert_eq!(*id, client_id);
+            assert_eq!(warning.query_id, query_id);
+            assert_eq!(warning.table_name, "todos");
+            assert_eq!(warning.row_count, 3);
+        }
+        other => panic!("expected relayed schema warning, got {other:?}"),
+    }
+}
+
+#[test]
 fn remove_server_stops_sync() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();

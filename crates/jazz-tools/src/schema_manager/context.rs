@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::object::BranchName;
+use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{BatchId, ComposedBranchName, Schema, SchemaHash};
 
 use super::lens::Lens;
@@ -79,6 +79,11 @@ pub enum SchemaError {
         source: SchemaHash,
         target: SchemaHash,
     },
+    /// Publishing permissions used an outdated parent bundle.
+    StalePermissionsParent {
+        expected: Option<ObjectId>,
+        current: Option<ObjectId>,
+    },
 }
 
 impl std::fmt::Display for SchemaError {
@@ -109,6 +114,13 @@ impl std::fmt::Display for SchemaError {
                     "Lens not found: {} -> {}",
                     source.short(),
                     target.short()
+                )
+            }
+            SchemaError::StalePermissionsParent { expected, current } => {
+                write!(
+                    f,
+                    "stale permissions parent: expected {:?}, current {:?}",
+                    expected, current
                 )
             }
         }
@@ -299,6 +311,22 @@ impl SchemaContext {
         &self,
         from: &SchemaHash,
     ) -> Result<Vec<(&Lens, super::lens::Direction)>, SchemaError> {
+        self.lens_path_inner(from, false)
+    }
+
+    /// Find a path that uses only non-draft lenses.
+    fn non_draft_lens_path(
+        &self,
+        from: &SchemaHash,
+    ) -> Result<Vec<(&Lens, super::lens::Direction)>, SchemaError> {
+        self.lens_path_inner(from, true)
+    }
+
+    fn lens_path_inner(
+        &self,
+        from: &SchemaHash,
+        skip_drafts: bool,
+    ) -> Result<Vec<(&Lens, super::lens::Direction)>, SchemaError> {
         use super::lens::Direction;
 
         if from == &self.current_hash {
@@ -317,6 +345,9 @@ impl SchemaContext {
         while let Some(current) = queue.pop_front() {
             // Check all lenses - both forward and backward directions
             for ((source, target), lens) in &self.lenses {
+                if skip_drafts && lens.is_draft() {
+                    continue;
+                }
                 // Forward direction: source -> target
                 if source == &current && !visited.contains(target) {
                     visited.insert(*target);
@@ -424,7 +455,7 @@ impl SchemaContext {
 
         for hash in pending_hashes {
             // Check if we can now reach current from this pending schema
-            if self.lens_path(&hash).is_ok() {
+            if self.non_draft_lens_path(&hash).is_ok() {
                 // Move from pending to live
                 if let Some(schema) = self.pending_schemas.remove(&hash) {
                     self.live_schemas.insert(hash, schema);

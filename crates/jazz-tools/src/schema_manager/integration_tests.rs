@@ -1266,6 +1266,91 @@ mod tests {
         assert_eq!(manager_b.all_branches().len(), 2);
     }
 
+    /// Test catalogue update processing: draft lenses are stored but must not
+    /// activate pending schemas.
+    #[test]
+    fn catalogue_draft_lens_does_not_activate_pending_schema() {
+        let v1 = SchemaBuilder::new()
+            .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("org_id", ColumnType::Uuid),
+            )
+            .build();
+
+        let mut schema_manager =
+            SchemaManager::new(SyncManager::new(), v1.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let v2_object_id = v2_hash.to_object_id();
+        let v2_encoded = encode_schema(&v2);
+        let mut schema_metadata = HashMap::new();
+        schema_metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueSchema.to_string(),
+        );
+        schema_metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        schema_metadata.insert(MetadataKey::SchemaHash.to_string(), v2_hash.to_string());
+
+        schema_manager
+            .process_catalogue_update(v2_object_id, &schema_metadata, &v2_encoded)
+            .unwrap();
+
+        assert!(
+            schema_manager.context().is_pending(&v2_hash),
+            "v2 should be pending before any lens arrives"
+        );
+
+        let lens = generate_lens(&v1, &v2);
+        assert!(lens.is_draft(), "v1 -> v2 should be a draft lens");
+
+        let lens_object_id = lens.object_id();
+        let lens_encoded = encode_lens_transform(&lens.forward);
+        let mut lens_metadata = HashMap::new();
+        lens_metadata.insert(
+            MetadataKey::Type.to_string(),
+            ObjectType::CatalogueLens.to_string(),
+        );
+        lens_metadata.insert(
+            MetadataKey::AppId.to_string(),
+            test_app_id().uuid().to_string(),
+        );
+        lens_metadata.insert(MetadataKey::SourceHash.to_string(), v1_hash.to_string());
+        lens_metadata.insert(MetadataKey::TargetHash.to_string(), v2_hash.to_string());
+
+        schema_manager
+            .process_catalogue_update(lens_object_id, &lens_metadata, &lens_encoded)
+            .unwrap();
+
+        assert!(
+            schema_manager.get_lens(&v1_hash, &v2_hash).is_some(),
+            "draft lens should still be registered"
+        );
+        assert!(
+            schema_manager.context().is_pending(&v2_hash),
+            "draft lens should not activate pending schema v2"
+        );
+        assert!(
+            !schema_manager.context().is_live(&v2_hash),
+            "draft lens should not make v2 live"
+        );
+        assert_eq!(
+            schema_manager.all_branches().len(),
+            1,
+            "only the current schema branch should be active"
+        );
+    }
+
     /// Test pending catalogue updates are queued in QueryManager.
     #[test]
     fn query_manager_queues_catalogue_updates() {

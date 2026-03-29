@@ -3,7 +3,7 @@ title: TypeScript (Browser)
 description: Build a local-first browser app with Jazz using plain TypeScript. Schema, subscriptions, and mutations without a framework.
 ---
 
-import RunCodegen from "../../partials/quickstarts/run-codegen.mdx";
+import SchemaSetup from "../../partials/quickstarts/schema-setup.mdx";
 import QuickstartSchemaTypesSummary from "../../partials/quickstarts/schema-types-summary.mdx";
 
 ## Install
@@ -16,17 +16,17 @@ For full environment and server setup options, see [Setup](/docs/setup).
 
 ## Define your schema
 
-Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
+Create `schema.ts` at the root of your project. This is the source of truth for your data model.
 
-<include cwd lang="ts" title="schema/current.ts">
-  ../examples/docs/todo-client-localfirst-ts/schema/current.ts#schema-todo-client-ts
+<include cwd lang="ts" title="schema.ts">
+  ../examples/docs/todo-client-localfirst-ts/schema.ts#schema-todo-client-ts
 </include>
 
 <QuickstartSchemaTypesSummary />
 
-### Run codegen
+### Validate schema
 
-<RunCodegen />
+<SchemaSetup />
 
 Deep dive: [Schemas](/docs/schemas).
 For chunked browser file storage, see [Files & Blobs](/docs/files-and-blobs).
