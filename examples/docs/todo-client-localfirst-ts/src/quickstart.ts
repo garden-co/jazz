@@ -1,6 +1,6 @@
 // #region setup-ts
 import { createDb } from "jazz-tools";
-import { app } from "../schema/app.js";
+import { app } from "../schema.js";
 import { renderTodoItem } from "./TodoItem.js";
 
 const db = await createDb({

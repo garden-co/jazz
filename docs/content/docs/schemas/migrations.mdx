@@ -1,6 +1,6 @@
 ---
 title: Migrations
-description: Schema evolution workflow and generated migration stubs.
+description: Structural schema evolution workflow and reviewed migration edges.
 reviewedAt: "14cd73f0"
 ---
 
@@ -14,30 +14,50 @@ Traditional migration systems run a linear sequence and require peers to converg
 
 ## Workflow
 
-Edit your schema, then run `npx jazz-tools@alpha build` to generate migration stubs automatically:
+1. Edit `schema.ts` when you are changing data shape.
+2. Optionally run `npx jazz-tools validate` to catch local authoring errors.
+3. Once Jazz reports an old and new structural hash pair, generate a migration stub:
 
 <include cwd lang="bash">
   ../examples/docs/todo-server-ts/docs/migrations-workflow.sh#migrations-workflow-ts
 </include>
 
-Review the generated files, adjust any defaults, then commit.
+4. Review the generated file, rename it to something meaningful, then publish the reviewed edge.
+
+Permission-only changes in `permissions.ts` do not need migrations.
 
 ## Generated stub
 
-`npx jazz-tools@alpha build` generates a complete migration file per schema change, with the `migrate` section auto-populated&hairsp;—&hairsp;adds, drops, possible renames, and sensible defaults (nullable columns get `null`, non-nullable columns get type-appropriate defaults like `""` or `0`).
+`npx jazz-tools migrations create <fromHash> <toHash>` generates a `s.defineMigration(...)` stub with the structural diff already filled in.
 
 Here's a generated stub for adding a `description` column:
 
-<include cwd lang="ts" meta='title="migration_v1_v2_generated_stub.ts"'>
-  ../examples/docs/todo-server-ts/schema/migration_v1_v2_generated_stub_example.ts#migration-generated-stub-example
+<include cwd lang="ts" meta='title="migrations/20260318-unnamed-a01f5c72ec47-311995e9a178.ts"'>
+  ../examples/docs/todo-server-ts/migrations/20260318-unnamed-a01f5c72ec47-311995e9a178.ts
+</include>
+
+## Customizing defaults
+
+Review generated defaults before you publish. For example, you might replace a nullable default with a domain-specific value:
+
+<include
+  cwd
+  lang="ts"
+  meta='title="migrations/20260318-add-description-a01f5c72ec47-311995e9a178.ts"'
+>
+  ../examples/docs/todo-server-ts/migrations/20260318-add-description-a01f5c72ec47-311995e9a178.ts
 </include>
 
 ## Backwards defaults
 
 When a newer schema drops a column that older clients still expect, define a backwards default so the lens can supply a value for those clients:
 
-<include cwd lang="ts" meta='title="migration_v1_v2_backwards_default_example.ts"'>
-  ../examples/docs/todo-server-ts/schema/migration_v1_v2_backwards_default_example.ts#backwards-default-example
+<include
+  cwd
+  lang="ts"
+  meta='title="migrations/20260318-drop-legacy-priority-311995e9a178-73b65d082ab8.ts"'
+>
+  ../examples/docs/todo-server-ts/migrations/20260318-drop-legacy-priority-311995e9a178-73b65d082ab8.ts
 </include>
 
 ## Next steps

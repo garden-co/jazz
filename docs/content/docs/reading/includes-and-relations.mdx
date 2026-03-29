@@ -12,18 +12,9 @@ Use `include(...)` to load related rows as nested objects in a single query resu
 
 Including a relation adds the resolved object alongside the foreign-key column — it does not replace it. For example, `include({ project: true })` gives you both `projectId` (the FK string) and `project` (the resolved row).
 
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="schema.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/schema/current.ts#schema-todo-client-ts
-    </include>
-  </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql" meta='title="schema.sql"'>
-      ../examples/docs/todo-server-rs/schema/current.sql
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/schema.ts#schema-todo-client-ts
+</include>
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
   <Tab value="TypeScript">

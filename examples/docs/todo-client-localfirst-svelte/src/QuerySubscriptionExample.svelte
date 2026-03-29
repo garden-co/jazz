@@ -1,7 +1,7 @@
 <!-- #region query-subscription-svelte -->
 <script lang="ts">
   import { QuerySubscription } from 'jazz-tools/svelte';
-  import { app } from '../schema/app.js';
+  import { app } from '../schema.js';
 
   const todos = new QuerySubscription(
     app.todos.where({ done: false }),
