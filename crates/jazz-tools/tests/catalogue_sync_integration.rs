@@ -10,13 +10,12 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz_tools::schema_catalogue;
 use jazz_tools::schema_manager::{Lens, generate_lens};
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
-use support::{wait_for_edge_query_ready, wait_for_query};
+use support::{push_catalogue_in_memory, wait_for_edge_query_ready, wait_for_query};
 
 fn user_values_v1(id: jazz_tools::ObjectId, name: &str) -> HashMap<String, Value> {
     HashMap::from([
@@ -101,7 +100,7 @@ async fn catalogue_sync_e2e_schema_evolution_through_sync_manager() {
     .await;
 
     // === Push v2 schema + lens to server through the real sync pipeline ===
-    schema_catalogue::push_in_memory(
+    push_catalogue_in_memory(
         &server.base_url(),
         server.app_id(),
         "dev",
@@ -174,7 +173,7 @@ async fn catalogue_sync_e2e_backward_data_migration_through_sync_manager() {
     let server = TestingServer::start().await;
 
     // Seed the server with both schemas and the v1<->v2 lens before clients connect.
-    schema_catalogue::push_in_memory(
+    push_catalogue_in_memory(
         &server.base_url(),
         server.app_id(),
         "dev",

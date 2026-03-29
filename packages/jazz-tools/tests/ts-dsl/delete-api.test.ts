@@ -1,6 +1,6 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { app } from "./fixtures/basic/app";
+import { app } from "./fixtures/basic/schema";
 import { insertUser, uniqueDbName } from "./factories";
 
 describe("TS Delete API", () => {

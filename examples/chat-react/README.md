@@ -21,7 +21,7 @@ pnpm walkthrough
 pnpm walkthrough        # Marp slideshow — Jazz patterns used in this app
 pnpm walkthrough:shots  # Re-capture screenshots for the slideshow
 pnpm test               # Vitest browser tests
-pnpm build              # Schema codegen + production build
+pnpm build              # Optional schema validation + production build
 ```
 
 ## How it works
@@ -40,7 +40,7 @@ pnpm build              # Schema codegen + production build
 
 ## Schema
 
-Defined in `schema/current.ts` using the Jazz `table()` / `col.*` DSL. Running `pnpm build` generates the typed client (`schema/app.ts`) and SQL files.
+Defined in `schema.ts` using the Jazz typed schema DSL. Running `pnpm build` validates `schema.ts` before the production build; the app imports the typed `app` export directly from that file.
 
 - **profiles** — userId, name, avatar
 - **chats** — isPublic, createdBy, joinCode (nullable — set for private chats)

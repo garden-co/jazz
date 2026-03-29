@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Db } from "jazz-tools";
-import { app } from "../../schema/app.js";
-import { fileBlobPermissions } from "../../schema/files-and-blobs-permissions.js";
+import { app } from "../../schema.js";
+import { fileBlobPermissions } from "../../files-and-blobs-permissions.js";
 import {
   createUploadFromBlob,
   createUploadFromStream,

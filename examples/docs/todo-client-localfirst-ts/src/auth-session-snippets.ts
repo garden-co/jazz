@@ -1,5 +1,5 @@
 import { createDb, resolveClientSession, type DbConfig } from "jazz-tools";
-import { app } from "../schema/session-app.js";
+import { app } from "../session-app.js";
 
 export async function authSessionExamples(config: DbConfig) {
   const db = await createDb(config);

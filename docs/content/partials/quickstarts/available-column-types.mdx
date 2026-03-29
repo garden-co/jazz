@@ -1,17 +1,17 @@
 There are a number of column types available which cover most common use cases:
 
-| DSL                       | TypeScript type      | SQL type        |
-| ------------------------- | -------------------- | --------------- |
-| `col.string()`            | `string`             | `TEXT`          |
-| `col.boolean()`           | `boolean`            | `BOOLEAN`       |
-| `col.int()`               | `number`             | `INTEGER`       |
-| `col.float()`             | `number`             | `REAL`          |
-| `col.timestamp()`         | `Date \| number`     | `TIMESTAMP`     |
-| `col.bytes()`             | `Uint8Array`         | `BYTEA`         |
-| `col.ref("table")`        | `string` (row ID)    | `UUID` (FK)     |
-| `col.array(col.string())` | `string[]`           | `TEXT[]`        |
-| `col.enum("a", "b")`      | `"a" \| "b"`         | `ENUM('a','b')` |
-| `col.json()`              | `JsonValue`          | `JSON`          |
-| `col.json(schema)`        | inferred from schema | `JSON`          |
+| DSL                   | TypeScript type      | SQL type        |
+| --------------------- | -------------------- | --------------- |
+| `s.string()`          | `string`             | `TEXT`          |
+| `s.boolean()`         | `boolean`            | `BOOLEAN`       |
+| `s.int()`             | `number`             | `INTEGER`       |
+| `s.float()`           | `number`             | `REAL`          |
+| `s.timestamp()`       | `Date \| number`     | `TIMESTAMP`     |
+| `s.bytes()`           | `Uint8Array`         | `BYTEA`         |
+| `s.ref("table")`      | `string` (row ID)    | `UUID` (FK)     |
+| `s.array(s.string())` | `string[]`           | `TEXT[]`        |
+| `s.enum("a", "b")`    | `"a" \| "b"`         | `ENUM('a','b')` |
+| `s.json()`            | `JsonValue`          | `JSON`          |
+| `s.json(schema)`      | inferred from schema | `JSON`          |
 
 Any column can be made nullable with `.optional()`.

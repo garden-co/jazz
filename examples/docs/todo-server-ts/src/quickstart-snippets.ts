@@ -1,6 +1,7 @@
 import type { Application, Request, Response } from "express";
 import { createJazzContext } from "jazz-tools/backend";
-import { app as schemaApp } from "../schema/app.js";
+import { app as schemaApp } from "../schema.js";
+import permissions from "../permissions.js";
 
 type AuthenticatedRequest = Request<
   Record<string, string>,
@@ -12,6 +13,7 @@ type AuthenticatedRequest = Request<
 const context = createJazzContext({
   appId: "todo-server-ts",
   app: schemaApp,
+  permissions,
   driver: { type: "persistent", dataPath: "./data/jazz.db" },
   serverUrl: process.env.JAZZ_SERVER_URL,
   backendSecret: process.env.JAZZ_BACKEND_SECRET,

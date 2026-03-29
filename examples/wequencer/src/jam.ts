@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools";
-import { app } from "../schema/app.js";
+import { app } from "../schema.js";
 
 export const SEED_INSTRUMENTS = [
   { name: "Kick", file: "/kick.mp3", display_order: 0 },
@@ -26,8 +26,8 @@ export async function ensureInstrumentsSeeded(db: Db): Promise<void> {
   // First visit on this device: wait for edge confirmation before deciding what
   // to insert. Without deterministic IDs in the Jazz API we cannot make
   // concurrent inserts from two fresh clients idempotent at the DB layer, so
-  // settledTier: 'edge' remains the dedup guard here.
-  const existing = await db.all(app.instruments, { settledTier: "edge" });
+  // tier: 'edge' remains the dedup guard here.
+  const existing = await db.all(app.instruments, { tier: "edge" });
   const existingNames = new Set(existing.map((i) => i.name));
 
   for (const seed of missingSeeds(existingNames)) {
@@ -61,5 +61,5 @@ export async function getCurrentJam(db: Db): Promise<string> {
     return existing[0].id;
   }
 
-  return db.insert(app.jams, { created_at: now, bpm: 95, beat_count: 16 });
+  return db.insert(app.jams, { created_at: now, bpm: 95, beat_count: 16 }).id;
 }

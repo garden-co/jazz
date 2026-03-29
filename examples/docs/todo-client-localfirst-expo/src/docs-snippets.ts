@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools/react-native";
-import { app } from "../schema/app";
+import { app } from "../schema";
 
 const EXAMPLE_TODO_ID = "00000000-0000-0000-0000-000000000000";
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";

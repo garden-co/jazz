@@ -2,7 +2,7 @@
 
 import { spawnSync } from "node:child_process";
 import { accessSync, chmodSync, constants, existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const BINARIES = {
@@ -40,25 +40,6 @@ function ensureExecutable(binaryPath, name) {
   } catch {
     fail(`Binary ${name} is not executable after chmod.`);
   }
-}
-
-function parseSchemaDir(args) {
-  let schemaDir = "./schema";
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "--schema-dir" && args[i + 1]) {
-      schemaDir = args[++i];
-      continue;
-    }
-
-    const prefix = "--schema-dir=";
-    if (arg.startsWith(prefix)) {
-      schemaDir = arg.slice(prefix.length);
-    }
-  }
-
-  return schemaDir;
 }
 
 function parseWrapperArgs(rawArgs) {
@@ -121,6 +102,24 @@ if (command === "mcp") {
   const { runServer } = await import(mcpPath);
   await runServer();
   // runServer resolves when stdin closes; process exits naturally.
+} else if (command === "build") {
+  fail("`jazz-tools build` has been renamed to `jazz-tools validate`.");
+} else if (
+  command === "validate" ||
+  command === "migrations" ||
+  command === "permissions" ||
+  command === "schema"
+) {
+  const tsCliPath = join(here, "..", "dist", "cli.js");
+  if (!existsSync(tsCliPath)) {
+    fail(`TypeScript schema CLI missing: ${tsCliPath}`);
+  }
+
+  const tsCommandResult = spawnSync(process.execPath, [tsCliPath, ...args], {
+    stdio: "inherit",
+    env: process.env,
+  });
+  exitWithSpawnResult(tsCommandResult, "TypeScript schema CLI");
 } else {
   const key = `${process.platform}-${process.arch}`;
   const binaryName = BINARIES[key];
@@ -156,26 +155,6 @@ if (command === "mcp") {
   }
 
   ensureExecutable(binaryPath, rustBinOverride ?? binaryName ?? localBinaryName);
-
-  if (command === "build") {
-    const schemaDirArg = parseSchemaDir(args.slice(1));
-    const schemaDir = resolve(process.cwd(), schemaDirArg);
-    const currentTsPath = join(schemaDir, "current.ts");
-    const tsCliPath = join(here, "..", "dist", "cli.js");
-
-    if (existsSync(currentTsPath) && existsSync(tsCliPath)) {
-      console.log(`Detected ${schemaDirArg}/current.ts. Running TypeScript schema build.`);
-      const tsBuildResult = spawnSync(
-        process.execPath,
-        [tsCliPath, "build", "--schema-dir", schemaDirArg, "--jazz-bin", binaryPath],
-        {
-          stdio: "inherit",
-          env: process.env,
-        },
-      );
-      exitWithSpawnResult(tsBuildResult, "TypeScript schema build");
-    }
-  }
 
   const result = spawnSync(binaryPath, args, { stdio: "inherit", env: process.env });
   exitWithSpawnResult(result, binaryName ?? binaryPath);

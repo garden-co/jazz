@@ -8,5 +8,11 @@
     "skipLibCheck": true,
     "resolveJsonModule": true
   },
-  "include": ["src", "schema"]
+  "include": [
+    "src",
+    "schema.ts",
+    "permissions.ts",
+    "files-and-blobs-permissions.ts",
+    "session-app.ts"
+  ]
 }

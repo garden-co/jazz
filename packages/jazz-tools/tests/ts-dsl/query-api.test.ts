@@ -1,6 +1,6 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, describe, it, expect, assert, expectTypeOf } from "vitest";
-import { app, Project, Todo, User } from "./fixtures/basic/app";
+import { app, type Project, type Todo, type User } from "./fixtures/basic/schema";
 import { insertProject, insertTodo, insertUser, uniqueDbName } from "./factories";
 
 function makeFriends(db: Db, user1: User, user2: User) {
