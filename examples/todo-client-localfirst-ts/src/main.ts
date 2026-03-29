@@ -6,7 +6,7 @@ import {
   type DbConfig,
   type Db,
 } from "jazz-tools";
-import { app, Todo } from "../schema/app.js";
+import { app, type Todo } from "../schema.js";
 
 function readEnvAppId(): string | undefined {
   return (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env

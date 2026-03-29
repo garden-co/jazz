@@ -470,20 +470,30 @@ fn rebac_insert_denied_by_simple_policy() {
 }
 
 #[test]
-fn rebac_insert_denied_by_simple_policy_in_server_mode_known_schema() {
-    let schema = rebac_test_schema();
+fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
+    let authorization_schema = rebac_test_schema();
+    let schema: Schema = authorization_schema
+        .iter()
+        .map(|(table_name, table_schema)| {
+            let mut structural = table_schema.clone();
+            structural.policies = TablePolicies::default();
+            (*table_name, structural)
+        })
+        .collect();
     let schema_hash = SchemaHash::compute(&schema);
     let branch = ComposedBranchName::new("dev", schema_hash, "main")
         .to_branch_name()
         .as_str()
         .to_string();
 
-    // Server mode: QueryManager has no current schema; only known_schemas is populated.
+    // Server mode: the branch schema has no embedded policies, but the server should still
+    // enforce the latest authorization schema.
     let sync_manager = SyncManager::new();
     let mut qm = QueryManager::new(sync_manager);
     let mut known_schemas = HashMap::new();
     known_schemas.insert(schema_hash, schema);
     qm.set_known_schemas(Arc::new(known_schemas));
+    qm.set_authorization_schema(authorization_schema);
 
     let mut storage = MemoryStorage::new();
 
@@ -541,7 +551,7 @@ fn rebac_insert_denied_by_simple_policy_in_server_mode_known_schema() {
     });
     assert!(
         denied,
-        "Insert should be denied by policy in server mode using known_schemas"
+        "Insert should be denied by current permissions in server mode"
     );
 
     let tips = qm

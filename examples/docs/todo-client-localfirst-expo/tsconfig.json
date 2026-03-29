@@ -10,7 +10,6 @@
     "jsx": "react-jsx",
     "typeRoots": ["./node_modules/@types"]
   },
-  "include": ["App.tsx", "src/**/*", "schema/**/*"],
-  "exclude": ["schema/**/*.test.ts"],
+  "include": ["App.tsx", "src/**/*", "schema.ts", "permissions.ts"],
   "extends": "expo/tsconfig.base"
 }

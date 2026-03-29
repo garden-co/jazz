@@ -1,34 +1,54 @@
 ---
 title: Schemas
-description: Define tables and relationships in TS DSL or SQL, then use the CLI for generated artifacts.
+description: Define tables and relationships in root schema.ts, then review migration edges as your app evolves.
 ---
 
 import AvailableColumnTypes from "../partials/quickstarts/available-column-types.mdx";
 
 ## Table Definitions
 
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
+Every Jazz app defines its schema in a root `schema.ts`, including Rust backends.
+
+<Tabs groupId="jazz-schema-language" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
     <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/schema/current.ts#schema-todo-client-ts
+      ../examples/docs/todo-server-rs/schema.ts
     </include>
   </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql">
-      ../examples/docs/todo-server-rs/schema/current.sql
+
+  <Tab value="Rust">
+    Rust apps use the same `schema.ts` file. The schema definition language is still TypeScript, and Rust consumes the compiled internal schema representation through the CLI and low-level APIs.
+
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-rs/schema.ts
     </include>
+
+    In practice, a Rust app runs the schema export command and deserializes the JSON into Jazz's Rust `Schema` type:
+
+    ```bash
+    npx jazz-tools schema export --format json
+    ```
+
+    The Rust examples shell out to this command at startup, so the schema definition stays unified even when the app itself is written in Rust. See [Setup](/docs/setup) for the end-to-end backend context pattern.
+
   </Tab>
 </Tabs>
 
+Each top-level property of the `schema` object is a table. In the example above, `projects` and `todos` become tables, and each nested property becomes a column on that table.
+
+The `type AppSchema = s.Schema<typeof schema>; export const app: s.App<AppSchema> = s.defineApp(schema);` pattern is there to keep TypeScript hovers short and readable. Without that alias boundary, TypeScript tends to expand the entire schema literal when you hover `app`, `app.todos`, or derived row/query types.
+
+## Lifecycle
+
+- `schema.ts` defines structure. Structural edits create new schema hashes.
+- `permissions.ts` defines the current auth rules. Permission-only edits do not create schema hashes.
+- `migrations/` connect structural schema hashes so old and new shapes stay interoperable.
+
 ## Datatypes and References
 
-- TypeScript DSL defaults to `col.string`, `col.boolean`, and `col.ref` for relationships.
-- SQL keeps the same model via `TEXT`, `BOOLEAN`, and `UUID REFERENCES ...`.
-- Use SQL as the alternate path when your project is Rust-first.
-
-For browser files and large uploaded blobs, define the conventional `files` / `file_parts`
-tables and store a normal reference to `files` from your app rows. See
-[Files & Blobs](/docs/files-and-blobs).
+- Use `s.string()`, `s.boolean()`, `s.int()`, `s.timestamp()`, and `s.bytes()` for scalar fields.
+- Use `s.ref("tableName")` for foreign keys. Jazz infers typed `.include(...)` relations directly from `schema.ts`.
+- For browser files and large uploaded blobs, define the conventional `files` / `file_parts` tables and store a normal reference to `files` from your app rows. See [Files & Blobs](/docs/files-and-blobs).
 
 ### Available column types
 
@@ -39,12 +59,16 @@ tables and store a normal reference to `files` from your app rows. See
 You can declare default values directly in the schema definition with `.default(...)`.
 
 ```ts
-table("todos", {
-  title: col.string(),
-  done: col.boolean().default(false),
-  tags: col.array(col.string()).default([]),
-  ownerId: col.ref("users").optional().default(null),
-});
+import { schema as s } from "jazz-tools";
+
+const schema = {
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean().default(false),
+    tags: s.array(s.string()).default([]),
+    ownerId: s.ref("users").optional().default(null),
+  }),
+};
 ```
 
 Schema defaults are used in two places:
@@ -57,7 +81,7 @@ Schema defaults are used in two places:
 When you use insert new values:
 
 - Omitted fields use the schema default if present.
-- Filds explicitly set to `undefined` are treated the same as omitted.
+- Fields explicitly set to `undefined` are treated the same as omitted.
 - `null` is only allowed for nullable columns, and it is not replaced by the default value.
 
 That means schema defaults affect future inserts, not reads of already-stored rows.
@@ -69,101 +93,89 @@ Schema defaults also feed Jazz's auto-generated lenses:
 - When a column is added across schema versions, Jazz uses the column's default for new rows that predate the new column.
 - When a column is removed across schema versions, Jazz uses the column's default when auto-generating the reverse/default lens behavior for older schemas.
 
-## Jazz CLI and Generated Files
+## Workflow and Schema Evolution
 
-### TS Client Codegen
+### Edit `schema.ts` during development
 
-<include cwd lang="bash">
-  ../examples/docs/todo-client-localfirst-ts/docs/schema-codegen.sh#schemas-ts-codegen-cli
+Most of the time, schema evolution starts with a normal edit to `schema.ts`. New writes use the new schema immediately.
+
+If you only changed `permissions.ts`, stop there structurally. That updates the active permission bundle and does not require a migration. Optionally double-check locally with `npx jazz-tools validate`, inspect with `npx jazz-tools permissions status`, then publish with `npx jazz-tools permissions push`.
+
+When older rows are no longer reachable from the current schema graph, Jazz logs a warning with the exact hashes you need next. These warnings can appear in browser logs, backend logs, or be forwarded from upstream servers. A typical warning looks like this, wrapped for readability:
+
+```text
+[client] Detected 3 rows of todos with differing schema versions.
+[client] To ensure data visibility and forward/backward compatibility please create
+         a new migration with:
+         npx jazz-tools migrations create \
+           a01f5c72ec47 \
+           311995e9a178
+```
+
+That warning is the handoff from day-to-day schema editing to reviewed compatibility work.
+
+### Generate a migration edge with `migrations create`
+
+`migrations create` is only for structural schema changes. It connects to your Jazz server, loads both schema hashes, and writes a prefilled file into `migrations/{dateCreated}-unnamed-{fromHash}-{toHash}.ts`.
+
+```bash
+npx jazz-tools migrations create <fromHash> <toHash>
+```
+
+The generated file already contains `fromHash`, `toHash`, and minimal typed `from` / `to` witnesses. In most cases, the only manual work is to fill in `migrate` and replace `unnamed` in the filename with a real migration name.
+
+### Publish a reviewed edge with `migrations push`
+
+Publishing is the explicit gate. New schema hashes are still learned automatically when clients connect, but Jazz never auto-pushes migrations.
+
+```bash
+npx jazz-tools migrations push <fromHash> <toHash>
+```
+
+Run this after reviewing the migration file. Once pushed, that edge becomes available to make data visible across those schema hashes.
+
+## Example Migration Files
+
+Migration files live in `migrations/` and are always TypeScript, even for Rust apps.
+
+### Generated stub
+
+<include
+  cwd
+  lang="ts"
+  meta='title="examples/docs/todo-server-ts/migrations/20260318-unnamed-a01f5c72ec47-311995e9a178.ts"'
+>
+  ../examples/docs/todo-server-ts/migrations/20260318-unnamed-a01f5c72ec47-311995e9a178.ts
 </include>
 
-Run this from a normal app root. It regenerates `schema/current.sql` and typed client bindings (for example `schema/app.ts`) from `schema/current.ts`.
+### Edited stub
 
-### Generated migration stubs
+<include
+  cwd
+  lang="ts"
+  meta='title="examples/docs/todo-server-ts/migrations/20260318-add-description-a01f5c72ec47-311995e9a178.ts"'
+>
+  ../examples/docs/todo-server-ts/migrations/20260318-add-description-a01f5c72ec47-311995e9a178.ts
+</include>
 
-TypeScript migration stubs encode both forward and backward behavior in one file.
-SQL migrations are split into explicit forward and backward files.
+### Backwards default example
 
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
-  <Tab value="TypeScript">
-    <include
-      cwd
-      lang="ts"
-      meta='title="examples/docs/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts"'
-    >
-      ../examples/docs/todo-server-ts/schema/migration_v1_v2_a01f5c72ec47_311995e9a178.ts
-    </include>
-  </Tab>
-  <Tab value="SQL">
-    Forward:
-    <include
-      cwd
-      lang="sql"
-      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql"'
-    >
-      ../examples/docs/todo-server-rs/schema/migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql
-    </include>
-    Backward:
-    <include
-      cwd
-      lang="sql"
-      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql"'
-    >
-      ../examples/docs/todo-server-rs/schema/migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql
-    </include>
-  </Tab>
-</Tabs>
+<include
+  cwd
+  lang="ts"
+  meta='title="examples/docs/todo-server-ts/migrations/20260318-drop-legacy-priority-311995e9a178-73b65d082ab8.ts"'
+>
+  ../examples/docs/todo-server-ts/migrations/20260318-drop-legacy-priority-311995e9a178-73b65d082ab8.ts
+</include>
 
-### Edited stubs (example customization)
+Backwards defaults define what older-schema clients see for fields dropped in newer schemas. When new clients write rows without that field, the backward lens supplies the configured default to old clients. If the lens is auto-generated, Jazz first looks for schema defaults on the column definition before falling back to heuristic defaults.
 
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-server-ts/schema/migration_v1_v2_customized_example.ts
-    </include>
-  </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql">
-      ../examples/docs/todo-server-rs/schema/migration_v1_v2_customized_example_fwd.sql
-    </include>
-  </Tab>
-</Tabs>
+## Permissions
 
-### Backwards default examples
+To define row-level policies, add a sibling `permissions.ts` next to `schema.ts`.
 
-Backwards defaults define what older-schema clients see for fields dropped in newer schemas.
-When new clients write rows without that field, the backward lens supplies the configured default to old clients.
-In TypeScript, the same migration stub carries both forward and backward translation behavior.
-In SQL, the backward lens file explicitly reintroduces dropped columns with a default.
+Those policies are versioned separately from structural schema hashes, so reviewing or publishing a permission change does not require a migration edge.
 
-If the lens is auto-generated, Jazz will first look for schema defaults on the column definition before falling back to heuristic defaults.
-
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
-  <Tab value="TypeScript">
-    <include
-      cwd
-      lang="ts"
-      meta='title="examples/docs/todo-server-ts/schema/migration_v1_v2_backwards_default_example.ts"'
-    >
-      ../examples/docs/todo-server-ts/schema/migration_v1_v2_backwards_default_example.ts
-    </include>
-  </Tab>
-  <Tab value="SQL">
-    Forward:
-    <include
-      cwd
-      lang="sql"
-      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_backwards_default_example_fwd.sql"'
-    >
-      ../examples/docs/todo-server-rs/schema/migration_v1_v2_backwards_default_example_fwd.sql
-    </include>
-    Backward:
-    <include
-      cwd
-      lang="sql"
-      meta='title="examples/docs/todo-server-rs/schema/migration_v1_v2_backwards_default_example_bwd.sql"'
-    >
-      ../examples/docs/todo-server-rs/schema/migration_v1_v2_backwards_default_example_bwd.sql
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts" title="permissions.ts">
+  ../examples/docs/todo-server-ts/permissions.ts
+</include>

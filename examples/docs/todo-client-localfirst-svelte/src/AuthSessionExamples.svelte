@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getDb, getSession, QuerySubscription } from 'jazz-tools/svelte';
-	import { app } from '../schema/session-app.js';
+	import { app } from '../session-app.js';
 
 	const db = getDb();
 

@@ -42,8 +42,10 @@ use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{QueryError, QueryUpdate};
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
-use crate::query_manager::types::{OrderedRowDelta, Schema, Value};
-use crate::schema_manager::SchemaManager;
+use crate::query_manager::types::{
+    OrderedRowDelta, Schema, SchemaHash, TableName, TablePolicies, Value,
+};
+use crate::schema_manager::{Lens, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};
 
@@ -327,6 +329,47 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         let id = self.schema_manager.persist_schema(&mut self.storage);
         info!(object_id = %id, "persisted schema to catalogue");
         id
+    }
+
+    /// Publish any known schema object to the catalogue and in-memory schema manager.
+    pub fn publish_schema(&mut self, schema: Schema) -> ObjectId {
+        let schema_hash = crate::query_manager::types::SchemaHash::compute(&schema);
+
+        if self.schema_manager.get_known_schema(&schema_hash).is_none() {
+            self.schema_manager.add_known_schema(schema.clone());
+        }
+
+        let id = self
+            .schema_manager
+            .persist_schema_object(&mut self.storage, &schema);
+        self.immediate_tick();
+        id
+    }
+
+    pub fn publish_permissions_bundle(
+        &mut self,
+        schema_hash: SchemaHash,
+        permissions: HashMap<TableName, TablePolicies>,
+        expected_parent_bundle_object_id: Option<ObjectId>,
+    ) -> Result<Option<ObjectId>, crate::schema_manager::SchemaError> {
+        let id = self.schema_manager.publish_permissions_bundle(
+            &mut self.storage,
+            schema_hash,
+            permissions,
+            expected_parent_bundle_object_id,
+        )?;
+        self.immediate_tick();
+        Ok(id)
+    }
+
+    /// Publish a reviewed lens edge to the active schema manager and catalogue.
+    pub fn publish_lens(&mut self, lens: &Lens) -> Result<ObjectId, RuntimeError> {
+        let id = self
+            .schema_manager
+            .publish_lens(&mut self.storage, lens)
+            .map_err(|error| RuntimeError::WriteError(error.to_string()))?;
+        self.immediate_tick();
+        Ok(id)
     }
     // =========================================================================
     // Schema/State Access

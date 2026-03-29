@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getDb } from 'jazz-tools/svelte';
-	import { app } from '../schema/app.js';
+	import { app } from '../schema.js';
 	import { getAudioContext } from './audio-context.js';
 	import { setHashJamId } from './router.svelte.js';
 
