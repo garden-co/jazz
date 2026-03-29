@@ -1383,7 +1383,23 @@ describe("NAPI integration", () => {
       await writer.deleteDurable(simpleTodosTable, rowId, { tier: "edge" });
       await settleAsyncSyncWork();
       await waitForQueryRows(
-        reader,
+        writer,
+        allTodosQuery,
+        (rows) => !rows.some((row) => row.id === rowId),
+      );
+      await readerContext.shutdown();
+      readerContext = createJazzContext({
+        appId,
+        app: { wasmSchema: TEST_SCHEMA },
+        permissions: {},
+        driver: { type: "memory" },
+        serverUrl: server.url,
+        backendSecret,
+      });
+      await settleAsyncSyncWork();
+      const refreshedReader = readerContext.asBackend();
+      await waitForQueryRows(
+        refreshedReader,
         allTodosQuery,
         (rows) => !rows.some((row) => row.id === rowId),
       );

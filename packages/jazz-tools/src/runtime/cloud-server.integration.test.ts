@@ -1107,6 +1107,7 @@ async function runSocialReadPermissionsScenario(style: SocialPolicyStyle): Promi
 
   try {
     const app = await createApp(server.baseUrl, jwks.url);
+    await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, socialSchema);
 
     seeder = await connectClient(
       makeContext(app.app_id, server.baseUrl, signJwt("seed-user", JWT_SECRET), socialSchema),
@@ -1270,6 +1271,7 @@ describe("cloud-server integration (Jazz TS)", () => {
     let client: JazzClient | null = null;
     try {
       const app = await createApp(server.baseUrl, jwks.url);
+      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, TEST_SCHEMA);
       client = await connectClient(
         makeContext(app.app_id, server.baseUrl, signJwt("empty-snapshot", JWT_SECRET)),
       );
@@ -1312,6 +1314,7 @@ describe("cloud-server integration (Jazz TS)", () => {
 
     try {
       const app = await createApp(server.baseUrl, jwks.url);
+      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, TEST_SCHEMA);
       clientA = await connectClient(
         makeContext(app.app_id, server.baseUrl, signJwt("a", JWT_SECRET)),
       );
@@ -1389,6 +1392,7 @@ describe("cloud-server integration (Jazz TS)", () => {
       let writer: JazzClient | null = null;
       try {
         const app = await createApp(server.baseUrl, jwks.url);
+        await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, TEST_SCHEMA);
         writer = await connectClient(
           makeContext(app.app_id, server.baseUrl, signJwt("writer", JWT_SECRET)),
         );
