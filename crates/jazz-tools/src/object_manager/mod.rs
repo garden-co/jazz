@@ -8,7 +8,7 @@ use crate::commit::{Commit, CommitId, StoredState};
 use crate::object::{
     Branch, BranchLoadedState, BranchName, Object, ObjectId, PrefixBatchCatalog, PrefixBatchMeta,
 };
-use crate::query_manager::types::{BranchPrefixName, ComposedBranchName};
+use crate::query_manager::types::{BranchPrefixName, ComposedBranchName, QueryBranchRef};
 use crate::storage::{LoadedBranch, LoadedBranchTips, PrefixBatchUpdate, Storage, StorageError};
 
 /// Unique identifier for a subscription.
@@ -317,9 +317,10 @@ impl ObjectManager {
             if !needs_load {
                 continue;
             }
+            let branch_ref = QueryBranchRef::from_branch_name(bn);
 
             if full_history {
-                if let Ok(Some(loaded)) = storage.load_branch(id, &bn) {
+                if let Ok(Some(loaded)) = storage.load_branch(id, &branch_ref) {
                     let branch = Self::branch_from_loaded(loaded);
                     let commit_ids_for_branch: Vec<_> = branch.commits.keys().copied().collect();
                     object.branches.insert(bn, branch);
@@ -327,7 +328,7 @@ impl ObjectManager {
                         object.commit_branches.insert(commit_id, bn);
                     }
                 }
-            } else if let Ok(Some(loaded)) = storage.load_branch_tips(id, &bn) {
+            } else if let Ok(Some(loaded)) = storage.load_branch_tips(id, &branch_ref) {
                 let branch = Self::branch_from_loaded_tips(loaded);
                 let commit_ids_for_branch: Vec<_> = branch.commits.keys().copied().collect();
                 object.branches.insert(bn, branch);
@@ -379,6 +380,7 @@ impl ObjectManager {
         }
 
         io.load_commit_branch(object_id, commit_id)
+            .map(|branch| branch.map(|branch| branch.branch_name()))
             .map_err(Error::StorageError)
     }
 
@@ -604,7 +606,7 @@ impl ObjectManager {
         if io
             .append_commit(
                 object_id,
-                &branch_name,
+                &QueryBranchRef::from_branch_name(branch_name),
                 commit.clone(),
                 pending_batch_update
                     .as_ref()
@@ -924,7 +926,7 @@ impl ObjectManager {
         if io
             .append_commit(
                 object_id,
-                &branch_name,
+                &QueryBranchRef::from_branch_name(branch_name),
                 commit.clone(),
                 pending_batch_update
                     .as_ref()
@@ -1209,7 +1211,12 @@ impl ObjectManager {
             .filter(|(commit_id, _)| !commits_to_delete.contains(commit_id))
             .map(|(_, commit)| commit.clone())
             .collect();
-        let _ = io.replace_branch(object_id, &branch_name, retained_commits, tail_ids.clone());
+        let _ = io.replace_branch(
+            object_id,
+            &QueryBranchRef::from_branch_name(branch_name),
+            retained_commits,
+            tail_ids.clone(),
+        );
 
         // Update in-memory state
         let object = self

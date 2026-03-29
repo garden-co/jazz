@@ -4,6 +4,7 @@ use tracing::{info, warn};
 
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::ObjectId;
+use crate::query_manager::types::QueryBranchRef;
 use crate::storage::{CatalogueManifest, Storage};
 
 use super::{AppId, SchemaManager};
@@ -14,7 +15,7 @@ fn latest_catalogue_content<S: Storage + ?Sized>(
 ) -> Result<Option<Vec<u8>>, String> {
     let branch = super::catalogue_branch_name();
     let loaded = storage
-        .load_branch_tips(object_id, &branch)
+        .load_branch_tips(object_id, &QueryBranchRef::from_branch_name(branch))
         .map_err(|err| format!("failed to load catalogue object branch {object_id}: {err:?}"))?;
 
     Ok(loaded.and_then(|branch_data| {

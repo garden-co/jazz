@@ -1,8 +1,10 @@
 use std::ops::Bound;
 
 use crate::commit::CommitId;
-use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::{ComposedBranchName, QueryBranchRef, Value};
+#[cfg(test)]
+use crate::object::BranchName;
+use crate::object::ObjectId;
+use crate::query_manager::types::{QueryBranchRef, Value};
 
 use super::{StorageError, encode_value};
 
@@ -64,16 +66,12 @@ fn encode_branch_prefix_storage_id(prefix: &str) -> String {
     hex::encode(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, prefix.as_bytes()).as_bytes())
 }
 
-pub(super) fn encode_object_branch_key(branch: &BranchName) -> String {
-    if let Some(composed_branch) = ComposedBranchName::parse(branch) {
-        format!(
-            "c{}:{}",
-            encode_branch_prefix_storage_id(&composed_branch.prefix().branch_prefix()),
-            composed_branch.batch_id.branch_segment()
-        )
-    } else {
-        format!("r{}", hex::encode(branch.as_str().as_bytes()))
-    }
+pub(super) fn encode_object_branch_key(branch: &QueryBranchRef) -> String {
+    format!(
+        "c{}:{}",
+        encode_branch_prefix_storage_id(branch.prefix_name().as_str()),
+        branch.batch_id().branch_segment()
+    )
 }
 
 fn max_index_value_segment_len(table: &str, column: &str, branch_key: &str) -> Option<usize> {
@@ -158,7 +156,7 @@ pub(super) fn obj_meta_key(id: ObjectId) -> String {
     format!("obj:{}:meta", format_uuid(id))
 }
 
-pub(super) fn branch_manifest_key(object_id: ObjectId, branch: &BranchName) -> String {
+pub(super) fn branch_manifest_key(object_id: ObjectId, branch: &QueryBranchRef) -> String {
     format!(
         "obj:{}:br:{}:manifest",
         format_uuid(object_id),
@@ -168,7 +166,7 @@ pub(super) fn branch_manifest_key(object_id: ObjectId, branch: &BranchName) -> S
 
 pub(super) fn branch_segment_key(
     object_id: ObjectId,
-    branch: &BranchName,
+    branch: &QueryBranchRef,
     segment_id: u32,
 ) -> String {
     format!(
@@ -451,7 +449,8 @@ mod tests {
     #[test]
     fn composed_object_branch_keys_store_prefix_id_and_batch_only() {
         let branch = BranchName::new("dev-070707070707-main-b00000000000000000000000000000001");
-        let key = branch_manifest_key(ObjectId::from_uuid(uuid::Uuid::nil()), &branch);
+        let branch_ref = QueryBranchRef::from_branch_name(branch);
+        let key = branch_manifest_key(ObjectId::from_uuid(uuid::Uuid::nil()), &branch_ref);
 
         assert!(key.contains(":br:c"));
         assert!(key.contains(":b00000000000000000000000000000001:manifest"));

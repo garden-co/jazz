@@ -317,7 +317,7 @@ impl Storage for FjallStorage {
     fn load_branch(
         &self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
     ) -> Result<Option<LoadedBranch>, StorageError> {
         self.with_inner(|inner| {
             let tx = inner.db.read_tx();
@@ -330,7 +330,7 @@ impl Storage for FjallStorage {
     fn load_branch_tips(
         &self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
     ) -> Result<Option<LoadedBranchTips>, StorageError> {
         self.with_inner(|inner| {
             let tx = inner.db.read_tx();
@@ -344,7 +344,7 @@ impl Storage for FjallStorage {
         &self,
         object_id: ObjectId,
         commit_id: CommitId,
-    ) -> Result<Option<BranchName>, StorageError> {
+    ) -> Result<Option<QueryBranchRef>, StorageError> {
         self.with_inner(|inner| {
             let tx = inner.db.read_tx();
             load_commit_branch_core(object_id, commit_id, |key| {
@@ -382,7 +382,7 @@ impl Storage for FjallStorage {
     fn append_commit(
         &mut self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
         commit: Commit,
         prefix_batch_update: Option<PrefixBatchUpdate>,
     ) -> Result<(), StorageError> {
@@ -403,7 +403,7 @@ impl Storage for FjallStorage {
     fn replace_branch(
         &mut self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
         commits: Vec<Commit>,
         tails: HashSet<CommitId>,
     ) -> Result<(), StorageError> {
@@ -628,6 +628,19 @@ mod tests {
     use super::*;
     use smallvec::smallvec;
 
+    fn test_branch_ref(user_branch: &str) -> QueryBranchRef {
+        let prefix = crate::query_manager::types::BranchPrefixName::new(
+            "dev",
+            crate::query_manager::types::SchemaHash::from_bytes([7; 32]),
+            user_branch,
+        );
+        let batch_id = crate::query_manager::types::BatchId::from_uuid(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            user_branch.as_bytes(),
+        ));
+        QueryBranchRef::from_prefix_and_batch(&prefix, batch_id)
+    }
+
     fn make_commit(content: &[u8]) -> Commit {
         Commit {
             parents: smallvec![],
@@ -684,7 +697,7 @@ mod tests {
         let (_temp_dir, mut storage) = test_storage();
 
         let id = ObjectId::new();
-        let branch = BranchName::new("main");
+        let branch = test_branch_ref("main");
         storage.create_object(id, HashMap::new()).unwrap();
 
         assert_eq!(storage.load_branch(id, &branch).unwrap(), None);
@@ -730,7 +743,7 @@ mod tests {
         let (_temp_dir, mut storage) = test_storage();
 
         let id = ObjectId::new();
-        let branch = BranchName::new("main");
+        let branch = test_branch_ref("main");
         storage.create_object(id, HashMap::new()).unwrap();
 
         let mut parent_id = None;
@@ -758,8 +771,12 @@ mod tests {
         storage.create_object(id, HashMap::new()).unwrap();
 
         let prefix = "dev-070707070707-main";
-        let branch1 = BranchName::new(format!("{prefix}-b{:032x}", 1));
-        let branch2 = BranchName::new(format!("{prefix}-b{:032x}", 2));
+        let branch1 = crate::query_manager::types::QueryBranchRef::from_branch_name(
+            BranchName::new(format!("{prefix}-b{:032x}", 1)),
+        );
+        let branch2 = crate::query_manager::types::QueryBranchRef::from_branch_name(
+            BranchName::new(format!("{prefix}-b{:032x}", 2)),
+        );
         let batch1_id = crate::query_manager::types::BatchId::from_uuid(uuid::Uuid::from_u128(1));
         let batch2_id = crate::query_manager::types::BatchId::from_uuid(uuid::Uuid::from_u128(2));
 
@@ -953,7 +970,7 @@ mod tests {
         );
 
         let commit_content = b"persistent data";
-        let branch = BranchName::new("main");
+        let branch = test_branch_ref("main");
 
         {
             let mut storage = FjallStorage::open(&db_path, 8 * 1024 * 1024).unwrap();

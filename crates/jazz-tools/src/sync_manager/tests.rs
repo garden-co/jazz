@@ -2574,8 +2574,13 @@ fn persistence_ack_survives_reload() {
 
     let commit = make_test_commit(b"persist-test", vec![]);
     let commit_id = commit.id();
-    io.append_commit(obj_id, &main_branch(), commit, None)
-        .unwrap();
+    io.append_commit(
+        obj_id,
+        &crate::query_manager::types::QueryBranchRef::from_branch_name(main_branch()),
+        commit,
+        None,
+    )
+    .unwrap();
 
     // Store ack tier
     io.store_ack_tier(commit_id, DurabilityTier::EdgeServer)
@@ -2583,7 +2588,10 @@ fn persistence_ack_survives_reload() {
 
     // Load branch and verify ack_state is populated
     let loaded = io
-        .load_branch(obj_id, &main_branch())
+        .load_branch(
+            obj_id,
+            &crate::query_manager::types::QueryBranchRef::from_branch_name(main_branch()),
+        )
         .unwrap()
         .expect("Branch should exist");
 

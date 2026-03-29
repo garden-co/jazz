@@ -262,14 +262,14 @@ pub trait Storage {
     fn load_branch(
         &self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
     ) -> Result<Option<LoadedBranch>, StorageError>;
 
     /// Load only the visible tip commits for a branch.
     fn load_branch_tips(
         &self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
     ) -> Result<Option<LoadedBranchTips>, StorageError>;
 
     /// Resolve which branch owns a persisted commit.
@@ -277,7 +277,7 @@ pub trait Storage {
         &self,
         object_id: ObjectId,
         commit_id: CommitId,
-    ) -> Result<Option<BranchName>, StorageError>;
+    ) -> Result<Option<QueryBranchRef>, StorageError>;
 
     /// Load the current batch catalog for one shared batch prefix.
     fn load_prefix_batch_catalog(
@@ -297,7 +297,7 @@ pub trait Storage {
     fn append_commit(
         &mut self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
         commit: Commit,
         prefix_batch_update: Option<PrefixBatchUpdate>,
     ) -> Result<(), StorageError>;
@@ -308,7 +308,7 @@ pub trait Storage {
     fn replace_branch(
         &mut self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
         commits: Vec<Commit>,
         tails: HashSet<CommitId>,
     ) -> Result<(), StorageError>;
@@ -491,7 +491,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     fn load_branch(
         &self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
     ) -> Result<Option<LoadedBranch>, StorageError> {
         (**self).load_branch(object_id, branch)
     }
@@ -499,7 +499,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     fn load_branch_tips(
         &self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
     ) -> Result<Option<LoadedBranchTips>, StorageError> {
         (**self).load_branch_tips(object_id, branch)
     }
@@ -508,7 +508,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         &self,
         object_id: ObjectId,
         commit_id: CommitId,
-    ) -> Result<Option<BranchName>, StorageError> {
+    ) -> Result<Option<QueryBranchRef>, StorageError> {
         (**self).load_commit_branch(object_id, commit_id)
     }
 
@@ -531,7 +531,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     fn append_commit(
         &mut self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
         commit: Commit,
         prefix_batch_update: Option<PrefixBatchUpdate>,
     ) -> Result<(), StorageError> {
@@ -541,7 +541,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     fn replace_branch(
         &mut self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
         commits: Vec<Commit>,
         tails: HashSet<CommitId>,
     ) -> Result<(), StorageError> {
@@ -932,12 +932,12 @@ impl Storage for MemoryStorage {
     fn load_branch(
         &self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
     ) -> Result<Option<LoadedBranch>, StorageError> {
         let Some(obj) = self.objects.get(&object_id) else {
             return Ok(None);
         };
-        let Some(branch_data) = obj.branches.get(branch) else {
+        let Some(branch_data) = obj.branches.get(&branch.branch_name()) else {
             return Ok(None);
         };
         let mut commits = branch_data.commits.clone();
@@ -955,12 +955,12 @@ impl Storage for MemoryStorage {
     fn load_branch_tips(
         &self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
     ) -> Result<Option<LoadedBranchTips>, StorageError> {
         let Some(obj) = self.objects.get(&object_id) else {
             return Ok(None);
         };
-        let Some(branch_data) = obj.branches.get(branch) else {
+        let Some(branch_data) = obj.branches.get(&branch.branch_name()) else {
             return Ok(None);
         };
 
@@ -987,11 +987,12 @@ impl Storage for MemoryStorage {
         &self,
         object_id: ObjectId,
         commit_id: CommitId,
-    ) -> Result<Option<BranchName>, StorageError> {
+    ) -> Result<Option<QueryBranchRef>, StorageError> {
         Ok(self
             .objects
             .get(&object_id)
-            .and_then(|obj| obj.commit_branches.get(&commit_id).copied()))
+            .and_then(|obj| obj.commit_branches.get(&commit_id).copied())
+            .map(QueryBranchRef::from_branch_name))
     }
 
     fn load_prefix_batch_catalog(
@@ -1020,12 +1021,13 @@ impl Storage for MemoryStorage {
     fn append_commit(
         &mut self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
         commit: Commit,
         prefix_batch_update: Option<PrefixBatchUpdate>,
     ) -> Result<(), StorageError> {
         let obj = self.objects.entry(object_id).or_default();
-        let branch_data = obj.branches.entry(*branch).or_default();
+        let branch_name = branch.branch_name();
+        let branch_data = obj.branches.entry(branch_name).or_default();
 
         let commit_id = commit.id();
 
@@ -1037,7 +1039,7 @@ impl Storage for MemoryStorage {
         // Add this commit as a tip
         branch_data.tails.insert(commit_id);
         branch_data.commits.push(commit);
-        obj.commit_branches.insert(commit_id, *branch);
+        obj.commit_branches.insert(commit_id, branch_name);
 
         if let Some(update) = prefix_batch_update {
             let catalog = obj.prefix_batches.entry(update.prefix).or_default();
@@ -1059,12 +1061,13 @@ impl Storage for MemoryStorage {
     fn replace_branch(
         &mut self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
         commits: Vec<Commit>,
         tails: HashSet<CommitId>,
     ) -> Result<(), StorageError> {
         if let Some(obj) = self.objects.get_mut(&object_id) {
-            let branch_data = obj.branches.entry(*branch).or_default();
+            let branch_name = branch.branch_name();
+            let branch_data = obj.branches.entry(branch_name).or_default();
             let old_commit_ids: HashSet<CommitId> =
                 branch_data.commits.iter().map(Commit::id).collect();
             let new_commit_ids: HashSet<CommitId> = commits.iter().map(Commit::id).collect();
@@ -1073,7 +1076,7 @@ impl Storage for MemoryStorage {
                 obj.commit_branches.remove(removed_commit_id);
             }
             for commit in &commits {
-                obj.commit_branches.insert(commit.id(), *branch);
+                obj.commit_branches.insert(commit.id(), branch_name);
             }
 
             branch_data.commits = commits;
@@ -1330,6 +1333,19 @@ mod tests {
     use super::*;
     use smallvec::smallvec;
 
+    fn test_branch_ref(user_branch: &str) -> QueryBranchRef {
+        let prefix = crate::query_manager::types::BranchPrefixName::new(
+            "dev",
+            crate::query_manager::types::SchemaHash::from_bytes([7; 32]),
+            user_branch,
+        );
+        let batch_id = crate::query_manager::types::BatchId::from_uuid(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            user_branch.as_bytes(),
+        ));
+        QueryBranchRef::from_prefix_and_batch(&prefix, batch_id)
+    }
+
     fn make_commit(content: &[u8]) -> Commit {
         Commit {
             parents: smallvec![],
@@ -1370,7 +1386,7 @@ mod tests {
         let mut storage = MemoryStorage::new();
 
         let id = ObjectId::new();
-        let branch = BranchName::new("main");
+        let branch = test_branch_ref("main");
 
         storage.create_object(id, HashMap::new()).unwrap();
 
@@ -1406,8 +1422,12 @@ mod tests {
         storage.create_object(id, HashMap::new()).unwrap();
 
         let prefix = "dev-070707070707-main";
-        let branch1 = BranchName::new(format!("{prefix}-b{:032x}", 1));
-        let branch2 = BranchName::new(format!("{prefix}-b{:032x}", 2));
+        let branch1 = crate::query_manager::types::QueryBranchRef::from_branch_name(
+            BranchName::new(format!("{prefix}-b{:032x}", 1)),
+        );
+        let branch2 = crate::query_manager::types::QueryBranchRef::from_branch_name(
+            BranchName::new(format!("{prefix}-b{:032x}", 2)),
+        );
         let batch1_id = crate::query_manager::types::BatchId::from_uuid(uuid::Uuid::from_u128(1));
         let batch2_id = crate::query_manager::types::BatchId::from_uuid(uuid::Uuid::from_u128(2));
 

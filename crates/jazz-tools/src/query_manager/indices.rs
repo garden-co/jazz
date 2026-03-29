@@ -292,6 +292,7 @@ impl QueryManager {
                     .load_commit_branch(object_id, commit_id)
                     .ok()
                     .flatten()
+                    .map(|branch| branch.branch_name())
             })
     }
 

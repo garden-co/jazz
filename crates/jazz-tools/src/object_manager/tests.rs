@@ -1,6 +1,8 @@
 use super::*;
 use crate::commit::CommitAckState;
-use crate::query_manager::types::{BatchId, BranchPrefixName, ComposedBranchName, SchemaHash};
+use crate::query_manager::types::{
+    BatchId, BranchPrefixName, ComposedBranchName, QueryBranchRef, SchemaHash,
+};
 use crate::storage::MemoryStorage;
 use uuid::Uuid;
 
@@ -1225,15 +1227,15 @@ fn add_commit_accepts_new_batch_root_merge_and_tracks_prefix_leaves() {
 
     assert_eq!(
         io.load_commit_branch(object_id, head1).unwrap(),
-        Some(batch1)
+        Some(QueryBranchRef::from_branch_name(batch1))
     );
     assert_eq!(
         io.load_commit_branch(object_id, head2).unwrap(),
-        Some(batch2)
+        Some(QueryBranchRef::from_branch_name(batch2))
     );
     assert_eq!(
         io.load_commit_branch(object_id, merged_head).unwrap(),
-        Some(batch3)
+        Some(QueryBranchRef::from_branch_name(batch3))
     );
 }
 

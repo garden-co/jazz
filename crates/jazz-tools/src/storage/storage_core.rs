@@ -50,21 +50,18 @@ const POSTCARD_CODEC_LZ4: u8 = 1;
 const MIN_LZ4_POSTCARD_BYTES: usize = 256;
 
 impl StoredBranchRef {
-    fn from_branch_name(branch: &BranchName) -> Self {
-        let composed_branch = crate::query_manager::types::ComposedBranchName::parse(branch)
-            .expect("stored commit branches must use composed batch format");
+    fn from_branch_ref(branch: &QueryBranchRef) -> Self {
         Self {
-            prefix: composed_branch.prefix().branch_prefix(),
-            batch_id: composed_branch.batch_id,
+            prefix: branch.prefix_name().as_str().to_string(),
+            batch_id: branch.batch_id(),
         }
     }
 
-    fn to_branch_name(&self) -> BranchName {
-        BranchName::new(format!(
-            "{}-{}",
-            self.prefix,
-            self.batch_id.branch_segment()
-        ))
+    fn to_branch_ref(&self) -> QueryBranchRef {
+        QueryBranchRef::from_prefix_name_and_batch(
+            BranchName::new(self.prefix.clone()),
+            self.batch_id,
+        )
     }
 }
 
@@ -147,7 +144,7 @@ pub(super) fn load_object_metadata_core(
 
 fn load_branch_manifest(
     object_id: ObjectId,
-    branch: &BranchName,
+    branch: &QueryBranchRef,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
 ) -> Result<Option<PersistedBranchManifest>, StorageError> {
     let key = branch_manifest_key(object_id, branch);
@@ -159,7 +156,7 @@ fn load_branch_manifest(
 
 fn load_branch_segment(
     object_id: ObjectId,
-    branch: &BranchName,
+    branch: &QueryBranchRef,
     segment_id: u32,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
 ) -> Result<Option<PersistedBranchSegment>, StorageError> {
@@ -209,7 +206,7 @@ impl PersistedPrefixBatchCatalog {
 
 fn persist_branch_manifest(
     object_id: ObjectId,
-    branch: &BranchName,
+    branch: &QueryBranchRef,
     manifest: &PersistedBranchManifest,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
@@ -220,7 +217,7 @@ fn persist_branch_manifest(
 
 fn persist_branch_segment(
     object_id: ObjectId,
-    branch: &BranchName,
+    branch: &QueryBranchRef,
     segment_id: u32,
     segment: &PersistedBranchSegment,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
@@ -247,7 +244,7 @@ fn tip_commits_for_branch(commits: &[Commit]) -> Vec<Commit> {
 
 pub(super) fn load_branch_core(
     object_id: ObjectId,
-    branch: &BranchName,
+    branch: &QueryBranchRef,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
 ) -> Result<Option<LoadedBranch>, StorageError> {
     let meta_key = obj_meta_key(object_id);
@@ -285,7 +282,7 @@ pub(super) fn load_branch_core(
 
 pub(super) fn load_branch_tips_core(
     object_id: ObjectId,
-    branch: &BranchName,
+    branch: &QueryBranchRef,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
 ) -> Result<Option<LoadedBranchTips>, StorageError> {
     let meta_key = obj_meta_key(object_id);
@@ -314,12 +311,12 @@ pub(super) fn load_commit_branch_core(
     object_id: ObjectId,
     commit_id: CommitId,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<BranchName>, StorageError> {
+) -> Result<Option<QueryBranchRef>, StorageError> {
     let key = commit_branch_key(object_id, commit_id);
     match get(&key)? {
         Some(data) => {
             let branch_ref: StoredBranchRef = decode_json(&data, "commit branch")?;
-            Ok(Some(branch_ref.to_branch_name()))
+            Ok(Some(branch_ref.to_branch_ref()))
         }
         None => Ok(None),
     }
@@ -391,7 +388,7 @@ pub(super) fn adjust_table_prefix_batch_refcount_core(
 
 pub(super) fn append_commit_core(
     object_id: ObjectId,
-    branch: &BranchName,
+    branch: &QueryBranchRef,
     commit: Commit,
     prefix_batch_update: Option<PrefixBatchUpdate>,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
@@ -416,7 +413,7 @@ pub(super) fn append_commit_core(
 
     let commit_branch_lookup_key = commit_branch_key(object_id, commit_id);
     let commit_branch_json =
-        encode_json(&StoredBranchRef::from_branch_name(branch), "commit branch")?;
+        encode_json(&StoredBranchRef::from_branch_ref(branch), "commit branch")?;
     set(&commit_branch_lookup_key, &commit_branch_json)?;
 
     for parent in &commit.parents {
@@ -462,7 +459,7 @@ pub(super) fn append_commit_core(
 
 pub(super) fn replace_branch_core(
     object_id: ObjectId,
-    branch: &BranchName,
+    branch: &QueryBranchRef,
     commits: Vec<Commit>,
     tails: HashSet<CommitId>,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
@@ -514,7 +511,7 @@ pub(super) fn replace_branch_core(
     }
     for commit in &commits {
         let key = commit_branch_key(object_id, commit.id());
-        let value = encode_json(&StoredBranchRef::from_branch_name(branch), "commit branch")?;
+        let value = encode_json(&StoredBranchRef::from_branch_ref(branch), "commit branch")?;
         set(&key, &value)?;
     }
 
