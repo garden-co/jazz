@@ -361,6 +361,7 @@ async fn connect_client(
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
+        sync_tracer: None,
     };
     Ok(JazzClient::connect(context).await?)
 }

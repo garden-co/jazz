@@ -112,6 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
+        sync_tracer: None,
     };
 
     let client = JazzClient::connect(context).await?;
