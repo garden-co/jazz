@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const SERVER_URL = process.env.NEXT_PUBLIC_SYNC_SERVER_URL!;
-const APP_ID = process.env.APP_ID!;
+const APP_ID = process.env.NEXT_PUBLIC_APP_ID!;
 const BACKEND_SECRET = process.env.BACKEND_SECRET!;
 const ADMIN_SECRET = process.env.ADMIN_SECRET!;
 const WEB_PORT = Number(process.env.WEB_PORT ?? "3000");
