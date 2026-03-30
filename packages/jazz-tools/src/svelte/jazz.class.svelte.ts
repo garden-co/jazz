@@ -11,9 +11,9 @@ import type {
   InstanceOfSchema,
   Loaded,
   MaybeLoaded,
-  NotLoaded,
   ResolveQuery,
   ResolveQueryStrict,
+  CoValueCursor,
 } from "jazz-tools";
 import {
   captureStack,
@@ -48,6 +48,12 @@ type CoStateOptions<
    * For more info see the [branching](https://jazz.tools/docs/svelte/using-covalues/version-control) documentation.
    */
   unstable_branch?: BranchDefinition;
+  /**
+   * Load the CoValue at a specific cursor.
+   *
+   * Cursors let you take a "snapshot" of a CoValue at the time of cursor creations.
+   */
+  cursor?: CoValueCursor;
 };
 
 type CoStateId = string | undefined | null;
@@ -106,6 +112,7 @@ export class CoState<
           false, // skipRetry
           false, // bestEffortResolution
           options?.unstable_branch,
+          options?.cursor,
         );
 
         subscriptionScope.callerStack = callerStack;
@@ -193,6 +200,7 @@ export class AccountCoState<
           false, // skipRetry
           false, // bestEffortResolution
           options?.unstable_branch,
+          options?.cursor,
         );
 
         subscriptionScope.callerStack = callerStack;

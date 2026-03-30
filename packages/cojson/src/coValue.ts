@@ -8,6 +8,7 @@ import { RawCoStream } from "./coValues/coStream.js";
 import { RawGroup } from "./coValues/group.js";
 import { RawCoID } from "./ids.js";
 import { JsonObject, JsonValue } from "./jsonValue.js";
+import { CoValueFrontier } from "./knownState.js";
 
 export type CoID<T extends RawCoValue> = RawCoID & {
   readonly __type: T;
@@ -26,6 +27,8 @@ export interface RawCoValue {
   /** Returns an immutable JSON presentation of this `CoValue` */
   toJSON(): JsonValue;
   atTime(time: number): this;
+  /** Returns a view of this `CoValue` at the given frontier */
+  atFrontier(frontier: CoValueFrontier): this;
   /** Lets you subscribe to future updates to this CoValue (whether made locally or by other users).
    *
    * Takes a listener function that will be called with the current state for each update.
@@ -77,6 +80,10 @@ export class RawUnknownCoValue implements RawCoValue {
   }
 
   atTime() {
+    return this;
+  }
+
+  atFrontier() {
     return this;
   }
 

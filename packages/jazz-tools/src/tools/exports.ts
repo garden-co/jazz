@@ -128,6 +128,8 @@ export {
   type CoreAccountSchema as AnyAccountSchema,
   type ResolveQuery,
   type ResolveQueryStrict,
+  type CoValueCursor,
+  type LoadCoValueCursorOption,
 } from "./internal.js";
 
 export {

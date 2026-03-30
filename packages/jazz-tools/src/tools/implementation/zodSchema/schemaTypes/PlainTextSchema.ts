@@ -8,6 +8,8 @@ import {
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  CoValueCursor,
+  LoadCoValueCursorOption,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
@@ -85,6 +87,7 @@ export class PlainTextSchema implements CorePlainTextSchema {
     options: {
       loadAs: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
+      cursor?: LoadCoValueCursorOption;
     },
   ): Promise<Settled<CoPlainText>> {
     return this.coValueClass.load(id, options);
@@ -95,6 +98,7 @@ export class PlainTextSchema implements CorePlainTextSchema {
     options: {
       loadAs: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
+      cursor?: CoValueCursor;
     },
     listener: (value: CoPlainText, unsubscribe: () => void) => void,
   ): () => void;

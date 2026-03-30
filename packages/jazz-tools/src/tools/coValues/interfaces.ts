@@ -31,6 +31,8 @@ import {
   coValueClassFromCoValueClassOrSchema,
   inspect,
   LocalValidationMode,
+  CoValueCursor,
+  LoadCoValueCursorOption,
 } from "../internal.js";
 import type {
   BranchDefinition,
@@ -78,6 +80,8 @@ export interface CoValue {
     isBranched: boolean;
     branchName: string | undefined;
     unstable_merge: () => void;
+    cursor: CoValueCursor | undefined;
+    createCursor: () => CoValueCursor;
   };
   /**
    * Whether the CoValue is loaded. Can be used to distinguish between loaded and {@link NotLoaded} CoValues.
@@ -167,16 +171,18 @@ export function loadCoValueWithoutMe<
     loadAs?: Account | AnonymousJazzAgent;
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
+    cursor?: LoadCoValueCursorOption;
   },
 ): Promise<Settled<Resolved<V, R>>> {
   return loadCoValue(cls, id, {
     ...options,
     loadAs: options?.loadAs ?? activeAccountContext.get(),
     unstable_branch: options?.unstable_branch,
+    cursor: options?.cursor,
   });
 }
 
-export function loadCoValue<
+export async function loadCoValue<
   V extends CoValue,
   const R extends RefsToResolve<V>,
 >(
@@ -187,8 +193,46 @@ export function loadCoValue<
     loadAs: Account | AnonymousJazzAgent;
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
+    cursor?: LoadCoValueCursorOption;
   },
 ): Promise<Settled<Resolved<V, R>>> {
+  let cursor: CoValueCursor | undefined;
+
+  if (options.cursor) {
+    if (typeof options.cursor === "string") {
+      cursor = options.cursor;
+    } else if (options.cursor.useCurrentCursor) {
+      const loadAs = options.loadAs ?? activeAccountContext.get();
+      const node = "node" in loadAs ? loadAs.node : loadAs.$jazz.localNode;
+
+      const resolve = options.resolve ?? true;
+
+      const rootNode = new SubscriptionScope<CoValue>(
+        node,
+        resolve as any,
+        id,
+        {
+          ref: coValueClassFromCoValueClassOrSchema(cls),
+          optional: false,
+        },
+        options.skipRetry,
+        false,
+        options.unstable_branch,
+        undefined,
+      );
+
+      try {
+        await rootNode.getPromise();
+        rootNode.destroy();
+      } catch (error) {
+        rootNode.destroy();
+        throw error;
+      }
+
+      cursor = rootNode.createCursor();
+    }
+  }
+
   return new Promise((resolve) => {
     subscribeToCoValue<V, R>(
       cls,
@@ -200,6 +244,7 @@ export function loadCoValue<
         skipRetry: options.skipRetry,
         onError: resolve,
         unstable_branch: options.unstable_branch,
+        cursor,
       },
       (value, unsubscribe) => {
         resolve(value);
@@ -218,6 +263,7 @@ export async function ensureCoValueLoaded<
     | {
         resolve?: RefsToResolveStrict<V, R>;
         unstable_branch?: BranchDefinition;
+        cursor?: LoadCoValueCursorOption;
       }
     | undefined,
 ): Promise<Resolved<V, R>> {
@@ -228,6 +274,7 @@ export async function ensureCoValueLoaded<
       loadAs: existing.$jazz.loadedAs,
       resolve: options?.resolve,
       unstable_branch: options?.unstable_branch,
+      cursor: options?.cursor,
     },
   );
 
@@ -261,6 +308,7 @@ export type SubscribeListenerOptions<
    */
   onUnavailable?: (value: NotLoaded<V>) => void;
   unstable_branch?: BranchDefinition;
+  cursor?: CoValueCursor;
 };
 
 export type SubscribeRestArgs<V extends CoValue, R extends RefsToResolve<V>> =
@@ -290,6 +338,7 @@ export function parseSubscribeRestArgs<
           onUnauthorized: args[0].onUnauthorized,
           onUnavailable: args[0].onUnavailable,
           unstable_branch: args[0].unstable_branch,
+          cursor: args[0].cursor,
         },
         listener: args[1],
       };
@@ -346,6 +395,7 @@ export function subscribeToCoValue<
     syncResolution?: boolean;
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
+    cursor?: CoValueCursor;
   },
   listener: SubscribeListener<V, R>,
 ): () => void {
@@ -367,6 +417,7 @@ export function subscribeToCoValue<
     options.skipRetry,
     false,
     options.unstable_branch,
+    options.cursor,
   );
 
   // Track performance for API subscriptions
@@ -434,6 +485,7 @@ export function subscribeToExistingCoValue<
          */
         onUnauthorized?: (value: NotLoaded<V>) => void;
         unstable_branch?: BranchDefinition;
+        cursor?: CoValueCursor;
       }
     | undefined,
   listener: SubscribeListener<V, R>,
@@ -448,6 +500,7 @@ export function subscribeToExistingCoValue<
       onUnavailable: options?.onUnavailable,
       onUnauthorized: options?.onUnauthorized,
       unstable_branch: options?.unstable_branch,
+      cursor: options?.cursor,
     },
     listener,
   );
@@ -831,6 +884,7 @@ export async function exportCoValue<
     skipRetry?: boolean;
     bestEffortResolution?: boolean;
     unstable_branch?: BranchDefinition;
+    cursor?: CoValueCursor;
   },
 ) {
   const loadAs = options.loadAs ?? activeAccountContext.get();

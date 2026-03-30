@@ -1,0 +1,109 @@
+import { base58 } from "@scure/base";
+import { cojsonInternals, RawCoID, Stringified } from "cojson";
+import { CoValueCursor, DecodedCoValueCursor } from "./types.js";
+import { z } from "zod/v4";
+import type { RefsToResolve } from "../coValues/deepLoading.js";
+import { isSubsetOfRefsToResolve } from "./utils.js";
+
+const cursorSchema = z.object({
+  version: z.literal(1),
+  rootId: z.string<RawCoID>(),
+  resolveFingerprint: z.record(z.string(), z.any()),
+  frontiers: z.record(z.string<RawCoID>(), z.record(z.string(), z.number())),
+}) satisfies z.ZodType<DecodedCoValueCursor>;
+
+export class CursorError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CursorError";
+  }
+}
+
+export const normalizeResolveForFingerprint = (
+  resolve: RefsToResolve<any>,
+): RefsToResolve<any> => {
+  if (resolve === true) {
+    return {};
+  }
+
+  if (typeof resolve === "object") {
+    return Object.fromEntries(
+      Object.entries(resolve)
+        .filter(([k]) => k !== "$onError")
+        .map(([k, v]) => [
+          k,
+          normalizeResolveForFingerprint(v as RefsToResolve<any>),
+        ]),
+    );
+  }
+
+  return resolve;
+};
+
+export const encodeCursor = (
+  decodedCursor: Omit<DecodedCoValueCursor, "resolveFingerprint"> & {
+    resolveFingerprint: DecodedCoValueCursor["resolveFingerprint"] | boolean;
+  },
+): CoValueCursor => {
+  const textEncoder = new TextEncoder();
+  return `cursor_z${base58.encode(
+    textEncoder.encode(
+      cojsonInternals.stableStringify({
+        ...decodedCursor,
+        resolveFingerprint: normalizeResolveForFingerprint(
+          decodedCursor.resolveFingerprint,
+        ),
+      }),
+    ),
+  )}`;
+};
+
+export const decodeAndValidateCursor = ({
+  rootId,
+  resolve,
+  cursor,
+}: {
+  cursor: CoValueCursor;
+  rootId: string;
+  resolve: RefsToResolve<any>;
+}): DecodedCoValueCursor => {
+  const textDecoder = new TextDecoder();
+
+  let maybeDecodedCursor: DecodedCoValueCursor;
+  try {
+    maybeDecodedCursor = cojsonInternals.parseJSON(
+      textDecoder.decode(
+        base58.decode(cursor.replace(/^cursor_z/, "")),
+      ) as Stringified<DecodedCoValueCursor>,
+    );
+  } catch {
+    throw new CursorError("Invalid cursor string");
+  }
+
+  const parseResult = cursorSchema.safeParse(maybeDecodedCursor);
+
+  if (!parseResult.success) {
+    throw new CursorError("Invalid cursor string");
+  }
+
+  const decodedCursor = parseResult.data;
+
+  if (decodedCursor.rootId !== rootId) {
+    throw new CursorError("Invalid cursor: root CoValue ID mismatch");
+  }
+
+  const normalizedResolve = normalizeResolveForFingerprint(resolve);
+
+  if (
+    !isSubsetOfRefsToResolve(
+      normalizedResolve,
+      decodedCursor.resolveFingerprint,
+    )
+  ) {
+    throw new CursorError(
+      `Invalid cursor: resolve query mismatch. Expected ${JSON.stringify(normalizedResolve)} to be a subset of ${JSON.stringify(decodedCursor.resolveFingerprint)}`,
+    );
+  }
+
+  return decodedCursor;
+};

@@ -13,6 +13,8 @@ import {
   getSubscriptionScope,
   inspect,
   unstable_mergeBranch,
+  CoValueCursor,
+  RefsToResolve,
 } from "../internal.js";
 import { Group, TypeSym } from "../internal.js";
 
@@ -167,6 +169,18 @@ export abstract class CoValueJazzApi<V extends CoValue> {
     const subscriptionScope = this._subscriptionScope;
 
     return Boolean(subscriptionScope?.unstable_branch);
+  }
+
+  get cursor(): CoValueCursor | undefined {
+    const subscriptionScope = this._subscriptionScope;
+
+    return subscriptionScope?.cursor;
+  }
+
+  createCursor(): CoValueCursor {
+    const subscriptionScope = getSubscriptionScope(this.coValue);
+
+    return subscriptionScope.cursor ?? subscriptionScope.createCursor();
   }
 
   /**

@@ -13,6 +13,7 @@ import {
   Simplify,
   SubscribeListenerOptions,
   LocalValidationMode,
+  LoadCoValueCursorOption,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFieldSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
@@ -75,6 +76,7 @@ export interface CoRecordSchema<
       >;
       loadAs?: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
+      cursor?: LoadCoValueCursorOption;
     },
   ): Promise<Settled<Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>>>;
 

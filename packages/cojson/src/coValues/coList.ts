@@ -1,11 +1,15 @@
 import { CoID, RawCoValue } from "../coValue.js";
-import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
+import {
+  AvailableCoValueCore,
+  DecryptedTransaction,
+} from "../coValueCore/coValueCore.js";
 import { AgentID, SessionID, TransactionID, RawCoID } from "../ids.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { isCoValue } from "../typeUtils/isCoValue.js";
 import { RawAccountID } from "./account.js";
 import { RawGroup } from "./group.js";
+import { CoValueFrontier } from "../knownState.js";
 
 export type OpID = TransactionID & { changeIdx: number };
 
@@ -78,6 +82,9 @@ export class RawCoList<
   /** @internal */
   atTimeFilter?: number = undefined;
 
+  /** @internal */
+  atFrontierFilter?: CoValueFrontier = undefined;
+
   /** @category 6. Meta */
   readonly _item!: Item;
 
@@ -106,7 +113,13 @@ export class RawCoList<
   }
 
   /** @internal */
-  constructor(core: AvailableCoValueCore, atTimeFilter?: number) {
+  constructor(
+    core: AvailableCoValueCore,
+    options?: {
+      atTimeFilter?: number;
+      atFrontierFilter?: CoValueFrontier;
+    },
+  ) {
     this.id = core.id as CoID<this>;
     this.core = core;
 
@@ -115,13 +128,14 @@ export class RawCoList<
     this.afterStart = [];
     this.beforeEnd = [];
     this.knownTransactions = { [core.id]: 0 };
-    this.atTimeFilter = atTimeFilter;
+    this.atTimeFilter = options?.atTimeFilter;
+    this.atFrontierFilter = options?.atFrontierFilter;
 
     const ruleset = this.core.verified.header.ruleset;
     this.#isDeletionRestricted =
       ruleset.type === "ownedByGroup" && ruleset.restrictDeletion === true;
 
-    this._processNewTransactions();
+    this.processNewTransactions();
   }
 
   private getInsertionsEntry(opID: OpID) {
@@ -208,17 +222,6 @@ export class RawCoList<
   }
 
   processNewTransactions() {
-    if (this.isTimeTravelEntity()) {
-      throw new Error("Cannot process transactions on a time travel entity");
-    }
-    this._processNewTransactions();
-  }
-
-  private transactionContainsDeletion(changes: ListOpPayload<Item>[]) {
-    return changes.some((change) => change.op === "del");
-  }
-
-  private _processNewTransactions() {
     // Get all transactions including invalid ones, so that items referencing
     // entries from invalid init transactions can still find their references.
     const transactions = this.core.getValidSortedTransactions({
@@ -235,10 +238,12 @@ export class RawCoList<
     let oldestValidTransaction: number | undefined = undefined;
     this._cachedEntries = undefined;
 
-    for (const { txID, changes, madeAt, isValid } of transactions) {
-      if (this.isFilteredOut(madeAt)) {
+    for (const tx of transactions) {
+      if (this.isFilteredOut(tx)) {
         continue;
       }
+
+      const { txID, changes, madeAt, isValid } = tx;
 
       if (
         isValid &&
@@ -338,6 +343,10 @@ export class RawCoList<
     this.totalValidTransactions += transactions.length;
   }
 
+  private transactionContainsDeletion(changes: ListOpPayload<Item>[]) {
+    return changes.some((change) => change.op === "del");
+  }
+
   rebuildFromCore() {
     this.version += 1;
 
@@ -346,14 +355,22 @@ export class RawCoList<
   }
 
   isTimeTravelEntity() {
-    return Boolean(this.atTimeFilter);
+    return Boolean(this.atTimeFilter) || Boolean(this.atFrontierFilter);
   }
 
-  private isFilteredOut(time: number): boolean {
-    if (this.atTimeFilter === undefined) {
-      return false;
+  private isFilteredOut(tx: DecryptedTransaction): boolean {
+    if (this.atTimeFilter !== undefined && tx.madeAt > this.atTimeFilter) {
+      return true;
     }
-    return time > this.atTimeFilter;
+
+    if (
+      this.atFrontierFilter !== undefined &&
+      tx.txID.txIndex >= (this.atFrontierFilter[tx.txID.sessionID] ?? -1)
+    ) {
+      return true;
+    }
+
+    return false;
   }
 
   /** @category 6. Meta */
@@ -366,13 +383,18 @@ export class RawCoList<
     return this.core.getGroup();
   }
 
-  /**
-   * Not yet implemented
-   *
-   * @category 4. Time travel
-   */
+  /** @category 4. Time travel */
   atTime(time: number): this {
-    return new RawCoList(this.core, time) as this;
+    return new RawCoList(this.core, {
+      atTimeFilter: time,
+    }) as this;
+  }
+
+  /** @category 4. Time travel */
+  atFrontier(frontier: CoValueFrontier): this {
+    return new RawCoList(this.core, {
+      atFrontierFilter: frontier,
+    }) as this;
   }
 
   /**
@@ -600,6 +622,10 @@ export class RawCoList<
     privacy: "private" | "trusting" = "private",
     meta?: JsonObject,
   ) {
+    if (this.isTimeTravelEntity()) {
+      throw new Error("Cannot mutate a time travel entity");
+    }
+
     const entries = this.entries();
     after =
       after === undefined
@@ -651,6 +677,10 @@ export class RawCoList<
     before?: number,
     privacy: "private" | "trusting" = "private",
   ) {
+    if (this.isTimeTravelEntity()) {
+      throw new Error("Cannot mutate a time travel entity");
+    }
+
     const entries = this.entries();
     before = before === undefined ? 0 : before;
     let opIDAfter;
@@ -693,6 +723,10 @@ export class RawCoList<
    * @category 2. Editing
    **/
   delete(at: number, privacy: "private" | "trusting" = "private") {
+    if (this.isTimeTravelEntity()) {
+      throw new Error("Cannot mutate a time travel entity");
+    }
+
     const entries = this.entries();
     const entry = entries[at];
     if (!entry) {
@@ -716,6 +750,10 @@ export class RawCoList<
     newItem: Item,
     privacy: "private" | "trusting" = "private",
   ) {
+    if (this.isTimeTravelEntity()) {
+      throw new Error("Cannot mutate a time travel entity");
+    }
+
     const entries = this.entries();
     const entry = entries[at];
     if (!entry) {

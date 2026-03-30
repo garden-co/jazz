@@ -64,9 +64,10 @@ export function rejectedPromise<T>(reason: unknown): PromiseWithStatus<T> {
   return promise;
 }
 
-export function isEqualRefsToResolve(
+function compareRefsToResolve(
   a: RefsToResolve<any>,
   b: RefsToResolve<any>,
+  mode: "equality" | "subset",
 ) {
   // Fast path: same reference
   if (a === b) {
@@ -98,7 +99,7 @@ export function isEqualRefsToResolve(
   const keysB = Object.keys(b);
 
   // Different number of keys means not equal
-  if (keysA.length !== keysB.length) {
+  if (mode === "equality" && keysA.length !== keysB.length) {
     return false;
   }
 
@@ -112,10 +113,24 @@ export function isEqualRefsToResolve(
     const valueB = (b as any)[key];
 
     // Recursively compare nested RefsToResolve values
-    if (!isEqualRefsToResolve(valueA, valueB)) {
+    if (!compareRefsToResolve(valueA, valueB, mode)) {
       return false;
     }
   }
 
   return true;
+}
+
+export function isEqualRefsToResolve(
+  a: RefsToResolve<any>,
+  b: RefsToResolve<any>,
+) {
+  return compareRefsToResolve(a, b, "equality");
+}
+
+export function isSubsetOfRefsToResolve(
+  a: RefsToResolve<any>,
+  b: RefsToResolve<any>,
+) {
+  return compareRefsToResolve(a, b, "subset");
 }

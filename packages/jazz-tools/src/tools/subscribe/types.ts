@@ -1,5 +1,6 @@
 import type { Account, CoValue, Group, Resolved } from "../internal.js";
 import type { JazzError } from "./JazzError.js";
+import { RawCoValueCursor } from "cojson";
 
 export const CoValueLoadingState = {
   /**
@@ -49,6 +50,17 @@ export type SubscriptionValueLoading = {
 };
 
 export type BranchDefinition = { name: string; owner?: Group | Account };
+
+export type DecodedCoValueCursor = RawCoValueCursor & {
+  version: 1;
+  resolveFingerprint: Record<string, any>;
+};
+
+export type CoValueCursor = `cursor_z${string}`;
+
+export type LoadCoValueCursorOption =
+  | CoValueCursor
+  | { useCurrentCursor: true };
 
 /**
  * Detail structure for subscription performance marks and measures.

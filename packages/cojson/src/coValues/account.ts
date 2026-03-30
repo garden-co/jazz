@@ -11,7 +11,6 @@ import {
 import { AgentID, isAgentID } from "../ids.js";
 import { JsonObject } from "../jsonValue.js";
 import { LocalNode } from "../localNode.js";
-import { logger } from "../logger.js";
 import type { AccountRole, Role } from "../permissions.js";
 import { RawCoMap } from "./coMap.js";
 import { Everyone, EVERYONE, InviteSecret, RawGroup } from "./group.js";

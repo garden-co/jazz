@@ -16,6 +16,7 @@ import {
   withSchemaPermissions,
   type Schema,
   CoValueCreateOptions,
+  LoadCoValueCursorOption,
 } from "../../../internal.js";
 import { CoValueUniqueness } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
@@ -121,6 +122,7 @@ export class CoListSchema<
       resolve?: RefsToResolveStrict<CoListInstanceCoValuesMaybeLoaded<T>, R>;
       loadAs?: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
+      cursor?: LoadCoValueCursorOption;
     },
   ): Promise<Settled<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
     // @ts-expect-error

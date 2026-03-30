@@ -51,6 +51,8 @@ import {
   subscribeToExistingCoValue,
   CoreFileStreamSchema,
   CoValueCreateOptionsInternal,
+  CoValueCursor,
+  LoadCoValueCursorOption,
 } from "../internal.js";
 import { z } from "../implementation/zodSchema/zodReExport.js";
 import {
@@ -559,6 +561,7 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
     options?: {
       resolve?: RefsToResolveStrict<F, R>;
       unstable_branch?: BranchDefinition;
+      cursor?: LoadCoValueCursorOption;
     },
   ): Promise<Resolved<F, R>> {
     return ensureCoValueLoaded(this.coFeed, options);
@@ -579,6 +582,7 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
     options: {
       resolve?: RefsToResolveStrict<F, R>;
       unstable_branch?: BranchDefinition;
+      cursor?: CoValueCursor;
     },
     listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
   ): () => void;

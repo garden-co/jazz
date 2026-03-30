@@ -8,6 +8,7 @@ import { isCoValue } from "../typeUtils/isCoValue.js";
 import { RawAccountID } from "./account.js";
 import { RawGroup } from "./group.js";
 import { RawCoID } from "../ids.js";
+import { CoValueFrontier } from "../knownState.js";
 
 export type CoStreamItem<Item extends JsonValue> = {
   value: Item;
@@ -32,17 +33,26 @@ export class RawCoStreamView<
   totalValidTransactions: number = 0;
   version: number = 0;
 
+  /** @internal */
+  atFrontierFilter?: CoValueFrontier = undefined;
+
   private resetInternalState() {
     this.items = {};
     this.knownTransactions = { [this.core.id]: 0 };
     this.totalValidTransactions = 0;
   }
 
-  constructor(core: AvailableCoValueCore) {
+  constructor(
+    core: AvailableCoValueCore,
+    options?: {
+      atFrontierFilter?: CoValueFrontier;
+    },
+  ) {
     this.id = core.id as CoID<this>;
     this.core = core;
     this.items = {};
     this.knownTransactions = { [core.id]: 0 };
+    this.atFrontierFilter = options?.atFrontierFilter;
     this.processNewTransactions();
   }
 
@@ -64,6 +74,16 @@ export class RawCoStreamView<
   /** Not yet implemented */
   atTime(_time: number): this {
     throw new Error("Not yet implemented");
+  }
+
+  atFrontier(frontier: CoValueFrontier): this {
+    return new RawCoStreamView(this.core, {
+      atFrontierFilter: frontier,
+    }) as this;
+  }
+
+  isTimeTravelEntity() {
+    return Boolean(this.atFrontierFilter);
   }
 
   /** @internal */
@@ -96,6 +116,13 @@ export class RawCoStreamView<
     }
 
     for (const { txID, madeAt, changes } of newValidTransactions) {
+      if (
+        this.atFrontierFilter &&
+        txID.txIndex >= (this.atFrontierFilter[txID.sessionID] ?? -1)
+      ) {
+        continue;
+      }
+
       for (const changeUntyped of changes) {
         const change = changeUntyped as Item;
         let entries = this.items[txID.sessionID];
@@ -230,16 +257,14 @@ export class RawCoStreamView<
 
   *itemsBy(account: RawAccountID | AgentID) {
     // TODO: this can be made more lazy without a huge collect and sort
-    const items = [
-      ...Object.keys(this.items).flatMap((sessionID) =>
-        sessionID.startsWith(account)
-          ? [...this.itemsIn(sessionID as SessionID)].map((item) => ({
-              in: sessionID as SessionID,
-              ...item,
-            }))
-          : [],
-      ),
-    ];
+    const items = Object.keys(this.items).flatMap((sessionID) =>
+      sessionID.startsWith(account)
+        ? [...this.itemsIn(sessionID as SessionID)].map((item) => ({
+            in: sessionID as SessionID,
+            ...item,
+          }))
+        : [],
+    );
 
     items.sort((a, b) => a.at.getTime() - b.at.getTime());
 
@@ -273,7 +298,17 @@ export class RawCoStream<
   extends RawCoStreamView<Item, Meta>
   implements RawCoValue
 {
+  override atFrontier(frontier: CoValueFrontier): this {
+    return new RawCoStream(this.core, {
+      atFrontierFilter: frontier,
+    }) as this;
+  }
+
   push(item: Item, privacy: "private" | "trusting" = "private"): void {
+    if (this.isTimeTravelEntity()) {
+      throw new Error("Cannot mutate a time travel entity");
+    }
+
     this.core.makeTransaction([isCoValue(item) ? item.id : item], privacy);
     this.processNewTransactions();
   }

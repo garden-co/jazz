@@ -7,6 +7,8 @@ import {
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
   withSchemaPermissions,
+  CoValueCursor,
+  LoadCoValueCursorOption,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
@@ -84,6 +86,7 @@ export class RichTextSchema implements CoreRichTextSchema {
     options: {
       loadAs: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
+      cursor?: LoadCoValueCursorOption;
     },
   ): Promise<Settled<CoRichText>> {
     return this.coValueClass.load(id, options);
@@ -94,6 +97,7 @@ export class RichTextSchema implements CoreRichTextSchema {
     options: {
       loadAs: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
+      cursor?: CoValueCursor;
     },
     listener: (value: CoRichText, unsubscribe: () => void) => void,
   ): () => void;

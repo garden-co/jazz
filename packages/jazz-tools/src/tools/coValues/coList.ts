@@ -38,6 +38,8 @@ import {
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
   CoValueCreateOptionsInternal,
+  CoValueCursor,
+  LoadCoValueCursorOption,
 } from "../internal.js";
 import { z } from "../implementation/zodSchema/zodReExport.js";
 import { CoreCoListSchema } from "../implementation/zodSchema/schemaTypes/CoListSchema.js";
@@ -912,6 +914,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     options: {
       resolve: RefsToResolveStrict<L, R>;
       unstable_branch?: BranchDefinition;
+      cursor?: LoadCoValueCursorOption;
     },
   ): Promise<Resolved<L, R>> {
     return ensureCoValueLoaded(this.coList, options);
@@ -935,6 +938,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     options: {
       resolve?: RefsToResolveStrict<L, R>;
       unstable_branch?: BranchDefinition;
+      cursor?: CoValueCursor;
     },
     listener: (value: Resolved<L, R>, unsubscribe: () => void) => void,
   ): () => void;

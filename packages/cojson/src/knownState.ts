@@ -2,6 +2,8 @@ import type { RawCoID, SessionID } from "./exports.js";
 
 export type KnownStateSessions = { [sessionID: SessionID]: number };
 
+export type CoValueFrontier = KnownStateSessions;
+
 export type CoValueKnownState = {
   id: RawCoID;
   header: boolean;
