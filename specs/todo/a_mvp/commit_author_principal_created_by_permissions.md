@@ -33,6 +33,7 @@ That mismatch blocks a clean "created by current user" permission story:
 - Preserve creator provenance across later edits.
 - Add a small permission surface for creator-based policies.
 - Expose `$createdBy`, `$createdAt`, `$updatedBy`, and `$updatedAt` as magic columns.
+- Support explicit backend attribution overrides without conflating them with requester-scoped permissions.
 - Keep the MVP compatible with the existing recommendation for complex ownership:
   explicit schema columns, join tables, and ReBAC policies.
 
@@ -263,8 +264,41 @@ If the write does not have a session, use `jazz:system`.
 
 This keeps the rule simple:
 
-- if an app wants per-user provenance, it must write through a session-scoped path
+- if an app wants per-user provenance, it must either write through a session-scoped path or opt into explicit backend attribution override
 - sessionless/internal writes are explicitly system-authored
+
+### Explicit backend attribution override
+
+Some backend/admin flows need to create or update rows with user attribution even though the operation should not run under that user's permission scope.
+
+Examples:
+
+- system-generated tasks created "for" a user
+- admin/backfill jobs that should preserve end-user provenance
+- backend workflows that should stamp `createdBy` for downstream policy/UI behavior without impersonating the user
+
+For that case, MVP should add an explicit attribution override surface:
+
+- `context.withAttribution(principalId)`
+- `context.withAttributionForSession(session)`
+- `context.withAttributionForRequest(request)`
+
+Semantics:
+
+- these helpers affect commit provenance only
+- they set commit `author` and row `created_by` / `updated_by` provenance to the attributed principal
+- they do **not** change permission evaluation context to that user
+- they do **not** grant the attributed user's read/write powers
+- they are backend/admin helpers, not normal app-client helpers
+
+Mental model:
+
+- `context.forRequest(req)` = act as the requester
+- `context.withAttributionForRequest(req)` = act as backend/system, but attribute writes to the requester
+
+The low-level primitive is `withAttribution(principalId)`. The `ForSession` / `ForRequest` variants are convenience helpers that resolve `principalId` from `session.user_id`.
+
+Without an explicit attribution override, backend/system/sessionless writes remain `jazz:system`.
 
 ### Catalogue / index / derived-data writes
 
@@ -298,6 +332,7 @@ If we later need migration, it can be designed separately. This MVP optimizes fo
 - Update object-manager/storage/sync serialization paths accordingly.
 - Preserve `created_by` / `created_at` metadata on row commits.
 - Add reserved system principal constant.
+- Add write-time attribution override plumbing separate from session-scoped policy evaluation.
 
 ### Shared provenance payload
 
@@ -348,6 +383,12 @@ This should not require a new planner node; it should fit inside the existing ma
 - Extend permissions typing so `$createdBy`, `$createdAt`, `$updatedBy`, `$updatedAt` are accepted in policy where-objects and row callback contexts.
 - Compile those comparisons into the existing Rust policy representation as normal column comparisons on known magic-column names.
 
+### Backend context surface
+
+- Add `withAttribution(principalId)`, `withAttributionForSession(session)`, and `withAttributionForRequest(request)` on the backend context surface.
+- Keep these separate from `forSession(...)` / `forRequest(...)`, which still mean requester-scoped authorization.
+- Document that attribution helpers only affect provenance stamping, not policy identity.
+
 ### Query/runtime TypeScript surface
 
 - Extend the shared magic-column registry and TS typing for `$createdBy`, `$createdAt`, `$updatedBy`, `$updatedAt`.
@@ -383,6 +424,8 @@ Add focused coverage for:
 - insert/update/delete stamping the right author
 - creator provenance surviving later edits by another user
 - creator provenance surviving hard-delete truncation boundaries
+- backend/system writes defaulting to `jazz:system` without attribution override
+- `withAttribution(...)`, `withAttributionForSession(...)`, and `withAttributionForRequest(...)` stamping user provenance without switching policy evaluation to that user
 - selecting/projecting/filtering/ordering on `$createdBy`, `$createdAt`, `$updatedBy`, `$updatedAt`
 - joined-query scoping for provenance magic columns
 - provenance magic columns working without a session
