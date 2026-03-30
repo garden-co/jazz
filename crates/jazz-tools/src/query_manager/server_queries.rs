@@ -669,8 +669,8 @@ impl QueryManager {
         })
     }
 
-    fn should_sync_policy_context_rows(&self, client_id: ClientId) -> bool {
-        self.client_bypasses_authorization_filtering(client_id)
+    fn should_sync_policy_context_rows(&self, session: Option<&Session>) -> bool {
+        session.is_some()
     }
 
     fn client_bypasses_authorization_filtering(&self, client_id: ClientId) -> bool {
@@ -797,7 +797,8 @@ impl QueryManager {
                 continue;
             };
 
-            let sync_policy_context_rows = self.should_sync_policy_context_rows(sub.client_id);
+            let sync_policy_context_rows =
+                self.should_sync_policy_context_rows(session_for_policy.as_ref());
             let branch_schema_map = Self::branch_schema_map_for_context(&subscription_context);
 
             // Initial settle to populate the graph
@@ -860,7 +861,8 @@ impl QueryManager {
                     session_for_policy.as_ref(),
                 )
             };
-            // Trusted clients (Peer/Admin) also need policy context rows.
+            // Session-scoped clients need policy context rows to reproduce
+            // relation-backed authorization locally after sync.
             let scope = if sync_policy_context_rows {
                 let om = &self.sync_manager.object_manager;
                 Self::scope_with_policy_context_rows_from_object_manager(
@@ -1031,7 +1033,7 @@ impl QueryManager {
                         sub.session.as_ref(),
                     )
                 };
-                if self.should_sync_policy_context_rows(client_id) {
+                if self.should_sync_policy_context_rows(sub.session.as_ref()) {
                     let om = &self.sync_manager.object_manager;
                     Self::scope_with_policy_context_rows_from_object_manager(
                         &result_scope,

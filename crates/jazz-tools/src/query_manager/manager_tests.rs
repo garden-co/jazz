@@ -9630,6 +9630,96 @@ fn e2e_permissions_prevent_new_row_sync() {
     assert_eq!(results[0].1[0], Value::Text("Alice's doc".into()));
 }
 
+/// E2E: Untrusted synced clients still need relation-backed policy context rows.
+#[test]
+fn e2e_untrusted_client_syncs_exists_policy_dependencies() {
+    use crate::query_manager::policy::{CmpOp, OUTER_ROW_SESSION_PREFIX, PolicyValue};
+    use crate::sync_manager::{ClientId, ServerId};
+    use uuid::Uuid;
+
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)]),
+            TablePolicies::new().with_select(PolicyExpr::Exists {
+                table: "document_shares".into(),
+                condition: Box::new(PolicyExpr::and(vec![
+                    PolicyExpr::Cmp {
+                        column: "document_id".into(),
+                        op: CmpOp::Eq,
+                        value: PolicyValue::SessionRef(vec![
+                            OUTER_ROW_SESSION_PREFIX.into(),
+                            "id".into(),
+                        ]),
+                    },
+                    PolicyExpr::eq_session("user_id", vec!["user_id".into()]),
+                ])),
+            }),
+        ),
+    );
+    schema.insert(
+        TableName::new("document_shares"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("document_id", ColumnType::Uuid),
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+        ])
+        .into(),
+    );
+
+    let (mut server, mut server_io) = create_query_manager(SyncManager::new(), schema.clone());
+    let doc_id = server
+        .insert(
+            &mut server_io,
+            "documents",
+            &[Value::Text("Shared doc".into())],
+        )
+        .unwrap()
+        .row_id;
+    server
+        .insert(
+            &mut server_io,
+            "document_shares",
+            &[Value::Uuid(doc_id), Value::Text("bob".into())],
+        )
+        .unwrap();
+    server.process(&mut server_io);
+
+    let (mut client, mut client_io) = create_query_manager(SyncManager::new(), schema.clone());
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client.sync_manager_mut().add_server(server_id);
+    server.sync_manager_mut().add_client(client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client.query("documents").build(),
+            Some(PolicySession::new("bob")),
+            None,
+        )
+        .unwrap();
+
+    pump_messages(
+        &mut client,
+        &mut server,
+        &mut client_io,
+        &mut server_io,
+        client_id,
+        server_id,
+    );
+
+    let results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        results.len(),
+        1,
+        "Untrusted synced clients should receive the rows needed to realize EXISTS-backed visibility"
+    );
+    assert_eq!(results[0].1[0], Value::Text("Shared doc".into()));
+}
+
 /// E2E: In a 3-tier topology, upstream must sync policy-evaluation dependencies.
 ///
 /// Scenario:
@@ -9759,9 +9849,10 @@ fn e2e_three_tier_policy_dependencies_must_sync_downstream() {
     );
 }
 
-/// E2E: Untrusted downstream clients keep result-set-only scope (no policy context rows).
+/// E2E: Untrusted downstream clients still receive policy dependencies needed
+/// to realize inherited visibility locally.
 #[test]
-fn e2e_three_tier_untrusted_downstream_keeps_result_only_scope() {
+fn e2e_three_tier_untrusted_downstream_syncs_policy_dependencies() {
     use crate::query_manager::policy::Operation;
     use crate::sync_manager::{ClientId, ServerId};
     use uuid::Uuid;
@@ -9863,7 +9954,7 @@ fn e2e_three_tier_untrusted_downstream_keeps_result_only_scope() {
     let results = client.get_subscription_results(sub_id);
     assert_eq!(
         results.len(),
-        0,
-        "Untrusted downstream should keep current result-only sync behavior"
+        1,
+        "Untrusted downstream should receive docs visible via INHERITS once policy dependencies sync"
     );
 }
