@@ -1601,9 +1601,6 @@ async fn read_and_write_policies_remain_independent() {
 /// alice ──update true→false──────► observer stream (add ✓)
 /// ```
 #[tokio::test]
-#[should_panic(
-    expected = "visible-to-hidden scope shrink does not emit ObjectOutOfScope/remove deltas"
-)]
 async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
     let table_name = "documents_visibility_deltas";
     let schema = SchemaBuilder::new()
