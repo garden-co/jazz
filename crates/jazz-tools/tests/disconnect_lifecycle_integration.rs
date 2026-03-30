@@ -89,7 +89,7 @@ async fn client_reconnects_after_server_reaps_stale_state() {
     }
 
     // Set TTL to 1ms so alice is immediately eligible for reaping
-    server.set_client_ttl(Duration::from_millis(1));
+    server.set_client_ttl(Duration::from_millis(1)).await;
     // Small sleep to ensure the disconnect timestamp is past the TTL
     tokio::time::sleep(Duration::from_millis(10)).await;
     let reaped = server.run_sweep_once().await;
@@ -277,7 +277,7 @@ async fn sweep_reaps_disconnected_client_without_affecting_connected_client() {
     }
 
     // Reap alice
-    server.set_client_ttl(Duration::from_millis(1));
+    server.set_client_ttl(Duration::from_millis(1)).await;
     tokio::time::sleep(Duration::from_millis(10)).await;
     let reaped = server.run_sweep_once().await;
     assert!(!reaped.is_empty(), "alice should be reaped");

@@ -289,8 +289,8 @@ impl TestingServer {
     }
 
     /// Set the client state TTL. Disconnected clients are reaped after this duration.
-    pub fn set_client_ttl(&self, ttl: Duration) {
-        self.state.set_client_ttl(ttl);
+    pub async fn set_client_ttl(&self, ttl: Duration) {
+        self.state.set_client_ttl(ttl).await;
     }
 
     /// Run one sweep iteration to reap expired disconnect candidates.

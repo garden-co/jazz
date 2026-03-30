@@ -183,7 +183,6 @@ async fn events_handler(
     // takes candidates(write) — sequential, not nested. on_connection_closed
     // nests candidates(write) → connections(read), which is safe because
     // connections(read) doesn't block this path's already-released write.
-    // run_sweep_once holds connections(read) during reap to prevent TOCTOU.
     // See on_connection_closed doc for the full lock ordering table.
     {
         let mut connections = state.connections.write().await;
@@ -276,12 +275,17 @@ async fn events_handler(
         }
     };
 
-    Ok(axum::response::Response::builder()
+    axum::response::Response::builder()
         .header("Content-Type", "application/octet-stream")
         .header("Transfer-Encoding", "chunked")
         .header("Cache-Control", "no-cache")
         .body(axum::body::Body::from_stream(stream))
-        .unwrap())
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to build SSE response: {e}"),
+            )
+        })
 }
 
 /// Push an ordered batch of sync payloads to the server's inbox.
