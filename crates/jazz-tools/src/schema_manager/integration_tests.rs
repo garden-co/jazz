@@ -339,6 +339,62 @@ mod tests {
         results
     }
 
+    #[test]
+    fn update_after_default_query_uses_visible_batch_branches() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("name", ColumnType::Text)
+                    .column("score", ColumnType::Integer),
+            )
+            .build();
+        let mut storage = MemoryStorage::new();
+
+        let mut alice = SchemaManager::new(
+            SyncManager::new(),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let inserted = alice
+            .insert(
+                &mut storage,
+                "users",
+                HashMap::from([
+                    ("name".to_string(), Value::Text("Alice".into())),
+                    ("score".to_string(), Value::Integer(100)),
+                ]),
+            )
+            .expect("alice insert");
+
+        let mut bob =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let rows = execute_query(&mut bob, &mut storage, QueryBuilder::new("users").build());
+        assert_eq!(rows.len(), 1, "default query should see alice's row");
+        assert_eq!(rows[0].0, inserted.row_id);
+
+        bob.update_with_session(
+            &mut storage,
+            inserted.row_id,
+            &[
+                ("name".to_string(), Value::Text("Alicia".into())),
+                ("score".to_string(), Value::Integer(101)),
+            ],
+            None,
+        )
+        .expect("bob should update the visible row onto a fresh batch branch");
+
+        let updated_rows =
+            execute_query(&mut bob, &mut storage, QueryBuilder::new("users").build());
+        assert_eq!(updated_rows.len(), 1);
+        assert_eq!(
+            updated_rows[0].1,
+            vec![Value::Text("Alicia".into()), Value::Integer(101)]
+        );
+    }
+
     /// Ingest a remote row commit on a specific branch through ObjectManager's sync path.
     /// QueryManager picks this up during `process()` via global object updates.
     fn ingest_remote_row(

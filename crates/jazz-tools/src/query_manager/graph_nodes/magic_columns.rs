@@ -11,7 +11,7 @@ use crate::query_manager::policy::Operation;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnName, ColumnType, LoadedRow, Row, RowDescriptor, Schema, TableName,
-    Tuple, TupleDelta, TupleDescriptor, TupleElement, Value,
+    Tuple, TupleDelta, TupleDescriptor, TupleElement, TupleProvenance, Value,
 };
 use crate::storage::Storage;
 
@@ -173,7 +173,7 @@ impl MagicColumnsNode {
         &mut self,
         input: TupleDelta,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<&TupleProvenance>) -> Option<LoadedRow>,
     ) -> TupleDelta {
         let mut result = TupleDelta::default();
 
@@ -248,7 +248,7 @@ impl MagicColumnsNode {
     fn reevaluate_all_with_context(
         &mut self,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<&TupleProvenance>) -> Option<LoadedRow>,
     ) -> TupleDelta {
         let mut result = TupleDelta::default();
         let input_tuples: Vec<_> = self.input_tuples.iter().cloned().collect();
@@ -290,7 +290,7 @@ impl MagicColumnsNode {
         &self,
         tuple: &Tuple,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<&TupleProvenance>) -> Option<LoadedRow>,
     ) -> Option<Tuple> {
         let mut projected = tuple.clone();
 
@@ -337,7 +337,7 @@ impl MagicColumnsNode {
         row: &Row,
         descriptor: &RowDescriptor,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<&TupleProvenance>) -> Option<LoadedRow>,
     ) -> Value {
         let Some(session) = self.session.as_ref() else {
             return Value::Null;

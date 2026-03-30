@@ -9,7 +9,8 @@ use crate::query_manager::policy_graph::PolicyGraph;
 use crate::query_manager::relation_ir::RelExpr;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    ColumnType, LoadedRow, QueryBranchRef, Row, RowDescriptor, Schema, TableName, Value,
+    ColumnType, LoadedRow, QueryBranchRef, Row, RowDescriptor, Schema, TableName, TupleProvenance,
+    Value,
 };
 use crate::storage::Storage;
 
@@ -39,7 +40,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         table_name: &str,
         local_policy_override: Option<&PolicyExpr>,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<&TupleProvenance>) -> Option<LoadedRow>,
         depth: usize,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
@@ -99,7 +100,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         row: &Row,
         target_table_name: &str,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<&TupleProvenance>) -> Option<LoadedRow>,
         depth: usize,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
     ) -> bool {
@@ -142,7 +143,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         };
 
         for source_row_id in candidate_ids {
-            let Some(source_row) = row_loader(source_row_id) else {
+            let Some(source_row) = row_loader(source_row_id, None) else {
                 continue;
             };
 
@@ -182,7 +183,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         descriptor: &RowDescriptor,
         table_name: &str,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<&TupleProvenance>) -> Option<LoadedRow>,
         depth: usize,
         visited: &mut HashSet<ObjectId>,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
@@ -283,7 +284,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         descriptor: &RowDescriptor,
         _table_name: &str,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<&TupleProvenance>) -> Option<LoadedRow>,
         depth: usize,
         visited: &mut HashSet<ObjectId>,
         visited_referencing: &mut HashSet<(TableName, ObjectId, Operation)>,
@@ -320,7 +321,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         }
         visited.insert(parent_id);
 
-        let parent_row = match row_loader(parent_id) {
+        let parent_row = match row_loader(parent_id, None) {
             Some(content) => content,
             None => return false,
         };
@@ -365,7 +366,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         row: &Row,
         descriptor: &RowDescriptor,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<&TupleProvenance>) -> Option<LoadedRow>,
         depth: usize,
     ) -> bool {
         if depth >= crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
@@ -385,6 +386,7 @@ impl<'a> PolicyContextEvaluator<'a> {
             self.session,
             self.schema,
             self.branch,
+            io,
         ) {
             Some(g) => g,
             None => return false,
@@ -406,7 +408,7 @@ impl<'a> PolicyContextEvaluator<'a> {
         row: &Row,
         descriptor: &RowDescriptor,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<&TupleProvenance>) -> Option<LoadedRow>,
         depth: usize,
     ) -> bool {
         if depth >= crate::query_manager::policy::RECURSIVE_POLICY_MAX_DEPTH_HARD_CAP {
@@ -419,7 +421,8 @@ impl<'a> PolicyContextEvaluator<'a> {
                 None => return false,
             };
 
-        let mut graph = match PolicyGraph::for_exists_rel(&bound_rel, self.schema, self.branch) {
+        let mut graph = match PolicyGraph::for_exists_rel(&bound_rel, self.schema, self.branch, io)
+        {
             Some(g) => g,
             None => return false,
         };

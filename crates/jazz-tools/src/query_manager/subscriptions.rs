@@ -114,6 +114,7 @@ impl QueryManager {
             self.local_subscription_uses_explicit_authorization(session.as_ref());
         let compile_schema = self.local_subscription_compile_schema(session.as_ref());
         let graph = Self::compile_graph(
+            None,
             &query,
             &branches,
             &compile_schema,
@@ -204,6 +205,7 @@ impl QueryManager {
 
         // Compile query graph with explicit schema context
         let graph = Self::compile_graph(
+            None,
             &query,
             &branches,
             &compile_schema,
@@ -516,6 +518,18 @@ impl QueryManager {
     /// filled with the short hash, and the rest zeroed (as produced by ComposedBranchName::parse).
     pub(super) fn find_schema_by_short_hash(&self, partial: &SchemaHash) -> Option<SchemaHash> {
         let target_short = &partial.0[..4];
+
+        if self.schema_context.is_initialized()
+            && &self.schema_context.current_hash.0[..4] == target_short
+        {
+            return Some(self.schema_context.current_hash);
+        }
+
+        for live_hash in self.schema_context.live_schemas.keys() {
+            if &live_hash.0[..4] == target_short {
+                return Some(*live_hash);
+            }
+        }
 
         // Search known_schemas for matching short hash
         for full_hash in self.known_schemas.keys() {

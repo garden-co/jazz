@@ -42,6 +42,7 @@ use super::session::Session;
 use super::types::{
     BatchId, ColumnDescriptor, ColumnName, ColumnType, LoadedRow, QueryBranchRef, Row, RowDelta,
     RowDescriptor, Schema, SchemaHash, TableName, Tuple, TupleDelta, TupleDescriptor,
+    TupleProvenance,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -593,6 +594,24 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<Self> {
+        Self::compile_relation_ir_with_branch_refs_and_schema_context_using_storage(
+            relation,
+            schema,
+            branches,
+            session,
+            schema_context,
+            None,
+        )
+    }
+
+    pub(crate) fn compile_relation_ir_with_branch_refs_and_schema_context_using_storage(
+        relation: &RelExpr,
+        schema: &Schema,
+        branches: &[QueryBranchRef],
+        session: Option<Session>,
+        schema_context: &SchemaContext,
+        storage: Option<&dyn Storage>,
+    ) -> Option<Self> {
         Self::compile_relation_ir_with_schema_context_and_features(
             relation,
             schema,
@@ -600,6 +619,7 @@ impl QueryGraph {
             session,
             schema_context,
             RelationCompileFeatures::default(),
+            storage,
         )
     }
 
@@ -610,6 +630,7 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
         features: RelationCompileFeatures,
+        storage: Option<&dyn Storage>,
     ) -> Option<Self> {
         let plan = lower_relation_to_execution_plan_with_branch_refs(
             relation,
@@ -619,7 +640,13 @@ impl QueryGraph {
             features.select_columns,
         )?;
         validate_execution_plan(&plan, schema).ok()?;
-        Self::compile_execution_plan_with_schema_context(&plan, schema, session, schema_context)
+        Self::compile_execution_plan_with_schema_context_and_storage(
+            &plan,
+            schema,
+            session,
+            schema_context,
+            storage,
+        )
     }
 
     fn compile_execution_plan_with_schema_context(
@@ -627,6 +654,56 @@ impl QueryGraph {
         schema: &Schema,
         session: Option<Session>,
         schema_context: &SchemaContext,
+    ) -> Option<Self> {
+        Self::compile_execution_plan_with_schema_context_and_storage(
+            plan,
+            schema,
+            session,
+            schema_context,
+            None,
+        )
+    }
+
+    pub(crate) fn resolve_active_branches_for_table(
+        storage: &dyn Storage,
+        table: TableName,
+        seed_branches: &[QueryBranchRef],
+    ) -> Option<Vec<QueryBranchRef>> {
+        let mut branch_keys = Vec::new();
+
+        for branch in seed_branches {
+            let mut table_branches = storage
+                .load_table_prefix_batch_keys(table.as_str(), branch.prefix_name())
+                .ok()?;
+            if table_branches.is_empty() {
+                branch_keys.push(branch.batch_branch_key());
+            } else {
+                branch_keys.append(&mut table_branches);
+            }
+        }
+
+        branch_keys.sort_by(|left, right| {
+            left.prefix_name()
+                .as_str()
+                .cmp(right.prefix_name().as_str())
+                .then_with(|| left.batch_id().as_bytes().cmp(right.batch_id().as_bytes()))
+        });
+        branch_keys.dedup();
+
+        Some(
+            branch_keys
+                .into_iter()
+                .map(QueryBranchRef::from_batch_branch_key)
+                .collect(),
+        )
+    }
+
+    fn compile_execution_plan_with_schema_context_and_storage(
+        plan: &ExecutionQueryPlan,
+        schema: &Schema,
+        session: Option<Session>,
+        schema_context: &SchemaContext,
+        storage: Option<&dyn Storage>,
     ) -> Option<Self> {
         // Build branch -> schema hash map for column translation.
         // Use full hashes from SchemaContext (do not re-parse branch strings, which only encode
@@ -647,6 +724,11 @@ impl QueryGraph {
         } else {
             plan.branches.clone()
         };
+        let branches = if let Some(storage) = storage {
+            Self::resolve_active_branches_for_table(storage, plan.table, &branches)?
+        } else {
+            branches
+        };
 
         if !plan.joins.is_empty() {
             return Self::compile_join_plan(
@@ -655,6 +737,7 @@ impl QueryGraph {
                 &branches,
                 session.clone(),
                 schema_context,
+                storage,
             );
         }
 
@@ -1055,6 +1138,24 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Result<Self, QueryCompileError> {
+        Self::try_compile_with_schema_context_and_branches_using_storage(
+            query,
+            branches,
+            schema,
+            session,
+            schema_context,
+            None,
+        )
+    }
+
+    pub fn try_compile_with_schema_context_and_branches_using_storage(
+        query: &Query,
+        branches: &[QueryBranchRef],
+        schema: &Schema,
+        session: Option<Session>,
+        schema_context: &SchemaContext,
+        storage: Option<&dyn Storage>,
+    ) -> Result<Self, QueryCompileError> {
         ensure_relation_tables_exist(&query.relation_ir, schema)?;
 
         let plan = lower_relation_to_execution_plan_with_branch_refs(
@@ -1072,13 +1173,18 @@ impl QueryGraph {
 
         validate_execution_plan(&plan, schema)?;
 
-        Self::compile_execution_plan_with_schema_context(&plan, schema, session, schema_context)
-            .ok_or_else(|| {
-                QueryCompileError::InvalidPlan(
-                    "unsupported relation_ir shape for schema-context query compilation"
-                        .to_string(),
-                )
-            })
+        Self::compile_execution_plan_with_schema_context_and_storage(
+            &plan,
+            schema,
+            session,
+            schema_context,
+            storage,
+        )
+        .ok_or_else(|| {
+            QueryCompileError::InvalidPlan(
+                "unsupported relation_ir shape for schema-context query compilation".to_string(),
+            )
+        })
     }
 
     /// Compile an array subquery specification into an ArraySubqueryNode.
@@ -1383,6 +1489,7 @@ impl QueryGraph {
         branches: &[QueryBranchRef],
         session: Option<Session>,
         schema_context: &SchemaContext,
+        storage: Option<&dyn Storage>,
     ) -> Option<Self> {
         let base_table_schema = schema.get(&plan.table)?;
         let base_descriptor = base_table_schema.columns.clone();
@@ -1393,6 +1500,11 @@ impl QueryGraph {
             vec![current_branch]
         } else {
             branches.to_vec()
+        };
+        let base_scan_branches = if let Some(storage) = storage {
+            Self::resolve_active_branches_for_table(storage, plan.table, &join_branches)?
+        } else {
+            join_branches.clone()
         };
 
         // Track all table names and descriptors for TupleDescriptor
@@ -1406,7 +1518,7 @@ impl QueryGraph {
         let base_scan = IndexScanNode::new_with_branches(
             plan.table,
             id_column,
-            join_branches.clone(),
+            base_scan_branches.clone(),
             ScanCondition::All,
             base_descriptor.clone(),
         );
@@ -1439,7 +1551,10 @@ impl QueryGraph {
                 session.clone(),
                 schema.clone(),
                 plan.table.as_str(),
-                branch_for_policy,
+                base_scan_branches
+                    .first()
+                    .map(|branch| branch.as_str().to_string())
+                    .unwrap_or(branch_for_policy),
             );
             let inherits_tables: Vec<TableName> = policy_node
                 .inherits_tables()
@@ -1485,13 +1600,18 @@ impl QueryGraph {
 
             let right_table_schema = schema.get(&join_spec.table)?;
             let right_descriptor = right_table_schema.columns.clone();
+            let right_scan_branches = if let Some(storage) = storage {
+                Self::resolve_active_branches_for_table(storage, join_spec.table, &join_branches)?
+            } else {
+                join_branches.clone()
+            };
 
             // Build pipeline for right table: one multi-branch IndexScan -> Materialize.
             let id_column = ColumnName::new("_id");
             let right_scan = IndexScanNode::new_with_branches(
                 join_spec.table,
                 id_column,
-                join_branches.clone(),
+                right_scan_branches.clone(),
                 ScanCondition::All,
                 right_descriptor.clone(),
             );
@@ -1522,7 +1642,10 @@ impl QueryGraph {
                     session.clone(),
                     schema.clone(),
                     join_spec.table.as_str(),
-                    branch_for_policy,
+                    right_scan_branches
+                        .first()
+                        .map(|branch| branch.as_str().to_string())
+                        .unwrap_or(branch_for_policy),
                 );
                 let inherits_tables: Vec<TableName> = policy_node
                     .inherits_tables()
@@ -2052,7 +2175,7 @@ impl QueryGraph {
     /// Uses tuple-based processing internally, converts to RowDelta for output.
     pub fn settle<F>(&mut self, storage: &dyn Storage, mut row_loader: F) -> RowDelta
     where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
+        F: FnMut(ObjectId, Option<&TupleProvenance>) -> Option<LoadedRow>,
     {
         let order = self.topo_sort_dirty();
         if !order.is_empty() {
@@ -2214,11 +2337,10 @@ impl QueryGraph {
                     if let Some(GraphNode::RecursiveRelation(recursive_node)) =
                         self.get_node_mut(node_id)
                     {
-                        let delta = recursive_node.process_with_context(
-                            input_delta,
-                            storage,
-                            &mut row_loader,
-                        );
+                        let delta =
+                            recursive_node.process_with_context(input_delta, storage, &mut |id| {
+                                row_loader(id, None)
+                            });
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
@@ -2267,9 +2389,7 @@ impl QueryGraph {
 
                     if let Some(GraphNode::MagicColumns(magic_node)) = self.get_node_mut(node_id) {
                         let delta =
-                            magic_node.process_with_context(input_delta, storage, &mut |id| {
-                                row_loader(id)
-                            });
+                            magic_node.process_with_context(input_delta, storage, &mut row_loader);
                         tracing::debug!(
                             node_id = node_id.0,
                             node_type,
@@ -2309,9 +2429,7 @@ impl QueryGraph {
                     if let Some(GraphNode::PolicyFilter(policy_node)) = self.get_node_mut(node_id) {
                         // Use process_with_context if the policy has INHERITS clauses
                         let delta = if policy_node.has_inherits() {
-                            policy_node.process_with_context(input_delta, storage, &mut |id| {
-                                row_loader(id)
-                            })
+                            policy_node.process_with_context(input_delta, storage, &mut row_loader)
                         } else {
                             RowNode::process(policy_node, input_delta)
                         };
@@ -2384,7 +2502,7 @@ impl QueryGraph {
                     {
                         // Check if inner table changed - need to reevaluate all existing instances
                         let mut delta = if subquery_node.is_inner_dirty() {
-                            subquery_node.reevaluate_all(storage, &mut |id| row_loader(id))
+                            subquery_node.reevaluate_all(storage, &mut row_loader)
                         } else {
                             TupleDelta::new()
                         };

@@ -11,6 +11,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use blake3::Hasher;
 
+use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
@@ -117,6 +118,26 @@ pub struct SchemaManager {
 }
 
 impl SchemaManager {
+    fn visible_branches_for_row<H: Storage>(
+        &self,
+        storage: &H,
+        object_id: ObjectId,
+    ) -> Result<(String, Vec<String>), QueryError> {
+        let table = storage
+            .load_object_metadata(object_id)
+            .ok()
+            .flatten()
+            .and_then(|metadata| metadata.get(MetadataKey::Table.as_str()).cloned())
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
+
+        let branches = self
+            .query_manager
+            .visible_branch_names_for_table(storage, &table)
+            .map_err(|err| QueryError::IndexError(err.to_string()))?;
+
+        Ok((table, branches))
+    }
+
     /// Create a new SchemaManager with integrated QueryManager.
     ///
     /// # Arguments
@@ -1345,7 +1366,7 @@ impl SchemaManager {
         session: Option<&Session>,
     ) -> Result<crate::commit::CommitId, QueryError> {
         let current_branch = self.context.branch_name().as_str().to_string();
-        let branches = self.all_branch_strings();
+        let (_table_name, branches) = self.visible_branches_for_row(storage, object_id)?;
         let (table, source_branch, old_current_data, _source_commit_id) = self
             .query_manager
             .load_row_for_schema_update(storage, object_id, &branches)
@@ -1402,7 +1423,7 @@ impl SchemaManager {
         session: Option<&Session>,
     ) -> Result<DeleteHandle, QueryError> {
         let current_branch = self.context.branch_name().as_str().to_string();
-        let branches = self.all_branch_strings();
+        let (_table_name, branches) = self.visible_branches_for_row(storage, object_id)?;
         let (table, source_branch, old_current_data, _source_commit_id) = self
             .query_manager
             .load_row_for_schema_update(storage, object_id, &branches)

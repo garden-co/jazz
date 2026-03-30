@@ -24,8 +24,8 @@ use super::server_queries::RowTransformContext;
 use super::session::Session;
 use super::types::{
     BatchBranchKey, BatchId, ComposedBranchName, LoadedRow, OrderedRowDelta, QueryBranchRef, Row,
-    RowDelta, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, TableSchema, Value,
-    build_ordered_delta_with_post_ids,
+    RowDelta, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, TableSchema,
+    TupleProvenance, Value, build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -395,6 +395,31 @@ impl QueryManager {
             .collect()
     }
 
+    pub(super) fn candidate_query_branches_for_row(
+        id: ObjectId,
+        provenance: Option<&TupleProvenance>,
+        requested_branches: &[QueryBranchRef],
+    ) -> Vec<QueryBranchRef> {
+        let mut branches = Vec::new();
+        let mut seen = HashSet::new();
+
+        if let Some(provenance) = provenance {
+            for (_, branch_key) in provenance.iter().filter(|(object_id, _)| *object_id == id) {
+                if seen.insert(*branch_key) {
+                    branches.push(QueryBranchRef::from_batch_branch_key(*branch_key));
+                }
+            }
+        }
+
+        for branch in requested_branches {
+            if seen.insert(branch.batch_branch_key()) {
+                branches.push(*branch);
+            }
+        }
+
+        branches
+    }
+
     pub(super) fn resolve_query_branch_ref_for_context(
         schema_context: &SchemaContext,
         branch: &str,
@@ -595,18 +620,20 @@ impl QueryManager {
     }
 
     pub(super) fn compile_graph(
+        storage: Option<&dyn Storage>,
         query: &Query,
         branches: &[QueryBranchRef],
         schema: &Schema,
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Result<QueryGraph, QueryCompileError> {
-        QueryGraph::try_compile_with_schema_context_and_branches(
+        QueryGraph::try_compile_with_schema_context_and_branches_using_storage(
             query,
             branches,
             schema,
             session,
             schema_context,
+            storage,
         )
     }
 
@@ -644,6 +671,21 @@ impl QueryManager {
             .into_iter()
             .map(QueryBranchRef::from_batch_branch_key)
             .collect())
+    }
+
+    pub(crate) fn visible_branch_names_for_table(
+        &self,
+        storage: &dyn Storage,
+        table: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        Self::default_query_branches_for_table(storage, table, &self.schema_context).map(
+            |branches| {
+                branches
+                    .into_iter()
+                    .map(|branch| branch.as_str().to_string())
+                    .collect()
+            },
+        )
     }
 
     pub(super) fn resolve_query_branches_for_context(
@@ -748,6 +790,7 @@ impl QueryManager {
 
             if sub.needs_recompile || sub.branches != next_branches {
                 match Self::compile_graph(
+                    Some(storage),
                     &sub.query,
                     &next_branches,
                     &compile_schema,
@@ -827,6 +870,7 @@ impl QueryManager {
 
             if sub.needs_recompile || sub.branches != next_branches {
                 match Self::compile_graph(
+                    Some(storage),
                     &compile_query,
                     &next_branches,
                     &compile_schema,
@@ -1003,7 +1047,6 @@ impl QueryManager {
 
             let _sub_span = tracing::trace_span!("settle_subscription", sub_id = sub_id.0, table = %subscription.graph.table).entered();
             let branches = subscription.branches.clone();
-            let requested_branches = Self::branch_names_for_query_branches(&branches);
             let table = subscription.graph.table.as_str().to_string();
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let include_deleted = subscription.query.include_deleted;
@@ -1021,31 +1064,36 @@ impl QueryManager {
                     schema_context: &schema_context,
                     schema_warnings: &mut schema_warnings,
                 };
-                let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                    let obj = om.get_or_load_tips(id, storage_ref, &requested_branches);
-                    if obj.is_none() {
-                        tracing::trace!(%id, "row_loader: object not found");
-                        return None;
-                    }
-                    let obj = obj?;
-                    let resolved = Self::resolve_latest_row_with_schema_transform(
-                        id,
-                        obj,
-                        &branches,
-                        &mut transform_context,
-                    )?;
-                    if resolved.is_soft_deleted && !include_deleted {
-                        return None;
-                    }
+                let row_loader =
+                    |id: ObjectId, provenance: Option<&TupleProvenance>| -> Option<LoadedRow> {
+                        let candidate_branches =
+                            Self::candidate_query_branches_for_row(id, provenance, &branches);
+                        let candidate_branch_names =
+                            Self::branch_names_for_query_branches(&candidate_branches);
+                        let obj = om.get_or_load_tips(id, storage_ref, &candidate_branch_names);
+                        if obj.is_none() {
+                            tracing::trace!(%id, "row_loader: object not found");
+                            return None;
+                        }
+                        let obj = obj?;
+                        let resolved = Self::resolve_latest_row_with_schema_transform(
+                            id,
+                            obj,
+                            &candidate_branches,
+                            &mut transform_context,
+                        )?;
+                        if resolved.is_soft_deleted && !include_deleted {
+                            return None;
+                        }
 
-                    Some(LoadedRow::new(
-                        resolved.content,
-                        resolved.commit_id,
-                        [(id, BatchBranchKey::from_branch_name(resolved.branch_name))]
-                            .into_iter()
-                            .collect(),
-                    ))
-                };
+                        Some(LoadedRow::new(
+                            resolved.content,
+                            resolved.commit_id,
+                            [(id, BatchBranchKey::from_branch_name(resolved.branch_name))]
+                                .into_iter()
+                                .collect(),
+                        ))
+                    };
 
                 subscription.graph.settle(storage_ref, row_loader)
             };
@@ -1149,63 +1197,66 @@ impl QueryManager {
                     subscription.has_pending_local_updates = false;
                 }
             } else {
-                subscription.current_visible_rows.clear();
+                let visible_rows = subscription.graph.current_result().to_vec();
+                let visible_rows_by_id: HashMap<_, _> = visible_rows
+                    .iter()
+                    .cloned()
+                    .map(|row| (row.id, row))
+                    .collect();
+                let visible_delta = Self::row_delta_from_rows(
+                    &subscription.current_visible_rows,
+                    &subscription.current_ordered_ids,
+                    &visible_rows,
+                );
                 if !subscription.settled_once {
                     // First delivery — full current state snapshot
                     subscription.settled_once = true;
-                    let full_result = subscription.graph.current_result_as_delta();
-                    let ordered_ids_after: Vec<ObjectId> = subscription
-                        .graph
-                        .current_result()
-                        .iter()
-                        .map(|row| row.id)
-                        .collect();
+                    let ordered_ids_after: Vec<ObjectId> =
+                        visible_rows.iter().map(|row| row.id).collect();
                     let ordered = build_ordered_delta_with_post_ids(
                         &subscription.current_ordered_ids,
                         &ordered_ids_after,
-                        &full_result,
+                        &visible_delta,
                         false,
                     );
                     subscription.current_ordered_ids = ordered.ordered_ids_after;
+                    subscription.current_visible_rows = visible_rows_by_id;
                     // Always emit the first snapshot once tier is satisfied, even if empty.
                     // This guarantees one-shot queries can resolve to [] instead of hanging.
                     tracing::debug!(
                         sub_id = sub_id.0,
-                        added = full_result.added.len(),
+                        added = visible_delta.added.len(),
                         "first delivery (snapshot)"
                     );
                     self.update_outbox.push(QueryUpdate {
                         subscription_id: sub_id,
-                        delta: full_result,
+                        delta: visible_delta,
                         ordered_delta: ordered.delta,
                         descriptor: subscription.graph.combined_descriptor.clone(),
                     });
                     subscription.has_pending_local_updates = false;
-                } else if !delta.is_empty() {
-                    let ordered_ids_after: Vec<ObjectId> = subscription
-                        .graph
-                        .current_result()
-                        .iter()
-                        .map(|row| row.id)
-                        .collect();
+                } else if !visible_delta.is_empty() {
+                    let ordered_ids_after: Vec<ObjectId> =
+                        visible_rows.iter().map(|row| row.id).collect();
                     let ordered = build_ordered_delta_with_post_ids(
                         &subscription.current_ordered_ids,
                         &ordered_ids_after,
-                        &delta,
+                        &visible_delta,
                         false,
                     );
                     subscription.current_ordered_ids = ordered.ordered_ids_after;
+                    subscription.current_visible_rows = visible_rows_by_id;
                     tracing::debug!(
                         sub_id = sub_id.0,
-                        added = delta.added.len(),
-                        removed = delta.removed.len(),
-                        updated = delta.updated.len(),
+                        added = visible_delta.added.len(),
+                        removed = visible_delta.removed.len(),
+                        updated = visible_delta.updated.len(),
                         "incremental delivery"
                     );
                     // Incremental delivery
                     self.update_outbox.push(QueryUpdate {
                         subscription_id: sub_id,
-                        delta: delta.clone(),
+                        delta: visible_delta,
                         ordered_delta: ordered.delta,
                         descriptor: subscription.graph.combined_descriptor.clone(),
                     });

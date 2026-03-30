@@ -246,6 +246,15 @@ impl Tuple {
         &self.1
     }
 
+    /// Return only the provenance entries for a specific object id.
+    pub fn provenance_for_id(&self, id: ObjectId) -> TupleProvenance {
+        self.1
+            .iter()
+            .copied()
+            .filter(|(object_id, _)| *object_id == id)
+            .collect()
+    }
+
     /// Replace the contributing-object provenance for this tuple.
     pub fn with_provenance(mut self, provenance: TupleProvenance) -> Self {
         self.1 = provenance;

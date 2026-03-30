@@ -16,7 +16,7 @@ use super::policy_graph::PolicyGraph;
 use super::session::Session;
 use super::types::{
     BatchBranchKey, ComposedBranchName, LoadedRow, QueryBranchRef, Row, RowDescriptor, Schema,
-    SchemaHash, TableName, TableSchema, Value,
+    SchemaHash, TableName, TableSchema, TupleProvenance, Value,
 };
 
 enum WriteSchemaResolution {
@@ -310,7 +310,7 @@ impl QueryManager {
         let row = Row::new(object_id, transformed, CommitId([0; 32]));
         let evaluator = PolicyContextEvaluator::new(auth_schema, session, branch_name.as_str());
         let mut visited = HashSet::new();
-        let mut row_loader = |related_id: ObjectId| {
+        let mut row_loader = |related_id: ObjectId, _provenance: Option<&TupleProvenance>| {
             self.load_row_for_authorization_context(
                 storage,
                 related_id,
@@ -783,6 +783,7 @@ impl QueryManager {
                 }
             };
             let graph = Self::compile_graph(
+                Some(storage),
                 &query_for_compile,
                 &branches,
                 &schema_for_compile,
@@ -814,7 +815,6 @@ impl QueryManager {
             // Initial settle to populate the graph
             let storage_ref: &dyn Storage = storage;
 
-            let requested_branches = Self::branch_names_for_query_branches(&branches);
             let table = sub.query.table.as_str().to_string();
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let include_deleted = sub.query.include_deleted;
@@ -826,25 +826,30 @@ impl QueryManager {
             };
             {
                 let om = &mut self.sync_manager.object_manager;
-                let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                    let obj = om.get_or_load_tips(id, storage_ref, &requested_branches)?;
-                    let resolved = Self::resolve_latest_row_with_schema_transform(
-                        id,
-                        obj,
-                        &branches,
-                        &mut transform_context,
-                    )?;
-                    if resolved.is_soft_deleted && !include_deleted {
-                        return None;
-                    }
-                    Some(LoadedRow::new(
-                        resolved.content,
-                        resolved.commit_id,
-                        [(id, BatchBranchKey::from_branch_name(resolved.branch_name))]
-                            .into_iter()
-                            .collect(),
-                    ))
-                };
+                let row_loader =
+                    |id: ObjectId, provenance: Option<&TupleProvenance>| -> Option<LoadedRow> {
+                        let candidate_branches =
+                            Self::candidate_query_branches_for_row(id, provenance, &branches);
+                        let candidate_branch_names =
+                            Self::branch_names_for_query_branches(&candidate_branches);
+                        let obj = om.get_or_load_tips(id, storage_ref, &candidate_branch_names)?;
+                        let resolved = Self::resolve_latest_row_with_schema_transform(
+                            id,
+                            obj,
+                            &candidate_branches,
+                            &mut transform_context,
+                        )?;
+                        if resolved.is_soft_deleted && !include_deleted {
+                            return None;
+                        }
+                        Some(LoadedRow::new(
+                            resolved.content,
+                            resolved.commit_id,
+                            [(id, BatchBranchKey::from_branch_name(resolved.branch_name))]
+                                .into_iter()
+                                .collect(),
+                        ))
+                    };
 
                 let _delta = graph.settle(storage_ref, row_loader);
             }
@@ -970,6 +975,7 @@ impl QueryManager {
             HashSet<(ObjectId, BatchBranchKey)>,
             Option<Session>,
         )> = Vec::new();
+        let mut removed_row_resyncs: Vec<(ClientId, ObjectId, BatchBranchKey)> = Vec::new();
         let mut settled_notifications: Vec<(ClientId, QueryId)> = Vec::new();
         let mut schema_warning_notifications: Vec<(ClientId, crate::sync_manager::SchemaWarning)> =
             Vec::new();
@@ -980,8 +986,8 @@ impl QueryManager {
             let Some(mut sub) = self.server_subscriptions.remove(&(client_id, query_id)) else {
                 continue;
             };
+            let previous_scope = sub.last_scope.clone();
             let branches = &sub.branches;
-            let requested_branches = Self::branch_names_for_query_branches(branches);
             let table = sub.query.table.as_str().to_string();
             let include_deleted = sub.query.include_deleted;
             let branch_schema_map = Self::branch_schema_map_for_context(&sub.schema_context);
@@ -997,71 +1003,89 @@ impl QueryManager {
             let new_scope = {
                 {
                     let om = &mut self.sync_manager.object_manager;
-                    let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                        let obj = om.get_or_load_tips(id, storage, &requested_branches)?;
-                        let resolved = Self::resolve_latest_row_with_schema_transform(
-                            id,
-                            obj,
-                            branches,
-                            &mut transform_context,
-                        )?;
-                        if resolved.is_soft_deleted && !include_deleted {
-                            return None;
-                        }
-                        Some(LoadedRow::new(
-                            resolved.content,
-                            resolved.commit_id,
-                            [(id, BatchBranchKey::from_branch_name(resolved.branch_name))]
-                                .into_iter()
-                                .collect(),
-                        ))
-                    };
+                    let row_loader =
+                        |id: ObjectId, provenance: Option<&TupleProvenance>| -> Option<LoadedRow> {
+                            let candidate_branches =
+                                Self::candidate_query_branches_for_row(id, provenance, branches);
+                            let candidate_branch_names =
+                                Self::branch_names_for_query_branches(&candidate_branches);
+                            let obj = om.get_or_load_tips(id, storage, &candidate_branch_names)?;
+                            let resolved = Self::resolve_latest_row_with_schema_transform(
+                                id,
+                                obj,
+                                &candidate_branches,
+                                &mut transform_context,
+                            )?;
+                            if resolved.is_soft_deleted && !include_deleted {
+                                return None;
+                            }
+                            Some(LoadedRow::new(
+                                resolved.content,
+                                resolved.commit_id,
+                                [(id, BatchBranchKey::from_branch_name(resolved.branch_name))]
+                                    .into_iter()
+                                    .collect(),
+                            ))
+                        };
 
                     let _delta = sub.graph.settle(storage, row_loader);
-                }
-                let new_schema_warnings = Self::finalize_schema_warnings(
-                    &mut sub.reported_schema_warnings,
-                    schema_warnings.warnings_for_query(query_id),
-                );
-                schema_warning_notifications.extend(
-                    new_schema_warnings
-                        .into_iter()
-                        .map(|warning| (client_id, warning)),
-                );
+                    let new_schema_warnings = Self::finalize_schema_warnings(
+                        &mut sub.reported_schema_warnings,
+                        schema_warnings.warnings_for_query(query_id),
+                    );
+                    schema_warning_notifications.extend(
+                        new_schema_warnings
+                            .into_iter()
+                            .map(|warning| (client_id, warning)),
+                    );
 
-                // Emit QuerySettled on first settlement
-                if !sub.settled_once {
-                    sub.settled_once = true;
-                    settled_notifications.push((client_id, query_id));
-                }
+                    // Emit QuerySettled on first settlement
+                    if !sub.settled_once {
+                        sub.settled_once = true;
+                        settled_notifications.push((client_id, query_id));
+                    }
 
-                // Check if scope changed
-                let result_scope = if self.client_bypasses_authorization_filtering(client_id) {
-                    sub.graph.sync_scope_object_keys()
-                } else {
-                    self.authorized_scope_from_graph(
-                        storage,
-                        &sub.graph,
-                        &sub.schema_context,
-                        &branch_schema_map,
-                        sub.session.as_ref(),
-                    )
-                };
-                if self.should_sync_policy_context_rows(client_id) {
-                    let om = &self.sync_manager.object_manager;
-                    Self::scope_with_policy_context_rows_from_object_manager(
-                        &result_scope,
-                        &sub.graph,
-                        branches,
-                        om,
-                    )
-                } else {
-                    result_scope
+                    // Check if scope changed
+                    let result_scope = if self.client_bypasses_authorization_filtering(client_id) {
+                        sub.graph.sync_scope_object_keys()
+                    } else {
+                        self.authorized_scope_from_graph(
+                            storage,
+                            &sub.graph,
+                            &sub.schema_context,
+                            &branch_schema_map,
+                            sub.session.as_ref(),
+                        )
+                    };
+                    if self.should_sync_policy_context_rows(client_id) {
+                        let om = &self.sync_manager.object_manager;
+                        Self::scope_with_policy_context_rows_from_object_manager(
+                            &result_scope,
+                            &sub.graph,
+                            branches,
+                            om,
+                        )
+                    } else {
+                        result_scope
+                    }
                 }
             };
             if new_scope != sub.last_scope {
                 scope_updates.push((client_id, query_id, new_scope.clone(), sub.session.clone()));
                 sub.last_scope = new_scope;
+            }
+            for (object_id, old_branch_key) in previous_scope.difference(&sub.last_scope) {
+                if sub
+                    .branches
+                    .iter()
+                    .any(|branch| branch.batch_branch_key() == *old_branch_key)
+                {
+                    continue;
+                }
+
+                for branch in &sub.branches {
+                    removed_row_resyncs.push((client_id, *object_id, branch.batch_branch_key()));
+                }
             }
 
             self.server_subscriptions.insert((client_id, query_id), sub);
@@ -1071,6 +1095,25 @@ impl QueryManager {
         for (client_id, query_id, new_scope, session) in scope_updates {
             self.sync_manager
                 .set_client_query_scope_keys(client_id, query_id, new_scope, session);
+        }
+
+        let removed_row_resyncs: HashSet<_> = removed_row_resyncs.into_iter().collect();
+        for (client_id, object_id, branch_key) in removed_row_resyncs {
+            let Some(object) = self.sync_manager.object_manager.get(object_id) else {
+                continue;
+            };
+            let Some(branch) = object.branches.get(&branch_key.branch_name()) else {
+                continue;
+            };
+            let metadata = object.metadata.clone();
+            let tips = branch.tips.iter().copied().collect();
+            self.sync_manager.queue_tips_to_client_unscoped(
+                client_id,
+                object_id,
+                metadata,
+                branch_key.branch_name(),
+                tips,
+            );
         }
 
         for (client_id, warning) in schema_warning_notifications {
@@ -1521,8 +1564,10 @@ impl QueryManager {
     }
 
     /// Create policy graphs for complex clauses (INHERITS/EXISTS).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn create_policy_graphs_for_complex_clauses(
         &self,
+        storage: &dyn Storage,
         clauses: &[ComplexClause],
         content: &[u8],
         descriptor: &RowDescriptor,
@@ -1605,13 +1650,14 @@ impl QueryManager {
                         session,
                         &self.schema,
                         branch.as_str(),
+                        storage,
                     ) {
                         graphs.push(graph);
                     }
                 }
                 ComplexClause::ExistsRel { rel } => {
                     if let Some(graph) =
-                        PolicyGraph::for_exists_rel(rel, &self.schema, branch.as_str())
+                        PolicyGraph::for_exists_rel(rel, &self.schema, branch.as_str(), storage)
                     {
                         graphs.push(graph);
                     }
@@ -1638,23 +1684,41 @@ impl QueryManager {
         // Settle each active policy check
         for (pending_id, state) in &mut self.active_policy_checks {
             let branch = state.branch;
-            let branches = vec![branch.as_str().to_string()];
-            let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let obj = om.get_or_load_tips(id, storage_ref, &branches)?;
-                let branch_state = obj.branches.get(&branch)?;
-                let tip_id = branch_state.tips.iter().next()?;
-                let commit = branch_state.commits.get(tip_id)?;
-                if commit.content.is_empty() {
-                    return None;
-                }
-                Some(LoadedRow::new(
-                    commit.content.clone(),
-                    *tip_id,
-                    [(id, BatchBranchKey::from_branch_name(branch))]
-                        .into_iter()
-                        .collect(),
-                ))
-            };
+            let requested_branches = vec![QueryBranchRef::from_branch_name(branch)];
+            let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
+            let schema_context = self.schema_context.clone();
+            let mut schema_warnings = SchemaWarningAccumulator::default();
+            let mut row_loader =
+                |id: ObjectId, provenance: Option<&TupleProvenance>| -> Option<LoadedRow> {
+                    let candidate_branches =
+                        Self::candidate_query_branches_for_row(id, provenance, &requested_branches);
+                    let candidate_branch_names =
+                        Self::branch_names_for_query_branches(&candidate_branches);
+                    let obj = om.get_or_load_tips(id, storage_ref, &candidate_branch_names)?;
+                    let table = obj.metadata.get(MetadataKey::Table.as_str())?.clone();
+                    let mut transform_context = RowTransformContext {
+                        table: &table,
+                        branch_schema_map: &branch_schema_map,
+                        schema_context: &schema_context,
+                        schema_warnings: &mut schema_warnings,
+                    };
+                    let resolved = Self::resolve_latest_row_with_schema_transform(
+                        id,
+                        obj,
+                        &candidate_branches,
+                        &mut transform_context,
+                    )?;
+                    if resolved.content.is_empty() {
+                        return None;
+                    }
+                    Some(LoadedRow::new(
+                        resolved.content,
+                        resolved.commit_id,
+                        [(id, BatchBranchKey::from_branch_name(resolved.branch_name))]
+                            .into_iter()
+                            .collect(),
+                    ))
+                };
 
             // Settle all graphs
             let all_complete = state

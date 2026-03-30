@@ -6,8 +6,9 @@
 
 use crate::query_manager::graph::QueryGraph;
 use crate::query_manager::query::{Query, QueryBuilder};
-use crate::query_manager::types::{RowDescriptor, Schema, Value};
+use crate::query_manager::types::{QueryBranchRef, RowDescriptor, Schema, Value};
 use crate::schema_manager::SchemaContext;
+use crate::storage::Storage;
 
 /// Template for creating subgraph instances.
 ///
@@ -61,6 +62,7 @@ impl SubgraphTemplate {
         &self,
         correlation_value: Value,
         schema: &Schema,
+        storage: Option<&dyn Storage>,
     ) -> Option<SubgraphInstance> {
         // Build query with correlation filter
         let mut query_builder = QueryBuilder::new(self.base_query.table);
@@ -158,9 +160,21 @@ impl SubgraphTemplate {
         }
 
         let query = query_builder.try_build().ok()?;
-        let graph =
-            QueryGraph::try_compile_with_schema_context(&query, schema, None, &self.schema_context)
-                .ok()?;
+        let branches: Vec<QueryBranchRef> = query
+            .branches
+            .iter()
+            .cloned()
+            .map(QueryBranchRef::from_branch_name)
+            .collect();
+        let graph = QueryGraph::try_compile_with_schema_context_and_branches_using_storage(
+            &query,
+            &branches,
+            schema,
+            None,
+            &self.schema_context,
+            storage,
+        )
+        .ok()?;
 
         Some(SubgraphInstance {
             graph,
@@ -325,11 +339,16 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use uuid::Uuid;
+
     use crate::query_manager::graph::GraphNode;
+    use crate::query_manager::manager::QueryManager;
     use crate::query_manager::query::QueryBuilder;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType, TableName};
+    use crate::query_manager::types::{BatchId, ColumnDescriptor, ColumnType, TableName, Value};
     use crate::query_manager::types::{ComposedBranchName, SchemaBuilder, SchemaHash, TableSchema};
     use crate::schema_manager::{Lens, LensOp, LensTransform};
+    use crate::storage::MemoryStorage;
+    use crate::sync_manager::SyncManager;
 
     fn test_schema() -> Schema {
         let mut schema = HashMap::new();
@@ -380,7 +399,7 @@ mod tests {
             .build(&schema)
             .unwrap();
 
-        let instance = template.instantiate(Value::Integer(42), &schema);
+        let instance = template.instantiate(Value::Integer(42), &schema, None);
         assert!(instance.is_some());
 
         let instance = instance.unwrap();
@@ -396,7 +415,9 @@ mod tests {
             .build(&schema)
             .unwrap();
 
-        let mut instance = template.instantiate(Value::Integer(1), &schema).unwrap();
+        let mut instance = template
+            .instantiate(Value::Integer(1), &schema, None)
+            .unwrap();
         instance.current_results = vec![Value::Integer(10), Value::Integer(20)];
 
         let array = instance.as_array();
@@ -458,7 +479,7 @@ mod tests {
         );
 
         let instance = template
-            .instantiate(Value::Text("alice@example.com".to_string()), &v2)
+            .instantiate(Value::Text("alice@example.com".to_string()), &v2, None)
             .expect("subgraph should compile using inherited schema context");
         assert_eq!(instance.graph.index_scan_nodes.len(), 1);
 
@@ -484,5 +505,78 @@ mod tests {
             })
             .expect("index scan node must exist");
         assert_eq!(scan_branch, vec![v1_branch]);
+    }
+
+    #[test]
+    fn subgraph_template_resolves_active_table_batches_from_storage() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Integer)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let schema_hash = SchemaHash::compute(&schema);
+        let user_batch = BatchId::from_uuid(Uuid::from_u128(71));
+        let seed_batch = BatchId::from_uuid(Uuid::from_u128(72));
+
+        let mut qm = QueryManager::new(SyncManager::new());
+        qm.set_current_schema_with_batch(schema.clone(), "dev", "main", user_batch);
+        let mut storage = MemoryStorage::new();
+        qm.insert(
+            &mut storage,
+            "users",
+            &[Value::Integer(1), Value::Text("Alice".into())],
+        )
+        .expect("user insert");
+
+        let schema_context = qm.schema_context().clone();
+        let seed_branch = ComposedBranchName::new("dev", schema_hash, "main", seed_batch)
+            .to_branch_name()
+            .as_str()
+            .to_string();
+        let user_branch = ComposedBranchName::new("dev", schema_hash, "main", user_batch)
+            .to_branch_name()
+            .as_str()
+            .to_string();
+
+        let base_query = QueryBuilder::new("users")
+            .branches(&[seed_branch.as_str()])
+            .build();
+        let output_descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("name", ColumnType::Text),
+        ]);
+        let template = SubgraphTemplate::new(
+            base_query,
+            "id".to_string(),
+            Vec::new(),
+            output_descriptor,
+            schema_context,
+        );
+
+        let instance = template
+            .instantiate(Value::Integer(1), &schema, Some(&storage))
+            .expect("instantiate subgraph");
+
+        let (scan_id, table, _scan_column) = &instance.graph.index_scan_nodes[0];
+        assert_eq!(*table, TableName::new("users"));
+
+        let scan_branches = instance
+            .graph
+            .nodes
+            .get(scan_id.0 as usize)
+            .and_then(|ctx| match &ctx.node {
+                GraphNode::IndexScan(scan) => Some(
+                    scan.branches
+                        .iter()
+                        .map(|branch| branch.as_str())
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .expect("index scan node must exist");
+
+        assert_eq!(scan_branches, vec![user_branch]);
     }
 }

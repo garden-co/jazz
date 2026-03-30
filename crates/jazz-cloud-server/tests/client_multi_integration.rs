@@ -1,11 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, routing::get};
 use base64::Engine;
-use jazz_tools::query_manager::types::{BatchId, ComposedBranchName, QueryBranchRef, SchemaHash};
+use jazz_tools::object::BranchName;
+use jazz_tools::query_manager::types::{BranchPrefixName, SchemaHash};
 use jazz_tools::storage::{FjallStorage, Storage};
 use jazz_tools::{
     AppContext, AppId, ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder,
@@ -339,9 +340,7 @@ async fn wait_for_todos_count_on_disk(
         .join(app_id.to_string())
         .join("jazz.fjall");
     let schema_hash = SchemaHash::compute(&test_schema());
-    let branch_name =
-        ComposedBranchName::new("client", schema_hash, "main", BatchId::nil()).to_branch_name();
-    let branch = QueryBranchRef::from_branch_name(branch_name);
+    let prefix = BranchPrefixName::new("client", schema_hash, "main");
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last_count = 0usize;
 
@@ -349,7 +348,13 @@ async fn wait_for_todos_count_on_disk(
         if db_path.exists()
             && let Ok(storage) = FjallStorage::open(&db_path, 64 * 1024 * 1024)
         {
-            let row_ids = storage.index_scan_all("todos", "_id", &branch);
+            let branches = storage
+                .load_table_prefix_branches("todos", BranchName::new(prefix.branch_prefix()))
+                .unwrap_or_default();
+            let mut row_ids = HashSet::new();
+            for branch in &branches {
+                row_ids.extend(storage.index_scan_all("todos", "_id", branch));
+            }
             let mut materialized = 0usize;
             for row_id in row_ids {
                 let has_metadata = storage
@@ -357,17 +362,19 @@ async fn wait_for_todos_count_on_disk(
                     .ok()
                     .flatten()
                     .is_some();
-                let has_content = storage
-                    .load_branch(row_id, &branch)
-                    .ok()
-                    .flatten()
-                    .map(|loaded| {
-                        loaded
-                            .commits
-                            .iter()
-                            .any(|commit| !commit.content.is_empty())
-                    })
-                    .unwrap_or(false);
+                let has_content = branches.iter().any(|branch| {
+                    storage
+                        .load_branch(row_id, branch)
+                        .ok()
+                        .flatten()
+                        .map(|loaded| {
+                            loaded
+                                .commits
+                                .iter()
+                                .any(|commit| !commit.content.is_empty())
+                        })
+                        .unwrap_or(false)
+                });
                 if has_metadata && has_content {
                     materialized += 1;
                 }

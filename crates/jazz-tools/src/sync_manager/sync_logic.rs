@@ -224,7 +224,7 @@ impl SyncManager {
         self.queue_tips_to_client_inner(client_id, object_id, metadata, branch_name, tips, true);
     }
 
-    pub(super) fn queue_tips_to_client_unscoped(
+    pub(crate) fn queue_tips_to_client_unscoped(
         &mut self,
         client_id: ClientId,
         object_id: ObjectId,
@@ -354,14 +354,18 @@ impl SyncManager {
                 continue;
             }
 
+            let Some(commit) = branch.commits.get(&commit_id) else {
+                // Merge roots may reference parents that live on sibling batches.
+                // Branch-scoped sync payloads only ship commits stored on this branch.
+                continue;
+            };
+
             to_send.insert(commit_id);
 
             // Visit parents
-            if let Some(commit) = branch.commits.get(&commit_id) {
-                for parent in &commit.parents {
-                    if !visited.contains(parent) {
-                        to_visit.push(*parent);
-                    }
+            for parent in &commit.parents {
+                if !visited.contains(parent) {
+                    to_visit.push(*parent);
                 }
             }
         }

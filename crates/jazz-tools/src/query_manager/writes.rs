@@ -939,6 +939,7 @@ impl QueryManager {
 
         let branch_name = self.resolve_branch_name(branch);
         let mut graphs = self.create_policy_graphs_for_complex_clauses(
+            storage,
             &graph_clauses,
             content,
             descriptor,
@@ -950,25 +951,43 @@ impl QueryManager {
             return true;
         }
 
-        let branches = vec![branch_name.as_str().to_string()];
         let storage_ref: &dyn Storage = storage;
         let om = &mut self.sync_manager.object_manager;
-        let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-            let obj = om.get_or_load(id, storage_ref, &branches)?;
-            let branch_state = obj.branches.get(&branch_name)?;
-            let tip_id = branch_state.tips.iter().next()?;
-            let commit = branch_state.commits.get(tip_id)?;
-            if commit.content.is_empty() {
-                return None;
-            }
-            Some(LoadedRow::new(
-                commit.content.clone(),
-                *tip_id,
-                [(id, BatchBranchKey::from_branch_name(branch_name))]
-                    .into_iter()
-                    .collect(),
-            ))
-        };
+        let requested_branches = vec![QueryBranchRef::from_branch_name(branch_name)];
+        let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
+        let schema_context = self.schema_context.clone();
+        let mut schema_warnings = SchemaWarningAccumulator::default();
+        let mut row_loader =
+            |id: ObjectId, provenance: Option<&crate::query_manager::types::TupleProvenance>| {
+                let candidate_branches =
+                    Self::candidate_query_branches_for_row(id, provenance, &requested_branches);
+                let candidate_branch_names =
+                    Self::branch_names_for_query_branches(&candidate_branches);
+                let obj = om.get_or_load_tips(id, storage_ref, &candidate_branch_names)?;
+                let table = obj.metadata.get(MetadataKey::Table.as_str())?.clone();
+                let mut transform_context = RowTransformContext {
+                    table: &table,
+                    branch_schema_map: &branch_schema_map,
+                    schema_context: &schema_context,
+                    schema_warnings: &mut schema_warnings,
+                };
+                let resolved = Self::resolve_latest_row_with_schema_transform(
+                    id,
+                    obj,
+                    &candidate_branches,
+                    &mut transform_context,
+                )?;
+                if resolved.content.is_empty() {
+                    return None;
+                }
+                Some(LoadedRow::new(
+                    resolved.content,
+                    resolved.commit_id,
+                    [(id, BatchBranchKey::from_branch_name(resolved.branch_name))]
+                        .into_iter()
+                        .collect(),
+                ))
+            };
 
         for graph in &mut graphs {
             for _ in 0..100 {
