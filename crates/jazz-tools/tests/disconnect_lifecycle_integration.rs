@@ -324,3 +324,62 @@ async fn sweep_reaps_disconnected_client_without_affecting_connected_client() {
     bob.shutdown().await.expect("bob shutdown");
     server.shutdown().await;
 }
+
+/// Verifies that the background sweep task (spawned in ServerBuilder) fires
+/// automatically and reaps expired candidates without manual run_sweep_once.
+///
+/// ```text
+/// alice ──SSE connect──▶ server ──disconnects──▶ candidate registered
+///                             │
+///                     TTL set to 1ms, background sweep fires (30s interval)
+///                             │
+///                     alice reaped by background sweep
+/// ```
+#[tokio::test]
+async fn background_sweep_task_reaps_expired_candidates() {
+    let server = TestingServer::start().await;
+    let schema = test_schema();
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(schema)
+        .with_user_id("alice-bg-sweep")
+        .ready_on("todos", READY_TIMEOUT)
+        .connect()
+        .await;
+
+    alice.shutdown().await.expect("alice shutdown");
+
+    // Wait for disconnect candidate
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while server.disconnect_candidate_count().await == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for disconnect candidate"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Set TTL to 1ms so the background sweep will reap alice on its next tick
+    server.set_client_ttl(Duration::from_millis(1)).await;
+
+    // Wait for the background sweep task to fire and reap alice.
+    // The sweep runs every 30s, but we wait up to 35s to account for timing.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(35);
+    while server.disconnect_candidate_count().await > 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for background sweep to reap candidate"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Candidate was reaped by the background task (not by manual run_sweep_once)
+    assert_eq!(
+        server.disconnect_candidate_count().await,
+        0,
+        "background sweep should have reaped alice"
+    );
+
+    server.shutdown().await;
+}
