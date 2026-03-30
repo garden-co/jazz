@@ -123,19 +123,19 @@ impl ServerState {
             return Vec::new();
         }
 
-        // Step 2: snapshot active client IDs then drop the lock.
-        // New connections can arrive after this snapshot, but that's safe:
-        // if a client reconnects between snapshot and reap, remove_client
-        // is a no-op (the new add_client call re-registers fresh state).
-        let active_clients: std::collections::HashSet<ClientId> = {
-            let connections = self.connections.read().await;
-            connections.values().map(|c| c.client_id).collect()
-        };
-
         let mut reaped = Vec::new();
         let mut requeued = Vec::new();
         for client_id in expired {
-            if active_clients.contains(&client_id) {
+            // Check for active connections right before reaping to close the
+            // TOCTOU window: if a client reconnects between the candidate drain
+            // above and this check, we see the new connection and skip.
+            let has_connection = self
+                .connections
+                .read()
+                .await
+                .values()
+                .any(|c| c.client_id == client_id);
+            if has_connection {
                 tracing::debug!(%client_id, "skipping reap: client reconnected");
                 continue;
             }
@@ -368,14 +368,14 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn sweep_skips_client_that_reconnected_after_expiry() {
-        // Exercises the active_clients.contains guard in run_sweep_once:
+        // Exercises the per-client connection check in run_sweep_once:
         // alice is in disconnect_candidates (expired), but also has an
         // active connection. Sweep should see the connection and skip her.
         //
         // We insert the candidate manually to bypass on_client_connected
         // (which would remove it), simulating the race where a reconnect
-        // happens after the candidate was already drained by a prior
-        // sweep phase.
+        // happens after candidates are drained but before the per-client
+        // connection check.
         let state = build_test_state().await;
         let alice = ClientId::new();
         let _ = state.runtime.add_client(alice, None);
@@ -395,7 +395,7 @@ mod tests {
         let _conn = add_connection(&state, alice).await;
 
         // Sweep drains alice from candidates (expired), but the
-        // active_clients snapshot sees her connection → skip reap
+        // per-client connection check sees her connection → skip reap
         let reaped = state.run_sweep_once().await;
         assert!(
             reaped.is_empty(),
@@ -407,6 +407,78 @@ mod tests {
             .with_sync_manager(|sm| sm.get_client(alice).is_some())
             .expect("lock");
         assert!(has_client, "alice's state should be preserved");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_preserves_fresh_state_when_client_reconnects_after_drain() {
+        //
+        // Exercises the critical TOCTOU window in run_sweep_once:
+        //
+        //   sweep: drain candidates ──▶ (alice expired, removed from candidates)
+        //                                     │
+        //   alice: reconnect ──▶ ensure_client_with_session (fresh ClientState)
+        //                        on_client_connected (no-op, already drained)
+        //                        add_connection (visible in connections map)
+        //                                     │
+        //   sweep: per-client connection check ──▶ sees alice's connection → skip
+        //
+        // Without the per-client check, the sweep would use a stale snapshot
+        // and destroy alice's freshly registered state.
+        //
+        let state = build_test_state().await;
+        let alice = ClientId::new();
+        let _ = state.runtime.add_client(alice, None);
+
+        // alice disconnects and expires
+        let conn = add_connection(&state, alice).await;
+        remove_connection(&state, conn).await;
+        tokio::time::advance(Duration::from_secs(301)).await;
+
+        // Manually drain candidates (simulating the first phase of run_sweep_once)
+        let expired: Vec<ClientId> = {
+            let mut candidates = state.disconnect_candidates.write().await;
+            let drained: Vec<_> = candidates.keys().copied().collect();
+            candidates.clear();
+            drained
+        };
+        assert_eq!(expired, vec![alice]);
+
+        // alice reconnects AFTER drain — fresh state created, new connection added
+        let _ = state.runtime.ensure_client_with_session(
+            alice,
+            crate::query_manager::session::Session {
+                user_id: "alice".into(),
+                claims: serde_json::Value::Null,
+            },
+        );
+        let _conn2 = add_connection(&state, alice).await;
+        // on_client_connected is a no-op here (alice was already drained)
+        state.on_client_connected(alice).await;
+
+        // Now run the full sweep — it should see alice's connection and skip her
+        // (we need to re-insert alice as expired to let sweep process her,
+        // since we manually drained above)
+        {
+            let mut candidates = state.disconnect_candidates.write().await;
+            candidates.insert(
+                alice,
+                super::DisconnectCandidate {
+                    disconnected_at: tokio::time::Instant::now() - Duration::from_secs(301),
+                },
+            );
+        }
+        let reaped = state.run_sweep_once().await;
+
+        assert!(
+            reaped.is_empty(),
+            "alice has fresh state and active connection — must not be reaped"
+        );
+
+        let has_client = state
+            .runtime
+            .with_sync_manager(|sm| sm.get_client(alice).is_some())
+            .expect("lock");
+        assert!(has_client, "alice's fresh ClientState should be preserved");
     }
 
     #[tokio::test(start_paused = true)]
@@ -647,9 +719,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn lock_ordering_sweep_and_reconnect() {
         // Exercises sequential lock ordering: sweep takes candidates(write)
-        // then connections(read), while connect path takes connections(write)
-        // then on_client_connected takes candidates(write). Verifies correct
-        // state transitions when these operations are interleaved.
+        // then per-client connections(read), while connect path takes
+        // connections(write) then on_client_connected takes candidates(write).
+        // Verifies correct state transitions when these operations are
+        // interleaved.
         let state = build_test_state().await;
         let alice = ClientId::new();
         let bob = ClientId::new();
@@ -663,9 +736,8 @@ mod tests {
         remove_connection(&state, conn_b).await;
         tokio::time::advance(Duration::from_secs(301)).await;
 
-        // Interleave: alice reconnects between sweep drain and reap
-        // (simulated by reconnecting before sweep runs — sweep's
-        // connection guard catches it)
+        // Interleave: alice reconnects before sweep runs — sweep's
+        // per-client connection check catches her active connection
         let _conn_a2 = add_connection(&state, alice).await;
         state.on_client_connected(alice).await;
 
