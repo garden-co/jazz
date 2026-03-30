@@ -2245,6 +2245,135 @@ fn local_insert_with_exists_rel_policy_denies_non_admin() {
 }
 
 #[test]
+fn local_insert_policy_with_null_literal_allows_null_rows_and_denies_non_null_rows() {
+    let mut schema = Schema::new();
+    let tasks_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("deleted_at", ColumnType::Text).nullable(),
+    ]);
+    let tasks_policies =
+        TablePolicies::new().with_insert(PolicyExpr::eq_literal("deleted_at", Value::Null));
+    schema.insert(
+        TableName::new("tasks"),
+        TableSchema::with_policies(tasks_descriptor, tasks_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    qm.insert_with_session(
+        &mut storage,
+        "tasks",
+        &[Value::Text("draft".into()), Value::Null],
+        Some(&Session::new("alice")),
+    )
+    .expect("null row should satisfy deleted_at = NULL policy");
+
+    let archived_err = qm
+        .insert_with_session(
+            &mut storage,
+            "tasks",
+            &[
+                Value::Text("archived".into()),
+                Value::Text("2026-03-30T12:00:00Z".into()),
+            ],
+            Some(&Session::new("alice")),
+        )
+        .expect_err("non-null row should fail deleted_at = NULL policy");
+    assert!(matches!(
+        archived_err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Insert
+        } if table == TableName::new("tasks")
+    ));
+}
+
+#[test]
+fn local_insert_with_exists_rel_null_literal_predicate_matches_null_rows() {
+    let mut schema = Schema::new();
+    let admins_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("user_id", ColumnType::Text),
+        ColumnDescriptor::new("revoked_at", ColumnType::Text).nullable(),
+    ]);
+    schema.insert(
+        TableName::new("admins"),
+        TableSchema::new(admins_descriptor.clone()),
+    );
+
+    let projects_descriptor =
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]);
+    let projects_policies = TablePolicies::new().with_insert(PolicyExpr::ExistsRel {
+        rel: RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("admins"),
+            }),
+            predicate: PredicateExpr::And(vec![
+                PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("user_id"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::SessionRef(vec!["user_id".into()]),
+                },
+                PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("revoked_at"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::Literal(Value::Null),
+                },
+            ]),
+        },
+    });
+    schema.insert(
+        TableName::new("projects"),
+        TableSchema::with_policies(projects_descriptor, projects_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    qm.insert(
+        &mut storage,
+        "admins",
+        &[Value::Text("alice".into()), Value::Null],
+    )
+    .expect("seed active admin row");
+    qm.insert(
+        &mut storage,
+        "admins",
+        &[
+            Value::Text("carol".into()),
+            Value::Text("2026-03-30T12:00:00Z".into()),
+        ],
+    )
+    .expect("seed revoked admin row");
+
+    qm.insert_with_session(
+        &mut storage,
+        "projects",
+        &[Value::Text("alice project".into())],
+        Some(&Session::new("alice")),
+    )
+    .expect("active admin row should satisfy revoked_at = NULL predicate");
+
+    let carol_err = qm
+        .insert_with_session(
+            &mut storage,
+            "projects",
+            &[Value::Text("carol project".into())],
+            Some(&Session::new("carol")),
+        )
+        .expect_err("revoked admin row should fail revoked_at = NULL predicate");
+    assert!(matches!(
+        carol_err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Insert
+        } if table == TableName::new("projects")
+    ));
+}
+
+#[test]
 fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
     let mut schema = Schema::new();
     let folders_descriptor = RowDescriptor::new(vec![
@@ -2313,6 +2442,141 @@ fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
             operation: Operation::Update
         } if table == TableName::new("folders")
     ));
+}
+
+#[test]
+fn rebac_select_policy_with_null_literal_filters_query_results() {
+    use crate::query_manager::query::QueryBuilder;
+
+    let mut schema = Schema::new();
+    let documents_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("deleted_at", ColumnType::Text).nullable(),
+    ]);
+    let documents_policies =
+        TablePolicies::new().with_select(PolicyExpr::eq_literal("deleted_at", Value::Null));
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(documents_descriptor, documents_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let visible_id = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[Value::Text("draft".into()), Value::Null],
+        )
+        .unwrap()
+        .row_id;
+    let hidden_id = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[
+                Value::Text("soft-deleted".into()),
+                Value::Text("2026-03-30T12:00:00Z".into()),
+            ],
+        )
+        .unwrap()
+        .row_id;
+
+    let sub_id = qm
+        .subscribe_with_session(
+            QueryBuilder::new("documents").build(),
+            Some(Session::new("alice")),
+            None,
+        )
+        .unwrap();
+
+    for _ in 0..10 {
+        qm.process(&mut storage);
+    }
+
+    let visible_ids: HashSet<_> = qm
+        .get_subscription_results(sub_id)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert!(
+        visible_ids.contains(&visible_id),
+        "rows with deleted_at = NULL should remain visible"
+    );
+    assert!(
+        !visible_ids.contains(&hidden_id),
+        "rows with non-null deleted_at should be filtered out"
+    );
+}
+
+#[test]
+fn rebac_select_policy_with_is_null_filters_query_results() {
+    use crate::query_manager::query::QueryBuilder;
+
+    let mut schema = Schema::new();
+    let documents_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("deleted_at", ColumnType::Text).nullable(),
+    ]);
+    let documents_policies = TablePolicies::new().with_select(PolicyExpr::IsNull {
+        column: "deleted_at".into(),
+    });
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(documents_descriptor, documents_policies),
+    );
+
+    let sync_manager = SyncManager::new();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let visible_id = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[Value::Text("draft".into()), Value::Null],
+        )
+        .unwrap()
+        .row_id;
+    let hidden_id = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[
+                Value::Text("soft-deleted".into()),
+                Value::Text("2026-03-30T12:00:00Z".into()),
+            ],
+        )
+        .unwrap()
+        .row_id;
+
+    let sub_id = qm
+        .subscribe_with_session(
+            QueryBuilder::new("documents").build(),
+            Some(Session::new("alice")),
+            None,
+        )
+        .unwrap();
+
+    for _ in 0..10 {
+        qm.process(&mut storage);
+    }
+
+    let visible_ids: HashSet<_> = qm
+        .get_subscription_results(sub_id)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert!(
+        visible_ids.contains(&visible_id),
+        "rows with deleted_at IS NULL should remain visible"
+    );
+    assert!(
+        !visible_ids.contains(&hidden_id),
+        "rows with non-null deleted_at should be filtered out by IS NULL"
+    );
 }
 
 #[test]

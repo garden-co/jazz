@@ -53,6 +53,7 @@ impl FjallStorage {
         let db = SingleWriterTxDatabase::builder(path.as_ref())
             .cache_size(cache_size_bytes as u64)
             .manual_journal_persist(true)
+            .max_cached_files(Some(64))
             .open()
             .map_err(|e| StorageError::IoError(format!("fjall open: {e}")))?;
         let keyspace = db
@@ -1060,6 +1061,26 @@ mod tests {
                 source_hash,
                 target_hash,
             })
+        );
+    }
+
+    mod fjall_conformance {
+        use crate::storage::Storage;
+        use crate::storage::fjall::FjallStorage;
+        use crate::storage_conformance_tests_persistent;
+
+        storage_conformance_tests_persistent!(
+            fjall,
+            || {
+                let dir = tempfile::TempDir::new().unwrap();
+                let path = dir.path().join("test.fjall");
+                let storage = FjallStorage::open(&path, 8 * 1024 * 1024).unwrap();
+                std::mem::forget(dir);
+                Box::new(storage) as Box<dyn Storage>
+            },
+            |path: &std::path::Path| {
+                Box::new(FjallStorage::open(path, 8 * 1024 * 1024).unwrap()) as Box<dyn Storage>
+            }
         );
     }
 }

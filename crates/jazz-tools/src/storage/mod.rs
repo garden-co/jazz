@@ -9,6 +9,8 @@
 //! Storage instance. Cross-thread communication uses the sync protocol over
 //! postMessage, not shared mutable state.
 
+#[cfg(test)]
+pub mod conformance;
 mod key_codec;
 mod opfs_btree;
 mod storage_core;
