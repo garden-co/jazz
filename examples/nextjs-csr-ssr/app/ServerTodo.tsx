@@ -1,5 +1,5 @@
 import { revalidatePath } from "next/cache";
-import { app } from "@/schema/app";
+import { app } from "../schema";
 import { db } from "@/lib/jazz-server";
 
 export default function ServerTodo() {
