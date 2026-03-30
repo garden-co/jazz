@@ -148,7 +148,7 @@ impl SourceNode for IndexScanNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType, Value};
+    use crate::query_manager::types::{ColumnDescriptor, ColumnType, SchemaHash, Value};
     use crate::storage::MemoryStorage;
     use std::ops::Bound;
 
@@ -169,7 +169,7 @@ mod tests {
     }
 
     fn test_branch_name(ord: u128) -> String {
-        format!("dev-070707070707-main-b{ord:032x}")
+        format!("dev-{}-main-b{ord:032x}", SchemaHash::from_bytes([7; 32]))
     }
 
     fn test_branch_ref(ord: u128) -> QueryBranchRef {

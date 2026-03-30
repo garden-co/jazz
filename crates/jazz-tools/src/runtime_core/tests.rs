@@ -884,17 +884,20 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
 
 #[test]
 fn test_park_sync_message() {
-    use crate::object::BranchName;
+    use crate::query_manager::types::{BatchId, BranchPrefixName, SchemaHash};
     use crate::sync_manager::{Source, SyncPayload};
 
     let mut core = create_test_runtime();
+    let branch_name = BranchPrefixName::new("dev", SchemaHash::from_bytes([7; 32]), "main")
+        .with_batch_id(BatchId::from_uuid(uuid::Uuid::from_u128(1)))
+        .to_branch_name();
 
     let message = InboxEntry {
         source: Source::Server(ServerId::new()),
         payload: SyncPayload::ObjectUpdated {
             object_id: ObjectId::new(),
             metadata: None,
-            branch_name: BranchName::new("main"),
+            branch_name,
             commits: vec![],
         },
     };

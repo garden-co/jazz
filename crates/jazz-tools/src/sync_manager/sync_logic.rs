@@ -169,8 +169,6 @@ impl SyncManager {
             (object_id, BatchBranchKey::from_branch_name(branch_name)),
             tips,
         );
-        let payload_branch_name = Self::display_branch_name(branch_name);
-
         self.outbox.push(OutboxEntry {
             destination: Destination::Server(server_id),
             payload: SyncPayload::ObjectUpdated {
@@ -183,7 +181,7 @@ impl SyncManager {
                 } else {
                     None
                 },
-                branch_name: payload_branch_name,
+                branch_name,
                 commits,
             },
         });
@@ -297,8 +295,6 @@ impl SyncManager {
             (object_id, BatchBranchKey::from_branch_name(branch_name)),
             tips,
         );
-        let payload_branch_name = Self::display_branch_name(branch_name);
-
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
             payload: SyncPayload::ObjectUpdated {
@@ -311,7 +307,7 @@ impl SyncManager {
                 } else {
                     None
                 },
-                branch_name: payload_branch_name,
+                branch_name,
                 commits,
             },
         });

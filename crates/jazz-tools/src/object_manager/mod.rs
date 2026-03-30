@@ -143,16 +143,6 @@ impl ObjectManager {
         ComposedBranchName::parse(&branch_name).map(|_| branch_name)
     }
 
-    pub(crate) fn normalize_loaded_branch_name_for_sync(
-        branch_name: BranchName,
-    ) -> Option<BranchName> {
-        Self::normalize_loaded_branch_name(branch_name)
-    }
-
-    pub(crate) fn display_branch_name_for_sync(branch_name: BranchName) -> BranchName {
-        branch_name
-    }
-
     pub fn new() -> Self {
         Self::default()
     }
@@ -206,6 +196,14 @@ impl ObjectManager {
             tails: None,
             loaded_state: BranchLoadedState::TipsOnly,
         }
+    }
+
+    fn newest_tip_commit(branch: &Branch) -> Option<(CommitId, &Commit)> {
+        branch
+            .tips
+            .iter()
+            .filter_map(|tip_id| branch.commits.get(tip_id).map(|commit| (*tip_id, commit)))
+            .max_by_key(|(tip_id, commit)| (commit.timestamp, *tip_id))
     }
 
     /// Get next monotonic timestamp (microseconds since epoch).
@@ -314,7 +312,7 @@ impl ObjectManager {
             let needs_load = match object.branches.get(&bn).map(|branch| branch.loaded_state) {
                 Some(BranchLoadedState::AllCommits) => false,
                 Some(BranchLoadedState::TipsOnly) => full_history,
-                Some(BranchLoadedState::TipIdsOnly | BranchLoadedState::NotLoaded) => true,
+                Some(BranchLoadedState::NotLoaded) => true,
                 None => true,
             };
             if !needs_load {
@@ -866,6 +864,96 @@ impl ObjectManager {
         }
 
         Ok(head_ids)
+    }
+
+    pub fn resolve_latest_visible_tip<H: Storage>(
+        &mut self,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+        storage: &H,
+    ) -> Result<Option<(BranchName, CommitId, Commit)>, Error> {
+        let branch_name = Self::normalize_branch_name(branch_name.into())?;
+        let requested_branches = [branch_name.as_str().to_string()];
+        if self
+            .get_or_load_tips(object_id, storage, &requested_branches)
+            .is_none()
+        {
+            return Ok(None);
+        }
+
+        if let Some((commit_id, commit)) = self
+            .get(object_id)
+            .and_then(|object| object.branches.get(&branch_name))
+            .and_then(Self::newest_tip_commit)
+        {
+            return Ok(Some((branch_name, commit_id, commit.clone())));
+        }
+
+        let composed_branch =
+            ComposedBranchName::parse(&branch_name).ok_or(Error::InvalidBranchName(branch_name))?;
+        let leaf_heads =
+            self.get_leaf_head_ids_for_prefix(object_id, &composed_branch.prefix(), storage)?;
+
+        let missing_leaf_branches: Vec<String> = {
+            let object = self
+                .get(object_id)
+                .ok_or(Error::ObjectNotFound(object_id))?;
+            leaf_heads
+                .keys()
+                .filter(|leaf_branch_name| !object.branches.contains_key(leaf_branch_name))
+                .map(|leaf_branch_name| leaf_branch_name.as_str().to_string())
+                .collect()
+        };
+        if !missing_leaf_branches.is_empty() {
+            self.get_or_load_tips(object_id, storage, &missing_leaf_branches);
+        }
+
+        let object = self
+            .get(object_id)
+            .ok_or(Error::ObjectNotFound(object_id))?;
+        Ok(leaf_heads
+            .into_iter()
+            .filter_map(|(leaf_branch_name, head_id)| {
+                object
+                    .branches
+                    .get(&leaf_branch_name)
+                    .and_then(|branch| branch.commits.get(&head_id))
+                    .map(|commit| (leaf_branch_name, head_id, commit.clone()))
+            })
+            .max_by_key(|(_, head_id, commit)| (commit.timestamp, *head_id)))
+    }
+
+    pub fn resolve_visible_parent_ids<H: Storage>(
+        &mut self,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+        storage: &H,
+    ) -> Result<Vec<CommitId>, Error> {
+        let branch_name = Self::normalize_branch_name(branch_name.into())?;
+        let requested_branches = [branch_name.as_str().to_string()];
+        if self
+            .get_or_load_tips(object_id, storage, &requested_branches)
+            .is_none()
+        {
+            return Err(Error::ObjectNotFound(object_id));
+        }
+
+        if let Ok(tips) = self.get_tip_ids(object_id, branch_name) {
+            return Ok(tips.iter().copied().collect());
+        }
+
+        let composed_branch =
+            ComposedBranchName::parse(&branch_name).ok_or(Error::InvalidBranchName(branch_name))?;
+        let mut parents: Vec<_> = self
+            .get_leaf_head_ids_for_prefix(object_id, &composed_branch.prefix(), storage)?
+            .into_iter()
+            .filter_map(|(leaf_branch_name, head_id)| {
+                (leaf_branch_name != branch_name).then_some(head_id)
+            })
+            .collect();
+        parents.sort();
+        parents.dedup();
+        Ok(parents)
     }
 
     /// Receive an object from a remote source (with specified ID).

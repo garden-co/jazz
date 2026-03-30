@@ -28,6 +28,10 @@ pub fn make_commit(content: &[u8], author: ObjectId, parents: &[CommitId]) -> Co
     }
 }
 
+fn test_branch_name(user_branch: &str) -> BranchName {
+    branch_ref(user_branch).branch_name()
+}
+
 fn branch_ref(branch: &str) -> QueryBranchRef {
     let branch_name = BranchName::new(branch);
     if crate::query_manager::types::ComposedBranchName::parse(&branch_name).is_some() {
@@ -53,18 +57,6 @@ trait IntoCompatBranchRef {
 impl IntoCompatBranchRef for &str {
     fn into_compat_branch_ref(self) -> QueryBranchRef {
         branch_ref(self)
-    }
-}
-
-impl IntoCompatBranchRef for &String {
-    fn into_compat_branch_ref(self) -> QueryBranchRef {
-        branch_ref(self)
-    }
-}
-
-impl IntoCompatBranchRef for String {
-    fn into_compat_branch_ref(self) -> QueryBranchRef {
-        branch_ref(&self)
     }
 }
 
@@ -268,7 +260,7 @@ pub fn test_object_metadata_isolation(factory: &dyn Fn() -> Box<dyn Storage>) {
 pub fn test_branch_load_nonexistent_returns_none(factory: &dyn Fn() -> Box<dyn Storage>) {
     let storage = factory();
     let obj = ObjectId::new();
-    let branch = BranchName::new("main");
+    let branch = test_branch_name("main");
 
     let result = storage.compat_load_branch(obj, branch).unwrap();
     assert!(result.is_none());
@@ -277,7 +269,7 @@ pub fn test_branch_load_nonexistent_returns_none(factory: &dyn Fn() -> Box<dyn S
 pub fn test_commit_append_and_load(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let alice = ObjectId::new();
-    let branch = BranchName::new("main");
+    let branch = test_branch_name("main");
 
     let mut meta = HashMap::new();
     meta.insert("owner".to_string(), "alice".to_string());
@@ -304,7 +296,7 @@ pub fn test_commit_append_chain(factory: &dyn Fn() -> Box<dyn Storage>) {
 
     let mut storage = factory();
     let alice = ObjectId::new();
-    let branch = BranchName::new("main");
+    let branch = test_branch_name("main");
 
     let mut meta = HashMap::new();
     meta.insert("owner".to_string(), "alice".to_string());
@@ -332,7 +324,7 @@ pub fn test_commit_append_chain(factory: &dyn Fn() -> Box<dyn Storage>) {
 pub fn test_commit_delete(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let alice = ObjectId::new();
-    let branch = BranchName::new("main");
+    let branch = test_branch_name("main");
 
     let mut meta = HashMap::new();
     meta.insert("owner".to_string(), "alice".to_string());
@@ -356,7 +348,7 @@ pub fn test_commit_delete(factory: &dyn Fn() -> Box<dyn Storage>) {
 pub fn test_branch_tails_set_and_clear(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let alice = ObjectId::new();
-    let branch = BranchName::new("main");
+    let branch = test_branch_name("main");
 
     let mut meta = HashMap::new();
     meta.insert("owner".to_string(), "alice".to_string());
@@ -395,8 +387,8 @@ pub fn test_multiple_branches_independent(factory: &dyn Fn() -> Box<dyn Storage>
 
     let mut storage = factory();
     let tasks = ObjectId::new();
-    let main_branch = BranchName::new("main");
-    let draft_branch = BranchName::new("draft");
+    let main_branch = test_branch_name("main");
+    let draft_branch = test_branch_name("draft");
 
     let mut meta = HashMap::new();
     meta.insert("type".to_string(), "tasks".to_string());
@@ -734,7 +726,7 @@ pub fn test_index_value_types(factory: &dyn Fn() -> Box<dyn Storage>) {
 pub fn test_store_and_load_ack_tier(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let alice = ObjectId::new();
-    let branch = BranchName::new("main");
+    let branch = test_branch_name("main");
 
     let mut meta = HashMap::new();
     meta.insert("owner".to_string(), "alice".to_string());
@@ -849,7 +841,7 @@ pub fn test_persistence_survives_close_reopen(factory: &PersistentStorageFactory
     let path = dir.path();
 
     let alice = ObjectId::new();
-    let branch = BranchName::new("main");
+    let branch = test_branch_name("main");
     let row_id = ObjectId::new();
 
     // Write phase
@@ -934,8 +926,8 @@ pub fn test_alice_bob_concurrent_branches(factory: &dyn Fn() -> Box<dyn Storage>
 
     let alice = ObjectId::new();
     let bob = ObjectId::new();
-    let main_branch = BranchName::new("main");
-    let draft_branch = BranchName::new("draft");
+    let main_branch = test_branch_name("main");
+    let draft_branch = test_branch_name("draft");
 
     // Alice writes to main
     let c_alice = make_commit(b"alice publishes", alice, &[]);

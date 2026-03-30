@@ -170,9 +170,9 @@ impl FjallStorage {
         prefix: &str,
     ) -> Result<HashSet<BatchId>, StorageError> {
         Ok(self
-            .load_table_prefix_branches(table, BranchName::new(prefix))?
+            .load_table_prefix_batch_keys(table, BranchName::new(prefix))?
             .into_iter()
-            .map(|branch| branch.batch_id())
+            .map(|branch_key| branch_key.batch_id())
             .collect())
     }
 
@@ -771,7 +771,10 @@ mod tests {
         let id = ObjectId::new();
         storage.create_object(id, HashMap::new()).unwrap();
 
-        let prefix = "dev-070707070707-main";
+        let prefix = format!(
+            "dev-{}-main",
+            crate::query_manager::types::SchemaHash::from_bytes([7; 32])
+        );
         let branch1 = crate::query_manager::types::QueryBranchRef::from_branch_name(
             BranchName::new(format!("{prefix}-b{:032x}", 1)),
         );
@@ -789,7 +792,7 @@ mod tests {
                 &branch1,
                 commit1.clone(),
                 Some(PrefixBatchUpdate {
-                    prefix: prefix.to_string(),
+                    prefix: prefix.clone(),
                     batch_meta: PrefixBatchMeta {
                         batch_id: batch1_id,
                         batch_ord: crate::query_manager::types::BatchOrd(0),
@@ -815,7 +818,7 @@ mod tests {
                 &branch2,
                 commit2.clone(),
                 Some(PrefixBatchUpdate {
-                    prefix: prefix.to_string(),
+                    prefix: prefix.clone(),
                     batch_meta: PrefixBatchMeta {
                         batch_id: batch2_id,
                         batch_ord: crate::query_manager::types::BatchOrd(1),
@@ -844,7 +847,7 @@ mod tests {
         );
         assert_eq!(
             storage
-                .load_prefix_batch_catalog(id, prefix)
+                .load_prefix_batch_catalog(id, &prefix)
                 .unwrap()
                 .map(|catalog| catalog.leaf_batch_ids().collect::<HashSet<_>>()),
             Some(HashSet::from([batch2_id]))
@@ -867,7 +870,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            storage.load_table_prefix_batches("users", prefix).unwrap(),
+            storage.load_table_prefix_batches("users", &prefix).unwrap(),
             HashSet::from([batch1_id, batch2_id])
         );
 
@@ -884,7 +887,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            storage.load_table_prefix_batches("users", prefix).unwrap(),
+            storage.load_table_prefix_batches("users", &prefix).unwrap(),
             HashSet::new()
         );
     }

@@ -3,7 +3,6 @@ use std::{
     sync::Arc,
 };
 
-use crate::object::BranchName;
 use crate::object_manager::AllObjectUpdate;
 use crate::storage::Storage;
 use crate::sync_manager::QueryPropagation;
@@ -503,68 +502,6 @@ impl QueryManager {
     /// This enables lazy branch activation when rows arrive with unknown branches.
     pub fn set_known_schemas(&mut self, schemas: Arc<HashMap<SchemaHash, Schema>>) {
         self.known_schemas = schemas;
-    }
-
-    /// Add a branch → schema hash mapping (for server-mode schema activation).
-    ///
-    /// Used when a subscription arrives with explicit schema context.
-    pub fn add_schema_branch(&mut self, branch: &str, schema_hash: SchemaHash) {
-        Self::record_branch_schema_mapping(
-            &mut self.branch_schema_map,
-            BranchName::new(branch),
-            schema_hash,
-        );
-    }
-
-    /// Find a schema in known_schemas by its short hash prefix.
-    ///
-    /// Returns the full SchemaHash if found. The partial hash has the first 4 bytes
-    /// filled with the short hash, and the rest zeroed (as produced by ComposedBranchName::parse).
-    pub(super) fn find_schema_by_short_hash(&self, partial: &SchemaHash) -> Option<SchemaHash> {
-        let target_short = &partial.0[..4];
-
-        if self.schema_context.is_initialized()
-            && &self.schema_context.current_hash.0[..4] == target_short
-        {
-            return Some(self.schema_context.current_hash);
-        }
-
-        for live_hash in self.schema_context.live_schemas.keys() {
-            if &live_hash.0[..4] == target_short {
-                return Some(*live_hash);
-            }
-        }
-
-        // Search known_schemas for matching short hash
-        for full_hash in self.known_schemas.keys() {
-            if &full_hash.0[..4] == target_short {
-                return Some(*full_hash);
-            }
-        }
-        None
-    }
-
-    /// Update the branch_schema_map from the current schema context.
-    ///
-    /// Called internally after schema changes to ensure the map
-    /// includes all live schemas.
-    pub fn update_branch_schema_map(&mut self) {
-        if !self.schema_context.is_initialized() {
-            return;
-        }
-
-        // Current schema branch
-        Self::record_branch_schema_mapping(
-            &mut self.branch_schema_map,
-            self.schema_context.branch_name(),
-            self.schema_context.current_hash,
-        );
-
-        // Live schema branches
-        for &live_hash in self.schema_context.live_schemas.keys() {
-            let live_branch = self.schema_context.branch_name_for_hash(live_hash);
-            Self::record_branch_schema_mapping(&mut self.branch_schema_map, live_branch, live_hash);
-        }
     }
 
     /// Get subscription results as decoded rows with ObjectIds (for testing).

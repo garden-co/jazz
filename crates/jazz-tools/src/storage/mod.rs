@@ -337,17 +337,29 @@ pub trait Storage {
         prefix: BranchName,
     ) -> Result<Vec<BatchBranchKey>, StorageError>;
 
-    fn load_table_prefix_branches(
+    fn resolve_active_table_batch_keys(
         &self,
         table: &str,
-        prefix: BranchName,
-    ) -> Result<Vec<QueryBranchRef>, StorageError> {
-        self.load_table_prefix_batch_keys(table, prefix)
-            .map(|keys| {
-                keys.into_iter()
-                    .map(QueryBranchRef::from_batch_branch_key)
-                    .collect()
-            })
+        seed_branches: &[BatchBranchKey],
+    ) -> Result<Vec<BatchBranchKey>, StorageError> {
+        let mut branch_keys = Vec::new();
+        for branch in seed_branches {
+            let mut table_branches =
+                self.load_table_prefix_batch_keys(table, branch.prefix_name())?;
+            if table_branches.is_empty() {
+                branch_keys.push(*branch);
+            } else {
+                branch_keys.append(&mut table_branches);
+            }
+        }
+        branch_keys.sort_by(|left, right| {
+            left.prefix_name()
+                .as_str()
+                .cmp(right.prefix_name().as_str())
+                .then_with(|| left.batch_id().as_bytes().cmp(right.batch_id().as_bytes()))
+        });
+        branch_keys.dedup();
+        Ok(branch_keys)
     }
 
     /// Append a commit to a branch.
@@ -585,6 +597,14 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).load_table_prefix_batch_keys(table, prefix)
     }
 
+    fn resolve_active_table_batch_keys(
+        &self,
+        table: &str,
+        seed_branches: &[BatchBranchKey],
+    ) -> Result<Vec<BatchBranchKey>, StorageError> {
+        (**self).resolve_active_table_batch_keys(table, seed_branches)
+    }
+
     fn append_commit(
         &mut self,
         object_id: ObjectId,
@@ -779,9 +799,9 @@ impl MemoryStorage {
         prefix: &str,
     ) -> Result<HashSet<BatchId>, StorageError> {
         Ok(self
-            .load_table_prefix_branches(table, BranchName::new(prefix))?
+            .load_table_prefix_batch_keys(table, BranchName::new(prefix))?
             .into_iter()
-            .map(|branch| branch.batch_id())
+            .map(|branch_key| branch_key.batch_id())
             .collect())
     }
 
@@ -1480,7 +1500,7 @@ mod tests {
         let id = ObjectId::new();
         storage.create_object(id, HashMap::new()).unwrap();
 
-        let prefix = "dev-070707070707-main";
+        let prefix = format!("dev-{}-main", SchemaHash::from_bytes([7; 32]));
         let branch1 = crate::query_manager::types::QueryBranchRef::from_branch_name(
             BranchName::new(format!("{prefix}-b{:032x}", 1)),
         );
@@ -1498,7 +1518,7 @@ mod tests {
                 &branch1,
                 commit1.clone(),
                 Some(PrefixBatchUpdate {
-                    prefix: prefix.to_string(),
+                    prefix: prefix.clone(),
                     batch_meta: PrefixBatchMeta {
                         batch_id: batch1_id,
                         batch_ord: crate::query_manager::types::BatchOrd(0),
@@ -1521,7 +1541,7 @@ mod tests {
         );
         assert_eq!(
             storage
-                .load_prefix_batch_catalog(id, prefix)
+                .load_prefix_batch_catalog(id, &prefix)
                 .unwrap()
                 .map(|catalog| catalog.leaf_batch_ids().collect::<HashSet<_>>()),
             Some(HashSet::from([batch1_id]))
@@ -1536,7 +1556,7 @@ mod tests {
                 &branch2,
                 commit2.clone(),
                 Some(PrefixBatchUpdate {
-                    prefix: prefix.to_string(),
+                    prefix: prefix.clone(),
                     batch_meta: PrefixBatchMeta {
                         batch_id: batch2_id,
                         batch_ord: crate::query_manager::types::BatchOrd(1),
@@ -1561,7 +1581,7 @@ mod tests {
         );
         assert_eq!(
             storage
-                .load_prefix_batch_catalog(id, prefix)
+                .load_prefix_batch_catalog(id, &prefix)
                 .unwrap()
                 .map(|catalog| catalog.leaf_batch_ids().collect::<HashSet<_>>()),
             Some(HashSet::from([batch2_id]))
@@ -1571,7 +1591,7 @@ mod tests {
     #[test]
     fn memory_storage_tracks_table_prefix_batches() {
         let mut storage = MemoryStorage::new();
-        let prefix = "dev-070707070707-main";
+        let prefix = format!("dev-{}-main", SchemaHash::from_bytes([7; 32]));
         let batch1 = BatchId::parse_segment(&format!("b{:032x}", 1)).unwrap();
         let batch2 = BatchId::parse_segment(&format!("b{:032x}", 2)).unwrap();
         let users_branch1 = format!("{prefix}-{}", batch1.branch_segment());
@@ -1610,11 +1630,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            storage.load_table_prefix_batches("users", prefix).unwrap(),
+            storage.load_table_prefix_batches("users", &prefix).unwrap(),
             HashSet::from([batch1, batch2])
         );
         assert_eq!(
-            storage.load_table_prefix_batches("posts", prefix).unwrap(),
+            storage.load_table_prefix_batches("posts", &prefix).unwrap(),
             HashSet::from([batch1])
         );
 
@@ -1638,7 +1658,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            storage.load_table_prefix_batches("users", prefix).unwrap(),
+            storage.load_table_prefix_batches("users", &prefix).unwrap(),
             HashSet::new()
         );
     }

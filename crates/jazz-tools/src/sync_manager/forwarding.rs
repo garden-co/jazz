@@ -123,14 +123,12 @@ impl SyncManager {
         }
 
         let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
-        let payload_branch_name = Self::display_branch_name(branch_name);
-
         for server_id in server_ids {
             self.outbox.push(OutboxEntry {
                 destination: Destination::Server(server_id),
                 payload: SyncPayload::ObjectTruncated {
                     object_id,
-                    branch_name: payload_branch_name,
+                    branch_name,
                     tails: tails.clone(),
                 },
             });
@@ -185,14 +183,12 @@ impl SyncManager {
             })
             .map(|(id, _)| *id)
             .collect();
-        let payload_branch_name = Self::display_branch_name(branch_name);
-
         for client_id in client_ids {
             self.outbox.push(OutboxEntry {
                 destination: Destination::Client(client_id),
                 payload: SyncPayload::ObjectTruncated {
                     object_id,
-                    branch_name: payload_branch_name,
+                    branch_name,
                     tails: tails.clone(),
                 },
             });

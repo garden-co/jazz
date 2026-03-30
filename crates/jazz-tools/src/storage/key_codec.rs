@@ -355,10 +355,10 @@ pub(super) fn increment_string(s: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query_manager::types::QueryBranchRef;
+    use crate::query_manager::types::{QueryBranchRef, SchemaHash};
 
     fn batch_branch_name(ord: u128) -> String {
-        format!("dev-070707070707-main-b{ord:032x}")
+        format!("dev-{}-main-b{ord:032x}", SchemaHash::from_bytes([7; 32]))
     }
 
     fn branch_ref(ord: u128) -> QueryBranchRef {
@@ -431,7 +431,7 @@ mod tests {
 
     #[test]
     fn composed_branch_index_keys_only_store_batch_segment() {
-        let branch = BranchName::new("dev-070707070707-main-b00000000000000000000000000000001");
+        let branch = BranchName::new(batch_branch_name(1));
         let branch_ref = QueryBranchRef::from_branch_name(branch);
         let key = index_entry_key(
             "users",
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn composed_object_branch_keys_store_prefix_id_and_batch_only() {
-        let branch = BranchName::new("dev-070707070707-main-b00000000000000000000000000000001");
+        let branch = BranchName::new(batch_branch_name(1));
         let branch_ref = QueryBranchRef::from_branch_name(branch);
         let key = branch_manifest_key(ObjectId::from_uuid(uuid::Uuid::nil()), &branch_ref);
 

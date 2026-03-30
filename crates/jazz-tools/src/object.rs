@@ -41,7 +41,6 @@ impl<'de> Deserialize<'de> for ObjectId {
 pub enum BranchLoadedState {
     #[default]
     NotLoaded,
-    TipIdsOnly,
     TipsOnly,
     AllCommits,
 }
@@ -180,25 +179,51 @@ impl ObjectBranches {
 
     pub fn get(&self, branch_name: &BranchName) -> Option<&Branch> {
         let (prefix_name, batch_id) = Self::split_branch_name(branch_name)?;
-        self.branches_by_prefix
-            .get(&prefix_name)?
-            .branches_by_batch
-            .get(&batch_id)
+        self.get_by_key(BatchBranchKey::from_prefix_name_and_batch(
+            prefix_name,
+            batch_id,
+        ))
     }
 
     pub fn get_mut(&mut self, branch_name: &BranchName) -> Option<&mut Branch> {
         let (prefix_name, batch_id) = Self::split_branch_name(branch_name)?;
+        self.get_mut_by_key(BatchBranchKey::from_prefix_name_and_batch(
+            prefix_name,
+            batch_id,
+        ))
+    }
+
+    pub fn get_by_key(&self, branch_key: BatchBranchKey) -> Option<&Branch> {
         self.branches_by_prefix
-            .get_mut(&prefix_name)?
+            .get(&branch_key.prefix_name())?
             .branches_by_batch
-            .get_mut(&batch_id)
+            .get(&branch_key.batch_id())
+    }
+
+    pub fn get_mut_by_key(&mut self, branch_key: BatchBranchKey) -> Option<&mut Branch> {
+        self.branches_by_prefix
+            .get_mut(&branch_key.prefix_name())?
+            .branches_by_batch
+            .get_mut(&branch_key.batch_id())
     }
 
     pub fn insert(&mut self, branch_name: BranchName, branch: Branch) -> Option<Branch> {
         let (prefix_name, batch_id) =
             Self::split_branch_name(&branch_name).expect("branch storage requires composed names");
-        let prefix_store = self.branches_by_prefix.entry(prefix_name).or_default();
-        let previous = prefix_store.branches_by_batch.insert(batch_id, branch);
+        self.insert_by_key(
+            BatchBranchKey::from_prefix_name_and_batch(prefix_name, batch_id),
+            branch,
+        )
+    }
+
+    pub fn insert_by_key(&mut self, branch_key: BatchBranchKey, branch: Branch) -> Option<Branch> {
+        let prefix_store = self
+            .branches_by_prefix
+            .entry(branch_key.prefix_name())
+            .or_default();
+        let previous = prefix_store
+            .branches_by_batch
+            .insert(branch_key.batch_id(), branch);
         if previous.is_none() {
             self.branch_count += 1;
         }
@@ -212,8 +237,22 @@ impl ObjectBranches {
     ) -> &mut Branch {
         let (prefix_name, batch_id) =
             Self::split_branch_name(&branch_name).expect("branch storage requires composed names");
-        let prefix_store = self.branches_by_prefix.entry(prefix_name).or_default();
-        match prefix_store.branches_by_batch.entry(batch_id) {
+        self.get_or_insert_with_key(
+            BatchBranchKey::from_prefix_name_and_batch(prefix_name, batch_id),
+            default,
+        )
+    }
+
+    pub fn get_or_insert_with_key(
+        &mut self,
+        branch_key: BatchBranchKey,
+        default: impl FnOnce() -> Branch,
+    ) -> &mut Branch {
+        let prefix_store = self
+            .branches_by_prefix
+            .entry(branch_key.prefix_name())
+            .or_default();
+        match prefix_store.branches_by_batch.entry(branch_key.batch_id()) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 self.branch_count += 1;

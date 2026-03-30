@@ -40,9 +40,8 @@ use super::relation_ir_query_plan::{
 };
 use super::session::Session;
 use super::types::{
-    BatchId, ColumnDescriptor, ColumnName, ColumnType, ComposedBranchName, LoadedRow,
-    QueryBranchRef, Row, RowDelta, RowDescriptor, Schema, SchemaHash, TableName, Tuple, TupleDelta,
-    TupleDescriptor, TupleProvenance,
+    BatchId, ColumnDescriptor, ColumnName, ColumnType, LoadedRow, QueryBranchRef, Row, RowDelta,
+    RowDescriptor, Schema, TableName, Tuple, TupleDelta, TupleDescriptor, TupleProvenance,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -672,29 +671,14 @@ impl QueryGraph {
         table: TableName,
         seed_branches: &[QueryBranchRef],
     ) -> Option<Vec<QueryBranchRef>> {
-        let mut branch_keys = Vec::new();
-
-        for branch in seed_branches {
-            let mut table_branches = storage
-                .load_table_prefix_batch_keys(table.as_str(), branch.prefix_name())
-                .ok()?;
-            if table_branches.is_empty() {
-                branch_keys.push(branch.batch_branch_key());
-            } else {
-                branch_keys.append(&mut table_branches);
-            }
-        }
-
-        branch_keys.sort_by(|left, right| {
-            left.prefix_name()
-                .as_str()
-                .cmp(right.prefix_name().as_str())
-                .then_with(|| left.batch_id().as_bytes().cmp(right.batch_id().as_bytes()))
-        });
-        branch_keys.dedup();
-
+        let seed_keys: Vec<_> = seed_branches
+            .iter()
+            .map(QueryBranchRef::batch_branch_key)
+            .collect();
         Some(
-            branch_keys
+            storage
+                .resolve_active_table_batch_keys(table.as_str(), &seed_keys)
+                .ok()?
                 .into_iter()
                 .map(QueryBranchRef::from_batch_branch_key)
                 .collect(),
@@ -708,18 +692,6 @@ impl QueryGraph {
         schema_context: &SchemaContext,
         storage: Option<&dyn Storage>,
     ) -> Option<Self> {
-        // Build branch -> schema hash map for column translation.
-        // Use full hashes from SchemaContext (do not re-parse branch strings, which only encode
-        // a shortened hash prefix).
-        let mut branch_schema_map: HashMap<String, SchemaHash> = HashMap::new();
-        for schema_hash in schema_context.all_live_hashes() {
-            let branch_name = schema_context.branch_name_for_hash(schema_hash);
-            branch_schema_map.insert(branch_name.as_str().to_string(), schema_hash);
-            if let Some(composed) = ComposedBranchName::parse(&branch_name) {
-                branch_schema_map.insert(composed.prefix().branch_prefix(), schema_hash);
-            }
-        }
-
         // Expand branches to include all live schema branches if not specified
         let branches: Vec<QueryBranchRef> = if plan.branches.is_empty() {
             schema_context
@@ -773,19 +745,19 @@ impl QueryGraph {
 
             let mut scan_groups: HashMap<String, Vec<QueryBranchRef>> = HashMap::new();
             for branch in &branches {
-                let translated_column = branch_schema_map
-                    .get(branch.as_str())
-                    .copied()
-                    .filter(|target_hash| *target_hash != schema_context.current_hash)
-                    .and_then(|target_hash| {
-                        translate_column_for_index(
-                            schema_context,
-                            table_str,
-                            &scan_column,
-                            &target_hash,
-                        )
-                    })
-                    .unwrap_or_else(|| scan_column.clone());
+                let translated_column = super::manager::QueryManager::schema_hash_for_prefix_name(
+                    &branch.prefix_name(),
+                )
+                .filter(|target_hash| *target_hash != schema_context.current_hash)
+                .and_then(|target_hash| {
+                    translate_column_for_index(
+                        schema_context,
+                        table_str,
+                        &scan_column,
+                        &target_hash,
+                    )
+                })
+                .unwrap_or_else(|| scan_column.clone());
                 scan_groups
                     .entry(translated_column)
                     .or_default()

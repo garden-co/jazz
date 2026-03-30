@@ -744,14 +744,8 @@ fn branch_prefix_name_formats_prefix_and_batch_prefix_shapes() {
     let hash = SchemaHash::from_bytes([0xab; 32]);
     let prefix = BranchPrefixName::new("dev", hash, "feature-x");
 
-    assert_eq!(
-        prefix.branch_prefix(),
-        format!("dev-{}-feature-x", hash.short())
-    );
-    assert_eq!(
-        prefix.to_batch_prefix(),
-        format!("dev-{}-feature-x-", hash.short())
-    );
+    assert_eq!(prefix.branch_prefix(), format!("dev-{}-feature-x", hash));
+    assert_eq!(prefix.to_batch_prefix(), format!("dev-{}-feature-x-", hash));
 }
 
 #[test]
@@ -765,7 +759,7 @@ fn composed_branch_name_format() {
     let branch_name = composed.to_branch_name();
     let s = branch_name.as_str();
 
-    // Should be in format: dev-XXXXXXXX-main-bYYYY...
+    // Should be in format: dev-<64 hex schema hash>-main-bYYYY...
     assert!(s.starts_with("dev-"));
     assert!(s.contains("-main-"));
     assert_eq!(s.matches('-').count(), 3);
@@ -785,8 +779,7 @@ fn composed_branch_name_parse() {
     assert_eq!(parsed.env, "prod");
     assert_eq!(parsed.user_branch, "feature-x");
     assert_eq!(parsed.batch_id, batch_id);
-    // Note: full hash can't be recovered from 12 chars, but short() should match
-    assert_eq!(parsed.schema_hash.short(), original.schema_hash.short());
+    assert_eq!(parsed.schema_hash, original.schema_hash);
 }
 
 #[test]
@@ -804,7 +797,7 @@ fn composed_branch_name_parse_with_batch() {
     assert_eq!(parsed.env, "prod");
     assert_eq!(parsed.user_branch, "feature-x");
     assert_eq!(parsed.batch_id, batch_id);
-    assert_eq!(parsed.schema_hash.short(), original.schema_hash.short());
+    assert_eq!(parsed.schema_hash, original.schema_hash);
 }
 
 #[test]
@@ -843,16 +836,18 @@ fn composed_branch_name_parse_invalid() {
     let name = BranchName::new("just-one");
     assert!(ComposedBranchName::parse(&name).is_none());
 
-    // Hash not 12 chars
+    // Hash not 64 chars
     let name = BranchName::new("dev-abc-main");
     assert!(ComposedBranchName::parse(&name).is_none());
 
     // Hash not hex
-    let name = BranchName::new("dev-gggggggggggg-main");
+    let name =
+        BranchName::new("dev-gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg-main");
     assert!(ComposedBranchName::parse(&name).is_none());
 
     // Missing batch suffix
-    let name = BranchName::new("dev-aabbccddeeff-main");
+    let name =
+        BranchName::new("dev-aabbccddeeff00112233445566778899aabbccddeeff001122334455667788-main");
     assert!(ComposedBranchName::parse(&name).is_none());
 }
 

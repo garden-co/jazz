@@ -577,25 +577,6 @@ impl SchemaManager {
             .collect()
     }
 
-    /// Build a mapping from branch name to schema hash.
-    pub fn branch_schema_map(&self) -> std::collections::HashMap<String, SchemaHash> {
-        let mut map = std::collections::HashMap::new();
-
-        // Current schema branch
-        map.insert(
-            self.context.branch_name().as_str().to_string(),
-            self.context.current_hash,
-        );
-
-        // Live schema branches
-        for hash in self.context.live_schemas.keys() {
-            let branch = self.context.branch_name_for_hash(*hash);
-            map.insert(branch.as_str().to_string(), *hash);
-        }
-
-        map
-    }
-
     /// Create a LensTransformer for a specific table.
     pub fn transformer(&self, table: &str) -> super::transformer::LensTransformer<'_> {
         super::transformer::LensTransformer::new(&self.context, table)
@@ -1293,11 +1274,6 @@ impl SchemaManager {
         // Try to activate any pending schemas that now have lens paths
         temp_context.try_activate_pending();
 
-        // Ensure the client's branch is registered for indexing (server-mode)
-        let client_branch = ctx.branch_name().to_branch_name();
-        self.query_manager
-            .add_schema_branch(client_branch.as_str(), ctx.schema_hash);
-
         // Ensure indices exist for all branches in the temp context
         for branch_name in temp_context.all_branch_names() {
             let branch_str = branch_name.as_str();
@@ -1796,26 +1772,6 @@ mod tests {
         // Generated but not registered
         assert!(!lens.is_draft());
         assert_eq!(manager.all_branches().len(), 1); // Only current
-    }
-
-    #[test]
-    fn schema_manager_branch_schema_map() {
-        let v1 = make_schema_v1();
-        let v2 = make_schema_v2();
-        let v1_hash = SchemaHash::compute(&v1);
-        let v2_hash = SchemaHash::compute(&v2);
-
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
-        manager.add_live_schema(v1).unwrap();
-
-        let map = manager.branch_schema_map();
-        assert_eq!(map.len(), 2);
-
-        // Should contain both schema hashes
-        let hashes: std::collections::HashSet<_> = map.values().collect();
-        assert!(hashes.contains(&v1_hash));
-        assert!(hashes.contains(&v2_hash));
     }
 
     #[test]

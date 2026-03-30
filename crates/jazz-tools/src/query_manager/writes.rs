@@ -13,8 +13,7 @@ use super::policy::{ComplexClause, Operation, evaluate_simple_parts};
 use super::server_queries::{AuthorizationPolicyRequest, RowTransformContext};
 use super::session::Session;
 use super::types::{
-    BatchBranchKey, ColumnType, ComposedBranchName, LoadedRow, QueryBranchRef, RowDescriptor,
-    Schema, TableName, Value,
+    BatchBranchKey, ColumnType, LoadedRow, QueryBranchRef, RowDescriptor, Schema, TableName, Value,
 };
 
 pub struct RowBranchWrite<'a> {
@@ -44,25 +43,6 @@ pub struct RowBranchDelete<'a> {
 }
 
 impl QueryManager {
-    fn winning_tip_commit(
-        object_manager_branch: &crate::object::Branch,
-    ) -> Option<(CommitId, Commit)> {
-        let mut tips: Vec<_> = object_manager_branch.tips.iter().copied().collect();
-        tips.sort_by_key(|id| {
-            (
-                object_manager_branch
-                    .commits
-                    .get(id)
-                    .map(|commit| commit.timestamp)
-                    .unwrap_or(0),
-                *id,
-            )
-        });
-        let tip_id = *tips.last()?;
-        let commit = object_manager_branch.commits.get(&tip_id)?.clone();
-        Some((tip_id, commit))
-    }
-
     fn resolve_write_head_on_branch<H: Storage>(
         &mut self,
         storage: &H,
@@ -70,69 +50,12 @@ impl QueryManager {
         branch: &str,
     ) -> Option<ResolvedWriteHead> {
         let branch_name = self.resolve_branch_name(branch);
-        let requested_branches = [branch_name.as_str().to_string()];
         self.sync_manager
             .object_manager
-            .get_or_load(id, storage, &requested_branches)?;
-
-        if let Some((commit_id, commit)) = self
-            .sync_manager
-            .object_manager
-            .get(id)?
-            .branches
-            .get(&branch_name)
-            .and_then(Self::winning_tip_commit)
-        {
-            return Some(ResolvedWriteHead { commit_id, commit });
-        }
-
-        let composed_branch = ComposedBranchName::parse(&branch_name)?;
-        let leaf_heads = self
-            .sync_manager
-            .object_manager
-            .get_leaf_head_ids_for_prefix(id, &composed_branch.prefix(), storage)
-            .ok()?;
-
-        let missing_leaf_branches: Vec<String> = {
-            let object = self.sync_manager.object_manager.get(id)?;
-            leaf_heads
-                .keys()
-                .filter(|leaf_branch_name| !object.branches.contains_key(leaf_branch_name))
-                .map(|leaf_branch_name| leaf_branch_name.as_str().to_string())
-                .collect()
-        };
-        if !missing_leaf_branches.is_empty() {
-            self.sync_manager
-                .object_manager
-                .get_or_load(id, storage, &missing_leaf_branches)?;
-        }
-
-        let object = self.sync_manager.object_manager.get(id)?;
-        let mut resolved: Option<ResolvedWriteHead> = None;
-        for (leaf_branch_name, head_id) in leaf_heads {
-            let Some(commit) = object
-                .branches
-                .get(&leaf_branch_name)
-                .and_then(|object_manager_branch| object_manager_branch.commits.get(&head_id))
-            else {
-                continue;
-            };
-
-            let should_replace = match &resolved {
-                Some(current) => {
-                    (commit.timestamp, head_id) > (current.commit.timestamp, current.commit_id)
-                }
-                None => true,
-            };
-            if should_replace {
-                resolved = Some(ResolvedWriteHead {
-                    commit_id: head_id,
-                    commit: commit.clone(),
-                });
-            }
-        }
-
-        resolved
+            .resolve_latest_visible_tip(id, branch_name, storage)
+            .ok()
+            .flatten()
+            .map(|(_, commit_id, commit)| ResolvedWriteHead { commit_id, commit })
     }
 
     fn write_parents_on_branch<H: Storage>(
@@ -142,41 +65,10 @@ impl QueryManager {
         branch: &str,
     ) -> Result<Vec<CommitId>, QueryError> {
         let branch_name = self.resolve_branch_name(branch);
-        let requested_branches = [branch_name.as_str().to_string()];
-        if self
-            .sync_manager
+        self.sync_manager
             .object_manager
-            .get_or_load(id, storage, &requested_branches)
-            .is_none()
-        {
-            return Err(QueryError::ObjectNotFound(id));
-        }
-
-        if let Ok(tips) = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, branch_name)
-        {
-            return Ok(tips.iter().copied().collect());
-        }
-
-        let composed_branch =
-            ComposedBranchName::parse(&branch_name).ok_or(QueryError::ObjectNotFound(id))?;
-        let leaf_heads = self
-            .sync_manager
-            .object_manager
-            .get_leaf_head_ids_for_prefix(id, &composed_branch.prefix(), storage)
-            .map_err(|_| QueryError::ObjectNotFound(id))?;
-
-        let mut parents: Vec<_> = leaf_heads
-            .into_iter()
-            .filter_map(|(leaf_branch_name, head_id)| {
-                (leaf_branch_name != branch_name).then_some(head_id)
-            })
-            .collect();
-        parents.sort();
-        parents.dedup();
-        Ok(parents)
+            .resolve_visible_parent_ids(id, branch_name, storage)
+            .map_err(|_| QueryError::ObjectNotFound(id))
     }
 
     fn prepare_update_write<H: Storage>(
@@ -355,7 +247,6 @@ impl QueryManager {
         id: ObjectId,
         branches: &[String],
     ) -> Option<(String, String, Vec<u8>, CommitId)> {
-        let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
         let branch_refs: Vec<QueryBranchRef> = branches
             .iter()
             .map(|branch| self.resolve_query_branch_ref(branch))
@@ -368,7 +259,6 @@ impl QueryManager {
         let mut schema_warnings = SchemaWarningAccumulator::default();
         let mut transform_context = RowTransformContext {
             table: &table,
-            branch_schema_map: &branch_schema_map,
             schema_context: &self.schema_context,
             schema_warnings: &mut schema_warnings,
         };
@@ -798,7 +688,6 @@ impl QueryManager {
         auth_schema: &Schema,
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> bool {
-        let source_branch_schema_map = self.branch_schema_map.clone();
         self.evaluate_authorization_policy(
             storage,
             AuthorizationPolicyRequest {
@@ -810,7 +699,6 @@ impl QueryManager {
                 session,
                 auth_schema,
                 auth_context,
-                source_branch_schema_map: &source_branch_schema_map,
                 operation,
             },
         )
@@ -954,7 +842,6 @@ impl QueryManager {
         let storage_ref: &dyn Storage = storage;
         let om = &mut self.sync_manager.object_manager;
         let requested_branches = vec![QueryBranchRef::from_branch_name(branch_name)];
-        let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
         let schema_context = self.schema_context.clone();
         let mut schema_warnings = SchemaWarningAccumulator::default();
         let mut row_loader =
@@ -967,7 +854,6 @@ impl QueryManager {
                 let table = obj.metadata.get(MetadataKey::Table.as_str())?.clone();
                 let mut transform_context = RowTransformContext {
                     table: &table,
-                    branch_schema_map: &branch_schema_map,
                     schema_context: &schema_context,
                     schema_warnings: &mut schema_warnings,
                 };

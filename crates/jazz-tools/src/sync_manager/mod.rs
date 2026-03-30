@@ -5,6 +5,7 @@ use crate::object::{BranchName, ObjectId};
 use crate::object_manager::ObjectManager;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
+use crate::query_manager::types::ComposedBranchName;
 use crate::storage::Storage;
 
 // Module declarations
@@ -98,11 +99,7 @@ impl Default for SyncManager {
 
 impl SyncManager {
     fn normalize_branch_name(branch_name: BranchName) -> Option<BranchName> {
-        ObjectManager::normalize_loaded_branch_name_for_sync(branch_name)
-    }
-
-    fn display_branch_name(branch_name: BranchName) -> BranchName {
-        ObjectManager::display_branch_name_for_sync(branch_name)
+        ComposedBranchName::parse(&branch_name).map(|_| branch_name)
     }
 
     pub fn new() -> Self {

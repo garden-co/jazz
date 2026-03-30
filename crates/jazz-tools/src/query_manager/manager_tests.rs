@@ -8354,8 +8354,6 @@ fn handle_object_update_in_server_mode_checks_hard_delete_on_update_branch() {
     let branch =
         ComposedBranchName::new("dev", schema_hash, "main", BatchId::nil()).to_branch_name();
 
-    qm.branch_schema_map
-        .insert(branch.as_str().to_string(), schema_hash);
     qm.known_schemas = Arc::new(HashMap::from([(schema_hash, schema)]));
 
     let row_id = ObjectId::new();

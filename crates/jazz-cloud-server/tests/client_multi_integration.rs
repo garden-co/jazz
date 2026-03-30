@@ -349,11 +349,17 @@ async fn wait_for_todos_count_on_disk(
             && let Ok(storage) = FjallStorage::open(&db_path, 64 * 1024 * 1024)
         {
             let branches = storage
-                .load_table_prefix_branches("todos", BranchName::new(prefix.branch_prefix()))
+                .load_table_prefix_batch_keys("todos", BranchName::new(prefix.branch_prefix()))
                 .unwrap_or_default();
             let mut row_ids = HashSet::new();
             for branch in &branches {
-                row_ids.extend(storage.index_scan_all("todos", "_id", branch));
+                row_ids.extend(storage.index_scan_all(
+                    "todos",
+                    "_id",
+                    &jazz_tools::query_manager::types::QueryBranchRef::from_batch_branch_key(
+                        *branch,
+                    ),
+                ));
             }
             let mut materialized = 0usize;
             for row_id in row_ids {
@@ -364,7 +370,12 @@ async fn wait_for_todos_count_on_disk(
                     .is_some();
                 let has_content = branches.iter().any(|branch| {
                     storage
-                        .load_branch(row_id, branch)
+                        .load_branch(
+                            row_id,
+                            &jazz_tools::query_manager::types::QueryBranchRef::from_batch_branch_key(
+                                *branch,
+                            ),
+                        )
                         .ok()
                         .flatten()
                         .map(|loaded| {

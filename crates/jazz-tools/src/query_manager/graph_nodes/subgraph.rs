@@ -4,12 +4,9 @@
 //! multiple times with different parameter bindings. Each instantiation creates
 //! a SubgraphInstance with its own state.
 
-use crate::object::BranchName;
 use crate::query_manager::graph::QueryGraph;
 use crate::query_manager::query::{Query, QueryBuilder};
-use crate::query_manager::types::{
-    BatchBranchKey, ComposedBranchName, QueryBranchRef, RowDescriptor, Schema, Value,
-};
+use crate::query_manager::types::{BatchBranchKey, QueryBranchRef, RowDescriptor, Schema, Value};
 use crate::schema_manager::SchemaContext;
 use crate::storage::Storage;
 
@@ -34,43 +31,28 @@ pub struct SubgraphTemplate {
 }
 
 impl SubgraphTemplate {
-    fn default_branch_names(&self, storage: Option<&dyn Storage>) -> Vec<String> {
-        let Some(storage) = storage else {
-            return self
-                .schema_context
-                .all_branch_names()
-                .into_iter()
-                .map(|branch| branch.as_str().to_string())
-                .collect();
-        };
-
-        let mut branch_keys = Vec::new();
-        for branch_name in self.schema_context.all_branch_names() {
-            let Some(composed_branch) = ComposedBranchName::parse(&branch_name) else {
-                branch_keys.push(BatchBranchKey::from_branch_name(branch_name));
-                continue;
-            };
-
-            let prefix = BranchName::new(composed_branch.prefix().branch_prefix());
-            match storage.load_table_prefix_batch_keys(self.base_query.table.as_str(), prefix) {
-                Ok(mut prefix_branches) if !prefix_branches.is_empty() => {
-                    branch_keys.append(&mut prefix_branches);
-                }
-                _ => branch_keys.push(BatchBranchKey::from_branch_name(branch_name)),
-            }
-        }
-
-        branch_keys.sort_by(|left, right| {
-            left.prefix_name()
-                .as_str()
-                .cmp(right.prefix_name().as_str())
-                .then_with(|| left.batch_id().as_bytes().cmp(right.batch_id().as_bytes()))
-        });
-        branch_keys.dedup();
-        branch_keys
+    fn default_branches(&self, storage: Option<&dyn Storage>) -> Vec<QueryBranchRef> {
+        let seed_keys: Vec<_> = self
+            .schema_context
+            .all_branch_names()
             .into_iter()
-            .map(|branch_key| branch_key.branch_name().as_str().to_string())
-            .collect()
+            .map(BatchBranchKey::from_branch_name)
+            .collect();
+
+        match storage.and_then(|storage| {
+            storage
+                .resolve_active_table_batch_keys(self.base_query.table.as_str(), &seed_keys)
+                .ok()
+        }) {
+            Some(branch_keys) => branch_keys
+                .into_iter()
+                .map(QueryBranchRef::from_batch_branch_key)
+                .collect(),
+            None => seed_keys
+                .into_iter()
+                .map(QueryBranchRef::from_batch_branch_key)
+                .collect(),
+        }
     }
 
     /// Create a new subgraph template.
@@ -109,7 +91,12 @@ impl SubgraphTemplate {
         // Build query with correlation filter
         let mut query_builder = QueryBuilder::new(self.base_query.table);
         if self.base_query.branches.is_empty() {
-            query_builder = query_builder.branches_owned(self.default_branch_names(storage));
+            query_builder = query_builder.branches_owned(
+                self.default_branches(storage)
+                    .into_iter()
+                    .map(|branch| branch.as_str().to_string())
+                    .collect(),
+            );
         } else {
             query_builder = query_builder.branches_owned(self.base_query.branches.clone());
         }

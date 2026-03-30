@@ -23,9 +23,9 @@ use super::query::Query;
 use super::server_queries::RowTransformContext;
 use super::session::Session;
 use super::types::{
-    BatchBranchKey, BatchId, ComposedBranchName, LoadedRow, OrderedRowDelta, QueryBranchRef, Row,
-    RowDelta, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, TableSchema,
-    TupleProvenance, Value, build_ordered_delta_with_post_ids,
+    BatchBranchKey, BatchId, BranchPrefixName, ComposedBranchName, LoadedRow, OrderedRowDelta,
+    QueryBranchRef, Row, RowDelta, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies,
+    TableSchema, TupleProvenance, Value, build_ordered_delta_with_post_ids,
 };
 
 /// Error types for QueryManager operations.
@@ -372,10 +372,6 @@ pub struct QueryManager {
     /// Enables lens transforms for rows from old schema branches.
     pub(super) schema_context: SchemaContext,
 
-    /// Maps branch name to schema hash (derived from schema_context).
-    /// Used to determine which schema a branch uses.
-    pub(super) branch_schema_map: HashMap<String, SchemaHash>,
-
     /// Buffered row updates for unknown schema branches.
     /// These are retried when new schemas activate via try_activate_pending().
     pub(super) pending_row_updates: Vec<AllObjectUpdate>,
@@ -388,17 +384,6 @@ pub struct QueryManager {
 }
 
 impl QueryManager {
-    pub(super) fn record_branch_schema_mapping(
-        branch_schema_map: &mut HashMap<String, SchemaHash>,
-        branch_name: BranchName,
-        schema_hash: SchemaHash,
-    ) {
-        branch_schema_map.insert(branch_name.as_str().to_string(), schema_hash);
-        if let Some(composed) = ComposedBranchName::parse(&branch_name) {
-            branch_schema_map.insert(composed.prefix().branch_prefix(), schema_hash);
-        }
-    }
-
     pub(super) fn branch_names_for_query_branches(branches: &[QueryBranchRef]) -> Vec<String> {
         branches
             .iter()
@@ -429,6 +414,14 @@ impl QueryManager {
         }
 
         branches
+    }
+
+    pub(super) fn schema_hash_for_branch_name(branch_name: &BranchName) -> Option<SchemaHash> {
+        ComposedBranchName::parse(branch_name).map(|composed| composed.schema_hash)
+    }
+
+    pub(super) fn schema_hash_for_prefix_name(prefix_name: &BranchName) -> Option<SchemaHash> {
+        BranchPrefixName::parse(prefix_name).map(|prefix| prefix.schema_hash)
     }
 
     pub(super) fn resolve_query_branch_ref_for_context(
@@ -534,7 +527,6 @@ impl QueryManager {
             active_policy_checks: HashMap::new(),
             server_subscriptions: HashMap::new(),
             schema_context: SchemaContext::empty(),
-            branch_schema_map: HashMap::new(),
             pending_row_updates: Vec::new(),
             known_schemas: Arc::new(HashMap::new()),
         }
@@ -561,14 +553,6 @@ impl QueryManager {
         self.schema = Arc::new(schema.clone());
         self.authorization_schema = Some(Arc::new(schema.clone()));
         self.authorization_schema_required = true;
-
-        // Update branch -> schema hash map
-        let branch = self.schema_context.branch_name();
-        Self::record_branch_schema_mapping(
-            &mut self.branch_schema_map,
-            branch,
-            self.schema_context.current_hash,
-        );
     }
 
     pub fn set_authorization_schema(&mut self, schema: Schema) {
@@ -593,16 +577,10 @@ impl QueryManager {
             return;
         }
 
-        // Build branch name for this schema
-        let branch = self.schema_context.branch_name_for_hash(hash);
-
         // Add to live_schemas (without lens - caller should register lens separately)
         self.schema_context
             .live_schemas
             .insert(hash, schema.clone());
-
-        // Update branch -> schema hash map
-        Self::record_branch_schema_mapping(&mut self.branch_schema_map, branch, hash);
 
         // Mark subscriptions for recompile to pick up new branch
         self.mark_subscriptions_for_recompile();
@@ -620,9 +598,7 @@ impl QueryManager {
             // New schemas activated - register branches and mark for recompile
             for hash in activated {
                 if let Some(_schema) = self.schema_context.live_schemas.get(&hash).cloned() {
-                    let branch = self.schema_context.branch_name_for_hash(hash);
-
-                    Self::record_branch_schema_mapping(&mut self.branch_schema_map, branch, hash);
+                    let _branch = self.schema_context.branch_name_for_hash(hash);
                 }
             }
             self.mark_subscriptions_for_recompile();
@@ -652,32 +628,13 @@ impl QueryManager {
         table: &str,
         schema_context: &SchemaContext,
     ) -> Result<Vec<QueryBranchRef>, StorageError> {
-        let mut branch_keys = Vec::new();
-
-        for branch_name in schema_context.all_branch_names() {
-            let Some(composed_branch) = ComposedBranchName::parse(&branch_name) else {
-                branch_keys.push(BatchBranchKey::from_branch_name(branch_name));
-                continue;
-            };
-
-            let prefix = BranchName::new(composed_branch.prefix().branch_prefix());
-            let mut prefix_branches = storage.load_table_prefix_batch_keys(table, prefix)?;
-
-            if prefix_branches.is_empty() {
-                branch_keys.push(BatchBranchKey::from_branch_name(branch_name));
-            } else {
-                branch_keys.append(&mut prefix_branches);
-            }
-        }
-
-        branch_keys.sort_by(|left, right| {
-            left.prefix_name()
-                .as_str()
-                .cmp(right.prefix_name().as_str())
-                .then_with(|| left.batch_id().as_bytes().cmp(right.batch_id().as_bytes()))
-        });
-        branch_keys.dedup();
-        Ok(branch_keys
+        let seed_keys: Vec<_> = schema_context
+            .all_branch_names()
+            .into_iter()
+            .map(BatchBranchKey::from_branch_name)
+            .collect();
+        Ok(storage
+            .resolve_active_table_batch_keys(table, &seed_keys)?
             .into_iter()
             .map(QueryBranchRef::from_batch_branch_key)
             .collect())
@@ -1047,7 +1004,6 @@ impl QueryManager {
         }
         let storage_ref: &dyn Storage = storage;
         let schema_context = self.schema_context.clone();
-        let branch_schema_map = self.branch_schema_map.clone();
         let subscription_ids: Vec<_> = self.subscriptions.keys().copied().collect();
 
         for sub_id in subscription_ids {
@@ -1070,7 +1026,6 @@ impl QueryManager {
                 let om = &mut self.sync_manager.object_manager;
                 let mut transform_context = RowTransformContext {
                     table: &table,
-                    branch_schema_map: &branch_schema_map,
                     schema_context: &schema_context,
                     schema_warnings: &mut schema_warnings,
                 };
@@ -1144,7 +1099,6 @@ impl QueryManager {
                     storage_ref,
                     &subscription.graph,
                     &schema_context,
-                    &branch_schema_map,
                     subscription.session.as_ref(),
                 );
                 let visible_rows_by_id: HashMap<_, _> = visible_rows
@@ -1422,43 +1376,16 @@ impl QueryManager {
         let branch = resolved_branch_name.as_str();
 
         // Look up the correct schema for this branch
-        let schema_hash = match self.branch_schema_map.get(branch) {
-            Some(&hash) => hash,
+        let schema_hash = match Self::schema_hash_for_branch_name(&resolved_branch_name) {
+            Some(hash) => hash,
             None => {
-                // Unknown branch - try lazy activation from known_schemas
-                let branch_name = BranchName::new(branch);
-                if let Some(composed) = ComposedBranchName::parse(&branch_name) {
-                    // Search known_schemas for matching short hash
-                    if let Some(full_hash) = self.find_schema_by_short_hash(&composed.schema_hash) {
-                        // Activate this branch/schema combination
-                        Self::record_branch_schema_mapping(
-                            &mut self.branch_schema_map,
-                            branch_name,
-                            full_hash,
-                        );
-                        full_hash
-                    } else {
-                        let schema_short = composed.schema_hash.short();
-                        tracing::error!(
-                            object_id = %update.object_id,
-                            branch = %branch,
-                            schema_hash = %schema_short,
-                            "buffering row update for unknown schema hash; schema not yet known"
-                        );
-                        // Schema not known yet - buffer for retry
-                        self.pending_row_updates.push(update);
-                        return;
-                    }
-                } else {
-                    tracing::error!(
-                        object_id = %update.object_id,
-                        branch = %branch,
-                        "buffering row update for unknown branch; cannot parse schema hash"
-                    );
-                    // Can't parse branch - buffer for retry
-                    self.pending_row_updates.push(update);
-                    return;
-                }
+                tracing::error!(
+                    object_id = %update.object_id,
+                    branch = %branch,
+                    "buffering row update for unknown branch; cannot parse schema hash"
+                );
+                self.pending_row_updates.push(update);
+                return;
             }
         };
 

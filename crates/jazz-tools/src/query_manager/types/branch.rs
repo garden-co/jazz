@@ -31,6 +31,16 @@ impl SchemaHash {
         hex::encode(&self.0[..6])
     }
 
+    pub fn parse_hex(hex_str: &str) -> Option<Self> {
+        let bytes = hex::decode(hex_str).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(Self(arr))
+    }
+
     /// Convert to an ObjectId for storage in the catalogue.
     ///
     /// Uses UUIDv5 with DNS namespace over the hash bytes.
@@ -378,12 +388,7 @@ impl BranchPrefixName {
     }
 
     pub fn branch_prefix(&self) -> String {
-        format!(
-            "{}-{}-{}",
-            self.env,
-            self.schema_hash.short(),
-            self.user_branch
-        )
+        format!("{}-{}-{}", self.env, self.schema_hash, self.user_branch)
     }
 
     /// Prefix shared by all batches: `{env}-{schemaHash}-{userBranch}-`.
@@ -393,6 +398,23 @@ impl BranchPrefixName {
 
     pub fn with_batch_id(&self, batch_id: BatchId) -> ComposedBranchName {
         ComposedBranchName::new(&self.env, self.schema_hash, &self.user_branch, batch_id)
+    }
+
+    pub fn parse(name: &BranchName) -> Option<Self> {
+        let s = name.as_str();
+        let parts: Vec<&str> = s.splitn(3, '-').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+
+        let env = parts[0];
+        let schema_hash = SchemaHash::parse_hex(parts[1])?;
+        let user_branch = parts[2];
+        if user_branch.is_empty() {
+            return None;
+        }
+
+        Some(Self::new(env, schema_hash, user_branch))
     }
 }
 
@@ -526,8 +548,8 @@ impl std::fmt::Display for QueryBranchRef {
 }
 
 /// A branch name composed of environment, schema hash, user branch, and batch id.
-/// Format: `{env}-{schemaHash}-{userBranch}-{batchId}`
-/// Example: `dev-a1b2c3d4e5f6-main-b018d6f2...`
+/// Format: `{env}-{fullSchemaHash}-{userBranch}-{batchId}`
+/// Example: `dev-a1b2c3d4e5f6...-main-b018d6f2...`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ComposedBranchName {
     pub env: String,
@@ -568,39 +590,14 @@ impl ComposedBranchName {
     /// Parse a BranchName back into its components.
     /// Returns None if the format doesn't match.
     pub fn parse(name: &BranchName) -> Option<Self> {
-        let s = name.as_str();
-        let parts: Vec<&str> = s.splitn(3, '-').collect();
-        if parts.len() != 3 {
-            return None;
-        }
-
-        let env = parts[0].to_string();
-        let hash_str = parts[1];
-        let rest = parts[2];
-
-        // Validate hash is 12 hex chars (6 bytes)
-        if hash_str.len() != 12 || !hash_str.chars().all(|c| c.is_ascii_hexdigit()) {
-            return None;
-        }
-
-        // We can't fully reconstruct the hash from just 12 chars,
-        // so we store a partial hash. For matching purposes, we use a zeroed hash
-        // with the short portion filled in.
-        let mut hash_bytes = [0u8; 32];
-        if let Ok(bytes) = hex_decode(hash_str) {
-            hash_bytes[..6].copy_from_slice(&bytes);
-        }
-
-        let (user_branch, batch_segment) = rest.rsplit_once('-')?;
-        if user_branch.is_empty() {
-            return None;
-        }
+        let (prefix, batch_segment) = name.as_str().rsplit_once('-')?;
+        let prefix = BranchPrefixName::parse(&BranchName::new(prefix))?;
         let batch_id = BatchId::parse_segment(batch_segment)?;
 
         Some(Self {
-            env,
-            schema_hash: SchemaHash::from_bytes(hash_bytes),
-            user_branch: user_branch.to_string(),
+            env: prefix.env,
+            schema_hash: prefix.schema_hash,
+            user_branch: prefix.user_branch,
             batch_id,
         })
     }
