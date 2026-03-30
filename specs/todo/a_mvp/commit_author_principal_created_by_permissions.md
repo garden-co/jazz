@@ -70,7 +70,7 @@ Commit authorship must use the same stable principal that permissions already us
 
 ### 3. Creator provenance is preserved explicitly on row commits
 
-Changing `Commit.author` is necessary, but it is not sufficient for stable `_created_by` semantics once a row has many later commits or truncated history.
+Changing `Commit.author` is necessary, but it is not sufficient for stable created-by semantics once a row has many later commits or truncated history.
 
 For row-object commits, MVP stores creator provenance in commit metadata and carries it forward:
 
@@ -413,7 +413,7 @@ Add focused coverage for:
 
 ## Follow-ups (Later)
 
-- Query-time edit metadata columns (`_created_by`, `_updated_by`, `_created_at`, `_updated_at`)
+- possible future first-class provenance fields beyond the magic-column surface, if we later want schema/catalog-visible edit metadata
 - richer provenance inspection in reads/devtools
 - backwards-compatible migration strategy for old commit-author encodings if needed
 - possible reuse of a shared `PrincipalId` type across more of the auth/session stack
