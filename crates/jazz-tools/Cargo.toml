@@ -22,11 +22,11 @@ rocksdb = ["dep:rocksdb"]
 runtime-tokio = ["dep:tokio"]
 transport = []
 transport-http = ["transport", "dep:reqwest", "dep:base64", "dep:bytes"]
-client = ["runtime-tokio", "transport-http", "rocksdb", "dep:thiserror", "dep:tokio"]
+client = ["runtime-tokio", "transport-http", "fjall", "dep:thiserror", "dep:tokio"]
 cli = [
   "runtime-tokio",
   "transport",
-  "rocksdb",
+  "fjall",
   "dep:tokio",
   "dep:axum",
   "dep:clap",

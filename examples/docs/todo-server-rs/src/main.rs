@@ -110,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         schema,
         server_url,
         data_dir: PathBuf::from(data_dir),
-        storage: ClientStorage::RocksDB,
+        storage: ClientStorage::Persistent,
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,

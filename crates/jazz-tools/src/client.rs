@@ -128,7 +128,7 @@ impl JazzClient {
         let declared_schema = context.schema.clone();
         let default_session = default_session_from_context(&context);
         let client_id = match context.storage {
-            ClientStorage::RocksDB => load_or_create_persistent_client_id(&context)?,
+            ClientStorage::Persistent => load_or_create_persistent_client_id(&context)?,
             ClientStorage::Memory => context.client_id.unwrap_or_default(),
         };
 
@@ -147,7 +147,7 @@ impl JazzClient {
         };
 
         let storage: DynStorage = match context.storage {
-            ClientStorage::RocksDB => Box::new(open_rocksdb_storage(&context.data_dir).await?),
+            ClientStorage::Persistent => open_persistent_storage(&context.data_dir).await?,
             ClientStorage::Memory => Box::new(MemoryStorage::new()),
         };
 
@@ -1120,6 +1120,17 @@ fn load_or_create_persistent_client_id(context: &AppContext) -> Result<ClientId>
     };
 
     Ok(client_id)
+}
+
+async fn open_persistent_storage(data_dir: &std::path::Path) -> Result<DynStorage> {
+    #[cfg(feature = "rocksdb")]
+    {
+        Ok(Box::new(open_rocksdb_storage(data_dir).await?))
+    }
+    #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+    {
+        Ok(Box::new(open_fjall_storage(data_dir).await?))
+    }
 }
 
 #[cfg(feature = "rocksdb")]
