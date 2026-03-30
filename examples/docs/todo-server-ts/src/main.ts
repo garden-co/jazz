@@ -61,6 +61,15 @@ export interface RunningServer extends TodoServer {
 export async function createServer(dataPath?: string): Promise<TodoServer> {
   const dbPath = dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
   const appId = process.env.JAZZ_APP_ID ?? "todo-server-ts";
+  const serverUrl = process.env.JAZZ_SERVER_URL?.trim();
+  const backendSecret = process.env.JAZZ_BACKEND_SECRET?.trim();
+  const adminSecret = process.env.JAZZ_ADMIN_SECRET?.trim();
+
+  if (!serverUrl || !backendSecret) {
+    throw new Error(
+      "JAZZ_SERVER_URL and JAZZ_BACKEND_SECRET are required for the upstream-backed server example.",
+    );
+  }
 
   // #region context-setup-ts-backend
   const context = createJazzContext({
@@ -68,10 +77,13 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
     app: schemaApp,
     permissions,
     driver: { type: "persistent", dataPath: dbPath },
+    serverUrl,
+    backendSecret,
+    adminSecret,
     env: "dev",
     userBranch: "main",
   });
-  const db = context.db();
+  const db = context.asBackend();
   // #endregion context-setup-ts-backend
 
   // Create Express app

@@ -77,7 +77,8 @@ Create `src/index.ts`. This quickstart puts everything in one file; a real app w
 - Runtime storage path controls where local server state persists.
 
 Each route handler calls `context.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
-For the unscoped `context.db()` helper and explicit backend mode, see [Server Setup](/docs/reference/server-setup).
+For server-owned work, use `context.asBackend()`. [Server Setup](/docs/reference/server-setup)
+covers that pattern in more detail.
 
 <Accordions type="single">
   <Accordion title="What does the driver do?">
