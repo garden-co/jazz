@@ -10,7 +10,7 @@ use std::ops::Bound;
 use std::path::Path;
 
 use rocksdb::{
-    BlockBasedOptions, Cache, IteratorMode, Options, Transaction, TransactionDB,
+    BlockBasedOptions, Cache, IteratorMode, Options, ReadOptions, Transaction, TransactionDB,
     TransactionDBOptions,
 };
 
@@ -72,6 +72,21 @@ impl RocksDBStorage {
         f(inner)
     }
 
+    /// Compute the lexicographic successor of a byte prefix for use as an
+    /// exclusive upper bound. Returns `None` when the prefix is all `0xFF`
+    /// bytes (practically never for our key scheme).
+    fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
+        let mut bound = prefix.to_vec();
+        while let Some(last) = bound.last_mut() {
+            if *last < 0xFF {
+                *last += 1;
+                return Some(bound);
+            }
+            bound.pop();
+        }
+        None
+    }
+
     // ---- read helpers (direct DB, no transaction) ----
 
     fn get_from_db(db: &TransactionDB, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
@@ -84,17 +99,18 @@ impl RocksDBStorage {
         prefix: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
         let prefix_bytes = prefix.as_bytes();
+        let mut read_opts = ReadOptions::default();
+        if let Some(ub) = Self::prefix_upper_bound(prefix_bytes) {
+            read_opts.set_iterate_upper_bound(ub);
+        }
         let mut out = Vec::new();
-        let iter = db.iterator(IteratorMode::From(
-            prefix_bytes,
-            rocksdb::Direction::Forward,
-        ));
+        let iter = db.iterator_opt(
+            IteratorMode::From(prefix_bytes, rocksdb::Direction::Forward),
+            read_opts,
+        );
         for item in iter {
             let (key, value) =
                 item.map_err(|e| StorageError::IoError(format!("rocksdb iter: {e}")))?;
-            if !key.starts_with(prefix_bytes) {
-                break;
-            }
             let key_str = String::from_utf8(key.to_vec())
                 .map_err(|e| StorageError::IoError(format!("rocksdb invalid key utf8: {e}")))?;
             out.push((key_str, value.to_vec()));
@@ -107,16 +123,17 @@ impl RocksDBStorage {
         prefix: &str,
     ) -> Result<Vec<String>, StorageError> {
         let prefix_bytes = prefix.as_bytes();
+        let mut read_opts = ReadOptions::default();
+        if let Some(ub) = Self::prefix_upper_bound(prefix_bytes) {
+            read_opts.set_iterate_upper_bound(ub);
+        }
         let mut out = Vec::new();
-        let iter = db.iterator(IteratorMode::From(
-            prefix_bytes,
-            rocksdb::Direction::Forward,
-        ));
+        let iter = db.iterator_opt(
+            IteratorMode::From(prefix_bytes, rocksdb::Direction::Forward),
+            read_opts,
+        );
         for item in iter {
             let (key, _) = item.map_err(|e| StorageError::IoError(format!("rocksdb iter: {e}")))?;
-            if !key.starts_with(prefix_bytes) {
-                break;
-            }
             let key_str = String::from_utf8(key.to_vec())
                 .map_err(|e| StorageError::IoError(format!("rocksdb invalid key utf8: {e}")))?;
             out.push(key_str);
@@ -130,14 +147,15 @@ impl RocksDBStorage {
         end: &str,
     ) -> Result<Vec<String>, StorageError> {
         let start_bytes = start.as_bytes();
-        let end_bytes = end.as_bytes();
+        let mut read_opts = ReadOptions::default();
+        read_opts.set_iterate_upper_bound(end.as_bytes().to_vec());
         let mut out = Vec::new();
-        let iter = db.iterator(IteratorMode::From(start_bytes, rocksdb::Direction::Forward));
+        let iter = db.iterator_opt(
+            IteratorMode::From(start_bytes, rocksdb::Direction::Forward),
+            read_opts,
+        );
         for item in iter {
             let (key, _) = item.map_err(|e| StorageError::IoError(format!("rocksdb iter: {e}")))?;
-            if key.as_ref() >= end_bytes {
-                break;
-            }
             let key_str = String::from_utf8(key.to_vec())
                 .map_err(|e| StorageError::IoError(format!("rocksdb invalid key utf8: {e}")))?;
             out.push(key_str);
