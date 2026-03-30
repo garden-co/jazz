@@ -968,9 +968,6 @@ async fn select_policies_scalar_comparators_filter_rows() {
 /// alice ──insert/update reviewer_id──► server ──null policy checks──► bob EdgeServer query
 /// ```
 #[tokio::test]
-#[should_panic(
-    expected = "policy eq/null comparisons are evaluated like byte equality instead of null semantics"
-)]
 async fn null_predicates_on_nullable_columns_gate_reads_and_writes() {
     let schema = SchemaBuilder::new()
         .table(make_review_schema(
