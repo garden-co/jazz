@@ -29,6 +29,14 @@
 - [**storage-limits-and-eviction**](todo/ideas/1_mvp/storage-limits-and-eviction.md) — Bounded storage with LRU eviction of cold data on clients and edge servers, with lazy re-fetch from upstream.
 - [**sync-protocol-reliability**](todo/ideas/1_mvp/sync-protocol-reliability.md) — Fix critical reliability gaps in the sync path and unify the transport layer across network sync (client-server), worker communication (main thread-worker), and peer replication (server-server).
 
+### Launch
+
+- [**concurrent-merge-notification**](todo/ideas/2_launch/concurrent-merge-notification.md) — Notify the client when a row has been overwritten by a concurrent write (LWW race). Currently merges happen silently — the user never knows their edit lost.
+
+### Later
+
+(empty)
+
 ## Projects
 
 - [**ordered-index-topk-query-path**](todo/projects/ordered-index-topk-query-path/)

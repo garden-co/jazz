@@ -1,10 +1,14 @@
-# Problem Statement: Sync Protocol Reliability & Unification
+# Problem Statement: Sync Protocol Reliability
 
 ## What's broken
 
-A local change can look successful to the user but silently fail to reach other devices. The sync path has six identified reliability gaps that compound each other:
+The current sync protocol was not designed with reliability as a first-class property. It works in the happy path but provides no guarantees when things go wrong — and in a distributed system, things always go wrong. The result: a local change can look successful to the user but silently fail to reach other devices.
 
-1. **Out-of-order payload arrival corrupts branch tips.** The sender topologically sorts commits (parents before children) within a single payload, but rapid writes produce separate payloads — one per async task/microtask. These payloads can arrive at the receiver out of order. The receiver's `receive_commit()` accepts a child commit without checking that its parents exist yet. When a parent hasn't arrived, `branch.tips.remove(parent)` is a no-op, so both the orphaned child and the late-arriving parent end up as separate tips. This corrupts the branch tip set: queries see phantom merge states, subscriptions emit spurious deltas, and downstream sync propagates the wrong frontier. The spec claims "topological sort ensures parent-before-child" (INV-S in `sync_manager.md`), but that invariant only holds within a single payload — the transport layer provides no cross-payload ordering guarantee.
+This is not a collection of bugs to patch. The gaps below are structural — symptoms of a protocol that lacks delivery confirmation, ordering guarantees, and loss detection. The project is a **protocol redesign** with reliability as a foundational goal.
+
+Five identified reliability gaps that compound each other:
+
+1. **Out-of-order payload arrival corrupts branch tips.** The sender topologically sorts commits (parents before children) within a single payload, but every write produces a Spawn (async task), so even consecutive writes generate separate payloads that race. These payloads can arrive at the receiver out of order. The receiver's `receive_commit()` accepts a child commit without checking that its parents exist yet. When a parent hasn't arrived, `branch.tips.remove(parent)` is a no-op, so both the orphaned child and the late-arriving parent end up as separate tips. This corrupts the branch tip set: queries see phantom merge states, subscriptions emit spurious deltas, and downstream sync propagates the wrong frontier. The spec claims "topological sort ensures parent-before-child" (INV-S in `sync_manager.md`), but that invariant only holds within a single payload — the transport layer provides no cross-payload ordering guarantee. **This is inherent to the write path** — every write spawns a task, so any sequence of writes can hit it under normal usage, not just explicitly parallel operations.
 
 2. **Outbox drained before delivery confirmation.** The client clears its outbox as soon as it hands messages to the transport — before the server acknowledges receipt. If the connection drops mid-flight, those messages are gone. The client believes they were sent; the server never saw them.
 
@@ -14,9 +18,17 @@ A local change can look successful to the user but silently fail to reach other 
 
 5. **Asymmetric reconnect recovery.** On reconnect, the client replays all active `QuerySubscription`s, which repairs the receive side (server re-sends scoped data). But the send side has no equivalent mechanism — any outbound messages lost before the disconnect stay lost. The client-to-server direction can silently diverge.
 
-6. **Data and control messages share a fragile path.** `ObjectUpdated`, `QuerySubscription`, `PersistenceAck`, and `Error` all flow through the same channel. A backlog of large data payloads can delay delivery of time-sensitive control messages (subscriptions, acks, errors), and a malformed payload in one type can potentially disrupt the entire stream.
+### Theoretical concern (to verify)
+
+- **Data and control messages share a fragile path.** `ObjectUpdated`, `QuerySubscription`, `PersistenceAck`, and `Error` all flow through the same channel. A backlog of large data payloads could delay delivery of time-sensitive control messages (subscriptions, acks, errors), and a malformed payload in one type could potentially disrupt the entire stream. No concrete incident has been observed — this is an architectural risk to validate during design.
+
+### Design constraint: transport-agnostic protocol
+
+Whatever reliability solution we build must work as the communication layer for **client↔worker** (postMessage) in addition to **client↔server** (HTTP/SSE). The protocol is the protocol regardless of transport — reliability guarantees must hold across all channels.
 
 ### Evidence
+
+- **Pre-production framework.** Jazz is not yet in production, so these gaps are identified through testing and code review rather than production incidents.
 
 - **Ignored regression test:** `subscription_reflects_final_state_after_rapid_bulk_updates` in `crates/jazz-tools/tests/subscribe_all_integration.rs` (line 459) is `#[ignore]` with explicit reference to these gaps. The test sends 500 rapid updates from alice and verifies bob's last subscription delta matches his snapshot query. It fails because out-of-order payload arrival corrupts the branch tip set (gap 1), causing the subscription stream to diverge from the snapshot.
 
@@ -34,9 +46,9 @@ A local change can look successful to the user but silently fail to reach other 
 
 ## Concrete examples
 
-### Example 1: Rapid updates corrupt branch tips
+### Example 1: Concurrent Spawns corrupt branch tips
 
-Alice edits a document title 500 times in quick succession. Each write produces a commit with a parent pointer to the previous one (C1 ← C2 ← ... ← C500). The sender topologically sorts within each payload, but the payloads themselves race. If payload containing C3 (parent: C2) arrives before the payload containing C2 (parent: C1), the server's `receive_commit()` accepts C3 anyway — `tips.remove(C2)` is a no-op since C2 hasn't arrived yet. When C2 finally arrives, it also becomes a tip. Now the branch has two tips {C2, C3} instead of {C3}. Bob's subscription sees this as a merge state, emitting spurious deltas. His snapshot query resolves to the correct final value (C500), but his subscription stream diverges from it.
+Alice's app spawns three related objects in parallel (e.g., a Project, a TaskList, and a first Task — each via a separate `Spawn` call). Each Spawn produces a commit sent in its own payload. The sender topologically sorts within each payload, but the payloads themselves race across the network. If the Task payload (parent: TaskList) arrives before the TaskList payload, the server's `receive_commit()` accepts the Task commit anyway — `tips.remove(TaskList)` is a no-op since TaskList hasn't arrived yet. When TaskList finally arrives, it also becomes a tip. Now the branch has two tips {TaskList, Task} instead of {Task}. Bob's subscription sees this as a merge state, emitting spurious deltas. This is normal app behavior — every write spawns a task, so any sequence of writes can trigger it.
 
 ### Example 2: Offline queue loss
 
