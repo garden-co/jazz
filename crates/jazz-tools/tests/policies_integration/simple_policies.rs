@@ -117,6 +117,37 @@ async fn delete_document(client: &JazzClient, document_id: ObjectId) {
     client.delete(document_id).await.expect("delete document");
 }
 
+async fn connect_ready_client(
+    server: &TestingServer,
+    schema: &Schema,
+    user_id: &str,
+    ready_table: &str,
+) -> JazzClient {
+    TestingClient::builder()
+        .with_server(server)
+        .with_schema(schema.clone())
+        .with_user_id(user_id)
+        .ready_on(ready_table, READY_TIMEOUT)
+        .connect()
+        .await
+}
+
+async fn connect_ready_user(
+    server: &TestingServer,
+    schema: &Schema,
+    user_id: &str,
+    ready_table: &str,
+) -> JazzClient {
+    TestingClient::builder()
+        .with_server(server)
+        .with_schema(schema.clone())
+        .with_user_id(user_id)
+        .as_user()
+        .ready_on(ready_table, READY_TIMEOUT)
+        .connect()
+        .await
+}
+
 fn make_priority_schema(table_name: &str, policies: TablePolicies) -> TableSchemaBuilder {
     TableSchema::builder(table_name)
         .column("title", ColumnType::Text)
@@ -160,6 +191,15 @@ fn status_values(title: &str, status: &str, archived: bool) -> Vec<Value> {
     ]
 }
 
+fn has_row(rows: &[(ObjectId, Vec<Value>)], row_id: ObjectId, expected: &[Value]) -> bool {
+    rows.iter()
+        .any(|(id, values)| *id == row_id && values.as_slice() == expected)
+}
+
+fn lacks_row(rows: &[(ObjectId, Vec<Value>)], row_id: ObjectId) -> bool {
+    rows.iter().all(|(id, _)| *id != row_id)
+}
+
 async fn start_alice_and_bob_server(schema: Schema) -> (TestingServer, JazzClient, JazzClient) {
     let server = TestingServer::builder()
         .with_schema(schema.clone())
@@ -172,23 +212,8 @@ async fn start_alice_and_bob_server(schema: Schema) -> (TestingServer, JazzClien
         .map(|table| table.as_str().to_string())
         .expect("schema must contain at least one table");
 
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice")
-        .as_user()
-        .ready_on(ready_table.clone(), READY_TIMEOUT)
-        .connect()
-        .await;
-
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("bob")
-        .as_user()
-        .ready_on(ready_table, READY_TIMEOUT)
-        .connect()
-        .await;
+    let alice = connect_ready_user(&server, &schema, "alice", &ready_table).await;
+    let bob = connect_ready_user(&server, &schema, "bob", &ready_table).await;
 
     (server, alice, bob)
 }
@@ -373,22 +398,20 @@ async fn select_policies_filter_out_archived_rows() {
         query,
         "bob only sees rows where archived=false",
         |rows| {
-            rows.iter()
-                .any(|(id, values)| {
-                    *id == active_id
-                        && *values == boolean_policy_document_values("alice", "active", false)
-                })
+            let active_values = boolean_policy_document_values("alice", "active", false);
+            (has_row(&rows, active_id, &active_values) && lacks_row(&rows, archived_id))
                 .then_some(rows)
-                .filter(|rows| rows.iter().all(|(id, _)| *id != archived_id))
         },
     )
     .await;
 
     assert_eq!(bob_rows.len(), 1);
-    assert!(bob_rows.iter().any(|(id, values)| {
-        *id == active_id && *values == boolean_policy_document_values("alice", "active", false)
-    }));
-    assert!(bob_rows.iter().all(|(id, _)| *id != archived_id));
+    assert!(has_row(
+        &bob_rows,
+        active_id,
+        &boolean_policy_document_values("alice", "active", false),
+    ));
+    assert!(lacks_row(&bob_rows, archived_id));
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
@@ -639,14 +662,7 @@ async fn archived_state_policies_gate_insert_update_and_delete() {
     // archived=true on the current row.
     delete_document(&bob, active_id).await;
 
-    let observer = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("observer")
-        .as_user()
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
+    let observer = connect_ready_user(&server, &schema, "observer", table_name).await;
 
     let observer_rows = wait_for_rows(
         &observer,
@@ -662,9 +678,11 @@ async fn archived_state_policies_gate_insert_update_and_delete() {
         },
     )
     .await;
-    assert!(observer_rows.iter().any(|(id, values)| {
-        *id == active_id && *values == boolean_policy_document_values("alice", "task", false)
-    }));
+    assert!(has_row(
+        &observer_rows,
+        active_id,
+        &boolean_policy_document_values("alice", "task", false),
+    ));
 
     // Alice's successful archive update is the causal barrier for bob's
     // earlier rejected delete: it can only apply if the incomplete row still
@@ -684,9 +702,11 @@ async fn archived_state_policies_gate_insert_update_and_delete() {
         },
     )
     .await;
-    assert!(observer_rows.iter().any(|(id, values)| {
-        *id == active_id && *values == boolean_policy_document_values("alice", "task", true)
-    }));
+    assert!(has_row(
+        &observer_rows,
+        active_id,
+        &boolean_policy_document_values("alice", "task", true),
+    ));
 
     // This optimistic local update should be rejected because UPDATE USING is
     // checked against the old row, which is already archived=true.
@@ -1707,47 +1727,22 @@ async fn read_and_write_policies_remain_independent() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("admin")
-        .ready_on("documents_read_only", READY_TIMEOUT)
-        .connect()
-        .await;
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice")
-        .as_user()
-        .ready_on("documents_read_only", READY_TIMEOUT)
-        .connect()
-        .await;
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("bob")
-        .as_user()
-        .ready_on("documents_read_only", READY_TIMEOUT)
-        .connect()
-        .await;
+    let admin = connect_ready_client(&server, &schema, "admin", "documents_read_only").await;
+    let alice = connect_ready_user(&server, &schema, "alice", "documents_read_only").await;
+    let bob = connect_ready_user(&server, &schema, "bob", "documents_read_only").await;
 
     let read_only_id =
         seed_document(&admin, "documents_read_only", "owner", "original", false).await;
     let write_only_id =
         seed_document(&alice, "documents_write_only", "alice", "hidden", true).await;
+    let read_only_values = boolean_policy_document_values("owner", "original", false);
+    let revealed_write_only_values = boolean_policy_document_values("alice", "hidden", false);
 
     let read_only_rows = wait_for_rows(
         &bob,
         QueryBuilder::new("documents_read_only").build(),
         "read-only row is visible",
-        |rows| {
-            rows.iter()
-                .any(|(id, values)| {
-                    *id == read_only_id
-                        && *values == boolean_policy_document_values("owner", "original", false)
-                })
-                .then_some(rows)
-        },
+        |rows| has_row(&rows, read_only_id, &read_only_values).then_some(rows),
     )
     .await;
     assert_eq!(read_only_rows.len(), 1);
@@ -1757,28 +1752,13 @@ async fn read_and_write_policies_remain_independent() {
         &admin,
         QueryBuilder::new("documents_read_only").build(),
         "read access does not imply write access",
-        |rows| {
-            rows.iter()
-                .any(|(id, values)| {
-                    *id == read_only_id
-                        && *values == boolean_policy_document_values("owner", "original", false)
-                })
-                .then_some(rows)
-        },
+        |rows| has_row(&rows, read_only_id, &read_only_values).then_some(rows),
     )
     .await;
-    assert!(read_only_after.iter().all(|(id, values)| {
-        *id != read_only_id || *values == boolean_policy_document_values("owner", "original", false)
-    }));
+    assert!(has_row(&read_only_after, read_only_id, &read_only_values));
 
-    let alice_hidden_reader = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice")
-        .as_user()
-        .ready_on("documents_write_only", READY_TIMEOUT)
-        .connect()
-        .await;
+    let alice_hidden_reader =
+        connect_ready_user(&server, &schema, "alice", "documents_write_only").await;
     let write_only_before = wait_for_query(
         &alice_hidden_reader,
         QueryBuilder::new("documents_write_only").build(),
@@ -1795,31 +1775,20 @@ async fn read_and_write_policies_remain_independent() {
         .expect("shutdown alice_hidden_reader");
 
     update_document_archived(&alice, write_only_id, false).await;
-    let alice_visible_reader = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice")
-        .as_user()
-        .ready_on("documents_write_only", READY_TIMEOUT)
-        .connect()
-        .await;
+    let alice_visible_reader =
+        connect_ready_user(&server, &schema, "alice", "documents_write_only").await;
     let alice_rows = wait_for_rows(
         &alice_visible_reader,
         QueryBuilder::new("documents_write_only").build(),
         "same session can reveal a row it was allowed to write before it could read",
-        |rows| {
-            rows.iter()
-                .any(|(id, values)| {
-                    *id == write_only_id
-                        && *values == boolean_policy_document_values("alice", "hidden", false)
-                })
-                .then_some(rows)
-        },
+        |rows| has_row(&rows, write_only_id, &revealed_write_only_values).then_some(rows),
     )
     .await;
-    assert!(alice_rows.iter().any(|(id, values)| {
-        *id == write_only_id && *values == boolean_policy_document_values("alice", "hidden", false)
-    }));
+    assert!(has_row(
+        &alice_rows,
+        write_only_id,
+        &revealed_write_only_values,
+    ));
     alice_visible_reader
         .shutdown()
         .await
@@ -1834,9 +1803,11 @@ async fn read_and_write_policies_remain_independent() {
         Some,
     )
     .await;
-    assert!(write_only_after.iter().any(|(id, values)| {
-        *id == write_only_id && *values == boolean_policy_document_values("alice", "hidden", false)
-    }));
+    assert!(has_row(
+        &write_only_after,
+        write_only_id,
+        &revealed_write_only_values,
+    ));
 
     admin.shutdown().await.expect("shutdown admin");
     alice.shutdown().await.expect("shutdown alice");
@@ -1878,23 +1849,12 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice")
-        .as_user()
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let observer = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("observer")
-        .as_user()
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
+    let alice = connect_ready_user(&server, &schema, "alice", table_name).await;
+    let observer = connect_ready_user(&server, &schema, "observer", table_name).await;
     let query = QueryBuilder::new(table_name).build();
+    let visible_values = boolean_policy_document_values("alice", "visible", false);
+    let renamed_visible_values = boolean_policy_document_values("alice", "visible renamed", false);
+    let revealed_hidden_values = boolean_policy_document_values("alice", "hidden", false);
 
     let mut observer_stream = observer
         .subscribe(query.clone())
@@ -1913,29 +1873,18 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
     .await;
 
     let hidden_id = seed_document(&alice, table_name, "alice", "hidden", true).await;
-    let verifier_after_hidden_insert = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(verifier_schema.clone())
-        .with_user_id("verifier-hidden")
-        .as_user()
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
+    let verifier_after_hidden_insert =
+        connect_ready_user(&server, &verifier_schema, "verifier-hidden", table_name).await;
     let rows_after_hidden_insert = verifier_after_hidden_insert
         .query(query.clone(), Some(DurabilityTier::EdgeServer))
         .await
         .expect("EdgeServer query after hidden insert");
     assert!(
-        rows_after_hidden_insert.iter().any(|(id, values)| {
-            *id == visible_id
-                && *values == boolean_policy_document_values("alice", "visible", false)
-        }),
+        has_row(&rows_after_hidden_insert, visible_id, &visible_values),
         "visible insert should still be readable: rows={rows_after_hidden_insert:?}"
     );
     assert!(
-        rows_after_hidden_insert
-            .iter()
-            .all(|(id, _)| *id != hidden_id),
+        lacks_row(&rows_after_hidden_insert, hidden_id),
         "authorized insert that fails SELECT must stay hidden: rows={rows_after_hidden_insert:?}"
     );
     collect_stream_deltas(&mut observer_stream, &mut observer_log, NO_DELTA_WINDOW).await;
@@ -1950,33 +1899,20 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
 
     observer_log.clear();
     update_document_title(&alice, visible_id, "visible renamed").await;
-    let verifier_after_visible_update = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(verifier_schema.clone())
-        .with_user_id("verifier-updated")
-        .as_user()
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
+    let verifier_after_visible_update =
+        connect_ready_user(&server, &verifier_schema, "verifier-updated", table_name).await;
     let rows_after_visible_update = wait_for_rows(
         &verifier_after_visible_update,
         query.clone(),
         "EdgeServer query after visible update",
-        |rows| {
-            rows.iter()
-                .any(|(id, values)| {
-                    *id == visible_id
-                        && *values
-                            == boolean_policy_document_values("alice", "visible renamed", false)
-                })
-                .then_some(rows)
-        },
+        |rows| has_row(&rows, visible_id, &renamed_visible_values).then_some(rows),
     )
     .await;
-    assert!(rows_after_visible_update.iter().any(|(id, values)| {
-        *id == visible_id
-            && *values == boolean_policy_document_values("alice", "visible renamed", false)
-    }));
+    assert!(has_row(
+        &rows_after_visible_update,
+        visible_id,
+        &renamed_visible_values,
+    ));
     collect_stream_deltas(&mut observer_stream, &mut observer_log, NO_DELTA_WINDOW).await;
     assert!(
         has_updated(&observer_log, visible_id),
@@ -1999,22 +1935,16 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
     .await;
     observer_log.clear();
     update_document_archived(&alice, visible_id, true).await;
-    let verifier_after_hide = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(verifier_schema.clone())
-        .with_user_id("verifier-hide")
-        .as_user()
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
+    let verifier_after_hide =
+        connect_ready_user(&server, &verifier_schema, "verifier-hide", table_name).await;
     let rows_after_hide = wait_for_rows(
         &verifier_after_hide,
         query.clone(),
         "EdgeServer query after hiding row",
-        |rows| rows.iter().all(|(id, _)| *id != visible_id).then_some(rows),
+        |rows| lacks_row(&rows, visible_id).then_some(rows),
     )
     .await;
-    assert!(rows_after_hide.iter().all(|(id, _)| *id != visible_id));
+    assert!(lacks_row(&rows_after_hide, visible_id));
     wait_for_subscription_update(
         &mut observer_stream,
         &mut observer_log,
@@ -2038,31 +1968,20 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
 
     observer_log.clear();
     update_document_archived(&alice, hidden_id, false).await;
-    let verifier_after_reveal = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(verifier_schema)
-        .with_user_id("verifier-reveal")
-        .as_user()
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
+    let verifier_after_reveal =
+        connect_ready_user(&server, &verifier_schema, "verifier-reveal", table_name).await;
     let rows_after_reveal = wait_for_rows(
         &verifier_after_reveal,
         query,
         "EdgeServer query after revealing row",
-        |rows| {
-            rows.iter()
-                .any(|(id, values)| {
-                    *id == hidden_id
-                        && *values == boolean_policy_document_values("alice", "hidden", false)
-                })
-                .then_some(rows)
-        },
+        |rows| has_row(&rows, hidden_id, &revealed_hidden_values).then_some(rows),
     )
     .await;
-    assert!(rows_after_reveal.iter().any(|(id, values)| {
-        *id == hidden_id && *values == boolean_policy_document_values("alice", "hidden", false)
-    }));
+    assert!(has_row(
+        &rows_after_reveal,
+        hidden_id,
+        &revealed_hidden_values,
+    ));
     wait_for_subscription_update(
         &mut observer_stream,
         &mut observer_log,
