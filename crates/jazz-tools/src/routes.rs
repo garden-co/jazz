@@ -323,11 +323,20 @@ async fn events_handler(
         .and_then(|v| v.to_str().ok());
     let has_session_header = headers.get("X-Jazz-Session").is_some();
 
-    if backend_secret.is_some() && !has_session_header {
+    // Resolve auth first (can fail with early return, no side effects yet).
+    // Then insert connection before creating ClientState — this closes the
+    // TOCTOU window where a sweep could see freshly created ClientState but
+    // no connection yet, and reap it.
+    enum ClientSetup {
+        Backend,
+        Session(crate::query_manager::session::Session),
+    }
+
+    let setup = if backend_secret.is_some() && !has_session_header {
         if let Err((status, msg)) = validate_backend_secret(backend_secret, &state.auth_config) {
             return Err((status, msg.to_string()));
         }
-        let _ = state.runtime.ensure_client_as_backend(client_id);
+        ClientSetup::Backend
     } else {
         // Extract session from headers (JWT, local auth, or backend impersonation)
         let session = {
@@ -364,31 +373,31 @@ async fn events_handler(
             }
         };
 
-        // Ensure client is registered with session (idempotent — won't overwrite
-        // existing role if client was already registered by a /sync request).
-        let _ = state.runtime.ensure_client_with_session(client_id, session);
-    }
+        ClientSetup::Session(session)
+    };
 
-    // Generate connection ID
+    // Connection is visible before ClientState is created — sweep will see
+    // the connection and skip reaping even if it runs during setup.
     let connection_id = state
         .next_connection_id
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-
-    // Subscribe to broadcast channel for this client's events
-    let mut sync_rx = state.sync_broadcast.subscribe();
-
-    // Store connection state.
-    // Lock ordering note: this takes connections(write) then on_client_connected
-    // takes candidates(write) — sequential, not nested. on_connection_closed
-    // nests candidates(write) → connections(read), which is safe because
-    // connections(read) doesn't block this path's already-released write.
-    // See on_connection_closed doc for the full lock ordering table.
     {
         let mut connections = state.connections.write().await;
         connections.insert(connection_id, ConnectionState { client_id });
     }
-    // Remove from disconnect candidates if reconnecting
     state.on_client_connected(client_id).await;
+
+    match setup {
+        ClientSetup::Backend => {
+            let _ = state.runtime.ensure_client_as_backend(client_id);
+        }
+        ClientSetup::Session(session) => {
+            let _ = state.runtime.ensure_client_with_session(client_id, session);
+        }
+    }
+
+    // Subscribe to broadcast channel for this client's events
+    let mut sync_rx = state.sync_broadcast.subscribe();
 
     // Clone state for cleanup on drop
     let state_cleanup = state.clone();
