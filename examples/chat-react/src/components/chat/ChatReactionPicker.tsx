@@ -10,7 +10,7 @@ import {
   DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { app } from "../../../schema/app.js";
+import { app } from "../../../schema.js";
 
 interface ReactionPickerProps {
   onPick: (emoji: string) => void;
