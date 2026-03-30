@@ -965,13 +965,17 @@ fn rebac_inherited_insert_uses_payload_branch_after_cold_start() {
 fn rebac_inherited_insert_hydrates_requested_branch_instead_of_reusing_cached_branch() {
     let (schema, folders_descriptor, schema_hash) = inherited_insert_schema();
     let branch = inherited_insert_branch(schema_hash);
+    let main_branch = ComposedBranchName::new("dev", schema_hash, "main", BatchId::nil())
+        .to_branch_name()
+        .as_str()
+        .to_string();
     let mut storage = MemoryStorage::new();
 
     let mut seed_qm = create_server_mode_query_manager(schema.clone(), schema_hash);
     let folder_id = seed_folder_on_branch(
         &mut seed_qm,
         &mut storage,
-        "main",
+        &main_branch,
         "bob",
         "Main Folder",
         &folders_descriptor,
@@ -1005,9 +1009,11 @@ fn rebac_inherited_insert_hydrates_requested_branch_instead_of_reusing_cached_br
         .set_client_session(client_id, Session::new("alice"));
     qm.sync_manager_mut().take_outbox();
 
-    qm.sync_manager_mut()
-        .object_manager
-        .get_or_load(folder_id, &storage, &["main".to_string()]);
+    qm.sync_manager_mut().object_manager.get_or_load(
+        folder_id,
+        &storage,
+        std::slice::from_ref(&main_branch),
+    );
     let cached_folder = qm
         .sync_manager()
         .object_manager
@@ -1016,7 +1022,7 @@ fn rebac_inherited_insert_hydrates_requested_branch_instead_of_reusing_cached_br
     assert!(
         cached_folder
             .branches
-            .contains_key(&BranchName::new("main"))
+            .contains_key(&BranchName::new(&main_branch))
     );
     assert!(
         !cached_folder

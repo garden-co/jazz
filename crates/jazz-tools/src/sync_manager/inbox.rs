@@ -3,6 +3,7 @@ use crate::commit::{Commit, CommitId};
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
+use crate::query_manager::types::ComposedBranchName;
 use crate::storage::Storage;
 use std::collections::HashSet;
 
@@ -27,6 +28,87 @@ fn log_schema_warning(origin: &str, warning: &SchemaWarning) {
 }
 
 impl SyncManager {
+    fn branch_tip_content(branch: &crate::object::Branch) -> Option<(CommitId, Vec<u8>)> {
+        let mut tips: Vec<_> = branch.tips.iter().copied().collect();
+        tips.sort_by_key(|id| {
+            (
+                branch
+                    .commits
+                    .get(id)
+                    .map(|commit| commit.timestamp)
+                    .unwrap_or(0),
+                *id,
+            )
+        });
+        let tip_id = *tips.last()?;
+        let commit = branch.commits.get(&tip_id)?;
+        Some((tip_id, commit.content.clone()))
+    }
+
+    fn resolve_existing_row_content_for_branch<H: Storage>(
+        &mut self,
+        storage: &H,
+        object_id: ObjectId,
+        branch_name: BranchName,
+    ) -> Option<Vec<u8>> {
+        let normalized_branch_name = Self::normalize_branch_name(branch_name)?;
+        let requested_branches = [normalized_branch_name.as_str().to_string()];
+        self.object_manager
+            .get_or_load_tips(object_id, storage, &requested_branches)?;
+
+        if let Some(content) = self
+            .object_manager
+            .get(object_id)
+            .and_then(|obj| obj.branches.get(&normalized_branch_name))
+            .and_then(Self::branch_tip_content)
+            .map(|(_, content)| content)
+        {
+            return Some(content);
+        }
+
+        let composed_branch = ComposedBranchName::parse(&normalized_branch_name)?;
+        let leaf_heads = self
+            .object_manager
+            .get_leaf_head_ids_for_prefix(object_id, &composed_branch.prefix(), storage)
+            .ok()?;
+
+        let missing_leaf_branches: Vec<String> = {
+            let object = self.object_manager.get(object_id)?;
+            leaf_heads
+                .keys()
+                .filter(|leaf_branch_name| !object.branches.contains_key(leaf_branch_name))
+                .map(|leaf_branch_name| leaf_branch_name.as_str().to_string())
+                .collect()
+        };
+        if !missing_leaf_branches.is_empty() {
+            self.object_manager
+                .get_or_load_tips(object_id, storage, &missing_leaf_branches)?;
+        }
+
+        let object = self.object_manager.get(object_id)?;
+        let mut resolved: Option<(u64, CommitId, Vec<u8>)> = None;
+        for (leaf_branch_name, head_id) in leaf_heads {
+            let Some(commit) = object
+                .branches
+                .get(&leaf_branch_name)
+                .and_then(|branch| branch.commits.get(&head_id))
+            else {
+                continue;
+            };
+
+            let candidate = (commit.timestamp, head_id, commit.content.clone());
+            let should_replace = match &resolved {
+                Some(current) => (candidate.0, candidate.1) > (current.0, current.1),
+                None => true,
+            };
+            if should_replace {
+                resolved = Some(candidate);
+            }
+        }
+
+        resolved.map(|(_, _, content)| content)
+    }
+
     /// Process a single inbox entry.
     pub(super) fn process_inbox_entry<H: Storage>(&mut self, storage: &mut H, entry: InboxEntry) {
         tracing::trace!(source = ?entry.source, payload = entry.payload.variant_name(), "processing inbox entry");
@@ -187,7 +269,9 @@ impl SyncManager {
             tracing::warn!(%client_id, "message from unknown client, ignoring");
             return;
         };
-        tracing::trace!(%client_id, role = ?client.role, payload = payload.variant_name(), "client→payload");
+        let client_role = client.role;
+        let client_session = client.session.clone();
+        tracing::trace!(%client_id, role = ?client_role, payload = payload.variant_name(), "client→payload");
 
         match &payload {
             SyncPayload::ObjectUpdated {
@@ -199,7 +283,7 @@ impl SyncManager {
             } => {
                 let object_id = *object_id;
                 let branch_name = *branch_name;
-                match client.role {
+                match client_role {
                     ClientRole::Peer | ClientRole::Admin => {
                         // Trusted — apply directly
                         self.apply_payload_from_client(storage, client_id, payload, false);
@@ -219,7 +303,7 @@ impl SyncManager {
                     }
                     ClientRole::User => {
                         // User requires session
-                        let Some(session) = &client.session else {
+                        let Some(session) = client_session.as_ref() else {
                             self.outbox.push(OutboxEntry {
                                 destination: Destination::Client(client_id),
                                 payload: SyncPayload::Error(SyncError::SessionRequired {
@@ -245,26 +329,16 @@ impl SyncManager {
                             .as_ref()
                             .map(|meta| meta.metadata.clone())
                             .unwrap_or_default();
-                        let normalized_branch_name =
-                            Self::normalize_branch_name(branch_name).unwrap_or(branch_name);
-                        let (stored_metadata, old_content) = self
+                        let stored_metadata = self
                             .object_manager
                             .get(object_id)
-                            .map(|obj| {
-                                let old = obj
-                                    .branches
-                                    .get(&normalized_branch_name)
-                                    .and_then(|branch| {
-                                        branch
-                                            .tips
-                                            .iter()
-                                            .next()
-                                            .and_then(|tip_id| branch.commits.get(tip_id))
-                                    })
-                                    .map(|commit| commit.content.clone());
-                                (obj.metadata.clone(), old)
-                            })
+                            .map(|obj| obj.metadata.clone())
                             .unwrap_or_default();
+                        let old_content = self.resolve_existing_row_content_for_branch(
+                            storage,
+                            object_id,
+                            branch_name,
+                        );
                         // For brand-new rows, metadata may only be present in the inbound payload
                         // because the object has not been applied to ObjectManager yet.
                         let metadata = if old_content.is_none() && stored_metadata.is_empty() {
@@ -304,7 +378,7 @@ impl SyncManager {
             } => {
                 let object_id = *object_id;
                 let branch_name = *branch_name;
-                match client.role {
+                match client_role {
                     ClientRole::Peer | ClientRole::Admin => {
                         self.apply_payload_from_client(storage, client_id, payload, false);
                     }
@@ -322,7 +396,7 @@ impl SyncManager {
                         self.apply_payload_from_client(storage, client_id, payload, false);
                     }
                     ClientRole::User => {
-                        let Some(session) = &client.session else {
+                        let Some(session) = client_session.as_ref() else {
                             self.outbox.push(OutboxEntry {
                                 destination: Destination::Client(client_id),
                                 payload: SyncPayload::Error(SyncError::SessionRequired {
@@ -332,26 +406,16 @@ impl SyncManager {
                             });
                             return;
                         };
-                        let normalized_branch_name =
-                            Self::normalize_branch_name(branch_name).unwrap_or(branch_name);
-                        let (metadata, old_content) = self
+                        let metadata = self
                             .object_manager
                             .get(object_id)
-                            .map(|obj| {
-                                let old = obj
-                                    .branches
-                                    .get(&normalized_branch_name)
-                                    .and_then(|branch| {
-                                        branch
-                                            .tips
-                                            .iter()
-                                            .next()
-                                            .and_then(|tip_id| branch.commits.get(tip_id))
-                                    })
-                                    .map(|commit| commit.content.clone());
-                                (obj.metadata.clone(), old)
-                            })
+                            .map(|obj| obj.metadata.clone())
                             .unwrap_or_default();
+                        let old_content = self.resolve_existing_row_content_for_branch(
+                            storage,
+                            object_id,
+                            branch_name,
+                        );
                         self.queue_for_permission_check(
                             client_id,
                             payload,

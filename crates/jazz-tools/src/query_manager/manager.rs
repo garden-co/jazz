@@ -388,6 +388,17 @@ pub struct QueryManager {
 }
 
 impl QueryManager {
+    pub(super) fn record_branch_schema_mapping(
+        branch_schema_map: &mut HashMap<String, SchemaHash>,
+        branch_name: BranchName,
+        schema_hash: SchemaHash,
+    ) {
+        branch_schema_map.insert(branch_name.as_str().to_string(), schema_hash);
+        if let Some(composed) = ComposedBranchName::parse(&branch_name) {
+            branch_schema_map.insert(composed.prefix().branch_prefix(), schema_hash);
+        }
+    }
+
     pub(super) fn branch_names_for_query_branches(branches: &[QueryBranchRef]) -> Vec<String> {
         branches
             .iter()
@@ -553,8 +564,9 @@ impl QueryManager {
 
         // Update branch -> schema hash map
         let branch = self.schema_context.branch_name();
-        self.branch_schema_map.insert(
-            branch.as_str().to_string(),
+        Self::record_branch_schema_mapping(
+            &mut self.branch_schema_map,
+            branch,
             self.schema_context.current_hash,
         );
     }
@@ -590,8 +602,7 @@ impl QueryManager {
             .insert(hash, schema.clone());
 
         // Update branch -> schema hash map
-        self.branch_schema_map
-            .insert(branch.as_str().to_string(), hash);
+        Self::record_branch_schema_mapping(&mut self.branch_schema_map, branch, hash);
 
         // Mark subscriptions for recompile to pick up new branch
         self.mark_subscriptions_for_recompile();
@@ -611,8 +622,7 @@ impl QueryManager {
                 if let Some(_schema) = self.schema_context.live_schemas.get(&hash).cloned() {
                     let branch = self.schema_context.branch_name_for_hash(hash);
 
-                    self.branch_schema_map
-                        .insert(branch.as_str().to_string(), hash);
+                    Self::record_branch_schema_mapping(&mut self.branch_schema_map, branch, hash);
                 }
             }
             self.mark_subscriptions_for_recompile();
@@ -1421,7 +1431,11 @@ impl QueryManager {
                     // Search known_schemas for matching short hash
                     if let Some(full_hash) = self.find_schema_by_short_hash(&composed.schema_hash) {
                         // Activate this branch/schema combination
-                        self.branch_schema_map.insert(branch.to_string(), full_hash);
+                        Self::record_branch_schema_mapping(
+                            &mut self.branch_schema_map,
+                            branch_name,
+                            full_hash,
+                        );
                         full_hash
                     } else {
                         let schema_short = composed.schema_hash.short();

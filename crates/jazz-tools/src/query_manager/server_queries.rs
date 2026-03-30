@@ -102,14 +102,24 @@ impl QueryManager {
         schema_context: &crate::schema_manager::SchemaContext,
     ) -> std::collections::HashMap<String, crate::query_manager::types::SchemaHash> {
         let mut map = std::collections::HashMap::new();
+        let current_branch = schema_context.branch_name();
         map.insert(
-            schema_context.branch_name().as_str().to_string(),
+            current_branch.as_str().to_string(),
             schema_context.current_hash,
         );
+        if let Some(composed) = ComposedBranchName::parse(&current_branch) {
+            map.insert(
+                composed.prefix().branch_prefix(),
+                schema_context.current_hash,
+            );
+        }
 
         for hash in schema_context.live_schemas.keys() {
             let branch = schema_context.branch_name_for_hash(*hash);
             map.insert(branch.as_str().to_string(), *hash);
+            if let Some(composed) = ComposedBranchName::parse(&branch) {
+                map.insert(composed.prefix().branch_prefix(), *hash);
+            }
         }
 
         map
@@ -589,7 +599,18 @@ impl QueryManager {
         is_soft_deleted: bool,
         context: &mut RowTransformContext<'_>,
     ) -> Option<ResolvedSchemaRow> {
-        let source_hash = context.branch_schema_map.get(branch_name.as_str()).copied();
+        let source_hash = context
+            .branch_schema_map
+            .get(branch_name.as_str())
+            .copied()
+            .or_else(|| {
+                ComposedBranchName::parse(&branch_name).and_then(|composed| {
+                    context
+                        .branch_schema_map
+                        .get(composed.prefix().branch_prefix().as_str())
+                        .copied()
+                })
+            });
 
         if let Some(source_hash) = source_hash
             && source_hash != context.schema_context.current_hash
@@ -1153,8 +1174,11 @@ impl QueryManager {
         let schema_hash = self.branch_schema_map.get(branch_name.as_str()).copied();
 
         if let Some(schema_hash) = schema_hash {
-            self.branch_schema_map
-                .insert(branch_name.as_str().to_string(), schema_hash);
+            Self::record_branch_schema_mapping(
+                &mut self.branch_schema_map,
+                branch_name,
+                schema_hash,
+            );
 
             let Some(schema) = self.schema_for_write_hash(schema_hash) else {
                 return WriteSchemaResolution::PendingSchema;
@@ -1173,8 +1197,11 @@ impl QueryManager {
                 return WriteSchemaResolution::PendingSchema;
             };
 
-            self.branch_schema_map
-                .insert(branch_name.as_str().to_string(), schema_hash);
+            Self::record_branch_schema_mapping(
+                &mut self.branch_schema_map,
+                branch_name,
+                schema_hash,
+            );
 
             let Some(schema) = self.schema_for_write_hash(schema_hash) else {
                 return WriteSchemaResolution::PendingSchema;

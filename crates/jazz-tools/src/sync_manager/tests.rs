@@ -23,6 +23,15 @@ fn main_branch() -> BranchName {
     test_branch("main")
 }
 
+fn main_branch_batch(label: &str) -> BranchName {
+    BranchPrefixName::new("dev", SchemaHash::from_bytes([7; 32]), "main")
+        .with_batch_id(BatchId::from_uuid(Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            label.as_bytes(),
+        )))
+        .to_branch_name()
+}
+
 // ========================================================================
 // Phase 1: Foundation Tests
 // ========================================================================
@@ -1323,6 +1332,120 @@ fn soft_delete_object_updated_is_queued_as_delete_permission_check() {
         .get_tip_ids(obj_id, main_branch())
         .unwrap();
     assert!(!tips.contains(&delete_commit.id()));
+}
+
+#[test]
+fn fresh_batch_update_uses_prefix_head_for_permission_check() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let alice_branch = main_branch_batch("alice-batch");
+    let bob_branch = main_branch_batch("bob-batch");
+
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let alice_commit = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            alice_branch,
+            vec![],
+            b"original".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("bob"));
+    sm.take_outbox();
+
+    let bob_update = Commit {
+        parents: smallvec![alice_commit],
+        content: b"hacked".to_vec(),
+        timestamp: 2000,
+        author,
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: bob_branch,
+            commits: vec![bob_update],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].operation, Operation::Update);
+    assert_eq!(pending[0].old_content, Some(b"original".to_vec()));
+    assert_eq!(pending[0].new_content, Some(b"hacked".to_vec()));
+}
+
+#[test]
+fn fresh_batch_delete_uses_prefix_head_for_permission_check() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let alice_branch = main_branch_batch("alice-delete-batch");
+    let bob_branch = main_branch_batch("bob-delete-batch");
+
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let alice_commit = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            alice_branch,
+            vec![],
+            b"original".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("bob"));
+    sm.take_outbox();
+
+    let bob_delete = Commit {
+        parents: smallvec![alice_commit],
+        content: b"original".to_vec(),
+        timestamp: 2000,
+        author,
+        metadata: Some(crate::metadata::soft_delete_metadata()),
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: bob_branch,
+            commits: vec![bob_delete],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].operation, Operation::Delete);
+    assert_eq!(pending[0].old_content, Some(b"original".to_vec()));
+    assert_eq!(pending[0].new_content, None);
 }
 
 #[test]

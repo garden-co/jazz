@@ -427,7 +427,7 @@ mod tests {
             .unwrap();
     }
 
-    /// Ingest a remote catalogue object on the `main` branch through sync path.
+    /// Ingest a remote catalogue object on the deterministic catalogue batch branch.
     fn ingest_remote_catalogue_object(
         qm: &mut QueryManager,
         storage: &mut MemoryStorage,
@@ -451,7 +451,12 @@ mod tests {
         };
         qm.sync_manager_mut()
             .object_manager
-            .receive_commit(storage, object_id, "main", commit)
+            .receive_commit(
+                storage,
+                object_id,
+                crate::schema_manager::catalogue_branch_name(),
+                commit,
+            )
             .unwrap();
     }
 
@@ -1986,16 +1991,8 @@ mod tests {
             });
         client_b.process(&mut io_b);
 
-        // Query across both branches; row should be visible transformed into current (v1) shape.
-        let v1_branch = client_b.branch_name().to_string();
-        let v2_branch = client_b
-            .query_manager()
-            .schema_context()
-            .branch_name_for_hash(v2_hash)
-            .to_string();
-        let query = QueryBuilder::new("users")
-            .branches(&[&v1_branch, &v2_branch])
-            .build();
+        // Query using default fanout across active batches for both live schema prefixes.
+        let query = QueryBuilder::new("users").build();
         let results = execute_query(&mut client_b, &mut io_b, query);
         assert_eq!(results.len(), 1, "Client B should observe the synced row");
 

@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::object::BranchName;
 use crate::object_manager::AllObjectUpdate;
 use crate::storage::Storage;
 use crate::sync_manager::QueryPropagation;
@@ -508,8 +509,11 @@ impl QueryManager {
     ///
     /// Used when a subscription arrives with explicit schema context.
     pub fn add_schema_branch(&mut self, branch: &str, schema_hash: SchemaHash) {
-        self.branch_schema_map
-            .insert(branch.to_string(), schema_hash);
+        Self::record_branch_schema_mapping(
+            &mut self.branch_schema_map,
+            BranchName::new(branch),
+            schema_hash,
+        );
     }
 
     /// Find a schema in known_schemas by its short hash prefix.
@@ -550,16 +554,16 @@ impl QueryManager {
         }
 
         // Current schema branch
-        self.branch_schema_map.insert(
-            self.schema_context.branch_name().as_str().to_string(),
+        Self::record_branch_schema_mapping(
+            &mut self.branch_schema_map,
+            self.schema_context.branch_name(),
             self.schema_context.current_hash,
         );
 
         // Live schema branches
         for &live_hash in self.schema_context.live_schemas.keys() {
             let live_branch = self.schema_context.branch_name_for_hash(live_hash);
-            self.branch_schema_map
-                .insert(live_branch.as_str().to_string(), live_hash);
+            Self::record_branch_schema_mapping(&mut self.branch_schema_map, live_branch, live_hash);
         }
     }
 

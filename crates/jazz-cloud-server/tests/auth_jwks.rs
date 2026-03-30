@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::{Json, Router, extract::State, routing::get};
 use base64::Engine;
 use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::types::{BatchId, BranchPrefixName, SchemaHash};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -126,7 +127,7 @@ impl TestServer {
             .spawn()
             .expect("spawn jazz-cloud-server");
 
-        let server = Self {
+        let mut server = Self {
             process,
             port,
             _data_dir: data_dir,
@@ -141,9 +142,12 @@ impl TestServer {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    async fn wait_ready(&self) {
+    async fn wait_ready(&mut self) {
         let health_url = format!("{}/health", self.base_url());
-        for _ in 0..60 {
+        for _ in 0..150 {
+            if let Some(status) = self.process.try_wait().expect("poll jazz-cloud-server") {
+                panic!("jazz-cloud-server exited before becoming ready: {status}");
+            }
             if let Ok(response) = self.client.get(&health_url).send().await
                 && response.status().is_success()
             {
@@ -325,13 +329,18 @@ fn get_free_port() -> u16 {
 }
 
 fn sync_body() -> Value {
+    let branch_name = BranchPrefixName::new("dev", SchemaHash::from_bytes([0; 32]), "main")
+        .with_batch_id(BatchId::nil())
+        .to_branch_name()
+        .as_str()
+        .to_string();
     json!({
         "client_id": "01234567-89ab-cdef-0123-456789abcdef",
         "payloads": [{
             "ObjectUpdated": {
                 "object_id": "01234567-89ab-cdef-0123-456789abcdef",
                 "metadata": null,
-                "branch_name": "main",
+                "branch_name": branch_name,
                 "commits": []
             }
         }]

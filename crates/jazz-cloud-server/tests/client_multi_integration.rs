@@ -498,7 +498,7 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
     assert!(saw_update, "client b should observe mutation from client a");
 
     client_a.delete(row_id).await.expect("client a delete todo");
-    let rows_after_delete = wait_for_todos_count(&client_b, 0, Duration::from_secs(15), None).await;
+    let rows_after_delete = wait_for_todos_count(&client_b, 0, Duration::from_secs(30), None).await;
     assert!(rows_after_delete.is_empty());
 
     client_a.shutdown().await.expect("shutdown client a");

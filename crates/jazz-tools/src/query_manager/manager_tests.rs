@@ -8242,12 +8242,14 @@ fn join_query_with_multiple_branches_reads_all_branches() {
 fn handle_object_update_respects_branch() {
     use crate::commit::{Commit, StoredState};
     use crate::query_manager::encoding::encode_row;
+    use crate::query_manager::types::{BatchId, ComposedBranchName, SchemaHash};
     use std::collections::HashMap;
 
     // Verify that handle_object_update updates the correct branch's indices.
     // Rows on a non-schema branch should NOT appear in queries on the schema branch.
     let sync_manager = SyncManager::new();
     let schema = test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
 
     // Get the actual schema branch
@@ -8275,6 +8277,9 @@ fn handle_object_update_respects_branch() {
     )
     .unwrap();
 
+    let other_branch = ComposedBranchName::new("dev", schema_hash, "other-branch", BatchId::nil())
+        .to_branch_name();
+
     // Receive commit on "other-branch" (not the schema's branch)
     let commit = Commit {
         parents: smallvec![],
@@ -8287,7 +8292,7 @@ fn handle_object_update_respects_branch() {
     };
     qm.sync_manager_mut()
         .object_manager
-        .receive_commit(&mut storage, row_id, "other-branch", commit)
+        .receive_commit(&mut storage, row_id, other_branch, commit)
         .unwrap();
 
     qm.process(&mut storage);

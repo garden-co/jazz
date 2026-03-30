@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::types::{BatchId, BranchPrefixName, SchemaHash};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -91,15 +92,32 @@ fn encode_session(session: &Session) -> String {
     base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
 }
 
+fn default_branch_name() -> String {
+    BranchPrefixName::new("dev", SchemaHash::from_bytes([0; 32]), "main")
+        .with_batch_id(BatchId::nil())
+        .to_branch_name()
+        .as_str()
+        .to_string()
+}
+
+fn catalogue_branch_name() -> String {
+    BranchPrefixName::new("catalogue", SchemaHash::from_bytes([0; 32]), "main")
+        .with_batch_id(BatchId::nil())
+        .to_branch_name()
+        .as_str()
+        .to_string()
+}
+
 /// Create a valid sync batch request body (SyncBatchRequest).
 fn sync_body() -> String {
+    let branch_name = default_branch_name();
     json!({
         "client_id": "01234567-89ab-cdef-0123-456789abcdef",
         "payloads": [{
             "ObjectUpdated": {
                 "object_id": "01234567-89ab-cdef-0123-456789abcdef",
                 "metadata": null,
-                "branch_name": "main",
+                "branch_name": branch_name,
                 "commits": []
             }
         }]
@@ -345,6 +363,7 @@ mod integration_tests {
 
     /// Create a valid catalogue sync body for testing admin auth.
     fn catalogue_sync_body() -> String {
+        let branch_name = crate::catalogue_branch_name();
         json!({
             "client_id": "01234567-89ab-cdef-0123-456789abcdef",
             "payloads": [{
@@ -354,7 +373,7 @@ mod integration_tests {
                         "id": "01234567-89ab-cdef-0123-456789abcdef",
                         "metadata": {"type": "catalogue_schema"}
                     },
-                    "branch_name": "main",
+                    "branch_name": branch_name,
                     "commits": []
                 }
             }]
@@ -721,6 +740,7 @@ mod integration_tests {
         let expected_hash = schema_hash.to_string();
         let encoded_schema = encode_schema(&schema);
         let object_id = schema_hash.to_object_id().to_string();
+        let catalogue_branch_name = crate::catalogue_branch_name();
 
         let mut metadata = HashMap::new();
         metadata.insert(
@@ -742,7 +762,7 @@ mod integration_tests {
                         "id": object_id,
                         "metadata": metadata
                     },
-                    "branch_name": "main",
+                    "branch_name": catalogue_branch_name,
                     "commits": [
                         {
                             "parents": [],
