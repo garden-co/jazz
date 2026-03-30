@@ -116,8 +116,7 @@ bearer-JWT-scoped high-level `Db`.
 `forRequest` reads authentication from standard HTTP headers, so `req` can be any object that exposes them: Express, Hono, Fastify, or a Web Fetch API `Request` all work.
 
 <Callout type="info">
-  `context.db()` still exists for embedded or local-only runtime setups, but it is not the primary
-  pattern for server-connected backends.
+  For embedded or local-only runtime setups where your backend is not connected to a server, use `context.db()` to get an unscoped, unauthenticated handle. This allows read/write access to the database directly, without permissions being evaluated.
 </Callout>
 
 #### Per-request user-scoped client
