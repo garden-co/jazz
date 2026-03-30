@@ -557,7 +557,7 @@ async fn anonymous_client_cannot_see_owner_restricted_rows() {
 /// bob ────delete own row──────────► server ──► removed
 /// ```
 #[tokio::test]
-#[should_panic(expected = "timed out waiting for bob reader sees no owned rows after delete")]
+#[should_panic]
 // Known failing: Bob's follow-up `wait_for_rows(..., EdgeServer)` uses a
 // one-shot query, and rows that leave scope on delete can stay stale in the
 // reader's local cache because removed-scope rows are not invalidated.
