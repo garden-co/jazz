@@ -63,9 +63,9 @@ describe("unwrapValue", () => {
     expect(Array.from(unwrapped as Uint8Array)).toEqual([0, 1, 255]);
   });
 
-  it("unwraps Null to undefined", () => {
+  it("unwraps Null to null", () => {
     const v: WasmValue = { type: "Null" };
-    expect(unwrapValue(v)).toBeUndefined();
+    expect(unwrapValue(v)).toBeNull();
   });
 
   it("unwraps Array recursively", () => {
@@ -217,13 +217,14 @@ describe("transformRows", () => {
       },
     ];
 
-    const result = transformRows<{ id: string; title: string; done: boolean; priority?: number }>(
-      rows,
-      schema,
-      "todos",
-    );
+    const result = transformRows<{
+      id: string;
+      title: string;
+      done: boolean;
+      priority: number | null;
+    }>(rows, schema, "todos");
 
-    expect(result[0]!.priority).toBeUndefined();
+    expect(result[0]!.priority).toBeNull();
   });
 
   it("throws for unknown table", () => {
@@ -346,7 +347,7 @@ describe("transformRows", () => {
       id: string;
       title: string;
       $canEdit: boolean;
-      $canDelete?: boolean;
+      $canDelete: boolean | null;
     }>(rows, schema, "todos", {}, ["title", "$canEdit", "$canDelete"]);
 
     expect(result).toEqual([
@@ -354,7 +355,7 @@ describe("transformRows", () => {
         id: "uuid-1",
         title: "Buy milk",
         $canEdit: true,
-        $canDelete: undefined,
+        $canDelete: null,
       },
     ]);
   });
@@ -397,7 +398,7 @@ describe("transformRows", () => {
         owner: {
           id: "user-1",
           name: "Alice",
-          manager_id: undefined,
+          manager_id: null,
         },
       },
     ]);
@@ -436,7 +437,7 @@ describe("transformRows", () => {
         owner: {
           id: "user-1",
           name: "Alice",
-          manager_id: undefined,
+          manager_id: null,
         },
       },
     ]);
@@ -473,7 +474,7 @@ describe("transformRows", () => {
         owner: {
           id: "user-1",
           name: "Alice",
-          manager_id: undefined,
+          manager_id: null,
         },
       },
     ]);
@@ -567,7 +568,7 @@ describe("transformRows", () => {
       {
         id: "user-1",
         name: "Alice",
-        manager_id: undefined,
+        manager_id: null,
         todosViaOwner: [
           { id: "todo-1", title: "Buy milk", owner_id: "user-1" },
           { id: "todo-2", title: "Write tests", owner_id: "user-1" },
@@ -630,7 +631,7 @@ describe("transformRows", () => {
           manager: {
             id: "user-2",
             name: "Manager",
-            manager_id: undefined,
+            manager_id: null,
           },
         },
       },
