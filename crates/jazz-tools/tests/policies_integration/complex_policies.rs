@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::support::{
-    TestingClient, collect_stream_deltas, has_added, has_removed, has_updated, wait_for_query,
-    wait_for_rows, wait_for_subscription_update,
+    collect_stream_deltas, connect_ready_claims, connect_ready_client, connect_ready_user,
+    has_added, has_removed, has_updated, wait_for_query, wait_for_rows,
+    wait_for_subscription_update,
 };
 use jazz_tools::query_manager::policy::{
     CmpOp, OUTER_ROW_SESSION_PREFIX, Operation, PolicyExpr, PolicyValue,
@@ -359,29 +360,9 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("admin")
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("bob")
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let dave = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("dave")
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
+    let dave = connect_ready_user(&server, &schema, "dave", "documents", READY_TIMEOUT).await;
 
     let query = QueryBuilder::new("documents").build();
     let mut bob_stream = bob.subscribe(query.clone()).await.expect("subscribe bob");
@@ -524,29 +505,9 @@ async fn exists_rel_join_grants_and_denies_correctly() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("admin")
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("bob")
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let dave = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("dave")
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
+    let dave = connect_ready_user(&server, &schema, "dave", "documents", READY_TIMEOUT).await;
 
     let doc_id = create_title_document(&admin, "Join Visible").await;
     create_group_membership(&admin, "bob", "eng").await;
@@ -599,29 +560,9 @@ async fn exists_rel_hop_grants_and_denies_correctly() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("admin")
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("bob")
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let dave = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("dave")
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
+    let dave = connect_ready_user(&server, &schema, "dave", "documents", READY_TIMEOUT).await;
 
     let doc_id = create_title_document(&admin, "Hop Visible").await;
     create_group_membership(&admin, "bob", "eng").await;
@@ -726,29 +667,25 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("admin")
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let alice_eng = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice")
-        .with_claims(json!({ "team_slugs": ["eng"] }))
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let alice_sales = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("alice")
-        .with_claims(json!({ "team_slugs": ["sales"] }))
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let alice_eng = connect_ready_claims(
+        &server,
+        &schema,
+        "alice",
+        json!({ "team_slugs": ["eng"] }),
+        "documents",
+        READY_TIMEOUT,
+    )
+    .await;
+    let alice_sales = connect_ready_claims(
+        &server,
+        &schema,
+        "alice",
+        json!({ "team_slugs": ["sales"] }),
+        "documents",
+        READY_TIMEOUT,
+    )
+    .await;
 
     let alice_folder = create_folder(&admin, "alice", "Alice Folder").await;
     let bob_folder = create_folder(&admin, "bob", "Bob Folder").await;
@@ -839,37 +776,11 @@ async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_st
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("admin")
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice")
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("bob")
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let observer = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("observer")
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, "alice", "documents", READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
+    let observer =
+        connect_ready_user(&server, &schema, "observer", "documents", READY_TIMEOUT).await;
 
     let query = QueryBuilder::new("documents").build();
     let mut observer_stream = observer

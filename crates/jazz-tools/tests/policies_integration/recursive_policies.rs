@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::support::{
-    TestingClient, collect_stream_deltas, has_added, has_any_change, has_removed, wait_for_query,
-    wait_for_rows, wait_for_subscription_update,
+    collect_stream_deltas, connect_ready_client, connect_ready_user, has_added, has_any_change,
+    has_removed, wait_for_query, wait_for_rows, wait_for_subscription_update,
 };
 use jazz_tools::query_manager::policy::{Operation, PolicyExpr};
 use jazz_tools::query_manager::relation_ir::{
@@ -363,29 +363,9 @@ async fn recursive_inherits_grants_visible_ancestor_chain_and_denies_unrelated_s
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("admin")
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice")
-        .as_user()
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let dave = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("dave")
-        .as_user()
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
+    let admin = connect_ready_client(&server, &schema, "admin", table_name, READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, "alice", table_name, READY_TIMEOUT).await;
+    let dave = connect_ready_user(&server, &schema, "dave", table_name, READY_TIMEOUT).await;
 
     let root = create_recursive_folder(&admin, table_name, "alice", "Root", None).await;
     let child = create_recursive_folder(&admin, table_name, "bob", "Child", Some(root)).await;
@@ -455,21 +435,8 @@ async fn recursive_inherits_respects_max_depth_boundaries() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("admin")
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("alice")
-        .as_user()
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
+    let admin = connect_ready_client(&server, &schema, "admin", table_name, READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, "alice", table_name, READY_TIMEOUT).await;
 
     let root = create_recursive_folder(&admin, table_name, "alice", "Root", None).await;
     let child = create_recursive_folder(&admin, table_name, "bob", "Child", Some(root)).await;
@@ -528,21 +495,8 @@ async fn recursive_inherits_cycles_fail_closed_without_poisoning_acyclic_branch(
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("admin")
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("alice")
-        .as_user()
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
+    let admin = connect_ready_client(&server, &schema, "admin", table_name, READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, "alice", table_name, READY_TIMEOUT).await;
 
     let root = create_recursive_folder(&admin, table_name, "alice", "Root", None).await;
     let child =
@@ -604,21 +558,8 @@ async fn recursive_inherits_subscription_updates_when_graph_edges_change() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("admin")
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("alice")
-        .as_user()
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
+    let admin = connect_ready_client(&server, &schema, "admin", table_name, READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, "alice", table_name, READY_TIMEOUT).await;
 
     let root = create_recursive_folder(&admin, table_name, "alice", "Root", None).await;
     let child = create_recursive_folder(&admin, table_name, "bob", "Child", None).await;
@@ -716,29 +657,9 @@ async fn recursive_exists_rel_gather_hop_grants_reachable_ancestor_and_denies_wi
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("admin")
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("bob")
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let dave = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("dave")
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
+    let dave = connect_ready_user(&server, &schema, "dave", "documents", READY_TIMEOUT).await;
 
     let root = create_team(&admin, "root").await;
     let leaf = create_team(&admin, "leaf").await;
@@ -807,21 +728,8 @@ async fn recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_delta
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("admin")
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("bob")
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
 
     let root = create_team(&admin, "root").await;
     let mid_a = create_team(&admin, "mid-a").await;
