@@ -4,10 +4,11 @@ import { pushSchemaCatalogue, TestingServer } from "jazz-tools/testing";
 const APP_ID = process.env.NEXT_PUBLIC_APP_ID!;
 const BACKEND_SECRET = process.env.BACKEND_SECRET!;
 const ADMIN_SECRET = process.env.ADMIN_SECRET!;
+const SERVER_PORT = Number(process.env.JAZZ_SERVER_PORT ?? "1625");
 
 const server = await TestingServer.start({
   appId: APP_ID,
-  port: 1625,
+  port: SERVER_PORT,
   adminSecret: ADMIN_SECRET,
   backendSecret: BACKEND_SECRET,
 });
