@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, routing::get};
 use base64::Engine;
-use jazz_tools::storage::{FjallStorage, Storage};
+use jazz_tools::storage::{RocksDBStorage, Storage};
 use jazz_tools::{
     AppContext, AppId, ClientId, ClientStorage, ColumnType, DurabilityTier, JazzClient,
     QueryBuilder, SchemaBuilder, TableSchema, Value,
@@ -203,7 +203,7 @@ fn make_context(
         schema: test_schema(),
         server_url,
         data_dir,
-        storage: ClientStorage::Fjall,
+        storage: ClientStorage::RocksDB,
         jwt_token: Some(jwt_token),
         backend_secret: Some(BACKEND_SECRET.to_string()),
         admin_secret: Some(ADMIN_SECRET.to_string()),
@@ -266,13 +266,13 @@ async fn wait_for_catalogue_manifest_schema_count_on_disk(
     expected_min_count: usize,
     timeout: Duration,
 ) {
-    let db_path = data_root.join("jazz.fjall");
+    let db_path = data_root.join("jazz.rocksdb");
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last_count = 0usize;
 
     while tokio::time::Instant::now() < deadline {
         if db_path.exists()
-            && let Ok(storage) = FjallStorage::open(&db_path, 64 * 1024 * 1024)
+            && let Ok(storage) = RocksDBStorage::open(&db_path, 64 * 1024 * 1024)
         {
             let manifest = storage
                 .load_catalogue_manifest(app_id.as_object_id())
