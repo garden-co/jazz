@@ -1,6 +1,6 @@
 "use client";
 
-import { app } from "@/schema/app";
+import { app } from "../schema";
 import { JazzProvider, useAll, useDb } from "jazz-tools/react";
 
 export default function ClientTodo() {
