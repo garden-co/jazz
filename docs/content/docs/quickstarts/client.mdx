@@ -6,6 +6,7 @@ reviewedAt: "14cd73f0"
 
 import { Callout } from "fumadocs-ui/components/callout";
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+import QuickstartSchemaTypesSummary from "../../partials/schema-types-summary.mdx";
 
 ## Create a project
 
@@ -138,26 +139,15 @@ Install Jazz in your project.
 
 ## Define your schema
 
-Create a file at `schema/current.ts` describing the structure of your app's data.
+Create `schema.ts` at the root of your project. This is the source of truth for your data model.
 
-<include cwd lang="ts" meta='title="schema/current.ts"'>
-  ../examples/docs/todo-client-localfirst-react/schema/current.ts#schema-react
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-react/schema.ts#schema-react
 </include>
 
-### Run codegen
+<QuickstartSchemaTypesSummary />
 
-```bash title="Terminal"
-npx jazz-tools@alpha build
-```
-
-This generates `schema/app.ts`, which exports a typed `app` object with a property for each table (e.g. `app.todos`). Import `app` whenever you need to query or write data.
-
-<Callout title="Generated code">
-  Never edit `schema/app.ts` by hand. Edit `schema/current.ts` and re-run `npx jazz-tools@alpha
-  build`.
-</Callout>
-
-[Learn more about schemas](/docs/schemas/defining-tables).
+[Learn more about schemas, optional validation, and migrations](/docs/schemas/defining-tables).
 
 ## Set up your app
 
@@ -350,43 +340,35 @@ npx jazz-tools@alpha server <your-app-id> --admin-secret secret
 
 The server rejects all reads and writes unless you define [permissions](/docs/auth/permissions). For this quickstart, allow everything:
 
-```ts title="schema/permissions.ts"
-import { definePermissions } from "jazz-tools/permissions";
-import { app } from "./app.js";
+```ts title="permissions.ts"
+import { schema as s } from "jazz-tools";
+import { app } from "./schema.js";
 
-export default definePermissions(app, ({ policy }) => [
-  policy.todos.allowRead.always(),
-  policy.todos.allowInsert.always(),
-  policy.todos.allowUpdate.always(),
-  policy.todos.allowDelete.always(),
-]);
-```
-
-Re-run codegen so the build picks up the new file:
-
-```bash title="Terminal"
-npx jazz-tools@alpha build
+export default s.definePermissions(app, ({ policy }) => {
+  policy.todos.allowRead.always();
+  policy.todos.allowInsert.always();
+  policy.todos.allowUpdate.always();
+  policy.todos.allowDelete.always();
+});
 ```
 
 ### Connect the client
 
-Update your client config to use the same app ID, and add `serverUrl` and `adminSecret`:
+Update your client config to use the same app ID, and add `serverUrl`:
 
 ```ts
 {
   appId: "<your-app-id>",
-  // Use your machine's LAN IP for mobile devices
+  // Use your machine's LAN IP for mobile devices.
   serverUrl: "http://127.0.0.1:1625",
-  adminSecret: "secret",
 }
 ```
 
-The schema and permissions are automatically published when the client connects. Data now syncs in real time between every connected client.
-
-<Callout type="warn" title="Likely to change">
-  The schema sync mechanism is under active development. Expect the admin secret flow and
-  auto-publish behaviour to change before launch.
-</Callout>
+Clients learn the structural schema when they connect. If you later change `permissions.ts`,
+publish the new permissions bundle explicitly with `npx jazz-tools@alpha permissions push`.
+If you change `schema.ts` structurally after data already exists, create and push a
+[reviewed migration edge](/docs/schemas/migrations) before old and new clients mix on the same
+shared server.
 
 For production deployment and hosting options, see [Server Setup](/docs/reference/server-setup).
 

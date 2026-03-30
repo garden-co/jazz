@@ -1,6 +1,6 @@
 import type { Request, Response } from "express";
 import type { JazzContext } from "jazz-tools/backend";
-import { app as schemaApp } from "../schema/app.js";
+import { app as schemaApp } from "../schema.js";
 
 declare const context: JazzContext;
 

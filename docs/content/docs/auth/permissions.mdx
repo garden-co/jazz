@@ -6,40 +6,31 @@ reviewedAt: "14cd73f0"
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 
-Permissions control who can read, insert, update, and delete rows. Jazz enforces them server-side using row-level policies defined in `schema/permissions.ts`. Clients that fail a policy check have their writes rejected and their reads filtered.
+Permissions control who can read, insert, update, and delete rows. Jazz enforces them server-side using row-level policies defined in `permissions.ts`. Clients that fail a policy check have their writes rejected and their reads filtered.
 
-## Schema policy syntax
+## Authoring workflow
 
-Jazz allows you to define policies using either TypeScript or SQL.
+Permissions are authored in TypeScript.
 
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    If we have the following schema:
+If we have the following schema:
 
-    <include cwd lang="ts" meta='title="schema/current.ts"'>
-      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-schema-ts
-    </include>
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-schema-ts
+</include>
 
-    We can define permissions in `schema/permissions.ts`:
+We can define permissions in `permissions.ts`:
 
-    <include cwd lang="ts" meta='title="schema/permissions.ts"'>
-      ../examples/docs/todo-server-ts/schema/permissions.ts
-    </include>
-
-  </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql" meta='title="schema/current.sql"'>
-      ../examples/docs/todo-server-ts/schema/current.sql
-    </include>
-  </Tab>
-</Tabs>
-
-Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})` / `USING (TRUE)`).
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/permissions.ts
+</include>
 
 <Callout type="info">
-  You should use the exact file names `schema/current.ts` and `schema/permissions.ts` so that Jazz
-  can find them.
+  Author permissions in the root `permissions.ts` next to `schema.ts`. `npx jazz-tools@alpha
+  validate` is a useful local sanity check before publishing. Permission-only changes do not require
+  migrations, but they do still require `npx jazz-tools@alpha permissions push`.
 </Callout>
+
+Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})`).
 
 ## Basic policies
 
@@ -47,54 +38,26 @@ Apps that do not need user-scoped filtering can still define explicit allow-all 
 
 Use the policy helpers `allowRead`, `allowInsert`, `allowUpdate`, and `allowDelete` with [`.where(...)`](/docs/reference/where-operators) to restrict access based on column values.
 
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="schema/permissions.ts"'>
-      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-simple-ts
-    </include>
-  </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql" meta='title="schema/permissions.sql"'>
-      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-simple-sql
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-simple-ts
+</include>
 
 ### `.always()`
 
-Use `.always()` when an operation should always be permitted. It is equivalent to
-`.where({})` and compiles to a `TRUE` policy expression.
+Use `.always()` when an operation should always be permitted. It is equivalent to `.where({})`.
 
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="schema/permissions.ts"'>
-      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-always-ts
-    </include>
-  </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql" meta='title="schema/permissions.sql"'>
-      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-always-sql
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-always-ts
+</include>
 
 ### `.never()`
 
 Use `.never()` when an operation should be impossible. It is equivalent to
-`.where(anyOf([]))` and compiles to a `FALSE` policy expression.
+`.where(anyOf([]))`.
 
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="schema/permissions.ts"'>
-      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-never-ts
-    </include>
-  </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql" meta='title="schema/permissions.sql"'>
-      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-never-sql
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-never-ts
+</include>
 
 ## Composing policies
 
@@ -102,78 +65,43 @@ Use `.never()` when an operation should be impossible. It is equivalent to
 
 Combine conditions with `allOf` (all must match) or `anyOf` (any can match).
 
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="schema/permissions.ts"'>
-      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-combinators-ts
-    </include>
-  </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql" meta='title="schema/permissions.sql"'>
-      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-combinators-sql
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-combinators-ts
+</include>
 
 ### JWT session claims
 
 When external auth JWTs carry claims, `session.where(...)` lets you check them directly in permissions without mapping them onto row columns first.
 
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="schema/permissions.ts"'>
-      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
-    </include>
-  </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql" meta='title="schema/permissions.sql"'>
-      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-session-claims-sql
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
+</include>
 
 ### Inherited access (`allowedTo.*`)
 
-A row can inherit its access from a related row. Use `allowedTo.read/insert/update/delete(...)` in TypeScript, or `INHERITS` in SQL.
+A row can inherit its access from a related row. Use
+`allowedTo.read/insert/update/delete(...)` to express that inheritance.
 
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="schema/permissions.ts"'>
-      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-allowed-to-ts
-    </include>
-  </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql" meta='title="schema/permissions.sql"'>
-      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-inherits-sql
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-allowed-to-ts
+</include>
 
 ### Share-based access
 
 Sometimes access isn't determined by ownership or a parent relationship, but by a separate "shares" table. Use `policy.<table>.exists.where(...)` to check whether a matching row exists in another table.
 
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="schema/permissions.ts"'>
-      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-shares-ts
-    </include>
-  </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql" meta='title="schema/permissions.sql"'>
-      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-shares-sql
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-shares-ts
+</include>
 
 The callback form `(todo) => ...` gives you access to the current row, so you can correlate it with rows in other tables.
 
 <Accordions type="single">
-<Accordion title="Recursive INHERITS">
+<Accordion title="Recursive inheritance">
 
 If a table references itself (e.g. a comment that can have sub-comments), you can inherit access recursively up to a fixed depth.
 
-<include cwd lang="ts" meta='title="schema/permissions.ts"'>
+<include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-recursive-inherits-ts
 </include>
 

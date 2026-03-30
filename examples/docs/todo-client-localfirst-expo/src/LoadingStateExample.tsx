@@ -1,6 +1,6 @@
 import { Text } from "react-native";
 import { useAll } from "jazz-tools/react-native";
-import { app } from "../schema/app";
+import { app } from "../schema";
 
 // #region reading-loading-state-expo
 export function TodoList() {

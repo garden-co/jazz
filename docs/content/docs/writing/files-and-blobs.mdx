@@ -8,7 +8,7 @@ This page explains how to store images and other binary blobs in Jazz using brow
 `File`, and `ReadableStream` values. These files benefit from the same sync, local-first storage,
 and permission model as the rest of your structured data.
 
-Use plain `col.bytes()` when the binary value is small, naturally belongs on the row itself, and
+Use plain `s.bytes()` when the binary value is small, naturally belongs on the row itself, and
 should always load together with the rest of that row.
 
 ## Add the Conventional Tables
@@ -16,8 +16,8 @@ should always load together with the rest of that row.
 `db.createFileFromBlob`, `db.createFileFromStream`, `db.loadFileAsBlob`, and
 `db.loadFileAsStream` currently expect these exact table and column names on `app`:
 
-<include cwd lang="ts" meta='title="schema/current.ts"'>
-  ../examples/docs/todo-client-localfirst-ts/schema/current.ts#schema-files-and-blobs-ts
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/schema.ts#schema-files-and-blobs-ts
 </include>
 
 `file_parts.data` stores the raw chunk bytes. `files.partIds` keeps the ordered chunk ids, and
@@ -28,8 +28,8 @@ is optional metadata; `createFileFromBlob(...)` fills it from `File.name` when a
 
 ## Add Permissions
 
-<include cwd lang="ts" meta='title="schema/files-and-blobs-permissions.ts"'>
-  ../examples/docs/todo-client-localfirst-ts/schema/files-and-blobs-permissions.ts#files-permissions-ts
+<include cwd lang="ts" meta='title="files-and-blobs-permissions.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/files-and-blobs-permissions.ts#files-permissions-ts
 </include>
 
 `uploads` owns access. `files` inherit read and delete access from `uploads.file`, and

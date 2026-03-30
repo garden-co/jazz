@@ -1,6 +1,6 @@
 import { FlatList, View } from "react-native";
 import { useAll } from "jazz-tools/react-native";
-import { app } from "../schema/app";
+import { app } from "../schema";
 import { TodoItem } from "./TodoItem";
 import { AddTodo } from "./AddTodo";
 

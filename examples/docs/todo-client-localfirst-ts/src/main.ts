@@ -1,6 +1,6 @@
 import { createDb, type DbConfig, type Db } from "jazz-tools";
 import { authSessionExamples } from "./auth-session-snippets.js";
-import { app, Todo } from "../schema/app.js";
+import { app, type Todo } from "../schema.js";
 
 // Keep docs-only auth snippets in the compiled example app.
 void authSessionExamples;

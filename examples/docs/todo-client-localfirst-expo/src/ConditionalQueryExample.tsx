@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Text, TextInput, View } from "react-native";
 import { useAll } from "jazz-tools/react-native";
-import { app } from "../schema/app";
+import { app } from "../schema";
 
 // #region reading-conditional-query-expo
 export function FilteredTodos() {

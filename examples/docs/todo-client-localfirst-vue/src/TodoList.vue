@@ -2,7 +2,7 @@
 import { ref } from "vue";
 // #region reading-reactive-hooks-vue
 import { useAll, useDb } from "jazz-tools/vue";
-import { app } from "../schema/app.js";
+import { app } from "../schema.js";
 
 const db = useDb();
 const todos = useAll(app.todos);

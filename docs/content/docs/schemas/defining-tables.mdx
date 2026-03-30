@@ -1,42 +1,33 @@
 ---
 title: Defining Tables
-description: Define tables and relationships using the TypeScript DSL or SQL.
+description: Define tables and relationships in schema.ts using the TypeScript DSL.
 reviewedAt: "14cd73f0"
 ---
 
+import SchemaSetup from "../../partials/schema-setup.mdx";
+
 ## Table definitions
 
-Tables are defined in `schema/current.ts` using the Jazz DSL. Each `table()` call registers a table with its columns.
+Tables are defined in `schema.ts` using the Jazz DSL. Each `s.table(...)` call registers a table and `s.ref(...)` defines typed relations between them.
 
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts" meta='title="schema/current.ts"'>
-      ../examples/docs/todo-client-localfirst-ts/schema/current.ts#schema-todo-client-ts
-    </include>
-  </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql" meta='title="schema/current.sql"'>
-      ../examples/docs/todo-server-rs/schema/current.sql
-    </include>
-  </Tab>
-</Tabs>
-
-The TypeScript DSL uses `col.string`, `col.boolean`, `col.ref`, etc. SQL uses the equivalent `TEXT`, `BOOLEAN`, `UUID REFERENCES ...`. Use SQL when your project is Rust-first. See [Column Types](/docs/reference/column-types) for the full list.
-
-<Callout type="warn">
-  `col.ref()` columns must be named with an `Id` or `_id` suffix (e.g. `projectId`, `owner_id`). For
-  `col.array(col.ref())`, use an `Ids` or `_ids` suffix instead. The runtime enforces this
-  convention and will throw if a ref column name does not match.
-</Callout>
-
-## Codegen
-
-<include cwd lang="bash" meta='title="Terminal"'>
-  ../examples/docs/todo-client-localfirst-ts/docs/schema-codegen.sh#schemas-ts-codegen-cli
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/schema.ts#schema-todo-client-ts
 </include>
 
-Run this from your project root. It regenerates `schema/current.sql` and typed client bindings (e.g. `schema/app.ts`) from `schema/current.ts`.
+The TypeScript DSL uses `s.string`, `s.boolean`, `s.ref`, and the other builders documented in [Column Types](/docs/reference/column-types). Rust consumers read the compiled structural schema, but authoring lives in TypeScript today.
 
-When you change your schema, Jazz generates migration stubs that translate data between versions. See [Migrations](/docs/schemas/migrations) for details.
+<Callout type="warn">
+  `s.ref()` columns must be named with an `Id` or `_id` suffix (for example `projectId` or
+  `owner_id`). For `s.array(s.ref())`, use an `Ids` or `_ids` suffix instead. The runtime enforces
+  this convention and will throw if a ref column name does not match.
+</Callout>
+
+## Validate locally
+
+<SchemaSetup />
+
+`schema.ts` is the source of truth. Jazz no longer generates `schema/app.ts` or `current.sql`.
+
+When you change your schema structurally on a shared app, create and push a reviewed migration edge. See [Migrations](/docs/schemas/migrations) for details.
 
 If you need to clear local browser data after a schema change, see [How do I reset browser storage?](/docs/reference/faq#reset-browser-storage).

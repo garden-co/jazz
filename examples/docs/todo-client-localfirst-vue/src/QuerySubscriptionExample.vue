@@ -1,7 +1,7 @@
 <!-- #region query-subscription-vue -->
 <script setup lang="ts">
 import { useAll } from "jazz-tools/vue";
-import { app } from "../schema/app.js";
+import { app } from "../schema.js";
 
 const todos = useAll(app.todos.where({ done: false }));
 </script>

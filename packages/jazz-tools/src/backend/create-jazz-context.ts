@@ -196,7 +196,7 @@ export class JazzContext {
   }
 
   /**
-   * Get a high-level `Db` using the context's configured auth/runtime identity.
+   * Get the shared high-level `Db` for this context with no per-request session attached.
    */
   db(source?: BackendSchemaInput): Db {
     return this.wrapDb(this.getClient(source));

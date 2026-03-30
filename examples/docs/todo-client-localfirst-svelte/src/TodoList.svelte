@@ -1,10 +1,10 @@
 <!-- #region read-write-svelte -->
 <script lang="ts">
-  // #region reading-reactive-svelte
-  import { getDb, QuerySubscription } from 'jazz-tools/svelte';
-  import { app } from '../schema/app.js';
+	import { getDb, QuerySubscription } from 'jazz-tools/svelte';
+	import { app } from '../schema.js';
 
   const db = getDb();
+  // #region reading-reactive-svelte
   const todos = new QuerySubscription(app.todos);
   // #endregion reading-reactive-svelte
 
