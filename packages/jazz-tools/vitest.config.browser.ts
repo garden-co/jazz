@@ -7,6 +7,7 @@ import { testingServerInfo, testingServerJwtForUser } from "./tests/browser/test
 
 const realisticBrowserScenarios = process.env.JAZZ_REALISTIC_BROWSER_SCENARIOS ?? "";
 const realisticBrowserRunId = process.env.JAZZ_REALISTIC_BROWSER_RUN_ID ?? "";
+const isRealisticBrowserBench = realisticBrowserScenarios.trim().length > 0;
 
 export default defineConfig({
   define: {
@@ -48,7 +49,7 @@ export default defineConfig({
       },
     },
     include: ["tests/browser/**/*.test.ts", "tests/browser/**/*.test.tsx"],
-    exclude: ["tests/browser/realistic-bench.test.ts"],
+    exclude: isRealisticBrowserBench ? [] : ["tests/browser/realistic-bench.test.ts"],
     globalSetup: ["tests/browser/global-setup.ts"],
     testTimeout: 30000,
   },
