@@ -6,6 +6,7 @@ use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
 use crate::storage::{CatalogueManifest, Storage};
 
+use super::encoding::decode_permissions_head;
 use super::{AppId, SchemaManager};
 
 fn latest_catalogue_content<S: Storage + ?Sized>(
@@ -54,6 +55,37 @@ fn lens_metadata_for_rehydrate(
     metadata
 }
 
+fn permissions_metadata_for_rehydrate(app_id: AppId, schema_hash: &str) -> HashMap<String, String> {
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        MetadataKey::Type.to_string(),
+        ObjectType::CataloguePermissions.to_string(),
+    );
+    metadata.insert(MetadataKey::AppId.to_string(), app_id.uuid().to_string());
+    metadata.insert(MetadataKey::SchemaHash.to_string(), schema_hash.to_string());
+    metadata
+}
+
+fn permissions_bundle_metadata_for_rehydrate(app_id: AppId) -> HashMap<String, String> {
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        MetadataKey::Type.to_string(),
+        ObjectType::CataloguePermissionsBundle.to_string(),
+    );
+    metadata.insert(MetadataKey::AppId.to_string(), app_id.uuid().to_string());
+    metadata
+}
+
+fn permissions_head_metadata_for_rehydrate(app_id: AppId) -> HashMap<String, String> {
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        MetadataKey::Type.to_string(),
+        ObjectType::CataloguePermissionsHead.to_string(),
+    );
+    metadata.insert(MetadataKey::AppId.to_string(), app_id.uuid().to_string());
+    metadata
+}
+
 /// Rehydrate server schema state from persisted catalogue manifest operations.
 ///
 /// This lets a restarted server recover known schemas/lenses before any client
@@ -75,10 +107,12 @@ pub fn rehydrate_schema_manager_from_manifest<S: Storage + ?Sized>(
 
     let CatalogueManifest {
         schema_seen,
+        permissions_seen,
         lens_seen,
     } = manifest;
 
     let mut schema_count = 0usize;
+    let mut permissions_count = 0usize;
     let mut lens_count = 0usize;
 
     for (object_id, schema_hash) in schema_seen {
@@ -102,6 +136,98 @@ pub fn rehydrate_schema_manager_from_manifest<S: Storage + ?Sized>(
             );
         } else {
             schema_count += 1;
+        }
+    }
+
+    let permissions_head_object_id = SchemaManager::permissions_head_object_id_for(app_id);
+    let rehydrated_permissions_head = if let Some(head_content) =
+        latest_catalogue_content(storage, permissions_head_object_id)?
+    {
+        match decode_permissions_head(&head_content) {
+            Ok((_schema_hash, _version, _parent_bundle_object_id, bundle_object_id)) => {
+                match latest_catalogue_content(storage, bundle_object_id)? {
+                    Some(bundle_content) => {
+                        let bundle_metadata = permissions_bundle_metadata_for_rehydrate(app_id);
+                        if let Err(error) = schema_manager.process_catalogue_update(
+                            bundle_object_id,
+                            &bundle_metadata,
+                            &bundle_content,
+                        ) {
+                            warn!(
+                                app_id = %app_id,
+                                object_id = %bundle_object_id,
+                                ?error,
+                                "failed to process permissions bundle from rehydrated head"
+                            );
+                            false
+                        } else {
+                            let head_metadata = permissions_head_metadata_for_rehydrate(app_id);
+                            if let Err(error) = schema_manager.process_catalogue_update(
+                                permissions_head_object_id,
+                                &head_metadata,
+                                &head_content,
+                            ) {
+                                warn!(
+                                    app_id = %app_id,
+                                    object_id = %permissions_head_object_id,
+                                    ?error,
+                                    "failed to process permissions head during rehydrate"
+                                );
+                                false
+                            } else {
+                                permissions_count += 1;
+                                true
+                            }
+                        }
+                    }
+                    None => {
+                        warn!(
+                            app_id = %app_id,
+                            object_id = %bundle_object_id,
+                            "catalogue permissions bundle referenced by head missing main branch content"
+                        );
+                        false
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(
+                    app_id = %app_id,
+                    object_id = %permissions_head_object_id,
+                    ?error,
+                    "failed to decode permissions head during rehydrate"
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    if !rehydrated_permissions_head {
+        for (object_id, schema_hash) in permissions_seen {
+            let Some(content) = latest_catalogue_content(storage, object_id)? else {
+                warn!(
+                    app_id = %app_id,
+                    object_id = %object_id,
+                    "legacy catalogue permissions in manifest missing main branch content"
+                );
+                continue;
+            };
+
+            let metadata = permissions_metadata_for_rehydrate(app_id, &schema_hash.to_string());
+            if let Err(error) =
+                schema_manager.process_catalogue_update(object_id, &metadata, &content)
+            {
+                warn!(
+                    app_id = %app_id,
+                    object_id = %object_id,
+                    ?error,
+                    "failed to process legacy permissions catalogue entry from manifest"
+                );
+            } else {
+                permissions_count += 1;
+            }
         }
     }
 
@@ -136,6 +262,7 @@ pub fn rehydrate_schema_manager_from_manifest<S: Storage + ?Sized>(
     info!(
         app_id = %app_id,
         schema_count,
+        permissions_count,
         lens_count,
         "rehydrated schema manager from catalogue manifest"
     );

@@ -1,94 +1,71 @@
 ---
 title: Permissions
-description: Fast RLS (ReBAC), simple policies, combinators, and inherited access policies.
+description: Current row-level auth rules, simple policies, combinators, and inherited access policies.
 ---
 
-## Schema Policy Syntax
+## Lifecycle
 
-Define policies in `schema/permissions.ts` for TypeScript DSL apps, or directly in SQL.
+- `schema.ts` defines the structural data model. It produces schema hashes and is the input to migrations.
+- `permissions.ts` defines the current auth rules for that app. Permission-only changes do not create schema hashes or migration edges.
+- `migrations/` only describe structural compatibility between schema hashes.
 
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
-  <Tab value="TypeScript">
-    Assuming the following schema:
+Jazz applies the latest published permissions even when data is being read through older schema versions. Older rows are transformed into the current permission schema for auth checks, then projected back into the caller's requested shape.
 
-    <include cwd lang="ts">
-      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-schema-ts
-    </include>
+## Publishing Permissions
 
-    Define permissions in `schema/permissions.ts`:
+Optionally validate the local files, inspect the current server head, then publish:
 
-    <include cwd lang="ts">
-      ../examples/docs/todo-server-ts/schema/permissions.ts
-    </include>
+```bash
+npx jazz-tools validate
+npx jazz-tools permissions status
+npx jazz-tools permissions push
+```
 
-  </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql">
-      ../examples/docs/todo-server-ts/schema/current.sql
-    </include>
-  </Tab>
-</Tabs>
+`permissions push` advances a single global permissions head. It fails loudly if the server head has moved since you last checked, so permission versions stay linear.
 
-Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})` / `USING (TRUE)`).
+## Defining Permissions
+
+Define policies in a root `permissions.ts` next to `schema.ts`. This applies to every Jazz app, including Rust backends that consume the compiled schema via the CLI.
+
+Assuming the following schema:
+
+<include cwd lang="ts">
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-schema-ts
+</include>
+
+Define permissions in `permissions.ts`:
+
+<include cwd lang="ts">
+  ../examples/docs/todo-server-ts/permissions.ts
+</include>
+
+Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})`).
 
 ## Simple Policies
 
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-simple-ts
-    </include>
-  </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql">
-      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-simple-sql
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts">
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-simple-ts
+</include>
 
 ## Explicitly Allow an Operation (`.always()`)
 
-Use `.always()` when an operation should always be permitted. It is equivalent to
-`.where({})` and compiles to a `TRUE` policy expression.
+Use `.always()` when an operation should always be permitted. It is equivalent to `.where({})`.
 
-This helper is available on read, insert, update, and delete policy builders.
-
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-always-ts
-    </include>
-  </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql">
-      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-always-sql
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts">
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-always-ts
+</include>
 
 ## Explicitly Deny an Operation (`.never()`)
 
-Use `.never()` when an operation should be impossible. It is equivalent to
-`.where(anyOf([]))` and compiles to a `FALSE` policy expression.
+Use `.never()` when an operation should be impossible. It is equivalent to `.where(anyOf([]))`.
 
-This helper is available on read, insert, update, and delete policy builders.
-
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-never-ts
-    </include>
-  </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql">
-      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-never-sql
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts">
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-never-ts
+</include>
 
 ## Combining Conditions (`allOf` / `anyOf`)
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+<Tabs groupId="jazz-permissions-language" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-combinators-ts
@@ -113,26 +90,17 @@ When external auth JWTs carry claims, `session.where(...)` lets you check them d
 
 ## Inherited Access Policies (`allowedTo.*`)
 
-TypeScript DSL exposes inherited access via `allowedTo.read/insert/update/delete(...)`, which compiles to `INHERITS` policy expressions.
+`allowedTo.read/insert/update/delete(...)` lets one table inherit access from another through relationships.
 
-<Tabs groupId="jazz-schema-format" items={["TypeScript", "SQL"]} persist>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-allowed-to-ts
-    </include>
-  </Tab>
-  <Tab value="SQL">
-    <include cwd lang="sql">
-      ../examples/docs/todo-server-ts/docs/permissions-snippets.sql#permissions-inherits-sql
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts">
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-allowed-to-ts
+</include>
 
 ## Advanced: Recursive INHERITS
 
 Use depth-bounded inherited access when foreign keys can form recursive chains.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+<Tabs groupId="jazz-permissions-recursive" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-recursive-inherits-ts
@@ -147,13 +115,19 @@ Use depth-bounded inherited access when foreign keys can form recursive chains.
 
 `maxDepth` must be a positive integer.
 
+## When Permissions Change
+
+Editing only `permissions.ts` updates the active auth rules. It does not require `migrations create` or `migrations push`.
+
+If you want to inspect the currently published auth bundle before changing it, run `npx jazz-tools permissions status`.
+
+Reach for migrations only when the structure in `schema.ts` changes and older/newer schema hashes need a reviewed compatibility edge.
+
 ## Policy Enforcement and Request Context
 
-Jazz permissions use relationship-based policy evaluation with requester session context.
-Backend endpoints should scope a client/session per request before reads and writes.
-Frontend clients are evaluated with the auth/session identity used to initialize context.
+Jazz permissions use relationship-based policy evaluation with requester session context. Backend endpoints should scope a client/session per request before reads and writes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist>
+<Tabs groupId="jazz-permissions-request-context" items={["TypeScript", "Rust"]} persist>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-handler-ts

@@ -506,6 +506,14 @@ impl SyncManager {
         }
     }
 
+    /// Emit a schema warning to a client.
+    pub fn emit_schema_warning(&mut self, client_id: ClientId, warning: SchemaWarning) {
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(client_id),
+            payload: SyncPayload::SchemaWarning(warning),
+        });
+    }
+
     /// Emit a query subscription rejection error to a client.
     pub fn emit_query_subscription_rejected(
         &mut self,

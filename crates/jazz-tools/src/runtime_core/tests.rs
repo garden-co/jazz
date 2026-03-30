@@ -2,7 +2,7 @@ use super::*;
 use crate::query_manager::policy::PolicyExpr;
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::types::{
-    ColumnType, SchemaBuilder, TableName, TablePolicies, TableSchema,
+    ColumnType, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
 };
 use crate::schema_manager::AppId;
 use crate::storage::MemoryStorage;
@@ -2112,6 +2112,84 @@ fn rc_delete_old_schema_row_after_evolution_hides_row_from_queries() {
     );
 }
 
+/// FIXME: this is an undesired behavior. See `/todo/ideas/1_mvp/lens-hardening.md`
+#[test]
+fn rc_old_client_update_removes_unseen_newer_fields() {
+    let v1 = schema_evolution_v1();
+    let v2 = schema_evolution_v2();
+
+    // Flow:
+    // v2 client writes row with email on the v2 branch
+    // v1 client reads that row through v2 -> v1 lens and updates only name
+    // v2 client does not see the original email after the v1-originated update
+    let mut new_runtime =
+        create_runtime_with_schema(v2.clone(), "schema-evolution-backward-update-test");
+    let user_id = ObjectId::new();
+    let inserted_values = HashMap::from([
+        ("id".to_string(), Value::Uuid(user_id)),
+        ("name".to_string(), Value::Text("Alice".to_string())),
+        (
+            "email".to_string(),
+            Value::Text("alice@example.com".to_string()),
+        ),
+    ]);
+    let (inserted_id, _) = new_runtime.insert("users", inserted_values, None).unwrap();
+
+    let storage = new_runtime.into_storage();
+
+    let mut old_runtime =
+        create_runtime_with_storage(v1.clone(), "schema-evolution-backward-update-test", storage);
+    old_runtime
+        .add_live_schema_and_persist_catalogue(v2.clone())
+        .expect("v2 should be attachable as a live schema for v1");
+    old_runtime.immediate_tick();
+
+    old_runtime
+        .update(
+            inserted_id,
+            vec![(
+                "name".to_string(),
+                Value::Text("Alice Updated From v1".to_string()),
+            )],
+            None,
+        )
+        .expect("Updating a newer-schema row from an old client should succeed");
+
+    let storage = old_runtime.into_storage();
+
+    let mut reloaded_v2 =
+        create_runtime_with_storage(v2.clone(), "schema-evolution-backward-update-test", storage);
+    reloaded_v2
+        .add_live_schema_and_persist_catalogue(v1.clone())
+        .expect("v1 should be attachable as a live schema for v2");
+    reloaded_v2.immediate_tick();
+
+    let results = execute_runtime_query(&mut reloaded_v2, Query::new("users"), None);
+    assert_eq!(
+        results.len(),
+        1,
+        "Old-client update should still leave one logical row visible"
+    );
+
+    let (queried_id, queried_values) = &results[0];
+    let current_schema = reloaded_v2.current_schema();
+    let id_idx = column_index(current_schema, "users", "id");
+    let name_idx = column_index(current_schema, "users", "name");
+    let email_idx = column_index(current_schema, "users", "email");
+
+    assert_eq!(*queried_id, inserted_id);
+    assert_eq!(queried_values[id_idx], Value::Uuid(user_id));
+    assert_eq!(
+        queried_values[name_idx],
+        Value::Text("Alice Updated From v1".to_string()),
+    );
+    assert_eq!(
+        queried_values[email_idx],
+        Value::Text("".to_string()),
+        "Old-client updates remove unseen new-schema fields",
+    );
+}
+
 #[test]
 fn test_persist_schema_then_add_server_sends_catalogue() {
     // Mirror the WASM flow EXACTLY: NO immediate_tick before persist_schema
@@ -2156,6 +2234,21 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
             false
         }
     });
+    let permissions_msg = messages.iter().find(|m| {
+        if let SyncPayload::ObjectUpdated { metadata, .. } = &m.payload {
+            metadata
+                .as_ref()
+                .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
+                .map(|t| {
+                    t == crate::metadata::ObjectType::CataloguePermissions.as_str()
+                        || t == crate::metadata::ObjectType::CataloguePermissionsBundle.as_str()
+                        || t == crate::metadata::ObjectType::CataloguePermissionsHead.as_str()
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    });
 
     assert!(
         catalogue_msg.is_some(),
@@ -2166,6 +2259,73 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
             .map(|m| format!("{:?}", m.payload))
             .collect::<Vec<_>>()
             .join(", ")
+    );
+    assert!(
+        permissions_msg.is_none(),
+        "persist_schema should not implicitly publish permissions catalogue objects"
+    );
+}
+
+#[test]
+fn test_publish_permissions_bundle_then_add_server_sends_head_and_bundle() {
+    let schema = test_schema();
+    let app_id = AppId::from_name("test-app");
+    let schema_hash = SchemaHash::compute(&schema);
+    let sync_manager = SyncManager::new();
+    let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
+    let mut core = RuntimeCore::new(
+        schema_manager,
+        MemoryStorage::new(),
+        NoopScheduler,
+        VecSyncSender::new(),
+    );
+
+    core.persist_schema();
+    core.publish_permissions_bundle(
+        schema_hash,
+        std::collections::HashMap::from([(
+            TableName::new("users"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]),
+        None,
+    )
+    .expect("publish permissions bundle");
+
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.batched_tick();
+
+    let messages = core.sync_sender().take();
+    let bundle_msg = messages.iter().find(|m| {
+        if let SyncPayload::ObjectUpdated { metadata, .. } = &m.payload {
+            metadata
+                .as_ref()
+                .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
+                .map(|t| t == crate::metadata::ObjectType::CataloguePermissionsBundle.as_str())
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    });
+    let head_msg = messages.iter().find(|m| {
+        if let SyncPayload::ObjectUpdated { metadata, .. } = &m.payload {
+            metadata
+                .as_ref()
+                .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
+                .map(|t| t == crate::metadata::ObjectType::CataloguePermissionsHead.as_str())
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    });
+
+    assert!(
+        bundle_msg.is_some(),
+        "Explicit permission publication should sync the immutable permissions bundle object"
+    );
+    assert!(
+        head_msg.is_some(),
+        "Explicit permission publication should sync the mutable permissions head object"
     );
 }
 

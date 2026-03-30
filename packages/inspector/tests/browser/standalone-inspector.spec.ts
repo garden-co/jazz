@@ -108,7 +108,9 @@ test.describe("data explorer page", () => {
   test("loads schema explorer", async ({ page }) => {
     await page.getByRole("link", { name: "View todos schema" }).click();
 
-    await expect(page.getByText("title TEXT NOT NULL")).toBeVisible();
-    await expect(page.getByText("done BOOLEAN NOT NULL")).toBeVisible();
+    await expect(page.getByText('"name": "title"')).toBeVisible();
+    await expect(page.getByText('"type": "Text"')).toBeVisible();
+    await expect(page.getByText('"name": "done"')).toBeVisible();
+    await expect(page.getByText('"type": "Boolean"')).toBeVisible();
   });
 });

@@ -29,11 +29,11 @@ mod routes;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 
 use axum::Router;
-use jazz_tools::schema_manager::SchemaDirectory;
-use jazz_tools::{AppContext, AppId, ClientStorage, JazzClient};
+use jazz_tools::{AppContext, AppId, ClientStorage, JazzClient, Schema};
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -46,6 +46,27 @@ pub struct AppState {
     pub client: JazzClient,
     /// Broadcast channel for SSE updates. Sends the full list of todos.
     pub sse_tx: broadcast::Sender<Vec<Todo>>,
+}
+
+fn load_schema_from_cli(schema_dir: &str) -> Result<Schema, Box<dyn std::error::Error>> {
+    let jazz_tools_bin = std::env::var("JAZZ_TOOLS_BIN").unwrap_or_else(|_| "jazz-tools".into());
+    let output = Command::new(jazz_tools_bin)
+        .args([
+            "schema",
+            "export",
+            "--schema-dir",
+            schema_dir,
+            "--format",
+            "json",
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("schema export failed: {stderr}").into());
+    }
+
+    Ok(serde_json::from_slice(&output.stdout)?)
 }
 
 #[tokio::main]
@@ -74,11 +95,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Jazz server: {}", server_url);
     info!("Data directory: {}", data_dir);
 
-    // Load schema from file
-    let schema_dir = SchemaDirectory::new("./schema");
-    let schema = schema_dir.current_schema()?;
+    let schema_root = env!("CARGO_MANIFEST_DIR");
+    let schema = load_schema_from_cli(schema_root)?;
     info!(
-        "Loaded schema from schema/current.sql ({} tables)",
+        "Loaded schema from {schema_root}/schema.ts ({} tables)",
         schema.len()
     );
 

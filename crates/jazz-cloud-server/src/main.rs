@@ -2,6 +2,12 @@ mod server;
 
 use clap::Parser;
 
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogueAuthorityArg {
+    Local,
+    Forward,
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "jazz-cloud-server")]
 #[command(about = "Jazz multi-tenant sync server")]
@@ -25,6 +31,10 @@ struct Cli {
     /// Number of worker threads used for app placement and fairness scheduling.
     #[arg(long)]
     worker_threads: Option<usize>,
+
+    /// Whether this server is the catalogue authority or forwards admin catalogue requests upstream.
+    #[arg(long, env = "JAZZ_CATALOGUE_AUTHORITY", default_value = "local")]
+    catalogue_authority: CatalogueAuthorityArg,
 }
 
 #[tokio::main]
@@ -49,6 +59,15 @@ async fn main() {
         eprintln!("Missing secret hash key. Set --secret-hash-key or JAZZ_SECRET_HASH_KEY.");
         std::process::exit(1);
     }
+    let catalogue_authority = match cli.catalogue_authority {
+        CatalogueAuthorityArg::Local => server::CatalogueAuthorityMode::Local,
+        CatalogueAuthorityArg::Forward => {
+            eprintln!(
+                "Unsupported --catalogue-authority=forward for jazz-cloud-server. Use --catalogue-authority=local for now."
+            );
+            std::process::exit(1);
+        }
+    };
 
     let worker_threads = cli.worker_threads.unwrap_or_else(|| {
         std::thread::available_parallelism()
@@ -62,10 +81,44 @@ async fn main() {
         internal_api_secret: cli.internal_api_secret,
         secret_hash_key: cli.secret_hash_key,
         worker_threads,
+        catalogue_authority,
     };
 
     if let Err(err) = server::run(config).await {
         eprintln!("Server error: {err}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_defaults_catalogue_authority_to_local() {
+        let cli = Cli::parse_from([
+            "jazz-cloud-server",
+            "--internal-api-secret",
+            "internal-secret",
+            "--secret-hash-key",
+            "hash-key",
+        ]);
+
+        assert_eq!(cli.catalogue_authority, CatalogueAuthorityArg::Local);
+    }
+
+    #[test]
+    fn cli_accepts_explicit_local_catalogue_authority() {
+        let cli = Cli::parse_from([
+            "jazz-cloud-server",
+            "--internal-api-secret",
+            "internal-secret",
+            "--secret-hash-key",
+            "hash-key",
+            "--catalogue-authority",
+            "local",
+        ]);
+
+        assert_eq!(cli.catalogue_authority, CatalogueAuthorityArg::Local);
     }
 }
