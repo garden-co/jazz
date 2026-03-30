@@ -1045,7 +1045,7 @@ fn get_or_load_computes_correct_tips_for_multi_commit_branch() {
 }
 
 #[test]
-fn get_or_load_hydrates_missing_branches_into_cached_object() {
+fn get_or_load_hydrates_missing_requested_branches_for_cached_objects() {
     let mut io = MemoryStorage::new();
     let author = ObjectId::new();
 
@@ -1067,7 +1067,7 @@ fn get_or_load_hydrates_missing_branches_into_cached_object() {
             oid,
             test_branch("dev-other-main"),
             vec![],
-            b"other".to_vec(),
+            b"draft".to_vec(),
             author,
             None,
         )

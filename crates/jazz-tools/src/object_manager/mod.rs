@@ -323,32 +323,59 @@ impl ObjectManager {
             let branch_ref = QueryBranchRef::from_branch_name(bn);
 
             if full_history {
-                if let Ok(Some(loaded)) = storage.load_branch(id, &branch_ref) {
-                    let branch = Self::branch_from_loaded(loaded);
-                    let commit_ids_for_branch: Vec<_> = branch.commits.keys().copied().collect();
-                    object.branches.insert(bn, branch);
-                    for commit_id in commit_ids_for_branch {
-                        object
-                            .commit_branches
-                            .insert(commit_id, BatchBranchKey::from_branch_name(bn));
+                match storage.load_branch(id, &branch_ref) {
+                    Ok(Some(loaded)) => {
+                        let branch = Self::branch_from_loaded(loaded);
+                        let commit_ids_for_branch: Vec<_> =
+                            branch.commits.keys().copied().collect();
+                        object.branches.insert(bn, branch);
+                        for commit_id in commit_ids_for_branch {
+                            object
+                                .commit_branches
+                                .insert(commit_id, BatchBranchKey::from_branch_name(bn));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            %id,
+                            branch = %bn,
+                            error = ?err,
+                            "get_or_load: failed to hydrate requested branch"
+                        );
                     }
                 }
-            } else if let Ok(Some(loaded)) = storage.load_branch_tips(id, &branch_ref) {
-                let branch = Self::branch_from_loaded_tips(loaded);
-                let commit_ids_for_branch: Vec<_> = branch.commits.keys().copied().collect();
-                object.branches.insert(bn, branch);
-                for commit_id in commit_ids_for_branch {
-                    object
-                        .commit_branches
-                        .insert(commit_id, BatchBranchKey::from_branch_name(bn));
+            } else {
+                match storage.load_branch_tips(id, &branch_ref) {
+                    Ok(Some(loaded)) => {
+                        let branch = Self::branch_from_loaded_tips(loaded);
+                        let commit_ids_for_branch: Vec<_> =
+                            branch.commits.keys().copied().collect();
+                        object.branches.insert(bn, branch);
+                        for commit_id in commit_ids_for_branch {
+                            object
+                                .commit_branches
+                                .insert(commit_id, BatchBranchKey::from_branch_name(bn));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            %id,
+                            branch = %bn,
+                            error = ?err,
+                            "get_or_load: failed to hydrate requested branch"
+                        );
+                    }
                 }
             }
         }
 
+        let object = self.objects.get(&id)?;
         let branch_count = object.branches.len();
         let commit_count: usize = object.branches.values().map(|b| b.commits.len()).sum();
         tracing::trace!(%id, branch_count, commit_count, "get_or_load: loaded from storage");
-        self.objects.get(&id)
+        Some(object)
     }
 
     /// Get an object, loading full branch history from storage if needed.

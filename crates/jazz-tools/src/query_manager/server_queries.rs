@@ -1600,7 +1600,7 @@ impl QueryManager {
                     if super::encoding::column_is_null(descriptor, content, col_idx)
                         .unwrap_or(false)
                     {
-                        continue; // NULL FK passes INHERITS
+                        continue;
                     }
 
                     // Decode the FK value to get parent ObjectId
