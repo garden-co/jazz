@@ -372,7 +372,6 @@ async fn recursive_inherits_cycles_fail_closed_without_poisoning_acyclic_branch(
 ///          alice stream ─► remove child, remove grand
 /// ```
 #[tokio::test]
-#[should_panic] // "known failing: recursive visibility invalidation still misses edge-removal updates"
 async fn recursive_inherits_subscription_updates_when_graph_edges_change() {
     let table_name = "recursive_folders";
     let schema = recursive_folder_policy_schema(None);
