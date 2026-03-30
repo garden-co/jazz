@@ -6,6 +6,7 @@ This MVP is intentionally narrow:
 
 - it fixes commit authorship semantics first,
 - it adds a minimal permission-facing provenance surface,
+- it exposes initial provenance magic columns for reads,
 - it does **not** try to solve dynamic/group ownership via commit history.
 
 For anything more dynamic than "the creator may access this row", developers should model ownership explicitly with row columns, tables, and reference-based policies.
@@ -31,6 +32,7 @@ That mismatch blocks a clean "created by current user" permission story:
 - Use the resolved Jazz principal, not raw external provider ids.
 - Preserve creator provenance across later edits.
 - Add a small permission surface for creator-based policies.
+- Expose `$createdBy`, `$createdAt`, `$updatedBy`, and `$updatedAt` as magic columns.
 - Keep the MVP compatible with the existing recommendation for complex ownership:
   explicit schema columns, join tables, and ReBAC policies.
 
@@ -38,7 +40,7 @@ That mismatch blocks a clean "created by current user" permission story:
 
 - No attempt to infer group/org/team ownership from commit history.
 - No "owner transfer" semantics driven by commit provenance.
-- No general query/read surface for edit metadata columns yet.
+- No schema/catalog exposure or wildcard inclusion for provenance metadata.
 - No broad migration layer for mixed old/new commit-author encodings.
 - No change to the existing recommendation that dynamic access should be modeled explicitly in data.
 
@@ -105,9 +107,47 @@ That means:
 - `createdBy(...)` conditions evaluate to `false`
 - rows are not accidentally exposed because provenance is missing
 
+For reads, the corresponding provenance magic columns should return `NULL` rather than erroring.
+
+### 5. Provenance is also surfaced as magic columns
+
+The first query/read surface for edit provenance should be magic columns, following the same opt-in model as the existing permission introspection columns.
+
+MVP provenance magic columns:
+
+- `$createdBy`
+- `$createdAt`
+- `$updatedBy`
+- `$updatedAt`
+
+Semantics on the visible row commit:
+
+- `$createdBy` = current commit metadata `created_by`
+- `$createdAt` = current commit metadata `created_at`
+- `$updatedBy` = current commit `author`
+- `$updatedAt` = current commit `timestamp`
+
+Type and nullability:
+
+- `$createdBy`: `TEXT NULL`
+- `$createdAt`: `TIMESTAMP NULL`
+- `$updatedBy`: `TEXT NULL`
+- `$updatedAt`: `TIMESTAMP NULL`
+
+Nulls are allowed for MVP because:
+
+- older/malformed commits may not carry the required provenance,
+- system/sessionless writes may appear during transition,
+- reads should degrade safely while policy checks remain fail-closed.
+
 ## Permission Surface (MVP)
 
-This MVP adds a small provenance-aware policy surface without pulling the whole edit-metadata query feature into scope.
+This MVP adds a small provenance-aware policy surface and aligns it with the new provenance magic columns.
+
+The intended mental model is:
+
+- app code reads `$createdBy`, `$createdAt`, `$updatedBy`, `$updatedAt`
+- policy code uses mirrored provenance helpers for authorization decisions
 
 ### TypeScript DSL
 
@@ -128,6 +168,11 @@ MVP helpers:
 - `meta.createdBy(value)`
 - `meta.updatedBy(value)`
 
+These helpers should be documented as the policy-side counterparts of:
+
+- `$createdBy`
+- `$updatedBy`
+
 Accepted `value` types in MVP:
 
 - string literal
@@ -136,7 +181,7 @@ Accepted `value` types in MVP:
 Not supported in MVP:
 
 - comparing provenance to row refs
-- using provenance as a general query filter/projection surface
+- timestamp-based provenance helpers in the TypeScript policy DSL
 
 ### SQL Policy Syntax
 
@@ -156,6 +201,47 @@ MVP functions:
 - `UPDATED_BY()`
 
 These are policy/runtime concepts, not user-declared schema columns.
+
+`CREATED_BY()` / `UPDATED_BY()` are the SQL-side counterparts of:
+
+- `$createdBy`
+- `$updatedBy`
+
+Timestamp provenance is still exposed in reads via magic columns, but policy helper functions for `created_at` / `updated_at` are intentionally deferred from this MVP.
+
+## Magic Columns (MVP)
+
+### Explicit opt-in
+
+Like `$canRead` / `$canEdit` / `$canDelete`, provenance magic columns are omitted from `select("*")`.
+
+Examples:
+
+- `select("*", "$createdBy", "$updatedAt")`
+- `select("title", "$createdAt")`
+
+### Joined queries
+
+They should work in joined queries through the same existing scoped magic-column path:
+
+- `select("users.name", "posts.title", "posts.$createdBy")`
+
+### Filters and ordering
+
+They should be usable in non-indexed filters and sort clauses through the same planner path already used for existing magic columns.
+
+Examples:
+
+- `where("$createdBy", "eq", sessionUserId)` in runtime query payloads
+- `orderBy("$updatedAt", "desc")`
+
+They remain non-indexed/system-computed values.
+
+### Session behavior
+
+Unlike permission introspection magic columns, provenance magic columns are **not** session-scoped.
+
+If the row is visible to the query, provenance magic columns evaluate from the visible row commit even when no session is present.
 
 ## Execution Semantics
 
@@ -230,6 +316,42 @@ If we later need migration, it can be designed separately. This MVP optimizes fo
 - Preserve `created_by` / `created_at` metadata on row commits.
 - Add reserved system principal constant.
 
+### Shared provenance payload
+
+Current graph materialization carries row bytes and `commit_id`, but not commit provenance.
+
+For this MVP, extend the loaded-row pipeline with commit provenance from the visible row commit:
+
+- commit author
+- commit timestamp
+- commit metadata required for `created_by` / `created_at`
+
+The cleanest MVP route is to widen `LoadedRow` with a compact provenance payload and thread it through the existing row-loader closures. That keeps one source of truth for:
+
+- materialization,
+- provenance magic columns,
+- provenance-aware policy evaluation.
+
+### Magic column implementation strategy
+
+The current magic-column pipeline is already a good fit:
+
+- magic columns are planner-recognized,
+- opt-in,
+- non-indexed,
+- available in projections/filters/order-by,
+- and computed in a dedicated `MagicColumnsNode`.
+
+MVP implementation strategy:
+
+1. Extend the magic-column registries in Rust and TypeScript with the four provenance columns.
+2. Teach `MagicColumnsNode` to assign per-kind output types instead of hard-coding `BOOLEAN`.
+3. Keep policy dependency-table tracking only for permission introspection kinds; provenance kinds have no cross-table dependency list.
+4. Evaluate provenance kinds directly from loaded visible-commit provenance, without requiring a session.
+5. Reuse the same provenance extraction helper in policy evaluation so reads and policies stay aligned.
+
+This should not require a new planner node; it should fit inside the existing magic-column pipeline.
+
 ### Permissions engine
 
 - Extend policy IR with provenance-aware conditions.
@@ -241,6 +363,12 @@ If we later need migration, it can be designed separately. This MVP optimizes fo
 - Add `meta.createdBy(...)` and `meta.updatedBy(...)`.
 - Compile them into the Rust policy representation.
 - Keep the helper small and intentionally scoped to simple comparisons.
+
+### Query/runtime TypeScript surface
+
+- Extend the shared magic-column registry and TS typing for `$createdBy`, `$createdAt`, `$updatedBy`, `$updatedAt`.
+- Keep them opt-in and excluded from wildcard selection.
+- Ensure row transformation maps timestamp values to the same runtime shape already used for normal timestamp columns.
 
 ### SQL parser/generator
 
@@ -276,6 +404,9 @@ Add focused coverage for:
 - insert/update/delete stamping the right author
 - creator provenance surviving later edits by another user
 - creator provenance surviving hard-delete truncation boundaries
+- selecting/projecting/filtering/ordering on `$createdBy`, `$createdAt`, `$updatedBy`, `$updatedAt`
+- joined-query scoping for provenance magic columns
+- provenance magic columns working without a session
 - `meta.createdBy(session.user_id)` and `meta.updatedBy(session.user_id)` in TS DSL
 - SQL parse/generate for `CREATED_BY()` / `UPDATED_BY()`
 - fail-closed behavior when provenance metadata is missing or malformed
