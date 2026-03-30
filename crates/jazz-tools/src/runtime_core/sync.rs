@@ -74,10 +74,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     }
 
     /// Remove a client connection.
-    pub fn remove_client(&mut self, client_id: ClientId) {
+    ///
+    /// Returns `false` if the client has unprocessed inbox entries.
+    pub fn remove_client(&mut self, client_id: ClientId) -> bool {
         self.schema_manager
             .query_manager_mut()
-            .remove_client(client_id);
+            .remove_client(client_id)
     }
 
     /// Promote a client to Admin role (full access, no ReBAC).

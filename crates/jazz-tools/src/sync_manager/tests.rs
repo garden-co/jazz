@@ -2691,10 +2691,9 @@ fn remove_client_cleans_pending_permission_checks() {
     sm.add_client(bob);
 
     let obj_id = ObjectId::new();
-    // Manually push pending permission checks
-    sm.pending_permission_checks.push(PendingPermissionCheck {
-        id: PendingUpdateId(1),
-        client_id: alice,
+    let make_check = |id: u64, client_id: ClientId| PendingPermissionCheck {
+        id: PendingUpdateId(id),
+        client_id,
         payload: SyncPayload::ObjectUpdated {
             object_id: obj_id,
             metadata: None,
@@ -2702,7 +2701,7 @@ fn remove_client_cleans_pending_permission_checks() {
             commits: vec![],
         },
         session: crate::query_manager::session::Session {
-            user_id: "alice".into(),
+            user_id: format!("{client_id}"),
             claims: serde_json::Value::Null,
         },
         schema_wait_started_at: None,
@@ -2710,29 +2709,13 @@ fn remove_client_cleans_pending_permission_checks() {
         old_content: None,
         new_content: None,
         operation: Operation::Insert,
-    });
-    sm.pending_permission_checks.push(PendingPermissionCheck {
-        id: PendingUpdateId(2),
-        client_id: bob,
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj_id,
-            metadata: None,
-            branch_name: BranchName::new("main"),
-            commits: vec![],
-        },
-        session: crate::query_manager::session::Session {
-            user_id: "bob".into(),
-            claims: serde_json::Value::Null,
-        },
-        schema_wait_started_at: None,
-        metadata: Default::default(),
-        old_content: None,
-        new_content: None,
-        operation: Operation::Insert,
-    });
+    };
+    sm.pending_permission_checks.push(make_check(1, alice));
+    sm.pending_permission_checks.push(make_check(2, bob));
 
-    sm.remove_client(alice);
+    let removed = sm.remove_client(alice);
 
+    assert!(removed, "should succeed — no inbox entries");
     assert_eq!(sm.pending_permission_checks.len(), 1);
     assert_eq!(sm.pending_permission_checks[0].client_id, bob);
 }
@@ -2854,20 +2837,16 @@ fn remove_client_cleans_outbox_entries() {
 }
 
 #[test]
-fn remove_client_cleans_inbox_entries() {
+fn remove_client_skips_when_inbox_entries_exist() {
     //
     // alice ──msg──▶ server inbox (not yet processed)
-    // bob   ──msg──▶ server inbox (not yet processed)
     //
-    // alice disconnects → only bob's inbox entry and server-sourced entries remain.
+    // alice disconnects → remove_client returns false, state preserved.
     //
     let mut sm = SyncManager::new();
 
     let alice = ClientId::new();
-    let bob = ClientId::new();
-    let server_id = ServerId::new();
     sm.add_client(alice);
-    sm.add_client(bob);
 
     let obj_id = ObjectId::new();
     let payload = SyncPayload::ObjectUpdated {
@@ -2879,21 +2858,17 @@ fn remove_client_cleans_inbox_entries() {
 
     sm.push_inbox(InboxEntry {
         source: Source::Client(alice),
-        payload: payload.clone(),
-    });
-    sm.push_inbox(InboxEntry {
-        source: Source::Client(bob),
-        payload: payload.clone(),
-    });
-    sm.push_inbox(InboxEntry {
-        source: Source::Server(server_id),
         payload,
     });
 
-    sm.remove_client(alice);
+    let removed = sm.remove_client(alice);
 
-    assert_eq!(sm.inbox.len(), 2);
-    assert!(sm.inbox.iter().all(|e| e.source != Source::Client(alice)));
+    assert!(!removed, "should skip reap when inbox entries exist");
+    assert!(
+        sm.get_client(alice).is_some(),
+        "alice's ClientState should be preserved"
+    );
+    assert_eq!(sm.inbox.len(), 1, "inbox should be untouched");
 }
 
 #[test]
