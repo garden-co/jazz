@@ -26,6 +26,6 @@
     "dotenv": "^17.3.1",
     "tailwindcss": "^4",
     "tsx": "^4.21.0",
-    "typescript": "^5"
+    "typescript": "catalog:default"
   }
 }
