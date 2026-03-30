@@ -619,7 +619,7 @@ describe("translateQuery", () => {
       });
     });
 
-    it("translates null value", () => {
+    it("translates eq null value to IsNull", () => {
       const builderJson = JSON.stringify({
         table: "todos",
         conditions: [{ column: "priority", op: "eq", value: null }],
@@ -629,10 +629,23 @@ describe("translateQuery", () => {
 
       const result = parseTranslatedQuery(builderJson, basicSchema);
       expect(expectFilterPredicate(result)).toEqual({
-        type: "Cmp",
-        left: { scope: "todos", column: "priority" },
-        op: "Eq",
-        right: { type: "Literal", value: { Null: null } },
+        type: "IsNull",
+        column: { scope: "todos", column: "priority" },
+      });
+    });
+
+    it("translates ne null value to IsNotNull", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "priority", op: "ne", value: null }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "IsNotNull",
+        column: { scope: "todos", column: "priority" },
       });
     });
 

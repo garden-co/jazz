@@ -71,8 +71,9 @@ describe("TS Query API", () => {
       expect(results.map((todo) => todo.id)).toEqual([todoWithOwner.id]);
     });
 
-    it("filters with explicit null values always return false", async () => {
-      const _todoWithoutOwner = insertTodo(db, {
+    // Note: this is a difference with respect to SQL, when =null checks always return false.
+    it("filters with explicit null values work as isNull:true", async () => {
+      const todoWithoutOwner = insertTodo(db, {
         title: "Todo without owner",
         ownerId: null,
       });
@@ -83,8 +84,8 @@ describe("TS Query API", () => {
 
       const resultsDirectNull = await db.all(app.todos.where({ ownerId: null }));
       const resultsEqNull = await db.all(app.todos.where({ ownerId: { eq: null } }));
-      expect(resultsDirectNull).toEqual([]);
-      expect(resultsEqNull).toEqual([]);
+      expect(resultsDirectNull.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
+      expect(resultsEqNull.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
     });
 
     it("filters with explicit undefined values are no-ops", async () => {
