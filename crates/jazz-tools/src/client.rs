@@ -13,7 +13,11 @@ use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
 use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_manifest};
-use crate::storage::{FjallStorage, MemoryStorage, Storage, StorageError};
+#[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+use crate::storage::FjallStorage;
+#[cfg(feature = "rocksdb")]
+use crate::storage::RocksDBStorage;
+use crate::storage::{MemoryStorage, Storage, StorageError};
 use crate::sync_manager::{
     ClientId, Destination, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
@@ -124,7 +128,7 @@ impl JazzClient {
         let declared_schema = context.schema.clone();
         let default_session = default_session_from_context(&context);
         let client_id = match context.storage {
-            ClientStorage::Fjall => load_or_create_persistent_client_id(&context)?,
+            ClientStorage::RocksDB => load_or_create_persistent_client_id(&context)?,
             ClientStorage::Memory => context.client_id.unwrap_or_default(),
         };
 
@@ -143,7 +147,7 @@ impl JazzClient {
         };
 
         let storage: DynStorage = match context.storage {
-            ClientStorage::Fjall => Box::new(open_fjall_storage(&context.data_dir).await?),
+            ClientStorage::RocksDB => Box::new(open_rocksdb_storage(&context.data_dir).await?),
             ClientStorage::Memory => Box::new(MemoryStorage::new()),
         };
 
@@ -1118,6 +1122,48 @@ fn load_or_create_persistent_client_id(context: &AppContext) -> Result<ClientId>
     Ok(client_id)
 }
 
+#[cfg(feature = "rocksdb")]
+async fn open_rocksdb_storage(data_dir: &std::path::Path) -> Result<RocksDBStorage> {
+    const MAX_ATTEMPTS: usize = 100;
+    const RETRY_DELAY_MS: u64 = 25;
+
+    std::fs::create_dir_all(data_dir)?;
+
+    let db_path = data_dir.join("jazz.rocksdb");
+    let mut opened = None;
+    let mut last_err = None;
+
+    for attempt in 0..MAX_ATTEMPTS {
+        match RocksDBStorage::open(&db_path, 64 * 1024 * 1024) {
+            Ok(storage) => {
+                opened = Some(storage);
+                break;
+            }
+            Err(err) => {
+                let is_lock_error = matches!(
+                    &err,
+                    StorageError::IoError(msg)
+                        if msg.contains("lock") || msg.contains("Lock") || msg.contains("busy")
+                );
+                if !is_lock_error || attempt + 1 == MAX_ATTEMPTS {
+                    last_err = Some(err);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+            }
+        }
+    }
+
+    opened.ok_or_else(|| {
+        JazzError::Connection(format!(
+            "failed to open rocksdb storage '{}': {:?}",
+            db_path.display(),
+            last_err
+        ))
+    })
+}
+
+#[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
 async fn open_fjall_storage(data_dir: &std::path::Path) -> Result<FjallStorage> {
     const MAX_ATTEMPTS: usize = 100;
     const RETRY_DELAY_MS: u64 = 25;

@@ -95,9 +95,9 @@ pub struct AppContext {
 #[cfg(feature = "client")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClientStorage {
-    /// Persist client state to disk using Fjall under `AppContext::data_dir`.
+    /// Persist client state to disk using RocksDB under `AppContext::data_dir`.
     #[default]
-    Fjall,
+    RocksDB,
     /// Keep all client state in memory for the lifetime of the process only.
     Memory,
 }

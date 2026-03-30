@@ -262,7 +262,7 @@ fn make_context(
         schema: test_schema(),
         server_url: format!("{server_url}/apps/{app_id}"),
         data_dir,
-        storage: jazz_tools::ClientStorage::Fjall,
+        storage: jazz_tools::ClientStorage::RocksDB,
         jwt_token: Some(jwt_token),
         backend_secret: Some(BACKEND_SECRET.to_string()),
         admin_secret: Some(ADMIN_SECRET.to_string()),
