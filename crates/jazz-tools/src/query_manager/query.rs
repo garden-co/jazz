@@ -146,21 +146,27 @@ impl Condition {
 
     /// Check if this condition can be used for an index scan.
     pub fn is_index_scannable(&self) -> bool {
-        !is_magic_column_name(self.column())
-            && matches!(
-                self,
-                Condition::Eq { .. }
-                    | Condition::Lt { .. }
-                    | Condition::Le { .. }
-                    | Condition::Gt { .. }
-                    | Condition::Ge { .. }
-                    | Condition::Between { .. }
-            )
+        if is_magic_column_name(self.column()) {
+            return false;
+        }
+
+        match self {
+            Condition::Eq { value, .. }
+            | Condition::Lt { value, .. }
+            | Condition::Le { value, .. }
+            | Condition::Gt { value, .. }
+            | Condition::Ge { value, .. } => !value.is_null(),
+            Condition::Between { min, max, .. } => !min.is_null() && !max.is_null(),
+            _ => false,
+        }
     }
 
     /// Convert to a Predicate for filter evaluation.
     pub fn to_predicate(&self, descriptor: &RowDescriptor) -> Option<Predicate> {
         let col_index = descriptor.column_index(self.column())?;
+        if let Some(predicate) = self.null_literal_predicate(col_index) {
+            return Some(predicate);
+        }
         let col_type = &descriptor.columns[col_index].column_type;
 
         Some(match self {
@@ -210,6 +216,9 @@ impl Condition {
     /// Convert to a Predicate using a TupleDescriptor so scoped join refs can resolve.
     pub fn to_tuple_predicate(&self, tuple_descriptor: &TupleDescriptor) -> Option<Predicate> {
         let col_index = tuple_condition_column_index(tuple_descriptor, self.raw_column())?;
+        if let Some(predicate) = self.null_literal_predicate(col_index) {
+            return Some(predicate);
+        }
         let combined_descriptor = tuple_descriptor.combined_descriptor();
         let col_type = &combined_descriptor.columns[col_index].column_type;
 
@@ -255,6 +264,22 @@ impl Condition {
             Condition::IsNull { .. } => Predicate::IsNull { col_index },
             Condition::IsNotNull { .. } => Predicate::IsNotNull { col_index },
         })
+    }
+
+    fn null_literal_predicate(&self, col_index: usize) -> Option<Predicate> {
+        match self {
+            Condition::Eq { value, .. } if value.is_null() => Some(Predicate::IsNull { col_index }),
+            Condition::Ne { value, .. } if value.is_null() => {
+                Some(Predicate::IsNotNull { col_index })
+            }
+            Condition::Lt { value, .. } if value.is_null() => Some(Predicate::Or(vec![])),
+            Condition::Le { value, .. } if value.is_null() => Some(Predicate::IsNull { col_index }),
+            Condition::Gt { value, .. } if value.is_null() => {
+                Some(Predicate::IsNotNull { col_index })
+            }
+            Condition::Ge { value, .. } if value.is_null() => Some(Predicate::True),
+            _ => None,
+        }
     }
 }
 
@@ -1374,6 +1399,21 @@ mod tests {
 
         let predicate = query.to_predicate(&descriptor);
         assert!(matches!(predicate, Predicate::Eq { col_index: 2, .. }));
+    }
+
+    #[test]
+    fn query_to_predicate_eq_null_becomes_is_null() {
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("deleted_at", ColumnType::Text).nullable(),
+        ]);
+        let query = QueryBuilder::new("users")
+            .filter_eq("deleted_at", Value::Null)
+            .build();
+
+        let predicate = query.to_predicate(&descriptor);
+        assert!(matches!(predicate, Predicate::IsNull { col_index: 1 }));
+        assert!(query.disjuncts[0].best_index_condition().is_none());
     }
 
     #[test]

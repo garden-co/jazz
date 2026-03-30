@@ -880,6 +880,20 @@ pub fn evaluate_cmp(
         None => return false,
     };
 
+    if cmp_value.is_null() {
+        return match column_is_null(descriptor, content, col_index) {
+            Ok(is_null) => match op {
+                CmpOp::Eq => is_null,
+                CmpOp::Ne => !is_null,
+                CmpOp::Lt => false,
+                CmpOp::Le => is_null,
+                CmpOp::Gt => !is_null,
+                CmpOp::Ge => true,
+            },
+            Err(_) => false,
+        };
+    }
+
     // Encode the comparison value to bytes
     let encoded = encode_value(&cmp_value);
 
@@ -2238,6 +2252,28 @@ mod tests {
         .unwrap()
     }
 
+    fn nullable_descriptor() -> RowDescriptor {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("owner_id", ColumnType::Text),
+            ColumnDescriptor::new("deleted_at", ColumnType::Text).nullable(),
+        ])
+    }
+
+    fn make_nullable_row_content(owner: &str, deleted_at: Option<&str>) -> Vec<u8> {
+        let desc = nullable_descriptor();
+        encode_row(
+            &desc,
+            &[
+                Value::Text(owner.into()),
+                match deleted_at {
+                    Some(value) => Value::Text(value.into()),
+                    None => Value::Null,
+                },
+            ],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn test_simple_parts_true_false() {
         let desc = test_descriptor();
@@ -2268,6 +2304,161 @@ mod tests {
         let content2 = make_row_content("user2", "eng", "active");
         let result = evaluate_simple_parts(&expr, &content2, &desc, &session);
         assert!(!result.passed);
+    }
+
+    #[test]
+    fn test_row_null_literal_comparisons_use_value_level_semantics() {
+        let desc = nullable_descriptor();
+        let session = Session::new("user1");
+        let null_content = make_nullable_row_content("user1", None);
+        let non_null_content = make_nullable_row_content("user1", Some("2026-03-30T12:00:00Z"));
+
+        let eq_null = PolicyExpr::eq_literal("deleted_at", Value::Null);
+        let eq_simple = evaluate_simple_parts(&eq_null, &null_content, &desc, &session);
+        assert!(eq_simple.passed);
+        assert!(eq_simple.complex_clauses.is_empty());
+        assert!(evaluate_policy_expr(
+            &eq_null,
+            &null_content,
+            &desc,
+            &session
+        ));
+        assert!(!evaluate_policy_expr(
+            &eq_null,
+            &non_null_content,
+            &desc,
+            &session,
+        ));
+
+        let ne_null = PolicyExpr::Cmp {
+            column: "deleted_at".into(),
+            op: CmpOp::Ne,
+            value: PolicyValue::Literal(Value::Null),
+        };
+        assert!(!evaluate_policy_expr(
+            &ne_null,
+            &null_content,
+            &desc,
+            &session
+        ));
+        assert!(evaluate_policy_expr(
+            &ne_null,
+            &non_null_content,
+            &desc,
+            &session,
+        ));
+
+        let lt_null = PolicyExpr::Cmp {
+            column: "deleted_at".into(),
+            op: CmpOp::Lt,
+            value: PolicyValue::Literal(Value::Null),
+        };
+        assert!(!evaluate_policy_expr(
+            &lt_null,
+            &null_content,
+            &desc,
+            &session
+        ));
+        assert!(!evaluate_policy_expr(
+            &lt_null,
+            &non_null_content,
+            &desc,
+            &session,
+        ));
+
+        let le_null = PolicyExpr::Cmp {
+            column: "deleted_at".into(),
+            op: CmpOp::Le,
+            value: PolicyValue::Literal(Value::Null),
+        };
+        assert!(evaluate_policy_expr(
+            &le_null,
+            &null_content,
+            &desc,
+            &session
+        ));
+        assert!(!evaluate_policy_expr(
+            &le_null,
+            &non_null_content,
+            &desc,
+            &session,
+        ));
+
+        let gt_null = PolicyExpr::Cmp {
+            column: "deleted_at".into(),
+            op: CmpOp::Gt,
+            value: PolicyValue::Literal(Value::Null),
+        };
+        assert!(!evaluate_policy_expr(
+            &gt_null,
+            &null_content,
+            &desc,
+            &session
+        ));
+        assert!(evaluate_policy_expr(
+            &gt_null,
+            &non_null_content,
+            &desc,
+            &session,
+        ));
+
+        let ge_null = PolicyExpr::Cmp {
+            column: "deleted_at".into(),
+            op: CmpOp::Ge,
+            value: PolicyValue::Literal(Value::Null),
+        };
+        assert!(evaluate_policy_expr(
+            &ge_null,
+            &null_content,
+            &desc,
+            &session
+        ));
+        assert!(evaluate_policy_expr(
+            &ge_null,
+            &non_null_content,
+            &desc,
+            &session,
+        ));
+    }
+
+    #[test]
+    fn test_row_explicit_null_checks() {
+        let desc = nullable_descriptor();
+        let session = Session::new("user1");
+        let null_content = make_nullable_row_content("user1", None);
+        let non_null_content = make_nullable_row_content("user1", Some("2026-03-30T12:00:00Z"));
+
+        let is_null = PolicyExpr::IsNull {
+            column: "deleted_at".into(),
+        };
+        assert!(evaluate_policy_expr(
+            &is_null,
+            &null_content,
+            &desc,
+            &session
+        ));
+        assert!(!evaluate_policy_expr(
+            &is_null,
+            &non_null_content,
+            &desc,
+            &session,
+        ));
+
+        let is_not_null = PolicyExpr::IsNotNull {
+            column: "deleted_at".into(),
+        };
+        assert!(!evaluate_policy_expr(
+            &is_not_null,
+            &null_content,
+            &desc,
+            &session,
+        ));
+        assert!(evaluate_policy_expr(
+            &is_not_null,
+            &non_null_content,
+            &desc,
+            &session,
+        ));
     }
 
     #[test]
