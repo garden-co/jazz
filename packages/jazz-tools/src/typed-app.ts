@@ -1,5 +1,6 @@
 import type {
   AnyTypedColumnBuilder,
+  ColumnBuilderHasDefault,
   ColumnBuilderOptional,
   ColumnBuilderReferences,
   ColumnBuilderSqlType,
@@ -151,6 +152,10 @@ type BuilderForColumn<
 type ColumnValue<TBuilder extends AnyTypedColumnBuilder> = TSTypeFromSqlType<
   ColumnBuilderSqlType<TBuilder>
 >;
+type InsertColumnValue<TBuilder extends AnyTypedColumnBuilder> =
+  ColumnBuilderOptional<TBuilder> extends true
+    ? ColumnValue<TBuilder> | null
+    : ColumnValue<TBuilder>;
 
 type OptionalColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
   [TColumn in ColumnName<TSchema, TTable>]-?: ColumnBuilderOptional<
@@ -164,6 +169,20 @@ type RequiredColumnName<TSchema extends SchemaLike, TTable extends TableName<TSc
   ColumnName<TSchema, TTable>,
   OptionalColumnName<TSchema, TTable>
 >;
+type DefaultedColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
+  [TColumn in ColumnName<TSchema, TTable>]-?: ColumnBuilderHasDefault<
+    BuilderForColumn<TSchema, TTable, TColumn>
+  > extends true
+    ? TColumn
+    : never;
+}[ColumnName<TSchema, TTable>];
+type OptionalInsertColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
+  | OptionalColumnName<TSchema, TTable>
+  | DefaultedColumnName<TSchema, TTable>;
+type RequiredInsertColumnName<
+  TSchema extends SchemaLike,
+  TTable extends TableName<TSchema>,
+> = Exclude<ColumnName<TSchema, TTable>, OptionalInsertColumnName<TSchema, TTable>>;
 
 export type TableRow<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Simplify<
   {
@@ -181,11 +200,11 @@ export type TableRow<TSchema extends SchemaLike, TTable extends TableName<TSchem
 
 export type TableInit<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Simplify<
   {
-    [TColumn in RequiredColumnName<TSchema, TTable>]: ColumnValue<
+    [TColumn in RequiredInsertColumnName<TSchema, TTable>]: InsertColumnValue<
       BuilderForColumn<TSchema, TTable, TColumn>
     >;
   } & {
-    [TColumn in OptionalColumnName<TSchema, TTable>]?: ColumnValue<
+    [TColumn in OptionalInsertColumnName<TSchema, TTable>]?: InsertColumnValue<
       BuilderForColumn<TSchema, TTable, TColumn>
     >;
   }
@@ -525,11 +544,13 @@ export type TableRelationMap = Record<string, TableRelation>;
 export interface TableMeta<
   TName extends string = string,
   TRow extends { id: string } = { id: string },
+  TInit extends object = Record<string, never>,
   TWhere extends object = Record<string, never>,
   TRelations extends TableRelationMap = {},
 > {
   readonly name: TName;
   readonly row: TRow;
+  readonly init: TInit;
   readonly where: TWhere;
   readonly relations: TRelations;
 }
@@ -538,12 +559,13 @@ export type AnyTableMeta = TableMeta<
   string,
   { id: string },
   Record<string, unknown>,
+  Record<string, unknown>,
   TableRelationMap
 >;
 
 type TableNameFromMeta<TMeta extends AnyTableMeta> = TMeta["name"];
 type TableRowFromMeta<TMeta extends AnyTableMeta> = TMeta["row"];
-type TableInitFromMeta<TMeta extends AnyTableMeta> = Simplify<Omit<TableRowFromMeta<TMeta>, "id">>;
+type TableInitFromMeta<TMeta extends AnyTableMeta> = TMeta["init"];
 type TableWhereFromMeta<TMeta extends AnyTableMeta> = TMeta["where"];
 type TableRelationsFromMeta<TMeta extends AnyTableMeta> = TMeta["relations"];
 type RelationNameFromMeta<TMeta extends AnyTableMeta> = Extract<
@@ -595,6 +617,7 @@ export type SchemaTable<TTable extends string, TSchema extends SchemaLike> =
     ? TableMeta<
         TTable,
         TableRow<TSchema, TTable>,
+        TableInit<TSchema, TTable>,
         TableWhereInput<TSchema, TTable>,
         SchemaRelations<TTable, TSchema>
       >

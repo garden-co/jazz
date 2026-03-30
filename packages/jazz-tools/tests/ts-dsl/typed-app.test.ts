@@ -33,6 +33,25 @@ const schema = {
 type AppSchema = s.Schema<typeof schema>;
 const app: s.App<AppSchema> = s.defineApp(schema);
 
+const defaultedSchema = {
+  users: s.table({
+    name: s.string(),
+  }),
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean().default(false),
+    tags: s.array(s.string()).default([]),
+    projectId: s.ref("projects"),
+    ownerId: s.ref("users").optional().default(null),
+    assigneesIds: s.array(s.ref("users")).default([]),
+  }),
+};
+type DefaultedAppSchema = s.Schema<typeof defaultedSchema>;
+const defaultedApp: s.App<DefaultedAppSchema> = s.defineApp(defaultedSchema);
+
 describe("typed app prototype", () => {
   it("serializes select/include metadata without codegen", () => {
     expect(JSON.parse(app.todos.select("title").include({ project: true })._build())).toEqual({
@@ -93,7 +112,7 @@ describe("typed app prototype", () => {
     expectTypeOf(todoInsert.done).toEqualTypeOf<boolean>();
     expectTypeOf(todoInsert.tags).toEqualTypeOf<string[]>();
     expectTypeOf(todoInsert.project).toEqualTypeOf<string>();
-    expectTypeOf(todoInsert.owner).toEqualTypeOf<string | undefined>();
+    expectTypeOf(todoInsert.owner).toEqualTypeOf<string | null | undefined>();
 
     expectTypeOf(undefined as TodoWhere["project"]).toEqualTypeOf<
       string | { eq?: string; ne?: string } | undefined
@@ -160,6 +179,37 @@ describe("typed app prototype", () => {
 
       // @ts-expect-error invalid ref target table name inside array ref
       s.defineApp(invalidArrayRefSchema);
+    }
+  });
+
+  it("infers fields with defaults as optional for init payloads", () => {
+    type TodoInsert = s.InsertOf<typeof defaultedApp.todos>;
+    const minimalInsert: TodoInsert = {
+      title: "Ship defaults",
+      projectId: "00000000-0000-0000-0000-000000000001",
+    };
+    const explicitOptionalValues: TodoInsert = {
+      title: "Ship defaults",
+      projectId: "00000000-0000-0000-0000-000000000001",
+      ownerId: null,
+      assigneesIds: ["00000000-0000-0000-0000-000000000002"],
+    };
+
+    expectTypeOf(minimalInsert.title).toEqualTypeOf<string>();
+    expectTypeOf(minimalInsert.projectId).toEqualTypeOf<string>();
+    expectTypeOf(minimalInsert.done).toEqualTypeOf<boolean | undefined>();
+    expectTypeOf(minimalInsert.tags).toEqualTypeOf<string[] | undefined>();
+    expectTypeOf(explicitOptionalValues.ownerId).toEqualTypeOf<string | null | undefined>();
+    expectTypeOf(explicitOptionalValues.assigneesIds).toEqualTypeOf<string[] | undefined>();
+
+    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      const invalidDefaultedNull: TodoInsert = {
+        title: "Broken",
+        projectId: "00000000-0000-0000-0000-000000000001",
+        // @ts-expect-error non-nullable defaulted columns still reject null
+        done: null,
+      };
+      void invalidDefaultedNull;
     }
   });
 });
