@@ -65,6 +65,8 @@ pub struct ServerState {
     pub external_identity_store: Arc<ExternalIdentityStore>,
     /// In-memory cache: (issuer, subject) -> principal_id.
     pub external_identities: RwLock<HashMap<(String, String), String>>,
+    /// Optional sync message tracer for test observability.
+    pub sync_tracer: Option<crate::sync_tracer::SyncTracer>,
 }
 
 /// State for a single SSE connection.

@@ -22,7 +22,7 @@ const JWT_KID: &str = "test-jwks-kid";
 const JWT_SECRET: &str = "test-jwt-secret-for-integration";
 
 /// Builder for configuring and starting a [`TestingServer`].
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct TestingServerBuilder {
     port: Option<u16>,
     app_id: Option<AppId>,
@@ -32,6 +32,18 @@ pub struct TestingServerBuilder {
     admin_secret: Option<String>,
     backend_secret: Option<String>,
     jwks_url: Option<String>,
+    sync_tracer: Option<crate::sync_tracer::SyncTracer>,
+}
+
+impl std::fmt::Debug for TestingServerBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestingServerBuilder")
+            .field("port", &self.port)
+            .field("app_id", &self.app_id)
+            .field("persistent_storage", &self.persistent_storage)
+            .field("has_tracer", &self.sync_tracer.is_some())
+            .finish()
+    }
 }
 
 impl TestingServerBuilder {
@@ -77,6 +89,11 @@ impl TestingServerBuilder {
 
     pub fn with_jwks_url(mut self, jwks_url: impl Into<String>) -> Self {
         self.jwks_url = Some(jwks_url.into());
+        self
+    }
+
+    pub fn with_tracer(mut self, tracer: crate::sync_tracer::SyncTracer) -> Self {
+        self.sync_tracer = Some(tracer);
         self
     }
 
@@ -164,6 +181,7 @@ impl TestingServer {
             admin_secret,
             backend_secret,
             jwks_url,
+            sync_tracer,
         } = builder;
 
         let app_id = app_id.unwrap_or_else(Self::default_app_id);
@@ -201,6 +219,9 @@ impl TestingServer {
 
         if let Some(schema) = schema {
             server_builder = server_builder.with_schema(schema);
+        }
+        if let Some(tracer) = sync_tracer {
+            server_builder = server_builder.with_sync_tracer(tracer);
         }
         let built = server_builder.build().await.expect("build test server");
 
@@ -339,6 +360,7 @@ impl TestingServer {
             jwt_token: Some(Self::jwt_for_user(user_id.as_ref())),
             backend_secret: Some(self.backend_secret.clone()),
             admin_secret: Some(self.admin_secret.clone()),
+            sync_tracer: None,
         }
     }
 
