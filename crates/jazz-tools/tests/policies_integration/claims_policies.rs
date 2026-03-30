@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::support::{
-    TestingClient, collect_stream_deltas, has_added, has_any_change, has_removed, has_updated,
-    wait_for_query, wait_for_rows, wait_for_subscription_update,
+    collect_stream_deltas, connect_ready_claims, connect_ready_client, connect_ready_user,
+    has_added, has_any_change, has_removed, has_updated, wait_for_query, wait_for_rows,
+    wait_for_subscription_update,
 };
 use jazz_tools::query_manager::policy::{CmpOp, PolicyExpr};
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
@@ -159,22 +160,24 @@ async fn admin_role_claims_allow_admin_mutations_and_member_reads() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("admin-user")
-        .with_claims(json!({ "role": "ADMIN" }))
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let member = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("member-user")
-        .with_claims(json!({ "role": "MEMBER" }))
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
+    let admin = connect_ready_claims(
+        &server,
+        &schema,
+        "admin-user",
+        json!({ "role": "ADMIN" }),
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
+    let member = connect_ready_claims(
+        &server,
+        &schema,
+        "member-user",
+        json!({ "role": "MEMBER" }),
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
     let query = QueryBuilder::new(table_name).build();
 
     let mut member_stream = member
@@ -300,30 +303,26 @@ async fn admin_role_claims_reject_member_mutations() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("admin-user")
-        .with_claims(json!({ "role": "ADMIN" }))
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let member = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("member-user")
-        .with_claims(json!({ "role": "MEMBER" }))
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let observer = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("observer")
-        .as_user()
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
+    let admin = connect_ready_claims(
+        &server,
+        &schema,
+        "admin-user",
+        json!({ "role": "ADMIN" }),
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
+    let member = connect_ready_claims(
+        &server,
+        &schema,
+        "member-user",
+        json!({ "role": "MEMBER" }),
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
+    let observer =
+        connect_ready_user(&server, &schema, "observer", table_name, READY_TIMEOUT).await;
     let query = QueryBuilder::new(table_name).build();
 
     let mut observer_stream = observer
@@ -471,45 +470,44 @@ async fn role_claim_presence_gates_row_visibility() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let seeder = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("seed-admin")
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let admin = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice")
-        .with_claims(json!({ "role": "ADMIN" }))
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let viewer = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("bob")
-        .with_claims(json!({ "role": "VIEWER" }))
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let null_role = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("carol")
-        .with_claims(json!({ "role": null }))
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let missing_role = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("dave")
-        .with_claims(json!({}))
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
+    let seeder =
+        connect_ready_client(&server, &schema, "seed-admin", table_name, READY_TIMEOUT).await;
+    let admin = connect_ready_claims(
+        &server,
+        &schema,
+        "alice",
+        json!({ "role": "ADMIN" }),
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
+    let viewer = connect_ready_claims(
+        &server,
+        &schema,
+        "bob",
+        json!({ "role": "VIEWER" }),
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
+    let null_role = connect_ready_claims(
+        &server,
+        &schema,
+        "carol",
+        json!({ "role": null }),
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
+    let missing_role = connect_ready_claims(
+        &server,
+        &schema,
+        "dave",
+        json!({}),
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
 
     let first_doc = create_title_document(&seeder, table_name, "alpha").await;
     let second_doc = create_title_document(&seeder, table_name, "beta").await;
@@ -604,57 +602,57 @@ async fn groups_allowed_claim_arrays_gate_visibility_and_live_updates() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("seed-admin")
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
+    let admin =
+        connect_ready_client(&server, &schema, "seed-admin", table_name, READY_TIMEOUT).await;
 
     let eng_doc = create_group_document(&admin, table_name, "eng", "Eng Only").await;
     let sales_doc = create_group_document(&admin, table_name, "sales", "Sales Only").await;
 
-    let eng = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("eng-user")
-        .with_claims(json!({ "groups_allowed": ["eng"] }))
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let sales = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("sales-user")
-        .with_claims(json!({ "groups_allowed": ["sales"] }))
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let both = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("both-user")
-        .with_claims(json!({ "groups_allowed": ["eng", "sales"] }))
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let empty = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("empty-user")
-        .with_claims(json!({ "groups_allowed": [] }))
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
-    let missing = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("missing-user")
-        .with_claims(json!({}))
-        .ready_on(table_name, READY_TIMEOUT)
-        .connect()
-        .await;
+    let eng = connect_ready_claims(
+        &server,
+        &schema,
+        "eng-user",
+        json!({ "groups_allowed": ["eng"] }),
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
+    let sales = connect_ready_claims(
+        &server,
+        &schema,
+        "sales-user",
+        json!({ "groups_allowed": ["sales"] }),
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
+    let both = connect_ready_claims(
+        &server,
+        &schema,
+        "both-user",
+        json!({ "groups_allowed": ["eng", "sales"] }),
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
+    let empty = connect_ready_claims(
+        &server,
+        &schema,
+        "empty-user",
+        json!({ "groups_allowed": [] }),
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
+    let missing = connect_ready_claims(
+        &server,
+        &schema,
+        "missing-user",
+        json!({}),
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
 
     let query = QueryBuilder::new(table_name).build();
 
@@ -832,37 +830,35 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let seeder = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("seed-admin")
-        .ready_on(null_table, READY_TIMEOUT)
-        .connect()
-        .await;
-    let explicit_null = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("null-user")
-        .with_claims(json!({ "revoked_at": null }))
-        .ready_on(null_table, READY_TIMEOUT)
-        .connect()
-        .await;
-    let present_value = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("present-user")
-        .with_claims(json!({ "revoked_at": "2026-03-26T00:00:00Z" }))
-        .ready_on(null_table, READY_TIMEOUT)
-        .connect()
-        .await;
-    let missing_path = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("missing-user")
-        .with_claims(json!({}))
-        .ready_on(null_table, READY_TIMEOUT)
-        .connect()
-        .await;
+    let seeder =
+        connect_ready_client(&server, &schema, "seed-admin", null_table, READY_TIMEOUT).await;
+    let explicit_null = connect_ready_claims(
+        &server,
+        &schema,
+        "null-user",
+        json!({ "revoked_at": null }),
+        null_table,
+        READY_TIMEOUT,
+    )
+    .await;
+    let present_value = connect_ready_claims(
+        &server,
+        &schema,
+        "present-user",
+        json!({ "revoked_at": "2026-03-26T00:00:00Z" }),
+        null_table,
+        READY_TIMEOUT,
+    )
+    .await;
+    let missing_path = connect_ready_claims(
+        &server,
+        &schema,
+        "missing-user",
+        json!({}),
+        null_table,
+        READY_TIMEOUT,
+    )
+    .await;
 
     let null_doc = create_title_document(&seeder, null_table, "explicit null only").await;
     let present_doc = create_title_document(&seeder, present_table, "present value only").await;
@@ -1005,46 +1001,44 @@ async fn row_and_claim_predicates_compose_under_and_and_or() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let seeder = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("seed-admin")
-        .ready_on(all_of_table, READY_TIMEOUT)
-        .connect()
-        .await;
-    let north_eng = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("north-eng")
-        .with_claims(json!({
+    let seeder =
+        connect_ready_client(&server, &schema, "seed-admin", all_of_table, READY_TIMEOUT).await;
+    let north_eng = connect_ready_claims(
+        &server,
+        &schema,
+        "north-eng",
+        json!({
             "org": { "slug": "north" },
             "groups_allowed": ["eng"]
-        }))
-        .ready_on(all_of_table, READY_TIMEOUT)
-        .connect()
-        .await;
-    let north_empty = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("north-empty")
-        .with_claims(json!({
+        }),
+        all_of_table,
+        READY_TIMEOUT,
+    )
+    .await;
+    let north_empty = connect_ready_claims(
+        &server,
+        &schema,
+        "north-empty",
+        json!({
             "org": { "slug": "north" },
             "groups_allowed": []
-        }))
-        .ready_on(all_of_table, READY_TIMEOUT)
-        .connect()
-        .await;
-    let south_eng = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("south-eng")
-        .with_claims(json!({
+        }),
+        all_of_table,
+        READY_TIMEOUT,
+    )
+    .await;
+    let south_eng = connect_ready_claims(
+        &server,
+        &schema,
+        "south-eng",
+        json!({
             "org": { "slug": "south" },
             "groups_allowed": ["eng"]
-        }))
-        .ready_on(all_of_table, READY_TIMEOUT)
-        .connect()
-        .await;
+        }),
+        all_of_table,
+        READY_TIMEOUT,
+    )
+    .await;
 
     let all_of_match =
         create_claim_compound_document(&seeder, all_of_table, "eng", true, "North Eng Live").await;

@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::support::{
-    TestingClient, collect_stream_deltas, has_added, has_any_change, has_removed, has_updated,
-    wait_for_query, wait_for_rows, wait_for_subscription_update,
+    TestingClient, collect_stream_deltas, connect_ready_claims, connect_ready_user, has_added,
+    has_any_change, has_removed, has_updated, wait_for_query, wait_for_rows,
+    wait_for_subscription_update,
 };
 use jazz_tools::middleware::auth::{LocalAuthMode, derive_local_principal_id};
 use jazz_tools::query_manager::policy::PolicyExpr;
@@ -255,23 +256,8 @@ async fn start_alice_and_bob_server(schema: Schema) -> (TestingServer, JazzClien
         .map(|table| table.as_str().to_string())
         .expect("schema must contain at least one table");
 
-    let alice = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice")
-        .as_user()
-        .ready_on(ready_table.clone(), READY_TIMEOUT)
-        .connect()
-        .await;
-
-    let bob = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("bob")
-        .as_user()
-        .ready_on(ready_table, READY_TIMEOUT)
-        .connect()
-        .await;
+    let alice = connect_ready_user(&server, &schema, "alice", &ready_table, READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, "bob", &ready_table, READY_TIMEOUT).await;
 
     (server, alice, bob)
 }
@@ -513,17 +499,18 @@ async fn anonymous_client_cannot_see_owner_restricted_rows() {
         LocalAuthMode::Anonymous,
         "anonymous-owner-restricted-device",
     );
-    let anonymous = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id(anonymous_user_id)
-        .with_claims(json!({
+    let anonymous = connect_ready_claims(
+        &server,
+        &schema,
+        &anonymous_user_id,
+        json!({
             "auth_mode": "local",
             "local_mode": "anonymous"
-        }))
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
+        }),
+        "documents",
+        READY_TIMEOUT,
+    )
+    .await;
 
     let anonymous_rows = wait_for_query(
         &anonymous,
@@ -557,11 +544,6 @@ async fn anonymous_client_cannot_see_owner_restricted_rows() {
 /// bob ────delete own row──────────► server ──► removed
 /// ```
 #[tokio::test]
-#[should_panic]
-// Known failing: Bob's follow-up `wait_for_rows(..., EdgeServer)` uses a
-// one-shot query, and rows that leave scope on delete can stay stale in the
-// reader's local cache because removed-scope rows are not invalidated.
-// See `todo/issues/stale-client-cache-after-scope-removal.md`.
 async fn session_user_id_policies_scope_crud_to_owned_rows() {
     let owner_policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
     let schema = SchemaBuilder::new()
@@ -575,22 +557,9 @@ async fn session_user_id_policies_scope_crud_to_owned_rows() {
         ))
         .build();
     let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
-    let alice_reader = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id("alice")
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
-    let bob_reader = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema)
-        .with_user_id("bob")
-        .as_user()
-        .ready_on("documents", READY_TIMEOUT)
-        .connect()
-        .await;
+    let alice_reader =
+        connect_ready_user(&server, &schema, "alice", "documents", READY_TIMEOUT).await;
+    let bob_reader = connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
     let query = QueryBuilder::new("documents").build();
 
     let alice_doc = seed_document(&alice, "documents", "alice", "alice original", false).await;
@@ -695,8 +664,10 @@ async fn session_user_id_policies_scope_crud_to_owned_rows() {
     );
 
     bob.delete(bob_doc).await.expect("delete bob owned row");
+    let bob_reader_after_delete =
+        connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
     let bob_rows = wait_for_rows(
-        &bob_reader,
+        &bob_reader_after_delete,
         query,
         "bob reader sees no owned rows after delete",
         |rows| rows.is_empty().then_some(rows),
@@ -711,6 +682,10 @@ async fn session_user_id_policies_scope_crud_to_owned_rows() {
         .await
         .expect("shutdown alice_reader");
     bob_reader.shutdown().await.expect("shutdown bob_reader");
+    bob_reader_after_delete
+        .shutdown()
+        .await
+        .expect("shutdown bob_reader_after_delete");
     server.shutdown().await;
 }
 

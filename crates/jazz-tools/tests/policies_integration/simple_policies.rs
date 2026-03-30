@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::support::{
-    TestingClient, collect_stream_deltas, has_added, has_any_change, has_removed, has_updated,
-    wait_for_query, wait_for_rows, wait_for_subscription_update,
+    collect_stream_deltas, connect_ready_client, connect_ready_user, has_added, has_any_change,
+    has_removed, has_row, has_updated, lacks_row, wait_for_query, wait_for_rows,
+    wait_for_subscription_update,
 };
 use jazz_tools::query_manager::policy::{CmpOp, PolicyExpr, PolicyValue};
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
@@ -116,37 +117,6 @@ async fn delete_document(client: &JazzClient, document_id: ObjectId) {
     client.delete(document_id).await.expect("delete document");
 }
 
-async fn connect_ready_client(
-    server: &TestingServer,
-    schema: &Schema,
-    user_id: &str,
-    ready_table: &str,
-) -> JazzClient {
-    TestingClient::builder()
-        .with_server(server)
-        .with_schema(schema.clone())
-        .with_user_id(user_id)
-        .ready_on(ready_table, READY_TIMEOUT)
-        .connect()
-        .await
-}
-
-async fn connect_ready_user(
-    server: &TestingServer,
-    schema: &Schema,
-    user_id: &str,
-    ready_table: &str,
-) -> JazzClient {
-    TestingClient::builder()
-        .with_server(server)
-        .with_schema(schema.clone())
-        .with_user_id(user_id)
-        .as_user()
-        .ready_on(ready_table, READY_TIMEOUT)
-        .connect()
-        .await
-}
-
 fn make_priority_schema(table_name: &str, policies: TablePolicies) -> TableSchemaBuilder {
     TableSchema::builder(table_name)
         .column("title", ColumnType::Text)
@@ -190,15 +160,6 @@ fn status_values(title: &str, status: &str, archived: bool) -> Vec<Value> {
     ]
 }
 
-fn has_row(rows: &[(ObjectId, Vec<Value>)], row_id: ObjectId, expected: &[Value]) -> bool {
-    rows.iter()
-        .any(|(id, values)| *id == row_id && values.as_slice() == expected)
-}
-
-fn lacks_row(rows: &[(ObjectId, Vec<Value>)], row_id: ObjectId) -> bool {
-    rows.iter().all(|(id, _)| *id != row_id)
-}
-
 async fn start_alice_and_bob_server(schema: Schema) -> (TestingServer, JazzClient, JazzClient) {
     let server = TestingServer::builder()
         .with_schema(schema.clone())
@@ -211,8 +172,8 @@ async fn start_alice_and_bob_server(schema: Schema) -> (TestingServer, JazzClien
         .map(|table| table.as_str().to_string())
         .expect("schema must contain at least one table");
 
-    let alice = connect_ready_user(&server, &schema, "alice", &ready_table).await;
-    let bob = connect_ready_user(&server, &schema, "bob", &ready_table).await;
+    let alice = connect_ready_user(&server, &schema, "alice", &ready_table, READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, "bob", &ready_table, READY_TIMEOUT).await;
 
     (server, alice, bob)
 }
@@ -661,7 +622,8 @@ async fn archived_state_policies_gate_insert_update_and_delete() {
     // archived=true on the current row.
     delete_document(&bob, active_id).await;
 
-    let observer = connect_ready_user(&server, &schema, "observer", table_name).await;
+    let observer =
+        connect_ready_user(&server, &schema, "observer", table_name, READY_TIMEOUT).await;
 
     let observer_rows = wait_for_rows(
         &observer,
@@ -1499,9 +1461,30 @@ async fn read_and_write_policies_remain_independent() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = connect_ready_client(&server, &schema, "admin", "documents_read_only").await;
-    let alice = connect_ready_user(&server, &schema, "alice", "documents_read_only").await;
-    let bob = connect_ready_user(&server, &schema, "bob", "documents_read_only").await;
+    let admin = connect_ready_client(
+        &server,
+        &schema,
+        "admin",
+        "documents_read_only",
+        READY_TIMEOUT,
+    )
+    .await;
+    let alice = connect_ready_user(
+        &server,
+        &schema,
+        "alice",
+        "documents_read_only",
+        READY_TIMEOUT,
+    )
+    .await;
+    let bob = connect_ready_user(
+        &server,
+        &schema,
+        "bob",
+        "documents_read_only",
+        READY_TIMEOUT,
+    )
+    .await;
 
     let read_only_id =
         seed_document(&admin, "documents_read_only", "owner", "original", false).await;
@@ -1529,8 +1512,14 @@ async fn read_and_write_policies_remain_independent() {
     .await;
     assert!(has_row(&read_only_after, read_only_id, &read_only_values));
 
-    let alice_hidden_reader =
-        connect_ready_user(&server, &schema, "alice", "documents_write_only").await;
+    let alice_hidden_reader = connect_ready_user(
+        &server,
+        &schema,
+        "alice",
+        "documents_write_only",
+        READY_TIMEOUT,
+    )
+    .await;
     let write_only_before = wait_for_query(
         &alice_hidden_reader,
         QueryBuilder::new("documents_write_only").build(),
@@ -1547,8 +1536,14 @@ async fn read_and_write_policies_remain_independent() {
         .expect("shutdown alice_hidden_reader");
 
     update_document_archived(&alice, write_only_id, false).await;
-    let alice_visible_reader =
-        connect_ready_user(&server, &schema, "alice", "documents_write_only").await;
+    let alice_visible_reader = connect_ready_user(
+        &server,
+        &schema,
+        "alice",
+        "documents_write_only",
+        READY_TIMEOUT,
+    )
+    .await;
     let alice_rows = wait_for_rows(
         &alice_visible_reader,
         QueryBuilder::new("documents_write_only").build(),
@@ -1618,8 +1613,9 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let alice = connect_ready_user(&server, &schema, "alice", table_name).await;
-    let observer = connect_ready_user(&server, &schema, "observer", table_name).await;
+    let alice = connect_ready_user(&server, &schema, "alice", table_name, READY_TIMEOUT).await;
+    let observer =
+        connect_ready_user(&server, &schema, "observer", table_name, READY_TIMEOUT).await;
     let query = QueryBuilder::new(table_name).build();
     let visible_values = boolean_policy_document_values("alice", "visible", false);
     let renamed_visible_values = boolean_policy_document_values("alice", "visible renamed", false);
@@ -1642,8 +1638,14 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
     .await;
 
     let hidden_id = seed_document(&alice, table_name, "alice", "hidden", true).await;
-    let verifier_after_hidden_insert =
-        connect_ready_user(&server, &verifier_schema, "verifier-hidden", table_name).await;
+    let verifier_after_hidden_insert = connect_ready_user(
+        &server,
+        &verifier_schema,
+        "verifier-hidden",
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
     let rows_after_hidden_insert = verifier_after_hidden_insert
         .query(query.clone(), Some(DurabilityTier::EdgeServer))
         .await
@@ -1668,8 +1670,14 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
 
     observer_log.clear();
     update_document_title(&alice, visible_id, "visible renamed").await;
-    let verifier_after_visible_update =
-        connect_ready_user(&server, &verifier_schema, "verifier-updated", table_name).await;
+    let verifier_after_visible_update = connect_ready_user(
+        &server,
+        &verifier_schema,
+        "verifier-updated",
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
     let rows_after_visible_update = wait_for_rows(
         &verifier_after_visible_update,
         query.clone(),
@@ -1704,8 +1712,14 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
     .await;
     observer_log.clear();
     update_document_archived(&alice, visible_id, true).await;
-    let verifier_after_hide =
-        connect_ready_user(&server, &verifier_schema, "verifier-hide", table_name).await;
+    let verifier_after_hide = connect_ready_user(
+        &server,
+        &verifier_schema,
+        "verifier-hide",
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
     let rows_after_hide = wait_for_rows(
         &verifier_after_hide,
         query.clone(),
@@ -1737,8 +1751,14 @@ async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
 
     observer_log.clear();
     update_document_archived(&alice, hidden_id, false).await;
-    let verifier_after_reveal =
-        connect_ready_user(&server, &verifier_schema, "verifier-reveal", table_name).await;
+    let verifier_after_reveal = connect_ready_user(
+        &server,
+        &verifier_schema,
+        "verifier-reveal",
+        table_name,
+        READY_TIMEOUT,
+    )
+    .await;
     let rows_after_reveal = wait_for_rows(
         &verifier_after_reveal,
         query,

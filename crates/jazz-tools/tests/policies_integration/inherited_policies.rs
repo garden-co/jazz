@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::support::{
-    TestingClient, collect_stream_deltas, has_added, has_any_change, has_removed, wait_for_query,
-    wait_for_rows, wait_for_subscription_update,
+    TestingClient, collect_stream_deltas, connect_ready_client, connect_ready_user, has_added,
+    has_any_change, has_removed, has_row, lacks_row, wait_for_query, wait_for_rows,
+    wait_for_subscription_update,
 };
 use jazz_tools::query_manager::policy::{Operation, PolicyExpr, PolicyValue};
 use jazz_tools::query_manager::types::{
@@ -304,15 +305,6 @@ fn file_row_count(rows: &[(ObjectId, Vec<Value>)], row_id: ObjectId) -> usize {
     rows.iter().filter(|(id, _)| *id == row_id).count()
 }
 
-fn has_row(rows: &[(ObjectId, Vec<Value>)], row_id: ObjectId, expected: &[Value]) -> bool {
-    rows.iter()
-        .any(|(id, values)| *id == row_id && values.as_slice() == expected)
-}
-
-fn lacks_row(rows: &[(ObjectId, Vec<Value>)], row_id: ObjectId) -> bool {
-    rows.iter().all(|(id, _)| *id != row_id)
-}
-
 // -- Seed / mutation helpers --
 
 async fn create_folder(
@@ -408,37 +400,6 @@ async fn create_array_ref_todo(
 
 async fn update_row(client: &JazzClient, row_id: ObjectId, changes: Vec<(String, Value)>) {
     client.update(row_id, changes).await.expect("update row");
-}
-
-async fn connect_ready_client(
-    server: &TestingServer,
-    schema: &Schema,
-    user_id: &str,
-    ready_table: &str,
-) -> JazzClient {
-    TestingClient::builder()
-        .with_server(server)
-        .with_schema(schema.clone())
-        .with_user_id(user_id)
-        .ready_on(ready_table, READY_TIMEOUT)
-        .connect()
-        .await
-}
-
-async fn connect_ready_user(
-    server: &TestingServer,
-    schema: &Schema,
-    user_id: &str,
-    ready_table: &str,
-) -> JazzClient {
-    TestingClient::builder()
-        .with_server(server)
-        .with_schema(schema.clone())
-        .with_user_id(user_id)
-        .as_user()
-        .ready_on(ready_table, READY_TIMEOUT)
-        .connect()
-        .await
 }
 
 // -- Tests --
@@ -1476,10 +1437,10 @@ async fn inherited_multiple_folder_paths_compose_with_or() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = connect_ready_client(&server, &schema, "admin", "documents").await;
-    let alice = connect_ready_user(&server, &schema, "alice", "documents").await;
-    let bob = connect_ready_user(&server, &schema, "bob", "documents").await;
-    let dave = connect_ready_user(&server, &schema, "dave", "documents").await;
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, "alice", "documents", READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
+    let dave = connect_ready_user(&server, &schema, "dave", "documents", READY_TIMEOUT).await;
 
     let primary_folder_id =
         create_folder(&admin, "primary_folders", "Primary", &["alice"], false).await;
@@ -1648,9 +1609,9 @@ async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = connect_ready_client(&server, &schema, "admin", "documents").await;
-    let alice = connect_ready_user(&server, &schema, "alice", "documents").await;
-    let bob = connect_ready_user(&server, &schema, "bob", "documents").await;
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, "alice", "documents", READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
 
     let folder_id = create_folder(&admin, "folders", "Shared", &["alice"], false).await;
     let doc_id = create_folder_document(
@@ -1750,9 +1711,9 @@ async fn inherited_referencing_scalar_paths_grant_visibility_and_compose_with_or
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = connect_ready_client(&server, &schema, "admin", "files").await;
-    let alice = connect_ready_user(&server, &schema, "alice", "files").await;
-    let dave = connect_ready_user(&server, &schema, "dave", "files").await;
+    let admin = connect_ready_client(&server, &schema, "admin", "files", READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, "alice", "files", READY_TIMEOUT).await;
+    let dave = connect_ready_user(&server, &schema, "dave", "files", READY_TIMEOUT).await;
 
     let file_single = create_file(&admin, "mallory", "Grant Single").await;
     let file_multi = create_file(&admin, "mallory", "Grant Multi").await;
@@ -1806,8 +1767,8 @@ async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = connect_ready_client(&server, &schema, "admin", "files").await;
-    let alice = connect_ready_user(&server, &schema, "alice", "files").await;
+    let admin = connect_ready_client(&server, &schema, "admin", "files", READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, "alice", "files", READY_TIMEOUT).await;
 
     let file_a = create_file(&admin, "mallory", "File A").await;
     let file_b = create_file(&admin, "mallory", "File B").await;
@@ -1921,8 +1882,8 @@ async fn inherited_referencing_array_membership_preserves_set_semantics() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = connect_ready_client(&server, &schema, "admin", "files").await;
-    let alice = connect_ready_user(&server, &schema, "alice", "files").await;
+    let admin = connect_ready_client(&server, &schema, "admin", "files", READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, "alice", "files", READY_TIMEOUT).await;
 
     let file_a = create_file(&admin, "mallory", "Array A").await;
     let file_b = create_file(&admin, "mallory", "Array B").await;
@@ -2038,9 +1999,9 @@ async fn inherited_multi_hop_forward_chain_grants_access_to_leaf_rows() {
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = connect_ready_client(&server, &schema, "admin", "file_parts").await;
-    let alice = connect_ready_user(&server, &schema, "alice", "file_parts").await;
-    let dave = connect_ready_user(&server, &schema, "dave", "file_parts").await;
+    let admin = connect_ready_client(&server, &schema, "admin", "file_parts", READY_TIMEOUT).await;
+    let alice = connect_ready_user(&server, &schema, "alice", "file_parts", READY_TIMEOUT).await;
+    let dave = connect_ready_user(&server, &schema, "dave", "file_parts", READY_TIMEOUT).await;
 
     let folder_id = create_folder(&admin, "folders", "Shared Folder", &["alice"], false).await;
     let file_id = admin
@@ -2129,8 +2090,8 @@ async fn inherited_parent_policy_change_propagates_to_child_on_active_subscripti
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = connect_ready_client(&server, &schema, "admin", "documents").await;
-    let bob = connect_ready_user(&server, &schema, "bob", "documents").await;
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
 
     let folder_id = create_folder(&admin, "folders", "Shared", &["alice", "bob"], false).await;
     let doc_id = create_folder_document(
@@ -2174,7 +2135,7 @@ async fn inherited_parent_policy_change_propagates_to_child_on_active_subscripti
     )
     .await;
 
-    let bob_fresh = connect_ready_user(&server, &schema, "bob", "documents").await;
+    let bob_fresh = connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
     let rows_after_update = wait_for_query(
         &bob_fresh,
         query,
@@ -2226,8 +2187,8 @@ async fn inherited_child_fk_retarget_visible_to_hidden_parent_removes_child_from
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = connect_ready_client(&server, &schema, "admin", "documents").await;
-    let bob = connect_ready_user(&server, &schema, "bob", "documents").await;
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
 
     let visible_folder_id = create_folder(&admin, "folders", "Visible", &["bob"], false).await;
     let hidden_folder_id = create_folder(&admin, "folders", "Hidden", &["alice"], false).await;
@@ -2269,7 +2230,7 @@ async fn inherited_child_fk_retarget_visible_to_hidden_parent_removes_child_from
     )
     .await;
 
-    let bob_fresh = connect_ready_user(&server, &schema, "bob", "documents").await;
+    let bob_fresh = connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
     let rows_after_retarget = wait_for_query(
         &bob_fresh,
         query,
@@ -2321,8 +2282,8 @@ async fn inherited_child_fk_retarget_hidden_to_visible_parent_adds_child_to_subs
         .with_schema(schema.clone())
         .start()
         .await;
-    let admin = connect_ready_client(&server, &schema, "admin", "documents").await;
-    let bob = connect_ready_user(&server, &schema, "bob", "documents").await;
+    let admin = connect_ready_client(&server, &schema, "admin", "documents", READY_TIMEOUT).await;
+    let bob = connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
 
     let hidden_folder_id = create_folder(&admin, "folders", "Hidden", &["alice"], false).await;
     let visible_folder_id = create_folder(&admin, "folders", "Visible", &["bob"], false).await;
@@ -2360,7 +2321,7 @@ async fn inherited_child_fk_retarget_hidden_to_visible_parent_adds_child_to_subs
     )
     .await;
 
-    let bob_fresh = connect_ready_user(&server, &schema, "bob", "documents").await;
+    let bob_fresh = connect_ready_user(&server, &schema, "bob", "documents", READY_TIMEOUT).await;
     let rows_after_retarget = wait_for_rows(
         &bob_fresh,
         query,
