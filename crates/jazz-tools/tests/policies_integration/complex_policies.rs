@@ -313,34 +313,6 @@ async fn create_title_document(client: &JazzClient, title: &str) -> ObjectId {
         .0
 }
 
-async fn create_document_share(
-    client: &JazzClient,
-    document_id: ObjectId,
-    user_id: &str,
-) -> ObjectId {
-    client
-        .create(
-            "document_shares",
-            row_input([
-                ("document_id", Value::Uuid(document_id)),
-                ("user_id", Value::Text(user_id.to_string())),
-            ]),
-        )
-        .await
-        .expect("create document share")
-        .0
-}
-
-async fn update_document_share_user(client: &JazzClient, share_id: ObjectId, user_id: &str) {
-    client
-        .update(
-            share_id,
-            row_changes([("user_id", Value::Text(user_id.to_string()))]),
-        )
-        .await
-        .expect("update document share user");
-}
-
 async fn create_document_grant(client: &JazzClient, document_id: ObjectId, group_slug: &str) {
     client
         .create(
@@ -365,71 +337,6 @@ async fn create_group_membership(client: &JazzClient, user_id: &str, group_slug:
         )
         .await
         .expect("create group membership");
-}
-
-async fn create_folder(client: &JazzClient, owner_id: &str, name: &str) -> ObjectId {
-    client
-        .create(
-            "folders",
-            row_input([
-                ("owner_id", Value::Text(owner_id.to_string())),
-                ("name", Value::Text(name.to_string())),
-            ]),
-        )
-        .await
-        .expect("create folder")
-        .0
-}
-
-async fn create_complex_document(
-    client: &JazzClient,
-    team_slug: &str,
-    published: bool,
-    title: &str,
-    folder_id: Option<ObjectId>,
-) -> ObjectId {
-    client
-        .create(
-            "documents",
-            row_input([
-                ("team_slug", Value::Text(team_slug.to_string())),
-                ("published", Value::Boolean(published)),
-                ("title", Value::Text(title.to_string())),
-                (
-                    "folder_id",
-                    folder_id.map(Value::Uuid).unwrap_or(Value::Null),
-                ),
-            ]),
-        )
-        .await
-        .expect("create complex document")
-        .0
-}
-
-async fn create_document_flag(client: &JazzClient, document_id: ObjectId, flag: &str) {
-    client
-        .create(
-            "document_flags",
-            row_input([
-                ("document_id", Value::Uuid(document_id)),
-                ("flag", Value::Text(flag.to_string())),
-            ]),
-        )
-        .await
-        .expect("create document flag");
-}
-
-async fn create_document_editor(client: &JazzClient, document_id: ObjectId, user_id: &str) {
-    client
-        .create(
-            "document_editors",
-            row_input([
-                ("document_id", Value::Uuid(document_id)),
-                ("user_id", Value::Text(user_id.to_string())),
-            ]),
-        )
-        .await
-        .expect("create document editor");
 }
 
 /// Verifies that correlated `EXISTS` policies bind outer-row references
@@ -509,7 +416,17 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
     bob_log.clear();
     dave_log.clear();
 
-    let share_id = create_document_share(&admin, doc_id, "bob").await;
+    let share_id = admin
+        .create(
+            "document_shares",
+            row_input([
+                ("document_id", Value::Uuid(doc_id)),
+                ("user_id", Value::Text("bob".to_string())),
+            ]),
+        )
+        .await
+        .expect("create document share")
+        .0;
     wait_for_subscription_update(
         &mut bob_stream,
         &mut bob_log,
@@ -527,7 +444,13 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations() {
     .await;
     assert_eq!(bob_rows.len(), 1);
 
-    update_document_share_user(&admin, share_id, "dave").await;
+    admin
+        .update(
+            share_id,
+            row_changes([("user_id", Value::Text("dave".to_string()))]),
+        )
+        .await
+        .expect("update document share user");
     wait_for_subscription_update(
         &mut bob_stream,
         &mut bob_log,
@@ -746,6 +669,58 @@ async fn exists_rel_hop_grants_and_denies_correctly() {
 #[tokio::test]
 #[should_panic] // known failing: mixed SELECT policy stays closed once EXISTS / INHERITS composition is involved
 async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
+    async fn create_folder(client: &JazzClient, owner_id: &str, name: &str) -> ObjectId {
+        client
+            .create(
+                "folders",
+                row_input([
+                    ("owner_id", Value::Text(owner_id.to_string())),
+                    ("name", Value::Text(name.to_string())),
+                ]),
+            )
+            .await
+            .expect("create folder")
+            .0
+    }
+
+    async fn create_complex_document(
+        client: &JazzClient,
+        team_slug: &str,
+        published: bool,
+        title: &str,
+        folder_id: Option<ObjectId>,
+    ) -> ObjectId {
+        client
+            .create(
+                "documents",
+                row_input([
+                    ("team_slug", Value::Text(team_slug.to_string())),
+                    ("published", Value::Boolean(published)),
+                    ("title", Value::Text(title.to_string())),
+                    (
+                        "folder_id",
+                        folder_id.map(Value::Uuid).unwrap_or(Value::Null),
+                    ),
+                ]),
+            )
+            .await
+            .expect("create complex document")
+            .0
+    }
+
+    async fn create_document_flag(client: &JazzClient, document_id: ObjectId, flag: &str) {
+        client
+            .create(
+                "document_flags",
+                row_input([
+                    ("document_id", Value::Uuid(document_id)),
+                    ("flag", Value::Text(flag.to_string())),
+                ]),
+            )
+            .await
+            .expect("create document flag");
+    }
+
     let schema = mixed_complex_policy_schema();
     let server = TestingServer::builder()
         .with_schema(schema.clone())
@@ -904,7 +879,16 @@ async fn rejected_optimistic_exists_updates_reconcile_to_server_authoritative_st
     let mut observer_log = Vec::new();
 
     let doc_id = create_title_document(&admin, "Original").await;
-    create_document_editor(&admin, doc_id, "alice").await;
+    admin
+        .create(
+            "document_editors",
+            row_input([
+                ("document_id", Value::Uuid(doc_id)),
+                ("user_id", Value::Text("alice".to_string())),
+            ]),
+        )
+        .await
+        .expect("create document editor");
     wait_for_subscription_update(
         &mut observer_stream,
         &mut observer_log,
