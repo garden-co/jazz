@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "node ../../packages/jazz-tools/dist/cli.js build && next build",
+    "build": "npx jazz-tools validate",
     "start": "next start",
-    "sync-server": "tsx --env-file=.env scripts/sync-server.ts"
+    "sync-server": "tsx --env-file=.env scripts/sync-server.ts",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "jazz-napi": "workspace:*",
@@ -17,10 +18,12 @@
     "react-dom": "19.2.4"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "dotenv": "^17.3.1",
     "tailwindcss": "^4",
     "tsx": "^4.21.0",
     "typescript": "^5"
