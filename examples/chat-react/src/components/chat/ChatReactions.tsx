@@ -2,7 +2,7 @@ import { Suspense } from "react";
 import clsx from "clsx";
 import { useAll, useDb, useSession } from "jazz-tools/react";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
-import { app } from "../../../schema/app.js";
+import { app } from "../../../schema.js";
 
 function ReactorName({ userId, currentUserId }: { userId: string; currentUserId?: string }) {
   const profiles = useAll(app.profiles.where({ userId })) ?? [];

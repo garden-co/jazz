@@ -1,5 +1,5 @@
 import { useAll, useSession } from "jazz-tools/react";
-import { app } from "../../schema/app.js";
+import { app } from "../../schema.js";
 
 /**
  * Returns the display name for a chat.

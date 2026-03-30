@@ -10,7 +10,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useMyProfile } from "@/hooks/useMyProfile";
-import { app } from "../../../schema/app.js";
+import { app } from "../../../schema.js";
 
 interface ActionMenuProps {
   chatId: string;
