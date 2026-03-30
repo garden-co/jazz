@@ -7,7 +7,7 @@ import {
 } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
 import { TodoList } from "./TodoList.js";
-import { app } from "../schema/app.js";
+import { app } from "../schema.js";
 
 const devToolsAttachedClients = new WeakSet<object>();
 

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import type { CompiledPermissions } from "../permissions/index.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { createJazzContext } from "./create-jazz-context.js";
 
@@ -112,6 +113,11 @@ vi.mock("../runtime/db.js", () => ({
 
 const SCHEMA_A: WasmSchema = {};
 const SCHEMA_B: WasmSchema = { todos: { columns: [] } };
+const TODO_PERMISSIONS: CompiledPermissions = {
+  todos: {
+    select: { using: { type: "True" } },
+  },
+};
 
 function makeJwt(payload: Record<string, unknown>): string {
   const encode = (value: unknown) =>
@@ -134,6 +140,7 @@ describe("backend/create-jazz-context", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
+      permissions: {},
       driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
     });
 
@@ -162,6 +169,7 @@ describe("backend/create-jazz-context", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
+      permissions: {},
       driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
       serverUrl: "http://localhost:1625",
       backendSecret: "secret",
@@ -205,6 +213,7 @@ describe("backend/create-jazz-context", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
+      permissions: {},
       driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
     });
 
@@ -217,6 +226,37 @@ describe("backend/create-jazz-context", () => {
     expect(() => context.forRequest(req)).not.toThrow();
     expect(() => context.forSession(session)).not.toThrow();
     expect(mocks.clients[0]!.asBackend).not.toHaveBeenCalled();
+  });
+
+  it("BC-U04: merges compiled permissions into the runtime schema", () => {
+    const context = createJazzContext({
+      appId: "server-app",
+      app: {
+        wasmSchema: {
+          todos: {
+            columns: [],
+          },
+        },
+      },
+      permissions: TODO_PERMISSIONS,
+      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+    });
+
+    context.db();
+
+    expect(mocks.runtimeCtor).toHaveBeenCalledWith(
+      serializeRuntimeSchema({
+        todos: {
+          columns: [],
+          policies: TODO_PERMISSIONS.todos as any,
+        },
+      }),
+      "server-app",
+      "dev",
+      "main",
+      "/tmp/jazz.db",
+      "edge",
+    );
   });
 
   it("BC-U04: throws when no schema source is available", () => {
@@ -245,6 +285,7 @@ describe("backend/create-jazz-context", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
+      permissions: {},
       driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
     });
 
@@ -260,6 +301,7 @@ describe("backend/create-jazz-context", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
+      permissions: {},
       driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
     });
 
@@ -278,6 +320,7 @@ describe("backend/create-jazz-context", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
+      permissions: {},
       driver: { type: "memory" },
       serverUrl: "http://localhost:1625",
     });
@@ -300,6 +343,7 @@ describe("backend/create-jazz-context", () => {
       createJazzContext({
         appId: "server-app",
         app: { wasmSchema: SCHEMA_A },
+        permissions: {},
         driver: { type: "memory" },
       }),
     ).toThrow("driver.type='memory' requires serverUrl.");

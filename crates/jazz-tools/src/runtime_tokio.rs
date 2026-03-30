@@ -25,7 +25,8 @@ use crate::runtime_core::{
     QueryFuture, ReadDurabilityOptions, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler,
     SubscriptionDelta, SyncSender,
 };
-use crate::schema_manager::{QuerySchemaContext, SchemaManager};
+use crate::schema_manager::manager::PermissionsHeadSummary;
+use crate::schema_manager::{Lens, QuerySchemaContext, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryPropagation, ServerId};
 
@@ -210,6 +211,37 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn persist_schema(&self) -> Result<ObjectId, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.persist_schema())
+    }
+
+    /// Publish any schema object to the local catalogue and in-memory schema manager.
+    pub fn publish_schema(&self, schema: Schema) -> Result<ObjectId, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.publish_schema(schema))
+    }
+
+    pub fn publish_permissions_bundle(
+        &self,
+        schema_hash: crate::query_manager::types::SchemaHash,
+        permissions: std::collections::HashMap<
+            crate::query_manager::types::TableName,
+            crate::query_manager::types::TablePolicies,
+        >,
+        expected_parent_bundle_object_id: Option<ObjectId>,
+    ) -> Result<Option<ObjectId>, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.publish_permissions_bundle(schema_hash, permissions, expected_parent_bundle_object_id)
+            .map_err(|error| RuntimeError::WriteError(error.to_string()))
+    }
+
+    pub fn current_permissions_head(&self) -> Result<Option<PermissionsHeadSummary>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.schema_manager().current_permissions_head())
+    }
+
+    /// Publish a reviewed lens edge to the local catalogue and active schema manager.
+    pub fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.publish_lens(lens)?)
     }
 
     // =========================================================================
@@ -421,6 +453,20 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(())
     }
 
+    /// Ensure a client exists and is marked as Backend without resetting state.
+    pub fn ensure_client_as_backend(&self, client_id: ClientId) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.ensure_client_as_backend(client_id);
+        Ok(())
+    }
+
+    /// Ensure a client exists and is marked as Admin without resetting state.
+    pub fn ensure_client_as_admin(&self, client_id: ClientId) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.ensure_client_as_admin(client_id);
+        Ok(())
+    }
+
     /// Remove a client connection.
     ///
     /// Returns `Ok(true)` if removed, `Ok(false)` if skipped due to
@@ -472,6 +518,13 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(core.schema_manager().get_known_schema(schema_hash).cloned())
     }
 
+    /// Seed an additional known schema into the in-memory schema manager.
+    pub fn add_known_schema(&self, schema: Schema) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.schema_manager_mut().add_known_schema(schema);
+        Ok(())
+    }
+
     /// Return grouped telemetry for active downstream server subscriptions.
     pub fn server_subscription_telemetry(
         &self,
@@ -500,6 +553,15 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     ) -> Result<R, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(f(core.schema_manager().query_manager().sync_manager()))
+    }
+
+    /// Access the underlying schema manager while holding the core lock.
+    pub fn with_schema_manager<R>(
+        &self,
+        f: impl FnOnce(&SchemaManager) -> R,
+    ) -> Result<R, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(f(core.schema_manager()))
     }
 
     /// Subscribe to a query with explicit schema context (for server use).

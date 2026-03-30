@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getDb, getSession } from "jazz-tools/svelte";
-  import { app, type Beat, type Instrument } from "../schema/app.js";
+  import { app, type Beat, type Instrument } from "../schema.js";
   import { getStableHue } from "./constants.js";
   import { getAudioContext } from "./audio-context.js";
 

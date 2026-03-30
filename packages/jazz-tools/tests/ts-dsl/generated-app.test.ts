@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { app } from "./fixtures/basic/app";
+import { app } from "./fixtures/basic/schema";
 
-describe("generated TS DSL fixture", () => {
+describe("schema.ts TS DSL fixture", () => {
   it("serializes select metadata on generated query builders", () => {
     expect(JSON.parse(app.todos.select("title").include({ project: true })._build())).toEqual({
       table: "todos",

@@ -12,13 +12,15 @@ use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
 use crate::runtime_core::ReadDurabilityOptions;
-use crate::schema_manager::SchemaManager;
+use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_manifest};
 use crate::storage::{FjallStorage, MemoryStorage, Storage, StorageError};
 use crate::sync_manager::{
     ClientId, Destination, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
+use base64::Engine;
 use bytes::BytesMut;
 use futures::StreamExt;
+use serde::Deserialize;
 use tokio::sync::{RwLock, mpsc, oneshot};
 
 use crate::transport::{AuthConfig, ServerConnection};
@@ -29,12 +31,21 @@ use crate::{
 type DynStorage = Box<dyn Storage + Send>;
 type ClientRuntime = TokioRuntime<DynStorage>;
 
+#[derive(Debug, Deserialize)]
+struct UnverifiedJwtClaims {
+    sub: String,
+    #[serde(default)]
+    claims: serde_json::Value,
+}
+
 /// Jazz client for building applications.
 ///
 /// Combines local storage with server sync.
 pub struct JazzClient {
     /// Schema as declared by the client/app code.
     declared_schema: Schema,
+    /// Session inferred from client auth context for user-scoped operations.
+    default_session: Option<Session>,
     /// Handle to the local runtime.
     runtime: ClientRuntime,
     /// Connection to the server (shared for event processor).
@@ -52,6 +63,55 @@ struct SubscriptionState {
     runtime_handle: RuntimeSubHandle,
 }
 
+fn build_client_schema_manager<S: Storage + ?Sized>(
+    storage: &S,
+    context: &AppContext,
+) -> Result<SchemaManager> {
+    let sync_manager = SyncManager::new();
+    let mut schema_manager = SchemaManager::new(
+        sync_manager,
+        context.schema.clone(),
+        context.app_id,
+        "client",
+        "main",
+    )
+    .map_err(|e| JazzError::Schema(format!("{:?}", e)))?;
+
+    rehydrate_schema_manager_from_manifest(&mut schema_manager, storage, context.app_id)
+        .map_err(JazzError::Storage)?;
+
+    Ok(schema_manager)
+}
+
+fn session_from_unverified_jwt(token: &str) -> Option<Session> {
+    let payload = token.split('.').nth(1)?;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
+        .ok()?;
+    let claims: UnverifiedJwtClaims = serde_json::from_slice(&payload).ok()?;
+    let user_id = claims.sub.trim();
+    if user_id.is_empty() {
+        return None;
+    }
+
+    Some(Session {
+        user_id: user_id.to_string(),
+        claims: claims.claims,
+    })
+}
+
+fn default_session_from_context(context: &AppContext) -> Option<Session> {
+    if context.backend_secret.is_some() || context.admin_secret.is_some() {
+        return None;
+    }
+
+    context
+        .jwt_token
+        .as_deref()
+        .and_then(session_from_unverified_jwt)
+}
+
 impl JazzClient {
     /// Connect to Jazz with the given configuration.
     ///
@@ -62,21 +122,11 @@ impl JazzClient {
     /// 4. Start syncing
     pub async fn connect(context: AppContext) -> Result<Self> {
         let declared_schema = context.schema.clone();
+        let default_session = default_session_from_context(&context);
         let client_id = match context.storage {
             ClientStorage::Fjall => load_or_create_persistent_client_id(&context)?,
             ClientStorage::Memory => context.client_id.unwrap_or_default(),
         };
-
-        // Create managers
-        let sync_manager = SyncManager::new();
-        let schema_manager = SchemaManager::new(
-            sync_manager,
-            context.schema.clone(),
-            context.app_id,
-            "client",
-            "main",
-        )
-        .map_err(|e| JazzError::Schema(format!("{:?}", e)))?;
 
         // Connect to server if URL provided (before creating runtime so we have the connection)
         let auth_config = AuthConfig::from_context(&context);
@@ -96,6 +146,8 @@ impl JazzClient {
             ClientStorage::Fjall => Box::new(open_fjall_storage(&context.data_dir).await?),
             ClientStorage::Memory => Box::new(MemoryStorage::new()),
         };
+
+        let schema_manager = build_client_schema_manager(&storage, &context)?;
 
         // Clone server connection for sync callback
         let server_conn_for_sync = server_connection.clone();
@@ -281,6 +333,7 @@ impl JazzClient {
 
         Ok(Self {
             declared_schema,
+            default_session,
             runtime,
             server_connection,
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
@@ -293,7 +346,8 @@ impl JazzClient {
     ///
     /// Returns a stream of row deltas as the data changes.
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
-        self.subscribe_internal(query, None).await
+        self.subscribe_internal(query, self.default_session.clone())
+            .await
     }
 
     /// Internal subscribe with optional session.
@@ -350,7 +404,7 @@ impl JazzClient {
             .runtime
             .query(
                 query,
-                None,
+                self.default_session.clone(),
                 ReadDurabilityOptions {
                     tier: durability_tier,
                     local_updates: LocalUpdates::Immediate,
@@ -613,7 +667,14 @@ fn reorder_values_by_column_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query_manager::policy::PolicyExpr;
+    use crate::query_manager::types::{SchemaHash, TablePolicies};
+    use crate::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
+    use crate::schema_manager::AppId;
+    use crate::storage::{CatalogueManifestOp, FjallStorage};
     use crate::{ColumnType, ObjectId, SchemaBuilder, TableSchema};
+    use serde_json::json;
+    use tempfile::TempDir;
 
     fn declared_todo_schema() -> Schema {
         SchemaBuilder::new()
@@ -635,6 +696,132 @@ mod tests {
             .build()
     }
 
+    fn learned_runtime_todo_schema() -> Schema {
+        SchemaBuilder::new()
+            .table(
+                TableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .column("completed", ColumnType::Boolean)
+                    .nullable_column("description", ColumnType::Text),
+            )
+            .build()
+    }
+
+    fn make_offline_context(
+        app_id: AppId,
+        data_dir: std::path::PathBuf,
+        schema: Schema,
+    ) -> AppContext {
+        AppContext {
+            app_id,
+            client_id: None,
+            schema,
+            server_url: String::new(),
+            data_dir,
+            storage: ClientStorage::default(),
+            jwt_token: None,
+            backend_secret: None,
+            admin_secret: None,
+        }
+    }
+
+    fn make_test_jwt(sub: &str, claims: serde_json::Value) -> String {
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"alg":"none","typ":"JWT"}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "sub": sub,
+                "claims": claims,
+            }))
+            .expect("serialize jwt payload"),
+        );
+        format!("{header}.{payload}.sig")
+    }
+
+    fn seed_rehydrated_client_storage(
+        data_dir: &std::path::Path,
+        app_id: AppId,
+        publish_permissions: bool,
+    ) -> (SchemaHash, SchemaHash) {
+        std::fs::create_dir_all(data_dir).expect("create seeded client data dir");
+        let db_path = data_dir.join("jazz.fjall");
+        let storage =
+            FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage");
+
+        let bundled_schema = declared_todo_schema();
+        let learned_schema = learned_runtime_todo_schema();
+        let bundled_hash = SchemaHash::compute(&bundled_schema);
+        let learned_hash = SchemaHash::compute(&learned_schema);
+
+        let schema_manager = SchemaManager::new(
+            SyncManager::new(),
+            learned_schema.clone(),
+            app_id,
+            "seed",
+            "main",
+        )
+        .expect("seed schema manager");
+        let mut runtime =
+            RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
+        let learned_schema_object_id = runtime.persist_schema();
+        let bundled_schema_object_id = runtime.publish_schema(bundled_schema.clone());
+        let lens = runtime
+            .schema_manager()
+            .generate_lens(&bundled_schema, &learned_schema);
+        assert!(!lens.is_draft(), "seed lens should be publishable");
+        let lens_object_id = runtime.publish_lens(&lens).expect("persist learned lens");
+
+        if publish_permissions {
+            runtime
+                .publish_permissions_bundle(
+                    learned_hash,
+                    HashMap::from([(
+                        TableName::new("todos"),
+                        TablePolicies::new().with_select(PolicyExpr::True),
+                    )]),
+                    None,
+                )
+                .expect("seed permissions bundle");
+        }
+
+        let mut storage = runtime.into_storage();
+        storage
+            .append_catalogue_manifest_ops(
+                app_id.as_object_id(),
+                &[
+                    CatalogueManifestOp::SchemaSeen {
+                        object_id: learned_schema_object_id,
+                        schema_hash: learned_hash,
+                    },
+                    CatalogueManifestOp::SchemaSeen {
+                        object_id: bundled_schema_object_id,
+                        schema_hash: bundled_hash,
+                    },
+                    CatalogueManifestOp::LensSeen {
+                        object_id: lens_object_id,
+                        source_hash: bundled_hash,
+                        target_hash: learned_hash,
+                    },
+                ],
+            )
+            .expect("append seeded client catalogue manifest ops");
+        storage.flush();
+        storage.close().expect("close seeded client storage");
+
+        (bundled_hash, learned_hash)
+    }
+
+    fn expected_client_catalogue_hash(context: &AppContext) -> String {
+        let db_path = context.data_dir.join("jazz.fjall");
+        let storage =
+            FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage");
+        let schema_manager = build_client_schema_manager(&storage, context)
+            .expect("rehydrate client schema manager");
+        let catalogue_hash = schema_manager.catalogue_state_hash();
+        storage.close().expect("close seeded client storage");
+        catalogue_hash
+    }
+
     #[test]
     fn query_rows_are_reordered_back_to_declared_schema() {
         let aligned = align_row_values_to_declared_schema(
@@ -647,6 +834,38 @@ mod tests {
         assert_eq!(
             aligned,
             vec![Value::Text("done".to_string()), Value::Boolean(true)]
+        );
+    }
+
+    #[test]
+    fn default_session_from_context_uses_jwt_claims_for_user_clients() {
+        let app_id = AppId::from_name("client-jwt-session");
+        let mut context = make_offline_context(
+            app_id,
+            TempDir::new().expect("tempdir").into_path(),
+            declared_todo_schema(),
+        );
+        context.jwt_token = Some(make_test_jwt("alice", json!({ "join_code": "secret-123" })));
+
+        let session = default_session_from_context(&context).expect("derive session from jwt");
+        assert_eq!(session.user_id, "alice");
+        assert_eq!(session.claims["join_code"], "secret-123");
+    }
+
+    #[test]
+    fn default_session_from_context_skips_backend_capable_clients() {
+        let app_id = AppId::from_name("client-backend-session");
+        let mut context = make_offline_context(
+            app_id,
+            TempDir::new().expect("tempdir").into_path(),
+            declared_todo_schema(),
+        );
+        context.jwt_token = Some(make_test_jwt("alice", json!({ "role": "user" })));
+        context.backend_secret = Some("backend-secret".to_string());
+
+        assert!(
+            default_session_from_context(&context).is_none(),
+            "backend/admin clients should keep using explicit SessionClient scopes"
         );
     }
 
@@ -686,6 +905,79 @@ mod tests {
             aligned[0].1,
             vec![Value::Text("keep-id".to_string()), Value::Boolean(false)]
         );
+    }
+
+    #[tokio::test]
+    async fn client_rehydrates_learned_lens_from_local_catalogue_on_restart() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-rehydrate-lens");
+        let (_bundled_hash, learned_hash) =
+            seed_rehydrated_client_storage(data_dir.path(), app_id, false);
+        let context = make_offline_context(
+            app_id,
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+
+        let client = JazzClient::connect(context).await.expect("connect client");
+
+        let has_learned_schema = client
+            .runtime
+            .known_schema_hashes()
+            .expect("read known schema hashes")
+            .contains(&learned_hash);
+        assert!(
+            has_learned_schema,
+            "client should restore newer learned schema"
+        );
+
+        let lens_path_len = client
+            .runtime
+            .with_schema_manager(|manager| manager.lens_path(&learned_hash).map(|path| path.len()))
+            .expect("read client schema manager")
+            .expect("lens path to bundled schema");
+        assert_eq!(
+            lens_path_len, 1,
+            "client should restore learned migration lens"
+        );
+
+        client.shutdown().await.expect("shutdown client");
+    }
+
+    #[tokio::test]
+    async fn client_rehydrates_permissions_head_and_bundle_from_local_catalogue_on_restart() {
+        let data_dir = TempDir::new().expect("temp client dir");
+        let app_id = AppId::from_name("client-rehydrate-permissions");
+        let (_bundled_hash, learned_hash) =
+            seed_rehydrated_client_storage(data_dir.path(), app_id, true);
+        let context = make_offline_context(
+            app_id,
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+        let expected_catalogue_hash = expected_client_catalogue_hash(&context);
+
+        let client = JazzClient::connect(context).await.expect("connect client");
+
+        let actual_catalogue_hash = client
+            .runtime
+            .catalogue_state_hash()
+            .expect("read client catalogue hash");
+        assert_eq!(
+            actual_catalogue_hash, expected_catalogue_hash,
+            "client should restore learned permissions head and bundle before any network sync"
+        );
+
+        let lens_path_exists = client
+            .runtime
+            .with_schema_manager(|manager| manager.lens_path(&learned_hash).is_ok())
+            .expect("read client schema manager");
+        assert!(
+            lens_path_exists,
+            "permissions rehydrate should preserve the target schema's learned lens context"
+        );
+
+        client.shutdown().await.expect("shutdown client");
     }
 }
 
@@ -734,6 +1026,11 @@ fn handle_server_event(
     runtime: &ClientRuntime,
     server_id: ServerId,
 ) -> Result<()> {
+    fn short_hash(hash: &impl ToString) -> String {
+        let hash = hash.to_string();
+        hash.chars().take(12).collect()
+    }
+
     match event {
         ServerEvent::Connected {
             connection_id,
@@ -754,6 +1051,20 @@ fn handle_server_event(
             Ok(())
         }
         ServerEvent::SyncUpdate { seq, payload } => {
+            if let SyncPayload::SchemaWarning(warning) = payload.as_ref() {
+                tracing::warn!(
+                    query_id = warning.query_id.0,
+                    table = warning.table_name,
+                    row_count = warning.row_count,
+                    from_hash = %warning.from_hash,
+                    to_hash = %warning.to_hash,
+                    "Detected {} rows of {} with differing schema versions. To ensure data visibility and forward/backward compatibility please create a new migration with `npx jazz-tools migrations create {} {}`",
+                    warning.row_count,
+                    warning.table_name,
+                    short_hash(&warning.from_hash),
+                    short_hash(&warning.to_hash),
+                );
+            }
             let entry = InboxEntry {
                 source: Source::Server(server_id),
                 payload: *payload,

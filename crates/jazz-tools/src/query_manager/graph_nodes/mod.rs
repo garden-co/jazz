@@ -8,7 +8,7 @@ pub mod limit_offset;
 pub mod magic_columns;
 pub mod materialize;
 pub mod output;
-mod policy_eval;
+pub(crate) mod policy_eval;
 pub mod policy_filter;
 pub mod project;
 pub mod recursive_relation;

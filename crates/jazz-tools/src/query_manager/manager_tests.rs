@@ -6417,6 +6417,133 @@ fn join_policy_schema() -> Schema {
     schema
 }
 
+fn legacy_documents_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("documents"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)]).into(),
+    );
+    schema
+}
+
+fn current_documents_permission_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("owner_id", ColumnType::Text),
+            ]),
+            TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+                .with_insert(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]))
+                .with_update(
+                    Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+                    PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+                )
+                .with_delete(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        ),
+    );
+    schema
+}
+
+fn legacy_documents_to_current_permissions_lens() -> crate::schema_manager::lens::Lens {
+    let legacy_schema = legacy_documents_schema();
+    let current_schema = current_documents_permission_schema();
+    let legacy_hash = crate::query_manager::types::SchemaHash::compute(&legacy_schema);
+    let current_hash = crate::query_manager::types::SchemaHash::compute(&current_schema);
+    let mut transform = crate::schema_manager::lens::LensTransform::new();
+    transform.push(
+        crate::schema_manager::lens::LensOp::AddColumn {
+            table: "documents".to_string(),
+            column: "owner_id".to_string(),
+            column_type: ColumnType::Text,
+            default: Value::Text("alice".into()),
+        },
+        false,
+    );
+    crate::schema_manager::lens::Lens::new(legacy_hash, current_hash, transform)
+}
+
+fn configure_legacy_client_with_current_permissions(qm: &mut QueryManager) {
+    let legacy_schema = legacy_documents_schema();
+    let legacy_hash = crate::query_manager::types::SchemaHash::compute(&legacy_schema);
+    let mut known_schemas = std::collections::HashMap::new();
+    known_schemas.insert(legacy_hash, legacy_schema);
+    qm.set_known_schemas(std::sync::Arc::new(known_schemas));
+    qm.register_lens(legacy_documents_to_current_permissions_lens());
+    qm.set_authorization_schema(current_documents_permission_schema());
+}
+
+fn legacy_join_provenance_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+    );
+    schema.insert(
+        TableName::new("posts"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("owner_name", ColumnType::Text),
+            ColumnDescriptor::new("title", ColumnType::Text),
+        ])
+        .into(),
+    );
+    schema
+}
+
+fn current_join_provenance_permission_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("users"),
+        RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]).into(),
+    );
+    schema.insert(
+        TableName::new("posts"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("owner_name", ColumnType::Text),
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("viewer_name", ColumnType::Text),
+            ]),
+            TablePolicies::new().with_select(PolicyExpr::eq_session(
+                "viewer_name",
+                vec!["user_id".into()],
+            )),
+        ),
+    );
+    schema
+}
+
+fn legacy_join_provenance_to_current_permissions_lens() -> crate::schema_manager::lens::Lens {
+    let legacy_schema = legacy_join_provenance_schema();
+    let current_schema = current_join_provenance_permission_schema();
+    let legacy_hash = crate::query_manager::types::SchemaHash::compute(&legacy_schema);
+    let current_hash = crate::query_manager::types::SchemaHash::compute(&current_schema);
+    let mut transform = crate::schema_manager::lens::LensTransform::new();
+    transform.push(
+        crate::schema_manager::lens::LensOp::AddColumn {
+            table: "posts".to_string(),
+            column: "viewer_name".to_string(),
+            column_type: ColumnType::Text,
+            default: Value::Text("bob".into()),
+        },
+        false,
+    );
+    crate::schema_manager::lens::Lens::new(legacy_hash, current_hash, transform)
+}
+
+fn configure_legacy_join_client_with_current_permissions(qm: &mut QueryManager) {
+    let legacy_schema = legacy_join_provenance_schema();
+    let legacy_hash = crate::query_manager::types::SchemaHash::compute(&legacy_schema);
+    let mut known_schemas = std::collections::HashMap::new();
+    known_schemas.insert(legacy_hash, legacy_schema);
+    qm.set_known_schemas(std::sync::Arc::new(known_schemas));
+    qm.register_lens(legacy_join_provenance_to_current_permissions_lens());
+    qm.set_authorization_schema(current_join_provenance_permission_schema());
+}
+
 #[test]
 fn policy_filters_select_results() {
     let sync_manager = SyncManager::new();
@@ -6641,6 +6768,310 @@ fn join_query_applies_policy_filter_on_joined_table() {
         update.delta.added.len(),
         1,
         "join query should apply policy filter on joined table rows"
+    );
+}
+
+#[test]
+fn local_subscription_uses_current_permissions_after_lens_transform() {
+    let sync_manager = SyncManager::new();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, legacy_documents_schema());
+    configure_legacy_client_with_current_permissions(&mut qm);
+
+    qm.insert(
+        &mut storage,
+        "documents",
+        &[Value::Text("Legacy doc".into())],
+    )
+    .unwrap();
+
+    let query = qm.query("documents").build();
+    let alice_sub = qm
+        .subscribe_with_session(query.clone(), Some(PolicySession::new("alice")), None)
+        .unwrap();
+    let bob_sub = qm
+        .subscribe_with_session(query, Some(PolicySession::new("bob")), None)
+        .unwrap();
+
+    qm.process(&mut storage);
+
+    let alice_results = qm.get_subscription_results(alice_sub);
+    assert_eq!(
+        alice_results.len(),
+        1,
+        "Alice should see the legacy row after lens-based auth transform"
+    );
+    assert_eq!(alice_results[0].1, vec![Value::Text("Legacy doc".into())]);
+    assert!(
+        qm.get_subscription_results(bob_sub).is_empty(),
+        "Bob should be filtered out by the current permission schema"
+    );
+}
+
+#[test]
+fn local_insert_uses_current_permissions_after_lens_transform() {
+    let sync_manager = SyncManager::new();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, legacy_documents_schema());
+    configure_legacy_client_with_current_permissions(&mut qm);
+
+    qm.insert_with_session(
+        &mut storage,
+        "documents",
+        &[Value::Text("Alice insert".into())],
+        Some(&PolicySession::new("alice")),
+    )
+    .expect("alice insert should be allowed by transformed current permissions");
+
+    let err = qm
+        .insert_with_session(
+            &mut storage,
+            "documents",
+            &[Value::Text("Bob insert".into())],
+            Some(&PolicySession::new("bob")),
+        )
+        .expect_err("bob insert should be denied by transformed current permissions");
+    assert_eq!(
+        err,
+        QueryError::PolicyDenied {
+            table: TableName::new("documents"),
+            operation: crate::query_manager::policy::Operation::Insert,
+        }
+    );
+}
+
+#[test]
+fn local_update_and_delete_use_current_permissions_after_lens_transform() {
+    let sync_manager = SyncManager::new();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, legacy_documents_schema());
+    configure_legacy_client_with_current_permissions(&mut qm);
+
+    let inserted = qm
+        .insert(
+            &mut storage,
+            "documents",
+            &[Value::Text("Legacy doc".into())],
+        )
+        .unwrap();
+
+    let update_err = qm
+        .update_with_session(
+            &mut storage,
+            inserted.row_id,
+            &[Value::Text("Bob edit".into())],
+            Some(&PolicySession::new("bob")),
+        )
+        .expect_err("bob update should be denied by transformed current permissions");
+    assert_eq!(
+        update_err,
+        QueryError::PolicyDenied {
+            table: TableName::new("documents"),
+            operation: crate::query_manager::policy::Operation::Update,
+        }
+    );
+
+    qm.update_with_session(
+        &mut storage,
+        inserted.row_id,
+        &[Value::Text("Alice edit".into())],
+        Some(&PolicySession::new("alice")),
+    )
+    .expect("alice update should be allowed by transformed current permissions");
+
+    let delete_err = qm
+        .delete_with_session(
+            &mut storage,
+            inserted.row_id,
+            Some(&PolicySession::new("bob")),
+        )
+        .expect_err("bob delete should be denied by transformed current permissions");
+    assert_eq!(
+        delete_err,
+        QueryError::PolicyDenied {
+            table: TableName::new("documents"),
+            operation: crate::query_manager::policy::Operation::Delete,
+        }
+    );
+
+    qm.delete_with_session(
+        &mut storage,
+        inserted.row_id,
+        Some(&PolicySession::new("alice")),
+    )
+    .expect("alice delete should be allowed by transformed current permissions");
+}
+
+#[test]
+fn local_join_query_uses_current_permissions_for_joined_provenance_after_lens_transform() {
+    let sync_manager = SyncManager::new();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, legacy_join_provenance_schema());
+    configure_legacy_join_client_with_current_permissions(&mut qm);
+
+    qm.insert(&mut storage, "users", &[Value::Text("bob".into())])
+        .unwrap();
+    qm.insert(
+        &mut storage,
+        "posts",
+        &[
+            Value::Text("bob".into()),
+            Value::Text("Bob private post".into()),
+        ],
+    )
+    .unwrap();
+
+    let query = QueryBuilder::new("users")
+        .join("posts")
+        .on("users.name", "posts.owner_name")
+        .build();
+    let alice_sub = qm
+        .subscribe_with_session(query.clone(), Some(PolicySession::new("alice")), None)
+        .unwrap();
+    let bob_sub = qm
+        .subscribe_with_session(query, Some(PolicySession::new("bob")), None)
+        .unwrap();
+
+    qm.process(&mut storage);
+
+    assert!(
+        qm.get_subscription_results(alice_sub).is_empty(),
+        "Joined provenance rows should be filtered when the transformed current permissions deny them"
+    );
+
+    let bob_results = qm.get_subscription_results(bob_sub);
+    assert_eq!(
+        bob_results.len(),
+        1,
+        "Bob should see the joined row after provenance rows are transformed into the current auth schema"
+    );
+    assert!(
+        bob_results[0]
+            .1
+            .iter()
+            .any(|value| matches!(value, Value::Text(text) if text == "Bob private post")),
+        "Joined result should retain the post payload after current-permissions filtering"
+    );
+}
+
+#[test]
+fn server_join_query_uses_current_permissions_for_joined_provenance() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use crate::query_manager::types::{ComposedBranchName, SchemaHash};
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+
+    let authorization_schema = join_policy_schema();
+    let structural_schema: Schema = authorization_schema
+        .iter()
+        .map(|(table_name, table_schema)| {
+            let mut structural = table_schema.clone();
+            structural.policies = TablePolicies::default();
+            (*table_name, structural)
+        })
+        .collect();
+    let schema_hash = SchemaHash::compute(&structural_schema);
+    let branch = ComposedBranchName::new("dev", schema_hash, "main")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+
+    let sync_manager = SyncManager::new();
+    let mut server_qm = QueryManager::new(sync_manager);
+    let mut known_schemas = HashMap::new();
+    known_schemas.insert(schema_hash, structural_schema);
+    server_qm.set_known_schemas(Arc::new(known_schemas));
+    server_qm.set_authorization_schema(authorization_schema);
+
+    let mut storage = MemoryStorage::new();
+    let author = ObjectId::new();
+
+    let mut user_metadata = HashMap::new();
+    user_metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    let user_id = server_qm
+        .sync_manager_mut()
+        .object_manager
+        .create(&mut storage, Some(user_metadata));
+    server_qm
+        .sync_manager_mut()
+        .object_manager
+        .add_commit(
+            &mut storage,
+            user_id,
+            &branch,
+            vec![],
+            encode_row(
+                &RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+                &[Value::Text("bob".into())],
+            )
+            .unwrap(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let mut post_metadata = HashMap::new();
+    post_metadata.insert(MetadataKey::Table.to_string(), "posts".to_string());
+    let post_id = server_qm
+        .sync_manager_mut()
+        .object_manager
+        .create(&mut storage, Some(post_metadata));
+    server_qm
+        .sync_manager_mut()
+        .object_manager
+        .add_commit(
+            &mut storage,
+            post_id,
+            &branch,
+            vec![],
+            encode_row(
+                &RowDescriptor::new(vec![
+                    ColumnDescriptor::new("owner_name", ColumnType::Text),
+                    ColumnDescriptor::new("title", ColumnType::Text),
+                ]),
+                &[
+                    Value::Text("bob".into()),
+                    Value::Text("Bob private post".into()),
+                ],
+            )
+            .unwrap(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let client_id = ClientId::new();
+    server_qm.sync_manager_mut().add_client(client_id);
+    let session = PolicySession::new("alice");
+    server_qm
+        .sync_manager_mut()
+        .set_client_session(client_id, session.clone());
+
+    let query = QueryBuilder::new("users")
+        .branch(&branch)
+        .join("posts")
+        .on("users.name", "posts.owner_name")
+        .build();
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: Some(session),
+            propagation: crate::sync_manager::QueryPropagation::Full,
+        },
+    });
+
+    server_qm.process(&mut storage);
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let object_updates: Vec<_> = outbox
+        .iter()
+        .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == client_id))
+        .filter(|entry| matches!(entry.payload, SyncPayload::ObjectUpdated { .. }))
+        .collect();
+
+    assert!(
+        object_updates.is_empty(),
+        "Joined rows should be filtered when current permissions deny any contributing provenance row"
     );
 }
 

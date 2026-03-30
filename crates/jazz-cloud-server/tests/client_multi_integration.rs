@@ -303,20 +303,30 @@ async fn wait_for_todos_count(
 async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
     let query = QueryBuilder::new("todos").build();
     let deadline = tokio::time::Instant::now() + timeout;
+    let mut last_error: Option<String> = None;
 
     while tokio::time::Instant::now() < deadline {
-        if let Ok(Ok(_)) = tokio::time::timeout(
+        match tokio::time::timeout(
             Duration::from_secs(8),
             client.query(query.clone(), Some(DurabilityTier::EdgeServer)),
         )
         .await
         {
-            return;
+            Ok(Ok(_)) => return,
+            Ok(Err(error)) => {
+                last_error = Some(error.to_string());
+            }
+            Err(_) => {
+                last_error = Some("query timed out".to_string());
+            }
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    panic!("timed out waiting for EdgeServer query readiness");
+    panic!(
+        "timed out waiting for EdgeServer query readiness, last_error={}",
+        last_error.unwrap_or_else(|| "<none>".to_string())
+    );
 }
 
 async fn wait_for_todos_count_on_disk(

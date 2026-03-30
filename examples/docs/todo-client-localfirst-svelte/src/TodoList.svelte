@@ -1,7 +1,7 @@
 <!-- #region read-write-svelte -->
 <script lang="ts">
 	import { getDb, QuerySubscription } from 'jazz-tools/svelte';
-	import { app } from '../schema/app.js';
+	import { app } from '../schema.js';
 
 	// #region writing-get-db-svelte
 	// #region reading-reactive-svelte

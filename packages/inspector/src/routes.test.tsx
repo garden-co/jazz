@@ -26,8 +26,8 @@ vi.mock("./components/data-explorer/TableDataGrid", () => ({
   TableDataGrid: () => <div>table grid</div>,
 }));
 
-vi.mock("./components/data-explorer/TableSchemaSql", () => ({
-  TableSchemaSql: () => <div>schema sql</div>,
+vi.mock("./components/data-explorer/TableSchemaDefinition", () => ({
+  TableSchemaDefinition: () => <div>schema definition</div>,
 }));
 
 vi.mock("./pages/live-query", () => ({

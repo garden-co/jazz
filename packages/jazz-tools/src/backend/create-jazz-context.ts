@@ -1,10 +1,12 @@
 import { NapiRuntime } from "jazz-napi";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import type { CompiledPermissions } from "../permissions/index.js";
 import { JazzClient, sessionFromRequest, type RequestLike } from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { createDbFromClient, type Db, type DbConfig } from "../runtime/db.js";
 import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
+import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 
 export interface BackendSchemaSource {
   wasmSchema: WasmSchema;
@@ -26,22 +28,29 @@ export type BackendDriver =
       type: "memory";
     };
 
-export interface BackendContextConfig extends Omit<
-  AppContext,
-  "schema" | "driver" | "clientId" | "tier"
-> {
+type BackendContextSchemaConfig =
+  | {
+      /** Default app/schema source for the context. */
+      app: BackendSchemaSource;
+      /** Compiled row-level permissions paired with the app schema. */
+      permissions: CompiledPermissions;
+    }
+  | {
+      app?: undefined;
+      permissions?: undefined;
+    };
+
+export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clientId" | "tier"> & {
   /** Server runtime driver mode and storage location. */
   driver: BackendDriver;
-  /** Optional default schema source (typically generated `app` export). */
-  app?: BackendSchemaSource;
   /** Optional node durability tier identity. */
   tier?: "worker" | "edge" | "global";
-}
+} & BackendContextSchemaConfig;
 
-interface ResolvedBackendContextConfig extends BackendContextConfig {
+type ResolvedBackendContextConfig = BackendContextConfig & {
   localAuthMode?: "anonymous" | "demo";
   localAuthToken?: string;
-}
+};
 
 function assertValidBackendConfig(config: BackendContextConfig): void {
   if (config.driver.type === "memory" && !config.serverUrl) {
@@ -86,7 +95,8 @@ function resolveSchema(input: BackendSchemaInput): WasmSchema {
  * Server-side Jazz context with lazy runtime setup.
  *
  * The first call to `db()`, `asBackend()`, `forRequest()`, or `forSession()`
- * initializes a NAPI runtime and backing client using the provided app/schema source.
+ * initializes a NAPI runtime and backing client using the provided app/schema
+ * source plus any compiled permissions.
  * Later calls reuse the same initialized runtime.
  */
 export class JazzContext {
@@ -109,7 +119,10 @@ export class JazzContext {
         "No schema source provided. Pass `app` to createJazzContext or provide a schema source when calling db()/asBackend()/forRequest()/forSession().",
       );
     }
-    return resolveSchema(selected);
+    const schema = resolveSchema(selected);
+    return this.config.permissions
+      ? mergePermissionsIntoWasmSchema(schema, this.config.permissions)
+      : schema;
   }
 
   private createClient(schema: WasmSchema): JazzClient {

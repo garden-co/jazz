@@ -10,19 +10,25 @@ mod support;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use jazz_tools::query_manager::types::SchemaHash;
-use jazz_tools::schema_catalogue;
-use jazz_tools::schema_manager::{Lens, LensOp, LensTransform};
+use jazz_tools::schema_manager::{Lens, generate_lens};
 use jazz_tools::server::TestingServer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder, TableSchema, Value,
 };
-use support::{wait_for_edge_query_ready, wait_for_query};
+use support::{push_catalogue_in_memory, wait_for_edge_query_ready, wait_for_query};
 
-fn user_values(id: jazz_tools::ObjectId, name: &str) -> HashMap<String, Value> {
+fn user_values_v1(id: jazz_tools::ObjectId, name: &str) -> HashMap<String, Value> {
     HashMap::from([
         ("id".to_string(), Value::Uuid(id)),
         ("name".to_string(), Value::Text(name.to_string())),
+    ])
+}
+
+fn user_values_v2(id: jazz_tools::ObjectId, name: &str, email: &str) -> HashMap<String, Value> {
+    HashMap::from([
+        ("id".to_string(), Value::Uuid(id)),
+        ("name".to_string(), Value::Text(name.to_string())),
+        ("email".to_string(), Value::Text(email.to_string())),
     ])
 }
 
@@ -48,15 +54,7 @@ fn schema_v2() -> jazz_tools::Schema {
 }
 
 fn v1_to_v2_lens() -> Lens {
-    let v1_hash = SchemaHash::compute(&schema_v1());
-    let v2_hash = SchemaHash::compute(&schema_v2());
-    let forward = LensTransform::with_ops(vec![LensOp::AddColumn {
-        table: "users".to_string(),
-        column: "email".to_string(),
-        column_type: ColumnType::Text,
-        default: Value::Null,
-    }]);
-    Lens::new(v1_hash, v2_hash, forward)
+    generate_lens(&schema_v1(), &schema_v2())
 }
 
 /// Alice writes under schema v1. The v2 schema and v1→v2 lens are pushed
@@ -86,7 +84,7 @@ async fn catalogue_sync_e2e_schema_evolution_through_sync_manager() {
 
     let user_id_value = jazz_tools::ObjectId::new();
     let (user_obj_id, _) = alice
-        .create("users", user_values(user_id_value, "Alice Smith"))
+        .create("users", user_values_v1(user_id_value, "Alice Smith"))
         .await
         .expect("alice creates user");
 
@@ -102,7 +100,7 @@ async fn catalogue_sync_e2e_schema_evolution_through_sync_manager() {
     .await;
 
     // === Push v2 schema + lens to server through the real sync pipeline ===
-    schema_catalogue::push_in_memory(
+    push_catalogue_in_memory(
         &server.base_url(),
         server.app_id(),
         "dev",
@@ -154,5 +152,105 @@ async fn catalogue_sync_e2e_schema_evolution_through_sync_manager() {
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Bob writes under schema v2 after the server has received the v1/v2
+/// catalogue. Alice connects with schema v1 and sees Bob's data transformed
+/// through the backward lens.
+///
+/// ```text
+/// push v1 schema + v2 schema + lens ──► server
+///                                        │
+/// bob (v2) ──create user with email──► server
+///                                        │
+///                  alice (v1) connects and queries
+///                                        │
+///                                        └──► user row without email column
+/// ```
+#[tokio::test]
+async fn catalogue_sync_e2e_backward_data_migration_through_sync_manager() {
+    let server = TestingServer::start().await;
+
+    // Seed the server with both schemas and the v1<->v2 lens before clients connect.
+    push_catalogue_in_memory(
+        &server.base_url(),
+        server.app_id(),
+        "dev",
+        "main",
+        server.admin_secret(),
+        &[schema_v1(), schema_v2()],
+        &[v1_to_v2_lens()],
+    )
+    .await
+    .expect("push catalogue");
+
+    // === Bob connects with v2, creates a user with the new email column ===
+    let bob = JazzClient::connect(server.make_client_context_for_user(schema_v2(), "bob-backward"))
+        .await
+        .expect("connect bob");
+
+    wait_for_edge_query_ready(&bob, "users", Duration::from_secs(30)).await;
+
+    let user_id_value = jazz_tools::ObjectId::new();
+    let user_email = "bob@example.com";
+    let (user_obj_id, _) = bob
+        .create(
+            "users",
+            user_values_v2(user_id_value, "Bob Backward", user_email),
+        )
+        .await
+        .expect("bob creates user");
+
+    wait_for_query(
+        &bob,
+        QueryBuilder::new("users").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "bob's v2 user settled at edge",
+        |rows| (rows.len() == 1 && rows[0].0 == user_obj_id).then_some(rows),
+    )
+    .await;
+
+    // === Alice connects with v1, queries — should see Bob's row without email ===
+    let alice =
+        JazzClient::connect(server.make_client_context_for_user(schema_v1(), "alice-backward"))
+            .await
+            .expect("connect alice");
+
+    wait_for_edge_query_ready(&alice, "users", Duration::from_secs(30)).await;
+
+    let alice_rows = wait_for_query(
+        &alice,
+        QueryBuilder::new("users").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(25),
+        "alice sees bob's user without email column",
+        |rows| (rows.len() == 1 && rows[0].0 == user_obj_id).then_some(rows),
+    )
+    .await;
+
+    assert_eq!(alice_rows.len(), 1, "alice should see exactly one user");
+    assert_eq!(alice_rows[0].0, user_obj_id);
+
+    let values = &alice_rows[0].1;
+    assert_eq!(
+        values.len(),
+        2,
+        "v1 view should not include the email column"
+    );
+    assert_eq!(
+        values[0],
+        Value::Uuid(user_id_value),
+        "id should match bob's user"
+    );
+    assert_eq!(
+        values[1],
+        Value::Text("Bob Backward".to_string()),
+        "name should match bob's user"
+    );
+
+    bob.shutdown().await.expect("shutdown bob");
+    alice.shutdown().await.expect("shutdown alice");
     server.shutdown().await;
 }
