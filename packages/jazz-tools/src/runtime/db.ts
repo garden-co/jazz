@@ -546,6 +546,16 @@ export class Db {
     }
 
     const bridge = new WorkerBridge(this.worker, client.getRuntime());
+    client.setWorkerQueryExecutor((queryJson, sessionJson, tier, optionsJson) =>
+      bridge.query(queryJson, sessionJson, tier, optionsJson),
+    );
+    client.setWorkerSubscriptionExecutor({
+      subscribe: (subscriptionId, queryJson, onDelta, sessionJson, tier, optionsJson) =>
+        bridge.subscribe(subscriptionId, queryJson, onDelta, sessionJson, tier, optionsJson),
+      unsubscribe: (subscriptionId) => {
+        bridge.unsubscribe(subscriptionId);
+      },
+    });
     this.leaderPeerIds.clear();
     bridge.onPeerSync((batch) => {
       this.handleWorkerPeerSync(batch);
@@ -852,6 +862,10 @@ export class Db {
         // Best effort
       }
       this.workerBridge = null;
+      for (const client of this.clients.values()) {
+        client.setWorkerQueryExecutor(null);
+        client.setWorkerSubscriptionExecutor(null);
+      }
     }
     this.bridgeReady = null;
 
@@ -888,6 +902,10 @@ export class Db {
       }
     }
     this.workerBridge = null;
+    for (const client of this.clients.values()) {
+      client.setWorkerQueryExecutor(null);
+      client.setWorkerSubscriptionExecutor(null);
+    }
     this.bridgeReady = null;
 
     for (const client of this.clients.values()) {
@@ -1325,6 +1343,10 @@ export class Db {
     if (this.workerBridge && this.worker) {
       await this.workerBridge.shutdown(this.worker);
       this.workerBridge = null;
+      for (const client of this.clients.values()) {
+        client.setWorkerQueryExecutor(null);
+        client.setWorkerSubscriptionExecutor(null);
+      }
     }
 
     for (const client of this.clients.values()) {

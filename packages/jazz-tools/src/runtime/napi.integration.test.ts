@@ -511,11 +511,21 @@ function signJwt(payload: Record<string, unknown>, secret: string): string {
   return `${signedPart}.${base64Url(signature)}`;
 }
 
-function buildClientQuerySubscriptionPayload(queryJson: string, queryId = 1): string {
+function buildClientQuerySubscriptionPayload(
+  queryJson: string,
+  runtime: { getSchemaHash(): string; getBatchId(): string },
+  queryId = 1,
+): string {
   return JSON.stringify({
     QuerySubscription: {
       query_id: queryId,
       query: JSON.parse(queryJson) as Record<string, unknown>,
+      schema_context: {
+        env: "test",
+        schema_hash: runtime.getSchemaHash(),
+        user_branch: "main",
+        batch_id: runtime.getBatchId(),
+      },
       session: null,
       propagation: "full",
     },
@@ -648,7 +658,7 @@ describe("NAPI integration", () => {
     runtime.setClientRole?.(clientId, "peer");
     runtime.onSyncMessageReceivedFromClient?.(
       clientId,
-      buildClientQuerySubscriptionPayload(queryJson),
+      buildClientQuerySubscriptionPayload(queryJson, runtime),
     );
 
     await vi.waitFor(

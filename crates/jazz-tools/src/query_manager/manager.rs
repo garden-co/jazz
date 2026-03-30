@@ -1357,6 +1357,7 @@ impl QueryManager {
 
         let table_name = TableName::new(&table);
         let resolved_branch_name = self.resolve_branch_name(update.branch_name.as_str());
+        let update_branch_ref = QueryBranchRef::from_branch_name(resolved_branch_name);
         let branch = resolved_branch_name.as_str();
 
         // Look up the correct schema for this branch
@@ -1430,7 +1431,7 @@ impl QueryManager {
         let descriptor = table_schema.columns.clone();
 
         // Check if we have a local hard delete tombstone - if so, ignore incoming updates
-        if self.is_hard_deleted(update.object_id) {
+        if self.is_hard_deleted_on_branch(update.object_id, &resolved_branch_name) {
             // Hard delete is authoritative - ignore incoming updates
             return;
         }
@@ -1450,7 +1451,7 @@ impl QueryManager {
                 head_commit_id,
                 &descriptor,
             );
-            self.mark_subscriptions_dirty(&table);
+            self.mark_subscriptions_dirty_for_branch(&table, &update_branch_ref);
             self.mark_row_deleted_in_subscriptions(&table, update.object_id);
             return;
         }
@@ -1464,7 +1465,7 @@ impl QueryManager {
                 head_commit_id,
                 &descriptor,
             );
-            self.mark_subscriptions_dirty(&table);
+            self.mark_subscriptions_dirty_for_branch(&table, &update_branch_ref);
             self.mark_row_deleted_in_subscriptions(&table, update.object_id);
             return;
         }
@@ -1487,7 +1488,7 @@ impl QueryManager {
             );
         }
 
-        self.mark_subscriptions_dirty(&table);
+        self.mark_subscriptions_dirty_for_branch(&table, &update_branch_ref);
         self.mark_row_updated_in_subscriptions(&table, update.object_id);
     }
     /// Mark subscriptions dirty for a table based on update origin.
@@ -1510,12 +1511,38 @@ impl QueryManager {
         }
     }
 
-    /// Mark subscriptions dirty from external updates (default behavior).
-    ///
-    /// Checks all tables involved in the subscription (including joined tables).
-    /// Also marks server-side subscriptions for downstream clients.
-    pub(super) fn mark_subscriptions_dirty(&mut self, table: &str) {
-        self.mark_subscriptions_dirty_with_origin(table, false);
+    /// Mark subscriptions dirty for a table and recompile only when the updated
+    /// branch is not already part of the subscription's read set.
+    fn mark_subscriptions_dirty_for_branch(
+        &mut self,
+        table: &str,
+        updated_branch: &QueryBranchRef,
+    ) {
+        for subscription in self.subscriptions.values_mut() {
+            if Self::subscription_involves_table(&subscription.graph, table) {
+                subscription.graph.mark_dirty_for_table(table);
+                if !subscription
+                    .branches
+                    .iter()
+                    .any(|branch| branch == updated_branch)
+                {
+                    subscription.needs_recompile = true;
+                }
+            }
+        }
+
+        for server_sub in self.server_subscriptions.values_mut() {
+            if Self::subscription_involves_table(&server_sub.graph, table) {
+                server_sub.graph.mark_dirty_for_table(table);
+                if !server_sub
+                    .branches
+                    .iter()
+                    .any(|branch| branch == updated_branch)
+                {
+                    server_sub.needs_recompile = true;
+                }
+            }
+        }
     }
 
     /// Mark subscriptions dirty from local writes.

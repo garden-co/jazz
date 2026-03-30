@@ -867,6 +867,43 @@ describe("Worker Bridge with OPFS", () => {
     expect(snapshotsB[0].title).toBe("local-only-local-1");
   }, 60000);
 
+  it("worker-tier subscriptions replay persisted rows after reopen", async () => {
+    const dbName = uniqueDbName("subscription-reopen");
+    const dbA = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+
+    await dbA.insertDurable(
+      todos,
+      { title: "subscription-reopen-row", done: false },
+      { tier: "worker" },
+    );
+    await dbA.shutdown();
+    untrack(dbA);
+
+    const dbB = track(
+      await createDb({ appId: "test-app", driver: { type: "persistent", dbName } }),
+    );
+
+    const snapshots: Todo[][] = [];
+    trackSubscription(
+      dbB.subscribeAll(
+        allTodos,
+        (delta) => {
+          snapshots.push([...delta.all]);
+        },
+        { tier: "worker" },
+      ),
+    );
+
+    await waitForCondition(
+      async () =>
+        snapshots.some((rows) => rows.some((row) => row.title === "subscription-reopen-row")),
+      8000,
+      "worker-tier subscription should replay persisted OPFS rows after reopen",
+    );
+  }, 60000);
+
   it("local-only subscriptions do not receive rows from sync server", async () => {
     const sharedLocalAuthToken = `sync-local-only-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const dbA = await createSyncedDb(ctx, "sync-local-only-a", sharedLocalAuthToken);
@@ -919,6 +956,58 @@ describe("Worker Bridge with OPFS", () => {
     expect(latest.some((row) => row.title === remoteTitle)).toBe(false);
 
     unsub();
+  }, 60000);
+
+  it("worker-tier subscriptions receive synced rows from another client", async () => {
+    const sharedLocalAuthToken = `sync-worker-sub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const dbA = await createSyncedDb(ctx, "sync-worker-sub-a", sharedLocalAuthToken);
+    const dbB = await createSyncedDb(ctx, "sync-worker-sub-b", sharedLocalAuthToken);
+
+    const snapshots: Todo[][] = [];
+    trackSubscription(
+      dbB.subscribeAll(
+        allTodos,
+        (delta) => {
+          snapshots.push([...delta.all]);
+        },
+        { tier: "worker" },
+      ),
+    );
+
+    const title = `sync-worker-sub-row-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await withTimeout(
+      dbA.insertDurable(todos, { title, done: false }, { tier: "worker" }),
+      10000,
+      "A insert(worker) did not resolve",
+    );
+
+    await waitForCondition(
+      async () => snapshots.some((rows) => rows.some((row) => row.title === title)),
+      20000,
+      "worker-tier subscription should receive synced row from another client",
+    );
+  }, 60000);
+
+  it("worker-tier query sees synced row on client B", async () => {
+    const sharedLocalAuthToken = `sync-worker-b-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const dbA = await createSyncedDb(ctx, "sync-worker-a", sharedLocalAuthToken);
+    const dbB = await createSyncedDb(ctx, "sync-worker-b", sharedLocalAuthToken);
+
+    const title = `sync-worker-visible-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await withTimeout(
+      dbA.insertDurable(todos, { title, done: false }, { tier: "worker" }),
+      10000,
+      "A insert(worker) did not resolve",
+    );
+
+    const rowsOnB = await waitForTodos(
+      dbB,
+      (rows) => rows.some((row) => row.title === title),
+      "A -> B worker-tier propagation",
+      20000,
+      "worker",
+    );
+    expect(rowsOnB.some((row) => row.title === title)).toBe(true);
   }, 60000);
 
   // -------------------------------------------------------------------------

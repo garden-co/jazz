@@ -5,8 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, routing::get};
 use base64::Engine;
-use jazz_tools::object::BranchName;
-use jazz_tools::query_manager::types::{ComposedBranchName, SchemaHash};
+use jazz_tools::query_manager::types::{BatchId, ComposedBranchName, QueryBranchRef, SchemaHash};
 use jazz_tools::storage::{FjallStorage, Storage};
 use jazz_tools::{
     AppContext, AppId, ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder,
@@ -340,9 +339,9 @@ async fn wait_for_todos_count_on_disk(
         .join(app_id.to_string())
         .join("jazz.fjall");
     let schema_hash = SchemaHash::compute(&test_schema());
-    let branch = ComposedBranchName::new("client", schema_hash, "main")
-        .to_branch_name()
-        .to_string();
+    let branch_name =
+        ComposedBranchName::new("client", schema_hash, "main", BatchId::nil()).to_branch_name();
+    let branch = QueryBranchRef::from_branch_name(branch_name);
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last_count = 0usize;
 
@@ -350,7 +349,6 @@ async fn wait_for_todos_count_on_disk(
         if db_path.exists()
             && let Ok(storage) = FjallStorage::open(&db_path, 64 * 1024 * 1024)
         {
-            let branch_name = BranchName::new(&branch);
             let row_ids = storage.index_scan_all("todos", "_id", &branch);
             let mut materialized = 0usize;
             for row_id in row_ids {
@@ -360,7 +358,7 @@ async fn wait_for_todos_count_on_disk(
                     .flatten()
                     .is_some();
                 let has_content = storage
-                    .load_branch(row_id, &branch_name)
+                    .load_branch(row_id, &branch)
                     .ok()
                     .flatten()
                     .map(|loaded| {

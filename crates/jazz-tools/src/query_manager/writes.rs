@@ -1852,12 +1852,11 @@ impl QueryManager {
     }
 
     /// Check if a row has a hard delete tombstone (empty content + delete: hard metadata).
-    pub(super) fn is_hard_deleted(&self, id: ObjectId) -> bool {
+    pub(super) fn is_hard_deleted_on_branch(&self, id: ObjectId, branch_name: &BranchName) -> bool {
         let Some(obj) = self.sync_manager.object_manager.get(id) else {
             return false;
         };
-        let current_branch = self.current_branch();
-        let Some(branch) = obj.branches.get(&current_branch) else {
+        let Some(branch) = obj.branches.get(branch_name) else {
             return false;
         };
         let Some(tip_id) = branch.tips.iter().next() else {
@@ -1868,6 +1867,12 @@ impl QueryManager {
         };
         // Hard delete: empty content + delete: hard metadata
         commit.content.is_empty() && commit.is_hard_deleted()
+    }
+
+    /// Check if a row has a hard delete tombstone on the default branch.
+    pub(super) fn is_hard_deleted(&self, id: ObjectId) -> bool {
+        let current_branch = self.current_branch();
+        self.is_hard_deleted_on_branch(id, &current_branch)
     }
 
     /// Check if a commit has been stored to disk.

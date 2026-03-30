@@ -105,6 +105,32 @@ export interface DebugSeedLiveSchemaMessage {
   schemaJson: string;
 }
 
+/** Execute a worker-local query and return rows to the main thread. */
+export interface QueryMessage {
+  type: "query";
+  requestId: number;
+  queryJson: string;
+  sessionJson?: string;
+  tier?: "worker" | "edge" | "global";
+  optionsJson?: string;
+}
+
+/** Start a worker-local subscription and stream deltas back to the main thread. */
+export interface SubscribeMessage {
+  type: "subscribe";
+  subscriptionId: number;
+  queryJson: string;
+  sessionJson?: string;
+  tier?: "worker" | "edge" | "global";
+  optionsJson?: string;
+}
+
+/** Stop a worker-local subscription. */
+export interface UnsubscribeMessage {
+  type: "unsubscribe";
+  subscriptionId: number;
+}
+
 export type MainToWorkerMessage =
   | InitMessage
   | SyncToWorkerMessage
@@ -116,7 +142,10 @@ export type MainToWorkerMessage =
   | ShutdownMessage
   | SimulateCrashMessage
   | DebugSchemaStateMessage
-  | DebugSeedLiveSchemaMessage;
+  | DebugSeedLiveSchemaMessage
+  | QueryMessage
+  | SubscribeMessage
+  | UnsubscribeMessage;
 
 // ============================================================================
 // Worker → Main Thread Messages
@@ -182,6 +211,40 @@ export interface DebugSeedLiveSchemaOkMessage {
   type: "debug-seed-live-schema-ok";
 }
 
+/** Worker responds with query rows. */
+export interface QueryOkMessage {
+  type: "query-ok";
+  requestId: number;
+  rows: unknown[];
+}
+
+/** Worker reports a query execution failure. */
+export interface QueryErrorMessage {
+  type: "query-error";
+  requestId: number;
+  message: string;
+}
+
+/** Worker confirms a subscription is active. */
+export interface SubscriptionReadyMessage {
+  type: "subscription-ready";
+  subscriptionId: number;
+}
+
+/** Worker streams a subscription delta. */
+export interface SubscriptionDeltaMessage {
+  type: "subscription-delta";
+  subscriptionId: number;
+  delta: unknown;
+}
+
+/** Worker reports a subscription setup failure. */
+export interface SubscriptionErrorMessage {
+  type: "subscription-error";
+  subscriptionId: number;
+  message: string;
+}
+
 export type WorkerToMainMessage =
   | ReadyMessage
   | InitOkMessage
@@ -190,4 +253,9 @@ export type WorkerToMainMessage =
   | ErrorMessage
   | ShutdownOkMessage
   | DebugSchemaStateOkMessage
-  | DebugSeedLiveSchemaOkMessage;
+  | DebugSeedLiveSchemaOkMessage
+  | QueryOkMessage
+  | QueryErrorMessage
+  | SubscriptionReadyMessage
+  | SubscriptionDeltaMessage
+  | SubscriptionErrorMessage;

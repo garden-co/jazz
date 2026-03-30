@@ -595,6 +595,7 @@ impl WasmRuntime {
         let (object_id, row_values) = core
             .insert(table, named_values, None)
             .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?;
+        core.batched_tick();
 
         let row = SubscriptionRow {
             id: object_id.uuid().to_string(),
@@ -622,6 +623,7 @@ impl WasmRuntime {
         let (object_id, row_values) = core
             .insert(table, named_values, session.as_ref())
             .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?;
+        core.batched_tick();
 
         let row = SubscriptionRow {
             id: object_id.uuid().to_string(),
@@ -694,6 +696,7 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.update(oid, updates, None)
             .map_err(|e| JsError::new(&format!("Update failed: {e}")))?;
+        core.batched_tick();
 
         tracing::debug!(object_id, "updated");
         Ok(())
@@ -725,6 +728,7 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.update(oid, updates, session.as_ref())
             .map_err(|e| JsError::new(&format!("Update failed: {e}")))?;
+        core.batched_tick();
 
         tracing::debug!(object_id, "updated_with_session");
         Ok(())
@@ -741,6 +745,7 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.delete(oid, None)
             .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?;
+        core.batched_tick();
 
         tracing::debug!(object_id, "deleted");
         Ok(())
@@ -763,6 +768,7 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.delete(oid, session.as_ref())
             .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?;
+        core.batched_tick();
 
         tracing::debug!(object_id, "deleted_with_session");
         Ok(())
@@ -987,9 +993,8 @@ impl WasmRuntime {
             parse_subscription_inputs(query_json, session_json, settled_tier, options_json)?;
         let callback = make_subscription_callback(on_update);
 
-        let handle = self
-            .core
-            .borrow_mut()
+        let mut core = self.core.borrow_mut();
+        let handle = core
             .subscribe_with_durability_and_propagation(
                 query,
                 callback,
@@ -998,6 +1003,7 @@ impl WasmRuntime {
                 propagation,
             )
             .map_err(|e| JsError::new(&format!("Subscribe failed: {:?}", e)))?;
+        core.batched_tick();
 
         let subscription_id = handle.0;
         tracing::debug!(subscription_id, "subscribed");
@@ -1010,9 +1016,9 @@ impl WasmRuntime {
     pub fn unsubscribe(&self, handle: f64) {
         let sub_id = handle as u64;
         let _span = tracing::debug_span!("wasm::unsubscribe", sub_id).entered();
-        self.core
-            .borrow_mut()
-            .unsubscribe(SubscriptionHandle(sub_id));
+        let mut core = self.core.borrow_mut();
+        core.unsubscribe(SubscriptionHandle(sub_id));
+        core.batched_tick();
     }
 
     /// Phase 1 of 2-phase subscribe: allocate a handle and store query params.
@@ -1055,10 +1061,10 @@ impl WasmRuntime {
         .entered();
         let callback = make_subscription_callback(on_update);
 
-        self.core
-            .borrow_mut()
-            .execute_subscription(sub_handle, callback)
+        let mut core = self.core.borrow_mut();
+        core.execute_subscription(sub_handle, callback)
             .map_err(|e| JsError::new(&format!("Execute subscription failed: {:?}", e)))?;
+        core.batched_tick();
 
         Ok(())
     }
@@ -1255,6 +1261,15 @@ impl WasmRuntime {
     pub fn flush(&self) {
         let _span = debug_span!("wasm::flush", tier = self.tier_label).entered();
         self.core.borrow().flush_storage();
+    }
+
+    /// Flush pending sync/storage work before dropping the runtime.
+    #[wasm_bindgen]
+    pub fn close(&self) {
+        let _span = debug_span!("wasm::close", tier = self.tier_label).entered();
+        let mut core = self.core.borrow_mut();
+        core.batched_tick();
+        core.flush_storage();
     }
 
     /// Flush only the WAL buffer to OPFS (not the snapshot).

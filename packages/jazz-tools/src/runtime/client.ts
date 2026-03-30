@@ -147,6 +147,34 @@ export interface Row {
  */
 export type SubscriptionCallback = (delta: RowDelta) => void;
 
+type WorkerQueryExecutor = (
+  queryJson: string,
+  sessionJson: string | undefined,
+  tier: DurabilityTier | undefined,
+  optionsJson: string | undefined,
+) => Promise<Row[]>;
+
+type WorkerSubscriptionExecutor = {
+  subscribe: (
+    subscriptionId: number,
+    queryJson: string,
+    onDelta: (delta: RowDelta | string) => void,
+    sessionJson: string | undefined,
+    tier: DurabilityTier | undefined,
+    optionsJson: string | undefined,
+  ) => Promise<void>;
+  unsubscribe: (subscriptionId: number) => void;
+};
+
+type WorkerSubscriptionEntry = {
+  queryJson: string;
+  sessionJson: string | undefined;
+  tier: DurabilityTier | undefined;
+  optionsJson: string | undefined;
+  callback: (delta: RowDelta | string) => void;
+  attachedExecutorVersion: number | null;
+};
+
 export interface LinkExternalIdentityOptions {
   jwtToken?: string;
   localAuthMode?: "anonymous" | "demo";
@@ -599,6 +627,11 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
   private useBackendSyncAuth = false;
+  private workerQueryExecutor: WorkerQueryExecutor | null = null;
+  private workerSubscriptionExecutor: WorkerSubscriptionExecutor | null = null;
+  private nextWorkerSubscriptionHandle = -1;
+  private workerSubscriptionExecutorVersion = 0;
+  private workerSubscriptions = new Map<number, WorkerSubscriptionEntry>();
 
   private constructor(
     runtime: Runtime,
@@ -1091,13 +1124,72 @@ export class JazzClient {
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const runtimeSchema = this.getSchema();
-    const results = await this.runtime.query(
-      queryJson,
-      sessionJson,
-      normalizedOptions.tier,
-      optionsJson,
-    );
+    const results =
+      normalizedOptions.tier === "worker" && this.workerQueryExecutor
+        ? await this.workerQueryExecutor(
+            queryJson,
+            sessionJson,
+            normalizedOptions.tier,
+            optionsJson,
+          )
+        : await this.runtime.query(queryJson, sessionJson, normalizedOptions.tier, optionsJson);
     return this.alignQueryRowsToDeclaredSchema(queryJson, results as Row[], runtimeSchema);
+  }
+
+  setWorkerQueryExecutor(executor: WorkerQueryExecutor | null): void {
+    this.workerQueryExecutor = executor;
+  }
+
+  setWorkerSubscriptionExecutor(executor: WorkerSubscriptionExecutor | null): void {
+    this.workerSubscriptionExecutor = executor;
+    this.workerSubscriptionExecutorVersion += 1;
+
+    if (!executor) {
+      for (const entry of this.workerSubscriptions.values()) {
+        entry.attachedExecutorVersion = null;
+      }
+      return;
+    }
+
+    const version = this.workerSubscriptionExecutorVersion;
+    for (const [subscriptionId, entry] of this.workerSubscriptions) {
+      entry.attachedExecutorVersion = null;
+      this.scheduler(() => {
+        void this.attachWorkerSubscription(subscriptionId, version);
+      });
+    }
+  }
+
+  private async attachWorkerSubscription(
+    subscriptionId: number,
+    expectedExecutorVersion = this.workerSubscriptionExecutorVersion,
+  ): Promise<void> {
+    const entry = this.workerSubscriptions.get(subscriptionId);
+    const executor = this.workerSubscriptionExecutor;
+    if (!entry || !executor) {
+      return;
+    }
+    if (entry.attachedExecutorVersion === expectedExecutorVersion) {
+      return;
+    }
+
+    entry.attachedExecutorVersion = expectedExecutorVersion;
+    try {
+      await executor.subscribe(
+        subscriptionId,
+        entry.queryJson,
+        entry.callback,
+        entry.sessionJson,
+        entry.tier,
+        entry.optionsJson,
+      );
+    } catch (error) {
+      const currentEntry = this.workerSubscriptions.get(subscriptionId);
+      if (currentEntry && currentEntry.attachedExecutorVersion === expectedExecutorVersion) {
+        currentEntry.attachedExecutorVersion = null;
+      }
+      console.error("[client] Worker subscription attach failed:", error);
+    }
   }
 
   /**
@@ -1242,6 +1334,30 @@ export class JazzClient {
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const runtimeSchema = this.getSchema();
 
+    if (normalizedOptions.tier === "worker" && this.workerSubscriptionExecutor) {
+      const handle = this.nextWorkerSubscriptionHandle--;
+      const workerCallback = (deltaJsonOrObject: RowDelta | string) => {
+        const delta: RowDelta =
+          typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
+        callback(this.alignSubscriptionDeltaToDeclaredSchema(queryJson, delta, runtimeSchema));
+      };
+
+      this.workerSubscriptions.set(handle, {
+        queryJson,
+        sessionJson,
+        tier: normalizedOptions.tier,
+        optionsJson,
+        callback: workerCallback,
+        attachedExecutorVersion: null,
+      });
+
+      this.scheduler(() => {
+        void this.attachWorkerSubscription(handle);
+      });
+
+      return handle;
+    }
+
     const handle = this.runtime.createSubscription(
       queryJson,
       sessionJson,
@@ -1271,6 +1387,10 @@ export class JazzClient {
    * @param subscriptionId ID returned from subscribe()
    */
   unsubscribe(subscriptionId: number): void {
+    if (this.workerSubscriptions.delete(subscriptionId)) {
+      this.workerSubscriptionExecutor?.unsubscribe(subscriptionId);
+      return;
+    }
     this.runtime.unsubscribe(subscriptionId);
   }
 

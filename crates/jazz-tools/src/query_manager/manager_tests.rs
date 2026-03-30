@@ -527,6 +527,77 @@ fn default_query_on_fresh_batch_branch_reads_registered_prefix_branches() {
 }
 
 #[test]
+fn subscription_recompiles_when_external_batch_arrives_for_same_prefix() {
+    use crate::commit::{Commit, StoredState};
+    use crate::query_manager::encoding::encode_row;
+    use std::collections::HashMap;
+
+    let schema = test_schema();
+    let schema_hash = crate::query_manager::types::SchemaHash::compute(&schema);
+    let mut storage = MemoryStorage::new();
+    let mut qm = create_query_manager_with_batch(SyncManager::new(), schema, 32);
+    qm.set_known_schemas(std::sync::Arc::new(std::collections::HashMap::from([(
+        schema_hash,
+        test_schema(),
+    )])));
+
+    let sub_id = qm.subscribe(qm.query("users").build()).unwrap();
+    let _ = qm.take_updates();
+
+    let remote_branch = ComposedBranchName::new(
+        "dev",
+        schema_hash,
+        "main",
+        BatchId::from_uuid(Uuid::from_u128(31)),
+    )
+    .to_branch_name();
+
+    let row_id = ObjectId::new();
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_object(&mut storage, row_id, metadata);
+
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let row_data = encode_row(
+        &descriptor,
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    let commit = Commit {
+        parents: smallvec![],
+        content: row_data,
+        timestamp: 1_000,
+        author: row_id,
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut storage, row_id, remote_branch, commit)
+        .unwrap();
+
+    qm.process(&mut storage);
+
+    let query = qm.query("users").build();
+    let results = execute_query(&mut qm, &mut storage, query)
+        .expect("default query should fan out to the new external batch");
+    assert_eq!(results.len(), 1);
+
+    let updates = qm.take_updates();
+    let update = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("subscription should recompile onto the new batch and emit the row");
+    assert_eq!(update.delta.added.len(), 1);
+}
+
+#[test]
 fn insert_and_query() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
@@ -2902,6 +2973,180 @@ fn sync_inbox_update_flows_to_subscription_delta() {
     let values = decode_row(&descriptor, &new_row.data).unwrap();
     assert_eq!(values[0], Value::Text("Alice Updated".into()));
     assert_eq!(values[1], Value::Integer(999));
+}
+
+#[test]
+fn sync_inbox_update_on_external_batch_becomes_query_visible() {
+    use crate::commit::{Commit, StoredState};
+    use crate::query_manager::encoding::{decode_row, encode_row};
+    use crate::query_manager::types::{BatchId, ComposedBranchName, SchemaHash};
+    use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    let schema = test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let mut qm = create_query_manager_with_batch(SyncManager::new(), schema, 32);
+    let mut storage = MemoryStorage::new();
+    qm.set_known_schemas(Arc::new(std::collections::HashMap::from([(
+        schema_hash,
+        test_schema(),
+    )])));
+
+    let server_id = ServerId::new();
+    qm.sync_manager_mut().add_server(server_id);
+    qm.sync_manager_mut().object_manager.subscribe_all();
+
+    let query = qm.query("users").build();
+    let sub_id = qm.subscribe(query.clone()).unwrap();
+    qm.process(&mut storage);
+    let _ = qm.take_updates();
+
+    let row_id = crate::object::ObjectId::new();
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let row_data = encode_row(
+        &descriptor,
+        &[Value::Text("SyncedUser".into()), Value::Integer(42)],
+    )
+    .unwrap();
+
+    let remote_branch = ComposedBranchName::new(
+        "dev",
+        schema_hash,
+        "main",
+        BatchId::from_uuid(Uuid::from_u128(31)),
+    )
+    .to_branch_name();
+
+    let mut obj_metadata = std::collections::HashMap::new();
+    obj_metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+
+    let commit = Commit {
+        parents: smallvec![],
+        content: row_data,
+        timestamp: 1000,
+        author: row_id,
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(server_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: row_id,
+            metadata: Some(crate::sync_manager::ObjectMetadata {
+                id: row_id,
+                metadata: obj_metadata,
+            }),
+            branch_name: remote_branch.into(),
+            commits: vec![commit],
+        },
+    });
+
+    qm.sync_manager_mut().process_inbox(&mut storage);
+    qm.process(&mut storage);
+
+    let results = execute_query(&mut qm, &mut storage, query)
+        .expect("default query should include synced rows from external batches");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1[0], Value::Text("SyncedUser".into()));
+    assert_eq!(results[0].1[1], Value::Integer(42));
+
+    let updates = qm.take_updates();
+    let update = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("subscription should emit the synced row from the external batch");
+    assert_eq!(update.delta.added.len(), 1);
+    let values = decode_row(&descriptor, &update.delta.added[0].data).unwrap();
+    assert_eq!(values[0], Value::Text("SyncedUser".into()));
+    assert_eq!(values[1], Value::Integer(42));
+}
+
+#[test]
+fn peer_client_update_on_external_batch_becomes_query_visible() {
+    use crate::commit::{Commit, StoredState};
+    use crate::query_manager::encoding::encode_row;
+    use crate::query_manager::types::{BatchId, ComposedBranchName, SchemaHash};
+    use crate::sync_manager::{ClientRole, InboxEntry, Source, SyncPayload};
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    let schema = test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let mut qm = create_query_manager_with_batch(SyncManager::new(), schema, 32);
+    let mut storage = MemoryStorage::new();
+    qm.set_known_schemas(Arc::new(std::collections::HashMap::from([(
+        schema_hash,
+        test_schema(),
+    )])));
+
+    let client_id = ClientId::new();
+    qm.sync_manager_mut().add_client(client_id);
+    qm.sync_manager_mut()
+        .set_client_role(client_id, ClientRole::Peer);
+
+    let query = qm.query("users").build();
+    let _ = qm.subscribe(query.clone()).unwrap();
+    qm.process(&mut storage);
+    let _ = qm.take_updates();
+
+    let row_id = crate::object::ObjectId::new();
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let row_data = encode_row(
+        &descriptor,
+        &[Value::Text("PeerUser".into()), Value::Integer(42)],
+    )
+    .unwrap();
+
+    let remote_branch = ComposedBranchName::new(
+        "dev",
+        schema_hash,
+        "main",
+        BatchId::from_uuid(Uuid::from_u128(41)),
+    )
+    .to_branch_name();
+
+    let mut obj_metadata = std::collections::HashMap::new();
+    obj_metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+
+    let commit = Commit {
+        parents: smallvec![],
+        content: row_data,
+        timestamp: 1000,
+        author: row_id,
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: row_id,
+            metadata: Some(crate::sync_manager::ObjectMetadata {
+                id: row_id,
+                metadata: obj_metadata,
+            }),
+            branch_name: remote_branch.into(),
+            commits: vec![commit],
+        },
+    });
+
+    qm.process(&mut storage);
+
+    let results = execute_query(&mut qm, &mut storage, query)
+        .expect("default query should include peer-originated rows from external batches");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1[0], Value::Text("PeerUser".into()));
+    assert_eq!(results[0].1[1], Value::Integer(42));
 }
 
 #[test]
@@ -7664,6 +7909,77 @@ fn handle_object_update_respects_branch() {
         results.len(),
         1,
         "Row on schema branch should appear in default query"
+    );
+}
+
+#[test]
+fn handle_object_update_in_server_mode_checks_hard_delete_on_update_branch() {
+    use crate::commit::{Commit, StoredState};
+    use crate::object_manager::AllObjectUpdate;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let mut qm = QueryManager::new(SyncManager::new());
+    let mut storage = MemoryStorage::new();
+    let schema = test_schema();
+    let schema_hash = crate::query_manager::types::SchemaHash::compute(&schema);
+    let branch =
+        ComposedBranchName::new("dev", schema_hash, "main", BatchId::nil()).to_branch_name();
+
+    qm.branch_schema_map
+        .insert(branch.as_str().to_string(), schema_hash);
+    qm.known_schemas = Arc::new(HashMap::from([(schema_hash, schema)]));
+
+    let row_id = ObjectId::new();
+    let author = row_id;
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_object(&mut storage, row_id, metadata.clone());
+
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let row_data = encode_row(
+        &descriptor,
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+
+    let commit = Commit {
+        parents: smallvec![],
+        content: row_data,
+        timestamp: 1_000,
+        author,
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+    let commit_id = qm
+        .sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut storage, row_id, branch.clone(), commit)
+        .unwrap();
+
+    qm.handle_object_update(
+        &mut storage,
+        AllObjectUpdate {
+            object_id: row_id,
+            metadata,
+            branch_name: branch,
+            commit_ids: vec![commit_id],
+            is_new_object: false,
+            previous_commit_ids: vec![],
+            old_content: None,
+        },
+    );
+
+    assert!(
+        qm.pending_row_updates.is_empty(),
+        "server-mode composed branch updates should not hit current_branch()"
     );
 }
 
