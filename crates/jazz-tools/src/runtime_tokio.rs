@@ -491,7 +491,8 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     }
 
     /// Run a closure with read access to the SyncManager (for testing/inspection).
-    pub fn with_sync_manager<R>(
+    #[cfg(test)]
+    pub(crate) fn with_sync_manager<R>(
         &self,
         f: impl FnOnce(&crate::sync_manager::SyncManager) -> R,
     ) -> Result<R, RuntimeError> {

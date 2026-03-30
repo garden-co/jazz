@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 
 use tokio::sync::{RwLock, broadcast};
 use tokio::time::Instant;
@@ -24,13 +24,11 @@ pub use testing::{TestingJwksServer, TestingServer, TestingServerBuilder};
 
 pub type DynStorage = Box<dyn Storage + Send>;
 
-/// Tracks a client awaiting reap after SSE disconnect.
+/// Tracks when a client's last SSE connection closed, pending reap after TTL.
 #[derive(Clone, Copy)]
 pub struct DisconnectCandidate {
     /// When the last SSE connection closed.
     pub disconnected_at: Instant,
-    /// Number of failed reap attempts.
-    pub attempts: u32,
 }
 
 /// Server state shared across request handlers.
@@ -52,9 +50,9 @@ pub struct ServerState {
     pub external_identities: RwLock<HashMap<(String, String), String>>,
     /// Clients that lost their SSE stream, waiting to be reaped after TTL.
     pub disconnect_candidates: RwLock<HashMap<ClientId, DisconnectCandidate>>,
-    /// Client state TTL in milliseconds. Default: 5 minutes (300_000ms).
+    /// Client state TTL. Default: 5 minutes.
     /// Disconnected clients are reaped after this duration.
-    pub client_ttl: AtomicU64,
+    pub client_ttl: RwLock<Duration>,
 }
 
 /// State for a single SSE connection.
@@ -74,7 +72,7 @@ impl ServerState {
     ///   on_connection_closed:  candidates(write) → connections(read)
     ///   on_client_connected:   candidates(write)
     ///   events_handler:        connections(write) ; candidates(write)   (sequential)
-    ///   run_sweep_once:        candidates(write) ; connections(read) → core(Mutex) ; candidates(write)  (read held during reap)
+    ///   run_sweep_once:        candidates(write) ; connections(read) ; core(Mutex)  (all sequential)
     pub async fn on_connection_closed(&self, client_id: ClientId) {
         let mut candidates = self.disconnect_candidates.write().await;
         let has_connections = self
@@ -88,7 +86,6 @@ impl ServerState {
                 client_id,
                 DisconnectCandidate {
                     disconnected_at: Instant::now(),
-                    attempts: 0,
                 },
             );
         }
@@ -100,38 +97,20 @@ impl ServerState {
         self.disconnect_candidates.write().await.remove(&client_id);
     }
 
-    /// Check if a client_id has any active SSE connections.
-    pub async fn has_active_connections(&self, client_id: ClientId) -> bool {
-        self.connections
-            .read()
-            .await
-            .values()
-            .any(|c| c.client_id == client_id)
-    }
-
     /// Run one sweep iteration: drain expired disconnect candidates,
-    /// check each for active connections, and reap those that are truly gone.
+    /// snapshot active connections, and reap those that are truly gone.
     /// Returns the list of reaped client IDs.
     pub async fn run_sweep_once(&self) -> Vec<ClientId> {
-        const MAX_REAP_ATTEMPTS: u32 = 3;
-
-        let ttl_ms = self.client_ttl.load(std::sync::atomic::Ordering::Relaxed);
-        let ttl = std::time::Duration::from_millis(ttl_ms);
+        let ttl = *self.client_ttl.read().await;
         let now = tokio::time::Instant::now();
 
         // Step 1: drain expired entries from candidates
-        let expired: Vec<(ClientId, DisconnectCandidate)> = {
+        let expired: Vec<ClientId> = {
             let mut candidates = self.disconnect_candidates.write().await;
             let mut expired = Vec::new();
             candidates.retain(|&client_id, candidate| {
                 if now.duration_since(candidate.disconnected_at) >= ttl {
-                    expired.push((
-                        client_id,
-                        DisconnectCandidate {
-                            disconnected_at: candidate.disconnected_at,
-                            attempts: candidate.attempts,
-                        },
-                    ));
+                    expired.push(client_id);
                     false // remove from candidates
                 } else {
                     true // keep
@@ -144,66 +123,28 @@ impl ServerState {
             return Vec::new();
         }
 
-        // Step 2: hold connections(read) for the entire reap phase.
-        // This prevents a TOCTOU race where a client reconnects (takes
-        // connections(write)) between our active-connections check and
-        // remove_client. While we hold this lock, no new connections can
-        // be inserted, so the snapshot is stable through all reaps.
-        //
-        // The sync Mutex inside remove_client is held for microseconds
-        // (HashMap retains), so blocking the tokio worker here is
-        // negligible. New SSE connections wait for the read lock to drop,
-        // which is O(expired × microseconds) — acceptable at any
-        // realistic scale.
-        //
-        // Building the active set once is also O(connections) total instead
-        // of O(expired × connections) from per-client linear scans.
-        let connections_guard = self.connections.read().await;
-        let active_clients: std::collections::HashSet<ClientId> =
-            connections_guard.values().map(|c| c.client_id).collect();
+        // Step 2: snapshot active client IDs then drop the lock.
+        // New connections can arrive after this snapshot, but that's safe:
+        // if a client reconnects between snapshot and reap, remove_client
+        // is a no-op (the new add_client call re-registers fresh state).
+        let active_clients: std::collections::HashSet<ClientId> = {
+            let connections = self.connections.read().await;
+            connections.values().map(|c| c.client_id).collect()
+        };
 
         let mut reaped = Vec::new();
-        let mut failed: Vec<(ClientId, DisconnectCandidate)> = Vec::new();
-        for (client_id, candidate) in expired {
+        for client_id in expired {
             if active_clients.contains(&client_id) {
                 tracing::debug!(%client_id, "skipping reap: client reconnected");
                 continue;
             }
-            // connections(read) held → reconnect can't insert a connection
-            // until we release, so remove_client can't race with re-registration.
             match self.runtime.remove_client(client_id) {
                 Ok(()) => {
                     reaped.push(client_id);
                     tracing::debug!(%client_id, "reaped disconnected client");
                 }
                 Err(e) => {
-                    tracing::warn!(%client_id, error = %e, attempts = candidate.attempts + 1, "failed to reap client");
-                    failed.push((client_id, candidate));
-                }
-            }
-        }
-        drop(connections_guard);
-
-        // Re-queue failures outside the connections lock to avoid
-        // nesting connections(read) → candidates(write).
-        if !failed.is_empty() {
-            let mut candidates = self.disconnect_candidates.write().await;
-            for (client_id, prev) in failed {
-                let next_attempt = prev.attempts + 1;
-                if next_attempt >= MAX_REAP_ATTEMPTS {
-                    tracing::error!(
-                        %client_id,
-                        attempts = next_attempt,
-                        "giving up reaping client after max attempts"
-                    );
-                } else {
-                    candidates.insert(
-                        client_id,
-                        DisconnectCandidate {
-                            disconnected_at: prev.disconnected_at,
-                            attempts: next_attempt,
-                        },
-                    );
+                    tracing::error!(%client_id, error = %e, "failed to reap client");
                 }
             }
         }
@@ -212,16 +153,8 @@ impl ServerState {
     }
 
     /// Update the client state TTL. Takes effect on the next sweep tick.
-    pub fn set_client_ttl(&self, ttl: std::time::Duration) {
-        let ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
-        self.client_ttl
-            .store(ms, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Get the current client state TTL.
-    pub fn get_client_ttl(&self) -> std::time::Duration {
-        let ms = self.client_ttl.load(std::sync::atomic::Ordering::Relaxed);
-        std::time::Duration::from_millis(ms)
+    pub async fn set_client_ttl(&self, ttl: Duration) {
+        *self.client_ttl.write().await = ttl;
     }
 }
 
@@ -439,7 +372,6 @@ mod tests {
                 alice,
                 super::DisconnectCandidate {
                     disconnected_at: tokio::time::Instant::now() - Duration::from_secs(301),
-                    attempts: 0,
                 },
             );
         }
@@ -522,7 +454,7 @@ mod tests {
         remove_connection(&state, conn).await;
 
         // Set TTL to 1 second
-        state.set_client_ttl(Duration::from_secs(1));
+        state.set_client_ttl(Duration::from_secs(1)).await;
 
         tokio::time::advance(Duration::from_secs(2)).await;
 
@@ -547,7 +479,7 @@ mod tests {
         assert!(reaped.is_empty(), "default TTL: alice should survive");
 
         // Now change TTL to 1 second — alice has been disconnected for 2s
-        state.set_client_ttl(Duration::from_secs(1));
+        state.set_client_ttl(Duration::from_secs(1)).await;
 
         let reaped = state.run_sweep_once().await;
         assert_eq!(reaped, vec![alice], "new TTL: alice should be reaped");
@@ -732,92 +664,6 @@ mod tests {
             .with_sync_manager(|sm| sm.get_client(alice).is_some())
             .expect("lock");
         assert!(has_alice, "alice reconnected — should be preserved");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn sweep_requeues_client_on_remove_failure() {
-        // When runtime.remove_client fails (poisoned lock), the client
-        // is re-inserted into disconnect_candidates with its original
-        // timestamp and an incremented attempt counter.
-        //
-        // To avoid interference from the background sweep task (which
-        // shares time with start_paused), we manually insert already-
-        // expired candidates before each run_sweep_once call.
-        let state = build_test_state().await;
-        let alice = ClientId::new();
-        let _ = state.runtime.add_client(alice, None);
-
-        // Poison the runtime's inner Mutex by panicking while holding it.
-        let runtime_clone = state.runtime.clone();
-        let handle = std::thread::spawn(move || {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = runtime_clone.with_sync_manager(|_sm| {
-                    panic!("intentional poison");
-                });
-            }));
-        });
-        handle.join().expect("thread should complete");
-
-        // Verify the mutex is poisoned
-        assert!(
-            state.runtime.remove_client(alice).is_err(),
-            "mutex should be poisoned"
-        );
-
-        // Advance time past TTL so we have room to create expired timestamps.
-        // The background sweep fires during this advance but finds no
-        // candidates (we haven't inserted any yet), so it's a no-op.
-        tokio::time::advance(Duration::from_secs(600)).await;
-
-        // Helper: insert alice as an already-expired candidate with given
-        // attempt count. Uses disconnected_at far in the past relative to
-        // the current (paused) clock.
-        let insert_expired = |attempts: u32| {
-            let state = &state;
-            async move {
-                let past = Instant::now() - Duration::from_secs(400);
-                state.disconnect_candidates.write().await.insert(
-                    alice,
-                    DisconnectCandidate {
-                        disconnected_at: past,
-                        attempts,
-                    },
-                );
-            }
-        };
-
-        // First sweep: fails to reap, re-queues with attempt=1
-        insert_expired(0).await;
-        let reaped = state.run_sweep_once().await;
-        assert!(reaped.is_empty(), "reap should fail on poisoned mutex");
-        {
-            let candidates = state.disconnect_candidates.read().await;
-            let candidate = candidates.get(&alice).expect("alice should be re-queued");
-            assert_eq!(candidate.attempts, 1);
-        }
-
-        // Second sweep: fails again, re-queues with attempt=2.
-        // We re-insert to ensure the candidate is expired (the re-queued
-        // candidate preserves the original disconnected_at, but the
-        // background sweep task may have consumed it during prior awaits).
-        insert_expired(1).await;
-        let reaped = state.run_sweep_once().await;
-        assert!(reaped.is_empty());
-        {
-            let candidates = state.disconnect_candidates.read().await;
-            let candidate = candidates.get(&alice).expect("alice should be re-queued");
-            assert_eq!(candidate.attempts, 2);
-        }
-
-        // Third sweep: gives up (MAX_REAP_ATTEMPTS=3), logs error, does NOT re-queue
-        insert_expired(2).await;
-        let reaped = state.run_sweep_once().await;
-        assert!(reaped.is_empty());
-        let candidates = state.disconnect_candidates.read().await;
-        assert!(
-            !candidates.contains_key(&alice),
-            "alice should NOT be re-queued after max attempts"
-        );
     }
 
     #[tokio::test(start_paused = true)]

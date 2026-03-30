@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use axum::Router;
@@ -108,7 +107,7 @@ impl ServerBuilder {
             external_identity_store,
             external_identities: RwLock::new(external_identities),
             disconnect_candidates: RwLock::new(HashMap::new()),
-            client_ttl: AtomicU64::new(300_000),
+            client_ttl: RwLock::new(Duration::from_secs(300)),
         });
 
         // Spawn periodic client state sweep (uses Weak so the task exits
