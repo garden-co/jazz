@@ -150,67 +150,47 @@ This MVP adds a small provenance-aware policy surface and aligns it with the new
 The intended mental model is:
 
 - app code reads `$createdBy`, `$createdAt`, `$updatedBy`, `$updatedAt`
-- policy code uses mirrored provenance helpers for authorization decisions
+- policy code uses the same provenance magic-column names for authorization decisions
 
 ### TypeScript DSL
 
-Extend `definePermissions(...)` context with a `meta` helper:
+Do not introduce a separate `meta` helper.
+
+Instead, permission conditions should accept provenance magic-column names anywhere ordinary column keys already work in `where(...)`, `whereOld(...)`, and `whereNew(...)`.
 
 ```ts
-definePermissions(app, ({ policy, meta, session, anyOf }) => {
-  policy.todos.allowRead.where(meta.createdBy(session.user_id));
-  policy.todos.allowDelete.where(meta.createdBy(session.user_id));
+definePermissions(app, ({ policy, session, anyOf }) => {
+  policy.todos.allowRead.where({ $createdBy: session.user_id });
+  policy.todos.allowDelete.where({ $createdBy: session.user_id });
   policy.todos.allowUpdate.whereOld(
-    anyOf([meta.createdBy(session.user_id), session.where({ "claims.role": "admin" })]),
+    anyOf([{ $createdBy: session.user_id }, session.where({ "claims.role": "admin" })]),
   );
 });
 ```
 
-MVP helpers:
-
-- `meta.createdBy(value)`
-- `meta.updatedBy(value)`
-
-These helpers should be documented as the policy-side counterparts of:
+In other words, the policy-side surface should reuse the same names as reads:
 
 - `$createdBy`
+- `$createdAt`
 - `$updatedBy`
+- `$updatedAt`
 
-Accepted `value` types in MVP:
+This keeps policy authoring aligned with the existing permissions DSL shape:
+
+- object-literal where clauses
+- `anyOf(...)` / `allOf(...)`
+- `whereOld(...)` / `whereNew(...)`
+
+Accepted right-hand-side values in MVP:
 
 - string literal
 - `session.user_id` / other session ref
 
 Not supported in MVP:
 
-- comparing provenance to row refs
-- timestamp-based provenance helpers in the TypeScript policy DSL
-
-### SQL Policy Syntax
-
-Add matching SQL helper functions for policies:
-
-```sql
-CREATE POLICY todos_select_policy ON todos FOR SELECT
-  USING (CREATED_BY() = @session.user_id);
-
-CREATE POLICY todos_delete_policy ON todos FOR DELETE
-  USING (CREATED_BY() = @session.user_id);
-```
-
-MVP functions:
-
-- `CREATED_BY()`
-- `UPDATED_BY()`
-
-These are policy/runtime concepts, not user-declared schema columns.
-
-`CREATED_BY()` / `UPDATED_BY()` are the SQL-side counterparts of:
-
-- `$createdBy`
-- `$updatedBy`
-
-Timestamp provenance is still exposed in reads via magic columns, but policy helper functions for `created_at` / `updated_at` are intentionally deferred from this MVP.
+- row-ref comparisons against provenance magic columns
+- timestamp-based provenance policies beyond ordinary comparisons using `$createdAt` / `$updatedAt`
+- a separate SQL-only provenance helper surface in MVP
 
 ## Magic Columns (MVP)
 
@@ -261,8 +241,8 @@ This means provenance checks align with the current row state rather than arbitr
 
 Creator-based update/delete permissions work like normal policy checks:
 
-- `allowUpdate.whereOld(meta.createdBy(session.user_id))`
-- `allowDelete.where(meta.createdBy(session.user_id))`
+- `allowUpdate.whereOld({ "$createdBy": session.user_id })`
+- `allowDelete.where({ "$createdBy": session.user_id })`
 
 There is no special "creator override" path outside the policy system.
 
@@ -357,26 +337,22 @@ This should not require a new planner node; it should fit inside the existing ma
 
 ### Permissions engine
 
-- Extend policy IR with provenance-aware conditions.
-- Evaluate provenance-aware conditions from the current visible row commit.
+- Reuse the existing column-comparison policy IR rather than introducing provenance-specific policy nodes.
+- Teach policy validation/evaluation to recognize provenance magic-column names in policy expressions.
+- Evaluate those magic-column comparisons from the current visible row commit.
 - Keep fail-closed behavior when provenance is unavailable or malformed.
 
 ### TypeScript permissions DSL
 
-- Add `meta.createdBy(...)` and `meta.updatedBy(...)`.
-- Compile them into the Rust policy representation.
-- Keep the helper small and intentionally scoped to simple comparisons.
+- Reuse the existing where-object API rather than adding new provenance helpers.
+- Extend permissions typing so `$createdBy`, `$createdAt`, `$updatedBy`, `$updatedAt` are accepted in policy where-objects and row callback contexts.
+- Compile those comparisons into the existing Rust policy representation as normal column comparisons on known magic-column names.
 
 ### Query/runtime TypeScript surface
 
 - Extend the shared magic-column registry and TS typing for `$createdBy`, `$createdAt`, `$updatedBy`, `$updatedAt`.
 - Keep them opt-in and excluded from wildcard selection.
 - Ensure row transformation maps timestamp values to the same runtime shape already used for normal timestamp columns.
-
-### SQL parser/generator
-
-- Parse `CREATED_BY()` / `UPDATED_BY()` in policy expressions.
-- Round-trip them through schema SQL generation.
 
 ## Relationship to Explicit Ownership Modeling
 
@@ -410,8 +386,7 @@ Add focused coverage for:
 - selecting/projecting/filtering/ordering on `$createdBy`, `$createdAt`, `$updatedBy`, `$updatedAt`
 - joined-query scoping for provenance magic columns
 - provenance magic columns working without a session
-- `meta.createdBy(session.user_id)` and `meta.updatedBy(session.user_id)` in TS DSL
-- SQL parse/generate for `CREATED_BY()` / `UPDATED_BY()`
+- direct policy usage like `{ "$createdBy": session.user_id }` and `{ "$updatedBy": session.user_id }` in TS DSL
 - fail-closed behavior when provenance metadata is missing or malformed
 
 ## Follow-ups (Later)
