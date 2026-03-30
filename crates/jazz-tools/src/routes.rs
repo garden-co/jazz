@@ -1,5 +1,6 @@
 //! HTTP routes for the Jazz server.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -27,6 +28,26 @@ use crate::query_manager::types::SchemaHash;
 use crate::schema_manager::AppId;
 use crate::server::{ConnectionState, ServerState};
 use crate::sync_manager::ClientId;
+
+/// Runs an async closure when this guard is dropped.
+///
+/// Bridges sync `Drop` to async cleanup — useful when an `async_stream`
+/// generator is cancelled on client disconnect, making code after the
+/// yield loop unreachable.
+struct AsyncDropGuard {
+    _tx: tokio::sync::oneshot::Sender<()>,
+}
+
+impl AsyncDropGuard {
+    fn new(cleanup: impl Future<Output = ()> + Send + 'static) -> Self {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = rx.await;
+            cleanup.await;
+        });
+        Self { _tx: tx }
+    }
+}
 
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
@@ -199,16 +220,7 @@ async fn events_handler(
     let client_id_str = client_id.to_string();
     let catalogue_state_hash = state.runtime.catalogue_state_hash().ok();
 
-    // Spawn cleanup task that fires when the stream is dropped.
-    // async_stream drops the generator future on disconnect, so cleanup code
-    // after the yield loop is unreachable. We use a oneshot channel: the
-    // sender lives inside the stream and is dropped when the stream ends,
-    // which wakes the cleanup task via the receiver's error.
-    let (cleanup_tx, cleanup_rx) = tokio::sync::oneshot::channel::<()>();
-
-    tokio::spawn(async move {
-        // Wait for the sender to be dropped (stream ended/cancelled)
-        let _ = cleanup_rx.await;
+    let cleanup_guard = AsyncDropGuard::new(async move {
         let closed_client_id = {
             let mut connections = state_cleanup.connections.write().await;
             let conn = connections.remove(&connection_id_cleanup);
@@ -226,8 +238,7 @@ async fn events_handler(
 
     // Create stream that emits length-prefixed binary frames
     let stream = async_stream::stream! {
-        // Hold the sender so dropping this stream triggers cleanup
-        let _cleanup_guard = cleanup_tx;
+        let _cleanup_guard = cleanup_guard;
 
         // Send Connected frame
         let connected = ServerEvent::Connected {
