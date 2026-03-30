@@ -52,7 +52,6 @@ let syncBatchFlushQueued = false;
 let initComplete = false;
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 let bootstrapCatalogueForwarding = false;
-const runtimeSubscriptionHandleByBridgeId = new Map<number, number>();
 
 // Accumulates non-catalogue server-bound payloads within a microtask boundary
 // and flushes them as a single ordered batch POST.
@@ -145,19 +144,6 @@ function post(msg: WorkerToMainMessage): void {
   self.postMessage(msg, transfer);
 }
 
-function normalizeSubscriptionCallbackArgs(args: unknown[]): unknown {
-  if (args.length === 1) {
-    return args[0];
-  }
-
-  if (args.length === 2 && args[0] == null) {
-    return args[1];
-  }
-
-  console.error("[worker] Invalid subscription callback arguments", args);
-  return undefined;
-}
-
 function collectPayloadTransferables(payloads: (Uint8Array | string)[]): Transferable[] {
   const transferables = [];
   for (const payload of payloads) {
@@ -214,7 +200,6 @@ async function handleInit(msg: InitMessage): Promise<void> {
     peerRuntimeClientByPeerId.clear();
     peerIdByRuntimeClient.clear();
     peerTermByPeerId.clear();
-    runtimeSubscriptionHandleByBridgeId.clear();
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -634,7 +619,6 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       peerRuntimeClientByPeerId.clear();
       peerIdByRuntimeClient.clear();
       peerTermByPeerId.clear();
-      runtimeSubscriptionHandleByBridgeId.clear();
       pendingPeerSyncMessages = [];
       post({ type: "shutdown-ok" });
       self.close();
@@ -665,7 +649,6 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       peerRuntimeClientByPeerId.clear();
       peerIdByRuntimeClient.clear();
       peerTermByPeerId.clear();
-      runtimeSubscriptionHandleByBridgeId.clear();
       pendingPeerSyncMessages = [];
       post({ type: "shutdown-ok" });
       self.close();
@@ -705,85 +688,6 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
         });
       }
       break;
-
-    case "query":
-      if (!runtime || !initComplete) {
-        post({
-          type: "query-error",
-          requestId: msg.requestId,
-          message: "worker query requested before worker init complete",
-        });
-        break;
-      }
-      try {
-        const promise = runtime.query(msg.queryJson, msg.sessionJson, msg.tier, msg.optionsJson);
-        const rows = await promise;
-        post({ type: "query-ok", requestId: msg.requestId, rows });
-      } catch (error: any) {
-        post({
-          type: "query-error",
-          requestId: msg.requestId,
-          message: `worker query failed: ${error?.message ?? error}`,
-        });
-      }
-      break;
-
-    case "subscribe":
-      if (!runtime || !initComplete) {
-        post({
-          type: "subscription-error",
-          subscriptionId: msg.subscriptionId,
-          message: "worker subscription requested before worker init complete",
-        });
-        break;
-      }
-      try {
-        const existingHandle = runtimeSubscriptionHandleByBridgeId.get(msg.subscriptionId);
-        if (existingHandle !== undefined) {
-          runtime.unsubscribe(existingHandle);
-        }
-
-        const handle = runtime.createSubscription(
-          msg.queryJson,
-          msg.sessionJson,
-          msg.tier,
-          msg.optionsJson,
-        );
-        runtimeSubscriptionHandleByBridgeId.set(msg.subscriptionId, handle);
-        post({ type: "subscription-ready", subscriptionId: msg.subscriptionId });
-        runtime.executeSubscription(handle, (...args: unknown[]) => {
-          const delta = normalizeSubscriptionCallbackArgs(args);
-          if (delta === undefined) {
-            return;
-          }
-          post({
-            type: "subscription-delta",
-            subscriptionId: msg.subscriptionId,
-            delta,
-          });
-        });
-      } catch (error: any) {
-        runtimeSubscriptionHandleByBridgeId.delete(msg.subscriptionId);
-        post({
-          type: "subscription-error",
-          subscriptionId: msg.subscriptionId,
-          message: `worker subscription failed: ${error?.message ?? error}`,
-        });
-      }
-      break;
-
-    case "unsubscribe": {
-      if (!runtime) {
-        runtimeSubscriptionHandleByBridgeId.delete(msg.subscriptionId);
-        break;
-      }
-      const handle = runtimeSubscriptionHandleByBridgeId.get(msg.subscriptionId);
-      if (handle !== undefined) {
-        runtime.unsubscribe(handle);
-        runtimeSubscriptionHandleByBridgeId.delete(msg.subscriptionId);
-      }
-      break;
-    }
   }
 };
 

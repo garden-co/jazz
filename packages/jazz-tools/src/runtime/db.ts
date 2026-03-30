@@ -546,23 +546,17 @@ export class Db {
     }
 
     const bridge = new WorkerBridge(this.worker, client.getRuntime());
-    client.setWorkerQueryExecutor((queryJson, sessionJson, tier, optionsJson) =>
-      bridge.query(queryJson, sessionJson, tier, optionsJson),
-    );
-    client.setWorkerSubscriptionExecutor({
-      subscribe: (subscriptionId, queryJson, onDelta, sessionJson, tier, optionsJson) =>
-        bridge.subscribe(subscriptionId, queryJson, onDelta, sessionJson, tier, optionsJson),
-      unsubscribe: (subscriptionId) => {
-        bridge.unsubscribe(subscriptionId);
-      },
-    });
+    const readyPromise = bridge
+      .init(this.buildWorkerBridgeOptions(schemaJson))
+      .then(() => undefined);
+    client.setWorkerReadyPromise(readyPromise);
     this.leaderPeerIds.clear();
     bridge.onPeerSync((batch) => {
       this.handleWorkerPeerSync(batch);
     });
     this.applyBridgeRoutingForCurrentLeader(bridge, false);
     this.workerBridge = bridge;
-    this.bridgeReady = bridge.init(this.buildWorkerBridgeOptions(schemaJson)).then(() => undefined);
+    this.bridgeReady = readyPromise;
   }
 
   private buildWorkerBridgeOptions(schemaJson: string): WorkerBridgeOptions {
@@ -863,8 +857,7 @@ export class Db {
       }
       this.workerBridge = null;
       for (const client of this.clients.values()) {
-        client.setWorkerQueryExecutor(null);
-        client.setWorkerSubscriptionExecutor(null);
+        client.setWorkerReadyPromise(null);
       }
     }
     this.bridgeReady = null;
@@ -903,8 +896,7 @@ export class Db {
     }
     this.workerBridge = null;
     for (const client of this.clients.values()) {
-      client.setWorkerQueryExecutor(null);
-      client.setWorkerSubscriptionExecutor(null);
+      client.setWorkerReadyPromise(null);
     }
     this.bridgeReady = null;
 
@@ -1344,8 +1336,7 @@ export class Db {
       await this.workerBridge.shutdown(this.worker);
       this.workerBridge = null;
       for (const client of this.clients.values()) {
-        client.setWorkerQueryExecutor(null);
-        client.setWorkerSubscriptionExecutor(null);
+        client.setWorkerReadyPromise(null);
       }
     }
 

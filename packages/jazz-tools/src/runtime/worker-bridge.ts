@@ -6,8 +6,7 @@
  * for the main thread's runtime.
  */
 
-import type { Row, Runtime } from "./client.js";
-import type { RowDelta } from "../drivers/types.js";
+import type { Runtime } from "./client.js";
 import type {
   InitMessage,
   WorkerLifecycleEvent,
@@ -39,8 +38,6 @@ export interface PeerSyncBatch {
   payload: Uint8Array[];
 }
 
-type WorkerSubscriptionCallback = (delta: RowDelta | string) => void;
-
 type BridgePhase = "idle" | "initializing" | "ready" | "failed" | "shutting-down" | "disposed";
 type BridgeEvent =
   | { type: "INIT_CALLED" }
@@ -57,7 +54,6 @@ interface WorkerBridgeState {
   syncBatchFlushQueued: boolean;
   peerSyncListener: ((batch: PeerSyncBatch) => void) | null;
   serverPayloadForwarder: ((payload: Uint8Array) => void) | null;
-  subscriptionCallbacks: Map<number, WorkerSubscriptionCallback>;
 }
 
 const INIT_RESPONSE_TIMEOUT_MS = 12_000;
@@ -75,7 +71,6 @@ export class WorkerBridge {
   private worker: Worker;
   private runtime: Runtime;
   private state: WorkerBridgeState;
-  private nextQueryRequestId = 1;
 
   constructor(worker: Worker, runtime: Runtime) {
     this.worker = worker;
@@ -88,7 +83,6 @@ export class WorkerBridge {
       syncBatchFlushQueued: false,
       peerSyncListener: null,
       serverPayloadForwarder: null,
-      subscriptionCallbacks: new Map(),
     };
 
     // Wire worker → main: incoming sync messages from worker
@@ -103,12 +97,6 @@ export class WorkerBridge {
           peerId: msg.peerId,
           term: msg.term,
           payload: msg.payload,
-        });
-      } else if (msg.type === "subscription-delta") {
-        this.state.subscriptionCallbacks.get(msg.subscriptionId)?.(msg.delta as RowDelta | string);
-      } else if (msg.type === "subscription-error") {
-        console.error("[worker-bridge] worker subscription failed:", msg.message, {
-          subscriptionId: msg.subscriptionId,
         });
       }
     };
@@ -280,107 +268,6 @@ export class WorkerBridge {
     this.runtime.addServer();
   }
 
-  async query(
-    queryJson: string,
-    sessionJson?: string,
-    tier?: "worker" | "edge" | "global",
-    optionsJson?: string,
-  ): Promise<Row[]> {
-    if (this.isDisposedLike()) {
-      throw new Error("WorkerBridge has been disposed");
-    }
-
-    const initPromise = this.state.initPromise;
-    if (!initPromise) {
-      throw new Error("WorkerBridge query requested before init");
-    }
-    await initPromise;
-
-    this.flushPendingSyncToWorker();
-
-    const requestId = this.nextQueryRequestId++;
-    const responsePromise = waitForMessage<WorkerToMainMessage>(
-      this.worker,
-      (msg) =>
-        (msg.type === "query-ok" || msg.type === "query-error") && msg.requestId === requestId,
-      INIT_RESPONSE_TIMEOUT_MS,
-      "Worker query timeout",
-    );
-
-    this.worker.postMessage({
-      type: "query",
-      requestId,
-      queryJson,
-      sessionJson,
-      tier,
-      optionsJson,
-    });
-
-    const response = await responsePromise;
-    if (response.type === "query-error") {
-      throw new Error(response.message);
-    }
-    if (response.type !== "query-ok") {
-      throw new Error("Unexpected worker query response");
-    }
-    return response.rows as Row[];
-  }
-
-  async subscribe(
-    subscriptionId: number,
-    queryJson: string,
-    onDelta: WorkerSubscriptionCallback,
-    sessionJson?: string,
-    tier?: "worker" | "edge" | "global",
-    optionsJson?: string,
-  ): Promise<void> {
-    if (this.isDisposedLike()) {
-      throw new Error("WorkerBridge has been disposed");
-    }
-
-    const initPromise = this.state.initPromise;
-    if (!initPromise) {
-      throw new Error("WorkerBridge subscription requested before init");
-    }
-    await initPromise;
-
-    this.flushPendingSyncToWorker();
-    this.state.subscriptionCallbacks.set(subscriptionId, onDelta);
-
-    const responsePromise = waitForMessage<WorkerToMainMessage>(
-      this.worker,
-      (msg) =>
-        (msg.type === "subscription-ready" || msg.type === "subscription-error") &&
-        msg.subscriptionId === subscriptionId,
-      INIT_RESPONSE_TIMEOUT_MS,
-      "Worker subscription timeout",
-    );
-
-    this.worker.postMessage({
-      type: "subscribe",
-      subscriptionId,
-      queryJson,
-      sessionJson,
-      tier,
-      optionsJson,
-    });
-
-    const response = await responsePromise;
-    if (response.type === "subscription-error") {
-      this.state.subscriptionCallbacks.delete(subscriptionId);
-      throw new Error(response.message);
-    }
-  }
-
-  unsubscribe(subscriptionId: number): void {
-    this.state.subscriptionCallbacks.delete(subscriptionId);
-    if (this.isDisposedLike()) return;
-    this.worker.postMessage({
-      type: "unsubscribe",
-      subscriptionId,
-    });
-  }
-
   onPeerSync(listener: (batch: PeerSyncBatch) => void): void {
     this.state.peerSyncListener = listener;
   }
@@ -481,7 +368,6 @@ export class WorkerBridge {
     this.state.pendingSyncPayloadsForWorker = [];
     this.state.serverPayloadForwarder = null;
     this.state.peerSyncListener = null;
-    this.state.subscriptionCallbacks.clear();
     this.state.syncBatchFlushQueued = false;
     this.runtime.onSyncMessageToSend(() => undefined);
   }

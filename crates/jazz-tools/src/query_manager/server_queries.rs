@@ -69,11 +69,12 @@ impl QueryManager {
         &self,
         ctx: &crate::schema_manager::QuerySchemaContext,
     ) -> Option<(Arc<Schema>, crate::schema_manager::SchemaContext)> {
-        if !self.schema.is_empty() {
-            return Some((self.schema.clone(), self.schema_context.clone()));
-        }
-
-        let target_schema = self.known_schemas.get(&ctx.schema_hash)?.clone();
+        let target_schema =
+            if !self.schema.is_empty() && self.schema_context.current_hash == ctx.schema_hash {
+                self.schema.as_ref().clone()
+            } else {
+                self.known_schemas.get(&ctx.schema_hash)?.clone()
+            };
 
         let mut schema_context = crate::schema_manager::SchemaContext::new_with_batch_id(
             target_schema.clone(),

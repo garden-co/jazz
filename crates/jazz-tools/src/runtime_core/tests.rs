@@ -1,14 +1,16 @@
 use super::*;
+use crate::object::BranchName;
 use crate::query_manager::policy::PolicyExpr;
 use crate::query_manager::query::QueryBuilder;
 use crate::query_manager::types::{
-    ColumnType, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
+    ColumnType, ComposedBranchName, SchemaBuilder, SchemaHash, TableName, TablePolicies,
+    TableSchema,
 };
 use crate::schema_manager::AppId;
 use crate::storage::MemoryStorage;
 use crate::sync_manager::{
-    ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
-    SyncManager, SyncPayload,
+    ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, QueryId, ServerId,
+    Source, SyncManager, SyncPayload,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -128,9 +130,17 @@ fn create_runtime_with_schema(schema: Schema, app_name: &str) -> TestCore {
 }
 
 fn create_runtime_with_storage(schema: Schema, app_name: &str, storage: MemoryStorage) -> TestCore {
+    create_runtime_with_storage_and_sync_manager(schema, app_name, storage, SyncManager::new())
+}
+
+fn create_runtime_with_storage_and_sync_manager(
+    schema: Schema,
+    app_name: &str,
+    storage: MemoryStorage,
+    sync_manager: SyncManager,
+) -> TestCore {
     let app_id = AppId::from_name(app_name);
-    let schema_manager =
-        SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
+    let schema_manager = SchemaManager::new(sync_manager, schema, app_id, "dev", "main").unwrap();
     let mut core = RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
     core.immediate_tick();
     core
@@ -1110,6 +1120,50 @@ fn pump_b_to_a(s: &mut ThreeTierRC) {
     s.a.immediate_tick();
 }
 
+fn pump_client_and_worker(
+    client: &mut TestCore,
+    worker: &mut TestCore,
+    client_id_on_worker: ClientId,
+    worker_server_id: ServerId,
+) {
+    for _ in 0..10 {
+        let mut any_messages = false;
+
+        client.batched_tick();
+        let client_outbox = client.sync_sender().take();
+        for entry in client_outbox {
+            if entry.destination == Destination::Server(worker_server_id) {
+                any_messages = true;
+                worker.park_sync_message(InboxEntry {
+                    source: Source::Client(client_id_on_worker),
+                    payload: entry.payload,
+                });
+            }
+        }
+
+        worker.batched_tick();
+        worker.immediate_tick();
+        worker.batched_tick();
+        let worker_outbox = worker.sync_sender().take();
+        for entry in worker_outbox {
+            if entry.destination == Destination::Client(client_id_on_worker) {
+                any_messages = true;
+                client.park_sync_message(InboxEntry {
+                    source: Source::Server(worker_server_id),
+                    payload: entry.payload,
+                });
+            }
+        }
+
+        client.batched_tick();
+        client.immediate_tick();
+
+        if !any_messages {
+            break;
+        }
+    }
+}
+
 /// Pump B → C (forward to edge).
 fn pump_b_to_c(s: &mut ThreeTierRC) {
     route_b_outbox(s);
@@ -1631,6 +1685,168 @@ fn rc_query_settled_tier_holds() {
         }
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
         Poll::Pending => panic!("Query should resolve after Worker QuerySettled"),
+    }
+}
+
+#[test]
+fn rc_query_settled_tier_restarted_worker_replays_persisted_rows() {
+    let schema = test_schema();
+    let app_name = "worker-restart-query";
+
+    let worker_sync = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
+    let mut worker =
+        create_runtime_with_schema_and_sync_manager(schema.clone(), app_name, worker_sync);
+    let alice_user_id = ObjectId::new();
+    let (alice_row_id, _row_values) = worker
+        .insert("users", user_insert_values(alice_user_id, "Alice"), None)
+        .unwrap();
+    worker.immediate_tick();
+    worker.batched_tick();
+
+    let storage = worker.into_storage();
+
+    let restarted_worker_sync = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
+    let mut restarted_worker = create_runtime_with_storage_and_sync_manager(
+        schema.clone(),
+        app_name,
+        storage,
+        restarted_worker_sync,
+    );
+    let restarted_results = execute_runtime_query(&mut restarted_worker, Query::new("users"), None);
+    assert_eq!(
+        restarted_results.len(),
+        1,
+        "Restarted Worker should still answer the query locally"
+    );
+    let restarted_prefix =
+        ComposedBranchName::parse(&restarted_worker.schema_manager().branch_name())
+            .unwrap()
+            .prefix()
+            .branch_prefix();
+
+    let batch_keys = restarted_worker
+        .storage()
+        .load_table_prefix_batch_keys("users", BranchName::new(restarted_prefix))
+        .unwrap();
+    assert!(
+        !batch_keys.is_empty(),
+        "Restarted Worker should retain active table batches after reload"
+    );
+
+    let client_sync = SyncManager::new();
+    let mut client = create_runtime_with_schema_and_sync_manager(schema, app_name, client_sync);
+
+    let worker_server_id = ServerId::new();
+    let client_id_on_worker = ClientId::new();
+
+    client
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .add_server(worker_server_id);
+    restarted_worker
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .add_client(client_id_on_worker);
+    restarted_worker
+        .schema_manager_mut()
+        .query_manager_mut()
+        .sync_manager_mut()
+        .set_client_role(client_id_on_worker, ClientRole::Peer);
+
+    client.sync_sender().take();
+    restarted_worker.sync_sender().take();
+
+    let mut future = client.query_with_propagation(
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::Worker),
+            local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
+
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(
+        Pin::new(&mut future).poll(&mut cx).is_pending(),
+        "Query should be pending before restarted Worker settlement"
+    );
+
+    client.batched_tick();
+    let client_outbox = client.sync_sender().take();
+    for entry in client_outbox {
+        if entry.destination == Destination::Server(worker_server_id) {
+            restarted_worker.park_sync_message(InboxEntry {
+                source: Source::Client(client_id_on_worker),
+                payload: entry.payload,
+            });
+        }
+    }
+
+    restarted_worker.batched_tick();
+    restarted_worker.immediate_tick();
+    restarted_worker.batched_tick();
+    let worker_scope = restarted_worker
+        .schema_manager()
+        .query_manager()
+        .sync_manager()
+        .get_client(client_id_on_worker)
+        .unwrap()
+        .queries
+        .get(&QueryId(0))
+        .unwrap()
+        .scope
+        .clone();
+    assert!(
+        !worker_scope.is_empty(),
+        "Restarted Worker should compute a non-empty downstream query scope"
+    );
+    let worker_outbox = restarted_worker.sync_sender().take();
+    assert!(
+        worker_outbox.iter().any(|entry| {
+            entry.destination == Destination::Client(client_id_on_worker)
+                && matches!(entry.payload, SyncPayload::ObjectUpdated { .. })
+        }),
+        "Restarted Worker should send ObjectUpdated during initial query sync: {worker_outbox:#?}"
+    );
+    assert!(
+        worker_outbox.iter().any(|entry| {
+            entry.destination == Destination::Client(client_id_on_worker)
+                && matches!(entry.payload, SyncPayload::QuerySettled { .. })
+        }),
+        "Restarted Worker should send QuerySettled during initial query sync"
+    );
+
+    for entry in worker_outbox {
+        if entry.destination == Destination::Client(client_id_on_worker) {
+            client.park_sync_message(InboxEntry {
+                source: Source::Server(worker_server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+
+    pump_client_and_worker(
+        &mut client,
+        &mut restarted_worker,
+        client_id_on_worker,
+        worker_server_id,
+    );
+
+    match Pin::new(&mut future).poll(&mut cx) {
+        Poll::Ready(Ok(results)) => {
+            assert_eq!(
+                results.len(),
+                1,
+                "Client should receive persisted rows from restarted Worker"
+            );
+            assert_eq!(results[0].0, alice_row_id);
+        }
+        Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+        Poll::Pending => panic!("Query should resolve after restarted Worker settlement"),
     }
 }
 

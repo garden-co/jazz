@@ -3042,7 +3042,7 @@ fn sync_inbox_update_on_external_batch_becomes_query_visible() {
                 id: row_id,
                 metadata: obj_metadata,
             }),
-            branch_name: remote_branch.into(),
+            branch_name: remote_branch,
             commits: vec![commit],
         },
     });
@@ -3135,7 +3135,7 @@ fn peer_client_update_on_external_batch_becomes_query_visible() {
                 id: row_id,
                 metadata: obj_metadata,
             }),
-            branch_name: remote_branch.into(),
+            branch_name: remote_branch,
             commits: vec![commit],
         },
     });
@@ -7961,7 +7961,7 @@ fn handle_object_update_in_server_mode_checks_hard_delete_on_update_branch() {
     let commit_id = qm
         .sync_manager_mut()
         .object_manager
-        .receive_commit(&mut storage, row_id, branch.clone(), commit)
+        .receive_commit(&mut storage, row_id, branch, commit)
         .unwrap();
 
     qm.handle_object_update(
@@ -8454,6 +8454,99 @@ fn server_builds_query_graph_on_subscription() {
 
     assert!(sent_ids.contains(&handle1.row_id), "Alice should be sent");
     assert!(sent_ids.contains(&handle3.row_id), "Charlie should be sent");
+}
+
+#[test]
+fn restarted_server_query_subscription_replays_persisted_rows_into_scope() {
+    use crate::sync_manager::{
+        ClientId, Destination, DurabilityTier, InboxEntry, QueryId, Source, SyncPayload,
+    };
+    use uuid::Uuid;
+
+    let schema = test_schema();
+    let mut storage = MemoryStorage::new();
+
+    let mut writer_qm = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 1);
+    let alice = writer_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap()
+        .row_id;
+    writer_qm.process(&mut storage);
+
+    let mut restarted_server = create_query_manager_with_batch(
+        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        schema.clone(),
+        2,
+    );
+    let restarted_rows = execute_query(
+        &mut restarted_server,
+        &mut storage,
+        QueryBuilder::new("users").build(),
+    )
+    .expect("restarted server should read persisted rows locally");
+    assert_eq!(restarted_rows.len(), 1);
+    assert_eq!(restarted_rows[0].0, alice);
+
+    let client_qm = create_query_manager_with_batch(SyncManager::new(), schema, 3);
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    restarted_server.sync_manager_mut().add_client(client_id);
+
+    restarted_server.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(
+                QueryBuilder::new("users")
+                    .branch(client_qm.schema_context().branch_name().as_str())
+                    .build(),
+            ),
+            schema_context: client_qm.schema_context().query_context(),
+            session: None,
+            propagation: QueryPropagation::Full,
+        },
+    });
+
+    restarted_server.process(&mut storage);
+
+    let subscription = restarted_server
+        .server_subscriptions
+        .get(&(client_id, QueryId(1)))
+        .expect("server subscription should exist after processing");
+    assert!(
+        subscription
+            .branches
+            .iter()
+            .any(|branch| branch.batch_id() != client_qm.schema_context().batch_id),
+        "restarted server should resolve downstream query to its own active batch branches, not keep only the client's current batch"
+    );
+    assert_eq!(
+        subscription.graph.current_result().len(),
+        1,
+        "restarted server subscription should still settle the persisted row"
+    );
+    assert_eq!(
+        subscription.graph.sync_scope_object_keys().len(),
+        1,
+        "restarted server subscription should keep that row in downstream sync scope"
+    );
+    assert_eq!(
+        subscription.last_scope.len(),
+        1,
+        "restarted server should remember a non-empty downstream scope"
+    );
+
+    let outbox = restarted_server.sync_manager_mut().take_outbox();
+    assert!(
+        outbox.iter().any(|entry| {
+            entry.destination == Destination::Client(client_id)
+                && matches!(entry.payload, SyncPayload::ObjectUpdated { object_id, .. } if object_id == alice)
+        }),
+        "restarted server should emit ObjectUpdated for the persisted row"
+    );
 }
 
 #[test]
