@@ -374,6 +374,98 @@ async fn select_policies_filter_subscription_results_per_client_session() {
     server.shutdown().await;
 }
 
+/// Verifies that the `session.userId` alias scopes subscription updates and
+/// query results identically to `session.user_id`.
+///
+/// Alice and bob each insert an owned row into a table protected by
+/// `owner_id = session.userId`. Each client should only observe its own row,
+/// both in the live subscription stream and in EdgeServer query results.
+///
+/// ```text
+/// alice ──insert "Alice Alias"──► server ──► alice stream (add ✓)
+///                                     │
+///                                     └── SELECT policy ──✗──► bob stream (silent)
+///
+/// bob ──insert "Bob Alias"──────► server ──► bob stream (add ✓)
+///                                   │
+///                                   └── SELECT policy ──✗──► alice stream (silent)
+/// ```
+#[tokio::test]
+async fn session_user_id_alias_resolves_identically_to_snake_case() {
+    let schema = SchemaBuilder::new()
+        .table(make_documents_schema(
+            "documents",
+            TablePolicies::new()
+                .with_select(PolicyExpr::eq_session("owner_id", vec!["userId".into()]))
+                .with_insert(PolicyExpr::eq_session("owner_id", vec!["userId".into()])),
+        ))
+        .build();
+
+    let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
+
+    let query = QueryBuilder::new("documents").build();
+
+    let mut alice_stream = alice
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe alice");
+    let mut bob_stream = bob.subscribe(query.clone()).await.expect("subscribe bob");
+    let mut alice_log = Vec::new();
+    let mut bob_log = Vec::new();
+
+    let alice_doc = seed_document(&alice, "documents", "alice", "Alice Alias", false).await;
+    wait_for_subscription_update(
+        &mut alice_stream,
+        &mut alice_log,
+        QUERY_TIMEOUT,
+        "alice add delta via session.userId",
+        |log| has_added(log, alice_doc),
+    )
+    .await;
+    collect_stream_deltas(&mut bob_stream, &mut bob_log, NO_DELTA_WINDOW).await;
+    assert!(
+        !has_any_change(&bob_log, alice_doc),
+        "bob should not receive alice's alias-scoped document"
+    );
+
+    let bob_doc = seed_document(&bob, "documents", "bob", "Bob Alias", false).await;
+    wait_for_subscription_update(
+        &mut bob_stream,
+        &mut bob_log,
+        QUERY_TIMEOUT,
+        "bob add delta via session.userId",
+        |log| has_added(log, bob_doc),
+    )
+    .await;
+    collect_stream_deltas(&mut alice_stream, &mut alice_log, NO_DELTA_WINDOW).await;
+    assert!(
+        !has_any_change(&alice_log, bob_doc),
+        "alice should not receive bob's alias-scoped document"
+    );
+
+    let alice_rows = wait_for_rows(&alice, query.clone(), "alice alias visible rows", |rows| {
+        (rows.len() == 1 && rows[0].0 == alice_doc).then_some(rows)
+    })
+    .await;
+    assert_eq!(
+        alice_rows[0].1,
+        boolean_policy_document_values("alice", "Alice Alias", false)
+    );
+
+    let bob_rows = wait_for_rows(&bob, query, "bob alias visible rows", |rows| {
+        (rows.len() == 1 && rows[0].0 == bob_doc).then_some(rows)
+    })
+    .await;
+    assert_eq!(
+        bob_rows[0].1,
+        boolean_policy_document_values("bob", "Bob Alias", false)
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
 /// Verifies that an anonymous client with no `session.user_id` cannot see rows
 /// protected by `owner_id = session.user_id`.
 ///
