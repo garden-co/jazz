@@ -98,16 +98,19 @@ This keeps creator provenance:
 - `updated_by` = current visible commit's `author`
 - `updated_at` = current visible commit's `timestamp`
 
-### 4. Fail closed on missing or inconsistent provenance
+### 4. Provenance is a required invariant
 
-If a row commit expected to carry creator provenance does not have valid `created_by` metadata, provenance-based permission checks must fail closed.
+In the greenfield MVP, row commits are required to carry valid creator provenance.
+
+If a row commit expected to carry creator provenance does not have valid `created_by` metadata, that is an invariant violation. Provenance-based permission checks must still fail closed rather than exposing data.
 
 That means:
 
 - `createdBy(...)` conditions evaluate to `false`
-- rows are not accidentally exposed because provenance is missing
+- `updatedBy(...)` conditions evaluate to `false`
+- rows are not accidentally exposed because provenance is missing or malformed
 
-For reads, the corresponding provenance magic columns should return `NULL` rather than erroring.
+For reads, the provenance magic columns are part of the non-null query contract. Missing provenance should be treated as a bug/corruption path, not as a nullable result shape.
 
 ### 5. Provenance is also surfaced as magic columns
 
@@ -127,18 +130,18 @@ Semantics on the visible row commit:
 - `$updatedBy` = current commit `author`
 - `$updatedAt` = current commit `timestamp`
 
-Type and nullability:
+Types:
 
-- `$createdBy`: `TEXT NULL`
-- `$createdAt`: `TIMESTAMP NULL`
-- `$updatedBy`: `TEXT NULL`
-- `$updatedAt`: `TIMESTAMP NULL`
+- `$createdBy`: `TEXT`
+- `$createdAt`: `TIMESTAMP`
+- `$updatedBy`: `TEXT`
+- `$updatedAt`: `TIMESTAMP`
 
-Nulls are allowed for MVP because:
+These are non-null in the MVP contract because:
 
-- older/malformed commits may not carry the required provenance,
-- system/sessionless writes may appear during transition,
-- reads should degrade safely while policy checks remain fail-closed.
+- greenfield rollout can require provenance from day one
+- system/sessionless writes still stamp concrete provenance via `jazz:system` and commit timestamps
+- `created_by` / `created_at` are copied forward on every row commit
 
 ## Permission Surface (MVP)
 
