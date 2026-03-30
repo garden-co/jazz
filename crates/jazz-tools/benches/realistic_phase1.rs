@@ -19,7 +19,8 @@ use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr
 use jazz_tools::query_manager::query::QueryBuilder;
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{
-    ColumnType, Schema, SchemaBuilder, TablePolicies, TableSchema, Value,
+    BatchId, BranchPrefixName, ColumnType, Schema, SchemaBuilder, SchemaHash, TablePolicies,
+    TableSchema, Value,
 };
 use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
 use jazz_tools::schema_manager::{AppId, SchemaManager};
@@ -1927,7 +1928,13 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
     scenario: &R8Scenario,
 ) -> ManyBranchesDataset {
     let object_id = manager.create(storage, None);
-    let prefix = format!("dev-r8{:08x}-main-", scenario.seed as u32);
+    let mut schema_hash_bytes = [0u8; 32];
+    for chunk in schema_hash_bytes.chunks_exact_mut(8) {
+        chunk.copy_from_slice(&scenario.seed.to_le_bytes());
+    }
+    let prefix_name =
+        BranchPrefixName::new("dev", SchemaHash::from_bytes(schema_hash_bytes), "main");
+    let prefix = prefix_name.to_batch_prefix();
     let author = ObjectId::new();
     let mut branch_names = Vec::with_capacity(scenario.branch_count);
     let mut head_ids = Vec::with_capacity(scenario.branch_count);
@@ -1935,7 +1942,13 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
     let mut root_timestamps = 1_770_000_000_000_000u64 + (scenario.seed & 0xffff);
 
     for branch_idx in 0..scenario.branch_count {
-        let branch_name = format!("{prefix}b{branch_idx:08}");
+        let branch_name = prefix_name
+            .with_batch_id(BatchId::from_uuid(uuid::Uuid::from_u128(
+                branch_idx as u128 + 1,
+            )))
+            .to_branch_name()
+            .as_str()
+            .to_string();
         let parent_start = branch_idx.saturating_sub(scenario.merge_fanin);
         let parent_ids: Vec<CommitId> = head_ids[parent_start..branch_idx].to_vec();
         used_as_parent[parent_start..branch_idx].fill(true);
@@ -2011,14 +2024,14 @@ fn scan_branch_heads(object: &Object, prefix: &str) -> BranchHeadScan {
         checksum: 0,
     };
 
-    for (branch_name, branch) in &object.branches {
+    for (branch_name, branch) in object.branches.iter() {
         if !branch_name.as_str().starts_with(prefix) {
             continue;
         }
         scan.branches_scanned += 1;
         for head_id in &branch.tips {
             scan.heads_found += 1;
-            scan.checksum ^= branch_head_checksum(branch_name, *head_id);
+            scan.checksum ^= branch_head_checksum(&branch_name, *head_id);
         }
     }
 
@@ -2036,7 +2049,7 @@ fn scan_leaf_like_branch_heads(
         checksum: 0,
     };
 
-    for (branch_name, branch) in &object.branches {
+    for (branch_name, branch) in object.branches.iter() {
         if !branch_name.as_str().starts_with(prefix) {
             continue;
         }
@@ -2046,7 +2059,7 @@ fn scan_leaf_like_branch_heads(
         }
         for head_id in &branch.tips {
             scan.heads_found += 1;
-            scan.checksum ^= branch_head_checksum(branch_name, *head_id);
+            scan.checksum ^= branch_head_checksum(&branch_name, *head_id);
         }
     }
 
