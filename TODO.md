@@ -22,6 +22,7 @@
 ### Mvp
 
 - [**complex-merge-strategies**](todo/ideas/1_mvp/complex-merge-strategies.md) — Per-column/per-table merge strategies beyond LWW (counters, sets, rich text, custom logic).
+- [**configurable-client-ttl**](todo/ideas/1_mvp/configurable-client-ttl.md) — Expose the client state TTL (how long a disconnected client's server-side state survives before reaping) as a configurable option per app. Currently hardcoded to 5 minutes in `ServerBuilder` with a `set_client_ttl` runtime setter that nothing calls outside of tests.
 - [**count-aggregation**](todo/ideas/1_mvp/count-aggregation.md) — Add terminal `.count()` queries for filtered relations, with the MVP limited to reactive `COUNT(*)` returning `{ count: number }`.
 - [**explicit-indices**](todo/ideas/1_mvp/explicit-indices.md) — Developer-declared indices in the schema language, replacing auto-index-all-columns.
 - [**optimistic-update-dx**](todo/ideas/1_mvp/optimistic-update-dx.md) — Developer-facing API for mutation settlement state — show pending/confirmed/rejected status on rows and filter queries by settlement tier.
