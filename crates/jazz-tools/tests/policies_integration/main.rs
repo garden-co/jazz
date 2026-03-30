@@ -4,6 +4,7 @@
 mod support;
 
 mod claims_policies;
+mod complex_policies;
 mod inherited_policies;
 mod recursive_policies;
 mod session_cases;
