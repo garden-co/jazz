@@ -633,12 +633,18 @@ impl QueryManager {
     }
 
     /// Remove a client and all its server-side state (subscriptions, in-flight policy checks).
-    pub fn remove_client(&mut self, client_id: ClientId) {
+    ///
+    /// Returns `false` if the client has unprocessed inbox entries.
+    /// The caller should retry later.
+    pub fn remove_client(&mut self, client_id: ClientId) -> bool {
+        if !self.sync_manager.remove_client(client_id) {
+            return false;
+        }
         self.server_subscriptions
             .retain(|&(cid, _), _| cid != client_id);
         self.active_policy_checks
             .retain(|_, state| state.pending_check.client_id != client_id);
-        self.sync_manager.remove_client(client_id);
+        true
     }
 
     /// Get the schema.

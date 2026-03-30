@@ -422,10 +422,12 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     }
 
     /// Remove a client connection.
-    pub fn remove_client(&self, client_id: ClientId) -> Result<(), RuntimeError> {
+    ///
+    /// Returns `Ok(true)` if removed, `Ok(false)` if skipped due to
+    /// unprocessed inbox entries (caller should retry later).
+    pub fn remove_client(&self, client_id: ClientId) -> Result<bool, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.remove_client(client_id);
-        Ok(())
+        Ok(core.remove_client(client_id))
     }
 
     /// Promote a client to Admin role (full access, no ReBAC).

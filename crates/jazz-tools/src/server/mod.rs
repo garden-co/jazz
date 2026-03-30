@@ -133,19 +133,34 @@ impl ServerState {
         };
 
         let mut reaped = Vec::new();
+        let mut requeued = Vec::new();
         for client_id in expired {
             if active_clients.contains(&client_id) {
                 tracing::debug!(%client_id, "skipping reap: client reconnected");
                 continue;
             }
             match self.runtime.remove_client(client_id) {
-                Ok(()) => {
+                Ok(true) => {
                     reaped.push(client_id);
                     tracing::debug!(%client_id, "reaped disconnected client");
+                }
+                Ok(false) => {
+                    // Client has unpersisted data — re-queue for next sweep
+                    requeued.push(client_id);
                 }
                 Err(e) => {
                     tracing::error!(%client_id, error = %e, "failed to reap client");
                 }
+            }
+        }
+
+        // Re-insert clients that couldn't be reaped yet
+        if !requeued.is_empty() {
+            let mut candidates = self.disconnect_candidates.write().await;
+            for client_id in requeued {
+                candidates.entry(client_id).or_insert(DisconnectCandidate {
+                    disconnected_at: Instant::now(),
+                });
             }
         }
 
