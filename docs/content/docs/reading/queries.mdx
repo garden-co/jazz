@@ -57,18 +57,34 @@ Queries are immutable and chainable. Each method returns a new query, so you can
 
 See [Filters & Sorting](/docs/reading/filters-and-sorting) for the full list of `where` operators, `orderBy`, `limit`, and `offset`.
 
-## Querying edit metadata
+## Including edit metadata
 
-You can select and filter on Jazz's edit metadata magic columns just like other columns. They are
-useful for showing authorship, when a row last changed, or building "my created items" views
-without storing duplicate ownership fields.
+You can select and filter on Jazz's magic columns just like other columns. They are omitted from
+`select("*")`, so opt in explicitly when you want them.
+
+### Permission introspection columns
+
+- `$canRead`&hairsp;—&hairsp;whether the current session can read the row
+- `$canEdit`&hairsp;—&hairsp;whether the current session can update the row
+- `$canDelete`&hairsp;—&hairsp;whether the current session can delete the row
+- Without a session, all three return `null`
+
+### Edit metadata columns
+
+- `$createdBy`&hairsp;—&hairsp;the Jazz principal that created the row
+- `$createdAt`&hairsp;—&hairsp;when the row was first created
+- `$updatedBy`&hairsp;—&hairsp;the Jazz principal that last updated the row
+- `$updatedAt`&hairsp;—&hairsp;when the row was last updated
+
+These are useful for showing authorship, when a row last changed, or building "my created items"
+views without storing duplicate ownership fields.
 
 <include cwd lang="ts" meta='title="app.ts"'>
   ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-edit-metadata-magic-columns-ts
 </include>
 
-See [Permissions](/docs/auth/permissions) for the full set of magic columns, including the
-permission introspection columns and `$createdBy`-based policy examples.
+See [Permissions](/docs/auth/permissions) for policy examples using `$createdBy` and the other
+magic columns.
 
 ## Framework hooks
 
