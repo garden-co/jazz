@@ -5,7 +5,7 @@ import { ActionMenu } from "@/components/composer/ActionMenu";
 import { Editor, type EditorHandle } from "@/components/editor/Editor";
 import { Button } from "@/components/ui/button";
 import { useMyProfile } from "@/hooks/useMyProfile";
-import { app } from "../../../schema/app.js";
+import { app } from "../../../schema.js";
 import type { AttachmentData } from "./UploadModal";
 
 interface MessageComposerProps {

@@ -5,7 +5,7 @@ import { ChatMessage } from "@/components/chat/ChatMessage";
 import { ChatHeader } from "@/components/chat-view/ChatHeader";
 import { MessageComposer } from "@/components/composer/MessageComposer";
 import { Button } from "@/components/ui/button";
-import { app } from "../../../schema/app.js";
+import { app } from "../../../schema.js";
 
 const INITIAL_MESSAGES_TO_SHOW = 20;
 const LOAD_MORE_STEP = 20;

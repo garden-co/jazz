@@ -28,7 +28,7 @@ pnpm build              # Optional schema validation + production build
 
 **State sync** is entirely handled by Jazz. Every message, reaction, stroke, and membership change is a synchronous local write (`db.insert`, `db.delete`). Jazz replicates the change to all connected peers in the background. The UI is driven by `useAll` reactive queries — no polling, no manual state management.
 
-**Row-level security** is a schema concern, not an application concern. Policies live in `schema/permissions.ts` in a typed DSL. They compile into a policy AST enforced server-side on every sync request. Components contain no auth logic.
+**Row-level security** is a schema concern, not an application concern. Policies live in `permissions.ts` in a typed DSL. They compile into a policy AST enforced server-side on every sync request. Components contain no auth logic.
 
 **Public chats** are visible to all connected clients. **Private chats** are restricted to members. A chat carries a `joinCode` column; presenting the code as an ephemeral session claim grants read access before membership is confirmed, which is how invite links work without a round-trip to a backend.
 

@@ -4,7 +4,7 @@ import { ChatListItem } from "@/components/chat-list/ChatListItem";
 import { Button } from "@/components/ui/button";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { navigate } from "@/hooks/useRouter";
-import { app } from "../../../schema/app.js";
+import { app } from "../../../schema.js";
 
 export const ChatList = () => {
   const db = useDb();
