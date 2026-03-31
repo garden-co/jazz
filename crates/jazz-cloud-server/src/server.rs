@@ -731,6 +731,7 @@ enum WorkerDispatchError {
 enum WorkerCommand {
     CreateRuntime {
         app_id: AppId,
+        env: String,
         data_dir: PathBuf,
         sync_broadcast: tokio::sync::broadcast::Sender<ClientSyncUpdate>,
         send_seq_by_client: ClientSendSeqMap,
@@ -943,6 +944,7 @@ impl WorkerPool {
     async fn create_runtime(
         &self,
         app_id: AppId,
+        env: String,
         data_dir: PathBuf,
         sync_broadcast: tokio::sync::broadcast::Sender<ClientSyncUpdate>,
         send_seq_by_client: ClientSendSeqMap,
@@ -950,6 +952,7 @@ impl WorkerPool {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         let command = WorkerCommand::CreateRuntime {
             app_id,
+            env,
             data_dir,
             sync_broadcast,
             send_seq_by_client,
@@ -1227,6 +1230,7 @@ impl AppStatus {
 #[derive(Debug, Clone)]
 struct AppConfig {
     app_name: String,
+    env: String,
     jwks_endpoint: String,
     jwks_cache_ttl_secs: u64,
     jwks_max_stale_secs: u64,
@@ -1252,6 +1256,7 @@ struct MetaAppRow {
     object_id: ObjectId,
     app_id: AppId,
     app_name: String,
+    env: String,
     jwks_endpoint: String,
     jwks_cache_ttl_secs: u64,
     jwks_max_stale_secs: u64,
@@ -1330,6 +1335,7 @@ impl MetaStore {
                 TableSchema::builder("apps")
                     .column("app_id", ColumnType::Uuid)
                     .column("app_name", ColumnType::Text)
+                    .column("env", ColumnType::Text)
                     .column("jwks_endpoint", ColumnType::Text)
                     .column("jwks_cache_ttl_secs", ColumnType::BigInt)
                     .column("jwks_max_stale_secs", ColumnType::BigInt)
@@ -1452,6 +1458,7 @@ impl MetaStore {
         &self,
         app_id: AppId,
         app_name: String,
+        env: String,
         jwks_endpoint: String,
         jwks_cache_ttl_secs: u64,
         jwks_max_stale_secs: u64,
@@ -1477,6 +1484,7 @@ impl MetaStore {
                 "app_name" => Value::Text(app_name.clone()),
                 "backend_secret_hash" => Value::Text(backend_secret_hash.clone()),
                 "created_at" => Value::Timestamp(now),
+                "env" => Value::Text(env.clone()),
                 "jwks_endpoint" => Value::Text(jwks_endpoint.clone()),
                 "jwks_cache_ttl_secs" => {
                     encode_u64_config_value("jwks_cache_ttl_secs", jwks_cache_ttl_secs)?
@@ -1504,6 +1512,7 @@ impl MetaStore {
             object_id,
             app_id,
             app_name,
+            env,
             jwks_endpoint,
             jwks_cache_ttl_secs,
             jwks_max_stale_secs,
@@ -1670,6 +1679,14 @@ impl MetaStore {
             None => return Err("meta row missing app_name".to_string()),
         };
 
+        let env = match descriptor_value(&self.apps_descriptor, values, "env") {
+            Some(Value::Text(s)) => s.clone(),
+            Some(Value::Null) | None => "prod".to_string(),
+            Some(other) => {
+                return Err(format!("meta row field env expected text, got {other:?}"));
+            }
+        };
+
         let jwks_endpoint = match descriptor_value(&self.apps_descriptor, values, "jwks_endpoint") {
             Some(Value::Text(s)) => s.clone(),
             Some(other) => {
@@ -1780,6 +1797,7 @@ impl MetaStore {
             object_id,
             app_id: AppId::from_object_id(app_obj_id),
             app_name,
+            env,
             jwks_endpoint,
             jwks_cache_ttl_secs,
             jwks_max_stale_secs,
@@ -1834,6 +1852,7 @@ struct AppRuntime {
 impl AppRuntime {
     fn new(
         app_id: AppId,
+        env: &str,
         data_dir: &Path,
         sync_broadcast: tokio::sync::broadcast::Sender<ClientSyncUpdate>,
         send_seq_by_client: ClientSendSeqMap,
@@ -1849,7 +1868,7 @@ impl AppRuntime {
             DurabilityTier::EdgeServer,
             DurabilityTier::GlobalServer,
         ]);
-        let mut schema_manager = SchemaManager::new_server(sync_manager, app_id, "prod");
+        let mut schema_manager = SchemaManager::new_server(sync_manager, app_id, env);
 
         let db_path = data_dir.join("jazz.rocksdb");
         let storage = RocksDBStorage::open(&db_path, 64 * 1024 * 1024)
@@ -1953,6 +1972,7 @@ async fn run_worker_loop(
             match command {
                 WorkerCommand::CreateRuntime {
                     app_id,
+                    env,
                     data_dir,
                     sync_broadcast,
                     send_seq_by_client,
@@ -1961,11 +1981,10 @@ async fn run_worker_loop(
                     let result = if let std::collections::hash_map::Entry::Vacant(entry) =
                         app_runtimes.entry(app_id)
                     {
-                        AppRuntime::new(app_id, &data_dir, sync_broadcast, send_seq_by_client).map(
-                            |runtime| {
+                        AppRuntime::new(app_id, &env, &data_dir, sync_broadcast, send_seq_by_client)
+                            .map(|runtime| {
                                 entry.insert(runtime);
-                            },
-                        )
+                            })
                     } else {
                         Err(format!("app runtime already exists for {app_id}"))
                     };
@@ -2284,6 +2303,7 @@ struct EventsParams {
 #[derive(Debug, Deserialize)]
 struct CreateAppRequest {
     app_name: String,
+    env: Option<String>,
     jwks_endpoint: Option<String>,
     jwks_cache_ttl_secs: Option<u64>,
     jwks_max_stale_secs: Option<u64>,
@@ -2324,6 +2344,7 @@ struct ManageUpdateAuthRequest {
 struct AppSummaryResponse {
     app_id: String,
     app_name: String,
+    env: String,
     jwks_endpoint: String,
     jwks_cache_ttl_secs: u64,
     jwks_max_stale_secs: u64,
@@ -2337,6 +2358,7 @@ struct AppSummaryResponse {
 struct CreateAppResponse {
     app_id: String,
     app_name: String,
+    env: String,
     jwks_endpoint: String,
     jwks_cache_ttl_secs: u64,
     jwks_max_stale_secs: u64,
@@ -2352,6 +2374,7 @@ struct CreateAppResponse {
 struct UpdateAppResponse {
     app_id: String,
     app_name: String,
+    env: String,
     jwks_endpoint: String,
     jwks_cache_ttl_secs: u64,
     jwks_max_stale_secs: u64,
@@ -2448,7 +2471,13 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
         let send_seq_by_client: ClientSendSeqMap = Arc::new(Mutex::new(HashMap::new()));
 
         match workers
-            .create_runtime(app_id, app_dir, sync_tx.clone(), send_seq_by_client.clone())
+            .create_runtime(
+                app_id,
+                app_config.env.clone(),
+                app_dir,
+                sync_tx.clone(),
+                send_seq_by_client.clone(),
+            )
             .await
         {
             Ok(()) => {
@@ -2598,6 +2627,7 @@ fn create_router(state: Arc<ServerState>) -> Router {
 fn app_config_from_row(row: &MetaAppRow) -> AppConfig {
     AppConfig {
         app_name: row.app_name.clone(),
+        env: row.env.clone(),
         jwks_endpoint: row.jwks_endpoint.clone(),
         jwks_cache_ttl_secs: row.jwks_cache_ttl_secs,
         jwks_max_stale_secs: row.jwks_max_stale_secs,
@@ -3324,6 +3354,7 @@ async fn app_summary(app: Arc<AppEntry>, worker: usize) -> AppSummaryResponse {
     AppSummaryResponse {
         app_id: app.app_id.to_string(),
         app_name: cfg.app_name.clone(),
+        env: cfg.env.clone(),
         jwks_endpoint: cfg.jwks_endpoint.clone(),
         jwks_cache_ttl_secs: cfg.jwks_cache_ttl_secs,
         jwks_max_stale_secs: cfg.jwks_max_stale_secs,
@@ -4206,6 +4237,7 @@ async fn create_app_handler(
         )
             .into_response();
     }
+    let env = request.env.unwrap_or_else(|| "prod".to_string());
     let jwks_endpoint = request.jwks_endpoint.unwrap_or_default().trim().to_string();
     let jwks_cache_ttl_secs = request
         .jwks_cache_ttl_secs
@@ -4235,6 +4267,7 @@ async fn create_app_handler(
         .create_app(
             app_id,
             app_name,
+            env.clone(),
             jwks_endpoint,
             jwks_cache_ttl_secs,
             jwks_max_stale_secs,
@@ -4266,6 +4299,7 @@ async fn create_app_handler(
         .workers
         .create_runtime(
             app_id,
+            env,
             data_dir,
             sync_tx.clone(),
             send_seq_by_client.clone(),
@@ -4301,6 +4335,7 @@ async fn create_app_handler(
     Json(CreateAppResponse {
         app_id: app_id.to_string(),
         app_name: meta_row.app_name,
+        env: meta_row.env,
         jwks_endpoint: meta_row.jwks_endpoint,
         jwks_cache_ttl_secs: meta_row.jwks_cache_ttl_secs,
         jwks_max_stale_secs: meta_row.jwks_max_stale_secs,
@@ -4484,6 +4519,7 @@ async fn update_app_handler(
     Json(UpdateAppResponse {
         app_id: app_id.to_string(),
         app_name: row.app_name,
+        env: row.env,
         jwks_endpoint: row.jwks_endpoint,
         jwks_cache_ttl_secs: row.jwks_cache_ttl_secs,
         jwks_max_stale_secs: row.jwks_max_stale_secs,
