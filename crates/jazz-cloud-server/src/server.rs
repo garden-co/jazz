@@ -3747,6 +3747,10 @@ async fn events_handler(
     let app_cleanup = app.clone();
     let client_id_str = client_id.to_string();
     let next_sync_seq = 1u64;
+    #[cfg(feature = "otel")]
+    let otel_env = cfg.env.clone();
+    #[cfg(feature = "otel")]
+    let otel_app_id = app_id.to_string();
 
     let stream = async_stream::stream! {
         let connected = ServerEvent::Connected {
@@ -3765,11 +3769,34 @@ async fn events_handler(
                     match result {
                         Ok((target_client_id, seq, payload)) => {
                             if target_client_id == client_id {
+                                #[cfg(feature = "otel")]
+                                let pt = payload_type_name(&payload);
                                 let event = ServerEvent::SyncUpdate {
                                     seq: Some(seq),
                                     payload: Box::new(payload),
                                 };
-                                yield Ok(encode_frame(&event));
+                                let frame = encode_frame(&event);
+                                #[cfg(feature = "otel")]
+                                {
+                                    let meter = opentelemetry::global::meter("jazz-cloud-server");
+                                    let sent_counter =
+                                        meter.u64_counter("jazz.sync.messages.sent").build();
+                                    let size_histogram = meter
+                                        .f64_histogram("jazz.sync.message.size_bytes")
+                                        .build();
+                                    let attrs = vec![
+                                        opentelemetry::KeyValue::new(
+                                            "app_id",
+                                            otel_app_id.clone(),
+                                        ),
+                                        opentelemetry::KeyValue::new("env", otel_env.clone()),
+                                        opentelemetry::KeyValue::new("payload_type", pt),
+                                        opentelemetry::KeyValue::new("direction", "outbound"),
+                                    ];
+                                    sent_counter.add(1, &attrs);
+                                    size_histogram.record(frame.len() as f64, &attrs);
+                                }
+                                yield Ok(frame);
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -3810,6 +3837,21 @@ async fn events_handler(
         .header("Cache-Control", "no-cache")
         .body(axum::body::Body::from_stream(stream))
         .unwrap())
+}
+
+#[cfg(feature = "otel")]
+fn payload_type_name(payload: &jazz_tools::sync_manager::SyncPayload) -> &'static str {
+    use jazz_tools::sync_manager::SyncPayload;
+    match payload {
+        SyncPayload::ObjectUpdated { .. } => "ObjectUpdated",
+        SyncPayload::ObjectTruncated { .. } => "ObjectTruncated",
+        SyncPayload::QuerySubscription { .. } => "QuerySubscription",
+        SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
+        SyncPayload::PersistenceAck { .. } => "PersistenceAck",
+        SyncPayload::QuerySettled { .. } => "QuerySettled",
+        SyncPayload::SchemaWarning(_) => "SchemaWarning",
+        SyncPayload::Error(_) => "Error",
+    }
 }
 
 async fn sync_handler(
@@ -3885,7 +3927,58 @@ async fn sync_handler(
 
     // Apply each payload in order, collecting per-payload results.
     let mut results = Vec::with_capacity(request.payloads.len());
+
+    #[cfg(feature = "otel")]
+    let sync_auth_type: &str = if is_admin {
+        "admin"
+    } else if is_backend && !has_session_header {
+        "backend"
+    } else if is_backend && has_session_header {
+        "backend_impersonation"
+    } else if headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .map_or(false, |v| v.starts_with("Bearer "))
+    {
+        "jwt"
+    } else if headers
+        .get("X-Jazz-Local-Mode")
+        .and_then(|v| v.to_str().ok())
+        == Some("anonymous")
+    {
+        "anonymous"
+    } else if headers
+        .get("X-Jazz-Local-Mode")
+        .and_then(|v| v.to_str().ok())
+        == Some("demo")
+    {
+        "demo"
+    } else {
+        "unknown"
+    };
+
     for payload in request.payloads {
+        #[cfg(feature = "otel")]
+        {
+            let meter = opentelemetry::global::meter("jazz-cloud-server");
+            let received_counter = meter.u64_counter("jazz.sync.messages.received").build();
+            let size_histogram = meter.f64_histogram("jazz.sync.message.size_bytes").build();
+
+            let pt = payload_type_name(&payload);
+            let attrs = vec![
+                opentelemetry::KeyValue::new("app_id", app_id.to_string()),
+                opentelemetry::KeyValue::new("env", cfg.env.clone()),
+                opentelemetry::KeyValue::new("payload_type", pt),
+                opentelemetry::KeyValue::new("auth_type", sync_auth_type),
+                opentelemetry::KeyValue::new("direction", "inbound"),
+            ];
+            received_counter.add(1, &attrs);
+            // Estimate payload size from JSON serialization
+            if let Ok(json) = serde_json::to_vec(&payload) {
+                size_histogram.record(json.len() as f64, &attrs);
+            }
+        }
+
         let dispatch_result = if is_admin {
             state
                 .workers
