@@ -766,4 +766,16 @@ describe("bin integration", () => {
       exported.todos.columns.some((column: { name: string }) => column.name === "ownerId"),
     ).toBe(true);
   });
+
+  it("shows the wrapper command surface in --help output", () => {
+    const result = runBin(["--help"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("validate");
+    expect(result.stdout).toContain("schema export");
+    expect(result.stdout).toContain("permissions push");
+    expect(result.stdout).toContain("migrations push");
+    expect(result.stdout).toContain("server");
+    expect(result.stdout).toContain("create");
+  });
 });
