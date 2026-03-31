@@ -50,7 +50,7 @@ Writes are **instant locally**. Row-level **policies** are enforced on the serve
 
 ## The schema
 
-**[`schema/current.ts`](../schema/current.ts)** defines the tables. You can optionally run `jazz-tools validate` as a local check via the root `schema.ts` wrapper.
+**[`schema.ts`](../schema.ts)** defines the tables. You can optionally run `jazz-tools validate` as a local check against that file.
 
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.8rem;margin-top:0.4rem">
 
@@ -193,7 +193,7 @@ No loading spinners, no optimistic UI layer. The insert is the UI update.
 
 ## Permissions — the policy DSL
 
-Policies live in **[`schema/permissions.ts`](../schema/permissions.ts)**, written in a typed DSL. They're compiled into the schema and enforced on the server on every sync.
+Policies live in **[`permissions.ts`](../permissions.ts)**, written in a typed DSL. They're compiled into the schema and enforced on the server on every sync.
 
 ```typescript
 // Messages: only chat members can read or send

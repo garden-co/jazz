@@ -1005,7 +1005,7 @@ fn get_or_load_computes_correct_tips_for_multi_commit_branch() {
 }
 
 #[test]
-fn get_or_load_hydrates_missing_branches_into_cached_object() {
+fn get_or_load_hydrates_missing_requested_branches_for_cached_objects() {
     let mut io = MemoryStorage::new();
     let author = ObjectId::new();
 
@@ -1017,9 +1017,9 @@ fn get_or_load_hydrates_missing_branches_into_cached_object() {
         mgr.add_commit(
             &mut io,
             oid,
-            "dev-other-main",
+            "draft",
             vec![],
-            b"other".to_vec(),
+            b"draft".to_vec(),
             author,
             None,
         )
@@ -1027,30 +1027,23 @@ fn get_or_load_hydrates_missing_branches_into_cached_object() {
         oid
     };
 
-    let mut mgr2 = ObjectManager::new();
-    let loaded_main = mgr2
-        .get_or_load(object_id, &io, &["main".to_string()])
-        .expect("object should load on main branch");
-    assert!(loaded_main.branches.contains_key(&BranchName::new("main")));
+    let mut mgr = ObjectManager::new();
+    mgr.get_or_load(object_id, &io, &["main".to_string()]);
+
+    let object = mgr.get(object_id).expect("object should be cached");
+    assert!(object.branches.contains_key(&BranchName::new("main")));
     assert!(
-        !loaded_main
-            .branches
-            .contains_key(&BranchName::new("dev-other-main"))
+        !object.branches.contains_key(&BranchName::new("draft")),
+        "setup should start with only the first requested branch cached"
     );
 
-    let loaded_with_fallback = mgr2
-        .get_or_load(object_id, &io, &["dev-other-main".to_string()])
-        .expect("object should load on dev-other-main branch");
+    mgr.get_or_load(object_id, &io, &["draft".to_string()]);
+
+    let object = mgr.get(object_id).expect("object should stay cached");
+    assert!(object.branches.contains_key(&BranchName::new("main")));
     assert!(
-        loaded_with_fallback
-            .branches
-            .contains_key(&BranchName::new("dev-other-main"))
-    );
-    // Main branch was already cached, so it's also returned
-    assert!(
-        loaded_with_fallback
-            .branches
-            .contains_key(&BranchName::new("main"))
+        object.branches.contains_key(&BranchName::new("draft")),
+        "subsequent get_or_load calls should hydrate newly requested branches"
     );
 }
 

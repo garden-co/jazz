@@ -1,0 +1,261 @@
+---
+title: Authentication
+description: "How and when to use Jazz's three different auth modes: anonymous, demo, and external JWTs."
+reviewedAt: "14cd73f0"
+---
+
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+
+Jazz has three auth modes. `anonymous` and `demo` generate identities locally without an auth provider. Most multi-user apps will need `external` authentication in production.
+
+| Mode        | What it does                                            | When to use it                                   |
+| ----------- | ------------------------------------------------------- | ------------------------------------------------ |
+| `anonymous` | Generates one device token, persisted in `localStorage` | Prototyping, single-user apps, offline-only apps |
+| `demo`      | Multiple synthetic user profiles per device             | Testing multi-user scenarios locally             |
+| `external`  | Validates a JWT from your auth provider via JWKS        | Production apps with real user accounts          |
+
+## Local auth for development
+
+### Anonymous
+
+Anonymous auth is the default when no JWT or backend auth is set up. Jazz generates a device token on first load and persists it in `localStorage`.
+
+<Tabs
+  groupId="jazz-framework"
+  persist
+  updateAnchor
+  items={["React", "Vue", "Svelte", "TypeScript"]}
+>
+  <Tab value="React">
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-anon-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue" meta='title="App.vue"'>
+      ../examples/docs/todo-client-localfirst-vue/src/AuthAnonymous.vue
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte" meta='title="App.svelte"'>
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthAnonymous.svelte#auth-anon-svelte
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-anon-ts
+    </include>
+  </Tab>
+</Tabs>
+
+<Accordions type="single">
+<Accordion title="Using a specific token">
+
+If you prefer not to have Jazz generate a token, pass `localAuthToken` explicitly:
+
+<Tabs
+  groupId="jazz-framework"
+  persist
+  updateAnchor
+  items={["React", "Vue", "Svelte", "TypeScript"]}
+>
+  <Tab value="React">
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-anon-token-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue" meta='title="App.vue"'>
+      ../examples/docs/todo-client-localfirst-vue/src/AuthAnonymousToken.vue
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte" meta='title="App.svelte"'>
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthAnonymousToken.svelte#auth-anon-token-svelte
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-anon-token-ts
+    </include>
+  </Tab>
+</Tabs>
+
+</Accordion>
+</Accordions>
+
+<Callout type="warn">
+  Anonymous tokens stored in `localStorage` cannot be recovered if deleted.
+</Callout>
+
+### Demo
+
+Demo auth lets you create multiple users and test multi-user flows. Data persists for each user individually.
+
+<Tabs
+  groupId="jazz-framework"
+  persist
+  updateAnchor
+  items={["React", "Vue", "Svelte", "TypeScript"]}
+>
+  <Tab value="React">
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-demo-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue" meta='title="App.vue"'>
+      ../examples/docs/todo-client-localfirst-vue/src/AuthDemo.vue
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte" meta='title="App.svelte"'>
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthDemo.svelte#auth-demo-svelte
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-demo-ts
+    </include>
+  </Tab>
+</Tabs>
+
+## External auth for production
+
+Pass a JWT from your auth provider using the `jwtToken` option. Jazz validates it against your JWKS endpoint.
+
+<Callout type="info" title="JWT? JWKS?">
+  JWTs, or JSON Web Tokens, are small JSON payloads signed by an authority&hairsp;—&hairsp;normally this is your authentication provider. Often this JSON payload includes details about your identity, but it can also include various other pieces of information known as 'claims'. Jazz can read the signed payload and use it in your permissions policies. To validate the signature and protect against spoofing, Jazz retrieves the signing key from the JWKS endpoint you specify.
+
+For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web-tokens) are a great starting point.
+
+</Callout>
+
+<Tabs
+  groupId="jazz-framework"
+  persist
+  updateAnchor
+  items={["React", "Vue", "Svelte", "TypeScript"]}
+>
+  <Tab value="React">
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-jwt-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue" meta='title="App.vue"'>
+      ../examples/docs/todo-client-localfirst-vue/src/AuthJwt.vue
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte" meta='title="App.svelte"'>
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthJwt.svelte#auth-jwt-svelte
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-jwt-ts
+    </include>
+  </Tab>
+</Tabs>
+
+### Server configuration
+
+| Flag                | Purpose                                                                                   | Development | Production                                                          |
+| ------------------- | ----------------------------------------------------------------------------------------- | ----------- | ------------------------------------------------------------------- |
+| `--port`            | Port to listen on (defaults to 1625)                                                      | Optional    | Optional                                                            |
+| `--data-dir`        | Directory for persistent storage                                                          | Required    | Required                                                            |
+| `--in-memory`       | Use in-memory storage instead of Fjall-backed files. Data is lost when the process exits. | Optional    | Optional                                                            |
+| `--jwks-url <url>`  | JWKS endpoint for JWT signature verification                                              | Optional    | Optional, but required if using JWT auth to validate JWT signatures |
+| `--backend-secret`  | Secret for backend session impersonation                                                  | Optional    | Optional                                                            |
+| `--admin-secret`    | Secret for admin operations (schema/policy sync)                                          | Optional    | Optional                                                            |
+| `--allow-anonymous` | Allow anonymous auth                                                                      | Enabled     | Disabled                                                            |
+| `--allow-demo`      | Allow demo auth                                                                           | Enabled     | Disabled                                                            |
+
+Production mode activates when `NODE_ENV=production`.
+
+<include cwd lang="bash" meta='title="Terminal"'>
+  ../examples/docs/todo-server-ts/docs/auth-server-cli.sh#auth-server-cli
+</include>
+
+### Session resolution
+
+When the server receives a request, it tries each auth method in priority order and uses the first match:
+
+1. **Backend impersonation** &hairsp;—&hairsp; the request includes `X-Jazz-Backend-Secret` and `X-Jazz-Session` headers. A trusted backend service (e.g. a cron job or webhook handler) can act as any user by providing the shared secret and a base64-encoded session identifying the user to impersonate.
+2. **External JWT** &hairsp;—&hairsp; the request includes an `Authorization: Bearer <jwt>` header. The token is validated against the JWKS endpoint configured with `--jwks-url`.
+3. **Local auth** &hairsp;—&hairsp; the request includes `X-Jazz-Local-Mode` and `X-Jazz-Local-Token` headers. Used by anonymous and demo auth in development.
+4. **No session** &hairsp;—&hairsp; none of the above matched.
+
+Backend impersonation always takes precedence, so a backend service can reliably impersonate users even if the request also carries a JWT.
+
+### Upgrading from local auth
+
+You might allow anonymous auth in production so users can try your app before signing up. If you do, you can link their local identity to an external one when they sign in, preserving any data they created.
+
+<Tabs
+  groupId="jazz-framework"
+  persist
+  updateAnchor
+  items={["React", "Vue", "Svelte", "TypeScript"]}
+>
+  <Tab value="React">
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-external-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue" meta='title="App.vue"'>
+      ../examples/docs/todo-client-localfirst-vue/src/AuthExternal.vue
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte" meta='title="App.svelte"'>
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthExternal.svelte#auth-external-svelte
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="auth.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-external-ts
+    </include>
+  </Tab>
+</Tabs>
+
+Once linked, JWT logins use the same user identity as the original local account.
+
+## Offline-only mode
+
+If you're building an app that never syncs, you can skip server auth entirely. Data will be persisted locally only.
+
+<Tabs
+  groupId="jazz-framework"
+  persist
+  updateAnchor
+  items={["React", "Vue", "Svelte", "TypeScript"]}
+>
+  <Tab value="React">
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-offline-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue" meta='title="App.vue"'>
+      ../examples/docs/todo-client-localfirst-vue/src/AuthOffline.vue
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte" meta='title="App.svelte"'>
+      ../examples/docs/todo-client-localfirst-svelte/src/AuthOffline.svelte#auth-offline-svelte
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-offline-ts
+    </include>
+  </Tab>
+</Tabs>
+
+## Next steps
+
+- [Sessions](/docs/auth/sessions)&hairsp;—&hairsp;read the current user and scope queries to their identity
+- [Permissions](/docs/auth/permissions)&hairsp;—&hairsp;define row-level access policies

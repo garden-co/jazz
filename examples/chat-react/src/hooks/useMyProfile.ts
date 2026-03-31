@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { useDb, useSession, useAll } from "jazz-tools/react";
 import { getRandomUsername } from "@/lib/utils";
-import { app, type Profile } from "../../schema/app.js";
+import { app, type Profile } from "../../schema.js";
 
 // Module-level guard: the in-memory WASM store settles synchronously with []
 // before OPFS data streams in from the worker. Without this guard, every page

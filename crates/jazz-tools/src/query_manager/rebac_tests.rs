@@ -10,7 +10,7 @@ use smallvec::smallvec;
 
 use crate::commit::Commit;
 use crate::metadata::MetadataKey;
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 use crate::storage::MemoryStorage;
 use crate::sync_manager::{
     ClientId, Destination, InboxEntry, ObjectMetadata, QueryId, Source, SyncError, SyncManager,
@@ -183,11 +183,156 @@ fn encode_document(owner_id: &str, title: &str, folder_id: Option<ObjectId>) -> 
     .unwrap()
 }
 
+fn encode_folder(owner_id: &str, name: &str) -> Vec<u8> {
+    let folders_desc = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("name", ColumnType::Text),
+    ]);
+    encode_row(
+        &folders_desc,
+        &[Value::Text(owner_id.into()), Value::Text(name.into())],
+    )
+    .unwrap()
+}
+
 /// Helper to create a document metadata map
 fn document_metadata() -> std::collections::HashMap<String, String> {
     let mut m = std::collections::HashMap::new();
     m.insert(MetadataKey::Table.to_string(), "documents".to_string());
     m
+}
+
+fn folder_metadata() -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    m.insert(MetadataKey::Table.to_string(), "folders".to_string());
+    m
+}
+
+fn inherited_insert_schema() -> (Schema, RowDescriptor, SchemaHash) {
+    let mut schema = Schema::new();
+
+    let folders_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("name", ColumnType::Text),
+    ]);
+    let folders_policies = TablePolicies::new()
+        .with_select(PolicyExpr::eq_session("owner_id", vec!["user_id".into()]));
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::with_policies(folders_descriptor.clone(), folders_policies),
+    );
+
+    let documents_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("folder_id", ColumnType::Uuid)
+            .nullable()
+            .references("folders"),
+    ]);
+    let documents_policies = TablePolicies::new().with_insert(PolicyExpr::And(vec![
+        PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+        PolicyExpr::Or(vec![
+            PolicyExpr::IsNull {
+                column: "folder_id".into(),
+            },
+            PolicyExpr::inherits(Operation::Select, "folder_id"),
+        ]),
+    ]));
+    schema.insert(
+        TableName::new("documents"),
+        TableSchema::with_policies(documents_descriptor, documents_policies),
+    );
+
+    let schema_hash = SchemaHash::compute(&schema);
+    (schema, folders_descriptor, schema_hash)
+}
+
+fn inherited_insert_branch(schema_hash: SchemaHash) -> String {
+    ComposedBranchName::new("dev", schema_hash, "client-alice-main")
+        .to_branch_name()
+        .as_str()
+        .to_string()
+}
+
+fn create_server_mode_query_manager(schema: Schema, schema_hash: SchemaHash) -> QueryManager {
+    let sync_manager = SyncManager::new();
+    let mut qm = QueryManager::new(sync_manager);
+    qm.schema = Arc::new(schema.clone());
+    let mut known_schemas = HashMap::new();
+    known_schemas.insert(schema_hash, schema);
+    qm.set_known_schemas(Arc::new(known_schemas));
+    qm
+}
+
+fn seed_folder_on_branch(
+    qm: &mut QueryManager,
+    storage: &mut MemoryStorage,
+    branch: &str,
+    owner_id: &str,
+    name: &str,
+    folders_descriptor: &RowDescriptor,
+) -> ObjectId {
+    let folder_id = qm
+        .sync_manager_mut()
+        .object_manager
+        .create(storage, Some(folder_metadata()));
+    let folder_content = encode_folder(owner_id, name);
+    qm.sync_manager_mut()
+        .object_manager
+        .add_commit(
+            storage,
+            folder_id,
+            branch,
+            vec![],
+            folder_content.clone(),
+            ObjectId::new(),
+            None,
+        )
+        .unwrap();
+    QueryManager::update_indices_for_insert_on_branch(
+        storage,
+        "folders",
+        branch,
+        folder_id,
+        &folder_content,
+        folders_descriptor,
+    )
+    .unwrap();
+    folder_id
+}
+
+fn enqueue_inherited_insert(
+    qm: &mut QueryManager,
+    client_id: ClientId,
+    doc_id: ObjectId,
+    branch: &str,
+    folder_id: ObjectId,
+    title: &str,
+) -> Commit {
+    let commit = Commit {
+        parents: smallvec![],
+        content: encode_document("alice", title, Some(folder_id)),
+        timestamp: 1000,
+        author: ObjectId::new(),
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: doc_id,
+            metadata: Some(ObjectMetadata {
+                id: doc_id,
+                metadata: document_metadata(),
+            }),
+            branch_name: branch.into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    commit
 }
 
 fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
@@ -637,6 +782,278 @@ fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
     assert!(
         tips.is_err() || !tips.unwrap().contains(&commit.id()),
         "Denied insert should not be applied on the branch"
+    );
+}
+
+#[test]
+fn rebac_inherited_insert_uses_payload_branch_for_parent_lookup() {
+    let (schema, folders_descriptor, schema_hash) = inherited_insert_schema();
+    let branch = inherited_insert_branch(schema_hash);
+
+    // Server mode keeps current_branch() at "main", while the write arrives on
+    // a composed client branch. The inherited parent lookup must use payload
+    // branch context, not current_branch().
+    let mut qm = create_server_mode_query_manager(schema, schema_hash);
+
+    assert_ne!(qm.current_branch(), branch);
+
+    let mut storage = MemoryStorage::new();
+    let client_id = ClientId::new();
+    qm.sync_manager_mut().add_client(client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+
+    let folder_id = seed_folder_on_branch(
+        &mut qm,
+        &mut storage,
+        &branch,
+        "alice",
+        "Shared Folder",
+        &folders_descriptor,
+    );
+    let doc_id = qm
+        .sync_manager_mut()
+        .object_manager
+        .create(&mut storage, Some(document_metadata()));
+
+    let mut scope = HashSet::new();
+    scope.insert((doc_id, branch.clone().into()));
+    qm.sync_manager_mut()
+        .set_client_query_scope(client_id, QueryId(1), scope, None);
+    qm.sync_manager_mut().take_outbox();
+
+    let commit = enqueue_inherited_insert(
+        &mut qm,
+        client_id,
+        doc_id,
+        &branch,
+        folder_id,
+        "Allowed via folder ownership",
+    );
+
+    for _ in 0..10 {
+        qm.process(&mut storage);
+    }
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let denied = outbox.iter().any(|entry| {
+        matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::PermissionDenied { .. }),
+            ) if *id == client_id
+        )
+    });
+    assert!(
+        !denied,
+        "Inherited insert should use the payload branch to find the parent folder"
+    );
+
+    let tips = qm
+        .sync_manager_mut()
+        .object_manager
+        .get_tip_ids(doc_id, &branch)
+        .unwrap();
+    assert!(
+        tips.contains(&commit.id()),
+        "Document insert should be applied when the parent folder is visible on the payload branch"
+    );
+}
+
+#[test]
+fn rebac_inherited_insert_uses_payload_branch_after_cold_start() {
+    let (schema, folders_descriptor, schema_hash) = inherited_insert_schema();
+    let branch = inherited_insert_branch(schema_hash);
+    let mut storage = MemoryStorage::new();
+
+    let mut seed_qm = create_server_mode_query_manager(schema.clone(), schema_hash);
+    let folder_id = seed_folder_on_branch(
+        &mut seed_qm,
+        &mut storage,
+        &branch,
+        "alice",
+        "Cold Folder",
+        &folders_descriptor,
+    );
+
+    let mut qm = create_server_mode_query_manager(schema, schema_hash);
+    let client_id = ClientId::new();
+    qm.sync_manager_mut().add_client(client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+    qm.sync_manager_mut().take_outbox();
+
+    let doc_id = ObjectId::new();
+    let commit = enqueue_inherited_insert(
+        &mut qm,
+        client_id,
+        doc_id,
+        &branch,
+        folder_id,
+        "Cold-start branch lookup",
+    );
+
+    // Cold start:
+    //   storage: folder exists only on the composed payload branch
+    //   cache:   parent folder is not loaded at all
+    //   write:   document insert must still authorize on that payload branch
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let denied = outbox.iter().any(|entry| {
+        matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::PermissionDenied { .. }),
+            ) if *id == client_id
+        )
+    });
+    assert!(
+        !denied,
+        "Inherited insert should authorize on the payload branch even after a cold start"
+    );
+
+    let cached_folder = qm
+        .sync_manager()
+        .object_manager
+        .get(folder_id)
+        .expect("authorization should hydrate the parent folder");
+    assert!(
+        cached_folder
+            .branches
+            .contains_key(&BranchName::new(&branch)),
+        "authorization should load the parent from the payload branch"
+    );
+
+    let tips = qm
+        .sync_manager_mut()
+        .object_manager
+        .get_tip_ids(doc_id, &branch)
+        .unwrap();
+    assert!(
+        tips.contains(&commit.id()),
+        "Document insert should be applied after settlement loads the parent from storage"
+    );
+}
+
+#[test]
+fn rebac_inherited_insert_hydrates_requested_branch_instead_of_reusing_cached_branch() {
+    let (schema, folders_descriptor, schema_hash) = inherited_insert_schema();
+    let branch = inherited_insert_branch(schema_hash);
+    let mut storage = MemoryStorage::new();
+
+    let mut seed_qm = create_server_mode_query_manager(schema.clone(), schema_hash);
+    let folder_id = seed_folder_on_branch(
+        &mut seed_qm,
+        &mut storage,
+        "main",
+        "bob",
+        "Main Folder",
+        &folders_descriptor,
+    );
+    seed_qm
+        .sync_manager_mut()
+        .object_manager
+        .add_commit(
+            &mut storage,
+            folder_id,
+            &branch,
+            vec![],
+            encode_folder("alice", "Dev Folder"),
+            ObjectId::new(),
+            None,
+        )
+        .unwrap();
+    QueryManager::update_indices_for_insert_on_branch(
+        &mut storage,
+        "folders",
+        &branch,
+        folder_id,
+        &encode_folder("alice", "Dev Folder"),
+        &folders_descriptor,
+    )
+    .unwrap();
+
+    let mut qm = create_server_mode_query_manager(schema, schema_hash);
+    let client_id = ClientId::new();
+    qm.sync_manager_mut().add_client(client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+    qm.sync_manager_mut().take_outbox();
+
+    qm.sync_manager_mut()
+        .object_manager
+        .get_or_load(folder_id, &storage, &["main".to_string()]);
+    let cached_folder = qm
+        .sync_manager()
+        .object_manager
+        .get(folder_id)
+        .expect("folder should be cached on main");
+    assert!(
+        cached_folder
+            .branches
+            .contains_key(&BranchName::new("main"))
+    );
+    assert!(
+        !cached_folder
+            .branches
+            .contains_key(&BranchName::new(&branch)),
+        "setup should start with only the unrelated branch cached"
+    );
+
+    let doc_id = ObjectId::new();
+    let commit = enqueue_inherited_insert(
+        &mut qm,
+        client_id,
+        doc_id,
+        &branch,
+        folder_id,
+        "Hydrate branch instead of reusing main",
+    );
+
+    // Wrong-branch cache:
+    //   storage: folder[main] = bob, folder[dev] = alice
+    //   cache:   only folder[main] is loaded before authorization
+    //   write:   document[dev] must hydrate folder[dev], not reuse folder[main]
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let denied = outbox.iter().any(|entry| {
+        matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::PermissionDenied { .. }),
+            ) if *id == client_id
+        )
+    });
+    assert!(
+        !denied,
+        "Inherited insert should hydrate the requested payload branch instead of reusing cached main"
+    );
+
+    let cached_folder = qm
+        .sync_manager()
+        .object_manager
+        .get(folder_id)
+        .expect("folder should remain cached");
+    assert!(
+        cached_folder
+            .branches
+            .contains_key(&BranchName::new(&branch)),
+        "authorization should hydrate the requested branch onto the cached object"
+    );
+
+    let tips = qm
+        .sync_manager_mut()
+        .object_manager
+        .get_tip_ids(doc_id, &branch)
+        .unwrap();
+    assert!(
+        tips.contains(&commit.id()),
+        "Document insert should apply once the requested parent branch is hydrated"
     );
 }
 
