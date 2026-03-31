@@ -66,20 +66,20 @@ export function DemoAuthApp() {
 // #endregion auth-demo-react
 
 // #region auth-external-react
-const externalAuthAppId = "my-app";
-const externalAuthServerUrl = "http://127.0.0.1:4200";
-const externalAuthProviderJwt = "<provider-jwt>";
+const appId = "my-app";
+const jazzServerUrl = "http://127.0.0.1:4200";
+const providerJwt = "<provider-jwt>";
 
 export function ExternalAuthApp() {
   const [hasJwt, setHasJwt] = useState(false);
   const linkExternalIdentity = useLinkExternalIdentity({
-    appId: externalAuthAppId,
-    serverUrl: externalAuthServerUrl,
+    appId,
+    serverUrl: jazzServerUrl,
     defaultMode: "anonymous",
   });
 
   async function onSignedIn() {
-    await linkExternalIdentity({ jwtToken: externalAuthProviderJwt });
+    await linkExternalIdentity({ jwtToken: providerJwt });
     setHasJwt(true);
   }
 
@@ -89,13 +89,13 @@ export function ExternalAuthApp() {
       config={
         hasJwt
           ? {
-              appId: externalAuthAppId,
-              serverUrl: externalAuthServerUrl,
-              jwtToken: externalAuthProviderJwt,
+              appId,
+              serverUrl: jazzServerUrl,
+              jwtToken: providerJwt,
             }
           : {
-              appId: externalAuthAppId,
-              serverUrl: externalAuthServerUrl,
+              appId,
+              serverUrl: jazzServerUrl,
             }
       }
     >
@@ -105,6 +105,22 @@ export function ExternalAuthApp() {
   );
 }
 // #endregion auth-external-react
+
+// #region auth-jwt-react
+export function JwtAuthApp() {
+  return (
+    <JazzProvider
+      config={{
+        appId: "my-app",
+        serverUrl: "http://127.0.0.1:4200",
+        jwtToken: "<provider-jwt>",
+      }}
+    >
+      <TodoApp />
+    </JazzProvider>
+  );
+}
+// #endregion auth-jwt-react
 
 // #region auth-offline-react
 export function OfflineOnlyAuthApp() {
