@@ -25,7 +25,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Item, ItemContent } from "@/components/ui/item";
-import { app, type Message, type Profile } from "../../../schema/app.js";
+import { app, type Message, type Profile } from "../../../schema.js";
 
 interface ChatMessageProps {
   message: Message;
