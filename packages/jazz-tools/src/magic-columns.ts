@@ -13,13 +13,6 @@ export const PROVENANCE_MAGIC_COLUMNS = [
 export type PermissionIntrospectionColumn = (typeof PERMISSION_INTROSPECTION_COLUMNS)[number];
 export type ProvenanceMagicColumn = (typeof PROVENANCE_MAGIC_COLUMNS)[number];
 
-export const PERMISSION_INTROSPECTION_TS_TYPE = "boolean | null";
-
-const MAGIC_COLUMN_SET = new Set<string>([
-  ...PERMISSION_INTROSPECTION_COLUMNS,
-  ...PROVENANCE_MAGIC_COLUMNS,
-]);
-
 export function isPermissionIntrospectionColumn(
   column: string,
 ): column is PermissionIntrospectionColumn {
