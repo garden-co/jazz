@@ -201,11 +201,17 @@ pub fn translate_table_name_to_schema(
     let lens_path = context.lens_path(target_hash).ok()?;
     let mut current_table = table.to_string();
     for (lens, direction) in lens_path.iter().rev() {
-        let translate_direction = match direction {
-            Direction::Forward => Direction::Backward,
-            Direction::Backward => Direction::Forward,
-        };
+        let translate_direction = direction.reverse();
         current_table = lens.translate_table(&current_table, translate_direction)?;
+
+        let next_hash = match translate_direction {
+            Direction::Forward => lens.target_hash,
+            Direction::Backward => lens.source_hash,
+        };
+        let next_schema = context.get_schema(&next_hash)?;
+        if !next_schema.contains_key(&TableName::new(&current_table)) {
+            return None;
+        }
     }
 
     Some(current_table)
@@ -225,6 +231,15 @@ pub fn translate_table_name_from_schema(
     let mut current_table = table.to_string();
     for (lens, direction) in lens_path {
         current_table = lens.translate_table(&current_table, direction)?;
+
+        let next_hash = match direction {
+            Direction::Forward => lens.target_hash,
+            Direction::Backward => lens.source_hash,
+        };
+        let next_schema = context.get_schema(&next_hash)?;
+        if !next_schema.contains_key(&TableName::new(&current_table)) {
+            return None;
+        }
     }
 
     Some(current_table)
@@ -279,10 +294,7 @@ pub fn translate_table_and_column_for_schema(
     let mut current_table = table.to_string();
     let mut current_column = column.to_string();
     for (lens, direction) in lens_path.iter().rev() {
-        let translate_direction = match direction {
-            Direction::Forward => Direction::Backward,
-            Direction::Backward => Direction::Forward,
-        };
+        let translate_direction = direction.reverse();
         let (next_table, next_column) =
             lens.translate_table_and_column(&current_table, &current_column, translate_direction)?;
         current_table = next_table;

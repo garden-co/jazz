@@ -184,19 +184,18 @@ fn translate_scan_table_name(
     schema_context: &SchemaContext,
     table: &str,
     branch_schema_hash: Option<SchemaHash>,
-) -> TableName {
+) -> Option<TableName> {
     let translated_table = if let Some(target_hash) = branch_schema_hash {
         if target_hash != schema_context.current_hash {
             translate_table_name_to_schema(schema_context, table, &target_hash)
-                .unwrap_or_else(|| table.to_string())
         } else {
-            table.to_string()
+            Some(table.to_string())
         }
     } else {
-        table.to_string()
+        Some(table.to_string())
     };
 
-    TableName::new(&translated_table)
+    translated_table.map(|name| TableName::new(&name))
 }
 
 fn push_unique_magic_ref(
@@ -624,8 +623,11 @@ impl QueryGraph {
         for branch in &branches {
             // Get schema hash for this branch to determine if column translation is needed
             let branch_schema_hash = branch_schema_map.get(branch).copied();
-            let scan_table_name =
-                translate_scan_table_name(schema_context, table_str, branch_schema_hash);
+            let Some(scan_table_name) =
+                translate_scan_table_name(schema_context, table_str, branch_schema_hash)
+            else {
+                continue;
+            };
 
             for disjunct in &plan.disjuncts {
                 // Find best index condition for this disjunct
@@ -1342,8 +1344,11 @@ impl QueryGraph {
         let mut base_scan_ids = Vec::new();
         for branch in &join_branches {
             let branch_schema_hash = branch_schema_map.get(*branch).copied();
-            let base_scan_table =
-                translate_scan_table_name(schema_context, plan.table.as_str(), branch_schema_hash);
+            let Some(base_scan_table) =
+                translate_scan_table_name(schema_context, plan.table.as_str(), branch_schema_hash)
+            else {
+                continue;
+            };
             let id_column = ColumnName::new("_id");
             let base_scan = IndexScanNode::new_with_branch(
                 base_scan_table,
@@ -1444,11 +1449,13 @@ impl QueryGraph {
             let mut right_scan_ids = Vec::new();
             for branch in &join_branches {
                 let branch_schema_hash = branch_schema_map.get(*branch).copied();
-                let right_scan_table = translate_scan_table_name(
+                let Some(right_scan_table) = translate_scan_table_name(
                     schema_context,
                     join_spec.table.as_str(),
                     branch_schema_hash,
-                );
+                ) else {
+                    continue;
+                };
                 let id_column = ColumnName::new("_id");
                 let right_scan = IndexScanNode::new_with_branch(
                     right_scan_table,
