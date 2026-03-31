@@ -30,6 +30,42 @@ mod tests {
     use crate::schema_manager::LensOp;
 
     #[test]
+    fn auto_lens_add_table() {
+        let old = SchemaBuilder::new().build();
+
+        let new = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        let lens = generate_lens(&old, &new);
+
+        assert_eq!(lens.forward.ops.len(), 1);
+        assert!(matches!(&lens.forward.ops[0], LensOp::AddTable { table, .. } if table == "users"));
+        assert!(!lens.is_draft());
+    }
+
+    #[test]
+    fn auto_lens_remove_table() {
+        let old = SchemaBuilder::new()
+            .table(TableSchema::builder("legacy").column("id", ColumnType::Uuid))
+            .build();
+
+        let new = SchemaBuilder::new().build();
+
+        let lens = generate_lens(&old, &new);
+
+        assert_eq!(lens.forward.ops.len(), 1);
+        assert!(
+            matches!(&lens.forward.ops[0], LensOp::RemoveTable { table, .. } if table == "legacy")
+        );
+        assert!(!lens.is_draft());
+    }
+
+    #[test]
     fn auto_lens_add_column() {
         let old = SchemaBuilder::new()
             .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
@@ -304,14 +340,22 @@ mod tests {
         let lens = generate_lens(&old, &new);
 
         // Should have:
+        // - AddTable (new_table)
+        // - RemoveTable (legacy_table)
         // - AddColumn (new_field)
         // - RemoveColumn (old_field)
 
+        let mut found_add_table = false;
+        let mut found_remove_table = false;
         let mut found_add_column = false;
         let mut found_remove_column = false;
 
         for op in &lens.forward.ops {
             match op {
+                LensOp::AddTable { table, .. } if table == "new_table" => found_add_table = true,
+                LensOp::RemoveTable { table, .. } if table == "legacy_table" => {
+                    found_remove_table = true
+                }
                 LensOp::AddColumn { column, .. } if column == "new_field" => {
                     found_add_column = true
                 }
@@ -322,6 +366,11 @@ mod tests {
             }
         }
 
+        assert!(found_add_table, "Should find AddTable for new_table");
+        assert!(
+            found_remove_table,
+            "Should find RemoveTable for legacy_table"
+        );
         assert!(found_add_column, "Should find AddColumn for new_field");
         assert!(
             found_remove_column,

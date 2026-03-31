@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::object::ObjectId;
 #[cfg(test)]
 use crate::query_manager::types::ColumnDescriptor;
-use crate::query_manager::types::{ColumnType, RowDescriptor, SchemaHash, Value};
+use crate::query_manager::types::{ColumnType, RowDescriptor, SchemaHash, TableSchema, Value};
 
 /// Direction for lens application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +55,14 @@ pub enum LensOp {
         old_name: String,
         new_name: String,
     },
+    /// Add a new table.
+    AddTable { table: String, schema: TableSchema },
+    /// Remove a table.
+    RemoveTable {
+        table: String,
+        /// Stored schema (needed for backward transform).
+        schema: TableSchema,
+    },
 }
 
 impl LensOp {
@@ -95,6 +103,14 @@ impl LensOp {
                 table: table.clone(),
                 old_name: new_name.clone(),
                 new_name: old_name.clone(),
+            },
+            LensOp::AddTable { table, schema } => LensOp::RemoveTable {
+                table: table.clone(),
+                schema: schema.clone(),
+            },
+            LensOp::RemoveTable { table, schema } => LensOp::AddTable {
+                table: table.clone(),
+                schema: schema.clone(),
             },
         }
     }
@@ -239,6 +255,9 @@ impl Lens {
                         current_table = new_name.clone();
                     }
                 }
+                LensOp::AddTable { .. } | LensOp::RemoveTable { .. } => {
+                    // Table add/remove does not rename existing table references.
+                }
                 LensOp::AddColumn { .. }
                 | LensOp::RemoveColumn { .. }
                 | LensOp::RenameColumn { .. } => {}
@@ -287,6 +306,7 @@ impl Lens {
                 LensOp::AddColumn { .. } => {
                     // New columns don't affect existing column references.
                 }
+                _ => {}
             }
         }
 
@@ -338,6 +358,9 @@ impl Lens {
                     if let Some(idx) = column_names.iter().position(|n| n == old_name) {
                         column_names[idx] = new_name.clone();
                     }
+                }
+                LensOp::AddTable { .. } | LensOp::RemoveTable { .. } => {
+                    // Table-level ops don't affect row transformation
                 }
             }
         }

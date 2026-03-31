@@ -423,6 +423,17 @@ fn decode_column_type_with_version(
     }
 }
 
+fn encode_row_descriptor(buf: &mut Vec<u8>, desc: &RowDescriptor) {
+    encode_row_descriptor_with_version(buf, desc, SchemaEncodingVersion::V3);
+}
+
+fn decode_row_descriptor(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<RowDescriptor, CatalogueEncodingError> {
+    decode_row_descriptor_with_version(data, offset, SchemaEncodingVersion::V3)
+}
+
 fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
     encode_column_type_with_version(buf, col_type, SchemaEncodingVersion::V3);
 }
@@ -487,7 +498,9 @@ pub fn decode_lens_transform(data: &[u8]) -> Result<LensTransform, CatalogueEnco
 const OP_ADD_COLUMN: u8 = 1;
 const OP_REMOVE_COLUMN: u8 = 2;
 const OP_RENAME_COLUMN: u8 = 3;
-const OP_RENAME_TABLE: u8 = 4;
+const OP_ADD_TABLE: u8 = 4;
+const OP_REMOVE_TABLE: u8 = 5;
+const OP_RENAME_TABLE: u8 = 6;
 
 fn encode_lens_op(buf: &mut Vec<u8>, op: &LensOp) {
     match op {
@@ -529,6 +542,16 @@ fn encode_lens_op(buf: &mut Vec<u8>, op: &LensOp) {
             write_string(buf, table);
             write_string(buf, old_name);
             write_string(buf, new_name);
+        }
+        LensOp::AddTable { table, schema } => {
+            buf.push(OP_ADD_TABLE);
+            write_string(buf, table);
+            encode_table_schema(buf, schema);
+        }
+        LensOp::RemoveTable { table, schema } => {
+            buf.push(OP_REMOVE_TABLE);
+            write_string(buf, table);
+            encode_table_schema(buf, schema);
         }
     }
 }
@@ -574,6 +597,16 @@ fn decode_lens_op(data: &[u8], offset: &mut usize) -> Result<LensOp, CatalogueEn
                 old_name,
                 new_name,
             })
+        }
+        OP_ADD_TABLE => {
+            let table = read_string(data, offset, "table")?;
+            let schema = decode_table_schema(data, offset)?;
+            Ok(LensOp::AddTable { table, schema })
+        }
+        OP_REMOVE_TABLE => {
+            let table = read_string(data, offset, "table")?;
+            let schema = decode_table_schema(data, offset)?;
+            Ok(LensOp::RemoveTable { table, schema })
         }
         _ => Err(CatalogueEncodingError::InvalidTypeTag {
             tag,
@@ -655,11 +688,48 @@ fn decode_lens_op_v1(data: &[u8], offset: &mut usize) -> Result<LensOp, Catalogu
                 new_name,
             })
         }
+        OP_ADD_TABLE => {
+            let table = read_string(data, offset, "table")?;
+            let schema = decode_table_schema_v1(data, offset)?;
+            Ok(LensOp::AddTable { table, schema })
+        }
+        OP_REMOVE_TABLE => {
+            let table = read_string(data, offset, "table")?;
+            let schema = decode_table_schema_v1(data, offset)?;
+            Ok(LensOp::RemoveTable { table, schema })
+        }
         _ => Err(CatalogueEncodingError::InvalidTypeTag {
             tag,
             context: "lens_op",
         }),
     }
+}
+
+fn encode_table_schema(buf: &mut Vec<u8>, schema: &TableSchema) {
+    encode_row_descriptor(buf, &schema.columns);
+}
+
+fn decode_table_schema(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<TableSchema, CatalogueEncodingError> {
+    let descriptor = decode_row_descriptor(data, offset)?;
+    Ok(TableSchema {
+        columns: descriptor,
+        policies: TablePolicies::default(),
+    })
+}
+
+fn decode_table_schema_v1(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<TableSchema, CatalogueEncodingError> {
+    let descriptor = decode_row_descriptor(data, offset)?;
+    decode_table_policies(data, offset)?;
+    Ok(TableSchema {
+        columns: descriptor,
+        policies: TablePolicies::default(),
+    })
 }
 
 // ============================================================================
@@ -2163,6 +2233,27 @@ mod tests {
     }
 
     #[test]
+    fn lens_roundtrip_strips_table_policies() {
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::AddTable {
+                table: "todos".to_string(),
+                schema: TableSchema::builder("todos")
+                    .column("id", ColumnType::Uuid)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True))
+                    .build(),
+            },
+            false,
+        );
+
+        let decoded = decode_lens_transform(&encode_lens_transform(&transform)).unwrap();
+        let LensOp::AddTable { schema, .. } = &decoded.ops[0] else {
+            panic!("expected add-table op");
+        };
+        assert_eq!(schema.policies, TablePolicies::default());
+    }
+
+    #[test]
     fn lens_transform_roundtrip_empty() {
         let transform = LensTransform::new();
         let encoded = encode_lens_transform(&transform);
@@ -2307,6 +2398,30 @@ mod tests {
                 table: "t".to_string(),
                 old_name: "a".to_string(),
                 new_name: "b".to_string(),
+            },
+            false,
+        );
+
+        // AddTable
+        transform.push(
+            LensOp::AddTable {
+                table: "new_table".to_string(),
+                schema: TableSchema::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+                    "id",
+                    ColumnType::Uuid,
+                )])),
+            },
+            false,
+        );
+
+        // RemoveTable
+        transform.push(
+            LensOp::RemoveTable {
+                table: "old_table".to_string(),
+                schema: TableSchema::new(RowDescriptor::new(vec![ColumnDescriptor::new(
+                    "x",
+                    ColumnType::Text,
+                )])),
             },
             false,
         );

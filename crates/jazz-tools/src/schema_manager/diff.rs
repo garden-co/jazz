@@ -7,6 +7,8 @@
 //!
 //! - New column in new schema → `AddColumn` with schema default when present (otherwise `NULL`)
 //! - Missing column in new schema → `RemoveColumn` with schema default when present (otherwise `NULL`)
+//! - Table added → `AddTable`
+//! - Table removed → `RemoveTable`
 //! - Column type change → Marked as ambiguity (requires manual review)
 //! - Possible column rename (same type, one added + one removed) → `RenameColumn` marked as draft
 //! - Possible table rename (same structure) → `RenameTable` marked as draft
@@ -157,8 +159,17 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> DiffResult {
             .iter()
             .enumerate()
             .filter(|(idx, _)| !matched_removed.contains(idx))
-            .map(|(_, table_name)| TableChange::Removed {
-                table: table_name.as_str().to_string(),
+            .map(|(_, table_name)| {
+                transform.push(
+                    LensOp::RemoveTable {
+                        table: table_name.as_str().to_string(),
+                        schema: old[*table_name].clone(),
+                    },
+                    false,
+                );
+                TableChange::Removed {
+                    table: table_name.as_str().to_string(),
+                }
             }),
     );
     table_changes.extend(
@@ -166,11 +177,19 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> DiffResult {
             .iter()
             .enumerate()
             .filter(|(idx, _)| !matched_added.contains(idx))
-            .map(|(_, table_name)| TableChange::Added {
-                table: table_name.as_str().to_string(),
+            .map(|(_, table_name)| {
+                transform.push(
+                    LensOp::AddTable {
+                        table: table_name.as_str().to_string(),
+                        schema: new[*table_name].clone(),
+                    },
+                    false,
+                );
+                TableChange::Added {
+                    table: table_name.as_str().to_string(),
+                }
             }),
     );
-
     // Tables in both (need to diff columns)
     for table_name in old_tables.intersection(&new_tables) {
         let old_table = &old[*table_name];
@@ -491,6 +510,48 @@ mod tests {
     }
 
     #[test]
+    fn diff_add_table() {
+        let old = make_schema(vec![("users", vec![("id", ColumnType::Text)])]);
+        let new = make_schema(vec![
+            ("users", vec![("id", ColumnType::Text)]),
+            ("posts", vec![("id", ColumnType::Text)]),
+        ]);
+
+        let result = diff_schemas(&old, &new);
+
+        assert_eq!(result.transform.ops.len(), 1);
+        assert!(result.ambiguities.is_empty());
+
+        match &result.transform.ops[0] {
+            LensOp::AddTable { table, .. } => {
+                assert_eq!(table, "posts");
+            }
+            _ => panic!("Expected AddTable"),
+        }
+    }
+
+    #[test]
+    fn diff_remove_table() {
+        let old = make_schema(vec![
+            ("users", vec![("id", ColumnType::Text)]),
+            ("legacy", vec![("id", ColumnType::Text)]),
+        ]);
+        let new = make_schema(vec![("users", vec![("id", ColumnType::Text)])]);
+
+        let result = diff_schemas(&old, &new);
+
+        assert_eq!(result.transform.ops.len(), 1);
+        assert!(result.ambiguities.is_empty());
+
+        match &result.transform.ops[0] {
+            LensOp::RemoveTable { table, .. } => {
+                assert_eq!(table, "legacy");
+            }
+            _ => panic!("Expected RemoveTable"),
+        }
+    }
+
+    #[test]
     fn diff_type_change() {
         let old = make_schema(vec![("users", vec![("age", ColumnType::Text)])]);
         let new = make_schema(vec![("users", vec![("age", ColumnType::Integer)])]);
@@ -657,9 +718,27 @@ mod tests {
 
         let result = diff_schemas(&old, &new);
 
-        assert!(
-            result.transform.ops.is_empty(),
-            "ambiguous same-shape tables should not be auto-paired"
+        assert_eq!(
+            result.transform.ops,
+            vec![
+                LensOp::RemoveTable {
+                    table: "admins".to_string(),
+                    schema: old[&TableName::new("admins")].clone(),
+                },
+                LensOp::RemoveTable {
+                    table: "users".to_string(),
+                    schema: old[&TableName::new("users")].clone(),
+                },
+                LensOp::AddTable {
+                    table: "members".to_string(),
+                    schema: new[&TableName::new("members")].clone(),
+                },
+                LensOp::AddTable {
+                    table: "people".to_string(),
+                    schema: new[&TableName::new("people")].clone(),
+                },
+            ],
+            "ambiguous same-shape tables should not be auto-paired, but should still emit explicit add/remove table ops"
         );
         assert!(result.ambiguities.is_empty());
         assert_eq!(
@@ -713,22 +792,26 @@ mod tests {
         // Should have:
         // - RemoveColumn deprecated
         // - AddColumn age
-        assert_eq!(result.transform.ops.len(), 2);
+        // - AddTable posts
+        assert_eq!(result.transform.ops.len(), 3);
 
         // Count operation types
         let mut add_col = 0;
         let mut remove_col = 0;
+        let mut add_table = 0;
 
         for op in &result.transform.ops {
             match op {
                 LensOp::AddColumn { .. } => add_col += 1,
                 LensOp::RemoveColumn { .. } => remove_col += 1,
+                LensOp::AddTable { .. } => add_table += 1,
                 _ => {}
             }
         }
 
         assert_eq!(add_col, 1);
         assert_eq!(remove_col, 1);
+        assert_eq!(add_table, 1);
         assert_eq!(
             result.table_changes,
             vec![TableChange::Added {

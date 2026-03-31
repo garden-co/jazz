@@ -30,7 +30,7 @@ This is the key mechanism for schema isolation. Data written under schema v1 liv
 
 Bidirectional transformations between schema versions.
 
-**V1 operations**: `AddColumn`, `RemoveColumn`, `RenameColumn`.
+**V1 operations**: `AddColumn`, `RemoveColumn`, `RenameColumn`, `AddTable`, `RemoveTable`.
 
 All operations are declarative and auto-invertible — the backward transform is computed automatically from the forward transform.
 
@@ -48,7 +48,7 @@ Auto-generated lenses may contain **draft** operations — uncertain transformat
 
 ### Auto-Lens Generation
 
-`generate_lens()` compares schemas and detects added/removed columns. Potential renames (same type, different name) marked as draft. Sensible defaults generated for most types; UUID and non-nullable columns flagged for review.
+`generate_lens()` compares schemas and detects added/removed tables/columns. Potential renames (same type, different name) marked as draft. Sensible defaults generated for most types; UUID and non-nullable columns flagged for review.
 
 > `crates/groove/src/schema_manager/auto_lens.rs:18-200`
 
