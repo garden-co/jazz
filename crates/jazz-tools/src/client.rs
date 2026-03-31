@@ -675,7 +675,11 @@ mod tests {
     use crate::query_manager::types::{SchemaHash, TablePolicies};
     use crate::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
     use crate::schema_manager::AppId;
-    use crate::storage::{CatalogueManifestOp, FjallStorage};
+    use crate::storage::CatalogueManifestOp;
+    #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+    use crate::storage::FjallStorage;
+    #[cfg(feature = "rocksdb")]
+    use crate::storage::RocksDBStorage;
     use crate::{ColumnType, ObjectId, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;
@@ -748,9 +752,17 @@ mod tests {
         publish_permissions: bool,
     ) -> (SchemaHash, SchemaHash) {
         std::fs::create_dir_all(data_dir).expect("create seeded client data dir");
-        let db_path = data_dir.join("jazz.fjall");
-        let storage =
-            FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage");
+
+        #[cfg(feature = "rocksdb")]
+        let storage = {
+            let db_path = data_dir.join("jazz.rocksdb");
+            RocksDBStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
+        };
+        #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+        let storage = {
+            let db_path = data_dir.join("jazz.fjall");
+            FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
+        };
 
         let bundled_schema = declared_todo_schema();
         let learned_schema = learned_runtime_todo_schema();
@@ -816,9 +828,16 @@ mod tests {
     }
 
     fn expected_client_catalogue_hash(context: &AppContext) -> String {
-        let db_path = context.data_dir.join("jazz.fjall");
-        let storage =
-            FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage");
+        #[cfg(feature = "rocksdb")]
+        let storage = {
+            let db_path = context.data_dir.join("jazz.rocksdb");
+            RocksDBStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
+        };
+        #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+        let storage = {
+            let db_path = context.data_dir.join("jazz.fjall");
+            FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
+        };
         let schema_manager = build_client_schema_manager(&storage, context)
             .expect("rehydrate client schema manager");
         let catalogue_hash = schema_manager.catalogue_state_hash();

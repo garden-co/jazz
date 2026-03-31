@@ -7,7 +7,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, routing::get};
 use base64::Engine;
-use jazz_tools::storage::{FjallStorage, Storage};
+#[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+use jazz_tools::storage::FjallStorage;
+#[cfg(feature = "rocksdb")]
+use jazz_tools::storage::RocksDBStorage;
+use jazz_tools::storage::Storage;
 use jazz_tools::{
     AppContext, AppId, ClientId, ClientStorage, ColumnType, DurabilityTier, JazzClient,
     QueryBuilder, SchemaBuilder, TableSchema, Value,
@@ -266,14 +270,27 @@ async fn wait_for_catalogue_manifest_schema_count_on_disk(
     expected_min_count: usize,
     timeout: Duration,
 ) {
+    #[cfg(feature = "rocksdb")]
+    let db_path = data_root.join("jazz.rocksdb");
+    #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
     let db_path = data_root.join("jazz.fjall");
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last_count = 0usize;
 
     while tokio::time::Instant::now() < deadline {
-        if db_path.exists()
-            && let Ok(storage) = FjallStorage::open(&db_path, 64 * 1024 * 1024)
-        {
+        #[cfg(feature = "rocksdb")]
+        let storage_result = if db_path.exists() {
+            RocksDBStorage::open(&db_path, 64 * 1024 * 1024).ok()
+        } else {
+            None
+        };
+        #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+        let storage_result = if db_path.exists() {
+            FjallStorage::open(&db_path, 64 * 1024 * 1024).ok()
+        } else {
+            None
+        };
+        if let Some(storage) = storage_result {
             let manifest = storage
                 .load_catalogue_manifest(app_id.as_object_id())
                 .ok()
