@@ -296,8 +296,8 @@ function detectPossibleTableRename(
     return undefined;
   }
 
-  const [oldTableName] = removedTables;
-  const [newTableName] = addedTables;
+  const oldTableName = removedTables[0]!;
+  const newTableName = addedTables[0]!;
 
   if (!tableSchemasEqual(fromSchema[oldTableName], toSchema[newTableName])) {
     return undefined;
@@ -442,6 +442,8 @@ function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
 function serializeForwardLenses(forward: readonly Lens[]): PublishedTableLens[] {
   return forward.map((tableLens) => ({
     table: tableLens.table,
+    added: tableLens.added,
+    removed: tableLens.removed,
     renamedFrom: tableLens.renamedFrom,
     operations: tableLens.operations.map((op) => {
       if (op.type === "rename") {
@@ -629,16 +631,30 @@ function renderMigrationBody(
 ): {
   migrateBody?: string;
   renameTablesBody?: string;
+  addedTablesBody?: string;
+  removedTablesBody?: string;
   witnessFrom: WasmSchema;
   witnessTo: WasmSchema;
 } {
   const renameSuggestion = detectPossibleTableRename(fromSchema, toSchema);
+  const addedTables = Object.keys(toSchema)
+    .filter((tableName) => !fromSchema[tableName])
+    .sort();
+  const removedTables = Object.keys(fromSchema)
+    .filter((tableName) => !toSchema[tableName])
+    .sort();
+  const explicitAddedTables = renameSuggestion
+    ? addedTables.filter((tableName) => tableName !== renameSuggestion.newTableName)
+    : addedTables;
+  const explicitRemovedTables = renameSuggestion
+    ? removedTables.filter((tableName) => tableName !== renameSuggestion.oldTableName)
+    : removedTables;
   const changedTables = changedTableNames(fromSchema, toSchema);
   const migratableTables = changedTables.filter(
     (tableName) => fromSchema[tableName] !== undefined && toSchema[tableName] !== undefined,
   );
-  const witnessFromTables = [...migratableTables];
-  const witnessToTables = [...migratableTables];
+  const witnessFromTables = [...migratableTables, ...explicitRemovedTables];
+  const witnessToTables = [...migratableTables, ...explicitAddedTables];
   if (renameSuggestion) {
     witnessFromTables.push(renameSuggestion.oldTableName);
     witnessToTables.push(renameSuggestion.newTableName);
@@ -667,7 +683,11 @@ function renderMigrationBody(
   }
 
   if (lines.length === 0) {
-    if (!renameSuggestion) {
+    if (
+      !renameSuggestion &&
+      explicitAddedTables.length === 0 &&
+      explicitRemovedTables.length === 0
+    ) {
       lines.push(
         changedTables.length === 0
           ? "// TODO: No schema differences were detected."
@@ -678,6 +698,14 @@ function renderMigrationBody(
 
   return {
     migrateBody: lines.length > 0 ? lines.join("\n").trimEnd() : undefined,
+    addedTablesBody:
+      explicitAddedTables.length > 0
+        ? explicitAddedTables.map((tableName) => `${JSON.stringify(tableName)}: true,`).join("\n")
+        : undefined,
+    removedTablesBody:
+      explicitRemovedTables.length > 0
+        ? explicitRemovedTables.map((tableName) => `${JSON.stringify(tableName)}: true,`).join("\n")
+        : undefined,
     renameTablesBody: renameSuggestion
       ? `${renameSuggestion.newTableName}: s.renameTableFrom(${JSON.stringify(renameSuggestion.oldTableName)}),`
       : undefined,
@@ -718,6 +746,14 @@ function renderMigrationStub(input: {
 
   if (rendered.renameTablesBody) {
     sections.push(`  renameTables: {\n${indentBlock(rendered.renameTablesBody, 4)}\n  },`);
+  }
+
+  if (rendered.addedTablesBody) {
+    sections.push(`  addedTables: {\n${indentBlock(rendered.addedTablesBody, 4)}\n  },`);
+  }
+
+  if (rendered.removedTablesBody) {
+    sections.push(`  removedTables: {\n${indentBlock(rendered.removedTablesBody, 4)}\n  },`);
   }
 
   if (rendered.migrateBody) {

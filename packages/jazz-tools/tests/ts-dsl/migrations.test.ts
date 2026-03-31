@@ -123,6 +123,48 @@ describe("typed migration object syntax", () => {
     ]);
   });
 
+  it("serializes explicit table additions and removals", () => {
+    const migration = s.defineMigration({
+      fromHash: "aaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbb",
+      from: {
+        users: s.table({
+          email: s.string(),
+        }),
+        legacyProfiles: s.table({
+          bio: s.string().optional(),
+        }),
+      },
+      to: {
+        users: s.table({
+          email: s.string(),
+        }),
+        profiles: s.table({
+          bio: s.string().optional(),
+        }),
+      },
+      addedTables: {
+        profiles: true,
+      },
+      removedTables: {
+        legacyProfiles: true,
+      },
+    });
+
+    expect(migration.forward).toEqual([
+      {
+        table: "profiles",
+        added: true,
+        operations: [],
+      },
+      {
+        table: "legacyProfiles",
+        removed: true,
+        operations: [],
+      },
+    ]);
+  });
+
   it("typechecks migrate coverage and op shapes", () => {
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
       s.defineMigration({
@@ -203,6 +245,44 @@ describe("typed migration object syntax", () => {
           users: s.table({}),
         },
         migrate: {},
+      });
+
+      // @ts-expect-error target-only tables must be declared in addedTables
+      s.defineMigration({
+        fromHash: "aaaaaaaaaaaa",
+        toHash: "bbbbbbbbbbbb",
+        from: {
+          users: s.table({
+            email: s.string(),
+          }),
+        },
+        to: {
+          users: s.table({
+            email: s.string(),
+          }),
+          profiles: s.table({
+            bio: s.string().optional(),
+          }),
+        },
+      });
+
+      // @ts-expect-error source-only tables must be declared in removedTables
+      s.defineMigration({
+        fromHash: "aaaaaaaaaaaa",
+        toHash: "bbbbbbbbbbbb",
+        from: {
+          users: s.table({
+            email: s.string(),
+          }),
+          legacyProfiles: s.table({
+            bio: s.string().optional(),
+          }),
+        },
+        to: {
+          users: s.table({
+            email: s.string(),
+          }),
+        },
       });
 
       // @ts-expect-error s.renameFrom(...) must point at a removed column with the same type

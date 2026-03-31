@@ -53,10 +53,40 @@ export type RenameTableShape<TFrom extends SchemaLike, TTo extends SchemaLike> =
   [TTable in AddedTableName<TFrom, TTo>]?: RenameTableFromOp<RemovedTableName<TFrom, TTo>>;
 }>;
 
-type RenameTables<TRenameTables> =
-  NonNullable<TRenameTables> extends Record<string, unknown> ? NonNullable<TRenameTables> : {};
+export type AddedTableShape<TFrom extends SchemaLike, TTo extends SchemaLike> = Simplify<{
+  [TTable in AddedTableName<TFrom, TTo>]?: true;
+}>;
+
+export type RemovedTableShape<TFrom extends SchemaLike, TTo extends SchemaLike> = Simplify<{
+  [TTable in RemovedTableName<TFrom, TTo>]?: true;
+}>;
+
+type RenameTables<TRenameTables> = [TRenameTables] extends [Record<string, unknown>]
+  ? TRenameTables
+  : {};
+
+type AddedTables<TAddedTables> = [TAddedTables] extends [Record<string, unknown>]
+  ? TAddedTables
+  : {};
+
+type RemovedTables<TRemovedTables> = [TRemovedTables] extends [Record<string, unknown>]
+  ? TRemovedTables
+  : {};
 
 type RenamedTargetTableName<TRenameTables> = Extract<keyof RenameTables<TRenameTables>, string>;
+type DeclaredAddedTableName<TAddedTables> = Extract<keyof AddedTables<TAddedTables>, string>;
+type DeclaredRemovedTableName<TRemovedTables> = Extract<
+  keyof RemovedTables<TRemovedTables>,
+  string
+>;
+
+type RenamedSourceTableName<TRenameTables> = {
+  [TTable in RenamedTargetTableName<TRenameTables>]: RenameTables<TRenameTables>[TTable] extends RenameTableFromOp<
+    infer TOldName extends string
+  >
+    ? TOldName
+    : never;
+}[RenamedTargetTableName<TRenameTables>];
 
 type MigratedTableName<TFrom extends SchemaLike, TTo extends SchemaLike, TRenameTables> =
   | SharedTableName<TFrom, TTo>
@@ -188,8 +218,7 @@ export type MigrationShape<
   >;
 }>;
 
-type MigrationTables<TMigrate> =
-  NonNullable<TMigrate> extends Record<string, unknown> ? NonNullable<TMigrate> : {};
+type MigrationTables<TMigrate> = [TMigrate] extends [Record<string, unknown>] ? TMigrate : {};
 
 type TableOpsFor<TMigrate, TTable extends string> = TTable extends keyof MigrationTables<TMigrate>
   ? MigrationTables<TMigrate>[TTable] extends Record<string, unknown>
@@ -224,6 +253,37 @@ type UnknownMigrationTables<
 > = Exclude<
   Extract<keyof MigrationTables<TMigrate>, string>,
   MigratedTableName<TFrom, TTo, TRenameTables>
+>;
+
+type UnknownAddedTables<TFrom extends SchemaLike, TTo extends SchemaLike, TAddedTables> = Exclude<
+  DeclaredAddedTableName<TAddedTables>,
+  AddedTableName<TFrom, TTo>
+>;
+
+type UnknownRemovedTables<
+  TFrom extends SchemaLike,
+  TTo extends SchemaLike,
+  TRemovedTables,
+> = Exclude<DeclaredRemovedTableName<TRemovedTables>, RemovedTableName<TFrom, TTo>>;
+
+type MissingAddedTables<
+  TFrom extends SchemaLike,
+  TTo extends SchemaLike,
+  TRenameTables,
+  TAddedTables,
+> = Exclude<
+  AddedTableName<TFrom, TTo>,
+  RenamedTargetTableName<TRenameTables> | DeclaredAddedTableName<TAddedTables>
+>;
+
+type MissingRemovedTables<
+  TFrom extends SchemaLike,
+  TTo extends SchemaLike,
+  TRenameTables,
+  TRemovedTables,
+> = Exclude<
+  RemovedTableName<TFrom, TTo>,
+  RenamedSourceTableName<TRenameTables> | DeclaredRemovedTableName<TRemovedTables>
 >;
 
 type UnknownMigrationColumns<
@@ -385,8 +445,47 @@ type MigrationValidationErrors<
   TFrom extends SchemaLike,
   TTo extends SchemaLike,
   TRenameTables,
+  TAddedTables,
+  TRemovedTables,
   TMigrate,
 > =
+  | (UnknownAddedTables<TFrom, TTo, TAddedTables> extends infer TUnknownAddedTable
+      ? [TUnknownAddedTable] extends [never]
+        ? never
+        : {
+            readonly table: Extract<TUnknownAddedTable, string>;
+            readonly problem: "addedTables may only mention target-only tables";
+          }
+      : never)
+  | (UnknownRemovedTables<TFrom, TTo, TRemovedTables> extends infer TUnknownRemovedTable
+      ? [TUnknownRemovedTable] extends [never]
+        ? never
+        : {
+            readonly table: Extract<TUnknownRemovedTable, string>;
+            readonly problem: "removedTables may only mention source-only tables";
+          }
+      : never)
+  | (MissingAddedTables<TFrom, TTo, TRenameTables, TAddedTables> extends infer TMissingAddedTable
+      ? [TMissingAddedTable] extends [never]
+        ? never
+        : {
+            readonly table: Extract<TMissingAddedTable, string>;
+            readonly problem: "Target-only tables must be covered by addedTables or renameTables";
+          }
+      : never)
+  | (MissingRemovedTables<
+      TFrom,
+      TTo,
+      TRenameTables,
+      TRemovedTables
+    > extends infer TMissingRemovedTable
+      ? [TMissingRemovedTable] extends [never]
+        ? never
+        : {
+            readonly table: Extract<TMissingRemovedTable, string>;
+            readonly problem: "Source-only tables must be covered by removedTables or renameTables";
+          }
+      : never)
   | (UnknownMigrationTables<TFrom, TTo, TRenameTables, TMigrate> extends infer TUnknownTable
       ? [TUnknownTable] extends [never]
         ? never
@@ -404,12 +503,23 @@ type ValidateMigrationConfig<
   TFrom extends SchemaLike,
   TTo extends SchemaLike,
   TRenameTables,
+  TAddedTables,
+  TRemovedTables,
   TMigrate,
-> = [MigrationValidationErrors<TFrom, TTo, TRenameTables, TMigrate>] extends [never]
+> = [
+  MigrationValidationErrors<TFrom, TTo, TRenameTables, TAddedTables, TRemovedTables, TMigrate>,
+] extends [never]
   ? unknown
   : {
-      readonly __migrationValidationError__: "Migration definitions must cover every added or removed column";
-      readonly __migrationErrors__: MigrationValidationErrors<TFrom, TTo, TRenameTables, TMigrate>;
+      readonly __migrationValidationError__: "Migration definitions must cover every added or removed table and column";
+      readonly __migrationErrors__: MigrationValidationErrors<
+        TFrom,
+        TTo,
+        TRenameTables,
+        TAddedTables,
+        TRemovedTables,
+        TMigrate
+      >;
     };
 
 export interface DefinedMigration<
@@ -506,13 +616,85 @@ function buildRenameTableMap(
   return map;
 }
 
+function buildAddedTableSet(
+  addedTables: Record<string, true> | undefined,
+  fromDefinition: Record<string, TableDefinition>,
+  toDefinition: Record<string, TableDefinition>,
+  renameTableMap: ReadonlyMap<string, string>,
+): Set<string> {
+  const set = new Set<string>();
+
+  if (!addedTables) {
+    return set;
+  }
+
+  for (const [tableName, marker] of Object.entries(addedTables)) {
+    if (marker !== true) {
+      throw new Error(`addedTables.${tableName} must be true.`);
+    }
+    if (!(tableName in toDefinition)) {
+      throw new Error(`addedTables references unknown target table ${tableName}.`);
+    }
+    if (tableName in fromDefinition) {
+      throw new Error(
+        `addedTables only supports target-only tables; ${tableName} already exists in the source schema.`,
+      );
+    }
+    if (renameTableMap.has(tableName)) {
+      throw new Error(`Table ${tableName} cannot be both added and renamed.`);
+    }
+
+    set.add(tableName);
+  }
+
+  return set;
+}
+
+function buildRemovedTableSet(
+  removedTables: Record<string, true> | undefined,
+  fromDefinition: Record<string, TableDefinition>,
+  toDefinition: Record<string, TableDefinition>,
+  renamedSources: ReadonlySet<string>,
+): Set<string> {
+  const set = new Set<string>();
+
+  if (!removedTables) {
+    return set;
+  }
+
+  for (const [tableName, marker] of Object.entries(removedTables)) {
+    if (marker !== true) {
+      throw new Error(`removedTables.${tableName} must be true.`);
+    }
+    if (!(tableName in fromDefinition)) {
+      throw new Error(`removedTables references unknown source table ${tableName}.`);
+    }
+    if (tableName in toDefinition) {
+      throw new Error(
+        `removedTables only supports source-only tables; ${tableName} still exists in the target schema.`,
+      );
+    }
+    if (renamedSources.has(tableName)) {
+      throw new Error(`Table ${tableName} cannot be both removed and renamed.`);
+    }
+
+    set.add(tableName);
+  }
+
+  return set;
+}
+
 function buildForwardLenses<
   TFrom extends SchemaLike,
   TTo extends SchemaLike,
   TRenameTables extends RenameTableShape<TFrom, TTo> | undefined,
+  TAddedTables extends AddedTableShape<TFrom, TTo> | undefined,
+  TRemovedTables extends RemovedTableShape<TFrom, TTo> | undefined,
 >(
   migrate: MigrationShape<TFrom, TTo, TRenameTables> | undefined,
   renameTables: TRenameTables | undefined,
+  addedTables: TAddedTables | undefined,
+  removedTables: TRemovedTables | undefined,
   fromDefinition: NormalizedSchema<TFrom>,
   toDefinition: NormalizedSchema<TTo>,
 ): Lens[] {
@@ -521,13 +703,34 @@ function buildForwardLenses<
     fromDefinition as Record<string, TableDefinition>,
     toDefinition as Record<string, TableDefinition>,
   );
-  if (!migrate && renameTableMap.size === 0) {
+  const renamedSources = new Set(renameTableMap.values());
+  const addedTableSet = buildAddedTableSet(
+    addedTables as Record<string, true> | undefined,
+    fromDefinition as Record<string, TableDefinition>,
+    toDefinition as Record<string, TableDefinition>,
+    renameTableMap,
+  );
+  const removedTableSet = buildRemovedTableSet(
+    removedTables as Record<string, true> | undefined,
+    fromDefinition as Record<string, TableDefinition>,
+    toDefinition as Record<string, TableDefinition>,
+    renamedSources,
+  );
+
+  if (
+    !migrate &&
+    renameTableMap.size === 0 &&
+    addedTableSet.size === 0 &&
+    removedTableSet.size === 0
+  ) {
     return [];
   }
 
   const forward: Lens[] = [];
   const orderedTableNames = [
     ...new Set([
+      ...Object.keys((addedTables ?? {}) as Record<string, unknown>),
+      ...Object.keys((removedTables ?? {}) as Record<string, unknown>),
       ...Object.keys((renameTables ?? {}) as Record<string, unknown>),
       ...Object.keys((migrate ?? {}) as Record<string, unknown>),
     ]),
@@ -536,18 +739,36 @@ function buildForwardLenses<
   const targetTables = toDefinition as Record<string, Record<string, AnyTypedColumnBuilder>>;
 
   for (const tableName of orderedTableNames) {
+    const added = addedTableSet.has(tableName) ? true : undefined;
+    const removed = removedTableSet.has(tableName) ? true : undefined;
     const renamedFrom = renameTableMap.get(tableName);
     const rawTableOps = (migrate as Record<string, unknown> | undefined)?.[tableName];
     const tableOps =
       rawTableOps && typeof rawTableOps === "object"
         ? (rawTableOps as Record<string, AddOp | DropOp | RenameOp>)
         : {};
+    const operationEntries = Object.entries(tableOps);
+
+    if (added && removed) {
+      throw new Error(`Table ${tableName} cannot be both added and removed.`);
+    }
+    if ((added || removed) && renamedFrom) {
+      throw new Error(
+        `Table ${tableName} cannot be combined with both table markers and renameTables.`,
+      );
+    }
+    if ((added || removed) && operationEntries.length > 0) {
+      throw new Error(
+        `Table ${tableName} cannot have column operations when declared in addedTables or removedTables.`,
+      );
+    }
+
     const operations: TableLens["operations"] = [];
     const renamedSources = new Set<string>();
     const droppedColumns = new Set<string>();
     const sourceTableName = renamedFrom ?? tableName;
 
-    for (const [columnName, operation] of Object.entries(tableOps)) {
+    for (const [columnName, operation] of operationEntries) {
       switch (operation._type) {
         case "rename": {
           assertUserColumnNameAllowed(columnName);
@@ -609,9 +830,11 @@ function buildForwardLenses<
       }
     }
 
-    if (renamedFrom || operations.length > 0) {
+    if (added || removed || renamedFrom || operations.length > 0) {
       forward.push({
         table: tableName,
+        added,
+        removed,
         renamedFrom,
         operations,
       });
@@ -629,6 +852,8 @@ export function defineMigration<
   const TFrom extends SchemaLike,
   const TTo extends SchemaLike,
   const TRenameTables extends RenameTableShape<TFrom, TTo> | undefined = undefined,
+  const TAddedTables extends AddedTableShape<TFrom, TTo> | undefined = undefined,
+  const TRemovedTables extends RemovedTableShape<TFrom, TTo> | undefined = undefined,
   const TMigrate extends MigrationShape<TFrom, TTo, TRenameTables> | undefined = undefined,
 >(
   config: {
@@ -637,8 +862,10 @@ export function defineMigration<
     from: TFrom;
     to: TTo;
     renameTables?: TRenameTables;
+    addedTables?: TAddedTables;
+    removedTables?: TRemovedTables;
     migrate?: TMigrate;
-  } & ValidateMigrationConfig<TFrom, TTo, TRenameTables, TMigrate>,
+  } & ValidateMigrationConfig<TFrom, TTo, TRenameTables, TAddedTables, TRemovedTables, TMigrate>,
 ): DefinedMigration<TFrom, TTo> {
   const fromDefinition = normalizeSchemaDefinition(
     config.from as SchemaDefinition,
@@ -652,6 +879,13 @@ export function defineMigration<
     toHash: config.toHash,
     from: config.from,
     to: config.to,
-    forward: buildForwardLenses(config.migrate, config.renameTables, fromDefinition, toDefinition),
+    forward: buildForwardLenses(
+      config.migrate,
+      config.renameTables,
+      config.addedTables,
+      config.removedTables,
+      fromDefinition,
+      toDefinition,
+    ),
   };
 }

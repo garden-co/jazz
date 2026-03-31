@@ -233,21 +233,21 @@ impl QueryManager {
         id: ObjectId,
         branches: &[String],
     ) -> Option<(String, String, Vec<u8>, CommitId)> {
-        let schema_context = self.schema_context.clone();
-        let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
+        let schema_context = &self.schema_context;
+        let branch_schema_map = Self::branch_schema_map_for_context(schema_context);
         let obj = self
             .sync_manager
             .object_manager
             .get_or_load(id, storage, branches)?;
         let table_hint = obj.metadata.get(MetadataKey::Table.as_str())?.clone();
-        let current_table = resolve_table_name_for_context(&schema_context, &table_hint)
+        let current_table = resolve_table_name_for_context(schema_context, &table_hint)
             .as_str()
             .to_string();
         let mut schema_warnings = SchemaWarningAccumulator::default();
         let mut transform_context = RowTransformContext {
             table: &current_table,
             branch_schema_map: &branch_schema_map,
-            schema_context: &schema_context,
+            schema_context,
             schema_warnings: &mut schema_warnings,
         };
         Self::resolve_latest_row_with_schema_transform(id, obj, branches, &mut transform_context)

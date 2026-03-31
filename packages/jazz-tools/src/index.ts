@@ -144,9 +144,11 @@ export type {
 } from "./typed-app.js";
 export type {
   DefinedMigration,
+  AddedTableShape,
   MigrationShape,
   MigrationTableShape,
   RenameTableShape,
+  RemovedTableShape,
 } from "./migrations.js";
 
 type RuntimeSchemaNamespace = typeof col & {

@@ -372,7 +372,7 @@ describe("cli migrations", () => {
     );
   });
 
-  it("skips table add/drop steps when inferring a migration stub", async () => {
+  it("renders addedTables and removedTables when inferring table add/drop steps", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
     const fromHash = "abababababababababababababababababababababababababababababababab";
@@ -431,10 +431,10 @@ describe("cli migrations", () => {
     const generated = await readFile(filePath, "utf8");
     expect(generated).toContain('"todos": {');
     expect(generated).toContain('"notes": s.add.string({ default: null }),');
-    expect(generated).not.toContain("createTable");
-    expect(generated).not.toContain("dropTable");
-    expect(generated).not.toContain('"legacy_users"');
-    expect(generated).not.toContain('"users"');
+    expect(generated).toContain("addedTables: {");
+    expect(generated).toContain('"users": true,');
+    expect(generated).toContain("removedTables: {");
+    expect(generated).toContain('"legacy_users": true,');
   });
 
   it("suggests renameTables for a single exact table rename", async () => {
@@ -630,6 +630,89 @@ export default s.defineMigration({
               value: "email_address",
             },
           ],
+        },
+      ]);
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pushMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("pushes explicit addedTables and removedTables via the admin migrations payload", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+
+    const fromHash = "1111111111111111111111111111111111111111111111111111111111111111";
+    const toHash = "2222222222222222222222222222222222222222222222222222222222222222";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+    const migrationPath = join(
+      migrationsDir,
+      `20260318-table-add-drop-${fromShortHash}-${toShortHash}.ts`,
+    );
+
+    await writeFile(
+      migrationPath,
+      `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export default s.defineMigration({
+  addedTables: {
+    profiles: true,
+  },
+  removedTables: {
+    legacy_profiles: true,
+  },
+  fromHash: ${JSON.stringify(fromShortHash)},
+  toHash: ${JSON.stringify(toShortHash)},
+  from: {
+    users: s.table({
+      email: s.string(),
+    }),
+    legacy_profiles: s.table({
+      bio: s.string().optional(),
+    }),
+  },
+  to: {
+    users: s.table({
+      email: s.string(),
+    }),
+    profiles: s.table({
+      bio: s.string().optional(),
+    }),
+  },
+});
+`,
+    );
+
+    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      if (_input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      const body = JSON.parse(String(init?.body));
+      expect(body.fromHash).toBe(fromHash);
+      expect(body.toHash).toBe(toHash);
+      expect(body.forward).toEqual([
+        {
+          table: "profiles",
+          added: true,
+          operations: [],
+        },
+        {
+          table: "legacy_profiles",
+          removed: true,
+          operations: [],
         },
       ]);
       return new Response(JSON.stringify({ ok: true }), { status: 201 });
