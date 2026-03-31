@@ -3648,6 +3648,33 @@ async fn events_handler(
         }
     }
 
+    #[cfg(feature = "otel")]
+    let auth_type = if is_backend && !has_session_header {
+        "backend"
+    } else if is_backend && has_session_header {
+        "backend_impersonation"
+    } else if headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .map_or(false, |v| v.starts_with("Bearer "))
+    {
+        "jwt"
+    } else if headers
+        .get("X-Jazz-Local-Mode")
+        .and_then(|v| v.to_str().ok())
+        == Some("anonymous")
+    {
+        "anonymous"
+    } else if headers
+        .get("X-Jazz-Local-Mode")
+        .and_then(|v| v.to_str().ok())
+        == Some("demo")
+    {
+        "demo"
+    } else {
+        "unknown"
+    };
+
     let catalogue_state_hash = match state.workers.get_catalogue_state_hash(app_id).await {
         Ok(hash) => Some(hash),
         Err(err) => {
@@ -3689,6 +3716,31 @@ async fn events_handler(
         connection_id,
         "events stream connected"
     );
+
+    #[cfg(feature = "otel")]
+    {
+        let meter = opentelemetry::global::meter("jazz-cloud-server");
+        let active = meter
+            .i64_up_down_counter("jazz.sync.connections.active")
+            .build();
+        let total = meter.u64_counter("jazz.sync.connections.total").build();
+        let attrs = vec![
+            opentelemetry::KeyValue::new("app_id", app_id.to_string()),
+            opentelemetry::KeyValue::new("env", cfg.env.clone()),
+            opentelemetry::KeyValue::new("worker", worker as i64),
+            opentelemetry::KeyValue::new("auth_type", auth_type),
+        ];
+        active.add(1, &attrs);
+        total.add(1, &attrs);
+    }
+
+    #[cfg(feature = "otel")]
+    let connect_attrs = vec![
+        opentelemetry::KeyValue::new("app_id", app_id.to_string()),
+        opentelemetry::KeyValue::new("env", cfg.env.clone()),
+        opentelemetry::KeyValue::new("worker", worker as i64),
+        opentelemetry::KeyValue::new("auth_type", auth_type),
+    ];
 
     let mut sync_rx = app.sync_broadcast.subscribe();
     let mut shutdown_rx = state.shutdown_tx.subscribe();
@@ -3741,6 +3793,15 @@ async fn events_handler(
 
         let mut connections = app_cleanup.connections.write().await;
         connections.remove(&connection_id);
+
+        #[cfg(feature = "otel")]
+        {
+            let meter = opentelemetry::global::meter("jazz-cloud-server");
+            let active = meter
+                .i64_up_down_counter("jazz.sync.connections.active")
+                .build();
+            active.add(-1, &connect_attrs);
+        }
     };
 
     Ok(axum::response::Response::builder()
