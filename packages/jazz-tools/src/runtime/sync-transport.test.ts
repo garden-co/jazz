@@ -117,8 +117,8 @@ describe("sync-transport", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
-    const firstBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    const secondBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
+    const firstBody = JSON.parse(fetchMock.mock.calls[0]![1].body as string);
+    const secondBody = JSON.parse(fetchMock.mock.calls[1]![1].body as string);
 
     expect(firstBody.client_id).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
@@ -137,7 +137,7 @@ describe("sync-transport", () => {
       jwtToken: "token",
     });
 
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    const body = JSON.parse(fetchMock.mock.calls[0]![1].body as string);
     expect(body.client_id).toBe(providedClientId);
   });
 
@@ -171,7 +171,7 @@ describe("sync-transport", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/apps/app-123/sync");
+    expect(fetchMock.mock.calls[0]![0]).toBe("http://localhost:3000/apps/app-123/sync");
   });
 
   it("posts non-catalogue payloads with backend secret when provided", async () => {
@@ -184,13 +184,13 @@ describe("sync-transport", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+    expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
       "Content-Type": "application/json",
       "X-Jazz-Backend-Secret": "backend-secret",
     });
-    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("Authorization");
-    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("X-Jazz-Local-Mode");
-    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("X-Jazz-Local-Token");
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("Authorization");
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Mode");
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Token");
   });
 
   it("skips catalogue payload sync when admin secret is missing", async () => {
@@ -235,13 +235,13 @@ describe("sync-transport", () => {
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+    expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
       "Content-Type": "application/json",
       "X-Jazz-Admin-Secret": "admin-secret",
     });
-    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("Authorization");
-    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("X-Jazz-Local-Mode");
-    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("X-Jazz-Local-Token");
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("Authorization");
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Mode");
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Token");
   });
 
   it("posts link-external with bearer and local auth headers", async () => {
@@ -266,11 +266,11 @@ describe("sync-transport", () => {
 
     expect(result.created).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe(
+    expect(fetchMock.mock.calls[0]![0]).toBe(
       "http://localhost:3000/apps/app-123/auth/link-external",
     );
-    expect(fetchMock.mock.calls[0][1].method).toBe("POST");
-    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+    expect(fetchMock.mock.calls[0]![1].method).toBe("POST");
+    expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
       Authorization: "Bearer jwt-token",
       "X-Jazz-Local-Mode": "anonymous",
       "X-Jazz-Local-Token": "device-token",
@@ -294,7 +294,11 @@ describe("sync-transport", () => {
   it("stream controller attaches on Connected and forwards sync payloads", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       streamResponse([
-        { type: "Connected", client_id: "server-client-1" },
+        {
+          type: "Connected",
+          client_id: "server-client-1",
+          catalogue_state_hash: "catalogue-1",
+        },
         { type: "SyncUpdate", payload: { Ping: {} } },
       ]),
     );
@@ -319,6 +323,7 @@ describe("sync-transport", () => {
     controller.start("http://localhost:3000");
 
     await vi.waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
+    expect(onConnected).toHaveBeenCalledWith("catalogue-1");
     await vi.waitFor(() =>
       expect(onSyncMessage).toHaveBeenCalledWith(JSON.stringify({ Ping: {} })),
     );
@@ -379,11 +384,11 @@ describe("sync-transport", () => {
     controller.start("http://localhost:3000");
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 
-    expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+    expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
       Accept: "application/octet-stream",
       "X-Jazz-Backend-Secret": "backend-secret",
     });
-    expect(fetchMock.mock.calls[0][1].headers).not.toHaveProperty("Authorization");
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("Authorization");
 
     controller.stop();
   });
@@ -439,7 +444,13 @@ describe("sync-transport", () => {
   });
 
   it("labels callback failures separately from parse failures", async () => {
-    const response = streamResponse([{ type: "Connected", client_id: "server-client-4" }]);
+    const response = streamResponse([
+      {
+        type: "Connected",
+        client_id: "server-client-4",
+        catalogue_state_hash: "catalogue-4",
+      },
+    ]);
     const reader = response.body!.getReader();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -458,10 +469,60 @@ describe("sync-transport", () => {
     expect(errorSpy).not.toHaveBeenCalledWith("[client] Stream parse error:", expect.any(Error));
   });
 
+  it("logs schema warnings that arrive over the stream", async () => {
+    const response = streamResponse([
+      {
+        type: "SyncUpdate",
+        payload: {
+          SchemaWarning: {
+            queryId: 7,
+            tableName: "todos",
+            rowCount: 3,
+            fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          },
+        },
+      },
+    ]);
+    const reader = response.body!.getReader();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const onSyncMessage = vi.fn();
+
+    await readBinaryFrames(
+      reader,
+      {
+        onSyncMessage,
+      },
+      "[client] ",
+    );
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[client] Detected 3 rows of todos with differing schema versions."),
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("npx jazz-tools migrations create aaaaaaaaaaaa bbbbbbbbbbbb"),
+    );
+    expect(onSyncMessage).toHaveBeenCalledWith(
+      JSON.stringify({
+        SchemaWarning: {
+          queryId: 7,
+          tableName: "todos",
+          rowCount: 3,
+          fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        },
+      }),
+    );
+  });
+
   it("runtime-bound stream controller maps stream events to runtime hooks", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       streamResponse([
-        { type: "Connected", client_id: "server-client-3" },
+        {
+          type: "Connected",
+          client_id: "server-client-3",
+          catalogue_state_hash: "catalogue-3",
+        },
         { type: "SyncUpdate", payload: { Ping: {} } },
       ]),
     );
@@ -486,6 +547,7 @@ describe("sync-transport", () => {
     controller.start("http://localhost:3000");
 
     await vi.waitFor(() => expect(runtime.addServer).toHaveBeenCalledTimes(1));
+    expect(runtime.addServer).toHaveBeenCalledWith("catalogue-3");
     await vi.waitFor(() =>
       expect(runtime.onSyncMessageReceived).toHaveBeenCalledWith(JSON.stringify({ Ping: {} })),
     );
@@ -546,12 +608,12 @@ describe("sync-transport", () => {
 
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
 
-      const requestBody = JSON.parse(fetchMock.mock.calls[0][1].body as string) as {
+      const requestBody = JSON.parse(fetchMock.mock.calls[0]![1].body as string) as {
         payloads: unknown[];
       };
       expect(requestBody.payloads).toEqual([JSON.parse(payloadJson)]);
-      expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/sync");
-      expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+      expect(fetchMock.mock.calls[0]![0]).toBe("http://localhost:3000/sync");
+      expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
         "X-Jazz-Backend-Secret": "backend-secret",
       });
     },
@@ -599,13 +661,13 @@ describe("sync-transport", () => {
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
 
-      const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+      const body = JSON.parse(fetchMock.mock.calls[0]![1].body as string);
       expect(body.payloads).toHaveLength(3);
       expect(body.client_id).toBe("client-alice");
       // Each element is the parsed payload, not the raw JSON string
-      expect(body.payloads[0]).toEqual(JSON.parse(payloads[0]));
-      expect(body.payloads[1]).toEqual(JSON.parse(payloads[1]));
-      expect(body.payloads[2]).toEqual(JSON.parse(payloads[2]));
+      expect(body.payloads[0]!).toEqual(JSON.parse(payloads[0]!));
+      expect(body.payloads[1]!).toEqual(JSON.parse(payloads[1]!));
+      expect(body.payloads[2]!).toEqual(JSON.parse(payloads[2]!));
     });
 
     it("preserves payload order in the POST body", async () => {
@@ -627,10 +689,10 @@ describe("sync-transport", () => {
         jwtToken: "bob-token",
       });
 
-      const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-      expect(body.payloads[0].ObjectUpdated.object_id).toBe("p1");
-      expect(body.payloads[1].ObjectUpdated.object_id).toBe("p2");
-      expect(body.payloads[2].ObjectUpdated.object_id).toBe("p3");
+      const body = JSON.parse(fetchMock.mock.calls[0]![1].body as string);
+      expect(body.payloads[0]!.ObjectUpdated.object_id).toBe("p1");
+      expect(body.payloads[1]!.ObjectUpdated.object_id).toBe("p2");
+      expect(body.payloads[2]!.ObjectUpdated.object_id).toBe("p3");
     });
 
     it("applies JWT auth header", async () => {
@@ -641,7 +703,7 @@ describe("sync-transport", () => {
         jwtToken: "alice-jwt",
       });
 
-      expect(fetchMock.mock.calls[0][1].headers).toMatchObject({
+      expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
         Authorization: "Bearer alice-jwt",
       });
     });
@@ -655,7 +717,7 @@ describe("sync-transport", () => {
         pathPrefix: "apps/app-42",
       });
 
-      expect(fetchMock.mock.calls[0][0]).toBe("http://localhost:3000/apps/app-42/sync");
+      expect(fetchMock.mock.calls[0]![0]).toBe("http://localhost:3000/apps/app-42/sync");
     });
 
     it("throws on non-2xx response", async () => {

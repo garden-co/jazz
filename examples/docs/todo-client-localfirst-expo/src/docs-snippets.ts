@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools/react-native";
-import { app } from "../schema/app";
+import { app } from "../schema";
 
 const EXAMPLE_TODO_ID = "00000000-0000-0000-0000-000000000000";
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";
@@ -30,7 +30,7 @@ export async function whereExamples(db: Db) {
 
   // Explicit operators
   await db.all(app.todos.where({ title: { contains: "milk" } }));
-  await db.all(app.todos.where({ project: { ne: EXAMPLE_PROJECT_ID } }));
+  await db.all(app.todos.where({ projectId: { ne: EXAMPLE_PROJECT_ID } }));
 }
 // #endregion where-operators-expo
 
@@ -39,7 +39,7 @@ export async function includeExamples(db: Db) {
   // Load each todo's project and parent in one shot
   const todos = await db.all(app.todos.include({ project: true, parent: true }));
 
-  // Reverse relations: project FK on todos creates todosViaProject on projects
+  // Reverse relations: projectId FK on todos creates todosViaProject on projects
   const projects = await db.all(app.projects.include({ todosViaProject: true }));
 
   // Nested: load project, and for each project, load its todos
@@ -104,8 +104,8 @@ export async function writeWithDurabilityTier(db: Db, todoTitle: string) {
     {
       title: todoTitle,
       done: false,
-      owner_id: EXAMPLE_OWNER_ID,
-      project: EXAMPLE_PROJECT_ID,
+      ownerId: EXAMPLE_OWNER_ID,
+      projectId: EXAMPLE_PROJECT_ID,
     },
     { tier: "worker" },
   );

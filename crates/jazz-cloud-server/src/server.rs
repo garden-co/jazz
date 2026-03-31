@@ -27,10 +27,12 @@ use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::QueryBuilder;
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{
-    ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName, TableSchema, Value,
+    ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies,
+    TableSchema, Value,
 };
 use jazz_tools::runtime_core::ReadDurabilityOptions;
 use jazz_tools::runtime_tokio::TokioRuntime;
+use jazz_tools::schema_manager::manager::PermissionsHeadSummary;
 use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
 use jazz_tools::storage::FjallStorage;
 use jazz_tools::sync_manager::{
@@ -46,7 +48,13 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
-const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+const DEFAULT_JWKS_CACHE_TTL_SECS: u64 = 300;
+/// Minimum interval between forced JWKS refreshes. Prevents unauthenticated
+/// callers from triggering unbounded outbound fetches by sending JWTs with
+/// fabricated key IDs.
+const JWKS_FORCED_REFRESH_COOLDOWN: Duration = Duration::from_secs(10);
+/// Maximum time a stale keyset is served after TTL expiry.
+const DEFAULT_JWKS_MAX_STALE_SECS: u64 = 300;
 const WORKER_SYNC_QUEUE_CAPACITY: usize = 4096;
 const WORKER_APP_QUANTUM: usize = 1;
 const LOCAL_MODE_HEADER: &str = "X-Jazz-Local-Mode";
@@ -219,6 +227,16 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
               <input type="text" id="admin-secret" placeholder="auto-generated if empty" />
             </label>
           </div>
+          <div class="row">
+            <label>
+              JWKS cache TTL (seconds)
+              <input type="number" id="jwks-cache-ttl-secs" min="0" step="1" placeholder="300" />
+            </label>
+            <label>
+              JWKS max stale (seconds)
+              <input type="number" id="jwks-max-stale-secs" min="0" step="1" placeholder="300" />
+            </label>
+          </div>
           <div class="checkboxes">
             <label><input type="checkbox" id="allow-anonymous" checked /> Allow anonymous local auth</label>
             <label><input type="checkbox" id="allow-demo" checked /> Allow demo local auth</label>
@@ -301,6 +319,20 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
         return "*".repeat(Math.max(8, Math.min(secret.length, 24)));
       }
 
+      function readOptionalSecondsValue(input, label) {
+        const raw = input.value.trim();
+        if (!raw) {
+          return null;
+        }
+
+        const parsed = Number.parseInt(raw, 10);
+        if (!Number.isInteger(parsed) || parsed < 0) {
+          throw new Error(`${label} must be a non-negative integer.`);
+        }
+
+        return parsed;
+      }
+
       async function loadApps() {
         const apps = await api("/manage/api/apps");
         appsBodyEl.textContent = "";
@@ -331,7 +363,7 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           const authCell = document.createElement("td");
           const authSummary = document.createElement("div");
           authSummary.className = "muted";
-          authSummary.textContent = `${app.allow_anonymous ? "anonymous:on" : "anonymous:off"}, ${app.allow_demo ? "demo:on" : "demo:off"}`;
+          authSummary.textContent = `${app.allow_anonymous ? "anonymous:on" : "anonymous:off"}, ${app.allow_demo ? "demo:on" : "demo:off"}, ttl:${app.jwks_cache_ttl_secs}s, max-stale:${app.jwks_max_stale_secs}s`;
           authCell.appendChild(authSummary);
 
           const authEditor = document.createElement("div");
@@ -362,6 +394,20 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           jwksInput.placeholder = "JWKS endpoint (blank disables JWT auth)";
           jwksInput.value = app.jwks_endpoint || "";
 
+          const jwksCacheTtlInput = document.createElement("input");
+          jwksCacheTtlInput.type = "number";
+          jwksCacheTtlInput.min = "0";
+          jwksCacheTtlInput.step = "1";
+          jwksCacheTtlInput.placeholder = "JWKS cache TTL (seconds)";
+          jwksCacheTtlInput.value = String(app.jwks_cache_ttl_secs ?? 300);
+
+          const jwksMaxStaleInput = document.createElement("input");
+          jwksMaxStaleInput.type = "number";
+          jwksMaxStaleInput.min = "0";
+          jwksMaxStaleInput.step = "1";
+          jwksMaxStaleInput.placeholder = "JWKS max stale (seconds)";
+          jwksMaxStaleInput.value = String(app.jwks_max_stale_secs ?? 300);
+
           const saveAuthButton = document.createElement("button");
           saveAuthButton.type = "button";
           saveAuthButton.className = "secondary";
@@ -369,13 +415,28 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           saveAuthButton.addEventListener("click", async () => {
             saveAuthButton.disabled = true;
             try {
+              const payload = {
+                allow_anonymous: anonymousCheckbox.checked,
+                allow_demo: demoCheckbox.checked,
+                jwks_endpoint: jwksInput.value.trim(),
+              };
+              const jwksCacheTtlSecs = readOptionalSecondsValue(
+                jwksCacheTtlInput,
+                "JWKS cache TTL"
+              );
+              const jwksMaxStaleSecs = readOptionalSecondsValue(
+                jwksMaxStaleInput,
+                "JWKS max stale"
+              );
+              if (jwksCacheTtlSecs !== null) {
+                payload.jwks_cache_ttl_secs = jwksCacheTtlSecs;
+              }
+              if (jwksMaxStaleSecs !== null) {
+                payload.jwks_max_stale_secs = jwksMaxStaleSecs;
+              }
               await api(`/manage/api/apps/${encodeURIComponent(app.app_id)}/auth`, {
                 method: "PATCH",
-                body: JSON.stringify({
-                  allow_anonymous: anonymousCheckbox.checked,
-                  allow_demo: demoCheckbox.checked,
-                  jwks_endpoint: jwksInput.value.trim(),
-                }),
+                body: JSON.stringify(payload),
               });
               setStatus(`Saved auth config for ${app.app_id}`);
               await loadApps();
@@ -388,6 +449,8 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
 
           authEditor.appendChild(flags);
           authEditor.appendChild(jwksInput);
+          authEditor.appendChild(jwksCacheTtlInput);
+          authEditor.appendChild(jwksMaxStaleInput);
           authEditor.appendChild(saveAuthButton);
           authCell.appendChild(authEditor);
 
@@ -533,6 +596,26 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
           payload.admin_secret = adminSecret;
         }
 
+        try {
+          const jwksCacheTtlSecs = readOptionalSecondsValue(
+            document.getElementById("jwks-cache-ttl-secs"),
+            "JWKS cache TTL"
+          );
+          const jwksMaxStaleSecs = readOptionalSecondsValue(
+            document.getElementById("jwks-max-stale-secs"),
+            "JWKS max stale"
+          );
+          if (jwksCacheTtlSecs !== null) {
+            payload.jwks_cache_ttl_secs = jwksCacheTtlSecs;
+          }
+          if (jwksMaxStaleSecs !== null) {
+            payload.jwks_max_stale_secs = jwksMaxStaleSecs;
+          }
+        } catch (error) {
+          setStatus(error.message || String(error), true);
+          return;
+        }
+
         if (!payload.app_name) {
           setStatus("App name is required.", true);
           return;
@@ -567,6 +650,14 @@ const MANAGEMENT_PAGE_HTML: &str = r##"<!doctype html>
   </body>
 </html>
 "##;
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CatalogueAuthorityMode {
+    #[default]
+    Local,
+    Forward,
+}
 type ClientSyncUpdate = (ClientId, u64, SyncPayload);
 type ClientSendSeqMap = Arc<Mutex<HashMap<ClientId, u64>>>;
 
@@ -617,6 +708,7 @@ pub struct ServerConfig {
     pub internal_api_secret: String,
     pub secret_hash_key: String,
     pub worker_threads: usize,
+    pub catalogue_authority: CatalogueAuthorityMode,
 }
 
 struct WorkerPool {
@@ -679,9 +771,29 @@ enum WorkerCommand {
         schema_hash: SchemaHash,
         response: tokio::sync::oneshot::Sender<Result<Option<Schema>, String>>,
     },
+    PublishSchema {
+        app_id: AppId,
+        schema: Schema,
+        response: tokio::sync::oneshot::Sender<Result<ObjectId, String>>,
+    },
+    PublishPermissions {
+        app_id: AppId,
+        schema_hash: SchemaHash,
+        permissions: HashMap<TableName, TablePolicies>,
+        expected_parent_bundle_object_id: Option<ObjectId>,
+        response: tokio::sync::oneshot::Sender<Result<Option<PermissionsHeadSummary>, String>>,
+    },
+    GetPermissionsHead {
+        app_id: AppId,
+        response: tokio::sync::oneshot::Sender<Result<Option<PermissionsHeadSummary>, String>>,
+    },
     GetSchemaHashes {
         app_id: AppId,
         response: tokio::sync::oneshot::Sender<Result<Vec<String>, String>>,
+    },
+    GetCatalogueStateHash {
+        app_id: AppId,
+        response: tokio::sync::oneshot::Sender<Result<String, String>>,
     },
 }
 
@@ -695,7 +807,11 @@ impl WorkerCommand {
             | WorkerCommand::SyncAsBackend { app_id, .. }
             | WorkerCommand::SyncAsAdmin { app_id, .. }
             | WorkerCommand::GetCatalogueSchema { app_id, .. }
-            | WorkerCommand::GetSchemaHashes { app_id, .. } => *app_id,
+            | WorkerCommand::PublishSchema { app_id, .. }
+            | WorkerCommand::PublishPermissions { app_id, .. }
+            | WorkerCommand::GetPermissionsHead { app_id, .. }
+            | WorkerCommand::GetSchemaHashes { app_id, .. }
+            | WorkerCommand::GetCatalogueStateHash { app_id, .. } => *app_id,
         }
     }
 }
@@ -947,6 +1063,65 @@ impl WorkerPool {
         }
     }
 
+    async fn publish_schema(
+        &self,
+        app_id: AppId,
+        schema: Schema,
+    ) -> Result<ObjectId, WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::PublishSchema {
+            app_id,
+            schema,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        match response_rx.await {
+            Ok(Ok(object_id)) => Ok(object_id),
+            Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
+            Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
+        }
+    }
+
+    async fn publish_permissions(
+        &self,
+        app_id: AppId,
+        schema_hash: SchemaHash,
+        permissions: HashMap<TableName, TablePolicies>,
+        expected_parent_bundle_object_id: Option<ObjectId>,
+    ) -> Result<Option<PermissionsHeadSummary>, WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::PublishPermissions {
+            app_id,
+            schema_hash,
+            permissions,
+            expected_parent_bundle_object_id,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        match response_rx.await {
+            Ok(Ok(head)) => Ok(head),
+            Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
+            Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
+        }
+    }
+
+    async fn get_permissions_head(
+        &self,
+        app_id: AppId,
+    ) -> Result<Option<PermissionsHeadSummary>, WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::GetPermissionsHead {
+            app_id,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        match response_rx.await {
+            Ok(Ok(head)) => Ok(head),
+            Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
+            Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
+        }
+    }
+
     async fn get_schema_hashes(&self, app_id: AppId) -> Result<Vec<String>, WorkerDispatchError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         let command = WorkerCommand::GetSchemaHashes {
@@ -956,6 +1131,20 @@ impl WorkerPool {
         let worker = self.send_command(command)?;
         match response_rx.await {
             Ok(Ok(schema_hashes)) => Ok(schema_hashes),
+            Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
+            Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
+        }
+    }
+
+    async fn get_catalogue_state_hash(&self, app_id: AppId) -> Result<String, WorkerDispatchError> {
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        let command = WorkerCommand::GetCatalogueStateHash {
+            app_id,
+            response: response_tx,
+        };
+        let worker = self.send_command(command)?;
+        match response_rx.await {
+            Ok(Ok(catalogue_state_hash)) => Ok(catalogue_state_hash),
             Ok(Err(message)) => Err(WorkerDispatchError::RuntimeError { worker, message }),
             Err(_) => Err(WorkerDispatchError::WorkerUnavailable { worker }),
         }
@@ -1039,11 +1228,23 @@ impl AppStatus {
 struct AppConfig {
     app_name: String,
     jwks_endpoint: String,
+    jwks_cache_ttl_secs: u64,
+    jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
     backend_secret_hash: String,
     admin_secret_hash: String,
     status: AppStatus,
+}
+
+impl AppConfig {
+    fn jwks_cache_ttl(&self) -> Duration {
+        Duration::from_secs(self.jwks_cache_ttl_secs)
+    }
+
+    fn jwks_max_stale(&self) -> Duration {
+        Duration::from_secs(self.jwks_max_stale_secs)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1052,6 +1253,8 @@ struct MetaAppRow {
     app_id: AppId,
     app_name: String,
     jwks_endpoint: String,
+    jwks_cache_ttl_secs: u64,
+    jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
     backend_secret_hash: String,
@@ -1092,6 +1295,30 @@ fn descriptor_value<'a>(
         .and_then(|index| values.get(index))
 }
 
+fn encode_u64_config_value(field: &str, value: u64) -> Result<Value, String> {
+    let encoded = i64::try_from(value).map_err(|_| format!("{field} is out of range"))?;
+    Ok(Value::BigInt(encoded))
+}
+
+fn decode_u64_config_value(
+    descriptor: &RowDescriptor,
+    values: &[Value],
+    field: &str,
+    default: u64,
+) -> Result<u64, String> {
+    match descriptor_value(descriptor, values, field) {
+        Some(Value::BigInt(value)) => u64::try_from(*value)
+            .map_err(|_| format!("meta row field {field} expected non-negative bigint")),
+        Some(Value::Integer(value)) => u64::try_from(*value)
+            .map_err(|_| format!("meta row field {field} expected non-negative integer")),
+        Some(Value::Timestamp(value)) => Ok(*value),
+        Some(other) => Err(format!(
+            "meta row field {field} expected integer-compatible numeric value, got {other:?}"
+        )),
+        None => Ok(default),
+    }
+}
+
 impl MetaStore {
     fn new(data_root: &Path, secret_hash_key: String) -> Result<Self, String> {
         let meta_dir = data_root.join("meta");
@@ -1104,6 +1331,8 @@ impl MetaStore {
                     .column("app_id", ColumnType::Uuid)
                     .column("app_name", ColumnType::Text)
                     .column("jwks_endpoint", ColumnType::Text)
+                    .column("jwks_cache_ttl_secs", ColumnType::BigInt)
+                    .column("jwks_max_stale_secs", ColumnType::BigInt)
                     .column("allow_anonymous", ColumnType::Boolean)
                     .column("allow_demo", ColumnType::Boolean)
                     .column("backend_secret_hash", ColumnType::Text)
@@ -1224,6 +1453,8 @@ impl MetaStore {
         app_id: AppId,
         app_name: String,
         jwks_endpoint: String,
+        jwks_cache_ttl_secs: u64,
+        jwks_max_stale_secs: u64,
         allow_anonymous: bool,
         allow_demo: bool,
         backend_secret_hash: String,
@@ -1232,11 +1463,9 @@ impl MetaStore {
         admin_secret: Option<String>,
     ) -> Result<MetaAppRow, String> {
         let now = now_timestamp_us();
-        let values: Vec<Value> = self
-            .apps_insert_descriptor
-            .columns
-            .iter()
-            .map(|column| match column.name.as_str() {
+        let mut values = HashMap::with_capacity(self.apps_insert_descriptor.columns.len());
+        for column in &self.apps_insert_descriptor.columns {
+            let value = match column.name.as_str() {
                 "admin_secret" => match &admin_secret {
                     Some(value) => Value::Text(value.clone()),
                     None => Value::Null,
@@ -1249,11 +1478,18 @@ impl MetaStore {
                 "backend_secret_hash" => Value::Text(backend_secret_hash.clone()),
                 "created_at" => Value::Timestamp(now),
                 "jwks_endpoint" => Value::Text(jwks_endpoint.clone()),
+                "jwks_cache_ttl_secs" => {
+                    encode_u64_config_value("jwks_cache_ttl_secs", jwks_cache_ttl_secs)?
+                }
+                "jwks_max_stale_secs" => {
+                    encode_u64_config_value("jwks_max_stale_secs", jwks_max_stale_secs)?
+                }
                 "status" => Value::Text(status.as_str().to_string()),
                 "updated_at" => Value::Timestamp(now),
                 other => panic!("unexpected meta apps column {other}"),
-            })
-            .collect();
+            };
+            values.insert(column.name.to_string(), value);
+        }
 
         let (object_id, _row_values) = self
             .runtime
@@ -1269,6 +1505,8 @@ impl MetaStore {
             app_id,
             app_name,
             jwks_endpoint,
+            jwks_cache_ttl_secs,
+            jwks_max_stale_secs,
             allow_anonymous,
             allow_demo,
             backend_secret_hash,
@@ -1281,7 +1519,7 @@ impl MetaStore {
     }
 
     async fn update_app(&self, row: &MetaAppRow) -> Result<(), String> {
-        let updates = vec![
+        let mut updates = vec![
             ("app_name".to_string(), Value::Text(row.app_name.clone())),
             (
                 "jwks_endpoint".to_string(),
@@ -1313,6 +1551,14 @@ impl MetaStore {
                 },
             ),
         ];
+        updates.push((
+            "jwks_cache_ttl_secs".to_string(),
+            encode_u64_config_value("jwks_cache_ttl_secs", row.jwks_cache_ttl_secs)?,
+        ));
+        updates.push((
+            "jwks_max_stale_secs".to_string(),
+            encode_u64_config_value("jwks_max_stale_secs", row.jwks_max_stale_secs)?,
+        ));
 
         self.runtime
             .update(row.object_id, updates, None)
@@ -1370,18 +1616,21 @@ impl MetaStore {
         principal_id: &str,
     ) -> Result<MetaExternalIdentityRow, String> {
         let now = now_timestamp_us();
-        let values: Vec<Value> = self
+        let values: HashMap<String, Value> = self
             .external_identities_insert_descriptor
             .columns
             .iter()
-            .map(|column| match column.name.as_str() {
-                "app_id" => Value::Uuid(app_id.as_object_id()),
-                "created_at" => Value::Timestamp(now),
-                "issuer" => Value::Text(issuer.to_string()),
-                "principal_id" => Value::Text(principal_id.to_string()),
-                "subject" => Value::Text(subject.to_string()),
-                "updated_at" => Value::Timestamp(now),
-                other => panic!("unexpected external identity column {other}"),
+            .map(|column| {
+                let value = match column.name.as_str() {
+                    "app_id" => Value::Uuid(app_id.as_object_id()),
+                    "created_at" => Value::Timestamp(now),
+                    "issuer" => Value::Text(issuer.to_string()),
+                    "principal_id" => Value::Text(principal_id.to_string()),
+                    "subject" => Value::Text(subject.to_string()),
+                    "updated_at" => Value::Timestamp(now),
+                    other => panic!("unexpected external identity column {other}"),
+                };
+                (column.name.to_string(), value)
             })
             .collect();
 
@@ -1430,6 +1679,18 @@ impl MetaStore {
             }
             None => return Err("meta row missing jwks_endpoint".to_string()),
         };
+        let jwks_cache_ttl_secs = decode_u64_config_value(
+            &self.apps_descriptor,
+            values,
+            "jwks_cache_ttl_secs",
+            DEFAULT_JWKS_CACHE_TTL_SECS,
+        )?;
+        let jwks_max_stale_secs = decode_u64_config_value(
+            &self.apps_descriptor,
+            values,
+            "jwks_max_stale_secs",
+            DEFAULT_JWKS_MAX_STALE_SECS,
+        )?;
 
         let allow_anonymous =
             match descriptor_value(&self.apps_descriptor, values, "allow_anonymous") {
@@ -1520,6 +1781,8 @@ impl MetaStore {
             app_id: AppId::from_object_id(app_obj_id),
             app_name,
             jwks_endpoint,
+            jwks_cache_ttl_secs,
+            jwks_max_stale_secs,
             allow_anonymous,
             allow_demo,
             backend_secret_hash,
@@ -1559,6 +1822,8 @@ struct ConnectionState {
 struct CachedJwks {
     endpoint: String,
     fetched_at_us: u64,
+    /// Per-app cooldown: timestamp of last forced refresh for this app's JWKS.
+    last_forced_refresh_us: u64,
     set: JwkSet,
 }
 
@@ -1741,13 +2006,10 @@ async fn run_worker_loop(
                         .get(&app_id)
                         .ok_or_else(|| format!("missing runtime for app {app_id}"))
                         .and_then(|runtime| {
-                            if let Err(err) = runtime.runtime.add_client(client_id, None) {
-                                Err(err.to_string())
-                            } else if let Err(err) = runtime.runtime.set_client_backend(client_id) {
-                                Err(err.to_string())
-                            } else {
-                                Ok(())
-                            }
+                            runtime
+                                .runtime
+                                .ensure_client_as_backend(client_id)
+                                .map_err(|err| err.to_string())
                         });
                     if response.send(result).is_err() {
                         warn!(
@@ -1800,9 +2062,7 @@ async fn run_worker_loop(
                 } => {
                     let result = match app_runtimes.get(&app_id) {
                         Some(runtime) => {
-                            if let Err(err) = runtime.runtime.add_client(client_id, None) {
-                                Err(err.to_string())
-                            } else if let Err(err) = runtime.runtime.set_client_backend(client_id) {
+                            if let Err(err) = runtime.runtime.ensure_client_as_backend(client_id) {
                                 Err(err.to_string())
                             } else if let Err(err) = runtime.runtime.push_sync_inbox(InboxEntry {
                                 source: Source::Client(client_id),
@@ -1832,9 +2092,7 @@ async fn run_worker_loop(
                 } => {
                     let result = match app_runtimes.get(&app_id) {
                         Some(runtime) => {
-                            if let Err(err) = runtime.runtime.add_client(client_id, None) {
-                                Err(err.to_string())
-                            } else if let Err(err) = runtime.runtime.set_client_admin(client_id) {
+                            if let Err(err) = runtime.runtime.ensure_client_as_admin(client_id) {
                                 Err(err.to_string())
                             } else if let Err(err) = runtime.runtime.push_sync_inbox(InboxEntry {
                                 source: Source::Client(client_id),
@@ -1875,6 +2133,71 @@ async fn run_worker_loop(
                         warn!(worker, app_id = %app_id, "schema response receiver dropped");
                     }
                 }
+                WorkerCommand::PublishSchema {
+                    app_id,
+                    schema,
+                    response,
+                } => {
+                    let result = app_runtimes
+                        .get(&app_id)
+                        .ok_or_else(|| format!("missing runtime for app {app_id}"))
+                        .and_then(|runtime| {
+                            runtime
+                                .runtime
+                                .publish_schema(schema)
+                                .map_err(|err| err.to_string())
+                        });
+                    if response.send(result).is_err() {
+                        warn!(worker, app_id = %app_id, "publish-schema response receiver dropped");
+                    }
+                }
+                WorkerCommand::PublishPermissions {
+                    app_id,
+                    schema_hash,
+                    permissions,
+                    expected_parent_bundle_object_id,
+                    response,
+                } => {
+                    let result = app_runtimes
+                        .get(&app_id)
+                        .ok_or_else(|| format!("missing runtime for app {app_id}"))
+                        .and_then(|runtime| {
+                            runtime
+                                .runtime
+                                .publish_permissions_bundle(
+                                    schema_hash,
+                                    permissions,
+                                    expected_parent_bundle_object_id,
+                                )
+                                .and_then(|_| runtime.runtime.current_permissions_head())
+                                .map_err(|err| err.to_string())
+                        });
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            "publish-permissions response receiver dropped"
+                        );
+                    }
+                }
+                WorkerCommand::GetPermissionsHead { app_id, response } => {
+                    let result = app_runtimes
+                        .get(&app_id)
+                        .ok_or_else(|| format!("missing runtime for app {app_id}"))
+                        .and_then(|runtime| {
+                            runtime
+                                .runtime
+                                .current_permissions_head()
+                                .map_err(|err| err.to_string())
+                        });
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            "permissions head response receiver dropped"
+                        );
+                    }
+                }
                 WorkerCommand::GetSchemaHashes { app_id, response } => {
                     let result = app_runtimes
                         .get(&app_id)
@@ -1890,6 +2213,24 @@ async fn run_worker_loop(
                         });
                     if response.send(result).is_err() {
                         warn!(worker, app_id = %app_id, "schema hashes response receiver dropped");
+                    }
+                }
+                WorkerCommand::GetCatalogueStateHash { app_id, response } => {
+                    let result = app_runtimes
+                        .get(&app_id)
+                        .ok_or_else(|| format!("missing runtime for app {app_id}"))
+                        .and_then(|runtime| {
+                            runtime
+                                .runtime
+                                .catalogue_state_hash()
+                                .map_err(|err| err.to_string())
+                        });
+                    if response.send(result).is_err() {
+                        warn!(
+                            worker,
+                            app_id = %app_id,
+                            "catalogue state hash response receiver dropped"
+                        );
                     }
                 }
             }
@@ -1944,6 +2285,8 @@ struct EventsParams {
 struct CreateAppRequest {
     app_name: String,
     jwks_endpoint: Option<String>,
+    jwks_cache_ttl_secs: Option<u64>,
+    jwks_max_stale_secs: Option<u64>,
     allow_anonymous: Option<bool>,
     allow_demo: Option<bool>,
     backend_secret: Option<String>,
@@ -1954,6 +2297,8 @@ struct CreateAppRequest {
 struct UpdateAppRequest {
     app_name: Option<String>,
     jwks_endpoint: Option<String>,
+    jwks_cache_ttl_secs: Option<u64>,
+    jwks_max_stale_secs: Option<u64>,
     allow_anonymous: Option<bool>,
     allow_demo: Option<bool>,
     status: Option<AppStatus>,
@@ -1969,6 +2314,8 @@ struct ManageSetStatusRequest {
 #[derive(Debug, Deserialize)]
 struct ManageUpdateAuthRequest {
     jwks_endpoint: Option<String>,
+    jwks_cache_ttl_secs: Option<u64>,
+    jwks_max_stale_secs: Option<u64>,
     allow_anonymous: Option<bool>,
     allow_demo: Option<bool>,
 }
@@ -1978,6 +2325,8 @@ struct AppSummaryResponse {
     app_id: String,
     app_name: String,
     jwks_endpoint: String,
+    jwks_cache_ttl_secs: u64,
+    jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
     status: AppStatus,
@@ -1989,6 +2338,8 @@ struct CreateAppResponse {
     app_id: String,
     app_name: String,
     jwks_endpoint: String,
+    jwks_cache_ttl_secs: u64,
+    jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
     backend_secret: String,
@@ -2002,6 +2353,8 @@ struct UpdateAppResponse {
     app_id: String,
     app_name: String,
     jwks_endpoint: String,
+    jwks_cache_ttl_secs: u64,
+    jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
     status: AppStatus,
@@ -2028,6 +2381,42 @@ struct ManageAdminSecretResponse {
 #[derive(Debug, Serialize)]
 struct SchemaHashesResponse {
     hashes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PublishSchemaRequest {
+    schema: Schema,
+    permissions: Option<HashMap<TableName, TablePolicies>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishPermissionsRequest {
+    schema_hash: String,
+    permissions: HashMap<String, TablePolicies>,
+    expected_parent_bundle_object_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishSchemaResponse {
+    object_id: String,
+    hash: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionsHeadView {
+    schema_hash: String,
+    version: u64,
+    parent_bundle_object_id: Option<String>,
+    bundle_object_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionsHeadResponse {
+    head: Option<PermissionsHeadView>,
 }
 
 pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
@@ -2098,6 +2487,10 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
     });
 
     info!(
+        catalogue_authority = match &config.catalogue_authority {
+            CatalogueAuthorityMode::Local => "local",
+            CatalogueAuthorityMode::Forward => "forward",
+        },
         workers = state.workers.worker_count(),
         data_root = %state.data_root.display(),
         app_count = state.app_count().await,
@@ -2154,6 +2547,15 @@ fn create_router(state: Arc<ServerState>) -> Router {
         .route("/apps/:app_id/sync", post(sync_handler))
         .route("/apps/:app_id/schema/:hash", get(schema_catalogue_handler))
         .route("/apps/:app_id/schemas", get(schema_hashes_handler))
+        .route("/apps/:app_id/admin/schemas", post(publish_schema_handler))
+        .route(
+            "/apps/:app_id/admin/permissions/head",
+            get(permissions_head_handler),
+        )
+        .route(
+            "/apps/:app_id/admin/permissions",
+            post(publish_permissions_handler),
+        )
         .route(
             "/apps/:app_id/auth/link-external",
             post(link_external_handler),
@@ -2197,6 +2599,8 @@ fn app_config_from_row(row: &MetaAppRow) -> AppConfig {
     AppConfig {
         app_name: row.app_name.clone(),
         jwks_endpoint: row.jwks_endpoint.clone(),
+        jwks_cache_ttl_secs: row.jwks_cache_ttl_secs,
+        jwks_max_stale_secs: row.jwks_max_stale_secs,
         allow_anonymous: row.allow_anonymous,
         allow_demo: row.allow_demo,
         backend_secret_hash: row.backend_secret_hash.clone(),
@@ -2530,15 +2934,45 @@ async fn fetch_jwks(http_client: &reqwest::Client, jwks_endpoint: &str) -> Resul
 async fn load_jwks_for_app(
     state: &ServerState,
     app_id: AppId,
-    jwks_endpoint: &str,
+    app_config: &AppConfig,
     force_refresh: bool,
 ) -> Result<JwkSet, String> {
-    let ttl_us = JWKS_CACHE_TTL.as_micros().min(u128::from(u64::MAX)) as u64;
+    let jwks_endpoint = app_config.jwks_endpoint.as_str();
+    let ttl_us = app_config
+        .jwks_cache_ttl()
+        .as_micros()
+        .min(u128::from(u64::MAX)) as u64;
+    let cooldown_us = JWKS_FORCED_REFRESH_COOLDOWN
+        .as_micros()
+        .min(u128::from(u64::MAX)) as u64;
 
-    let cached_jwks = if force_refresh {
-        None
-    } else {
-        state.jwks_cache.read().await.get(&app_id).cloned()
+    // Single read-lock: check cooldown and attempt cache hit together.
+    let (force_refresh, cached_jwks) = {
+        let cache = state.jwks_cache.read().await;
+        let cached = cache.get(&app_id).cloned();
+
+        // Downgrade forced refresh if this app's cooldown is still active.
+        let force_refresh = if force_refresh {
+            match &cached {
+                Some(entry) if entry.endpoint == jwks_endpoint => {
+                    let age_us = now_timestamp_us().saturating_sub(entry.last_forced_refresh_us);
+                    age_us > cooldown_us
+                }
+                None => true, // no cache entry → no cooldown → allow refresh
+                Some(_) => true,
+            }
+        } else {
+            false
+        };
+
+        (
+            force_refresh,
+            if force_refresh {
+                None
+            } else {
+                cached.filter(|entry| entry.endpoint == jwks_endpoint)
+            },
+        )
     };
 
     if let Some(cached) = cached_jwks {
@@ -2548,13 +2982,51 @@ async fn load_jwks_for_app(
         }
     }
 
-    let jwks = fetch_jwks(&state.http_client, jwks_endpoint).await?;
+    let max_stale_us = (app_config.jwks_cache_ttl() + app_config.jwks_max_stale())
+        .as_micros()
+        .min(u128::from(u64::MAX)) as u64;
 
-    state.jwks_cache.write().await.insert(
+    let jwks = match fetch_jwks(&state.http_client, jwks_endpoint).await {
+        Ok(jwks) => jwks,
+        Err(e) => {
+            // Stale-if-error: serve the cached keyset if it's not too old.
+            if let Some(cached) = state.jwks_cache.read().await.get(&app_id) {
+                let age_us = now_timestamp_us().saturating_sub(cached.fetched_at_us);
+                if cached.endpoint == jwks_endpoint && age_us <= max_stale_us {
+                    warn!(
+                        app_id = %app_id,
+                        error = %e,
+                        "JWKS fetch failed, serving stale cached keyset"
+                    );
+                    return Ok(cached.set.clone());
+                }
+                warn!(
+                    app_id = %app_id,
+                    error = %e,
+                    "JWKS fetch failed and stale keyset has expired"
+                );
+            }
+            return Err(e);
+        }
+    };
+
+    let now = now_timestamp_us();
+    let mut cache = state.jwks_cache.write().await;
+    let prev_forced_refresh = cache
+        .get(&app_id)
+        .filter(|cached| cached.endpoint == jwks_endpoint)
+        .map(|c| c.last_forced_refresh_us)
+        .unwrap_or(0);
+    cache.insert(
         app_id,
         CachedJwks {
             endpoint: jwks_endpoint.to_string(),
-            fetched_at_us: now_timestamp_us(),
+            fetched_at_us: now,
+            last_forced_refresh_us: if force_refresh {
+                now
+            } else {
+                prev_forced_refresh
+            },
             set: jwks.clone(),
         },
     );
@@ -2572,7 +3044,7 @@ async fn validate_jwt_with_jwks(
         return Err((StatusCode::FORBIDDEN, "External auth disabled for app"));
     }
 
-    let cached_jwks = load_jwks_for_app(state, app_id, &app_config.jwks_endpoint, false)
+    let cached_jwks = load_jwks_for_app(state, app_id, app_config, false)
         .await
         .map_err(|err| {
             warn!(
@@ -2599,7 +3071,7 @@ async fn validate_jwt_with_jwks(
         }
     }
 
-    let refreshed_jwks = load_jwks_for_app(state, app_id, &app_config.jwks_endpoint, true)
+    let refreshed_jwks = load_jwks_for_app(state, app_id, app_config, true)
         .await
         .map_err(|err| {
             warn!(
@@ -2853,6 +3325,8 @@ async fn app_summary(app: Arc<AppEntry>, worker: usize) -> AppSummaryResponse {
         app_id: app.app_id.to_string(),
         app_name: cfg.app_name.clone(),
         jwks_endpoint: cfg.jwks_endpoint.clone(),
+        jwks_cache_ttl_secs: cfg.jwks_cache_ttl_secs,
+        jwks_max_stale_secs: cfg.jwks_max_stale_secs,
         allow_anonymous: cfg.allow_anonymous,
         allow_demo: cfg.allow_demo,
         status: cfg.status,
@@ -2948,6 +3422,8 @@ async fn manage_set_status_handler(
         Json(UpdateAppRequest {
             app_name: None,
             jwks_endpoint: None,
+            jwks_cache_ttl_secs: None,
+            jwks_max_stale_secs: None,
             allow_anonymous: None,
             allow_demo: None,
             status: Some(request.status),
@@ -2987,6 +3463,8 @@ async fn manage_update_auth_handler(
         Json(UpdateAppRequest {
             app_name: None,
             jwks_endpoint: request.jwks_endpoint,
+            jwks_cache_ttl_secs: request.jwks_cache_ttl_secs,
+            jwks_max_stale_secs: request.jwks_max_stale_secs,
             allow_anonymous: request.allow_anonymous,
             allow_demo: request.allow_demo,
             status: None,
@@ -3069,6 +3547,8 @@ async fn manage_rotate_admin_secret_handler(
         Json(UpdateAppRequest {
             app_name: None,
             jwks_endpoint: None,
+            jwks_cache_ttl_secs: None,
+            jwks_max_stale_secs: None,
             allow_anonymous: None,
             allow_demo: None,
             status: None,
@@ -3137,6 +3617,20 @@ async fn events_handler(
         }
     }
 
+    let catalogue_state_hash = match state.workers.get_catalogue_state_hash(app_id).await {
+        Ok(hash) => Some(hash),
+        Err(err) => {
+            warn!(
+                app_id = %app_id,
+                worker,
+                client_id = %client_id,
+                ?err,
+                "failed to read catalogue state hash for events handshake"
+            );
+            None
+        }
+    };
+
     let connection_id = app.next_connection_id.fetch_add(1, Ordering::SeqCst);
     {
         let mut connections = app.connections.write().await;
@@ -3176,6 +3670,7 @@ async fn events_handler(
             connection_id: ConnectionId(connection_id),
             client_id: client_id_str,
             next_sync_seq: Some(next_sync_seq),
+            catalogue_state_hash: catalogue_state_hash.clone(),
         };
         yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected));
 
@@ -3339,6 +3834,242 @@ async fn sync_handler(
     Json(SyncBatchResponse { results }).into_response()
 }
 
+fn permissions_head_view(head: PermissionsHeadSummary) -> PermissionsHeadView {
+    PermissionsHeadView {
+        schema_hash: head.schema_hash.to_string(),
+        version: head.version,
+        parent_bundle_object_id: head
+            .parent_bundle_object_id
+            .map(|object_id: ObjectId| object_id.to_string()),
+        bundle_object_id: head.bundle_object_id.to_string(),
+    }
+}
+
+async fn publish_schema_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+    Json(request): Json<PublishSchemaRequest>,
+) -> impl IntoResponse {
+    let app_id = match parse_app_id(&path.app_id) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let app = match state.get_app(app_id).await {
+        Some(app) => app,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    let cfg = app.config.read().await.clone();
+    match validate_admin_secret(&headers, &cfg, &state.meta_store) {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse::unauthorized("admin secret required")),
+            )
+                .into_response();
+        }
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
+    if request.permissions.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::bad_request(
+                "inline permissions are no longer supported; publish permissions separately",
+            )),
+        )
+            .into_response();
+    }
+
+    let schema_hash = SchemaHash::compute(&request.schema);
+    match state.workers.publish_schema(app_id, request.schema).await {
+        Ok(object_id) => (
+            StatusCode::CREATED,
+            Json(PublishSchemaResponse {
+                object_id: object_id.to_string(),
+                hash: schema_hash.to_string(),
+            }),
+        )
+            .into_response(),
+        Err(err) => {
+            let (status, message) = worker_dispatch_status_and_message(err);
+            (status, Json(ErrorResponse::internal(message))).into_response()
+        }
+    }
+}
+
+async fn permissions_head_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let app_id = match parse_app_id(&path.app_id) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let app = match state.get_app(app_id).await {
+        Some(app) => app,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    let cfg = app.config.read().await.clone();
+    match validate_admin_secret(&headers, &cfg, &state.meta_store) {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse::unauthorized("admin secret required")),
+            )
+                .into_response();
+        }
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
+    match state.workers.get_permissions_head(app_id).await {
+        Ok(head) => Json(PermissionsHeadResponse {
+            head: head.map(permissions_head_view),
+        })
+        .into_response(),
+        Err(err) => {
+            let (status, message) = worker_dispatch_status_and_message(err);
+            (status, Json(ErrorResponse::internal(message))).into_response()
+        }
+    }
+}
+
+async fn publish_permissions_handler(
+    State(state): State<Arc<ServerState>>,
+    AxumPath(path): AxumPath<AppPath>,
+    headers: HeaderMap,
+    Json(request): Json<PublishPermissionsRequest>,
+) -> impl IntoResponse {
+    let app_id = match parse_app_id(&path.app_id) {
+        Ok(id) => id,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let app = match state.get_app(app_id).await {
+        Some(app) => app,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse::not_found(format!(
+                    "unknown app_id: {}",
+                    path.app_id
+                ))),
+            )
+                .into_response();
+        }
+    };
+
+    let cfg = app.config.read().await.clone();
+    match validate_admin_secret(&headers, &cfg, &state.meta_store) {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse::unauthorized("admin secret required")),
+            )
+                .into_response();
+        }
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    };
+
+    let schema_hash = match parse_schema_hash(&request.schema_hash) {
+        Ok(hash) => hash,
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::bad_request(msg))).into_response();
+        }
+    };
+
+    let mut permissions = HashMap::new();
+    for (table_name, policies) in request.permissions {
+        permissions.insert(TableName::new(&table_name), policies);
+    }
+
+    let expected_parent_bundle_object_id = match request.expected_parent_bundle_object_id {
+        Some(object_id) => match Uuid::parse_str(&object_id) {
+            Ok(uuid) => Some(ObjectId::from_uuid(uuid)),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::bad_request(
+                        "invalid expectedParentBundleObjectId",
+                    )),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+
+    match state
+        .workers
+        .publish_permissions(
+            app_id,
+            schema_hash,
+            permissions,
+            expected_parent_bundle_object_id,
+        )
+        .await
+    {
+        Ok(head) => (
+            StatusCode::CREATED,
+            Json(PermissionsHeadResponse {
+                head: head.map(permissions_head_view),
+            }),
+        )
+            .into_response(),
+        Err(WorkerDispatchError::RuntimeError { message, .. })
+            if message.contains("stale parent") =>
+        {
+            (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse::bad_request(message)),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            let (status, message) = worker_dispatch_status_and_message(err);
+            (status, Json(ErrorResponse::internal(message))).into_response()
+        }
+    }
+}
+
 async fn schema_catalogue_handler(
     State(state): State<Arc<ServerState>>,
     AxumPath(path): AxumPath<SchemaPath>,
@@ -3476,6 +4207,12 @@ async fn create_app_handler(
             .into_response();
     }
     let jwks_endpoint = request.jwks_endpoint.unwrap_or_default().trim().to_string();
+    let jwks_cache_ttl_secs = request
+        .jwks_cache_ttl_secs
+        .unwrap_or(DEFAULT_JWKS_CACHE_TTL_SECS);
+    let jwks_max_stale_secs = request
+        .jwks_max_stale_secs
+        .unwrap_or(DEFAULT_JWKS_MAX_STALE_SECS);
 
     let backend_secret = request.backend_secret.unwrap_or_else(generate_secret);
     let admin_secret = request.admin_secret.unwrap_or_else(generate_secret);
@@ -3499,6 +4236,8 @@ async fn create_app_handler(
             app_id,
             app_name,
             jwks_endpoint,
+            jwks_cache_ttl_secs,
+            jwks_max_stale_secs,
             allow_anonymous,
             allow_demo,
             backend_secret_hash,
@@ -3563,6 +4302,8 @@ async fn create_app_handler(
         app_id: app_id.to_string(),
         app_name: meta_row.app_name,
         jwks_endpoint: meta_row.jwks_endpoint,
+        jwks_cache_ttl_secs: meta_row.jwks_cache_ttl_secs,
+        jwks_max_stale_secs: meta_row.jwks_max_stale_secs,
         allow_anonymous: meta_row.allow_anonymous,
         allow_demo: meta_row.allow_demo,
         backend_secret,
@@ -3697,6 +4438,12 @@ async fn update_app_handler(
     if let Some(jwks_endpoint) = request.jwks_endpoint {
         row.jwks_endpoint = jwks_endpoint;
     }
+    if let Some(jwks_cache_ttl_secs) = request.jwks_cache_ttl_secs {
+        row.jwks_cache_ttl_secs = jwks_cache_ttl_secs;
+    }
+    if let Some(jwks_max_stale_secs) = request.jwks_max_stale_secs {
+        row.jwks_max_stale_secs = jwks_max_stale_secs;
+    }
     if let Some(allow_anonymous) = request.allow_anonymous {
         row.allow_anonymous = allow_anonymous;
     }
@@ -3738,6 +4485,8 @@ async fn update_app_handler(
         app_id: app_id.to_string(),
         app_name: row.app_name,
         jwks_endpoint: row.jwks_endpoint,
+        jwks_cache_ttl_secs: row.jwks_cache_ttl_secs,
+        jwks_max_stale_secs: row.jwks_max_stale_secs,
         allow_anonymous: row.allow_anonymous,
         allow_demo: row.allow_demo,
         status: row.status,
@@ -4023,6 +4772,8 @@ mod tests {
                 app_id,
                 "Meta Store App".to_string(),
                 "https://issuer.example/jwks".to_string(),
+                45,
+                90,
                 true,
                 false,
                 "backend-secret-hash".to_string(),
@@ -4041,6 +4792,8 @@ mod tests {
         assert_eq!(loaded.app_id, app_id);
         assert_eq!(loaded.app_name, "Meta Store App");
         assert_eq!(loaded.jwks_endpoint, "https://issuer.example/jwks");
+        assert_eq!(loaded.jwks_cache_ttl_secs, 45);
+        assert_eq!(loaded.jwks_max_stale_secs, 90);
         assert!(loaded.allow_anonymous);
         assert!(!loaded.allow_demo);
         assert_eq!(loaded.backend_secret_hash, "backend-secret-hash");

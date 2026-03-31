@@ -27,7 +27,7 @@ import {
 import { WorkerBridge, type PeerSyncBatch, type WorkerBridgeOptions } from "./worker-bridge.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
-import { toValueArray, toUpdateRecord } from "./value-converter.js";
+import { toInsertRecord, toUpdateRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import {
   createConventionalFileStorage,
@@ -988,7 +988,7 @@ export class Db {
     const client = this.getClient(table._schema);
     // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
     // If the bridge fails to initialize, the insert will be lost on restart.
-    const values = toValueArray(data as Record<string, unknown>, table._schema, table._table);
+    const values = toInsertRecord(data as Record<string, unknown>, table._schema, table._table);
     const row = client.create(table._table, values);
     return transformRow(row, table._schema, table._table);
   }
@@ -1013,7 +1013,7 @@ export class Db {
       table._table,
     );
     await this.ensureBridgeReady();
-    const values = toValueArray(data as Record<string, unknown>, inputSchema, table._table);
+    const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
     const row = await client.createDurable(table._table, values, options);
     return transformRow(row, table._schema, table._table);
   }
@@ -1262,13 +1262,7 @@ export class Db {
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T => {
-      return transformRows<T>(
-        [row],
-        outputSchema,
-        outputTable,
-        outputIncludes,
-        builtQuery.select,
-      )[0];
+      return transformRow<T>(row, outputSchema, outputTable, outputIncludes, builtQuery.select);
     };
 
     const subId = client.subscribeInternal(
@@ -1423,6 +1417,7 @@ class ClientBackedDb extends Db {
     config: DbConfig,
     private readonly runtimeClient: JazzClient,
     private readonly session?: Session,
+    private readonly attribution?: string,
   ) {
     super(config, null);
   }
@@ -1430,8 +1425,13 @@ class ClientBackedDb extends Db {
   override insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
-    const values = toValueArray(data as Record<string, unknown>, inputSchema, table._table);
-    const row = this.runtimeClient.createInternal(table._table, values, this.session);
+    const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
+    const row = this.runtimeClient.createInternal(
+      table._table,
+      values,
+      this.session,
+      this.attribution,
+    );
     return transformRow(row, table._schema, table._table);
   }
 
@@ -1442,11 +1442,12 @@ class ClientBackedDb extends Db {
   ): Promise<T> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
-    const values = toValueArray(data as Record<string, unknown>, inputSchema, table._table);
+    const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
     const row = await this.runtimeClient.createDurableInternal(
       table._table,
       values,
       this.session,
+      this.attribution,
       options,
     );
     return transformRow(row, table._schema, table._table);
@@ -1456,7 +1457,7 @@ class ClientBackedDb extends Db {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    this.runtimeClient.updateInternal(id, updates, this.session);
+    this.runtimeClient.updateInternal(id, updates, this.session, this.attribution);
   }
 
   override async updateDurable<T, Init>(
@@ -1468,11 +1469,17 @@ class ClientBackedDb extends Db {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    await this.runtimeClient.updateDurableInternal(id, updates, this.session, options);
+    await this.runtimeClient.updateDurableInternal(
+      id,
+      updates,
+      this.session,
+      this.attribution,
+      options,
+    );
   }
 
   override delete<T, Init>(_table: TableProxy<T, Init>, id: string): void {
-    this.runtimeClient.deleteInternal(id, this.session);
+    this.runtimeClient.deleteInternal(id, this.session, this.attribution);
   }
 
   override async deleteDurable<T, Init>(
@@ -1480,7 +1487,7 @@ class ClientBackedDb extends Db {
     id: string,
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
-    await this.runtimeClient.deleteDurableInternal(id, this.session, options);
+    await this.runtimeClient.deleteDurableInternal(id, this.session, this.attribution, options);
   }
 
   override async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
@@ -1527,7 +1534,7 @@ class ClientBackedDb extends Db {
     const wasmQuery = translateQuery(builderJson, planningSchema);
 
     const transform = (row: WasmRow): T =>
-      transformRows<T>([row], outputSchema, outputTable, outputIncludes, builtQuery.select)[0];
+      transformRow<T>(row, outputSchema, outputTable, outputIncludes, builtQuery.select);
 
     const subId = this.runtimeClient.subscribeInternal(
       wasmQuery,
@@ -1592,6 +1599,11 @@ export async function createDb(config: DbConfig): Promise<Db> {
   return Db.create(resolvedConfig);
 }
 
-export function createDbFromClient(config: DbConfig, client: JazzClient, session?: Session): Db {
-  return new ClientBackedDb(resolveLocalAuthDefaults(config), client, session);
+export function createDbFromClient(
+  config: DbConfig,
+  client: JazzClient,
+  session?: Session,
+  attribution?: string,
+): Db {
+  return new ClientBackedDb(resolveLocalAuthDefaults(config), client, session, attribution);
 }

@@ -122,6 +122,21 @@ describe("translateQuery", () => {
       expect(result.relation_ir).toEqual({ type: "TableScan", table: "todos" });
     });
 
+    it("pushes provenance magic select columns into the runtime query payload", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        select: ["title", "$createdBy", "$updatedAt"],
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+
+      expect(result.select_columns).toEqual(["title", "$createdBy", "$updatedAt"]);
+      expect(result.relation_ir).toEqual({ type: "TableScan", table: "todos" });
+    });
+
     it('treats select(["*"]) as selecting all columns', () => {
       const builderJson = JSON.stringify({
         table: "todos",
@@ -133,7 +148,41 @@ describe("translateQuery", () => {
 
       const result = parseTranslatedQuery(builderJson, basicSchema);
 
-      expect(result.select_columns).toBeUndefined();
+      expect(result.select_columns).toEqual([
+        "title",
+        "done",
+        "priority",
+        "status",
+        "project",
+        "tags",
+        "metadata",
+        "created_at",
+      ]);
+      expect(result.relation_ir).toEqual({ type: "TableScan", table: "todos" });
+    });
+
+    it('expands mixed select(["*", "$canDelete"]) into explicit runtime columns', () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        select: ["*", "$canDelete"],
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+
+      expect(result.select_columns).toEqual([
+        "title",
+        "done",
+        "priority",
+        "status",
+        "project",
+        "tags",
+        "metadata",
+        "created_at",
+        "$canDelete",
+      ]);
       expect(result.relation_ir).toEqual({ type: "TableScan", table: "todos" });
     });
   });
@@ -153,6 +202,23 @@ describe("translateQuery", () => {
         left: { scope: "todos", column: "title" },
         op: "Eq",
         right: { type: "Literal", value: { Text: "Buy milk" } },
+      });
+    });
+
+    it("translates eq condition with provenance magic text columns", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "$createdBy", op: "eq", value: "alice" }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "$createdBy" },
+        op: "Eq",
+        right: { type: "Literal", value: { Text: "alice" } },
       });
     });
 
@@ -477,6 +543,24 @@ describe("translateQuery", () => {
       });
     });
 
+    it("translates gte condition with provenance magic timestamp columns", () => {
+      const iso = "2026-03-31T00:00:00.000Z";
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "$updatedAt", op: "gte", value: iso }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "$updatedAt" },
+        op: "Ge",
+        right: { type: "Literal", value: { Timestamp: Date.parse(iso) } },
+      });
+    });
+
     it("translates lt condition", () => {
       const builderJson = JSON.stringify({
         table: "todos",
@@ -526,6 +610,34 @@ describe("translateQuery", () => {
       });
     });
 
+    it("translates isNull=false condition to IsNotNull", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "priority", op: "isNull", value: false }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "IsNotNull",
+        column: { scope: "todos", column: "priority" },
+      });
+    });
+
+    it("rejects non-boolean values for isNull condition", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "priority", op: "isNull", value: "false" }],
+        includes: {},
+        orderBy: [],
+      });
+
+      expect(() => translateQuery(builderJson, basicSchema)).toThrow(
+        '"isNull" operator requires a boolean value.',
+      );
+    });
+
     it("translates multiple conditions", () => {
       const builderJson = JSON.stringify({
         table: "todos",
@@ -557,7 +669,7 @@ describe("translateQuery", () => {
       });
     });
 
-    it("translates null value", () => {
+    it("translates eq null value to IsNull", () => {
       const builderJson = JSON.stringify({
         table: "todos",
         conditions: [{ column: "priority", op: "eq", value: null }],
@@ -567,10 +679,23 @@ describe("translateQuery", () => {
 
       const result = parseTranslatedQuery(builderJson, basicSchema);
       expect(expectFilterPredicate(result)).toEqual({
-        type: "Cmp",
-        left: { scope: "todos", column: "priority" },
-        op: "Eq",
-        right: { type: "Literal", value: { Null: null } },
+        type: "IsNull",
+        column: { scope: "todos", column: "priority" },
+      });
+    });
+
+    it("translates ne null value to IsNotNull", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "priority", op: "ne", value: null }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "IsNotNull",
+        column: { scope: "todos", column: "priority" },
       });
     });
 
@@ -1203,6 +1328,94 @@ describe("translateQuery", () => {
       ]);
     });
 
+    it("translates include builders with mixed wildcard and magic projections", () => {
+      const nestedSchema: WasmSchema = {
+        comments: {
+          columns: [
+            { name: "text", column_type: { type: "Text" }, nullable: false },
+            {
+              name: "todo_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "todos",
+            },
+          ],
+        },
+        todos: {
+          columns: [
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+            {
+              name: "owner_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "users",
+            },
+          ],
+        },
+        users: {
+          columns: [
+            { name: "name", column_type: { type: "Text" }, nullable: false },
+            { name: "email", column_type: { type: "Text" }, nullable: false },
+          ],
+        },
+      };
+
+      const builderJson = JSON.stringify({
+        table: "comments",
+        conditions: [],
+        includes: {
+          todo: {
+            table: "todos",
+            conditions: [],
+            includes: {
+              owner: {
+                table: "users",
+                conditions: [],
+                includes: {},
+                select: ["*", "$canEdit"],
+                orderBy: [],
+                hops: [],
+              },
+            },
+            select: ["*", "$canDelete"],
+            orderBy: [],
+            hops: [],
+          },
+        },
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, nestedSchema);
+
+      expect(result.array_subqueries).toEqual([
+        {
+          column_name: "todo",
+          table: "todos",
+          inner_column: "id",
+          outer_column: "comments.todo_id",
+          filters: [],
+          joins: [],
+          select_columns: ["title", "owner_id", "$canDelete", "__jazz_include_owner"],
+          order_by: [],
+          limit: null,
+          nested_arrays: [
+            {
+              column_name: "__jazz_include_owner",
+              table: "users",
+              inner_column: "id",
+              outer_column: "todos.owner_id",
+              filters: [],
+              joins: [],
+              select_columns: ["name", "email", "$canEdit"],
+              order_by: [],
+              limit: null,
+              nested_arrays: [],
+            },
+          ],
+        },
+      ]);
+    });
+
     it("omits implicit id from include builder projections", () => {
       const builderJson = JSON.stringify({
         table: "users",
@@ -1234,6 +1447,84 @@ describe("translateQuery", () => {
           order_by: [],
           limit: null,
           nested_arrays: [],
+        },
+      ]);
+    });
+
+    it('keeps projected include mode for include builders that select only "id"', () => {
+      const nestedSchema: WasmSchema = {
+        users: {
+          columns: [{ name: "name", column_type: { type: "Text" }, nullable: false }],
+        },
+        todos: {
+          columns: [
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+            {
+              name: "owner_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "users",
+            },
+          ],
+        },
+        comments: {
+          columns: [
+            { name: "text", column_type: { type: "Text" }, nullable: false },
+            {
+              name: "todo_id",
+              column_type: { type: "Uuid" },
+              nullable: false,
+              references: "todos",
+            },
+          ],
+        },
+      };
+
+      const builderJson = JSON.stringify({
+        table: "comments",
+        conditions: [],
+        includes: {
+          todo: {
+            table: "todos",
+            conditions: [],
+            includes: {
+              owner: true,
+            },
+            select: ["id"],
+            orderBy: [],
+            hops: [],
+          },
+        },
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, nestedSchema);
+
+      expect(result.array_subqueries).toEqual([
+        {
+          column_name: "todo",
+          table: "todos",
+          inner_column: "id",
+          outer_column: "comments.todo_id",
+          filters: [],
+          joins: [],
+          select_columns: ["__jazz_include_owner"],
+          order_by: [],
+          limit: null,
+          nested_arrays: [
+            {
+              column_name: "__jazz_include_owner",
+              table: "users",
+              inner_column: "id",
+              outer_column: "todos.owner_id",
+              filters: [],
+              joins: [],
+              select_columns: null,
+              order_by: [],
+              limit: null,
+              nested_arrays: [],
+            },
+          ],
         },
       ]);
     });

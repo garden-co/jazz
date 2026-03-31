@@ -190,7 +190,7 @@ fn normalize_route_prefix(path: &str) -> String {
     }
 }
 
-/// Check if a sync payload is for a catalogue object (schema or lens).
+/// Check if a sync payload is for a catalogue object.
 fn is_catalogue_payload(payload: &SyncPayload) -> bool {
     match payload {
         SyncPayload::ObjectUpdated { metadata, .. } => {
@@ -199,8 +199,7 @@ fn is_catalogue_payload(payload: &SyncPayload) -> bool {
                     .metadata
                     .get(crate::metadata::MetadataKey::Type.as_str())
             {
-                return type_str == crate::metadata::ObjectType::CatalogueSchema.as_str()
-                    || type_str == crate::metadata::ObjectType::CatalogueLens.as_str();
+                return crate::metadata::ObjectType::is_catalogue_type_str(type_str);
             }
             false
         }

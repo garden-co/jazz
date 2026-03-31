@@ -10,7 +10,7 @@ import {
   type ListRenderItem,
 } from "react-native";
 import { useAll, useDb, useSession } from "jazz-tools/react-native";
-import { app, type Todo } from "../schema/app";
+import { app, type Todo } from "../schema";
 
 function normalizeText(value: string | null | undefined): string {
   return typeof value === "string" ? value : "";
@@ -48,7 +48,7 @@ export function TodoList() {
   const addTodo = () => {
     const trimmed = normalizeText(title).trim();
     if (!trimmed || !sessionUserId) return;
-    db.insert(app.todos, { title: trimmed, done: false, owner_id: sessionUserId });
+    db.insert(app.todos, { title: trimmed, done: false, ownerId: sessionUserId });
     setTitle("");
   };
 

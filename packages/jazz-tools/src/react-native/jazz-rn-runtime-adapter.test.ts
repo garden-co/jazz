@@ -9,10 +9,14 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     close: vi.fn(),
     createSubscription: vi.fn(() => 9n),
     delete_: vi.fn(),
+    deleteWithSession: vi.fn(),
     executeSubscription: vi.fn(),
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
     insert: vi.fn((_table, _valuesJson) => JSON.stringify({ id: "row-1", values: [] })),
+    insertWithSession: vi.fn((_table, _valuesJson, _writeContextJson) =>
+      JSON.stringify({ id: "row-1", values: [] }),
+    ),
     onBatchedTickNeeded: vi.fn(),
     onSyncMessageReceived: vi.fn(),
     onSyncMessageReceivedFromClient: vi.fn(),
@@ -23,6 +27,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     subscribe: vi.fn(() => 7n),
     unsubscribe: vi.fn(),
     update: vi.fn(),
+    updateWithSession: vi.fn(),
     ...overrides,
   };
 }
@@ -33,7 +38,7 @@ describe("JazzRnRuntimeAdapter", () => {
     new JazzRnRuntimeAdapter(binding, {});
 
     const onBatchedTickNeeded = binding.onBatchedTickNeeded as ReturnType<typeof vi.fn>;
-    const callbackObject = onBatchedTickNeeded.mock.calls[0][0];
+    const callbackObject = onBatchedTickNeeded.mock.calls[0]![0];
 
     callbackObject.requestBatchedTick();
     expect(binding.batchedTick).not.toHaveBeenCalled();
@@ -46,11 +51,11 @@ describe("JazzRnRuntimeAdapter", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    const row = adapter.insert("todos", [{ type: "Text", value: "milk" }]);
+    const row = adapter.insert("todos", { title: { type: "Text", value: "milk" } });
     expect(row).toEqual({ id: "row-1", values: [] });
     expect(binding.insert).toHaveBeenCalledWith(
       "todos",
-      JSON.stringify([{ type: "Text", value: "milk" }]),
+      JSON.stringify({ title: { type: "Text", value: "milk" } }),
     );
 
     adapter.update("row-1", { done: { type: "Boolean", value: true } });
@@ -65,6 +70,55 @@ describe("JazzRnRuntimeAdapter", () => {
     await expect(adapter.query("{}", null, null)).resolves.toEqual([{ id: "row-1", values: [] }]);
   });
 
+  it("serializes write context payloads for session-aware mutations", async () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+    const writeContextJson = JSON.stringify({
+      session: { user_id: "alice", claims: {} },
+      attribution: "alice",
+    });
+
+    const row = adapter.insertWithSession(
+      "todos",
+      { title: { type: "Text", value: "milk" } },
+      writeContextJson,
+    );
+    expect(row).toEqual({ id: "row-1", values: [] });
+    expect(binding.insertWithSession).toHaveBeenCalledWith(
+      "todos",
+      JSON.stringify({ title: { type: "Text", value: "milk" } }),
+      writeContextJson,
+    );
+
+    adapter.updateWithSession(
+      "row-1",
+      { done: { type: "Boolean", value: true } },
+      writeContextJson,
+    );
+    expect(binding.updateWithSession).toHaveBeenCalledWith(
+      "row-1",
+      JSON.stringify({ done: { type: "Boolean", value: true } }),
+      writeContextJson,
+    );
+
+    adapter.deleteWithSession("row-1", writeContextJson);
+    expect(binding.deleteWithSession).toHaveBeenCalledWith("row-1", writeContextJson);
+
+    await expect(
+      adapter.insertDurableWithSession("todos", {}, writeContextJson, "worker"),
+    ).resolves.toEqual({
+      id: "row-1",
+      values: [],
+    });
+    await expect(
+      adapter.updateDurableWithSession("row-1", {}, writeContextJson, "worker"),
+    ).resolves.toBeUndefined();
+    await expect(
+      adapter.deleteDurableWithSession("row-1", writeContextJson, "worker"),
+    ).resolves.toBeUndefined();
+    expect(binding.flush).toHaveBeenCalledTimes(3);
+  });
+
   it("bridges sync and subscription callbacks with handle conversion", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
@@ -75,7 +129,7 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(onSyncMessageToSend).toHaveBeenCalledTimes(1);
 
     // New callback shape: direct 4-arg payload (after RN callback API update).
-    const callbackObject = onSyncMessageToSend.mock.calls[0][0];
+    const callbackObject = onSyncMessageToSend.mock.calls[0]![0];
     callbackObject.onSyncMessage("server", "server-1", "{}", false);
     expect(syncHandler).toHaveBeenCalledWith("server", "server-1", "{}", false);
 
@@ -84,7 +138,7 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(handle).toBe(7);
 
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
-    const subscriptionCallback = subscribeMock.mock.calls[0][1];
+    const subscriptionCallback = subscribeMock.mock.calls[0]![1];
     subscriptionCallback.onUpdate('{"added":[],"removed":[],"updated":[],"pending":false}');
     expect(onUpdate).toHaveBeenCalledWith({
       added: [],
@@ -110,9 +164,9 @@ describe("JazzRnRuntimeAdapter", () => {
 
     const executeMock = binding.executeSubscription as ReturnType<typeof vi.fn>;
     expect(executeMock).toHaveBeenCalledTimes(1);
-    expect(executeMock.mock.calls[0][0]).toBe(9n);
+    expect(executeMock.mock.calls[0]![0]).toBe(9n);
 
-    const callbackObject = executeMock.mock.calls[0][1];
+    const callbackObject = executeMock.mock.calls[0]![1];
     callbackObject.onUpdate('{"added":[],"removed":[],"updated":[],"pending":false}');
     expect(onUpdate).toHaveBeenCalledWith({
       added: [],
@@ -133,7 +187,7 @@ describe("JazzRnRuntimeAdapter", () => {
       throw new Error("sync boom");
     });
     const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
-    const syncCallback = onSyncMessageToSend.mock.calls[0][0];
+    const syncCallback = onSyncMessageToSend.mock.calls[0]![0];
     expect(() => syncCallback.onSyncMessage("server", "server-1", "{}", false)).not.toThrow();
 
     const onUpdate = vi.fn(() => {
@@ -141,7 +195,7 @@ describe("JazzRnRuntimeAdapter", () => {
     });
     adapter.subscribe("{}", onUpdate, null, null);
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
-    const subscriptionCallback = subscribeMock.mock.calls[0][1];
+    const subscriptionCallback = subscribeMock.mock.calls[0]![1];
     expect(() => subscriptionCallback.onUpdate("[]")).not.toThrow();
   });
 
@@ -152,7 +206,7 @@ describe("JazzRnRuntimeAdapter", () => {
     adapter.onSyncMessageToSend(syncHandler);
 
     const onSyncMessageToSend = binding.onSyncMessageToSend as ReturnType<typeof vi.fn>;
-    const callbackObject = onSyncMessageToSend.mock.calls[0][0];
+    const callbackObject = onSyncMessageToSend.mock.calls[0]![0];
     expect(() =>
       (callbackObject as any).onSyncMessage(
         JSON.stringify({
@@ -171,7 +225,7 @@ describe("JazzRnRuntimeAdapter", () => {
     const onUpdate = vi.fn();
     adapter.subscribe("{}", onUpdate, null, null);
     const subscribeMock = binding.subscribe as ReturnType<typeof vi.fn>;
-    const subscriptionCallback = subscribeMock.mock.calls[0][1];
+    const subscriptionCallback = subscribeMock.mock.calls[0]![1];
 
     subscriptionCallback.onUpdate(
       JSON.stringify({
@@ -204,7 +258,7 @@ describe("JazzRnRuntimeAdapter", () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
 
-    await expect(adapter.insertDurable("todos", [], "worker")).resolves.toEqual({
+    await expect(adapter.insertDurable("todos", {}, "worker")).resolves.toEqual({
       id: "row-1",
       values: [],
     });
@@ -214,7 +268,7 @@ describe("JazzRnRuntimeAdapter", () => {
     await expect(adapter.deleteDurable("row-1", "worker")).resolves.toBeUndefined();
     expect(binding.flush).toHaveBeenCalledTimes(3);
 
-    expect(() => adapter.insertDurable("todos", [], "edge")).toThrow("supports only 'worker' tier");
+    expect(() => adapter.insertDurable("todos", {}, "edge")).toThrow("supports only 'worker' tier");
   });
 
   it("swallows ObjectNotFound runtime errors for update/delete", () => {
@@ -236,6 +290,132 @@ describe("JazzRnRuntimeAdapter", () => {
 
     expect(() => adapter.update("row-1", { done: true })).not.toThrow();
     expect(() => adapter.delete("row-1")).not.toThrow();
+  });
+
+  it("wraps Jazz RN errors with error name and cause", async () => {
+    const runtimeError = {
+      tag: "Runtime",
+      inner: {
+        message: "indexed value too large",
+      },
+    };
+    const binding = createBinding({
+      insert: vi.fn(() => {
+        throw runtimeError;
+      }),
+      query: vi.fn(() => {
+        throw runtimeError;
+      }),
+      update: vi.fn(() => {
+        throw runtimeError;
+      }),
+      delete_: vi.fn(() => {
+        throw runtimeError;
+      }),
+    });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    const insertError = (() => {
+      try {
+        adapter.insert("todos", {});
+        return null;
+      } catch (error) {
+        return error;
+      }
+    })();
+    expect(insertError).toBeInstanceOf(Error);
+    expect((insertError as Error).name).toBe("JazzRnRuntimeError");
+    expect((insertError as Error).message).toBe("indexed value too large");
+    expect((insertError as Error & { cause?: unknown }).cause).toBe(runtimeError);
+    expect((insertError as Error & { tag?: unknown }).tag).toBe("Runtime");
+
+    const queryError = await adapter.query("{}", null, null).catch((error: unknown) => error);
+    expect(queryError).toBeInstanceOf(Error);
+    expect((queryError as Error).name).toBe("JazzRnRuntimeError");
+    expect((queryError as Error).message).toBe("indexed value too large");
+    expect((queryError as Error & { cause?: unknown }).cause).toBe(runtimeError);
+    expect((queryError as Error & { tag?: unknown }).tag).toBe("Runtime");
+
+    const updateError = (() => {
+      try {
+        adapter.update("row-1", { done: true });
+        return null;
+      } catch (error) {
+        return error;
+      }
+    })();
+    expect(updateError).toBeInstanceOf(Error);
+    expect((updateError as Error).name).toBe("JazzRnRuntimeError");
+    expect((updateError as Error).message).toBe("indexed value too large");
+    expect((updateError as Error & { cause?: unknown }).cause).toBe(runtimeError);
+    expect((updateError as Error & { tag?: unknown }).tag).toBe("Runtime");
+
+    const deleteError = (() => {
+      try {
+        adapter.delete("row-1");
+        return null;
+      } catch (error) {
+        return error;
+      }
+    })();
+    expect(deleteError).toBeInstanceOf(Error);
+    expect((deleteError as Error).name).toBe("JazzRnRuntimeError");
+    expect((deleteError as Error).message).toBe("indexed value too large");
+    expect((deleteError as Error & { cause?: unknown }).cause).toBe(runtimeError);
+    expect((deleteError as Error & { tag?: unknown }).tag).toBe("Runtime");
+  });
+
+  it("does not wrap non-Jazz errors", () => {
+    const binding = createBinding({
+      insert: vi.fn(() => {
+        throw new Error("plain failure");
+      }),
+    });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    const error = (() => {
+      try {
+        adapter.insert("todos", {});
+        return null;
+      } catch (caught) {
+        return caught;
+      }
+    })();
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).name).toBe("Error");
+    expect((error as Error).message).toBe("plain failure");
+    expect((error as Error & { tag?: unknown }).tag).toBeUndefined();
+  });
+
+  it("derives error name for non-runtime Jazz tags", () => {
+    const schemaError = {
+      tag: "Schema",
+      inner: {
+        message: "schema mismatch",
+      },
+    };
+    const binding = createBinding({
+      insert: vi.fn(() => {
+        throw schemaError;
+      }),
+    });
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    const error = (() => {
+      try {
+        adapter.insert("todos", {});
+        return null;
+      } catch (caught) {
+        return caught;
+      }
+    })();
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).name).toBe("JazzRnSchemaError");
+    expect((error as Error).message).toBe("schema mismatch");
+    expect((error as Error & { tag?: unknown }).tag).toBe("Schema");
+    expect((error as Error & { cause?: unknown }).cause).toBe(schemaError);
   });
 
   it("no-ops sync hooks after close", () => {

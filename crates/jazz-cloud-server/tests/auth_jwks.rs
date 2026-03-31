@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, extract::State, routing::get};
@@ -100,6 +100,10 @@ struct TestServer {
 
 impl TestServer {
     async fn start() -> Self {
+        Self::start_with_env(vec![]).await
+    }
+
+    async fn start_with_env(extra_env: Vec<(&str, String)>) -> Self {
         let data_dir = TempDir::new().expect("create temp data dir");
         let port = get_free_port();
 
@@ -116,6 +120,7 @@ impl TestServer {
                 "--worker-threads",
                 "1",
             ])
+            .envs(extra_env)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -150,7 +155,7 @@ impl TestServer {
     }
 
     async fn create_app(&self, jwks_endpoint: &str) -> CreateAppResponse {
-        self.create_app_with_config(Some(jwks_endpoint), None, None, None, None)
+        self.create_app_with_config(Some(jwks_endpoint), None, None, None, None, None, None)
             .await
     }
 
@@ -166,6 +171,8 @@ impl TestServer {
             None,
             backend_secret,
             admin_secret,
+            None,
+            None,
         )
         .await
     }
@@ -177,6 +184,8 @@ impl TestServer {
         allow_demo: Option<bool>,
         backend_secret: Option<&str>,
         admin_secret: Option<&str>,
+        jwks_cache_ttl_secs: Option<u64>,
+        jwks_max_stale_secs: Option<u64>,
     ) -> CreateAppResponse {
         let mut payload = json!({
             "app_name": "integration-app",
@@ -195,6 +204,12 @@ impl TestServer {
         }
         if let Some(secret) = admin_secret {
             payload["admin_secret"] = Value::String(secret.to_string());
+        }
+        if let Some(ttl_secs) = jwks_cache_ttl_secs {
+            payload["jwks_cache_ttl_secs"] = Value::Number(ttl_secs.into());
+        }
+        if let Some(max_stale_secs) = jwks_max_stale_secs {
+            payload["jwks_max_stale_secs"] = Value::Number(max_stale_secs.into());
         }
 
         let response = self
@@ -282,6 +297,13 @@ impl Drop for TestServer {
         let _ = self.process.kill();
         let _ = self.process.wait();
     }
+}
+
+fn auth_jwks_test_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock auth_jwks test guard")
 }
 
 async fn jwks_handler(State(state): State<JwksState>) -> Json<Value> {
@@ -372,6 +394,7 @@ fn make_jwt_with_options(
 
 #[tokio::test]
 async fn valid_bearer_jwt_is_accepted_with_cached_jwks() {
+    let _guard = auth_jwks_test_guard();
     let jwks_server = JwksServer::start(vec![hs256_jwks("kid-valid", "secret-valid")]).await;
     let server = TestServer::start().await;
     let app = server.create_app(&jwks_server.endpoint()).await;
@@ -405,6 +428,7 @@ async fn valid_bearer_jwt_is_accepted_with_cached_jwks() {
 
 #[tokio::test]
 async fn unknown_kid_triggers_single_refresh_then_succeeds() {
+    let _guard = auth_jwks_test_guard();
     let jwks_server = JwksServer::start(vec![
         hs256_jwks("kid-old", "secret-old"),
         hs256_jwks("kid-new", "secret-new"),
@@ -430,6 +454,7 @@ async fn unknown_kid_triggers_single_refresh_then_succeeds() {
 
 #[tokio::test]
 async fn bad_signature_stays_unauthorized_after_refresh_retry() {
+    let _guard = auth_jwks_test_guard();
     let jwks_server = JwksServer::start(vec![
         hs256_jwks("kid-signature", "good-secret"),
         hs256_jwks("kid-signature", "good-secret"),
@@ -453,8 +478,134 @@ async fn bad_signature_stays_unauthorized_after_refresh_retry() {
     );
 }
 
+/// Rapid requests with different unknown kids should not trigger unbounded
+/// JWKS fetches. After the first forced refresh, subsequent unknown-kid
+/// requests within the cooldown window should reuse the cached keyset
+/// rather than hammering the IdP endpoint.
+///
+/// ```text
+///  req(kid-0)          req(kid-1)          req(kid-2)
+///    |                    |                    |
+///    v                    v                    v
+///  load(1) ──> miss    cache hit            cache hit
+///  no match →          no match →           no match →
+///  refresh(2)          cooldown ──>         cooldown ──>
+///  no match → 401      use cached → 401    use cached → 401
+/// ```
+#[tokio::test]
+async fn rapid_unknown_kids_do_not_trigger_unbounded_refreshes() {
+    let _guard = auth_jwks_test_guard();
+    let jwks_server = JwksServer::start(vec![hs256_jwks("kid-stable", "secret-stable")]).await;
+    let server = TestServer::start().await;
+    let app = server.create_app(&jwks_server.endpoint()).await;
+
+    // Send 5 requests with different fabricated kids in rapid succession.
+    for i in 0..5 {
+        let token = make_jwt(
+            "user-dos",
+            &format!("kid-fabricated-{i}"),
+            "irrelevant-secret",
+        );
+
+        let response = server.sync_with_bearer(&app.app_id, &token).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // Without cooldown: 1 (first load) + 5 (one forced refresh per request) = 6
+    // With cooldown:    1 (first load) + 1 (first refresh, then cooldown) = 2
+    assert_eq!(
+        jwks_server.hits(),
+        2,
+        "rapid unknown-kid requests should trigger at most one refresh within the cooldown window"
+    );
+}
+
+/// When the JWKS endpoint goes down after the cache TTL expires, requests
+/// with valid JWTs should still succeed using the stale cached keyset
+/// rather than failing with an auth error.
+#[tokio::test]
+async fn stale_jwks_served_when_endpoint_goes_down_after_ttl_expiry() {
+    let _guard = auth_jwks_test_guard();
+    // Response 1: valid key. Response 2+: empty keys (fetch_jwks rejects these).
+    let jwks_server = JwksServer::start(vec![
+        hs256_jwks("kid-stale", "secret-stale"),
+        json!({ "keys": [] }),
+    ])
+    .await;
+    let server = TestServer::start().await;
+    let jwks_endpoint = jwks_server.endpoint();
+    let app = server
+        .create_app_with_config(Some(&jwks_endpoint), None, None, None, None, Some(1), None)
+        .await;
+
+    let token = make_jwt("user-stale", "kid-stale", "secret-stale");
+
+    // First request: fetches JWKS (hit 1), validates OK.
+    let first = server.sync_with_bearer(&app.app_id, &token).await;
+    assert_ne!(
+        first.status(),
+        StatusCode::UNAUTHORIZED,
+        "first request should succeed with cached JWKS"
+    );
+
+    // Wait for TTL to expire.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    // Second request: TTL expired, fetch fails (empty keys), should serve stale.
+    let second = server.sync_with_bearer(&app.app_id, &token).await;
+    assert_ne!(
+        second.status(),
+        StatusCode::UNAUTHORIZED,
+        "request should succeed with stale JWKS when endpoint is down"
+    );
+}
+
+/// Stale keysets should not be served forever. Once the entry is older
+/// than TTL + max_stale, the fallback is refused and the request fails.
+#[tokio::test]
+async fn stale_jwks_refused_after_max_stale_expires() {
+    let _guard = auth_jwks_test_guard();
+    let jwks_server = JwksServer::start(vec![
+        hs256_jwks("kid-expiry", "secret-expiry"),
+        json!({ "keys": [] }),
+    ])
+    .await;
+    // TTL=1s, max_stale=1s → total window = 2s.
+    let server = TestServer::start().await;
+    let jwks_endpoint = jwks_server.endpoint();
+    let app = server
+        .create_app_with_config(
+            Some(&jwks_endpoint),
+            None,
+            None,
+            None,
+            None,
+            Some(1),
+            Some(1),
+        )
+        .await;
+
+    let token = make_jwt("user-expiry", "kid-expiry", "secret-expiry");
+
+    // First request: validates OK.
+    let first = server.sync_with_bearer(&app.app_id, &token).await;
+    assert_ne!(first.status(), StatusCode::UNAUTHORIZED);
+
+    // Wait beyond TTL + max_stale (2s total).
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    // Request should now fail — stale keyset is too old to serve.
+    let expired = server.sync_with_bearer(&app.app_id, &token).await;
+    assert_eq!(
+        expired.status(),
+        StatusCode::UNAUTHORIZED,
+        "stale keyset beyond max_stale should not be served"
+    );
+}
+
 #[tokio::test]
 async fn backend_session_auth_requires_secret_and_accepts_valid_secret() {
+    let _guard = auth_jwks_test_guard();
     let jwks_server = JwksServer::start(vec![hs256_jwks("kid-valid", "secret-valid")]).await;
     let server = TestServer::start().await;
     let app = server
@@ -478,6 +629,7 @@ async fn backend_session_auth_requires_secret_and_accepts_valid_secret() {
 
 #[tokio::test]
 async fn local_mode_flags_are_enforced_per_app() {
+    let _guard = auth_jwks_test_guard();
     let server = TestServer::start().await;
     let app = server
         .create_app_with_config(
@@ -486,6 +638,8 @@ async fn local_mode_flags_are_enforced_per_app() {
             Some(true),
             Some("backend-secret-1"),
             Some("admin-secret-1"),
+            None,
+            None,
         )
         .await;
 
@@ -503,6 +657,7 @@ async fn local_mode_flags_are_enforced_per_app() {
 
 #[tokio::test]
 async fn link_external_is_idempotent_and_conflicts_on_relink_to_other_principal() {
+    let _guard = auth_jwks_test_guard();
     let jwks_server = JwksServer::start(vec![hs256_jwks("kid-link", "secret-link")]).await;
     let server = TestServer::start().await;
     let app = server.create_app(&jwks_server.endpoint()).await;

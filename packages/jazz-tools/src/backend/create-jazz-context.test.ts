@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import type { CompiledPermissions } from "../permissions/index.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { createJazzContext } from "./create-jazz-context.js";
 
@@ -9,7 +10,12 @@ const mocks = vi.hoisted(() => {
   const runtimeCtor = vi.fn();
   const inMemoryRuntimeCtor = vi.fn();
   const runtimeInstances: Array<{ flush: ReturnType<typeof vi.fn> }> = [];
-  const createdDbs: Array<{ kind: string; client: unknown; session?: Session }> = [];
+  const createdDbs: Array<{
+    kind: string;
+    client: unknown;
+    session?: Session;
+    attribution?: string;
+  }> = [];
   const clients: Array<{
     asBackend: ReturnType<typeof vi.fn>;
     shutdown: ReturnType<typeof vi.fn>;
@@ -24,15 +30,18 @@ const mocks = vi.hoisted(() => {
     clients.push(client);
     return client;
   });
-  const createDbFromClient = vi.fn((_config: unknown, client: unknown, session?: Session) => {
-    const db = {
-      kind: session ? "scoped-db" : "db",
-      client,
-      ...(session ? { session } : {}),
-    };
-    createdDbs.push(db);
-    return db;
-  });
+  const createDbFromClient = vi.fn(
+    (_config: unknown, client: unknown, session?: Session, attribution?: string) => {
+      const db = {
+        kind: session ? "scoped-db" : attribution !== undefined ? "attributed-db" : "db",
+        client,
+        ...(session ? { session } : {}),
+        ...(attribution !== undefined ? { attribution } : {}),
+      };
+      createdDbs.push(db);
+      return db;
+    },
+  );
 
   class MockNapiRuntime {
     readonly flush = vi.fn();
@@ -112,6 +121,11 @@ vi.mock("../runtime/db.js", () => ({
 
 const SCHEMA_A: WasmSchema = {};
 const SCHEMA_B: WasmSchema = { todos: { columns: [] } };
+const TODO_PERMISSIONS: CompiledPermissions = {
+  todos: {
+    select: { using: { type: "True" } },
+  },
+};
 
 function makeJwt(payload: Record<string, unknown>): string {
   const encode = (value: unknown) =>
@@ -134,6 +148,7 @@ describe("backend/create-jazz-context", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
+      permissions: {},
       driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
     });
 
@@ -158,10 +173,11 @@ describe("backend/create-jazz-context", () => {
     );
   });
 
-  it("BC-U02: supports high-level db/backend/request/session helpers", () => {
+  it("BC-U02: supports high-level db/backend/request/session/attribution helpers", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
+      permissions: {},
       driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
       serverUrl: "http://localhost:1625",
       backendSecret: "secret",
@@ -177,34 +193,53 @@ describe("backend/create-jazz-context", () => {
     const backendDb = context.asBackend();
     const requestDb = context.forRequest(req);
     const sessionDb = context.forSession(session);
+    const attributedDb = context.withAttribution("u2");
+    const attributedSessionDb = context.withAttributionForSession(session);
+    const attributedRequestDb = context.withAttributionForRequest(req);
 
     expect(db).toEqual({
       kind: "db",
-      client: mocks.clients[0],
+      client: mocks.clients[0]!,
     });
     expect(backendDb).toEqual({
       kind: "db",
-      client: mocks.clients[0],
+      client: mocks.clients[0]!,
     });
     expect(requestDb).toEqual({
       kind: "scoped-db",
-      client: mocks.clients[0],
+      client: mocks.clients[0]!,
       session: { user_id: "u1", claims: {} },
     });
     expect(sessionDb).toEqual({
       kind: "scoped-db",
-      client: mocks.clients[0],
+      client: mocks.clients[0]!,
       session,
     });
+    expect(attributedDb).toEqual({
+      kind: "attributed-db",
+      client: mocks.clients[0]!,
+      attribution: "u2",
+    });
+    expect(attributedSessionDb).toEqual({
+      kind: "attributed-db",
+      client: mocks.clients[0]!,
+      attribution: "u1",
+    });
+    expect(attributedRequestDb).toEqual({
+      kind: "attributed-db",
+      client: mocks.clients[0]!,
+      attribution: "u1",
+    });
     expect(mocks.clients).toHaveLength(1);
-    expect(mocks.clients[0].asBackend).toHaveBeenCalledTimes(3);
-    expect(mocks.createDbFromClient).toHaveBeenCalledTimes(4);
+    expect(mocks.clients[0]!.asBackend).toHaveBeenCalledTimes(6);
+    expect(mocks.createDbFromClient).toHaveBeenCalledTimes(7);
   });
 
-  it("BC-U03: request/session helpers work locally without backend sync config", () => {
+  it("BC-U03: request/session/attribution helpers work locally without backend sync config", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
+      permissions: {},
       driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
     });
 
@@ -216,7 +251,41 @@ describe("backend/create-jazz-context", () => {
 
     expect(() => context.forRequest(req)).not.toThrow();
     expect(() => context.forSession(session)).not.toThrow();
-    expect(mocks.clients[0].asBackend).not.toHaveBeenCalled();
+    expect(() => context.withAttribution("u2")).not.toThrow();
+    expect(() => context.withAttributionForSession(session)).not.toThrow();
+    expect(() => context.withAttributionForRequest(req)).not.toThrow();
+    expect(mocks.clients[0]!.asBackend).not.toHaveBeenCalled();
+  });
+
+  it("BC-U04: merges compiled permissions into the runtime schema", () => {
+    const context = createJazzContext({
+      appId: "server-app",
+      app: {
+        wasmSchema: {
+          todos: {
+            columns: [],
+          },
+        },
+      },
+      permissions: TODO_PERMISSIONS,
+      driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+    });
+
+    context.db();
+
+    expect(mocks.runtimeCtor).toHaveBeenCalledWith(
+      serializeRuntimeSchema({
+        todos: {
+          columns: [],
+          policies: TODO_PERMISSIONS.todos as any,
+        },
+      }),
+      "server-app",
+      "dev",
+      "main",
+      "/tmp/jazz.db",
+      "edge",
+    );
   });
 
   it("BC-U04: throws when no schema source is available", () => {
@@ -245,6 +314,7 @@ describe("backend/create-jazz-context", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
+      permissions: {},
       driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
     });
 
@@ -253,13 +323,14 @@ describe("backend/create-jazz-context", () => {
     context.flush();
 
     expect(mocks.runtimeInstances).toHaveLength(1);
-    expect(mocks.runtimeInstances[0].flush).toHaveBeenCalledTimes(1);
+    expect(mocks.runtimeInstances[0]!.flush).toHaveBeenCalledTimes(1);
   });
 
   it("BC-U07: shutdown releases client and allows re-init", async () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
+      permissions: {},
       driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
     });
 
@@ -267,7 +338,7 @@ describe("backend/create-jazz-context", () => {
     expect(mocks.clients).toHaveLength(1);
 
     await context.shutdown();
-    expect(mocks.clients[0].shutdown).toHaveBeenCalledTimes(1);
+    expect(mocks.clients[0]!.shutdown).toHaveBeenCalledTimes(1);
 
     context.db();
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(2);
@@ -278,6 +349,7 @@ describe("backend/create-jazz-context", () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
+      permissions: {},
       driver: { type: "memory" },
       serverUrl: "http://localhost:1625",
     });
@@ -300,6 +372,7 @@ describe("backend/create-jazz-context", () => {
       createJazzContext({
         appId: "server-app",
         app: { wasmSchema: SCHEMA_A },
+        permissions: {},
         driver: { type: "memory" },
       }),
     ).toThrow("driver.type='memory' requires serverUrl.");

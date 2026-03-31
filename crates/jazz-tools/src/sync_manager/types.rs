@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -8,6 +9,7 @@ use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
+use crate::query_manager::types::SchemaHash;
 
 /// Error returned when a policy denies an operation.
 #[derive(Debug, Clone)]
@@ -261,8 +263,23 @@ pub enum SyncPayload {
         through_seq: u64,
     },
 
+    /// Warning that rows exist on an older schema branch but are currently unreachable.
+    SchemaWarning(SchemaWarning),
+
     /// Error response.
     Error(SyncError),
+}
+
+/// Warning emitted when a query encounters rows that cannot be transformed into the
+/// subscriber's target schema because no reviewed migration path exists yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaWarning {
+    pub query_id: QueryId,
+    pub table_name: String,
+    pub row_count: usize,
+    pub from_hash: SchemaHash,
+    pub to_hash: SchemaHash,
 }
 
 /// Sessions contain claims as a JSON object.
@@ -358,8 +375,7 @@ impl SyncPayload {
         };
         matches!(
             metadata.get(crate::metadata::MetadataKey::Type.as_str()).map(|s| s.as_str()),
-            Some(t) if t == crate::metadata::ObjectType::CatalogueSchema.as_str()
-                || t == crate::metadata::ObjectType::CatalogueLens.as_str()
+            Some(t) if crate::metadata::ObjectType::is_catalogue_type_str(t)
         )
     }
 
@@ -372,6 +388,7 @@ impl SyncPayload {
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",
             SyncPayload::PersistenceAck { .. } => "PersistenceAck",
             SyncPayload::QuerySettled { .. } => "QuerySettled",
+            SyncPayload::SchemaWarning(_) => "SchemaWarning",
             SyncPayload::Error(_) => "Error",
         }
     }
@@ -431,6 +448,8 @@ pub struct PendingPermissionCheck {
     pub client_id: ClientId,
     pub payload: SyncPayload,
     pub session: Session,
+    /// When schema resolution started deferring this check.
+    pub schema_wait_started_at: Option<Instant>,
     /// Object metadata for policy evaluation.
     pub metadata: HashMap<String, String>,
     /// Old content for UPDATE/DELETE (None for INSERT).

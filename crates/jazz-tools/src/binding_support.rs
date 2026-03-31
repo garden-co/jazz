@@ -12,7 +12,7 @@ use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::parse_query_json;
 use crate::query_manager::query::Query;
-use crate::query_manager::session::Session;
+use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{RowDescriptor, Schema, TableName, Value};
 use crate::runtime_core::{ReadDurabilityOptions, SubscriptionDelta};
 use crate::sync_manager::{Destination, DurabilityTier, OutboxEntry, QueryPropagation};
@@ -129,6 +129,26 @@ pub fn parse_session_input(session_json: Option<&str>) -> Result<Option<Session>
         Some(json) => serde_json::from_str(json)
             .map(Some)
             .map_err(|err| err.to_string()),
+        None => Ok(None),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WriteContextWire {
+    Session(Session),
+    Context(WriteContext),
+}
+
+pub fn parse_write_context_input(
+    write_context_json: Option<&str>,
+) -> Result<Option<WriteContext>, String> {
+    match write_context_json {
+        Some(json) => match serde_json::from_str::<WriteContextWire>(json) {
+            Ok(WriteContextWire::Session(session)) => Ok(Some(WriteContext::from_session(session))),
+            Ok(WriteContextWire::Context(context)) => Ok(Some(context)),
+            Err(err) => Err(err.to_string()),
+        },
         None => Ok(None),
     }
 }

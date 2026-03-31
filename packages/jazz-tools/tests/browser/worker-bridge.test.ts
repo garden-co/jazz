@@ -10,7 +10,16 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createDb, Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
-import { TEST_PORT, ADMIN_SECRET, APP_ID } from "./test-constants.js";
+import {
+  TestCleanup,
+  createSyncedDb,
+  sleep,
+  uniqueDbName,
+  waitForCondition,
+  waitForQuery,
+  waitForWorkerMessageType,
+  withTimeout,
+} from "./support.js";
 
 interface DebugLensEdgeState {
   sourceHash: string;
@@ -159,62 +168,24 @@ const allCatalogueTodos: QueryBuilder<CatalogueTodo> = {
 };
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Generate a unique dbName to isolate OPFS state between tests. */
-function uniqueDbName(label: string): string {
-  return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 describe("Worker Bridge with OPFS", () => {
-  const dbs: Db[] = [];
-  const subscriptions: Array<() => void> = [];
+  const ctx = new TestCleanup();
 
-  /** Track dbs for cleanup. */
+  /** Shorthand: track a Db for cleanup. */
   function track(db: Db): Db {
-    dbs.push(db);
-    return db;
+    return ctx.track(db);
   }
 
-  /** Track subscriptions so they are always cleaned up, even on assertion failures. */
+  /** Shorthand: track a subscription for cleanup. */
   function trackSubscription(unsubscribe: () => void): () => void {
-    subscriptions.push(unsubscribe);
-    return () => {
-      try {
-        unsubscribe();
-      } finally {
-        const index = subscriptions.indexOf(unsubscribe);
-        if (index >= 0) {
-          subscriptions.splice(index, 1);
-        }
-      }
-    };
-  }
-
-  async function createSyncedDb(label: string, localAuthToken: string): Promise<Db> {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
-    return track(
-      await createDb({
-        appId: APP_ID,
-        driver: { type: "persistent", dbName: uniqueDbName(label) },
-        serverUrl,
-        localAuthMode: "anonymous",
-        localAuthToken,
-        adminSecret: ADMIN_SECRET,
-      }),
-    );
+    return ctx.trackSubscription(unsubscribe);
   }
 
   function untrack(db: Db): void {
-    const index = dbs.indexOf(db);
-    if (index >= 0) {
-      dbs.splice(index, 1);
-    }
+    ctx.untrack(db);
   }
 
   function getTabRole(db: Db): "leader" | "follower" | null {
@@ -281,23 +252,7 @@ describe("Worker Bridge with OPFS", () => {
     return leader;
   }
 
-  afterEach(async () => {
-    for (const unsubscribe of subscriptions.splice(0)) {
-      try {
-        unsubscribe();
-      } catch {
-        // Best effort
-      }
-    }
-
-    for (const db of dbs.splice(0).reverse()) {
-      try {
-        await db.shutdown();
-      } catch {
-        // Best effort
-      }
-    }
-  });
+  afterEach(() => ctx.cleanup());
 
   // -------------------------------------------------------------------------
   // 1. Worker initialization
@@ -587,6 +542,34 @@ describe("Worker Bridge with OPFS", () => {
     expect(titles).toEqual(["Also survives", "Crash-proof"]);
   });
 
+  it("recovers from OPFS handle conflict after abrupt worker termination", async () => {
+    // Hold a WritableStream on the OPFS file from the main thread — this
+    // blocks createSyncAccessHandle in the worker, exactly like a stale
+    // handle from a previous page load.
+    //
+    //  main thread: createWritable() ──── holds ──── close()
+    //  worker:            createSyncAccessHandle() → conflict → retry → success
+    //
+    const dbName = uniqueDbName("handle-conflict");
+    // Coupled to OpfsFile::file_name() in crates/opfs-btree/src/file.rs
+    const fileName = `${dbName}.opfsbtree`;
+
+    // Pre-create the OPFS file and hold a writable stream to block the worker.
+    const root = await navigator.storage.getDirectory();
+    const fileHandle = await root.getFileHandle(fileName, { create: true });
+    const writable = await fileHandle.createWritable();
+
+    // Start the Db — its worker will hit NoModificationAllowedError and retry.
+    const dbPromise = createDb({ appId: "test-app", driver: { type: "persistent", dbName } });
+
+    // Release the lock after 100ms so the retry can succeed.
+    setTimeout(() => writable.close(), 100);
+
+    const db = track(await dbPromise);
+    const rows = await db.all(allTodos, { tier: "worker" });
+    expect(rows).toEqual([]);
+  });
+
   it("deletes OPFS storage for the current namespace and keeps the same Db usable", async () => {
     const db = track(
       await createDb({
@@ -794,8 +777,8 @@ describe("Worker Bridge with OPFS", () => {
 
   it("propagates synced row from client A to client B", async () => {
     const sharedLocalAuthToken = `sync-token-a-to-b-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const dbA = await createSyncedDb("sync-a", sharedLocalAuthToken);
-    const dbB = await createSyncedDb("sync-b", sharedLocalAuthToken);
+    const dbA = await createSyncedDb(ctx, "sync-a", sharedLocalAuthToken);
+    const dbB = await createSyncedDb(ctx, "sync-b", sharedLocalAuthToken);
 
     const title = `sync-a-to-b-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
@@ -815,8 +798,8 @@ describe("Worker Bridge with OPFS", () => {
 
   it("propagates synced row from client B to client A", async () => {
     const sharedLocalAuthToken = `sync-token-b-to-a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const dbA = await createSyncedDb("sync-a-reverse", sharedLocalAuthToken);
-    const dbB = await createSyncedDb("sync-b-reverse", sharedLocalAuthToken);
+    const dbA = await createSyncedDb(ctx, "sync-a-reverse", sharedLocalAuthToken);
+    const dbB = await createSyncedDb(ctx, "sync-b-reverse", sharedLocalAuthToken);
 
     const title = `sync-b-to-a-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     await withTimeout(
@@ -886,8 +869,8 @@ describe("Worker Bridge with OPFS", () => {
 
   it("local-only subscriptions do not receive rows from sync server", async () => {
     const sharedLocalAuthToken = `sync-local-only-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const dbA = await createSyncedDb("sync-local-only-a", sharedLocalAuthToken);
-    const dbB = await createSyncedDb("sync-local-only-b", sharedLocalAuthToken);
+    const dbA = await createSyncedDb(ctx, "sync-local-only-a", sharedLocalAuthToken);
+    const dbB = await createSyncedDb(ctx, "sync-local-only-b", sharedLocalAuthToken);
 
     const snapshots: Todo[][] = [];
     const unsub = trackSubscription(
@@ -1063,115 +1046,17 @@ describe("Worker Bridge with OPFS", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Polling helper
+// Local helpers (thin wrappers over support.ts using local schema types)
 // ---------------------------------------------------------------------------
-
-async function waitForCondition(
-  check: () => Promise<boolean>,
-  timeoutMs: number,
-  message: string,
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let lastError: unknown = undefined;
-  while (Date.now() < deadline) {
-    try {
-      if (await check()) return;
-    } catch (error) {
-      lastError = error;
-    }
-    await sleep(50);
-  }
-
-  const lastErrorMessage =
-    lastError instanceof Error ? lastError.message : lastError ? String(lastError) : "none";
-  throw new Error(`Timeout after ${timeoutMs}ms: ${message}; lastError=${lastErrorMessage}`);
-}
-
-async function waitForWorkerMessageType(
-  worker: Worker,
-  expectedType: string,
-  timeoutMs: number,
-  label: string,
-): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error(`${label}: no ${expectedType} worker message within ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    const handler = (event: MessageEvent) => {
-      const data = event.data as { type?: string } | undefined;
-      if (data?.type === expectedType) {
-        cleanup();
-        resolve();
-      }
-    };
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      worker.removeEventListener("message", handler);
-    };
-
-    worker.addEventListener("message", handler);
-  });
-}
 
 async function waitForTodos(
   db: Db,
   predicate: (rows: Todo[]) => boolean,
   label: string,
   timeoutMs = 15000,
-  tier: "worker" | "edge" | undefined = undefined,
+  tier?: "worker" | "edge",
 ): Promise<Todo[]> {
-  const deadline = Date.now() + timeoutMs;
-  let lastRows: Todo[] = [];
-  let lastError: unknown = undefined;
-
-  while (Date.now() < deadline) {
-    try {
-      const rows = await db.all(allTodos, { tier });
-      if (predicate(rows)) {
-        return rows;
-      }
-      lastRows = rows;
-    } catch (error) {
-      lastError = error;
-    }
-
-    await sleep(150);
-  }
-
-  const rowPreview = JSON.stringify(
-    lastRows.slice(0, 10).map((row) => ({ id: row.id, title: row.title, done: row.done })),
-  );
-  const lastErrorMessage =
-    lastError instanceof Error ? lastError.message : lastError ? String(lastError) : "none";
-  throw new Error(
-    `${label}: timed out after ${timeoutMs}ms (tier=${tier ?? "default"}); ` +
-      `lastRowsCount=${lastRows.length}; lastRows=${rowPreview}; lastError=${lastErrorMessage}`,
-  );
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timeoutId = setTimeout(() => {
-          reject(new Error(`${label} after ${timeoutMs}ms`));
-        }, timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
-  }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return waitForQuery(db, allTodos, predicate, label, timeoutMs, tier);
 }
 
 function hasRestoredCatalogueState(state: DebugSchemaState): boolean {

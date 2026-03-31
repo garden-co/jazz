@@ -1,0 +1,33 @@
+{
+  "name": "auth-workos-chat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:auth": "tsx server/main.ts",
+    "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
+    "preview": "vite preview",
+    "sync-server": "tsx scripts/sync-server.ts",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@workos-inc/authkit-react": "^0.16.0",
+    "express": "^4.18.2",
+    "jazz-tools": "workspace:*",
+    "jose": "^6.2.1",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "catalog:default",
+    "vite": "^6.0.0"
+  }
+}

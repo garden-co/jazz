@@ -2,6 +2,7 @@
 //!
 //! Tests the full HTTP API end-to-end.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -17,7 +18,8 @@ use futures_util::StreamExt as _;
 use futures_util::stream::Stream;
 use http_body_util::BodyExt;
 use jazz_tools::{
-    AppContext, AppId, ColumnType, DurabilityTier, JazzClient, SchemaBuilder, TableSchema,
+    AppContext, AppId, ClientStorage, ColumnType, DurabilityTier, JazzClient, SchemaBuilder,
+    TableSchema,
 };
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -81,6 +83,7 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
         client_id: None,
         schema: test_schema(),
         server_url: String::new(),
+        storage: ClientStorage::Fjall,
         data_dir,
         jwt_token: None,
         backend_secret: None,
@@ -131,6 +134,14 @@ fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
         done,
         description,
     })
+}
+
+fn todo_values(title: impl Into<String>, description: impl Into<String>) -> HashMap<String, Value> {
+    HashMap::from([
+        ("title".to_string(), Value::Text(title.into())),
+        ("done".to_string(), Value::Boolean(false)),
+        ("description".to_string(), Value::Text(description.into())),
+    ])
 }
 
 /// Broadcast current todos to all SSE connections.
@@ -204,13 +215,7 @@ async fn create_todo(
     Json(request): Json<CreateTodoRequest>,
 ) -> impl IntoResponse {
     let description = request.description.clone().unwrap_or_default();
-    let values = vec![
-        Value::Text(request.title.clone()),
-        Value::Boolean(false),
-        Value::Text(description.clone()),
-        Value::Null,
-        Value::Null,
-    ];
+    let values = todo_values(request.title.clone(), description.clone());
     match state.client.create("todos", values).await {
         Ok((row_id, row_values)) => {
             let todo = row_to_todo(row_id, &row_values);
@@ -445,6 +450,7 @@ async fn test_local_persistence() {
             client_id: None,
             schema: test_schema(),
             server_url: String::new(),
+            storage: ClientStorage::Fjall,
             data_dir: data_path.clone(),
             jwt_token: None,
             backend_secret: None,
@@ -453,13 +459,7 @@ async fn test_local_persistence() {
         let client = JazzClient::connect(context).await.unwrap();
 
         // Create a todo
-        let values = vec![
-            Value::Text("Persist me".to_string()),
-            Value::Boolean(false),
-            Value::Text(String::new()),
-            Value::Null,
-            Value::Null,
-        ];
+        let values = todo_values("Persist me", "");
         let (row_id, _row_values) = client.create("todos", values).await.unwrap();
 
         // Verify it exists
@@ -480,6 +480,7 @@ async fn test_local_persistence() {
             client_id: None,
             schema: test_schema(),
             server_url: String::new(),
+            storage: ClientStorage::Fjall,
             data_dir: data_path,
             jwt_token: None,
             backend_secret: None,
@@ -742,6 +743,7 @@ async fn test_server_resync() {
             client_id: None,
             schema: test_schema(),
             server_url: server.base_url(),
+            storage: ClientStorage::Fjall,
             data_dir: data_path.clone(),
             jwt_token: Some(make_test_jwt("client1-user")),
             backend_secret: None,
@@ -750,13 +752,7 @@ async fn test_server_resync() {
         let client = JazzClient::connect(context).await.unwrap();
 
         // Create a todo
-        let values = vec![
-            Value::Text("Synced todo".to_string()),
-            Value::Boolean(false),
-            Value::Text(String::new()),
-            Value::Null,
-            Value::Null,
-        ];
+        let values = todo_values("Synced todo", "");
         let (_row_id, _row_values) = client.create("todos", values).await.unwrap();
 
         // Verify it exists locally
@@ -785,6 +781,7 @@ async fn test_server_resync() {
             client_id: None,
             schema: test_schema(),
             server_url: server.base_url(),
+            storage: ClientStorage::Fjall,
             data_dir: data_path,
             jwt_token: Some(make_test_jwt("client2-user")),
             backend_secret: None,

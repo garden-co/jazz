@@ -1,6 +1,6 @@
 import type { Request, Response } from "express";
 import type { JazzContext } from "jazz-tools/backend";
-import { app as schemaApp } from "../schema/app.js";
+import { app as schemaApp } from "../schema.js";
 
 declare const context: JazzContext;
 
@@ -42,10 +42,26 @@ export async function listTodosWithInheritedPolicy(
   try {
     const rows = await context
       .forRequest(req, schemaApp)
-      .all(schemaApp.todos.where({ project: req.params.projectId }));
+      .all(schemaApp.todos.where({ projectId: req.params.projectId }));
     res.json(rows);
   } catch {
     sendQueryError(res);
   }
 }
 // #endregion permissions-inherits-ts
+
+// #region backend-attribution-ts
+export function createAttributedHandles(req: Request) {
+  const syntheticSession = {
+    user_id: "user_123",
+    claims: {},
+  };
+
+  return {
+    backendDb: context.asBackend(schemaApp),
+    attributedDb: context.withAttribution("user_123", schemaApp),
+    attributedSessionDb: context.withAttributionForSession(syntheticSession, schemaApp),
+    attributedRequestDb: context.withAttributionForRequest(req, schemaApp),
+  };
+}
+// #endregion backend-attribution-ts

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useAll, useDb, useSession } from "jazz-tools/vue";
-import { app } from "../schema/session-app.js";
+import { app } from "../session-app.js";
 
 const db = useDb();
 
@@ -13,7 +13,7 @@ const sessionUserId = session?.user_id ?? null;
 // #endregion auth-session-vue-user-id
 
 // #region auth-session-vue-query
-const ownedTodos = useAll(app.todos.where({ owner_id: sessionUserId ?? "__no-session__" }));
+const ownedTodos = useAll(app.todos.where({ ownerId: sessionUserId ?? "__no-session__" }));
 // #endregion auth-session-vue-query
 
 // #region auth-session-vue-insert
@@ -23,7 +23,7 @@ function addOwnedTodo(title: string) {
   db.insert(app.todos, {
     title,
     done: false,
-    owner_id: sessionUserId,
+    ownerId: sessionUserId,
   });
 }
 // #endregion auth-session-vue-insert

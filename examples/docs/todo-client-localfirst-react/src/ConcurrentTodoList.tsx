@@ -1,6 +1,6 @@
 import { Suspense, useDeferredValue, useState, useTransition } from "react";
 import { useAllSuspense, useDb } from "jazz-tools/react";
-import { app, type TodoQueryBuilder } from "../schema/app.js";
+import { app, type TodoQueryBuilder } from "../schema.js";
 
 // #region reading-concurrent-rendering-react
 export function ConcurrentTodoList() {

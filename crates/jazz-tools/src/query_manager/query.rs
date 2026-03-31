@@ -13,6 +13,7 @@ use super::relation_ir::ColumnRef;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryBuildError {
     UnsupportedShape,
+    NullBetweenBound { column: String },
 }
 
 impl fmt::Display for QueryBuildError {
@@ -22,6 +23,12 @@ impl fmt::Display for QueryBuildError {
                 write!(
                     f,
                     "query shape is not supported by relation IR normalization"
+                )
+            }
+            QueryBuildError::NullBetweenBound { column } => {
+                write!(
+                    f,
+                    "BETWEEN does not support NULL bounds for column '{column}'"
                 )
             }
         }
@@ -146,22 +153,28 @@ impl Condition {
 
     /// Check if this condition can be used for an index scan.
     pub fn is_index_scannable(&self) -> bool {
-        !is_magic_column_name(self.column())
-            && matches!(
-                self,
-                Condition::Eq { .. }
-                    | Condition::Lt { .. }
-                    | Condition::Le { .. }
-                    | Condition::Gt { .. }
-                    | Condition::Ge { .. }
-                    | Condition::Between { .. }
-            )
+        if is_magic_column_name(self.column()) {
+            return false;
+        }
+
+        match self {
+            Condition::Eq { value, .. }
+            | Condition::Lt { value, .. }
+            | Condition::Le { value, .. }
+            | Condition::Gt { value, .. }
+            | Condition::Ge { value, .. } => !value.is_null(),
+            Condition::Between { min, max, .. } => !min.is_null() && !max.is_null(),
+            _ => false,
+        }
     }
 
     /// Convert to a Predicate for filter evaluation.
     pub fn to_predicate(&self, descriptor: &RowDescriptor) -> Option<Predicate> {
         let col_index = descriptor.column_index(self.column())?;
         let col_type = &descriptor.columns[col_index].column_type;
+        if let Some(predicate) = self.null_literal_predicate(col_index) {
+            return Some(predicate);
+        }
 
         Some(match self {
             Condition::Eq { value, .. } => Predicate::Eq {
@@ -212,6 +225,9 @@ impl Condition {
         let col_index = tuple_condition_column_index(tuple_descriptor, self.raw_column())?;
         let combined_descriptor = tuple_descriptor.combined_descriptor();
         let col_type = &combined_descriptor.columns[col_index].column_type;
+        if let Some(predicate) = self.null_literal_predicate(col_index) {
+            return Some(predicate);
+        }
 
         Some(match self {
             Condition::Eq { value, .. } => Predicate::Eq {
@@ -255,6 +271,22 @@ impl Condition {
             Condition::IsNull { .. } => Predicate::IsNull { col_index },
             Condition::IsNotNull { .. } => Predicate::IsNotNull { col_index },
         })
+    }
+
+    fn null_literal_predicate(&self, col_index: usize) -> Option<Predicate> {
+        match self {
+            Condition::Eq { value, .. } if value.is_null() => Some(Predicate::IsNull { col_index }),
+            Condition::Ne { value, .. } if value.is_null() => {
+                Some(Predicate::IsNotNull { col_index })
+            }
+            Condition::Lt { value, .. } if value.is_null() => Some(Predicate::Or(vec![])),
+            Condition::Le { value, .. } if value.is_null() => Some(Predicate::IsNull { col_index }),
+            Condition::Gt { value, .. } if value.is_null() => {
+                Some(Predicate::IsNotNull { col_index })
+            }
+            Condition::Ge { value, .. } if value.is_null() => Some(Predicate::True),
+            _ => None,
+        }
     }
 }
 
@@ -541,6 +573,39 @@ fn default_disjuncts() -> Vec<Conjunction> {
 }
 
 impl Query {
+    fn validate_conditions(conditions: &[Condition]) -> Result<(), QueryBuildError> {
+        for condition in conditions {
+            match condition {
+                Condition::Between { column, min, max } if min.is_null() || max.is_null() => {
+                    return Err(QueryBuildError::NullBetweenBound {
+                        column: column.clone(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_array_subqueries(specs: &[ArraySubquerySpec]) -> Result<(), QueryBuildError> {
+        for spec in specs {
+            Self::validate_conditions(&spec.filters)?;
+            Self::validate_array_subqueries(&spec.nested_arrays)?;
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), QueryBuildError> {
+        for disjunct in &self.disjuncts {
+            Self::validate_conditions(&disjunct.conditions)?;
+        }
+        Self::validate_array_subqueries(&self.array_subqueries)?;
+        if let Some(recursive) = &self.recursive {
+            Self::validate_conditions(&recursive.filters)?;
+        }
+        Ok(())
+    }
+
     /// Create a new query for a table (internal use - branches not set).
     fn new_internal(table: impl Into<TableName>) -> Self {
         let table = table.into();
@@ -586,6 +651,7 @@ impl Query {
 
     /// Rebuild relation IR from the query DSL fields.
     pub fn refresh_relation_ir(&mut self) -> Result<(), QueryBuildError> {
+        self.validate()?;
         self.relation_ir =
             normalize_query_to_rel_expr(self).ok_or(QueryBuildError::UnsupportedShape)?;
         Ok(())
@@ -960,7 +1026,7 @@ impl QueryBuilder {
 
     pub fn build(self) -> Query {
         self.try_build()
-            .expect("QueryBuilder::build produced an unsupported relation IR shape")
+            .unwrap_or_else(|err| panic!("QueryBuilder::build failed: {err}"))
     }
 }
 
@@ -1374,6 +1440,49 @@ mod tests {
 
         let predicate = query.to_predicate(&descriptor);
         assert!(matches!(predicate, Predicate::Eq { col_index: 2, .. }));
+    }
+
+    #[test]
+    fn query_to_predicate_eq_null_becomes_is_null() {
+        let descriptor = RowDescriptor::new(vec![
+            ColumnDescriptor::new("id", ColumnType::Integer),
+            ColumnDescriptor::new("deleted_at", ColumnType::Text).nullable(),
+        ]);
+        let query = QueryBuilder::new("users")
+            .filter_eq("deleted_at", Value::Null)
+            .build();
+
+        let predicate = query.to_predicate(&descriptor);
+        assert!(matches!(predicate, Predicate::IsNull { col_index: 1 }));
+        assert!(query.disjuncts[0].best_index_condition().is_none());
+    }
+
+    #[test]
+    fn query_builder_rejects_between_null_lower_bound() {
+        let result = QueryBuilder::new("users")
+            .filter_between("score", Value::Null, Value::Integer(10))
+            .try_build();
+
+        assert_eq!(
+            result,
+            Err(QueryBuildError::NullBetweenBound {
+                column: "score".into()
+            })
+        );
+    }
+
+    #[test]
+    fn query_builder_rejects_between_null_upper_bound() {
+        let result = QueryBuilder::new("users")
+            .filter_between("score", Value::Integer(10), Value::Null)
+            .try_build();
+
+        assert_eq!(
+            result,
+            Err(QueryBuildError::NullBetweenBound {
+                column: "score".into()
+            })
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 {
   "name": "jazz-wasm",
-  "version": "2.0.0-alpha.18",
+  "version": "2.0.0-alpha.21",
   "description": "WebAssembly bindings for the Jazz database engine",
   "keywords": [
     "crdt",
@@ -26,8 +26,5 @@
   },
   "scripts": {
     "build": "wasm-pack build --target web --profiling"
-  },
-  "devDependencies": {
-    "wasm-pack": "^0.14.0"
   }
 }

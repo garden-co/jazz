@@ -6,6 +6,8 @@
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::{Json, Router, extract::State, routing::get};
@@ -18,25 +20,42 @@ const JWT_KID: &str = "test-jwks-kid";
 
 #[derive(Clone)]
 struct JwksState {
-    kid: String,
-    secret_b64: String,
+    hits: Arc<AtomicUsize>,
+    responses: Arc<tokio::sync::RwLock<Vec<Value>>>,
 }
 
 struct JwksServer {
     task: tokio::task::JoinHandle<()>,
     url: String,
+    state: JwksState,
+}
+
+pub fn hs256_jwks(kid: &str, secret: &str) -> Value {
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret.as_bytes());
+    json!({
+        "keys": [{
+            "kty": "oct",
+            "kid": kid,
+            "alg": "HS256",
+            "k": encoded,
+        }]
+    })
 }
 
 impl JwksServer {
     async fn start(kid: &str, secret: &str) -> Self {
+        Self::start_with_responses(vec![hs256_jwks(kid, secret)]).await
+    }
+
+    async fn start_with_responses(responses: Vec<Value>) -> Self {
         let state = JwksState {
-            kid: kid.to_string(),
-            secret_b64: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret.as_bytes()),
+            hits: Arc::new(AtomicUsize::new(0)),
+            responses: Arc::new(tokio::sync::RwLock::new(responses)),
         };
 
         let app = Router::new()
             .route("/jwks", get(jwks_handler))
-            .with_state(state);
+            .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind JWKS server");
@@ -48,7 +67,12 @@ impl JwksServer {
         Self {
             task,
             url: format!("http://{addr}/jwks"),
+            state,
         }
+    }
+
+    fn hits(&self) -> usize {
+        self.state.hits.load(Ordering::SeqCst)
     }
 }
 
@@ -75,11 +99,61 @@ impl TestServer {
         Self::start_on_port(port).await
     }
 
+    /// Start a test server with programmable JWKS responses.
+    ///
+    /// The JWKS server returns `responses[N]` for the Nth request,
+    /// falling back to the last response for subsequent requests.
+    pub async fn start_with_jwks_responses(responses: Vec<Value>) -> Self {
+        let port = get_free_port();
+        let data_dir = TempDir::new().expect("create temp dir");
+        let jwks_server = JwksServer::start_with_responses(responses).await;
+        Self::start_inner(port, data_dir, jwks_server, vec![]).await
+    }
+
+    /// Start a test server with programmable JWKS responses and custom cache timing.
+    pub async fn start_with_jwks_responses_and_ttl(responses: Vec<Value>, ttl_secs: u64) -> Self {
+        Self::start_with_jwks_responses_and_cache_config(responses, ttl_secs, 300).await
+    }
+
+    /// Start a test server with programmable JWKS responses, custom TTL, and max stale.
+    pub async fn start_with_jwks_responses_and_cache_config(
+        responses: Vec<Value>,
+        ttl_secs: u64,
+        max_stale_secs: u64,
+    ) -> Self {
+        let port = get_free_port();
+        let data_dir = TempDir::new().expect("create temp dir");
+        let jwks_server = JwksServer::start_with_responses(responses).await;
+        Self::start_inner(
+            port,
+            data_dir,
+            jwks_server,
+            vec![
+                ("JAZZ_JWKS_CACHE_TTL_SECS", ttl_secs.to_string()),
+                ("JAZZ_JWKS_MAX_STALE_SECS", max_stale_secs.to_string()),
+            ],
+        )
+        .await
+    }
+
+    /// Number of times the JWKS endpoint has been hit.
+    pub fn jwks_hits(&self) -> usize {
+        self.jwks_server.hits()
+    }
+
     /// Start a test server on the given port.
     pub async fn start_on_port(port: u16) -> Self {
         let data_dir = TempDir::new().expect("create temp dir");
         let jwks_server = JwksServer::start(JWT_KID, JWT_SECRET).await;
+        Self::start_inner(port, data_dir, jwks_server, vec![]).await
+    }
 
+    async fn start_inner(
+        port: u16,
+        data_dir: TempDir,
+        jwks_server: JwksServer,
+        extra_env: Vec<(&str, String)>,
+    ) -> Self {
         // Use a deterministic UUID app ID for testing
         let app_id = "00000000-0000-0000-0000-000000000001";
 
@@ -100,6 +174,7 @@ impl TestServer {
             )
             .env("JAZZ_ADMIN_SECRET", "admin-secret-for-integration-tests")
             .env("JAZZ_JWKS_URL", &jwks_server.url)
+            .envs(extra_env)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -178,14 +253,14 @@ fn get_free_port() -> u16 {
 }
 
 async fn jwks_handler(State(state): State<JwksState>) -> Json<Value> {
-    Json(json!({
-        "keys": [
-            {
-                "kty": "oct",
-                "kid": state.kid,
-                "alg": "HS256",
-                "k": state.secret_b64,
-            }
-        ]
-    }))
+    let idx = state.hits.fetch_add(1, Ordering::SeqCst);
+    let responses = state.responses.read().await;
+
+    let body = responses
+        .get(idx)
+        .cloned()
+        .or_else(|| responses.last().cloned())
+        .unwrap_or_else(|| json!({ "keys": [] }));
+
+    Json(body)
 }

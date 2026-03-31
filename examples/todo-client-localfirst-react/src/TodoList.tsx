@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useDb, useAll, useSession } from "jazz-tools/react";
-import { app } from "../schema/app.js";
+import { app } from "../schema.js";
 
 export function TodoList() {
   const [filterTitle, setFilterTitle] = useState("");
@@ -25,7 +25,7 @@ export function TodoList() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim() || !sessionUserId) return;
-    db.insert(app.todos, { title: title.trim(), done: false, owner_id: sessionUserId });
+    db.insert(app.todos, { title: title.trim(), done: false, ownerId: sessionUserId });
     setTitle("");
   };
 

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { QuerySubscription } from "jazz-tools/svelte";
-  import { app } from "../schema/app.js";
+  import { app } from "../schema.js";
   import { getAudioContext } from "./audio-context.js";
   import InstrumentRow from "./InstrumentRow.svelte";
 

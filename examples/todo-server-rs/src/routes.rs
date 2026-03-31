@@ -1,5 +1,6 @@
 //! HTTP routes for the todo API.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -97,6 +98,14 @@ fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
     })
 }
 
+fn todo_values(title: String, description: String) -> HashMap<String, Value> {
+    HashMap::from([
+        ("title".to_string(), Value::Text(title)),
+        ("done".to_string(), Value::Boolean(false)),
+        ("description".to_string(), Value::Text(description)),
+    ])
+}
+
 /// List all todos.
 async fn list_todos(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let query = QueryBuilder::new("todos").build();
@@ -122,13 +131,7 @@ async fn create_todo(
     Json(request): Json<CreateTodoRequest>,
 ) -> impl IntoResponse {
     let description = request.description.clone().unwrap_or_default();
-    let values = vec![
-        Value::Text(request.title.clone()),
-        Value::Boolean(false),
-        Value::Text(description.clone()),
-        Value::Null,
-        Value::Null,
-    ];
+    let values = todo_values(request.title.clone(), description.clone());
 
     match state.client.create("todos", values).await {
         Ok((row_id, row_values)) => {

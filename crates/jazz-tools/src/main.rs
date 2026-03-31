@@ -8,13 +8,12 @@
 //! ```
 
 mod commands;
-mod middleware;
 #[cfg(feature = "otel")]
 mod otel;
-mod routes;
 
 use clap::{Parser, Subcommand};
-use middleware::AuthConfig;
+use jazz_tools::middleware::AuthConfig;
+use jazz_tools::server::CatalogueAuthorityMode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NodeEnvMode {
@@ -38,44 +37,14 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogueAuthorityArg {
+    Local,
+    Forward,
+}
+
 #[derive(Subcommand)]
 enum Commands {
-    /// Build schema files and generate lenses
-    Build {
-        /// Path to schema directory
-        #[arg(long, default_value = "./schema")]
-        schema_dir: String,
-
-        /// Generate TypeScript lens stubs instead of SQL lens files
-        #[arg(long)]
-        ts: bool,
-    },
-    /// Push schema catalogue objects to a sync server
-    #[command(name = "schema:push")]
-    SchemaPush {
-        /// Application ID
-        app_id: String,
-
-        /// Sync server URL
-        #[arg(long)]
-        server_url: String,
-
-        /// Secret for admin operations (schema/policy sync)
-        #[arg(long, env = "JAZZ_ADMIN_SECRET")]
-        admin_secret: String,
-
-        /// Environment name
-        #[arg(long, default_value = "dev")]
-        env: String,
-
-        /// User branch name
-        #[arg(long, default_value = "main")]
-        user_branch: String,
-
-        /// Path to schema directory
-        #[arg(long, default_value = "./schema")]
-        schema_dir: String,
-    },
     /// Create a new resource
     Create {
         #[command(subcommand)]
@@ -94,7 +63,7 @@ enum Commands {
         #[arg(short, long, default_value = "./data")]
         data_dir: String,
 
-        /// Use a temporary directory for storage (ephemeral, created on the fly)
+        /// Use in-memory storage instead of Fjall-backed files.
         #[arg(long)]
         in_memory: bool,
 
@@ -121,6 +90,18 @@ enum Commands {
         /// Secret for admin operations (schema/policy sync)
         #[arg(long, env = "JAZZ_ADMIN_SECRET")]
         admin_secret: Option<String>,
+
+        /// Whether this server is the catalogue authority or forwards admin catalogue requests upstream.
+        #[arg(long, env = "JAZZ_CATALOGUE_AUTHORITY", default_value = "local")]
+        catalogue_authority: CatalogueAuthorityArg,
+
+        /// Base URL for the upstream catalogue authority when --catalogue-authority=forward.
+        #[arg(long, env = "JAZZ_CATALOGUE_AUTHORITY_URL")]
+        catalogue_authority_url: Option<String>,
+
+        /// Admin secret used by this server when forwarding catalogue requests upstream.
+        #[arg(long, env = "JAZZ_CATALOGUE_AUTHORITY_ADMIN_SECRET")]
+        catalogue_authority_admin_secret: Option<String>,
     },
 }
 
@@ -142,34 +123,6 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Build { schema_dir, ts } => {
-            if let Err(e) = commands::build::run(&schema_dir, ts) {
-                eprintln!("Build error: {}", e);
-                std::process::exit(1);
-            }
-        }
-        Commands::SchemaPush {
-            server_url,
-            app_id,
-            admin_secret,
-            env,
-            user_branch,
-            schema_dir,
-        } => {
-            if let Err(e) = commands::schema_push::run(
-                &server_url,
-                &app_id,
-                &env,
-                &user_branch,
-                &admin_secret,
-                &schema_dir,
-            )
-            .await
-            {
-                eprintln!("Schema push error: {}", e);
-                std::process::exit(1);
-            }
-        }
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {
                 commands::create::app(name);
@@ -185,18 +138,10 @@ async fn main() {
             allow_demo,
             backend_secret,
             admin_secret,
+            catalogue_authority,
+            catalogue_authority_url,
+            catalogue_authority_admin_secret,
         } => {
-            let data_dir = if in_memory {
-                let tmp =
-                    std::env::temp_dir().join(format!("jazz-server-{}", uuid::Uuid::new_v4()));
-                std::fs::create_dir_all(&tmp).expect("failed to create temp dir for --in-memory");
-                tmp.into_os_string()
-                    .into_string()
-                    .expect("temp path is valid UTF-8")
-            } else {
-                data_dir
-            };
-
             let node_env_mode = resolve_node_env_mode();
             let allow_anonymous = match node_env_mode {
                 NodeEnvMode::Production => allow_anonymous,
@@ -209,13 +154,50 @@ async fn main() {
 
             let auth_config = AuthConfig {
                 jwks_url,
-                jwks_set: None,
                 allow_anonymous,
                 allow_demo,
                 backend_secret,
                 admin_secret,
             };
-            if let Err(e) = commands::server::run(&app_id, port, &data_dir, auth_config).await {
+            let catalogue_authority = match catalogue_authority {
+                CatalogueAuthorityArg::Local => CatalogueAuthorityMode::Local,
+                CatalogueAuthorityArg::Forward => {
+                    let base_url = match catalogue_authority_url {
+                        Some(base_url) => base_url,
+                        None => {
+                            eprintln!(
+                                "Server error: missing --catalogue-authority-url for --catalogue-authority=forward"
+                            );
+                            shutdown_tracing();
+                            std::process::exit(1);
+                        }
+                    };
+                    let admin_secret = match catalogue_authority_admin_secret {
+                        Some(admin_secret) => admin_secret,
+                        None => {
+                            eprintln!(
+                                "Server error: missing --catalogue-authority-admin-secret for --catalogue-authority=forward"
+                            );
+                            shutdown_tracing();
+                            std::process::exit(1);
+                        }
+                    };
+                    CatalogueAuthorityMode::Forward {
+                        base_url,
+                        admin_secret,
+                    }
+                }
+            };
+            if let Err(e) = commands::server::run(
+                &app_id,
+                port,
+                &data_dir,
+                in_memory,
+                auth_config,
+                catalogue_authority,
+            )
+            .await
+            {
                 eprintln!("Server error: {}", e);
                 shutdown_tracing();
                 std::process::exit(1);

@@ -2,6 +2,10 @@ use super::*;
 use std::collections::HashSet;
 use uuid::Uuid;
 
+fn test_row_provenance() -> crate::metadata::RowProvenance {
+    crate::metadata::RowProvenance::for_insert("jazz:test", 1)
+}
+
 #[test]
 fn column_type_fixed_sizes() {
     assert_eq!(ColumnType::Integer.fixed_size(), Some(4));
@@ -24,12 +28,53 @@ fn column_type_fixed_sizes() {
 fn column_descriptor_builder() {
     let col = ColumnDescriptor::new("email", ColumnType::Text)
         .nullable()
-        .references("users");
+        .references("users")
+        .default(Value::Text("unknown@example.com".into()));
 
     assert_eq!(col.name, "email");
     assert_eq!(col.column_type, ColumnType::Text);
     assert!(col.nullable);
     assert_eq!(col.references, Some(TableName::new("users")));
+    assert_eq!(col.default, Some(Value::Text("unknown@example.com".into())));
+}
+
+#[test]
+fn column_descriptor_deserializes_payload_without_default() {
+    let col: ColumnDescriptor = serde_json::from_str(
+        r#"{
+            "name":"email",
+            "column_type":{"type":"Text"},
+            "nullable":true,
+            "references":"users"
+        }"#,
+    )
+    .expect("deserialize column descriptor without default");
+
+    assert_eq!(col.name, "email");
+    assert_eq!(col.column_type, ColumnType::Text);
+    assert!(col.nullable);
+    assert_eq!(col.references, Some(TableName::new("users")));
+    assert_eq!(col.default, None);
+}
+
+#[test]
+fn column_descriptor_deserializes_payload_with_default() {
+    let col: ColumnDescriptor = serde_json::from_str(
+        r#"{
+            "name":"email",
+            "column_type":{"type":"Text"},
+            "nullable":true,
+            "references":"users",
+            "default":{"type":"Text","value":"unknown@example.com"}
+        }"#,
+    )
+    .expect("deserialize column descriptor without default");
+
+    assert_eq!(col.name, "email");
+    assert_eq!(col.column_type, ColumnType::Text);
+    assert!(col.nullable);
+    assert_eq!(col.references, Some(TableName::new("users")));
+    assert_eq!(col.default, Some(Value::Text("unknown@example.com".into())));
 }
 
 #[test]
@@ -136,6 +181,7 @@ fn tuple_element_row() {
         id,
         content: content.clone(),
         commit_id,
+        row_provenance: test_row_provenance(),
     };
 
     assert_eq!(elem.id(), id);
@@ -147,7 +193,7 @@ fn tuple_element_row() {
 #[test]
 fn tuple_element_from_row() {
     let id = crate::object::ObjectId::from_uuid(Uuid::from_u128(42));
-    let row = Row::new(id, vec![1, 2, 3], make_commit_id(1));
+    let row = Row::new(id, vec![1, 2, 3], make_commit_id(1), test_row_provenance());
     let elem = TupleElement::from_row(&row);
 
     assert_eq!(elem.id(), id);
@@ -168,7 +214,7 @@ fn tuple_from_id() {
 #[test]
 fn tuple_from_row() {
     let id = crate::object::ObjectId::from_uuid(Uuid::from_u128(42));
-    let row = Row::new(id, vec![1, 2, 3], make_commit_id(1));
+    let row = Row::new(id, vec![1, 2, 3], make_commit_id(1), test_row_provenance());
     let tuple = Tuple::from_row(&row);
 
     assert_eq!(tuple.len(), 1);
@@ -186,6 +232,7 @@ fn tuple_equality_based_on_ids() {
         id,
         content: vec![1, 2, 3],
         commit_id: make_commit_id(1),
+        row_provenance: test_row_provenance(),
     }]);
 
     assert_eq!(tuple1, tuple2);
@@ -203,6 +250,7 @@ fn tuple_hash_based_on_ids() {
         id,
         content: vec![1, 2, 3],
         commit_id: make_commit_id(1),
+        row_provenance: test_row_provenance(),
     }]);
 
     let mut hasher1 = DefaultHasher::new();
@@ -227,6 +275,7 @@ fn tuple_in_hashset() {
         id: id1,
         content: vec![1, 2, 3],
         commit_id: make_commit_id(1),
+        row_provenance: test_row_provenance(),
     }]);
     assert!(set.contains(&tuple_with_content));
 }
@@ -234,7 +283,7 @@ fn tuple_in_hashset() {
 #[test]
 fn tuple_delta_to_row_delta() {
     let id = crate::object::ObjectId::from_uuid(Uuid::from_u128(42));
-    let row = Row::new(id, vec![1, 2, 3], make_commit_id(1));
+    let row = Row::new(id, vec![1, 2, 3], make_commit_id(1), test_row_provenance());
     let tuple = Tuple::from_row(&row);
 
     let tuple_delta = TupleDelta {
@@ -520,6 +569,58 @@ fn schema_hash_different_schemas() {
 }
 
 #[test]
+fn schema_hash_ignores_policies() {
+    let schema_without_policies = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("owner_id", ColumnType::Uuid),
+        )
+        .build();
+
+    let schema_with_policies = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("users")
+                .column("id", ColumnType::Uuid)
+                .column("owner_id", ColumnType::Uuid)
+                .policies(TablePolicies::new().with_select(PolicyExpr::eq_session(
+                    "owner_id",
+                    vec!["user_id".to_string()],
+                ))),
+        )
+        .build();
+
+    assert_eq!(
+        SchemaHash::compute(&schema_without_policies),
+        SchemaHash::compute(&schema_with_policies),
+        "Policy-only changes should not affect schema identity",
+    );
+}
+
+#[test]
+fn schema_hash_changes_when_column_default_changes() {
+    let schema1 = SchemaBuilder::new()
+        .table(TableSchema::builder("users").column("role", ColumnType::Text))
+        .build();
+
+    let schema2 = SchemaBuilder::new()
+        .table(TableSchema::builder("users").column_with_default(
+            "role",
+            ColumnType::Text,
+            Value::Text("member".into()),
+        ))
+        .build();
+
+    let hash1 = SchemaHash::compute(&schema1);
+    let hash2 = SchemaHash::compute(&schema2);
+
+    assert_ne!(
+        hash1, hash2,
+        "Changing only a column default should change the schema hash"
+    );
+}
+
+#[test]
 fn schema_hash_short() {
     let schema = SchemaBuilder::new()
         .table(TableSchema::builder("users").column("id", ColumnType::Uuid))
@@ -568,17 +669,23 @@ fn schema_hash_to_object_id_different_hashes() {
 fn table_schema_builder() {
     let (name, schema) = TableSchema::builder("users")
         .column("id", ColumnType::Uuid)
+        .column_with_default("role", ColumnType::Text, Value::Text("member".into()))
         .nullable_column("email", ColumnType::Text)
         .fk_column("org_id", "orgs")
         .nullable_fk_column("manager_id", "users")
         .build_named();
 
     assert_eq!(name.as_str(), "users");
-    assert_eq!(schema.columns.columns.len(), 4);
+    assert_eq!(schema.columns.columns.len(), 5);
 
     let id_col = schema.columns.column("id").unwrap();
     assert_eq!(id_col.column_type, ColumnType::Uuid);
     assert!(!id_col.nullable);
+
+    let role_col = schema.columns.column("role").unwrap();
+    assert_eq!(role_col.column_type, ColumnType::Text);
+    assert_eq!(role_col.default, Some(Value::Text("member".into())));
+    assert!(!role_col.nullable);
 
     let email_col = schema.columns.column("email").unwrap();
     assert_eq!(email_col.column_type, ColumnType::Text);
@@ -612,6 +719,16 @@ fn row_descriptor_content_hash() {
     // Different columns -> different hash
     let desc3 = RowDescriptor::new(vec![ColumnDescriptor::new("id", ColumnType::Uuid)]);
     assert_ne!(desc1.content_hash(), desc3.content_hash());
+
+    let desc4 = RowDescriptor::new(vec![
+        ColumnDescriptor::new("id", ColumnType::Uuid),
+        ColumnDescriptor::new("name", ColumnType::Text).default(Value::Text("anonymous".into())),
+    ]);
+    assert_ne!(
+        desc1.content_hash(),
+        desc4.content_hash(),
+        "Column defaults should affect row descriptor content hash"
+    );
 }
 
 // ========================================================================

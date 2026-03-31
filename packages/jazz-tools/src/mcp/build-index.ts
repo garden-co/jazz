@@ -46,7 +46,11 @@ export function parseFrontmatter(content: string): FrontmatterResult {
   }
 
   const fm = match[1];
-  const body = match[2].trimStart();
+  const bodyMatch = match[2];
+  if (fm === undefined || bodyMatch === undefined) {
+    return { body: content };
+  }
+  const body = bodyMatch.trimStart();
 
   const titleMatch = fm.match(/^title:\s*(.+)$/m);
   const descMatch = fm.match(/^description:\s*(.+)$/m);
@@ -105,11 +109,14 @@ export async function resolveIncludes(
 
   while ((m = includeRe.exec(content)) !== null) {
     const attrs = m[1];
+    const includePath = m[2];
+    if (attrs === undefined || includePath === undefined) continue;
     const hasCwd = /\bcwd\b/.test(attrs);
     const langMatch = attrs.match(/\blang="([^"]+)"/);
     if (!langMatch) continue; // not a code include — leave untouched
     const lang = langMatch[1];
-    const rawPath = m[2].trim();
+    if (lang === undefined) continue;
+    const rawPath = includePath.trim();
     const hashIdx = rawPath.indexOf("#");
     const filePath = hashIdx === -1 ? rawPath : rawPath.slice(0, hashIdx);
     const anchor = hashIdx === -1 ? null : rawPath.slice(hashIdx + 1);
@@ -121,8 +128,9 @@ export async function resolveIncludes(
     if (anchor) {
       const regionRe = new RegExp(`// #region ${anchor}\\n([\\s\\S]*?)// #endregion ${anchor}`);
       const regionMatch = fileContent.match(regionRe);
-      if (regionMatch) {
-        fileContent = regionMatch[1].trimEnd();
+      const regionBody = regionMatch?.[1];
+      if (regionBody !== undefined) {
+        fileContent = regionBody.trimEnd();
       }
     }
 
@@ -178,8 +186,9 @@ export function splitIntoSections(body: string): Section[] {
       if (!headingMatch) {
         return { heading: "", body: part.trim() };
       }
+      const heading = headingMatch[1];
       return {
-        heading: headingMatch[1].trim(),
+        heading: heading?.trim() ?? "",
         body: part.replace(/^## .+\n/, "").trim(),
       };
     })

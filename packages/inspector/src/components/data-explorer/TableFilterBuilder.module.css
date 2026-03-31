@@ -1,0 +1,136 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.field {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  color: #9fb0c8;
+  font-size: 12px;
+}
+
+.select,
+.input {
+  min-width: 140px;
+  border: 1px solid #33445d;
+  border-radius: 6px;
+  background: #1d2735;
+  color: #d9e2f0;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.input {
+  min-width: 180px;
+}
+
+.button {
+  border: 1px solid #344357;
+  background: #202b3b;
+  color: #d3dceb;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  height: 31px;
+}
+
+.button:hover {
+  background: #273346;
+}
+
+.triggerButton {
+  align-self: flex-start;
+}
+
+.summaryBox {
+  border: 1px solid #2f3a4b;
+  border-radius: 8px;
+  background: #131b27;
+  padding: 8px 10px;
+}
+
+.summary {
+  margin: 0;
+  display: block;
+  color: #d7deea;
+  font-size: 13px;
+  line-height: 1.45;
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
+    monospace;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.modal {
+  border: 1px solid #2f3a4b;
+  border-radius: 8px;
+  background: #131b27;
+  color: #d9e2f0;
+  padding: 10px;
+  min-width: 720px;
+}
+
+.modal::backdrop {
+  background: rgba(2, 6, 15, 0.56);
+}
+
+.error {
+  margin: 8px 0 0;
+  color: #f5b1b1;
+  font-size: 12px;
+}
+
+.clauses {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.empty {
+  margin: 0;
+  color: #8393aa;
+  font-size: 12px;
+}
+
+.clause {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid #2f3a4b;
+  border-radius: 6px;
+  background: #1a2433;
+}
+
+.clauseText {
+  color: #d7deea;
+  font-size: 12px;
+}
+
+.removeButton {
+  border: 1px solid #33445d;
+  border-radius: 6px;
+  background: #1d2735;
+  color: #c7d3e7;
+  font-size: 12px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.removeButton:hover {
+  background: #253247;
+}

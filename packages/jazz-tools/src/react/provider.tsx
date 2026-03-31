@@ -3,7 +3,6 @@ import type { Session } from "../runtime/context.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import {
   JazzProvider as CoreJazzProvider,
-  CreateJazzClient,
   useDb as useCoreDb,
   useJazzClient as useCoreJazzClient,
   useSession,
@@ -22,7 +21,6 @@ interface JazzClientContextValue {
 export type JazzProviderProps = {
   config: DbConfig;
   fallback?: ReactNode;
-  createJazzClient: CreateJazzClient<JazzClientContextValue>;
   children: ReactNode;
 };
 

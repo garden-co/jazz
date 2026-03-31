@@ -1,10 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
-import { startLocalJazzServer, pushSchemaCatalogue } from "jazz-tools/testing";
+import { TestingServer, pushSchemaCatalogue } from "jazz-tools/testing";
 
 const APP_ID = "00000000-0000-0000-0000-000000000099";
 const PORT = 4200;
-const ADMIN_SECRET = "wequencer-dev-admin-secret";
 const ROOT = join(import.meta.dirname ?? __dirname, "..");
 
 let vite: ChildProcess | null = null;
@@ -12,20 +11,18 @@ let stopping = false;
 
 async function main() {
   console.log("Starting jazz server...");
-  const server = await startLocalJazzServer({
+  const server = await TestingServer.start({
     appId: APP_ID,
     port: PORT,
-    adminSecret: ADMIN_SECRET,
-    enableLogs: true,
   });
   console.log(`Jazz server ready at ${server.url}`);
 
   console.log("Pushing schema catalogue...");
   await pushSchemaCatalogue({
     serverUrl: server.url,
-    appId: APP_ID,
-    adminSecret: ADMIN_SECRET,
-    schemaDir: join(ROOT, "schema"),
+    appId: server.appId,
+    adminSecret: server.adminSecret,
+    schemaDir: ROOT,
   });
   console.log("Schema pushed.");
 

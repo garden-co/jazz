@@ -37,7 +37,7 @@ export interface LinkExternalResponse {
 /** Callbacks for stream events. */
 export interface StreamCallbacks {
   onSyncMessage(payloadJson: string): void;
-  onConnected?(clientId: string): void;
+  onConnected?(clientId: string, catalogueStateHash?: string | null): void;
 }
 
 export interface SyncStreamControllerOptions {
@@ -45,7 +45,7 @@ export interface SyncStreamControllerOptions {
   getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
   getClientId(): string;
   setClientId(clientId: string): void;
-  onConnected(): void;
+  onConnected(catalogueStateHash?: string | null): void;
   onDisconnected(): void;
   onSyncMessage(payloadJson: string): void;
 }
@@ -54,7 +54,7 @@ export interface SyncStreamControllerOptions {
  * Minimal runtime surface required for sync stream lifecycle wiring.
  */
 export interface RuntimeSyncTarget {
-  addServer(): void;
+  addServer(serverCatalogueStateHash?: string | null): void;
   removeServer(): void;
   onSyncMessageReceived(payload: string): void;
 }
@@ -97,6 +97,24 @@ export function isExpectedFetchAbortError(error: unknown, signal?: AbortSignal):
   }
 
   return false;
+}
+
+function logSchemaWarningPayload(payload: any, logPrefix = ""): void {
+  const warning = payload?.SchemaWarning;
+  if (!warning) return;
+
+  const rowCount = warning.rowCount ?? warning.row_count ?? 0;
+  const tableName = warning.tableName ?? warning.table_name ?? "unknown";
+  const fromHash = warning.fromHash ?? warning.from_hash ?? "unknown";
+  const toHash = warning.toHash ?? warning.to_hash ?? "unknown";
+  const shortHash = (hash: string) =>
+    typeof hash === "string" && /^[0-9a-f]{12,}$/i.test(hash) ? hash.slice(0, 12) : hash;
+
+  console.warn(
+    `${logPrefix}Detected ${rowCount} rows of ${tableName} with differing schema versions. ` +
+      `To ensure data visibility and forward/backward compatibility please create a new migration with ` +
+      `\`npx jazz-tools migrations create ${shortHash(fromHash)} ${shortHash(toHash)}\``,
+  );
 }
 
 /**
@@ -146,6 +164,7 @@ export class SyncStreamController {
   }
 
   notifyTransportFailure(): void {
+    this.abortStream();
     this.detachServer();
     this.scheduleReconnect();
   }
@@ -158,11 +177,11 @@ export class SyncStreamController {
     return this.activeServerPathPrefix;
   }
 
-  private attachServer(): void {
+  private attachServer(catalogueStateHash?: string | null): void {
     if (this.streamAttached) {
       this.options.onDisconnected();
     }
-    this.options.onConnected();
+    this.options.onConnected(catalogueStateHash);
     this.streamAttached = true;
     this.reconnectAttempt = 0;
   }
@@ -241,11 +260,11 @@ export class SyncStreamController {
         reader,
         {
           onSyncMessage: this.options.onSyncMessage,
-          onConnected: (clientId) => {
+          onConnected: (clientId, catalogueStateHash) => {
             this.options.setClientId(clientId);
             if (!connected) {
               connected = true;
-              this.attachServer();
+              this.attachServer(catalogueStateHash);
             }
           },
         },
@@ -279,7 +298,7 @@ export function createRuntimeSyncStreamController(
     getAuth: options.getAuth,
     getClientId: options.getClientId,
     setClientId: options.setClientId,
-    onConnected: () => options.getRuntime()?.addServer(),
+    onConnected: (catalogueStateHash) => options.getRuntime()?.addServer(catalogueStateHash),
     onDisconnected: () => options.getRuntime()?.removeServer(),
     onSyncMessage: (payload) => options.getRuntime()?.onSyncMessageReceived(payload),
   });
@@ -675,8 +694,9 @@ export async function readBinaryFrames(
 
       try {
         if (event.type === "Connected" && event.client_id) {
-          callbacks.onConnected?.(event.client_id);
+          callbacks.onConnected?.(event.client_id, event.catalogue_state_hash ?? null);
         } else if (event.type === "SyncUpdate") {
+          logSchemaWarningPayload(event.payload, logPrefix);
           callbacks.onSyncMessage(JSON.stringify(event.payload));
         }
       } catch (error) {
