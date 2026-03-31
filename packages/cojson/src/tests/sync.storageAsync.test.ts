@@ -786,9 +786,7 @@ describe("client syncs with a server with storage", () => {
     assert(coValueRow, "CoValue not found in storage");
 
     const sessions = rawDb
-      .prepare(
-        "SELECT rowID, lastIdx FROM sessions WHERE coValue = ?",
-      )
+      .prepare("SELECT rowID, lastIdx FROM sessions WHERE coValue = ?")
       .all(coValueRow.rowID) as { rowID: number; lastIdx: number }[];
 
     const targetSession = sessions.find((s) => s.lastIdx > 0);
@@ -814,8 +812,7 @@ describe("client syncs with a server with storage", () => {
 
     const signatureErrors = consoleErrorSpy.mock.calls.filter(
       ([msg]) =>
-        typeof msg === "string" &&
-        msg.includes("Failed to add transactions"),
+        typeof msg === "string" && msg.includes("Failed to add transactions"),
     );
 
     expect(signatureErrors).toEqual([]);
@@ -854,9 +851,7 @@ describe("client syncs with a server with storage", () => {
     assert(coValueRow, "CoValue not found");
 
     const sessions = rawDb
-      .prepare(
-        "SELECT rowID, lastIdx FROM sessions WHERE coValue = ?",
-      )
+      .prepare("SELECT rowID, lastIdx FROM sessions WHERE coValue = ?")
       .all(coValueRow.rowID) as { rowID: number; lastIdx: number }[];
 
     const targetSession = sessions.find((s) => s.lastIdx > 0);
@@ -900,9 +895,7 @@ describe("client syncs with a server with storage", () => {
         const writer = new Database(dbPath);
         writer.pragma("journal_mode = WAL");
         writer
-          .prepare(
-            "INSERT INTO transactions (ses, idx, tx) VALUES (?, ?, ?)",
-          )
+          .prepare("INSERT INTO transactions (ses, idx, tx) VALUES (?, ?, ?)")
           .run(targetSession.rowID, targetSession.lastIdx, existingTx.tx);
         writer.close();
       }
@@ -913,8 +906,7 @@ describe("client syncs with a server with storage", () => {
 
     const signatureErrors = consoleErrorSpy.mock.calls.filter(
       ([msg]) =>
-        typeof msg === "string" &&
-        msg.includes("Failed to add transactions"),
+        typeof msg === "string" && msg.includes("Failed to add transactions"),
     );
 
     expect(signatureErrors).toEqual([]);
