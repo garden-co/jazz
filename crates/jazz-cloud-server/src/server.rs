@@ -2623,8 +2623,47 @@ async fn shutdown_signal(shutdown_tx: tokio::sync::watch::Sender<bool>) {
     info!("shutdown signal received");
 }
 
+#[cfg(feature = "otel")]
+async fn otel_http_metrics(
+    matched_path: Option<axum::extract::MatchedPath>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let method = request.method().to_string();
+    let route = matched_path
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let meter = opentelemetry::global::meter("jazz-cloud-server");
+    let active = meter
+        .i64_up_down_counter("http.server.active_requests")
+        .build();
+    let duration_hist = meter.f64_histogram("http.server.request.duration").build();
+
+    let active_attrs = vec![
+        opentelemetry::KeyValue::new("http.request.method", method.clone()),
+        opentelemetry::KeyValue::new("http.route", route.clone()),
+    ];
+    active.add(1, &active_attrs);
+
+    let start = std::time::Instant::now();
+    let response = next.run(request).await;
+    let elapsed = start.elapsed().as_secs_f64();
+
+    let status = response.status().as_u16().to_string();
+    let attrs = vec![
+        opentelemetry::KeyValue::new("http.request.method", method),
+        opentelemetry::KeyValue::new("http.route", route),
+        opentelemetry::KeyValue::new("http.response.status_code", status),
+    ];
+    duration_hist.record(elapsed, &attrs);
+    active.add(-1, &active_attrs);
+
+    response
+}
+
 fn create_router(state: Arc<ServerState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/apps/:app_id/events", get(events_handler))
         .route("/apps/:app_id/sync", post(sync_handler))
         .route("/apps/:app_id/schema/:hash", get(schema_catalogue_handler))
@@ -2671,7 +2710,12 @@ fn create_router(state: Arc<ServerState>) -> Router {
         .route(
             "/manage/api/apps/:app_id/admin-secret/rotate",
             post(manage_rotate_admin_secret_handler),
-        )
+        );
+
+    #[cfg(feature = "otel")]
+    let router = router.layer(axum::middleware::from_fn(otel_http_metrics));
+
+    router
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state)
