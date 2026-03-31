@@ -1,11 +1,11 @@
 //! jazz-napi — Native Node.js bindings for Jazz.
 //!
-//! Provides `NapiRuntime` wrapping `RuntimeCore<FjallStorage>` via napi-rs.
+//! Provides `NapiRuntime` wrapping `RuntimeCore<RocksDBStorage>` via napi-rs.
 //! Exposed as the `jazz-napi` npm package for server-side TypeScript apps.
 //!
 //! # Architecture
 //!
-//! - `FjallStorage` provides persistent on-disk storage
+//! - `RocksDBStorage` provides persistent on-disk storage
 //! - `NapiScheduler` implements `Scheduler` using `ThreadsafeFunction` to schedule
 //!   `batched_tick()` on the Node.js event loop (debounced)
 //! - `NapiSyncSender` implements `SyncSender` bridging to a JS callback
@@ -40,7 +40,7 @@ use jazz_tools::runtime_core::{
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
 use jazz_tools::server::TestingServer as JazzTestingServer;
-use jazz_tools::storage::{FjallStorage, MemoryStorage, Storage};
+use jazz_tools::storage::{MemoryStorage, RocksDBStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload,
@@ -69,14 +69,17 @@ fn parse_node_durability_tier(tier: Option<String>) -> napi::Result<Vec<Durabili
     parse_node_durability_tiers(tier.as_deref())
 }
 
-fn open_fjall_storage_with_retry(data_path: &str, cache_size: usize) -> napi::Result<FjallStorage> {
+fn open_rocksdb_storage_with_retry(
+    data_path: &str,
+    cache_size: usize,
+) -> napi::Result<RocksDBStorage> {
     const MAX_ATTEMPTS: usize = 100;
     const RETRY_DELAY_MS: u64 = 25;
 
     let mut last_error = None;
 
     for attempt in 0..MAX_ATTEMPTS {
-        match FjallStorage::open(data_path, cache_size) {
+        match RocksDBStorage::open(data_path, cache_size) {
             Ok(storage) => return Ok(storage),
             Err(error) => {
                 let is_lock_error = matches!(
@@ -96,7 +99,7 @@ fn open_fjall_storage_with_retry(data_path: &str, cache_size: usize) -> napi::Re
 
     let error = last_error.unwrap_or_else(|| {
         jazz_tools::storage::StorageError::IoError(
-            "fjall open failed without error details".to_string(),
+            "rocksdb open failed without error details".to_string(),
         )
     });
     Err(napi::Error::from_reason(format!(
@@ -386,7 +389,7 @@ pub struct NapiRuntime {
 
 #[napi]
 impl NapiRuntime {
-    /// Create a new NapiRuntime with Fjall-backed persistent storage.
+    /// Create a new NapiRuntime with RocksDB-backed persistent storage.
     #[napi(constructor)]
     pub fn new(
         env: Env,
@@ -397,9 +400,9 @@ impl NapiRuntime {
         data_path: String,
         tier: Option<String>,
     ) -> napi::Result<Self> {
-        // Create FjallStorage
+        // Create RocksDB storage
         let cache_size = 64 * 1024 * 1024; // 64MB default
-        let storage = open_fjall_storage_with_retry(&data_path, cache_size)?;
+        let storage = open_rocksdb_storage_with_retry(&data_path, cache_size)?;
 
         build_napi_runtime(
             env,
