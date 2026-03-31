@@ -540,10 +540,6 @@ function toBinaryBody(bytes: Uint8Array): Blob {
   return new Blob([Uint8Array.from(bytes)]);
 }
 
-function encodeUtf8(value: string): Uint8Array {
-  return new TextEncoder().encode(value);
-}
-
 function decodeUtf8(bytes: Uint8Array, label: string): string {
   try {
     return new TextDecoder().decode(bytes);
@@ -568,11 +564,6 @@ function parseUuidString(uuid: string): Uint8Array {
 function writeU32(view: DataView, offset: number, value: number): number {
   view.setUint32(offset, value, false);
   return offset + 4;
-}
-
-function writeU64(view: DataView, offset: number, value: number): number {
-  view.setBigUint64(offset, BigInt(value), false);
-  return offset + 8;
 }
 
 function readU32(view: DataView, offset: number, label: string): [number, number] {
