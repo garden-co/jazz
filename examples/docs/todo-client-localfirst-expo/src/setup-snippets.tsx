@@ -1,16 +1,13 @@
+// #region context-setup-expo-minimal
 import { JazzProvider } from "jazz-tools/react-native";
 import { SafeAreaView, Text, View } from "react-native";
 import { TodoList } from "./TodoList";
 
-// #region context-setup-expo-minimal
-export function AppMinimal() {
+export function App() {
   return (
     <JazzProvider
       config={{
-        appId: "00000000-0000-0000-0000-000000000002",
-        serverUrl: "http://10.0.2.2:1625",
-        localAuthMode: "demo",
-        // jwtToken: authToken, // Use this (instead of localAuthMode) for external auth.
+        appId: "my-todo-app",
       }}
     >
       <SafeAreaView style={{ flex: 1 }}>

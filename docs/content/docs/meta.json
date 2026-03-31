@@ -3,15 +3,14 @@
   "pages": [
     "index",
     "quickstarts",
-    "setup",
-    "authentication",
+    "---Getting Started---",
+    "concepts",
     "schemas",
-    "reading-data",
-    "writing-data",
-    "files-and-blobs",
-    "guides",
-    "permissions",
-    "migrations",
-    "mcp"
+    "---Working with Data---",
+    "reading",
+    "writing",
+    "auth",
+    "---Reference---",
+    "reference"
   ]
 }

@@ -1,0 +1,12 @@
+{
+  "title": "Reference",
+  "pages": [
+    "column-types",
+    "where-operators",
+    "durability-tiers",
+    "framework-patterns",
+    "server-setup",
+    "mcp",
+    "faq"
+  ]
+}
