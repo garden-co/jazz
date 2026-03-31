@@ -154,6 +154,10 @@ type BuilderForColumn<
 type ColumnValue<TBuilder extends AnyTypedColumnBuilder> = TSTypeFromSqlType<
   ColumnBuilderSqlType<TBuilder>
 >;
+type ReturnedColumnValue<TBuilder extends AnyTypedColumnBuilder> =
+  ColumnBuilderOptional<TBuilder> extends true
+    ? ColumnValue<TBuilder> | null
+    : ColumnValue<TBuilder>;
 type InsertColumnValue<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderOptional<TBuilder> extends true
     ? ColumnValue<TBuilder> | null
@@ -194,7 +198,7 @@ export type TableRow<TSchema extends SchemaLike, TTable extends TableName<TSchem
       BuilderForColumn<TSchema, TTable, TColumn>
     >;
   } & {
-    [TColumn in OptionalColumnName<TSchema, TTable>]?: ColumnValue<
+    [TColumn in OptionalColumnName<TSchema, TTable>]: ReturnedColumnValue<
       BuilderForColumn<TSchema, TTable, TColumn>
     >;
   }
@@ -212,60 +216,69 @@ export type TableInit<TSchema extends SchemaLike, TTable extends TableName<TSche
   }
 >;
 
-type PrimitiveWhere<T> = T | { eq?: T; ne?: T };
-type NumberWhere<T extends number> = T | { eq?: T; ne?: T; gt?: T; gte?: T; lt?: T; lte?: T };
-type TimestampWhere =
-  | Date
-  | number
-  | {
-      eq?: Date | number;
-      gt?: Date | number;
-      gte?: Date | number;
-      lt?: Date | number;
-      lte?: Date | number;
-    };
+type MaybeNullableWhere<T, TOptional extends boolean> = TOptional extends true ? T | null : T;
+type WhereEqNe<T, TOptional extends boolean, TExtra extends object = {}> =
+  | MaybeNullableWhere<T, TOptional>
+  | ({
+      eq?: MaybeNullableWhere<T, TOptional>;
+      ne?: MaybeNullableWhere<T, TOptional>;
+    } & TExtra);
+type NumberWhere<T extends number, TOptional extends boolean> = WhereEqNe<
+  T,
+  TOptional,
+  { gt?: T; gte?: T; lt?: T; lte?: T }
+>;
+type TimestampWhere<TOptional extends boolean> = WhereEqNe<
+  Date | number,
+  TOptional,
+  {
+    gt?: Date | number;
+    gte?: Date | number;
+    lt?: Date | number;
+    lte?: Date | number;
+  }
+>;
 type UuidWhere<TOptional extends boolean, TRef extends string | undefined> = TRef extends string
-  ? TOptional extends true
-    ? string | { eq?: string; ne?: string; isNull?: boolean }
-    : string | { eq?: string; ne?: string }
-  : string | { eq?: string; ne?: string; in?: string[] };
+  ? WhereEqNe<string, TOptional, TOptional extends true ? { isNull?: boolean } : {}>
+  : WhereEqNe<
+      string,
+      TOptional,
+      TOptional extends true ? { in?: string[]; isNull?: boolean } : { in?: string[] }
+    >;
 
 type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderSqlType<TBuilder> extends "TEXT"
-    ? string | { eq?: string; ne?: string; contains?: string }
+    ? WhereEqNe<string, ColumnBuilderOptional<TBuilder>, { contains?: string }>
     : ColumnBuilderSqlType<TBuilder> extends "BOOLEAN"
       ? boolean
       : ColumnBuilderSqlType<TBuilder> extends "INTEGER" | "REAL"
-        ? NumberWhere<number>
+        ? NumberWhere<number, ColumnBuilderOptional<TBuilder>>
         : ColumnBuilderSqlType<TBuilder> extends "TIMESTAMP"
-          ? TimestampWhere
+          ? TimestampWhere<ColumnBuilderOptional<TBuilder>>
           : ColumnBuilderSqlType<TBuilder> extends "UUID"
             ? UuidWhere<ColumnBuilderOptional<TBuilder>, ColumnBuilderReferences<TBuilder>>
             : ColumnBuilderSqlType<TBuilder> extends "BYTEA"
-              ? PrimitiveWhere<Uint8Array>
+              ? WhereEqNe<Uint8Array, ColumnBuilderOptional<TBuilder>>
               : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
-                ?
-                    | ColumnValue<TBuilder>
-                    | {
-                        eq?: ColumnValue<TBuilder>;
-                        ne?: ColumnValue<TBuilder>;
-                        in?: ColumnValue<TBuilder>[];
-                      }
+                ? WhereEqNe<
+                    ColumnValue<TBuilder>,
+                    ColumnBuilderOptional<TBuilder>,
+                    { in?: ColumnValue<TBuilder>[] }
+                  >
                 : ColumnBuilderSqlType<TBuilder> extends {
                       kind: "ENUM";
                       variants: readonly (infer TVariant extends string)[];
                     }
-                  ? TVariant | { eq?: TVariant; ne?: TVariant; in?: TVariant[] }
+                  ? WhereEqNe<TVariant, ColumnBuilderOptional<TBuilder>, { in?: TVariant[] }>
                   : ColumnBuilderSqlType<TBuilder> extends {
                         kind: "ARRAY";
                         element: infer TElementSql extends SqlType;
                       }
-                    ?
-                        | ColumnValue<TBuilder>
-                        | {
-                            eq?: ColumnValue<TBuilder>;
-                            contains?: TSTypeFromSqlType<TElementSql>;
-                          }
+                    ? WhereEqNe<
+                        ColumnValue<TBuilder>,
+                        ColumnBuilderOptional<TBuilder>,
+                        { contains?: TSTypeFromSqlType<TElementSql> }
+                      >
                     : never;
 
 export type TableWhereInput<
@@ -471,13 +484,13 @@ type ApplyRelationCardinality<
   TRequired extends boolean,
 > = TIsArray extends true
   ? TNullable extends true
-    ? TValue[] | undefined
+    ? TValue[] | null
     : TValue[]
-  : TNullable extends true
-    ? TValue | undefined
-    : TRequired extends true
-      ? TValue
-      : TValue | undefined;
+  : TRequired extends true
+    ? TNullable extends true
+      ? TValue | null
+      : TValue
+    : TValue | null;
 
 export type TableInclude<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
   [TRelation in RelationName<TSchema, TTable>]?:

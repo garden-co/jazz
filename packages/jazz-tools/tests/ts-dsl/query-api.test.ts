@@ -1,5 +1,5 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
-import { afterEach, describe, it, expect, assert, expectTypeOf } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, assert, expectTypeOf } from "vitest";
 import { app, type Project, type Todo, type User } from "./fixtures/basic/schema";
 import { insertProject, insertTodo, insertUser, uniqueDbName } from "./factories";
 
@@ -16,34 +16,21 @@ function makeFriends(db: Db, user1: User, user2: User) {
 }
 
 describe("TS Query API", () => {
-  const dbs: Db[] = [];
+  let db: Db;
 
-  /** Track dbs for cleanup. */
-  function track(db: Db): Db {
-    dbs.push(db);
-    return db;
-  }
+  beforeEach(async () => {
+    db = await createDb({
+      appId: "test-app",
+      driver: { type: "persistent" },
+    });
+  });
 
   afterEach(async () => {
-    for (const db of dbs) {
-      try {
-        await db.shutdown();
-      } catch {
-        // Best effort
-      }
-    }
-    dbs.length = 0;
+    await db.shutdown();
   });
 
   describe("filtering", () => {
     it("queries by id", async () => {
-      const db = track(
-        await createDb({
-          appId: "test-app",
-          driver: { type: "persistent", dbName: uniqueDbName("query-by-id") },
-        }),
-      );
-
       const { id } = insertProject(db, "Project A");
 
       const results = await db.all(app.projects.where({ id: { eq: id } }));
@@ -54,14 +41,69 @@ describe("TS Query API", () => {
       expect(results[0]!.name).toBe("Project A");
     });
 
+    it("filters nullable columns with isNull:true", async () => {
+      const todoWithoutOwner = insertTodo(db, {
+        title: "Todo without owner",
+        ownerId: null,
+      });
+      const _todoWithOwner = insertTodo(db, {
+        title: "Todo with owner",
+        ownerId: insertUser(db).id,
+      });
+
+      const results = await db.all(app.todos.where({ ownerId: { isNull: true } }));
+
+      expect(results.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
+    });
+
+    it("filters non-nullable columns with isNull:false", async () => {
+      const _todoWithoutOwner = insertTodo(db, {
+        title: "Todo without owner",
+        ownerId: null,
+      });
+      const todoWithOwner = insertTodo(db, {
+        title: "Todo with owner",
+        ownerId: insertUser(db).id,
+      });
+
+      const results = await db.all(app.todos.where({ ownerId: { isNull: false } }));
+
+      expect(results.map((todo) => todo.id)).toEqual([todoWithOwner.id]);
+    });
+
+    // Note: this is a difference with respect to SQL, when =null checks always return false.
+    it("filters with explicit null values work as isNull:true", async () => {
+      const todoWithoutOwner = insertTodo(db, {
+        title: "Todo without owner",
+        ownerId: null,
+      });
+      const _todoWithOwner = insertTodo(db, {
+        title: "Todo with owner",
+        ownerId: insertUser(db).id,
+      });
+
+      const resultsDirectNull = await db.all(app.todos.where({ ownerId: null }));
+      const resultsEqNull = await db.all(app.todos.where({ ownerId: { eq: null } }));
+      expect(resultsDirectNull.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
+      expect(resultsEqNull.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
+    });
+
+    it("filters with explicit undefined values are no-ops", async () => {
+      const todoWithoutOwner = insertTodo(db, {
+        title: "Todo without owner",
+        ownerId: null,
+      });
+      const todoWithOwner = insertTodo(db, {
+        title: "Todo with owner",
+        ownerId: insertUser(db).id,
+      });
+
+      const results = await db.all(app.todos.where({ ownerId: undefined }));
+      expect(results.map((todo) => todo.id)).toEqual([todoWithoutOwner.id, todoWithOwner.id]);
+    });
+
     describe("query by array column", () => {
       it("using eq", async () => {
-        const db = track(
-          await createDb({
-            appId: "test-app",
-            driver: { type: "persistent", dbName: uniqueDbName("query-by-array-column-equality") },
-          }),
-        );
         const { id: id1 } = insertTodo(db, {
           title: "Todo 1",
           tags: ["tag1"],
@@ -81,12 +123,6 @@ describe("TS Query API", () => {
       });
 
       it("using contains", async () => {
-        const db = track(
-          await createDb({
-            appId: "test-app",
-            driver: { type: "persistent", dbName: uniqueDbName("query-by-array-column-contains") },
-          }),
-        );
         const { id: id1 } = insertTodo(db, {
           title: "Todo 1",
           tags: ["tag1"],
@@ -110,13 +146,6 @@ describe("TS Query API", () => {
 
   describe("include", () => {
     it("include returns the related entity", async () => {
-      const db = track(
-        await createDb({
-          appId: "test-app",
-          driver: { type: "persistent", dbName: uniqueDbName("include-returns-entity") },
-        }),
-      );
-
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: ownerId } = insertUser(db);
       const { id: todoId } = insertTodo(db, {
@@ -132,20 +161,13 @@ describe("TS Query API", () => {
       expect(results.length).toBe(1);
       const todo = results[0]!;
       expect(todo.title).toBe("Write tests");
-      expectTypeOf(todo.ownerId).toEqualTypeOf<string | undefined>();
+      expectTypeOf(todo.ownerId).toEqualTypeOf<string | null>();
       expect(todo.ownerId).toBe(ownerId);
-      expectTypeOf(todo.project).toEqualTypeOf<Project | undefined>();
+      expectTypeOf(todo.project).toEqualTypeOf<Project | null>();
       expect(todo.project?.name).toBe("Announcements");
     });
 
     it("include only resolves the provided columns, not all references", async () => {
-      const db = track(
-        await createDb({
-          appId: "test-app",
-          driver: { type: "persistent", dbName: uniqueDbName("select-root-columns") },
-        }),
-      );
-
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: ownerId } = insertUser(db);
       const { id: todoId } = insertTodo(db, {
@@ -161,21 +183,14 @@ describe("TS Query API", () => {
       );
 
       assert(result, "Result is not defined");
-      expectTypeOf(result.ownerId).toEqualTypeOf<string | undefined>();
+      expectTypeOf(result.ownerId).toEqualTypeOf<string | null>();
       expect(result.ownerId).toBe(ownerId);
-      expectTypeOf(result.project).toEqualTypeOf<Project | undefined>();
+      expectTypeOf(result.project).toEqualTypeOf<Project | null>();
       assert(result.project, "Project include is not defined");
       expect(result.project.name).toBe("Announcements");
     });
 
-    it("include returns 'undefined' for null foreign key columns", async () => {
-      const db = track(
-        await createDb({
-          appId: "test-app",
-          driver: { type: "persistent", dbName: uniqueDbName("select-root-columns") },
-        }),
-      );
-
+    it("include returns null for null foreign key columns", async () => {
       const { id: todoId } = insertTodo(db, {
         ownerId: undefined,
       });
@@ -183,18 +198,11 @@ describe("TS Query API", () => {
       const result = await db.one(app.todos.where({ id: { eq: todoId } }).include({ owner: true }));
 
       assert(result, "Result is not defined");
-      expectTypeOf(result.owner).toEqualTypeOf<User | undefined>();
-      expect(result.owner).toBeUndefined();
+      expectTypeOf(result.owner).toEqualTypeOf<User | null>();
+      expect(result.owner).toBeNull();
     });
 
     it("text is not corrupted when using include", async () => {
-      const db = track(
-        await createDb({
-          appId: "test-app",
-          driver: { type: "persistent", dbName: uniqueDbName("include-corruption") },
-        }),
-      );
-
       const { id: projectId } = insertProject(db);
       const { id: ownerId } = insertUser(db);
       const { id: todoId } = insertTodo(db, {
@@ -217,14 +225,7 @@ describe("TS Query API", () => {
   });
 
   describe("missing reference handling", () => {
-    it("include returns 'undefined' for missing scalar referenced entities", async () => {
-      const db = track(
-        await createDb({
-          appId: "test-app",
-          driver: { type: "persistent", dbName: uniqueDbName("include-returns-entity") },
-        }),
-      );
-
+    it("include returns null for missing scalar referenced entities", async () => {
       const project = insertProject(db);
       const todo = insertTodo(db, {
         projectId: project.id,
@@ -236,18 +237,11 @@ describe("TS Query API", () => {
         app.todos.where({ id: { eq: todo.id } }).include({ project: true }),
       );
       assert(result, "Result is not defined");
-      expectTypeOf(result.project).toEqualTypeOf<Project | undefined>();
-      expect(result.project).toBeUndefined();
+      expectTypeOf(result.project).toEqualTypeOf<Project | null>();
+      expect(result.project).toBeNull();
     });
 
     it("include skips missing referenced entities in forward array relations", async () => {
-      const db = track(
-        await createDb({
-          appId: "test-app",
-          driver: { type: "persistent", dbName: uniqueDbName("include-returns-entity") },
-        }),
-      );
-
       const assignee1 = insertUser(db);
       const assignee2 = insertUser(db);
       const todo = insertTodo(db, {
@@ -265,13 +259,6 @@ describe("TS Query API", () => {
     });
 
     it("include skips missing referenced entities in reverse relations", async () => {
-      const db = track(
-        await createDb({
-          appId: "test-app",
-          driver: { type: "persistent", dbName: uniqueDbName("include-returns-entity") },
-        }),
-      );
-
       const owner = insertUser(db);
       const { id: todoId } = insertTodo(db, {
         ownerId: owner.id,
@@ -294,13 +281,6 @@ describe("TS Query API", () => {
 
     describe("requireIncludes", () => {
       it("requireIncludes filters out rows with missing scalar referenced entities", async () => {
-        const db = track(
-          await createDb({
-            appId: "test-app",
-            driver: { type: "persistent", dbName: uniqueDbName("require-includes-scalar-missing") },
-          }),
-        );
-
         const project = insertProject(db);
         const todo = insertTodo(db, {
           projectId: project.id,
@@ -322,13 +302,6 @@ describe("TS Query API", () => {
       });
 
       it("requireIncludes does not filter out rows with null scalar references", async () => {
-        const db = track(
-          await createDb({
-            appId: "test-app",
-            driver: { type: "persistent", dbName: uniqueDbName("require-includes-scalar-missing") },
-          }),
-        );
-
         const todo = insertTodo(db, {
           ownerId: undefined,
         });
@@ -342,18 +315,11 @@ describe("TS Query API", () => {
 
         assert(result, "Result is not defined");
         expect(result.id).toBe(todo.id);
-        expectTypeOf(result.owner).toEqualTypeOf<User | undefined>();
-        expect(result.owner).toBeUndefined();
+        expectTypeOf(result.owner).toEqualTypeOf<User | null>();
+        expect(result.owner).toBeNull();
       });
 
       it("requireIncludes filters out rows with missing entities in forward array relations", async () => {
-        const db = track(
-          await createDb({
-            appId: "test-app",
-            driver: { type: "persistent", dbName: uniqueDbName("require-includes-array-missing") },
-          }),
-        );
-
         const assignee1 = insertUser(db);
         const assignee2 = insertUser(db);
         const todo = insertTodo(db, {
@@ -373,13 +339,6 @@ describe("TS Query API", () => {
       });
 
       it("requireIncludes does not filter rows for reverse relations", async () => {
-        const db = track(
-          await createDb({
-            appId: "test-app",
-            driver: { type: "persistent", dbName: uniqueDbName("require-includes-reverse") },
-          }),
-        );
-
         const owner = insertUser(db);
         const { id: todoId } = insertTodo(db, {
           ownerId: owner.id,
@@ -401,13 +360,6 @@ describe("TS Query API", () => {
       });
 
       it("can use requireIncludes in nested includes", async () => {
-        const db = track(
-          await createDb({
-            appId: "test-app",
-            driver: { type: "persistent", dbName: uniqueDbName("require-includes-nested") },
-          }),
-        );
-
         const alice = insertUser(db);
         const bob = insertUser(db);
         const deletedUser = insertUser(db);
@@ -430,13 +382,6 @@ describe("TS Query API", () => {
       });
 
       it("top-level requireIncludes does not affect inner includes", async () => {
-        const db = track(
-          await createDb({
-            appId: "test-app",
-            driver: { type: "persistent", dbName: uniqueDbName("require-includes-scalar-missing") },
-          }),
-        );
-
         const alice = insertUser(db);
         const bob = insertUser(db);
         const deletedUser = insertUser(db);
@@ -462,13 +407,6 @@ describe("TS Query API", () => {
       });
 
       it("rows skipped by requireIncludes affect limit-offset pagination", async () => {
-        const db = track(
-          await createDb({
-            appId: "test-app",
-            driver: { type: "persistent", dbName: uniqueDbName("require-includes-limit-offset") },
-          }),
-        );
-
         const alice = insertUser(db);
         const bob = insertUser(db);
         const deletedUser = insertUser(db);
@@ -493,13 +431,6 @@ describe("TS Query API", () => {
 
   describe("select", () => {
     it("select narrows root columns while preserving id and includes", async () => {
-      const db = track(
-        await createDb({
-          appId: "test-app",
-          driver: { type: "persistent", dbName: uniqueDbName("select-root-columns") },
-        }),
-      );
-
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: todoId } = insertTodo(db, {
         title: "Write tests",
@@ -518,7 +449,7 @@ describe("TS Query API", () => {
       assert(result, "Result is not defined");
       expectTypeOf(result.id).toEqualTypeOf<string>();
       expectTypeOf(result.title).toEqualTypeOf<string>();
-      expectTypeOf(result.project).toEqualTypeOf<Project | undefined>();
+      expectTypeOf(result.project).toEqualTypeOf<Project | null>();
       expect(result).toEqual({
         id: todoId,
         title: "Write tests",
@@ -532,13 +463,6 @@ describe("TS Query API", () => {
     });
 
     it('select("*") resets to all root columns', async () => {
-      const db = track(
-        await createDb({
-          appId: "test-app",
-          driver: { type: "persistent", dbName: uniqueDbName("select-all-columns") },
-        }),
-      );
-
       const { id: projectId } = insertProject(db);
       const { id: ownerId } = insertUser(db);
       const { id: todoId } = insertTodo(db, {
@@ -566,14 +490,12 @@ describe("TS Query API", () => {
     });
 
     it("selects and filters permission magic columns end to end", async () => {
-      const db = track(
-        await createDb({
-          appId: "test-app",
-          driver: { type: "persistent", dbName: uniqueDbName("select-magic-columns") },
-          localAuthMode: "anonymous",
-          localAuthToken: "magic-columns-user",
-        }),
-      );
+      const db = await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("select-magic-columns") },
+        localAuthMode: "anonymous",
+        localAuthToken: "magic-columns-user",
+      });
 
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: editableId } = insertTodo(db, {
@@ -665,20 +587,15 @@ describe("TS Query API", () => {
         done: false,
         tags: ["dev"],
         projectId,
-        ownerId: undefined,
+        ownerId: null,
         assigneesIds: [],
         $canDelete: true,
       });
+
+      await db.shutdown();
     });
 
     it("include builders can project nested relation columns", async () => {
-      const db = track(
-        await createDb({
-          appId: "test-app",
-          driver: { type: "persistent", dbName: uniqueDbName("select-nested-columns") },
-        }),
-      );
-
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: ownerId } = insertUser(db);
       const { id: todoId } = insertTodo(db, {
@@ -715,13 +632,6 @@ describe("TS Query API", () => {
     });
 
     it("subscribeAll preserves projected root columns with includes", async () => {
-      const db = track(
-        await createDb({
-          appId: "test-app",
-          driver: { type: "persistent", dbName: uniqueDbName("subscribe-select-root-columns") },
-        }),
-      );
-
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: ownerId } = insertUser(db);
 
@@ -781,8 +691,64 @@ describe("TS Query API", () => {
           },
         },
       ]);
-      expect("done" in delta.all[0]!).toBe(false);
-      expect("tags" in delta.all[0]!).toBe(false);
+      assert(delta.all[0]);
+      expect("done" in delta.all[0]).toBe(false);
+      expect("tags" in delta.all[0]).toBe(false);
+    });
+
+    it("subscribeAll returns null for selected nullable columns while omitting unselected columns", async () => {
+      const { id: projectId } = insertProject(db, "Announcements");
+
+      type SubscribedTodo = {
+        id: string;
+        title: string;
+        ownerId: string | null;
+      };
+
+      let unsubscribe = () => {};
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const deltaPromise = new Promise<{ all: SubscribedTodo[] }>((resolve, reject) => {
+        timeout = setTimeout(() => {
+          unsubscribe();
+          reject(new Error("Timed out waiting for subscribeAll nullable update"));
+        }, 10_000);
+
+        unsubscribe = db.subscribeAll(app.todos.select("title", "ownerId"), (delta) => {
+          if (delta.all.length !== 1) {
+            return;
+          }
+
+          resolve(delta as { all: SubscribedTodo[] });
+        });
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const { id: todoId } = insertTodo(db, {
+        title: "Watch nullable subscription",
+        done: false,
+        tags: ["dev"],
+        projectId,
+        ownerId: null,
+        assigneesIds: [],
+      });
+
+      const delta = await deltaPromise;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      unsubscribe();
+
+      expect(delta.all).toEqual([
+        {
+          id: todoId,
+          title: "Watch nullable subscription",
+          ownerId: null,
+        },
+      ]);
+      assert(delta.all[0]);
+      expect("done" in delta.all[0]).toBe(false);
+      expect("tags" in delta.all[0]).toBe(false);
     });
   });
 });
