@@ -954,11 +954,19 @@ impl QueryManager {
 
                     let (_, commit_id, content, source_branch, is_soft_deleted) =
                         best.filter(|(_, _, content, _, _)| !content.is_empty())?;
+                    let current_table = obj
+                        .metadata
+                        .get(MetadataKey::Table.as_str())
+                        .and_then(|table_hint| {
+                            resolve_current_table_name(&schema_context, table_hint)
+                                .or_else(|| Some(table_hint.clone()))
+                        })
+                        .unwrap_or_else(|| table.clone());
 
                     if let Some(&source_hash) = branch_schema_map.get(&source_branch)
                         && source_hash != schema_context.current_hash
                     {
-                        let transformer = LensTransformer::new(&schema_context, &table);
+                        let transformer = LensTransformer::new(&schema_context, &current_table);
                         match transformer.transform(&content, commit_id, source_hash) {
                             Ok(result) => {
                                 if is_soft_deleted && !include_deleted {
@@ -974,14 +982,14 @@ impl QueryManager {
                             }
                             Err(err) => {
                                 schema_warnings.record(
-                                    &table,
+                                    &current_table,
                                     source_hash,
                                     schema_context.current_hash,
                                 );
                                 tracing::debug!(
                                     sub_id = sub_id.0,
                                     row_id = %id,
-                                    table = %table,
+                                    table = %current_table,
                                     source_branch = %source_branch,
                                     source_schema = %source_hash.short(),
                                     target_schema = %schema_context.current_hash.short(),

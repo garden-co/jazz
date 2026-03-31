@@ -624,8 +624,14 @@ impl QueryManager {
         if content.is_empty() {
             return None;
         }
+        let current_table = obj
+            .metadata
+            .get(MetadataKey::Table.as_str())
+            .map(|table_hint| resolve_current_table_for_context(context.schema_context, table_hint))
+            .unwrap_or_else(|| TableName::new(context.table));
         Self::transform_row_with_schema(
             id,
+            current_table.as_str(),
             content,
             commit_id,
             branch_name,
@@ -636,6 +642,7 @@ impl QueryManager {
 
     pub(super) fn transform_row_with_schema(
         id: ObjectId,
+        current_table: &str,
         content: Vec<u8>,
         commit_id: CommitId,
         branch_name: BranchName,
@@ -647,7 +654,7 @@ impl QueryManager {
         if let Some(source_hash) = source_hash
             && source_hash != context.schema_context.current_hash
         {
-            let transformer = LensTransformer::new(context.schema_context, context.table);
+            let transformer = LensTransformer::new(context.schema_context, current_table);
             match transformer.transform(&content, commit_id, source_hash) {
                 Ok(result) => {
                     return Some(ResolvedSchemaRow {
@@ -659,13 +666,13 @@ impl QueryManager {
                 }
                 Err(err) => {
                     context.schema_warnings.record(
-                        context.table,
+                        current_table,
                         source_hash,
                         context.schema_context.current_hash,
                     );
                     tracing::debug!(
                         row_id = %id,
-                        table = context.table,
+                        table = current_table,
                         source_branch = %branch_name,
                         source_schema = %source_hash.short(),
                         target_schema = %context.schema_context.current_hash.short(),

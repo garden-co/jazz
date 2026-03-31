@@ -8,7 +8,8 @@
 //! - New column in new schema → `AddColumn` with schema default when present (otherwise `NULL`)
 //! - Missing column in new schema → `RemoveColumn` with schema default when present (otherwise `NULL`)
 //! - Column type change → Marked as ambiguity (requires manual review)
-//! - Possible rename (same type, one added + one removed) → `RenameColumn` marked as draft
+//! - Possible column rename (same type, one added + one removed) → `RenameColumn` marked as draft
+//! - Possible table rename (same structure) → `RenameTable` marked as draft
 
 use crate::query_manager::types::{ColumnType, Schema, TableSchema, Value};
 
