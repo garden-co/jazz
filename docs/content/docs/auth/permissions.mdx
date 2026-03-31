@@ -151,7 +151,7 @@ schema, and they are omitted from `select("*")`, so opt in explicitly when you w
   </Tab>
 </Tabs>
 
-### Provenance columns
+### Edit metadata columns
 
 Jazz also tracks row authorship and timestamps automatically:
 
@@ -160,12 +160,12 @@ Jazz also tracks row authorship and timestamps automatically:
 - `$updatedBy`&hairsp;—&hairsp;the Jazz principal that last updated the row
 - `$updatedAt`&hairsp;—&hairsp;when the row was last updated
 
-All four provenance columns are always present. Backend writes that are not attributed to a user are
-authored as `jazz:system`.
+All four edit metadata columns are always present. Backend writes that are not attributed to a user
+are authored as `jazz:system`.
 
 ### Authorship-based policies
 
-You can use provenance magic columns directly in `permissions.ts`. This is useful for simple
+You can use these edit metadata magic columns directly in `permissions.ts`. This is useful for simple
 "creator can read/edit/delete their own rows" policies without adding explicit `owner_id` columns.
 
 <include cwd lang="ts" meta='title="permissions.ts"'>

@@ -177,8 +177,8 @@ export async function readDeletableTodos(db: Db) {
 }
 // #endregion reading-magic-columns-ts
 
-// #region reading-provenance-magic-columns-ts
-export async function readTodoProvenance(db: Db, currentUserId: string, updatedSinceMs: number) {
+// #region reading-edit-metadata-magic-columns-ts
+export async function readTodoEditMetadata(db: Db, currentUserId: string, updatedSinceMs: number) {
   return db.all(
     app.todos
       .where({
@@ -188,7 +188,7 @@ export async function readTodoProvenance(db: Db, currentUserId: string, updatedS
       .select("title", "$createdBy", "$createdAt", "$updatedBy", "$updatedAt"),
   );
 }
-// #endregion reading-provenance-magic-columns-ts
+// #endregion reading-edit-metadata-magic-columns-ts
 
 // #region reading-recursive-ts
 export function buildTodoLineageQuery() {
