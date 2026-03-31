@@ -1,0 +1,21 @@
+There are a number of column types available which cover most common use cases:
+
+| DSL                   | TypeScript type      | SQL type        |
+| --------------------- | -------------------- | --------------- |
+| `s.string()`          | `string`             | `TEXT`          |
+| `s.boolean()`         | `boolean`            | `BOOLEAN`       |
+| `s.int()`             | `number`             | `INTEGER`       |
+| `s.float()`           | `number`             | `REAL`          |
+| `s.timestamp()`       | `Date \| number`     | `TIMESTAMP`     |
+| `s.bytes()`           | `Uint8Array`         | `BYTEA`         |
+| `s.ref("table")`      | `string` (row ID)    | `UUID` (FK)     |
+| `s.array(s.string())` | `string[]`           | `TEXT[]`        |
+| `s.enum("a", "b")`    | `"a" \| "b"`         | `ENUM('a','b')` |
+| `s.json()`            | `JsonValue`          | `JSON`          |
+| `s.json(schema)`      | inferred from schema | `JSON`          |
+
+Any column can be made nullable with `.optional()`.
+
+> **JSON columns are atomic.** The entire value is replaced on every write. Use `s.json()` for untyped JSON, or `s.json(schema)` with a [Zod](https://zod.dev)-compatible schema for typed validation. For structured data that needs per-field updates, use separate columns or a related table instead.
+
+> **Ref naming convention:** `s.ref()` columns must have a name ending in `Id` or `_id`. For `s.array(s.ref())`, the name must end in `Ids` or `_ids`. The runtime will throw if a ref column does not follow this convention.

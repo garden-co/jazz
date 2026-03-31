@@ -58,6 +58,16 @@ export async function upgradeIdentity(
 }
 // #endregion auth-external-ts
 
+// #region auth-jwt-ts
+export async function createJwtDb() {
+  return createDb({
+    appId: "my-app",
+    serverUrl: "http://127.0.0.1:4200",
+    jwtToken: "<provider-jwt>",
+  });
+}
+// #endregion auth-jwt-ts
+
 // #region auth-offline-ts
 export async function createOfflineDb() {
   return createDb({ appId: "my-app" });

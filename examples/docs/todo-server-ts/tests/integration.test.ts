@@ -54,7 +54,6 @@ describe("Todo Server Integration", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: "Test Todo",
-          description: "A test todo item",
         }),
       });
 
@@ -62,7 +61,6 @@ describe("Todo Server Integration", () => {
       const todo: Todo = await res.json();
       expect(todo.title).toBe("Test Todo");
       expect(todo.done).toBe(false);
-      expect(todo.description).toBe("A test todo item");
       expect(todo.id).toBeDefined();
 
       createdTodoId = todo.id;
@@ -186,7 +184,7 @@ describe("Todo Server Integration", () => {
       const createRes1 = await fetch(`${server1.baseUrl}/todos`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: "Survive restart", description: "persistent" }),
+        body: JSON.stringify({ title: "Survive restart" }),
       });
       expect(createRes1.status).toBe(201);
       const todo1: Todo = await createRes1.json();
@@ -216,7 +214,6 @@ describe("Todo Server Integration", () => {
       const found1 = todos.find((t) => t.id === todo1.id);
       expect(found1).toBeDefined();
       expect(found1!.title).toBe("Survive restart");
-      expect(found1!.description).toBe("persistent");
       expect(found1!.done).toBe(false);
 
       const found2 = todos.find((t) => t.id === todo2.id);

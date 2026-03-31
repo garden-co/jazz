@@ -10,3 +10,7 @@ gemini mcp add jazz-docs npx jazz-tools@alpha mcp
 # #region codex
 codex mcp add jazz-docs -- npx jazz-tools@alpha mcp
 # #endregion codex
+
+# #region opencode
+opencode mcp add jazz-docs -- npx jazz-tools@alpha mcp
+# #endregion opencode
