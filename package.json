@@ -92,7 +92,6 @@
       "msw",
       "react-native-nitro-modules",
       "sharp",
-      "wasm-pack",
       "workerd"
     ],
     "patchedDependencies": {

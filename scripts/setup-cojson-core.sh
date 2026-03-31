@@ -107,6 +107,22 @@ echo -e "${GREEN}✓${NC} Rust targets installed"
 echo ""
 
 # =============================================================================
+# Install wasm-pack
+# =============================================================================
+echo "=== Installing wasm-pack ==="
+echo ""
+
+if cargo install --list | grep -q "wasm-pack"; then
+    echo -e "${GREEN}✓${NC} wasm-pack is already installed"
+else
+    echo "Installing wasm-pack..."
+    cargo install wasm-pack --locked
+    echo -e "${GREEN}✓${NC} wasm-pack installed"
+fi
+
+echo ""
+
+# =============================================================================
 # Install cargo-ndk (Android)
 # =============================================================================
 echo "=== Installing cargo-ndk ==="
