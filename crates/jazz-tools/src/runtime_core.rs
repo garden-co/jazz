@@ -255,6 +255,9 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
 
     /// Label for tracing (e.g. "worker", "edge", "client").
     tier_label: &'static str,
+
+    /// Optional sync message tracer — off by default, enabled via `enable_sync_tracer()`.
+    sync_tracer: Option<crate::sync_tracer::SyncTracer>,
 }
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
@@ -275,7 +278,18 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             pending_one_shot_queries: HashMap::new(),
             ack_watchers: HashMap::new(),
             tier_label: "unknown",
+            sync_tracer: None,
         }
+    }
+
+    /// Enable sync message tracing. Messages are recorded until `sync_tracer().clear()`.
+    pub fn enable_sync_tracer(&mut self) {
+        self.sync_tracer = Some(crate::sync_tracer::SyncTracer::new());
+    }
+
+    /// Access the sync tracer if enabled.
+    pub fn sync_tracer(&self) -> Option<&crate::sync_tracer::SyncTracer> {
+        self.sync_tracer.as_ref()
     }
 
     /// Set the tier label used in tracing spans.

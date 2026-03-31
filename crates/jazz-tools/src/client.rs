@@ -494,6 +494,26 @@ impl JazzClient {
         }
     }
 
+    /// Enable sync message tracing. Call before performing operations.
+    pub fn enable_sync_tracer(&self) {
+        let _ = self.runtime.enable_sync_tracer();
+    }
+
+    /// Access the sync tracer for reading output.
+    /// Returns None if `enable_sync_tracer()` was not called.
+    pub fn sync_tracer(&self) -> Option<crate::sync_tracer::SyncTracerSnapshot> {
+        self.runtime
+            .with_sync_tracer(|t| crate::sync_tracer::SyncTracerSnapshot {
+                dump: t.dump(),
+                tally: t.tally(),
+                summary: t.summary(),
+                trace_normalized: t.trace_normalized(),
+                count: t.count(),
+            })
+            .ok()
+            .flatten()
+    }
+
     /// Shutdown the client and release resources.
     pub async fn shutdown(mut self) -> Result<()> {
         // Abort stream listener first (it holds TokioRuntime clone)

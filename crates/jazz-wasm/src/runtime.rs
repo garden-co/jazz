@@ -1352,4 +1352,60 @@ impl WasmRuntime {
             tier_label,
         })
     }
+
+    // =========================================================================
+    // Sync Tracer
+    // =========================================================================
+
+    /// Enable sync message tracing. Call before performing operations.
+    /// Messages are recorded until `syncTracerClear()` is called.
+    #[wasm_bindgen(js_name = enableSyncTracer)]
+    pub fn enable_sync_tracer(&self) {
+        self.core.borrow_mut().enable_sync_tracer();
+    }
+
+    /// Full formatted trace with timing.
+    #[wasm_bindgen(js_name = syncTracerDump)]
+    pub fn sync_tracer_dump(&self) -> Option<String> {
+        self.core.borrow().sync_tracer().map(|t| t.dump())
+    }
+
+    /// Grouped count summary (deterministic ordering).
+    #[wasm_bindgen(js_name = syncTracerTally)]
+    pub fn sync_tracer_tally(&self) -> Option<String> {
+        self.core.borrow().sync_tracer().map(|t| t.tally())
+    }
+
+    /// One line per message, shape only (from -> to type).
+    #[wasm_bindgen(js_name = syncTracerSummary)]
+    pub fn sync_tracer_summary(&self) -> Option<String> {
+        self.core.borrow().sync_tracer().map(|t| t.summary())
+    }
+
+    /// Sorted trace with auto-named commits (C1, C2, ...) and branches.
+    #[wasm_bindgen(js_name = syncTracerTraceNormalized)]
+    pub fn sync_tracer_trace_normalized(&self) -> Option<String> {
+        self.core
+            .borrow()
+            .sync_tracer()
+            .map(|t| t.trace_normalized())
+    }
+
+    /// Clear all recorded messages.
+    #[wasm_bindgen(js_name = syncTracerClear)]
+    pub fn sync_tracer_clear(&self) {
+        if let Some(t) = self.core.borrow().sync_tracer() {
+            t.clear();
+        }
+    }
+
+    /// Number of recorded messages.
+    #[wasm_bindgen(js_name = syncTracerCount)]
+    pub fn sync_tracer_count(&self) -> usize {
+        self.core
+            .borrow()
+            .sync_tracer()
+            .map(|t| t.count())
+            .unwrap_or(0)
+    }
 }

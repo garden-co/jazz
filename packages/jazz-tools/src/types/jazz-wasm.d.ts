@@ -95,5 +95,14 @@ declare module "jazz-wasm" {
     close?(): void;
     setClientRole?(clientId: string, role: string): void;
     onSyncMessageReceivedFromClient?(clientId: string, messageJson: string): void;
+
+    // Sync tracer — call enableSyncTracer() first, then read results.
+    enableSyncTracer(): void;
+    syncTracerDump(): string | undefined;
+    syncTracerTally(): string | undefined;
+    syncTracerSummary(): string | undefined;
+    syncTracerTraceNormalized(): string | undefined;
+    syncTracerClear(): void;
+    syncTracerCount(): number;
   }
 }

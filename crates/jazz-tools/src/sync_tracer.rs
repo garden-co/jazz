@@ -155,6 +155,17 @@ impl SyncMessage {
     }
 }
 
+/// Snapshot of tracer output — all views captured at one point in time.
+/// Returned by `JazzClient::sync_tracer()` to avoid holding the lock.
+#[derive(Debug, Clone)]
+pub struct SyncTracerSnapshot {
+    pub dump: String,
+    pub tally: String,
+    pub summary: String,
+    pub trace_normalized: String,
+    pub count: usize,
+}
+
 // ============================================================================
 // SyncTracer
 // ============================================================================

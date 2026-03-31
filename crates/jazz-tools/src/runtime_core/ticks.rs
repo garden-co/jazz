@@ -175,6 +175,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             debug!(count = outbox.len(), "flushing outbox");
         }
         for msg in outbox {
+            if let Some(ref tracer) = self.sync_tracer {
+                tracer.record_outgoing(self.tier_label, &msg.destination, &msg.payload);
+            }
             self.sync_sender.send_sync_message(msg);
         }
 
@@ -193,6 +196,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             debug!(count = outbox.len(), "flushing post-process outbox");
         }
         for msg in outbox {
+            if let Some(ref tracer) = self.sync_tracer {
+                tracer.record_outgoing(self.tier_label, &msg.destination, &msg.payload);
+            }
             self.sync_sender.send_sync_message(msg);
         }
 
@@ -268,6 +274,9 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Park a sync message for processing in next batched_tick.
     pub fn park_sync_message(&mut self, message: InboxEntry) {
         trace!(source = ?message.source, payload = message.payload.variant_name(), "parking sync message");
+        if let Some(ref tracer) = self.sync_tracer {
+            tracer.record_incoming(&message.source, self.tier_label, &message.payload);
+        }
         self.parked_sync_messages.push(message);
         self.scheduler.schedule_batched_tick();
     }

@@ -38,6 +38,13 @@ export declare class NapiRuntime {
   flush(): void
   /** Flush and close the underlying storage, releasing filesystem locks. */
   close(): void
+  enableSyncTracer(): void
+  syncTracerDump(): string | null
+  syncTracerTally(): string | null
+  syncTracerSummary(): string | null
+  syncTracerTraceNormalized(): string | null
+  syncTracerClear(): void
+  syncTracerCount(): number
 }
 
 export declare class TestingServer {

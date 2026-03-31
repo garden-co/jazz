@@ -372,6 +372,26 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     }
 
     // =========================================================================
+    // Sync Tracer
+    // =========================================================================
+
+    /// Enable sync message tracing on this runtime.
+    pub fn enable_sync_tracer(&self) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.enable_sync_tracer();
+        Ok(())
+    }
+
+    /// Access the sync tracer's output. Returns None if tracer is not enabled.
+    pub fn with_sync_tracer<R>(
+        &self,
+        f: impl FnOnce(&crate::sync_tracer::SyncTracer) -> R,
+    ) -> Result<Option<R>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.sync_tracer().map(f))
+    }
+
+    // =========================================================================
     // Sync Operations
     // =========================================================================
 

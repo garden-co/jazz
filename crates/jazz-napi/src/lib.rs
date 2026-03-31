@@ -1135,6 +1135,76 @@ impl NapiRuntime {
             .map_err(|e| napi::Error::from_reason(format!("Failed to close storage: {:?}", e)))?;
         Ok(())
     }
+
+    // =========================================================================
+    // Sync Tracer
+    // =========================================================================
+
+    #[napi(js_name = "enableSyncTracer")]
+    pub fn enable_sync_tracer(&self) -> napi::Result<()> {
+        self.core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?
+            .enable_sync_tracer();
+        Ok(())
+    }
+
+    #[napi(js_name = "syncTracerDump")]
+    pub fn sync_tracer_dump(&self) -> napi::Result<Option<String>> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        Ok(core.sync_tracer().map(|t| t.dump()))
+    }
+
+    #[napi(js_name = "syncTracerTally")]
+    pub fn sync_tracer_tally(&self) -> napi::Result<Option<String>> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        Ok(core.sync_tracer().map(|t| t.tally()))
+    }
+
+    #[napi(js_name = "syncTracerSummary")]
+    pub fn sync_tracer_summary(&self) -> napi::Result<Option<String>> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        Ok(core.sync_tracer().map(|t| t.summary()))
+    }
+
+    #[napi(js_name = "syncTracerTraceNormalized")]
+    pub fn sync_tracer_trace_normalized(&self) -> napi::Result<Option<String>> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        Ok(core.sync_tracer().map(|t| t.trace_normalized()))
+    }
+
+    #[napi(js_name = "syncTracerClear")]
+    pub fn sync_tracer_clear(&self) -> napi::Result<()> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        if let Some(t) = core.sync_tracer() {
+            t.clear();
+        }
+        Ok(())
+    }
+
+    #[napi(js_name = "syncTracerCount")]
+    pub fn sync_tracer_count(&self) -> napi::Result<u32> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        Ok(core.sync_tracer().map(|t| t.count() as u32).unwrap_or(0))
+    }
 }
 
 // ============================================================================
