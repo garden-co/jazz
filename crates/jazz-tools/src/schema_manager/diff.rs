@@ -7,8 +7,6 @@
 //!
 //! - New column in new schema → `AddColumn` with schema default when present (otherwise `NULL`)
 //! - Missing column in new schema → `RemoveColumn` with schema default when present (otherwise `NULL`)
-//! - Table added → `AddTable`
-//! - Table removed → `RemoveTable`
 //! - Column type change → Marked as ambiguity (requires manual review)
 //! - Possible rename (same type, one added + one removed) → `RenameColumn` marked as draft
 
@@ -84,30 +82,6 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> DiffResult {
     // Collect all table names
     let old_tables: std::collections::HashSet<_> = old.keys().collect();
     let new_tables: std::collections::HashSet<_> = new.keys().collect();
-
-    // Tables only in old (removed)
-    for table_name in old_tables.difference(&new_tables) {
-        let table_schema = old[*table_name].clone();
-        transform.push(
-            LensOp::RemoveTable {
-                table: table_name.as_str().to_string(),
-                schema: table_schema,
-            },
-            false, // We have the schema, so not draft
-        );
-    }
-
-    // Tables only in new (added)
-    for table_name in new_tables.difference(&old_tables) {
-        let table_schema = new[*table_name].clone();
-        transform.push(
-            LensOp::AddTable {
-                table: table_name.as_str().to_string(),
-                schema: table_schema,
-            },
-            false,
-        );
-    }
 
     // Tables in both (need to diff columns)
     for table_name in old_tables.intersection(&new_tables) {
@@ -379,48 +353,6 @@ mod tests {
     }
 
     #[test]
-    fn diff_add_table() {
-        let old = make_schema(vec![("users", vec![("id", ColumnType::Text)])]);
-        let new = make_schema(vec![
-            ("users", vec![("id", ColumnType::Text)]),
-            ("posts", vec![("id", ColumnType::Text)]),
-        ]);
-
-        let result = diff_schemas(&old, &new);
-
-        assert_eq!(result.transform.ops.len(), 1);
-        assert!(result.ambiguities.is_empty());
-
-        match &result.transform.ops[0] {
-            LensOp::AddTable { table, .. } => {
-                assert_eq!(table, "posts");
-            }
-            _ => panic!("Expected AddTable"),
-        }
-    }
-
-    #[test]
-    fn diff_remove_table() {
-        let old = make_schema(vec![
-            ("users", vec![("id", ColumnType::Text)]),
-            ("legacy", vec![("id", ColumnType::Text)]),
-        ]);
-        let new = make_schema(vec![("users", vec![("id", ColumnType::Text)])]);
-
-        let result = diff_schemas(&old, &new);
-
-        assert_eq!(result.transform.ops.len(), 1);
-        assert!(result.ambiguities.is_empty());
-
-        match &result.transform.ops[0] {
-            LensOp::RemoveTable { table, .. } => {
-                assert_eq!(table, "legacy");
-            }
-            _ => panic!("Expected RemoveTable"),
-        }
-    }
-
-    #[test]
     fn diff_type_change() {
         let old = make_schema(vec![("users", vec![("age", ColumnType::Text)])]);
         let new = make_schema(vec![("users", vec![("age", ColumnType::Integer)])]);
@@ -518,26 +450,22 @@ mod tests {
         // Should have:
         // - RemoveColumn deprecated
         // - AddColumn age
-        // - AddTable posts
-        assert_eq!(result.transform.ops.len(), 3);
+        assert_eq!(result.transform.ops.len(), 2);
 
         // Count operation types
         let mut add_col = 0;
         let mut remove_col = 0;
-        let mut add_table = 0;
 
         for op in &result.transform.ops {
             match op {
                 LensOp::AddColumn { .. } => add_col += 1,
                 LensOp::RemoveColumn { .. } => remove_col += 1,
-                LensOp::AddTable { .. } => add_table += 1,
                 _ => {}
             }
         }
 
         assert_eq!(add_col, 1);
         assert_eq!(remove_col, 1);
-        assert_eq!(add_table, 1);
     }
 
     #[test]
