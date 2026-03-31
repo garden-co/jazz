@@ -20,7 +20,6 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_CACHE_SIZE: 8G
-      LIBCLANG_PATH: /usr/lib/llvm-18/lib
 
     steps:
       - uses: actions/checkout@v6
@@ -70,7 +69,6 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_CACHE_SIZE: 8G
-      LIBCLANG_PATH: /usr/lib/llvm-18/lib
 
     steps:
       - uses: actions/checkout@v6
@@ -120,7 +118,6 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_CACHE_SIZE: 8G
-      LIBCLANG_PATH: /usr/lib/llvm-18/lib
 
     steps:
       - uses: actions/checkout@v6

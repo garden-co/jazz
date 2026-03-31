@@ -1,7 +1,2 @@
-[env]
-# bindgen (used by librocksdb-sys) needs libclang at build time.
-# On macOS with Homebrew, it's not on the default search path.
-# These use Homebrew's stable symlink so they survive LLVM upgrades.
-# `force = false` means these won't override existing env vars.
-LIBCLANG_PATH = { value = "/opt/homebrew/opt/llvm/lib", force = false }
-DYLD_LIBRARY_PATH = { value = "/opt/homebrew/opt/llvm/lib", force = false }
+# Intentionally left minimal.
+# macOS developers: see CONTRIBUTING.md for libclang setup.

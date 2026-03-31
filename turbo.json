@@ -5,7 +5,7 @@
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**", "target/**", "pkg/**"],
-      "env": ["JAZZ_NAPI_RELEASE", "LIBCLANG_PATH"]
+      "env": ["JAZZ_NAPI_RELEASE"]
     },
     "docs#build": {
       "dependsOn": [

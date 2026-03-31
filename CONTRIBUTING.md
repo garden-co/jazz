@@ -10,9 +10,9 @@ The `rocksdb` feature uses `bindgen` to generate FFI bindings at build time, whi
 
 ```sh
 brew install llvm
+# Add to your shell profile (~/.zshrc or ~/.bashrc):
+export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
 ```
-
-No additional configuration needed — `.cargo/config.toml` sets the required env vars automatically using Homebrew's stable symlink.
 
 **Linux (Debian/Ubuntu):**
 
