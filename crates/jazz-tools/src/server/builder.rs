@@ -207,8 +207,21 @@ impl ServerBuilder {
 }
 
 fn server_sync_manager() -> SyncManager {
-    SyncManager::new()
-        .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer])
+    let sync_manager = SyncManager::new()
+        .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
+
+    if should_allow_unprivileged_schema_catalogue_writes() {
+        sync_manager.with_unprivileged_schema_catalogue_writes()
+    } else {
+        sync_manager
+    }
+}
+
+fn should_allow_unprivileged_schema_catalogue_writes() -> bool {
+    !matches!(
+        std::env::var("NODE_ENV"),
+        Ok(value) if value.eq_ignore_ascii_case("production")
+    )
 }
 
 async fn build_jwks_cache(auth_config: &AuthConfig) -> Result<Option<JwksCache>, String> {

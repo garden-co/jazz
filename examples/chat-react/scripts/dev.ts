@@ -1,11 +1,12 @@
 /**
- * Unified dev entrypoint: starts a local jazz server, pushes the schema
- * catalogue, then launches Vite. Ctrl+C tears everything down.
+ * Unified dev entrypoint: starts a local jazz server, then launches Vite.
+ * In development mode the client auto-publishes the current structural schema
+ * on first connect. Ctrl+C tears everything down.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
-import { startLocalJazzServer, pushSchemaCatalogue } from "jazz-tools/testing";
+import { startLocalJazzServer } from "jazz-tools/testing";
 
 const APP_ID = "00000000-0000-0000-0000-000000000003";
 const PORT = 4200;
@@ -24,15 +25,6 @@ async function main() {
     enableLogs: true,
   });
   console.log(`Jazz server ready at ${server.url}`);
-
-  console.log("Pushing schema catalogue...");
-  await pushSchemaCatalogue({
-    serverUrl: server.url,
-    appId: APP_ID,
-    adminSecret: ADMIN_SECRET,
-    schemaDir: join(ROOT, "schema"),
-  });
-  console.log("Schema pushed.");
 
   vite = spawn("npx", ["vite"], {
     cwd: ROOT,
