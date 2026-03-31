@@ -91,13 +91,40 @@ function exitWithSpawnResult(result, name) {
   process.exit(1);
 }
 
+function printWrapperHelp() {
+  console.log("Jazz distributed database CLI");
+  console.log("");
+  console.log("Usage: jazz-tools <COMMAND> [options]");
+  console.log("");
+  console.log("Commands:");
+  console.log("  validate              Validate root schema.ts and optional permissions.ts");
+  console.log("  schema export         Print the compiled structural schema as JSON");
+  console.log("  permissions status    Show the current server permissions head for this app");
+  console.log("  permissions push      Publish the current permissions.ts with head-parent checks");
+  console.log(
+    "  migrations create     Generate a typed structural migration stub from two known schema hashes",
+  );
+  console.log("  migrations push       Push a reviewed migration edge to the server");
+  console.log("  create                Create a new resource");
+  console.log("  server                Run a Jazz server");
+  console.log("  mcp                   Run the Jazz MCP server");
+  console.log("  help                  Print this message");
+  console.log("");
+  console.log("Options:");
+  console.log("  -h, --help            Print help");
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 
 const { args, rustBinOverride } = parseWrapperArgs(process.argv.slice(2));
 const command = args[0];
 
 // Handle the MCP server before any Rust binary resolution.
-if (command === "mcp") {
+if (!command || command === "--help" || command === "-h") {
+  printWrapperHelp();
+} else if (command === "help" && args.length === 1) {
+  printWrapperHelp();
+} else if (command === "mcp") {
   const mcpPath = join(here, "..", "dist", "mcp", "server.js");
   const { runServer } = await import(mcpPath);
   await runServer();

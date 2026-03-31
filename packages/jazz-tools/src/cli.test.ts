@@ -820,4 +820,16 @@ exit 0
     expect(await readFile(argsPath, "utf8")).toBe("create\n--help\n");
     await expect(access(binaryPath, constants.X_OK)).resolves.toBeUndefined();
   });
+
+  it("shows the wrapper command surface in --help output", () => {
+    const result = runBin(["--help"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("validate");
+    expect(result.stdout).toContain("schema export");
+    expect(result.stdout).toContain("permissions push");
+    expect(result.stdout).toContain("migrations push");
+    expect(result.stdout).toContain("server");
+    expect(result.stdout).toContain("create");
+  });
 });
