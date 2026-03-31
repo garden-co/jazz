@@ -99,6 +99,9 @@ jobs:
           key: sccache-${{ github.repository_id }}-${{ runner.os }}-v1
           path: /home/runner/.cache/sccache
 
+      - name: Install libclang (needed by rocksdb bindgen)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
       - run: cargo test --workspace --lib --bins --tests --exclude jazz-rn --features test
 
   test-ts:
