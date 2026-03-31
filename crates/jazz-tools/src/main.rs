@@ -9,7 +9,7 @@
 
 mod commands;
 #[cfg(feature = "otel")]
-mod otel;
+use jazz_tools::otel;
 
 use clap::{Parser, Subcommand};
 use jazz_tools::middleware::AuthConfig;
