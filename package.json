@@ -37,8 +37,5 @@
       "react-dom": "19.2.4"
     },
     "patchedDependencies": {}
-  },
-  "onlyBuiltDependencies": [
-    "wasm-pack"
-  ]
+  }
 }
