@@ -269,6 +269,20 @@ fn make_context(
     }
 }
 
+/// Wait for a query to reach the expected row count.
+///
+/// WORKAROUND: Opens a persistent subscription to keep the client in scope on
+/// the server. Without this, one-shot query polling creates subscription gaps
+/// where the server skips `ObjectUpdated` forwarding because
+/// `client.is_in_scope()` returns false during the gap. This causes deletes
+/// (and any update that exits scope) to be permanently missed by the polling
+/// client, since `set_client_query_scope` only handles newly-visible objects.
+///
+/// The real fix is to include result IDs in `QuerySettled` so the client can
+/// detect stale local cache entries.
+///
+/// See: todo/issues/stale-client-cache-after-scope-removal.md
+///      todo/ideas/1_mvp/sync-protocol-reliability.md (gap #2, #5)
 async fn wait_for_todos_count(
     client: &JazzClient,
     expected_count: usize,
@@ -276,6 +290,15 @@ async fn wait_for_todos_count(
     durability_tier: Option<DurabilityTier>,
 ) -> Vec<(jazz_tools::ObjectId, Vec<Value>)> {
     let query = QueryBuilder::new("todos").build();
+
+    // Keep a persistent subscription alive so the server maintains scope for
+    // forwarding updates to this client. The one-shot queries below read the
+    // actual data.
+    let _subscription_guard = client
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe for wait_for_todos_count");
+
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last = Vec::new();
 
