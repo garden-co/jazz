@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::object::ObjectId;
 #[cfg(test)]
 use crate::query_manager::types::ColumnDescriptor;
-use crate::query_manager::types::{ColumnType, RowDescriptor, SchemaHash, TableSchema, Value};
+use crate::query_manager::types::{ColumnType, RowDescriptor, SchemaHash, Value};
 
 /// Direction for lens application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,14 +43,6 @@ pub enum LensOp {
         table: String,
         old_name: String,
         new_name: String,
-    },
-    /// Add a new table.
-    AddTable { table: String, schema: TableSchema },
-    /// Remove a table.
-    RemoveTable {
-        table: String,
-        /// Stored schema (needed for backward transform).
-        schema: TableSchema,
     },
 }
 
@@ -89,14 +81,6 @@ impl LensOp {
                 old_name: new_name.clone(),
                 new_name: old_name.clone(),
             },
-            LensOp::AddTable { table, schema } => LensOp::RemoveTable {
-                table: table.clone(),
-                schema: schema.clone(),
-            },
-            LensOp::RemoveTable { table, schema } => LensOp::AddTable {
-                table: table.clone(),
-                schema: schema.clone(),
-            },
         }
     }
 
@@ -105,9 +89,7 @@ impl LensOp {
         match self {
             LensOp::AddColumn { table, .. }
             | LensOp::RemoveColumn { table, .. }
-            | LensOp::RenameColumn { table, .. }
-            | LensOp::AddTable { table, .. }
-            | LensOp::RemoveTable { table, .. } => table,
+            | LensOp::RenameColumn { table, .. } => table,
         }
     }
 }
@@ -265,7 +247,6 @@ impl Lens {
                 LensOp::AddColumn { .. } => {
                     // New columns don't affect existing column names
                 }
-                _ => {}
             }
         }
 
@@ -314,9 +295,6 @@ impl Lens {
                     if let Some(idx) = column_names.iter().position(|n| n == old_name) {
                         column_names[idx] = new_name.clone();
                     }
-                }
-                LensOp::AddTable { .. } | LensOp::RemoveTable { .. } => {
-                    // Table-level ops don't affect row transformation
                 }
             }
         }
