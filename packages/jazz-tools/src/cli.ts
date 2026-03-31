@@ -411,6 +411,7 @@ function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
 function serializeForwardLenses(forward: readonly Lens[]): PublishedTableLens[] {
   return forward.map((tableLens) => ({
     table: tableLens.table,
+    renamedFrom: tableLens.renamedFrom,
     operations: tableLens.operations.map((op) => {
       if (op.type === "rename") {
         return op;

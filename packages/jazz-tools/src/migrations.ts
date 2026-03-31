@@ -10,6 +10,7 @@ import type {
   DropOp,
   Lens,
   RenameOp,
+  RenameTableFromOp,
   Schema as SchemaAst,
   Table as SchemaAstTable,
   TSTypeFromSqlType,
@@ -35,25 +36,80 @@ type NormalizedSchema<TSchema extends SchemaLike> =
       : never;
 
 type TableName<TSchema extends SchemaLike> = Extract<keyof NormalizedSchema<TSchema>, string>;
+type AddedTableName<TFrom extends SchemaLike, TTo extends SchemaLike> = Exclude<
+  TableName<TTo>,
+  TableName<TFrom>
+>;
+type RemovedTableName<TFrom extends SchemaLike, TTo extends SchemaLike> = Exclude<
+  TableName<TFrom>,
+  TableName<TTo>
+>;
 type SharedTableName<TFrom extends SchemaLike, TTo extends SchemaLike> = Extract<
   TableName<TFrom>,
   TableName<TTo>
 >;
+
+export type RenameTableShape<TFrom extends SchemaLike, TTo extends SchemaLike> = Simplify<{
+  [TTable in AddedTableName<TFrom, TTo>]?: RenameTableFromOp<RemovedTableName<TFrom, TTo>>;
+}>;
+
+type RenameTables<TRenameTables> =
+  NonNullable<TRenameTables> extends Record<string, unknown> ? NonNullable<TRenameTables> : {};
+
+type RenamedTargetTableName<TRenameTables> = Extract<keyof RenameTables<TRenameTables>, string>;
+
+type MigratedTableName<TFrom extends SchemaLike, TTo extends SchemaLike, TRenameTables> =
+  | SharedTableName<TFrom, TTo>
+  | RenamedTargetTableName<TRenameTables>;
+
+type SourceTableNameFor<
+  TFrom extends SchemaLike,
+  TTo extends SchemaLike,
+  TRenameTables,
+  TTable extends MigratedTableName<TFrom, TTo, TRenameTables>,
+> =
+  TTable extends SharedTableName<TFrom, TTo>
+    ? TTable
+    : TTable extends RenamedTargetTableName<TRenameTables>
+      ? RenameTables<TRenameTables>[TTable] extends RenameTableFromOp<infer TOldName extends string>
+        ? Extract<TOldName, TableName<TFrom>>
+        : never
+      : never;
+
 type ColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Extract<
   keyof NormalizedSchema<TSchema>[TTable],
   string
 >;
-type CommonColumnName<
+
+type SourceColumnName<
   TFrom extends SchemaLike,
   TTo extends SchemaLike,
-  TTable extends SharedTableName<TFrom, TTo>,
-> = Extract<ColumnName<TFrom, TTable>, ColumnName<TTo, TTable>>;
+  TRenameTables,
+  TTable extends MigratedTableName<TFrom, TTo, TRenameTables>,
+> = Extract<
+  keyof NormalizedSchema<TFrom>[SourceTableNameFor<TFrom, TTo, TRenameTables, TTable>],
+  string
+>;
 
-type BuilderForColumn<
+type CommonColumnName<
   TSchema extends SchemaLike,
   TTable extends TableName<TSchema>,
-  TColumn extends ColumnName<TSchema, TTable>,
-> = NormalizedSchema<TSchema>[TTable][TColumn];
+  TOtherColumn extends string,
+> = Extract<ColumnName<TSchema, TTable>, TOtherColumn>;
+
+type BuilderForTargetColumn<
+  TTo extends SchemaLike,
+  TTable extends TableName<TTo>,
+  TColumn extends ColumnName<TTo, TTable>,
+> = NormalizedSchema<TTo>[TTable][TColumn];
+
+type BuilderForSourceColumn<
+  TFrom extends SchemaLike,
+  TTo extends SchemaLike,
+  TRenameTables,
+  TTable extends MigratedTableName<TFrom, TTo, TRenameTables>,
+  TColumn extends SourceColumnName<TFrom, TTo, TRenameTables, TTable>,
+> = NormalizedSchema<TFrom>[SourceTableNameFor<TFrom, TTo, TRenameTables, TTable>][TColumn];
 
 type ColumnValue<TBuilder extends AnyTypedColumnBuilder> = TSTypeFromSqlType<
   ColumnBuilderSqlType<TBuilder>
@@ -67,14 +123,16 @@ type DefaultValueForBuilder<TBuilder extends AnyTypedColumnBuilder> =
 type AddedColumnName<
   TFrom extends SchemaLike,
   TTo extends SchemaLike,
-  TTable extends SharedTableName<TFrom, TTo>,
-> = Exclude<ColumnName<TTo, TTable>, ColumnName<TFrom, TTable>>;
+  TRenameTables,
+  TTable extends MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>,
+> = Exclude<ColumnName<TTo, TTable>, SourceColumnName<TFrom, TTo, TRenameTables, TTable>>;
 
 type RemovedColumnName<
   TFrom extends SchemaLike,
   TTo extends SchemaLike,
-  TTable extends SharedTableName<TFrom, TTo>,
-> = Exclude<ColumnName<TFrom, TTable>, ColumnName<TTo, TTable>>;
+  TRenameTables,
+  TTable extends MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>,
+> = Exclude<SourceColumnName<TFrom, TTo, TRenameTables, TTable>, ColumnName<TTo, TTable>>;
 
 type BuilderIdentity<TBuilder extends AnyTypedColumnBuilder> = readonly [
   ColumnBuilderSqlType<TBuilder>,
@@ -103,21 +161,31 @@ type DropOperationForBuilder<TBuilder extends AnyTypedColumnBuilder> = DropOp<
 export type MigrationTableShape<
   TFrom extends SchemaLike,
   TTo extends SchemaLike,
-  TTable extends SharedTableName<TFrom, TTo>,
+  TRenameTables,
+  TTable extends MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>,
 > = Simplify<
   {
-    [TColumn in AddedColumnName<TFrom, TTo, TTable>]?:
-      | AddOperationForBuilder<BuilderForColumn<TTo, TTable, TColumn>>
-      | RenameOp<RemovedColumnName<TFrom, TTo, TTable>>;
+    [TColumn in AddedColumnName<TFrom, TTo, TRenameTables, TTable>]?:
+      | AddOperationForBuilder<BuilderForTargetColumn<TTo, TTable, TColumn>>
+      | RenameOp<RemovedColumnName<TFrom, TTo, TRenameTables, TTable>>;
   } & {
-    [TColumn in RemovedColumnName<TFrom, TTo, TTable>]?: DropOperationForBuilder<
-      BuilderForColumn<TFrom, TTable, TColumn>
+    [TColumn in RemovedColumnName<TFrom, TTo, TRenameTables, TTable>]?: DropOperationForBuilder<
+      BuilderForSourceColumn<TFrom, TTo, TRenameTables, TTable, TColumn>
     >;
   }
 >;
 
-export type MigrationShape<TFrom extends SchemaLike, TTo extends SchemaLike> = Simplify<{
-  [TTable in SharedTableName<TFrom, TTo>]?: MigrationTableShape<TFrom, TTo, TTable>;
+export type MigrationShape<
+  TFrom extends SchemaLike,
+  TTo extends SchemaLike,
+  TRenameTables = undefined,
+> = Simplify<{
+  [TTable in MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>]?: MigrationTableShape<
+    TFrom,
+    TTo,
+    TRenameTables,
+    TTable
+  >;
 }>;
 
 type MigrationTables<TMigrate> =
@@ -148,15 +216,26 @@ type RenameSourcesForTable<TTableOps> =
       }[Extract<keyof TTableOps, string>]
     : never;
 
-type UnknownMigrationTables<TFrom extends SchemaLike, TTo extends SchemaLike, TMigrate> = Exclude<
+type UnknownMigrationTables<
+  TFrom extends SchemaLike,
+  TTo extends SchemaLike,
+  TRenameTables,
+  TMigrate,
+> = Exclude<
   Extract<keyof MigrationTables<TMigrate>, string>,
-  SharedTableName<TFrom, TTo>
+  MigratedTableName<TFrom, TTo, TRenameTables>
 >;
 
-type UnknownMigrationColumns<TFrom extends SchemaLike, TTo extends SchemaLike, TMigrate> = {
-  [TTable in SharedTableName<TFrom, TTo>]: Exclude<
+type UnknownMigrationColumns<
+  TFrom extends SchemaLike,
+  TTo extends SchemaLike,
+  TRenameTables,
+  TMigrate,
+> = {
+  [TTable in MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>]: Exclude<
     Extract<keyof TableOpsFor<TMigrate, TTable>, string>,
-    AddedColumnName<TFrom, TTo, TTable> | RemovedColumnName<TFrom, TTo, TTable>
+    | AddedColumnName<TFrom, TTo, TRenameTables, TTable>
+    | RemovedColumnName<TFrom, TTo, TRenameTables, TTable>
   > extends infer TUnknownColumn
     ? [TUnknownColumn] extends [never]
       ? never
@@ -166,13 +245,14 @@ type UnknownMigrationColumns<TFrom extends SchemaLike, TTo extends SchemaLike, T
           readonly problem: "Migration tables may only mention added or removed columns";
         }
     : never;
-}[SharedTableName<TFrom, TTo>];
+}[MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>];
 
 type ValidateAddedColumnOperation<
   TFrom extends SchemaLike,
   TTo extends SchemaLike,
-  TTable extends SharedTableName<TFrom, TTo>,
-  TColumn extends AddedColumnName<TFrom, TTo, TTable>,
+  TRenameTables,
+  TTable extends MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>,
+  TColumn extends AddedColumnName<TFrom, TTo, TRenameTables, TTable>,
   TMigrate,
 > =
   TableOpFor<TMigrate, TTable, TColumn> extends infer TOperation
@@ -182,13 +262,13 @@ type ValidateAddedColumnOperation<
           readonly column: TColumn;
           readonly problem: "Added columns must use col.add.*(...) or col.renameFrom(...)";
         }
-      : TOperation extends AddOperationForBuilder<BuilderForColumn<TTo, TTable, TColumn>>
+      : TOperation extends AddOperationForBuilder<BuilderForTargetColumn<TTo, TTable, TColumn>>
         ? never
         : TOperation extends RenameOp<infer TOldName extends string>
-          ? TOldName extends RemovedColumnName<TFrom, TTo, TTable>
+          ? TOldName extends RemovedColumnName<TFrom, TTo, TRenameTables, TTable>
             ? BuildersEqual<
-                BuilderForColumn<TFrom, TTable, TOldName>,
-                BuilderForColumn<TTo, TTable, TColumn>
+                BuilderForSourceColumn<TFrom, TTo, TRenameTables, TTable, TOldName>,
+                BuilderForTargetColumn<TTo, TTable, TColumn>
               > extends true
               ? never
               : {
@@ -210,23 +290,30 @@ type ValidateAddedColumnOperation<
             }
     : never;
 
-type AddedColumnOperationErrors<TFrom extends SchemaLike, TTo extends SchemaLike, TMigrate> = {
-  [TTable in SharedTableName<TFrom, TTo>]: {
-    [TColumn in AddedColumnName<TFrom, TTo, TTable>]: ValidateAddedColumnOperation<
+type AddedColumnOperationErrors<
+  TFrom extends SchemaLike,
+  TTo extends SchemaLike,
+  TRenameTables,
+  TMigrate,
+> = {
+  [TTable in MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>]: {
+    [TColumn in AddedColumnName<TFrom, TTo, TRenameTables, TTable>]: ValidateAddedColumnOperation<
       TFrom,
       TTo,
+      TRenameTables,
       TTable,
       TColumn,
       TMigrate
     >;
-  }[AddedColumnName<TFrom, TTo, TTable>];
-}[SharedTableName<TFrom, TTo>];
+  }[AddedColumnName<TFrom, TTo, TRenameTables, TTable>];
+}[MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>];
 
 type ValidateRemovedColumnOperation<
   TFrom extends SchemaLike,
   TTo extends SchemaLike,
-  TTable extends SharedTableName<TFrom, TTo>,
-  TColumn extends RemovedColumnName<TFrom, TTo, TTable>,
+  TRenameTables,
+  TTable extends MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>,
+  TColumn extends RemovedColumnName<TFrom, TTo, TRenameTables, TTable>,
   TMigrate,
 > =
   TColumn extends RenameSourcesForTable<TableOpsFor<TMigrate, TTable>>
@@ -244,7 +331,9 @@ type ValidateRemovedColumnOperation<
           readonly problem: "Removed columns must use col.drop.*(...) or be referenced by col.renameFrom(...)";
         }
       : [TableOpFor<TMigrate, TTable, TColumn>] extends [
-            DropOperationForBuilder<BuilderForColumn<TFrom, TTable, TColumn>>,
+            DropOperationForBuilder<
+              BuilderForSourceColumn<TFrom, TTo, TRenameTables, TTable, TColumn>
+            >,
           ]
         ? never
         : {
@@ -253,23 +342,35 @@ type ValidateRemovedColumnOperation<
             readonly problem: "Removed columns must use col.drop.*(...) or be referenced by col.renameFrom(...)";
           };
 
-type RemovedColumnOperationErrors<TFrom extends SchemaLike, TTo extends SchemaLike, TMigrate> = {
-  [TTable in SharedTableName<TFrom, TTo>]: {
-    [TColumn in RemovedColumnName<TFrom, TTo, TTable>]: ValidateRemovedColumnOperation<
+type RemovedColumnOperationErrors<
+  TFrom extends SchemaLike,
+  TTo extends SchemaLike,
+  TRenameTables,
+  TMigrate,
+> = {
+  [TTable in MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>]: {
+    [TColumn in RemovedColumnName<
       TFrom,
       TTo,
-      TTable,
-      TColumn,
-      TMigrate
-    >;
-  }[RemovedColumnName<TFrom, TTo, TTable>];
-}[SharedTableName<TFrom, TTo>];
+      TRenameTables,
+      TTable
+    >]: ValidateRemovedColumnOperation<TFrom, TTo, TRenameTables, TTable, TColumn, TMigrate>;
+  }[RemovedColumnName<TFrom, TTo, TRenameTables, TTable>];
+}[MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>];
 
-type UnsupportedSharedColumnChanges<TFrom extends SchemaLike, TTo extends SchemaLike> = {
-  [TTable in SharedTableName<TFrom, TTo>]: {
-    [TColumn in CommonColumnName<TFrom, TTo, TTable>]: BuildersEqual<
-      BuilderForColumn<TFrom, TTable, TColumn>,
-      BuilderForColumn<TTo, TTable, TColumn>
+type UnsupportedSharedColumnChanges<
+  TFrom extends SchemaLike,
+  TTo extends SchemaLike,
+  TRenameTables,
+> = {
+  [TTable in MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>]: {
+    [TColumn in CommonColumnName<
+      TTo,
+      TTable,
+      SourceColumnName<TFrom, TTo, TRenameTables, TTable>
+    >]: BuildersEqual<
+      BuilderForSourceColumn<TFrom, TTo, TRenameTables, TTable, TColumn>,
+      BuilderForTargetColumn<TTo, TTable, TColumn>
     > extends true
       ? never
       : {
@@ -277,30 +378,38 @@ type UnsupportedSharedColumnChanges<TFrom extends SchemaLike, TTo extends Schema
           readonly column: TColumn;
           readonly problem: "Columns with the same name must keep the same type, optionality, and ref target";
         };
-  }[CommonColumnName<TFrom, TTo, TTable>];
-}[SharedTableName<TFrom, TTo>];
+  }[CommonColumnName<TTo, TTable, SourceColumnName<TFrom, TTo, TRenameTables, TTable>>];
+}[MigratedTableName<TFrom, TTo, TRenameTables> & TableName<TTo>];
 
-type MigrationValidationErrors<TFrom extends SchemaLike, TTo extends SchemaLike, TMigrate> =
-  | (UnknownMigrationTables<TFrom, TTo, TMigrate> extends infer TUnknownTable
+type MigrationValidationErrors<
+  TFrom extends SchemaLike,
+  TTo extends SchemaLike,
+  TRenameTables,
+  TMigrate,
+> =
+  | (UnknownMigrationTables<TFrom, TTo, TRenameTables, TMigrate> extends infer TUnknownTable
       ? [TUnknownTable] extends [never]
         ? never
         : {
             readonly table: Extract<TUnknownTable, string>;
-            readonly problem: "Migration only supports tables present in both from and to";
+            readonly problem: "Migration only supports shared tables or target tables declared in renameTables";
           }
       : never)
-  | UnknownMigrationColumns<TFrom, TTo, TMigrate>
-  | AddedColumnOperationErrors<TFrom, TTo, TMigrate>
-  | RemovedColumnOperationErrors<TFrom, TTo, TMigrate>
-  | UnsupportedSharedColumnChanges<TFrom, TTo>;
+  | UnknownMigrationColumns<TFrom, TTo, TRenameTables, TMigrate>
+  | AddedColumnOperationErrors<TFrom, TTo, TRenameTables, TMigrate>
+  | RemovedColumnOperationErrors<TFrom, TTo, TRenameTables, TMigrate>
+  | UnsupportedSharedColumnChanges<TFrom, TTo, TRenameTables>;
 
-type ValidateMigrationConfig<TFrom extends SchemaLike, TTo extends SchemaLike, TMigrate> = [
-  MigrationValidationErrors<TFrom, TTo, TMigrate>,
-] extends [never]
+type ValidateMigrationConfig<
+  TFrom extends SchemaLike,
+  TTo extends SchemaLike,
+  TRenameTables,
+  TMigrate,
+> = [MigrationValidationErrors<TFrom, TTo, TRenameTables, TMigrate>] extends [never]
   ? unknown
   : {
       readonly __migrationValidationError__: "Migration definitions must cover every added or removed column";
-      readonly __migrationErrors__: MigrationValidationErrors<TFrom, TTo, TMigrate>;
+      readonly __migrationErrors__: MigrationValidationErrors<TFrom, TTo, TRenameTables, TMigrate>;
     };
 
 export interface DefinedMigration<
@@ -348,26 +457,95 @@ function definitionToSchema(definition: SchemaDefinition): SchemaAst {
   };
 }
 
-function buildForwardLenses<TFrom extends SchemaLike, TTo extends SchemaLike>(
-  migrate: MigrationShape<TFrom, TTo> | undefined,
+export function renameTableFrom<const TOldName extends string>(
+  oldName: TOldName,
+): RenameTableFromOp<TOldName> {
+  return {
+    _type: "renameTable",
+    oldName,
+  };
+}
+
+function buildRenameTableMap(
+  renameTables: Record<string, RenameTableFromOp<string>> | undefined,
+  fromDefinition: Record<string, TableDefinition>,
+  toDefinition: Record<string, TableDefinition>,
+): Map<string, string> {
+  const map = new Map<string, string>();
+  const usedSources = new Set<string>();
+
+  if (!renameTables) {
+    return map;
+  }
+
+  for (const [tableName, operation] of Object.entries(renameTables)) {
+    if (!(tableName in toDefinition)) {
+      throw new Error(`Table rename references unknown target table ${tableName}.`);
+    }
+    if (tableName in fromDefinition) {
+      throw new Error(
+        `Table rename target ${tableName} already exists in the source schema; renameTables only supports target-only tables.`,
+      );
+    }
+    if (!(operation.oldName in fromDefinition)) {
+      throw new Error(`Table rename references unknown source table ${operation.oldName}.`);
+    }
+    if (operation.oldName in toDefinition) {
+      throw new Error(
+        `Table rename source ${operation.oldName} still exists in the target schema; renameTables only supports source-only tables.`,
+      );
+    }
+    if (usedSources.has(operation.oldName)) {
+      throw new Error(`Table rename source ${operation.oldName} is used more than once.`);
+    }
+
+    usedSources.add(operation.oldName);
+    map.set(tableName, operation.oldName);
+  }
+
+  return map;
+}
+
+function buildForwardLenses<
+  TFrom extends SchemaLike,
+  TTo extends SchemaLike,
+  TRenameTables extends RenameTableShape<TFrom, TTo> | undefined,
+>(
+  migrate: MigrationShape<TFrom, TTo, TRenameTables> | undefined,
+  renameTables: TRenameTables | undefined,
   fromDefinition: NormalizedSchema<TFrom>,
   toDefinition: NormalizedSchema<TTo>,
 ): Lens[] {
-  if (!migrate) {
+  const renameTableMap = buildRenameTableMap(
+    renameTables as Record<string, RenameTableFromOp<string>> | undefined,
+    fromDefinition as Record<string, TableDefinition>,
+    toDefinition as Record<string, TableDefinition>,
+  );
+  if (!migrate && renameTableMap.size === 0) {
     return [];
   }
 
   const forward: Lens[] = [];
+  const orderedTableNames = [
+    ...new Set([
+      ...Object.keys((renameTables ?? {}) as Record<string, unknown>),
+      ...Object.keys((migrate ?? {}) as Record<string, unknown>),
+    ]),
+  ];
+  const sourceTables = fromDefinition as Record<string, Record<string, AnyTypedColumnBuilder>>;
+  const targetTables = toDefinition as Record<string, Record<string, AnyTypedColumnBuilder>>;
 
-  for (const [tableName, rawTableOps] of Object.entries(migrate)) {
-    if (!rawTableOps || typeof rawTableOps !== "object") {
-      continue;
-    }
-
-    const tableOps = rawTableOps as Record<string, AddOp | DropOp | RenameOp>;
+  for (const tableName of orderedTableNames) {
+    const renamedFrom = renameTableMap.get(tableName);
+    const rawTableOps = (migrate as Record<string, unknown> | undefined)?.[tableName];
+    const tableOps =
+      rawTableOps && typeof rawTableOps === "object"
+        ? (rawTableOps as Record<string, AddOp | DropOp | RenameOp>)
+        : {};
     const operations: TableLens["operations"] = [];
     const renamedSources = new Set<string>();
     const droppedColumns = new Set<string>();
+    const sourceTableName = renamedFrom ?? tableName;
 
     for (const [columnName, operation] of Object.entries(tableOps)) {
       switch (operation._type) {
@@ -393,9 +571,7 @@ function buildForwardLenses<TFrom extends SchemaLike, TTo extends SchemaLike>(
         }
         case "add": {
           assertUserColumnNameAllowed(columnName);
-          const builder = (toDefinition as Record<string, Record<string, AnyTypedColumnBuilder>>)[
-            tableName
-          ]?.[columnName];
+          const builder = targetTables[tableName]?.[columnName];
           if (!builder) {
             throw new Error(
               `Migration references unknown target column ${tableName}.${columnName}.`,
@@ -416,12 +592,10 @@ function buildForwardLenses<TFrom extends SchemaLike, TTo extends SchemaLike>(
             );
           }
           droppedColumns.add(columnName);
-          const builder = (fromDefinition as Record<string, Record<string, AnyTypedColumnBuilder>>)[
-            tableName
-          ]?.[columnName];
+          const builder = sourceTables[sourceTableName]?.[columnName];
           if (!builder) {
             throw new Error(
-              `Migration references unknown source column ${tableName}.${columnName}.`,
+              `Migration references unknown source column ${sourceTableName}.${columnName}.`,
             );
           }
           operations.push({
@@ -435,9 +609,10 @@ function buildForwardLenses<TFrom extends SchemaLike, TTo extends SchemaLike>(
       }
     }
 
-    if (operations.length > 0) {
+    if (renamedFrom || operations.length > 0) {
       forward.push({
         table: tableName,
+        renamedFrom,
         operations,
       });
     }
@@ -453,15 +628,17 @@ export function schemaDefinitionToAst(definition: SchemaDefinition | AppSchema<a
 export function defineMigration<
   const TFrom extends SchemaLike,
   const TTo extends SchemaLike,
-  const TMigrate extends MigrationShape<TFrom, TTo> | undefined = undefined,
+  const TRenameTables extends RenameTableShape<TFrom, TTo> | undefined = undefined,
+  const TMigrate extends MigrationShape<TFrom, TTo, TRenameTables> | undefined = undefined,
 >(
   config: {
     fromHash: string;
     toHash: string;
     from: TFrom;
     to: TTo;
+    renameTables?: TRenameTables;
     migrate?: TMigrate;
-  } & ValidateMigrationConfig<TFrom, TTo, TMigrate>,
+  } & ValidateMigrationConfig<TFrom, TTo, TRenameTables, TMigrate>,
 ): DefinedMigration<TFrom, TTo> {
   const fromDefinition = normalizeSchemaDefinition(
     config.from as SchemaDefinition,
@@ -475,6 +652,6 @@ export function defineMigration<
     toHash: config.toHash,
     from: config.from,
     to: config.to,
-    forward: buildForwardLenses(config.migrate, fromDefinition, toDefinition),
+    forward: buildForwardLenses(config.migrate, config.renameTables, fromDefinition, toDefinition),
   };
 }

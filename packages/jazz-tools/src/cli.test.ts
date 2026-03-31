@@ -509,6 +509,86 @@ export default s.defineMigration({
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it("pushes explicit table renames via renamedFrom on the admin migrations payload", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+
+    const fromHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const toHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+    const migrationPath = join(
+      migrationsDir,
+      `20260318-table-rename-${fromShortHash}-${toShortHash}.ts`,
+    );
+
+    await writeFile(
+      migrationPath,
+      `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export default s.defineMigration({
+  renameTables: {
+    people: s.renameTableFrom("users"),
+  },
+  migrate: {
+    people: {
+      email_address: s.renameFrom("email"),
+    },
+  },
+  fromHash: ${JSON.stringify(fromShortHash)},
+  toHash: ${JSON.stringify(toShortHash)},
+  from: {
+    users: s.table({
+      email: s.string(),
+    }),
+  },
+  to: {
+    people: s.table({
+      email_address: s.string(),
+    }),
+  },
+});
+`,
+    );
+
+    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      if (_input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      const body = JSON.parse(String(init?.body));
+      expect(body.fromHash).toBe(fromHash);
+      expect(body.toHash).toBe(toHash);
+      expect(body.forward).toEqual([
+        {
+          table: "people",
+          renamedFrom: "users",
+          operations: [
+            {
+              type: "rename",
+              column: "email",
+              value: "email_address",
+            },
+          ],
+        },
+      ]);
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pushMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("cli permissions", () => {

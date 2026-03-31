@@ -76,6 +76,53 @@ describe("typed migration object syntax", () => {
     ]);
   });
 
+  it("serializes explicit table renames alongside target-table column operations", () => {
+    const migration = s.defineMigration({
+      fromHash: "aaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbb",
+      from: {
+        users: s.table({
+          email: s.string(),
+        }),
+      },
+      to: {
+        people: s.table({
+          emailAddress: s.string(),
+          nickname: s.string().optional(),
+        }),
+      },
+      renameTables: {
+        people: s.renameTableFrom("users"),
+      },
+      migrate: {
+        people: {
+          emailAddress: s.renameFrom("email"),
+          nickname: s.add.string({ default: null }),
+        },
+      },
+    });
+
+    expect(migration.forward).toEqual([
+      {
+        table: "people",
+        renamedFrom: "users",
+        operations: [
+          {
+            type: "rename",
+            column: "email",
+            value: "emailAddress",
+          },
+          {
+            type: "introduce",
+            column: "nickname",
+            sqlType: "TEXT",
+            value: null,
+          },
+        ],
+      },
+    ]);
+  });
+
   it("typechecks migrate coverage and op shapes", () => {
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
       s.defineMigration({

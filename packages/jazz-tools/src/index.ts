@@ -8,7 +8,7 @@ import {
   resetCollectedState,
   table,
 } from "./dsl.js";
-import { defineMigration } from "./migrations.js";
+import { defineMigration, renameTableFrom } from "./migrations.js";
 import { definePermissions } from "./permissions/index.js";
 import {
   defineApp,
@@ -58,6 +58,7 @@ export type {
   AddOp,
   DropOp,
   RenameOp,
+  RenameTableFromOp,
   JsonValue,
   JsonSchema,
   JsonSchemaToTs,
@@ -106,7 +107,7 @@ export {
   TypedTableQueryBuilder,
   permissionIntrospectionColumns,
 } from "./typed-app.js";
-export { defineMigration } from "./migrations.js";
+export { defineMigration, renameTableFrom } from "./migrations.js";
 export type {
   Schema,
   TableDefinition,
@@ -141,13 +142,19 @@ export type {
   TableMetaOf,
   WhereOf,
 } from "./typed-app.js";
-export type { DefinedMigration, MigrationShape, MigrationTableShape } from "./migrations.js";
+export type {
+  DefinedMigration,
+  MigrationShape,
+  MigrationTableShape,
+  RenameTableShape,
+} from "./migrations.js";
 
 type RuntimeSchemaNamespace = typeof col & {
   table: typeof defineTable;
   defineSchema: typeof defineSchema;
   defineApp: typeof defineApp;
   defineMigration: typeof defineMigration;
+  renameTableFrom: typeof renameTableFrom;
   definePermissions: typeof definePermissions;
   permissionIntrospectionColumns: typeof permissionIntrospectionColumns;
 };
@@ -157,6 +164,7 @@ export const schema: RuntimeSchemaNamespace = Object.assign({}, col, {
   defineSchema,
   defineApp,
   defineMigration,
+  renameTableFrom,
   definePermissions,
   permissionIntrospectionColumns,
 } as const);

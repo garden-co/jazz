@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchSchemaHashes, fetchStoredWasmSchema } from "./schema-fetch.js";
+import {
+  fetchSchemaHashes,
+  fetchStoredWasmSchema,
+  publishStoredMigration,
+} from "./schema-fetch.js";
 import { fetchServerSubscriptions } from "./introspection-fetch.js";
 
 describe("schema-fetch", () => {
@@ -142,6 +146,48 @@ describe("schema-fetch", () => {
       headers: {
         "X-Jazz-Admin-Secret": "admin-secret",
       },
+    });
+  });
+
+  it("publishes migrations with renamedFrom when provided", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 201,
+      statusText: "Created",
+      json: async () => ({
+        objectId: "11111111-1111-1111-1111-111111111111",
+        fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      }),
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await publishStoredMigration("http://localhost:1625/", {
+      adminSecret: "admin-secret",
+      pathPrefix: "/apps/app-123",
+      fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      forward: [
+        {
+          table: "people",
+          renamedFrom: "users",
+          operations: [],
+        },
+      ],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![0]).toBe("http://localhost:1625/apps/app-123/admin/migrations");
+    expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toEqual({
+      fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      forward: [
+        {
+          table: "people",
+          renamedFrom: "users",
+          operations: [],
+        },
+      ],
     });
   });
 
