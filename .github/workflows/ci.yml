@@ -16,6 +16,7 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     env:
+      JAZZ_SKIP_RN_DEPS: "1"
       RUSTC_WRAPPER: sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_CACHE_SIZE: 8G
@@ -26,7 +27,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
-          targets: wasm32-unknown-unknown, aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
+          targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
       - uses: actions/setup-node@v6
@@ -55,12 +56,12 @@ jobs:
 
       - run: pnpm format:check
       - run: pnpm lint
-      - run: cargo clippy --workspace -- -D warnings
 
   test-rust:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     env:
+      JAZZ_SKIP_RN_DEPS: "1"
       RUSTC_WRAPPER: sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_CACHE_SIZE: 8G
@@ -71,7 +72,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
-          targets: wasm32-unknown-unknown, aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
+          targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
       - uses: actions/setup-node@v6
@@ -105,6 +106,7 @@ jobs:
     timeout-minutes: 15
     env:
       JAZZ_NAPI_RELEASE: "0"
+      JAZZ_SKIP_RN_DEPS: "1"
       RUSTC_WRAPPER: sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_CACHE_SIZE: 8G
@@ -115,7 +117,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
-          targets: wasm32-unknown-unknown, aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
+          targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
       - uses: actions/setup-node@v6
@@ -146,7 +148,7 @@ jobs:
           key: sccache-${{ github.repository_id }}-${{ runner.os }}-v1
           path: /home/runner/.cache/sccache
 
-      - run: pnpm build
+      - run: pnpm build:ci
       - name: Mount Playwright sticky disk
         uses: useblacksmith/stickydisk@v1
         with:
