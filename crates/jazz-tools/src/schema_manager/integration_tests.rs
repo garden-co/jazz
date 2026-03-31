@@ -5,7 +5,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::commit::{Commit, CommitId, StoredState};
-    use crate::metadata::MetadataKey;
+    use crate::metadata::{MetadataKey, RowProvenance, row_provenance_metadata};
     use crate::object::ObjectId;
     use crate::query_manager::encoding::{decode_row, encode_row};
     use crate::query_manager::manager::LocalUpdates;
@@ -24,6 +24,22 @@ mod tests {
 
     fn test_app_id() -> AppId {
         AppId::from_name("integration-test-app")
+    }
+
+    fn stored_row_commit(content: Vec<u8>, timestamp: u64, author: impl Into<String>) -> Commit {
+        let author = author.into();
+        Commit {
+            parents: Default::default(),
+            content,
+            timestamp,
+            metadata: Some(row_provenance_metadata(
+                &RowProvenance::for_insert(author.clone(), timestamp),
+                None,
+            )),
+            author,
+            stored_state: StoredState::Stored,
+            ack_state: Default::default(),
+        }
     }
 
     /// Test full migration workflow: v1 -> v2 with added column.
@@ -356,15 +372,7 @@ mod tests {
             .object_manager
             .receive_object(storage, object_id, metadata);
 
-        let commit = Commit {
-            parents: Default::default(),
-            content,
-            timestamp,
-            author: object_id,
-            metadata: None,
-            stored_state: StoredState::Stored,
-            ack_state: Default::default(),
-        };
+        let commit = stored_row_commit(content, timestamp, object_id.to_string());
         qm.sync_manager_mut()
             .object_manager
             .receive_commit(storage, object_id, branch, commit)
@@ -384,15 +392,7 @@ mod tests {
             .object_manager
             .receive_object(storage, object_id, metadata);
 
-        let commit = Commit {
-            parents: Default::default(),
-            content,
-            timestamp,
-            author: object_id,
-            metadata: None,
-            stored_state: StoredState::Stored,
-            ack_state: Default::default(),
-        };
+        let commit = stored_row_commit(content, timestamp, object_id.to_string());
         qm.sync_manager_mut()
             .object_manager
             .receive_commit(storage, object_id, "main", commit)

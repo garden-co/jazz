@@ -10,12 +10,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         &mut self,
         table: &str,
         values: HashMap<String, Value>,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
     ) -> Result<InsertedRow, RuntimeError> {
         let _span = debug_span!("insert", table).entered();
         let result = self
             .schema_manager
-            .insert_with_session(&mut self.storage, table, values, session)
+            .insert_with_write_context(&mut self.storage, table, values, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_id = result.row_id;
         let row_values = result.row_values;
@@ -29,11 +29,11 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         &mut self,
         object_id: ObjectId,
         values: Vec<(String, Value)>,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
     ) -> Result<(), RuntimeError> {
         let _span = debug_span!("update", %object_id).entered();
         self.schema_manager
-            .update_with_session(&mut self.storage, object_id, &values, session)
+            .update_with_write_context(&mut self.storage, object_id, &values, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
 
         self.immediate_tick();
@@ -44,11 +44,11 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     pub fn delete(
         &mut self,
         object_id: ObjectId,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
     ) -> Result<(), RuntimeError> {
         let _span = debug_span!("delete", %object_id).entered();
         self.schema_manager
-            .delete(&mut self.storage, object_id, session)
+            .delete(&mut self.storage, object_id, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         debug!("deleted");
         self.immediate_tick();
@@ -65,12 +65,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         &mut self,
         table: &str,
         values: HashMap<String, Value>,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<(InsertedRow, oneshot::Receiver<()>), RuntimeError> {
         let result = self
             .schema_manager
-            .insert_with_session(&mut self.storage, table, values, session)
+            .insert_with_write_context(&mut self.storage, table, values, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
         let row_id = result.row_id;
         let row_commit_id = result.row_commit_id;
@@ -101,12 +101,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         &mut self,
         object_id: ObjectId,
         values: Vec<(String, Value)>,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<oneshot::Receiver<()>, RuntimeError> {
         let commit_id = self
             .schema_manager
-            .update_with_session(&mut self.storage, object_id, &values, session)
+            .update_with_write_context(&mut self.storage, object_id, &values, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
 
         let (sender, receiver) = oneshot::channel();
@@ -133,12 +133,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     pub fn delete_persisted(
         &mut self,
         object_id: ObjectId,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
         tier: DurabilityTier,
     ) -> Result<oneshot::Receiver<()>, RuntimeError> {
         let handle = self
             .schema_manager
-            .delete(&mut self.storage, object_id, session)
+            .delete(&mut self.storage, object_id, write_context)
             .map_err(|e| RuntimeError::WriteError(e.to_string()))?;
 
         let (sender, receiver) = oneshot::channel();

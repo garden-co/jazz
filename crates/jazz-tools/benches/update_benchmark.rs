@@ -11,6 +11,7 @@ mod common;
 
 use common::{create_runtime, create_session, current_timestamp, setup_data};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use jazz_tools::query_manager::session::WriteContext;
 use jazz_tools::query_manager::types::Value;
 
 const USER_ID: &str = "benchmark_user";
@@ -25,6 +26,7 @@ fn update_own_documents(c: &mut Criterion) {
             let mut core = create_runtime();
             let data = setup_data(&mut core, scale, USER_ID);
             let session = create_session(USER_ID);
+            let write_context = WriteContext::from_session(session);
 
             // We'll cycle through owned documents
             let mut doc_idx = 0;
@@ -55,7 +57,7 @@ fn update_own_documents(c: &mut Criterion) {
                         ("author_id".to_string(), Value::Text(USER_ID.to_string())),
                         ("created_at".to_string(), Value::Timestamp(timestamp)),
                     ],
-                    Some(&session),
+                    Some(&write_context),
                 );
                 core.immediate_tick();
 
@@ -80,6 +82,7 @@ fn update_batch(c: &mut Criterion) {
                 let mut core = create_runtime();
                 let data = setup_data(&mut core, scale, USER_ID);
                 let session = create_session(USER_ID);
+                let write_context = WriteContext::from_session(session);
 
                 // Use subset of owned documents for batch updates
                 let doc_ids: Vec<_> = data
@@ -116,7 +119,7 @@ fn update_batch(c: &mut Criterion) {
                                     Value::Timestamp(timestamp + i as u64),
                                 ),
                             ],
-                            Some(&session),
+                            Some(&write_context),
                         );
                         result.expect("batch update should succeed");
                     }

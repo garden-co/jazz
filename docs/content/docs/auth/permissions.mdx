@@ -126,9 +126,12 @@ See [Setup](/docs/reference/server-setup) for context setup details.
   server-side before data is sent to the client.
 </Callout>
 
-## Computed permissions columns
+## Magic columns
 
-These columns are computed at query time&hairsp;—&hairsp;they don't exist in the database. They are omitted from `select("*")`, so you opt in explicitly&hairsp;—&hairsp;for example, `select("*", "$canDelete")` returns the normal row columns plus `$canDelete`.
+Jazz exposes a small set of system-provided magic columns at query time. They do not exist in your
+schema, and they are omitted from `select("*")`, so opt in explicitly when you want them.
+
+### Permission introspection columns
 
 - `$canRead`&hairsp;—&hairsp;whether the current session can read the row. Since read policies already gate which rows appear, this will usually be `true`.
 - `$canEdit`&hairsp;—&hairsp;whether the current session passes the row's `UPDATE USING` policy.
@@ -147,3 +150,27 @@ These columns are computed at query time&hairsp;—&hairsp;they don't exist in t
     </include>
   </Tab>
 </Tabs>
+
+### Edit metadata columns
+
+Jazz also tracks row authorship and timestamps automatically:
+
+- `$createdBy`&hairsp;—&hairsp;the Jazz principal that created the row
+- `$createdAt`&hairsp;—&hairsp;when the row was first created
+- `$updatedBy`&hairsp;—&hairsp;the Jazz principal that last updated the row
+- `$updatedAt`&hairsp;—&hairsp;when the row was last updated
+
+All four edit metadata columns are always present. Backend writes that are not attributed to a user
+are authored as `jazz:system`.
+
+### Authorship-based policies
+
+You can use these edit metadata magic columns directly in `permissions.ts`. This is useful for simple
+"creator can read/edit/delete their own rows" policies without adding explicit `owner_id` columns.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-created-by-ts
+</include>
+
+For more dynamic sharing or ownership models, prefer explicit tables and relations rather than
+encoding extra meaning into authorship alone.

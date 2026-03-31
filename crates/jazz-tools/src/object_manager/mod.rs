@@ -126,6 +126,10 @@ impl ObjectManager {
         self.last_timestamp
     }
 
+    pub fn reserve_timestamp(&mut self) -> u64 {
+        self.next_timestamp()
+    }
+
     /// Create a new object with optional metadata, returning its id.
     /// Persists to storage via Storage synchronously.
     pub fn create<H: Storage>(
@@ -296,14 +300,39 @@ impl ObjectManager {
     /// - Updates tips: removes parents from tips, adds new commit as tip
     /// - Persists to storage via Storage synchronously
     #[allow(clippy::too_many_arguments)]
-    pub fn add_commit<H: Storage>(
+    pub fn add_commit<H: Storage, A: ToString>(
         &mut self,
         io: &mut H,
         object_id: ObjectId,
         branch_name: impl Into<BranchName>,
         parents: Vec<CommitId>,
         content: Vec<u8>,
-        author: ObjectId,
+        author: A,
+        metadata: Option<BTreeMap<String, String>>,
+    ) -> Result<CommitId, Error> {
+        let timestamp = self.next_timestamp();
+        self.add_commit_with_timestamp(
+            io,
+            object_id,
+            branch_name,
+            parents,
+            content,
+            timestamp,
+            author,
+            metadata,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_commit_with_timestamp<H: Storage, A: ToString>(
+        &mut self,
+        io: &mut H,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+        parents: Vec<CommitId>,
+        content: Vec<u8>,
+        timestamp: u64,
+        author: A,
         metadata: Option<BTreeMap<String, String>>,
     ) -> Result<CommitId, Error> {
         let branch_name = branch_name.into();
@@ -354,13 +383,11 @@ impl ObjectManager {
             }
         };
 
-        let timestamp = self.next_timestamp();
-
         let mut commit = Commit {
             parents: parents.clone().into(),
             content,
             timestamp,
-            author,
+            author: author.to_string(),
             metadata,
             stored_state: StoredState::Pending,
             ack_state: Default::default(),
@@ -425,12 +452,12 @@ impl ObjectManager {
     /// - Does NOT call Storage (caller should handle persistence if needed)
     ///
     /// Returns the new commit ID.
-    pub fn replace_content(
+    pub fn replace_content<A: ToString>(
         &mut self,
         object_id: ObjectId,
         branch_name: impl Into<BranchName>,
         content: Vec<u8>,
-        author: ObjectId,
+        author: A,
     ) -> Result<CommitId, Error> {
         let branch_name = branch_name.into();
 
@@ -458,7 +485,7 @@ impl ObjectManager {
             parents: smallvec![],
             content,
             timestamp,
-            author,
+            author: author.to_string(),
             metadata: None,
             stored_state: StoredState::Pending,
             ack_state: Default::default(),

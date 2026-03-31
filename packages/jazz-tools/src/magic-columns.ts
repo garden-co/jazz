@@ -3,15 +3,24 @@ import type { ColumnType } from "./drivers/types.js";
 export const RESERVED_MAGIC_COLUMN_PREFIX = "$";
 
 export const PERMISSION_INTROSPECTION_COLUMNS = ["$canRead", "$canEdit", "$canDelete"] as const;
+export const PROVENANCE_MAGIC_COLUMNS = [
+  "$createdBy",
+  "$createdAt",
+  "$updatedBy",
+  "$updatedAt",
+] as const;
 
 export type PermissionIntrospectionColumn = (typeof PERMISSION_INTROSPECTION_COLUMNS)[number];
-
-const MAGIC_COLUMN_SET = new Set<string>(PERMISSION_INTROSPECTION_COLUMNS);
+export type ProvenanceMagicColumn = (typeof PROVENANCE_MAGIC_COLUMNS)[number];
 
 export function isPermissionIntrospectionColumn(
   column: string,
 ): column is PermissionIntrospectionColumn {
-  return MAGIC_COLUMN_SET.has(column);
+  return PERMISSION_INTROSPECTION_COLUMNS.includes(column as PermissionIntrospectionColumn);
+}
+
+export function isProvenanceMagicColumn(column: string): column is ProvenanceMagicColumn {
+  return PROVENANCE_MAGIC_COLUMNS.includes(column as ProvenanceMagicColumn);
 }
 
 export function isReservedMagicColumnName(column: string): boolean {
@@ -27,5 +36,14 @@ export function assertUserColumnNameAllowed(column: string): void {
 }
 
 export function magicColumnType(column: string): ColumnType | undefined {
-  return isPermissionIntrospectionColumn(column) ? { type: "Boolean" } : undefined;
+  if (isPermissionIntrospectionColumn(column)) {
+    return { type: "Boolean" };
+  }
+  if (column === "$createdBy" || column === "$updatedBy") {
+    return { type: "Text" };
+  }
+  if (column === "$createdAt" || column === "$updatedAt") {
+    return { type: "Timestamp" };
+  }
+  return undefined;
 }

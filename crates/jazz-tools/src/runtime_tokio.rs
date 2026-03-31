@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use crate::object::ObjectId;
 use crate::query_manager::query::Query;
-use crate::query_manager::session::Session;
+use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{Schema, SchemaHash, Value};
 pub use crate::runtime_core::SubscriptionHandle;
 use crate::runtime_core::{
@@ -256,7 +256,8 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         session: Option<&Session>,
     ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let result = core.insert(table, values, session)?;
+        let owned = session.cloned().map(WriteContext::from_session);
+        let result = core.insert(table, values, owned.as_ref())?;
         Ok(result)
     }
 
@@ -268,7 +269,8 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         session: Option<&Session>,
     ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.update(object_id, values, session)?;
+        let owned = session.cloned().map(WriteContext::from_session);
+        core.update(object_id, values, owned.as_ref())?;
         Ok(())
     }
 
@@ -279,7 +281,8 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         session: Option<&Session>,
     ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.delete(object_id, session)?;
+        let owned = session.cloned().map(WriteContext::from_session);
+        core.delete(object_id, owned.as_ref())?;
         Ok(())
     }
 
