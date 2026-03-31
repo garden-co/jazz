@@ -414,6 +414,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install libclang (needed by rocksdb bindgen)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
@@ -627,6 +630,10 @@ jobs:
         with:
           toolchain: 1.93.1
           targets: ${{ matrix.target }}
+
+      - name: Install libclang (needed by rocksdb bindgen)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
 
       - uses: Swatinem/rust-cache@v2
         with:
