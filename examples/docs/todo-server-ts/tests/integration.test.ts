@@ -9,6 +9,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
+import { TestingServer } from "jazz-tools/testing";
 import {
   createServer,
   startServer,
@@ -17,12 +18,33 @@ import {
   type Todo,
 } from "../src/main.ts";
 
+const originalEnv = {
+  appId: process.env.JAZZ_APP_ID,
+  serverUrl: process.env.JAZZ_SERVER_URL,
+  backendSecret: process.env.JAZZ_BACKEND_SECRET,
+  adminSecret: process.env.JAZZ_ADMIN_SECRET,
+};
+
+function restoreEnv(): void {
+  process.env.JAZZ_APP_ID = originalEnv.appId;
+  process.env.JAZZ_SERVER_URL = originalEnv.serverUrl;
+  process.env.JAZZ_BACKEND_SECRET = originalEnv.backendSecret;
+  process.env.JAZZ_ADMIN_SECRET = originalEnv.adminSecret;
+}
+
 describe("Todo Server Integration", () => {
   let server: RunningServer;
   let baseUrl: string;
+  let upstream: Awaited<ReturnType<typeof TestingServer.start>> | undefined;
 
   beforeAll(async () => {
-    // Create server with Fjall-backed storage (temp directory)
+    upstream = await TestingServer.start();
+    process.env.JAZZ_APP_ID = upstream.appId;
+    process.env.JAZZ_SERVER_URL = upstream.url;
+    process.env.JAZZ_BACKEND_SECRET = upstream.backendSecret;
+    process.env.JAZZ_ADMIN_SECRET = upstream.adminSecret;
+
+    // Create server with temp persistent storage plus an ephemeral upstream server.
     const todoServer = await createServer();
 
     // Start on random available port
@@ -34,6 +56,12 @@ describe("Todo Server Integration", () => {
     if (server) {
       await stopServer(server);
     }
+
+    if (upstream) {
+      await upstream.stop();
+    }
+
+    restoreEnv();
   });
 
   describe("Health Check", () => {
