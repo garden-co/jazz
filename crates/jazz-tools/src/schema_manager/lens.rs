@@ -255,8 +255,10 @@ impl Lens {
                         current_table = new_name.clone();
                     }
                 }
-                LensOp::AddTable { .. } | LensOp::RemoveTable { .. } => {
-                    // Table add/remove does not rename existing table references.
+                LensOp::AddTable { table, .. } | LensOp::RemoveTable { table, .. } => {
+                    if current_table == *table {
+                        return None;
+                    }
                 }
                 LensOp::AddColumn { .. }
                 | LensOp::RemoveColumn { .. }
@@ -306,7 +308,11 @@ impl Lens {
                 LensOp::AddColumn { .. } => {
                     // New columns don't affect existing column references.
                 }
-                _ => {}
+                LensOp::AddTable { table, .. } | LensOp::RemoveTable { table, .. } => {
+                    if current_table == *table {
+                        return None;
+                    }
+                }
             }
         }
 
@@ -592,6 +598,33 @@ mod tests {
             lens.translate_table("people", Direction::Backward),
             Some("users".to_string())
         );
+        assert_eq!(
+            lens.translate_table("orgs", Direction::Forward),
+            Some("orgs".to_string())
+        );
+    }
+
+    #[test]
+    fn lens_translate_table_returns_none_across_add_remove_boundary() {
+        let source = make_hash(1);
+        let target = make_hash(2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::AddTable {
+                table: "users".to_string(),
+                schema: TableSchema::new(RowDescriptor::new(vec![
+                    ColumnDescriptor::new("id", ColumnType::Uuid),
+                    ColumnDescriptor::new("name", ColumnType::Text),
+                ])),
+            },
+            false,
+        );
+
+        let lens = Lens::new(source, target, transform);
+
+        assert_eq!(lens.translate_table("users", Direction::Forward), None);
+        assert_eq!(lens.translate_table("users", Direction::Backward), None);
         assert_eq!(
             lens.translate_table("orgs", Direction::Forward),
             Some("orgs".to_string())

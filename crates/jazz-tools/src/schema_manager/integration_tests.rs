@@ -829,6 +829,117 @@ mod tests {
         assert_eq!(charlie_row.1[3], Value::Text("admin".to_string()));
     }
 
+    #[test]
+    fn removed_table_then_readded_does_not_resurface_old_rows() {
+        // Branch story:
+        //
+        // v1: users(id, name)   <- alice lives here
+        // v2: <users dropped>
+        // v3: users(id, name)   <- bob lives here
+        //
+        // A v3 query for `users` must only see the v3 table. The v1 `users`
+        // rows belong to a removed table lineage and must not be treated as
+        // the same logical table just because the name appears again in v3.
+
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let v2 = SchemaBuilder::new().build();
+        let v3 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .nullable_column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+        let v3_hash = SchemaHash::compute(&v3);
+
+        let lens_v1_v2 = generate_lens(&v1, &v2);
+        let lens_v2_v3 = generate_lens(&v2, &v3);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v3.clone(), "dev", "main");
+        qm.add_live_schema(v2.clone());
+        qm.register_lens(lens_v2_v3);
+        qm.add_live_schema(v1.clone());
+        qm.register_lens(lens_v1_v2);
+        let mut storage = MemoryStorage::new();
+
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+        let v3_branch = format!("dev-{}-main", v3_hash.short());
+
+        let lens_path = qm.schema_context().lens_path(&v1_hash).unwrap();
+        assert_eq!(lens_path.len(), 2, "expected v1 -> v2 -> v3 lens path");
+
+        assert_eq!(
+            crate::schema_manager::translate_table_name_to_schema(
+                qm.schema_context(),
+                "users",
+                &v1_hash,
+            ),
+            None,
+            "the re-added v3 users table must not translate back into the removed v1 table",
+        );
+
+        let v1_table = v1.get(&TableName::new("users")).unwrap();
+        let alice_id = ObjectId::new();
+        let alice_row = vec![Value::Uuid(alice_id), Value::Text("Alice".to_string())];
+        let alice_data = encode_row(&v1_table.columns, &alice_row).unwrap();
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "users",
+            alice_id,
+            &v1_branch,
+            alice_data,
+            1_000,
+        );
+
+        let bob_id = ObjectId::new();
+        qm.insert(
+            &mut storage,
+            "users",
+            &[
+                Value::Uuid(bob_id),
+                Value::Text("Bob".to_string()),
+                Value::Text("bob@example.com".to_string()),
+            ],
+        )
+        .unwrap();
+
+        let query = QueryBuilder::new("users")
+            .branches(&[&v1_branch, &v2_branch, &v3_branch])
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process(&mut storage);
+        let results = qm.get_subscription_results(sub_id);
+        qm.unsubscribe_with_sync(sub_id);
+
+        assert_eq!(
+            results.len(),
+            1,
+            "v1 rows from the dropped table lineage must not appear under the re-added v3 table",
+        );
+        assert_eq!(
+            results[0].1,
+            vec![
+                Value::Uuid(bob_id),
+                Value::Text("Bob".to_string()),
+                Value::Text("bob@example.com".to_string()),
+            ]
+        );
+    }
+
     /// Test multi-hop with chained column renames across versions.
     #[test]
     fn end_to_end_multi_hop_chained_renames() {
