@@ -1,6 +1,7 @@
 use super::*;
 use crate::query_manager::policy::PolicyExpr;
 use crate::query_manager::query::QueryBuilder;
+use crate::query_manager::session::WriteContext;
 use crate::query_manager::types::{
     ColumnType, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
 };
@@ -568,7 +569,7 @@ fn rc_user_inserted_row_stays_hidden_from_other_sessions() {
         .insert(
             "documents",
             document_insert_values("alice", title),
-            Some(&alice_session),
+            Some(&WriteContext::from_session(alice_session.clone())),
         )
         .expect("alice insert should satisfy local insert policy");
 
@@ -735,7 +736,7 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
         .insert(
             "documents",
             document_insert_values("alice", title),
-            Some(&alice_session),
+            Some(&WriteContext::from_session(alice_session.clone())),
         )
         .expect("alice insert should succeed through the public client API");
 

@@ -15,7 +15,7 @@ use crate::object::{BranchName, ObjectId};
 use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use crate::query_manager::query::{Query, QueryBuilder};
-use crate::query_manager::session::Session;
+use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{
     ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
@@ -1306,12 +1306,29 @@ impl SchemaManager {
         let _span =
             tracing::debug_span!("SM::insert", table, schema_hash = %self.context.current_hash)
                 .entered();
-        self.insert_with_session(storage, table, values, None)
+        self.insert_with_write_context(storage, table, values, None)
     }
 
     /// Insert with session-based policy checking.
     ///
     /// Omitted fields are filled from schema defaults or nullable nulls.
+    pub fn insert_with_write_context<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
+    ) -> Result<InsertResult, QueryError> {
+        let aligned_values = self.get_insert_values_with_defaults(table, values)?;
+        self.query_manager.insert_on_branch_with_write_context(
+            storage,
+            table,
+            self.context.branch_name().as_str(),
+            &aligned_values,
+            write_context,
+        )
+    }
+
     pub fn insert_with_session<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -1319,31 +1336,25 @@ impl SchemaManager {
         values: HashMap<String, Value>,
         session: Option<&Session>,
     ) -> Result<InsertResult, QueryError> {
-        let aligned_values = self.get_insert_values_with_defaults(table, values)?;
-        self.query_manager.insert_on_branch_with_session(
-            storage,
-            table,
-            self.context.branch_name().as_str(),
-            &aligned_values,
-            session,
-        )
+        let owned = session.cloned().map(WriteContext::from_session);
+        self.insert_with_write_context(storage, table, values, owned.as_ref())
     }
 
     /// Update a row using current-schema column names, performing copy-on-write
     /// when the latest visible row version still lives on an older schema branch.
-    pub fn update_with_session<H: Storage>(
+    pub fn update_with_write_context<H: Storage>(
         &mut self,
         storage: &mut H,
         object_id: ObjectId,
         values: &[(String, Value)],
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
     ) -> Result<crate::commit::CommitId, QueryError> {
         let current_branch = self.context.branch_name().as_str().to_string();
         let branches = self.all_branch_strings();
-        let (table, source_branch, old_current_data, _source_commit_id) = self
-            .query_manager
-            .load_row_for_schema_update(storage, object_id, &branches)
-            .ok_or(QueryError::ObjectNotFound(object_id))?;
+        let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
+            self.query_manager
+                .load_row_for_schema_update(storage, object_id, &branches)
+                .ok_or(QueryError::ObjectNotFound(object_id))?;
 
         let table_name = TableName::new(&table);
         let descriptor = self
@@ -1367,11 +1378,15 @@ impl SchemaManager {
         }
 
         let commit_id = if source_branch == current_branch {
-            self.query_manager
-                .update_with_session(storage, object_id, &current_values, session)?
+            self.query_manager.update_with_write_context(
+                storage,
+                object_id,
+                &current_values,
+                write_context,
+            )?
         } else {
             self.query_manager
-                .write_existing_row_on_branch_with_session(
+                .write_existing_row_on_branch_with_write_context(
                     storage,
                     RowBranchWrite {
                         table: &table,
@@ -1379,12 +1394,24 @@ impl SchemaManager {
                         id: object_id,
                         values: &current_values,
                         old_data_for_policy: &old_current_data,
+                        old_provenance_for_policy: &old_current_provenance,
                     },
-                    session,
+                    write_context,
                 )?
         };
 
         Ok(commit_id)
+    }
+
+    pub fn update_with_session<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        object_id: ObjectId,
+        values: &[(String, Value)],
+        session: Option<&Session>,
+    ) -> Result<crate::commit::CommitId, QueryError> {
+        let owned = session.cloned().map(WriteContext::from_session);
+        self.update_with_write_context(storage, object_id, values, owned.as_ref())
     }
 
     /// Delete a row (soft delete), performing copy-on-write when the latest
@@ -1393,32 +1420,43 @@ impl SchemaManager {
         &mut self,
         storage: &mut H,
         object_id: ObjectId,
-        session: Option<&Session>,
+        write_context: Option<&WriteContext>,
     ) -> Result<DeleteHandle, QueryError> {
         let current_branch = self.context.branch_name().as_str().to_string();
         let branches = self.all_branch_strings();
-        let (table, source_branch, old_current_data, _source_commit_id) = self
-            .query_manager
-            .load_row_for_schema_update(storage, object_id, &branches)
-            .ok_or(QueryError::ObjectNotFound(object_id))?;
+        let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
+            self.query_manager
+                .load_row_for_schema_update(storage, object_id, &branches)
+                .ok_or(QueryError::ObjectNotFound(object_id))?;
 
         let _span = tracing::debug_span!("SM::delete", table, %object_id, schema_hash = %self.context.current_hash).entered();
         if source_branch == current_branch {
             self.query_manager
-                .delete_with_session(storage, object_id, session)
+                .delete_with_write_context(storage, object_id, write_context)
         } else {
             self.query_manager
-                .delete_existing_row_on_branch_with_session(
+                .delete_existing_row_on_branch_with_write_context(
                     storage,
                     RowBranchDelete {
                         table: &table,
                         branch: &current_branch,
                         id: object_id,
                         old_data_for_policy: &old_current_data,
+                        old_provenance_for_policy: &old_current_provenance,
                     },
-                    session,
+                    write_context,
                 )
         }
+    }
+
+    pub fn delete_with_session<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        object_id: ObjectId,
+        session: Option<&Session>,
+    ) -> Result<DeleteHandle, QueryError> {
+        let owned = session.cloned().map(WriteContext::from_session);
+        self.delete(storage, object_id, owned.as_ref())
     }
 
     /// Process pending operations (drives SyncManager).

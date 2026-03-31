@@ -17,7 +17,7 @@ use jazz_tools::object::{BranchName, Object, ObjectId};
 use jazz_tools::object_manager::ObjectManager;
 use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr};
 use jazz_tools::query_manager::query::QueryBuilder;
-use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{
     ColumnType, Schema, SchemaBuilder, TablePolicies, TableSchema, Value,
 };
@@ -1379,6 +1379,7 @@ impl PermissionR5State {
     fn update_allowed_doc(&mut self) {
         let doc_id = self.allowed_doc_ids[self.rng.next_usize(self.allowed_doc_ids.len())];
         let updated_at = self.next_timestamp();
+        let write_context = WriteContext::from_session(self.session_alice.clone());
         self.runtime
             .update(
                 doc_id,
@@ -1386,7 +1387,7 @@ impl PermissionR5State {
                     ("status".to_string(), Value::Text("in_review".to_string())),
                     ("updated_at".to_string(), Value::Timestamp(updated_at)),
                 ],
-                Some(&self.session_alice),
+                Some(&write_context),
             )
             .expect("allowed permission update");
     }
@@ -1394,13 +1395,14 @@ impl PermissionR5State {
     fn update_denied_doc(&mut self) {
         let doc_id = self.denied_doc_ids[self.rng.next_usize(self.denied_doc_ids.len())];
         let updated_at = self.next_timestamp();
+        let write_context = WriteContext::from_session(self.session_alice.clone());
         let result = self.runtime.update(
             doc_id,
             vec![
                 ("status".to_string(), Value::Text("archived".to_string())),
                 ("updated_at".to_string(), Value::Timestamp(updated_at)),
             ],
-            Some(&self.session_alice),
+            Some(&write_context),
         );
         assert!(result.is_err(), "expected denied permission update");
     }
@@ -1928,7 +1930,7 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
 ) -> ManyBranchesDataset {
     let object_id = manager.create(storage, None);
     let prefix = format!("dev-r8{:08x}-main-", scenario.seed as u32);
-    let author = ObjectId::new();
+    let author = ObjectId::new().to_string();
     let mut branch_names = Vec::with_capacity(scenario.branch_count);
     let mut head_ids = Vec::with_capacity(scenario.branch_count);
     let mut used_as_parent = vec![false; scenario.branch_count];
@@ -1944,7 +1946,7 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
             parents: parent_ids.into(),
             content: many_branches_payload(scenario, branch_idx, 0),
             timestamp: root_timestamps,
-            author,
+            author: author.clone(),
             metadata: None,
             stored_state: StoredState::default(),
             ack_state: Default::default(),
@@ -1963,7 +1965,7 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
                     &branch_name,
                     vec![head_id],
                     many_branches_payload(scenario, branch_idx, commit_idx),
-                    author,
+                    author.clone(),
                     None,
                 )
                 .expect("append linear commit in many-branches benchmark");

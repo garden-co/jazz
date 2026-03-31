@@ -18,6 +18,7 @@ use common::{
     get_stats, reset_stats, setup_data,
 };
 use jazz_tools::query_manager::query::Query;
+use jazz_tools::query_manager::session::WriteContext;
 use jazz_tools::query_manager::types::Value;
 
 fn row<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
@@ -100,6 +101,7 @@ fn run_memory_benchmark(scale: usize) {
     // Insert 100 documents and measure incremental overhead
     let before_inserts = get_stats();
     let num_inserts = 100;
+    let write_context = WriteContext::from_session(session.clone());
 
     for i in 0..num_inserts {
         let timestamp = current_timestamp() + i as u64;
@@ -113,7 +115,7 @@ fn run_memory_benchmark(scale: usize) {
                     ("author_id", Value::Text(USER_ID.to_string())),
                     ("created_at", Value::Timestamp(timestamp)),
                 ]),
-                Some(&session),
+                Some(&write_context),
             )
             .expect("insert");
         core.immediate_tick();

@@ -37,6 +37,17 @@ s.definePermissions(exampleApp, ({ policy, allOf, session }) => {
 });
 // #endregion permissions-simple-ts
 
+// #region permissions-created-by-ts
+s.definePermissions(exampleApp, ({ policy, session }) => {
+  policy.todos.allowRead.where({ $createdBy: session.user_id });
+  policy.todos.allowInsert.always();
+  policy.todos.allowUpdate
+    .whereOld({ $createdBy: session.user_id })
+    .whereNew({ $createdBy: session.user_id });
+  policy.todos.allowDelete.where({ $createdBy: session.user_id });
+});
+// #endregion permissions-created-by-ts
+
 // #region permissions-always-ts
 s.definePermissions(exampleApp, ({ policy }) => {
   policy.todos.allowRead.always();

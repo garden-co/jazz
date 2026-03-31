@@ -105,9 +105,17 @@ create the context once at startup, then choose whether work should run as the b
 the caller.
 
 - `context.asBackend()` returns a `Db` that uses `backendSecret` for sync/auth when this process
-  talks to a Jazz server.
+  talks to a Jazz server. Writes from this handle are authored as `jazz:system` unless you add
+  explicit attribution.
 - `context.forRequest(req)` returns a `Db` that runs queries as the authenticated user who made
-  the request, so permission policies apply to them rather than the process itself.
+  the request, so permission policies apply to them rather than the process itself. Writes are also
+  attributed to that user.
+- `context.forSession(session)` is the same idea when you already have a resolved Jazz session.
+- `context.withAttribution(principalId)` keeps backend permissions, but stamps new writes and
+  updates as `principalId`.
+- `context.withAttributionForSession(session)` and `context.withAttributionForRequest(req)` derive
+  that authorship from a resolved session or authenticated request without impersonating the user
+  for permission checks.
 - `context.db()` gives you a high-level `Db` using the context's configured runtime/auth. On
   server-connected backends, prefer `context.asBackend()` or `context.forRequest(req)`; on
   embedded or local-only setups, `context.db()` is the right choice.
@@ -123,6 +131,21 @@ bearer-JWT-scoped high-level `Db`.
   `context.db()` to get an unscoped, unauthenticated handle. This allows read/write access to the
   database directly, without permissions being evaluated.
 </Callout>
+
+#### Attribution without impersonation
+
+Use the attribution helpers when backend code should keep backend-level access, but row provenance
+should still record who the work is for.
+
+<include cwd lang="ts">
+  ../examples/docs/todo-server-ts/src/request-context.ts#backend-attribution-ts
+</include>
+
+This is intentionally different from `forRequest(...)` or `forSession(...)`:
+
+- `forRequest` / `forSession` change both permission evaluation and authorship
+- `withAttribution*` only changes authorship
+- `asBackend()` and unscoped `db()` writes default to `jazz:system`
 
 #### Per-request user-scoped client
 
