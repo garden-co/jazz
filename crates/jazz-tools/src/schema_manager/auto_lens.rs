@@ -334,7 +334,11 @@ mod tests {
                     .column("name", ColumnType::Text)
                     .nullable_column("new_field", ColumnType::Boolean),
             )
-            .table(TableSchema::builder("new_table").column("id", ColumnType::Uuid))
+            .table(
+                TableSchema::builder("new_table")
+                    .column("id", ColumnType::Uuid)
+                    .nullable_column("archived_at", ColumnType::Timestamp),
+            )
             .build();
 
         let lens = generate_lens(&old, &new);
