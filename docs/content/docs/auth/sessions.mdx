@@ -116,14 +116,15 @@ Use whatever column fits your schema&hairsp;—&hairsp;`owner_id`, `author_id`, 
 
 ## Session identity and authorship
 
-Jazz also records who created and last updated each row through the provenance magic columns
-`$createdBy`, `$createdAt`, `$updatedBy`, and `$updatedAt`.
+Jazz also records authorship and edit times through the edit metadata magic columns `$createdBy`,
+`$createdAt`, `$updatedBy`, and `$updatedAt`.
 
 On clients, writes are automatically attributed to the current session user. On backends,
 `context.forRequest(...)` and `context.forSession(...)` both run as that user for permissions and
 also stamp authorship as that user.
 
-If backend code should keep backend permissions but still record a user's identity in provenance,
+If backend code should keep backend permissions but still record a user's identity in authorship
+metadata,
 use `withAttribution(...)`, `withAttributionForSession(...)`, or `withAttributionForRequest(...)`
 from [Server Setup](/docs/reference/server-setup).
 
