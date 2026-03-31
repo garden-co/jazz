@@ -6,8 +6,6 @@ export const PERMISSION_INTROSPECTION_COLUMNS = ["$canRead", "$canEdit", "$canDe
 
 export type PermissionIntrospectionColumn = (typeof PERMISSION_INTROSPECTION_COLUMNS)[number];
 
-export const PERMISSION_INTROSPECTION_TS_TYPE = "boolean | null";
-
 const MAGIC_COLUMN_SET = new Set<string>(PERMISSION_INTROSPECTION_COLUMNS);
 
 export function isPermissionIntrospectionColumn(

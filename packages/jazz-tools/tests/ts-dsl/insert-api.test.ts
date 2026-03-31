@@ -118,7 +118,7 @@ describe("TS Insert API", () => {
       string: "default value",
       array: ["a", "b", "c"],
       boolean: true,
-      nullable: undefined,
+      nullable: null,
       refId: "00000000-0000-0000-0000-000000000000",
     });
   });
@@ -141,8 +141,8 @@ describe("TS Insert API", () => {
       string: "default value",
       array: ["a", "b", "c"],
       boolean: true,
-      nullable: undefined,
-      refId: undefined,
+      nullable: null,
+      refId: null,
     });
   });
 });
