@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, hard_delete_metadata, soft_delete_metadata};
 use crate::object::{BranchName, ObjectId};
+use crate::schema_manager::resolve_current_table_name;
 use crate::storage::Storage;
 
 use super::encoding::{decode_column, decode_row, encode_row};
@@ -35,7 +36,22 @@ pub struct RowBranchDelete<'a> {
     pub old_data_for_policy: &'a [u8],
 }
 
+fn resolve_table_name_for_context(
+    schema_context: &crate::schema_manager::SchemaContext,
+    table_hint: &str,
+) -> TableName {
+    resolve_current_table_name(schema_context, table_hint)
+        .map(|name| TableName::new(&name))
+        .unwrap_or_else(|| TableName::new(table_hint))
+}
+
 impl QueryManager {
+    fn resolve_current_table_name_from_hint(&self, table_hint: &str) -> String {
+        resolve_table_name_for_context(&self.schema_context, table_hint)
+            .as_str()
+            .to_string()
+    }
+
     fn prepare_update_write<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -79,7 +95,8 @@ impl QueryManager {
             if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(branch, Some(session))
             {
-                let Some(auth_table_schema) = auth_schema.get(&table_name) else {
+                let auth_table_name = resolve_table_name_for_context(&auth_context, table);
+                let Some(auth_table_schema) = auth_schema.get(&auth_table_name) else {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Update,
@@ -91,7 +108,7 @@ impl QueryManager {
                         storage,
                         id,
                         branch,
-                        table_name,
+                        auth_table_name,
                         policy,
                         old_data_for_policy,
                         session,
@@ -111,7 +128,7 @@ impl QueryManager {
                         storage,
                         id,
                         branch,
-                        table_name,
+                        auth_table_name,
                         policy,
                         &new_data,
                         session,
@@ -216,23 +233,27 @@ impl QueryManager {
         id: ObjectId,
         branches: &[String],
     ) -> Option<(String, String, Vec<u8>, CommitId)> {
+        let schema_context = self.schema_context.clone();
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
         let obj = self
             .sync_manager
             .object_manager
             .get_or_load(id, storage, branches)?;
-        let table = obj.metadata.get(MetadataKey::Table.as_str())?.clone();
+        let table_hint = obj.metadata.get(MetadataKey::Table.as_str())?.clone();
+        let current_table = resolve_table_name_for_context(&schema_context, &table_hint)
+            .as_str()
+            .to_string();
         let mut schema_warnings = SchemaWarningAccumulator::default();
         let mut transform_context = RowTransformContext {
-            table: &table,
+            table: &current_table,
             branch_schema_map: &branch_schema_map,
-            schema_context: &self.schema_context,
+            schema_context: &schema_context,
             schema_warnings: &mut schema_warnings,
         };
         Self::resolve_latest_row_with_schema_transform(id, obj, branches, &mut transform_context)
             .map(|resolved| {
                 (
-                    table,
+                    current_table,
                     resolved.branch_name.as_str().to_string(),
                     resolved.content,
                     resolved.commit_id,
@@ -299,15 +320,16 @@ impl QueryManager {
             if let Some((auth_schema, auth_context)) = self
                 .local_write_authorization_context(self.current_branch().as_str(), Some(session))
             {
+                let auth_table_name = resolve_table_name_for_context(&auth_context, table);
                 let allowed = auth_schema
-                    .get(&table_name)
+                    .get(&auth_table_name)
                     .and_then(|table_schema| table_schema.policies.insert.with_check.as_ref())
                     .map(|policy| {
                         self.evaluate_current_authorization_policy_for_content(
                             storage,
                             object_id,
                             self.current_branch().as_str(),
-                            table_name,
+                            auth_table_name,
                             policy,
                             &data,
                             session,
@@ -316,7 +338,7 @@ impl QueryManager {
                             &auth_context,
                         )
                     })
-                    .unwrap_or_else(|| auth_schema.contains_key(&table_name));
+                    .unwrap_or_else(|| auth_schema.contains_key(&auth_table_name));
                 if !allowed {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
@@ -438,15 +460,16 @@ impl QueryManager {
             if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(branch, Some(session))
             {
+                let auth_table_name = resolve_table_name_for_context(&auth_context, table);
                 let allowed = auth_schema
-                    .get(&table_name)
+                    .get(&auth_table_name)
                     .and_then(|table_schema| table_schema.policies.insert.with_check.as_ref())
                     .map(|policy| {
                         self.evaluate_current_authorization_policy_for_content(
                             storage,
                             object_id,
                             branch,
-                            table_name,
+                            auth_table_name,
                             policy,
                             &data,
                             session,
@@ -455,7 +478,7 @@ impl QueryManager {
                             &auth_context,
                         )
                     })
-                    .unwrap_or_else(|| auth_schema.contains_key(&table_name));
+                    .unwrap_or_else(|| auth_schema.contains_key(&auth_table_name));
                 if !allowed {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
@@ -1056,6 +1079,7 @@ impl QueryManager {
             .get(id)
             .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
+        let table = self.resolve_current_table_name_from_hint(&table);
 
         // Get old data from ObjectManager
         let (old_data, _commit_id) = self
@@ -1199,6 +1223,7 @@ impl QueryManager {
             .get(id)
             .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
+        let table = self.resolve_current_table_name_from_hint(&table);
 
         let table_name = TableName::new(&table);
 
@@ -1229,7 +1254,8 @@ impl QueryManager {
             if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(&current_branch, Some(session))
             {
-                let Some(auth_table_schema) = auth_schema.get(&table_name) else {
+                let auth_table_name = resolve_table_name_for_context(&auth_context, &table);
+                let Some(auth_table_schema) = auth_schema.get(&auth_table_name) else {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Delete,
@@ -1241,7 +1267,7 @@ impl QueryManager {
                         storage,
                         id,
                         &current_branch,
-                        table_name,
+                        auth_table_name,
                         policy,
                         &old_data,
                         session,
@@ -1368,7 +1394,8 @@ impl QueryManager {
             if let Some((auth_schema, auth_context)) =
                 self.local_write_authorization_context(branch, Some(session))
             {
-                let Some(auth_table_schema) = auth_schema.get(&table_name) else {
+                let auth_table_name = resolve_table_name_for_context(&auth_context, table);
+                let Some(auth_table_schema) = auth_schema.get(&auth_table_name) else {
                     return Err(QueryError::PolicyDenied {
                         table: table_name,
                         operation: Operation::Delete,
@@ -1380,7 +1407,7 @@ impl QueryManager {
                         storage,
                         id,
                         branch,
-                        table_name,
+                        auth_table_name,
                         policy,
                         old_data_for_policy,
                         session,
@@ -1485,6 +1512,7 @@ impl QueryManager {
             .get(id)
             .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
+        let table = self.resolve_current_table_name_from_hint(&table);
 
         let table_name = TableName::new(&table);
 
@@ -1580,6 +1608,7 @@ impl QueryManager {
             .get(id)
             .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
+        let table = self.resolve_current_table_name_from_hint(&table);
 
         let table_name = TableName::new(&table);
 
@@ -1670,6 +1699,7 @@ impl QueryManager {
             .get(id)
             .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
             .ok_or(QueryError::ObjectNotFound(id))?;
+        let table = self.resolve_current_table_name_from_hint(&table);
 
         // Verify row is in _id_deleted index (soft-deleted)
         if !self.row_is_deleted(storage, &table, id) {
@@ -1692,6 +1722,7 @@ impl QueryManager {
             .metadata
             .get(MetadataKey::Table.as_str())?
             .clone();
+        let table = self.resolve_current_table_name_from_hint(&table);
         let table_name = TableName::new(&table);
 
         // Get row data from ObjectManager

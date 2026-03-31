@@ -64,7 +64,7 @@ pub use lens::{Direction, Lens, LensOp, LensTransform};
 pub use manager::SchemaManager;
 pub use rehydrate::rehydrate_schema_manager_from_manifest;
 pub use transformer::{
-    LensTransformer, TransformError, TransformResult, translate_column_for_index,
-    translate_table_for_schema,
+    LensTransformer, TransformError, TransformResult, resolve_current_table_name,
+    translate_column_for_index, translate_table_name_to_schema,
 };
 pub use types::AppId;

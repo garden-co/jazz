@@ -8,7 +8,7 @@ use smallvec::SmallVec;
 
 use crate::object::{BranchName, ObjectId};
 use crate::schema_manager::{
-    SchemaContext, translate_column_for_index, translate_table_for_schema,
+    SchemaContext, translate_column_for_index, translate_table_name_to_schema,
 };
 
 use crate::storage::Storage;
@@ -187,7 +187,7 @@ fn translate_scan_table_name(
 ) -> TableName {
     let translated_table = if let Some(target_hash) = branch_schema_hash {
         if target_hash != schema_context.current_hash {
-            translate_table_for_schema(schema_context, table, &target_hash)
+            translate_table_name_to_schema(schema_context, table, &target_hash)
                 .unwrap_or_else(|| table.to_string())
         } else {
             table.to_string()
