@@ -1023,6 +1023,173 @@ mod tests {
         assert_eq!(row[1], Value::Text("alice@example.com".to_string()));
     }
 
+    /// End-to-end test with table rename: query uses new table name,
+    /// lens translates old-branch scans and row decoding through the rename.
+    #[test]
+    fn end_to_end_table_rename_translation() {
+        // v1 branch: users(id, email)
+        //            |
+        //            | RenameTable users -> people
+        //            v
+        // v2 branch: people(id, email)
+        //
+        // Querying `people` across both branches should still find the v1 row.
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v2.clone(), "dev", "main");
+        qm.add_live_schema(v1.clone());
+        qm.register_lens(lens);
+        let mut storage = MemoryStorage::new();
+
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+
+        let v1_table = v1.get(&TableName::new("users")).unwrap();
+        let row_id = ObjectId::new();
+        let row_values = vec![
+            Value::Uuid(row_id),
+            Value::Text("alice@example.com".to_string()),
+        ];
+        let row_data = encode_row(&v1_table.columns, &row_values).unwrap();
+
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "users",
+            row_id,
+            &v1_branch,
+            row_data,
+            1_000,
+        );
+
+        let query = QueryBuilder::new("people")
+            .branches(&[&v1_branch, &v2_branch])
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+        qm.process(&mut storage);
+
+        let results = qm.get_subscription_results(sub_id);
+
+        assert_eq!(results.len(), 1);
+
+        let (_, row) = &results[0];
+        assert_eq!(row.len(), 2);
+        assert_eq!(row[0], Value::Uuid(row_id));
+        assert_eq!(row[1], Value::Text("alice@example.com".to_string()));
+    }
+
+    /// Table renames must also keep existing subscriptions reactive when old-schema
+    /// rows arrive after the query graph has already been compiled.
+    #[test]
+    fn table_rename_subscription_reacts_to_old_branch_updates() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let sm = SyncManager::new();
+        let mut qm = QueryManager::new(sm);
+        qm.set_current_schema(v2.clone(), "dev", "main");
+        qm.add_live_schema(v1.clone());
+        qm.register_lens(lens);
+        let mut storage = MemoryStorage::new();
+
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v2_branch = format!("dev-{}-main", v2_hash.short());
+
+        let query = QueryBuilder::new("people")
+            .branches(&[&v1_branch, &v2_branch])
+            .build();
+        let sub_id = qm.subscribe(query).unwrap();
+
+        qm.process(&mut storage);
+        assert!(
+            qm.get_subscription_results(sub_id).is_empty(),
+            "query should start empty before any rows are synced"
+        );
+
+        let v1_table = v1.get(&TableName::new("users")).unwrap();
+        let row_id = ObjectId::new();
+        let row_values = vec![
+            Value::Uuid(row_id),
+            Value::Text("alice@example.com".to_string()),
+        ];
+        let row_data = encode_row(&v1_table.columns, &row_values).unwrap();
+
+        ingest_remote_row(
+            &mut qm,
+            &mut storage,
+            "users",
+            row_id,
+            &v1_branch,
+            row_data,
+            1_000,
+        );
+
+        qm.process(&mut storage);
+
+        let results = qm.get_subscription_results(sub_id);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, row_id);
+        assert_eq!(
+            results[0].1[1],
+            Value::Text("alice@example.com".to_string())
+        );
+    }
+
     // ========================================================================
     // Catalogue Sync Tests
     // ========================================================================

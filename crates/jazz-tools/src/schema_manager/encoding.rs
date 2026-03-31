@@ -487,9 +487,15 @@ pub fn decode_lens_transform(data: &[u8]) -> Result<LensTransform, CatalogueEnco
 const OP_ADD_COLUMN: u8 = 1;
 const OP_REMOVE_COLUMN: u8 = 2;
 const OP_RENAME_COLUMN: u8 = 3;
+const OP_RENAME_TABLE: u8 = 4;
 
 fn encode_lens_op(buf: &mut Vec<u8>, op: &LensOp) {
     match op {
+        LensOp::RenameTable { old_name, new_name } => {
+            buf.push(OP_RENAME_TABLE);
+            write_string(buf, old_name);
+            write_string(buf, new_name);
+        }
         LensOp::AddColumn {
             table,
             column,
@@ -530,6 +536,11 @@ fn encode_lens_op(buf: &mut Vec<u8>, op: &LensOp) {
 fn decode_lens_op(data: &[u8], offset: &mut usize) -> Result<LensOp, CatalogueEncodingError> {
     let tag = read_u8(data, offset)?;
     match tag {
+        OP_RENAME_TABLE => {
+            let old_name = read_string(data, offset, "old_name")?;
+            let new_name = read_string(data, offset, "new_name")?;
+            Ok(LensOp::RenameTable { old_name, new_name })
+        }
         OP_ADD_COLUMN => {
             let table = read_string(data, offset, "table")?;
             let column = read_string(data, offset, "column")?;
@@ -2234,8 +2245,39 @@ mod tests {
     }
 
     #[test]
+    fn lens_transform_roundtrip_rename_table() {
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+
+        let encoded = encode_lens_transform(&transform);
+        let decoded = decode_lens_transform(&encoded).unwrap();
+
+        assert_eq!(decoded.ops.len(), 1);
+        assert!(matches!(
+            &decoded.ops[0],
+            LensOp::RenameTable { old_name, new_name }
+            if old_name == "users" && new_name == "people"
+        ));
+    }
+
+    #[test]
     fn lens_transform_roundtrip_all_ops() {
         let mut transform = LensTransform::new();
+
+        // RenameTable
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
 
         // AddColumn
         transform.push(
@@ -2272,7 +2314,7 @@ mod tests {
         let encoded = encode_lens_transform(&transform);
         let decoded = decode_lens_transform(&encoded).unwrap();
 
-        assert_eq!(decoded.ops.len(), 5);
+        assert_eq!(decoded.ops.len(), 4);
     }
 
     #[test]
