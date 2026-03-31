@@ -7246,6 +7246,141 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
     );
 }
 
+#[test]
+fn server_subscription_uses_current_permissions_after_table_rename_lens_transform() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use crate::query_manager::types::{ComposedBranchName, SchemaHash};
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+
+    // legacy branch: documents(title)
+    //                |
+    //                | RenameTable documents -> files
+    //                | AddColumn owner_id = "alice"
+    //                v
+    // current auth:  files(title, owner_id) with owner-based select policy
+    let authorization_schema = current_renamed_documents_permission_schema();
+    let structural_schema: Schema = authorization_schema
+        .iter()
+        .map(|(table_name, table_schema)| {
+            let mut structural = table_schema.clone();
+            structural.policies = TablePolicies::default();
+            (*table_name, structural)
+        })
+        .collect();
+    let legacy_schema = legacy_documents_schema();
+    let legacy_hash = SchemaHash::compute(&legacy_schema);
+    let legacy_branch = ComposedBranchName::new("dev", legacy_hash, "main")
+        .to_branch_name()
+        .as_str()
+        .to_string();
+
+    let sync_manager = SyncManager::new();
+    let mut server_qm = QueryManager::new(sync_manager);
+    server_qm.set_current_schema(structural_schema, "dev", "main");
+    server_qm.add_live_schema(legacy_schema.clone());
+    server_qm.register_lens(legacy_documents_to_renamed_current_permissions_lens());
+    server_qm.set_authorization_schema(authorization_schema);
+
+    let mut known_schemas = HashMap::new();
+    known_schemas.insert(legacy_hash, legacy_schema);
+    server_qm.set_known_schemas(Arc::new(known_schemas));
+
+    let mut storage = MemoryStorage::new();
+    let author = ObjectId::new();
+
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "documents".to_string());
+    let document_id = server_qm
+        .sync_manager_mut()
+        .object_manager
+        .create(&mut storage, Some(metadata));
+    server_qm
+        .sync_manager_mut()
+        .object_manager
+        .add_commit(
+            &mut storage,
+            document_id,
+            &legacy_branch,
+            vec![],
+            encode_row(
+                &RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)]),
+                &[Value::Text("Legacy doc".into())],
+            )
+            .unwrap(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let alice = ClientId::new();
+    server_qm.sync_manager_mut().add_client(alice);
+    let alice_session = PolicySession::new("alice");
+    server_qm
+        .sync_manager_mut()
+        .set_client_session(alice, alice_session.clone());
+
+    let bob = ClientId::new();
+    server_qm.sync_manager_mut().add_client(bob);
+    let bob_session = PolicySession::new("bob");
+    server_qm
+        .sync_manager_mut()
+        .set_client_session(bob, bob_session.clone());
+
+    let query = QueryBuilder::new("files").branch(&legacy_branch).build();
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(alice),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query.clone()),
+            session: Some(alice_session),
+            propagation: crate::sync_manager::QueryPropagation::Full,
+        },
+    });
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(bob),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(2),
+            query: Box::new(query),
+            session: Some(bob_session),
+            propagation: crate::sync_manager::QueryPropagation::Full,
+        },
+    });
+
+    server_qm.process(&mut storage);
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let alice_updates: Vec<_> = outbox
+        .iter()
+        .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == alice))
+        .filter(|entry| matches!(entry.payload, SyncPayload::ObjectUpdated { .. }))
+        .collect();
+    let bob_updates: Vec<_> = outbox
+        .iter()
+        .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == bob))
+        .filter(|entry| matches!(entry.payload, SyncPayload::ObjectUpdated { .. }))
+        .collect();
+
+    assert_eq!(
+        alice_updates.len(),
+        1,
+        "Alice should receive the renamed legacy row after current-permissions auth filtering"
+    );
+    assert!(
+        alice_updates.iter().any(|entry| matches!(
+            &entry.payload,
+            SyncPayload::ObjectUpdated { object_id, .. } if *object_id == document_id
+        )),
+        "Alice should receive the legacy document object"
+    );
+    assert!(
+        bob_updates.is_empty(),
+        "Bob should be filtered out by the current renamed permission schema"
+    );
+}
+
 // ========================================================================
 // Branch-aware query tests
 // ========================================================================
