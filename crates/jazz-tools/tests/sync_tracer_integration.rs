@@ -290,3 +290,25 @@ async fn named_object_trace() {
     alice.shutdown().await.expect("shutdown alice");
     server.shutdown().await;
 }
+
+/// Tracer is off by default — sync_tracer() returns None.
+#[tokio::test]
+async fn tracer_disabled_by_default() {
+    let server = TestingServer::start().await;
+
+    let alice = TestingClient::builder()
+        .with_server(&server)
+        .with_schema(test_schema())
+        .with_user_id("alice")
+        .ready_on("todos", Duration::from_secs(30))
+        .connect()
+        .await;
+
+    assert!(
+        alice.sync_tracer().is_none(),
+        "tracer should be None when not enabled",
+    );
+
+    alice.shutdown().await.expect("shutdown");
+    server.shutdown().await;
+}
