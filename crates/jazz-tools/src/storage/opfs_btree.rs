@@ -7,8 +7,8 @@
 //!
 //! ```text
 //! "obj:{uuid}:meta"                                       → JSON metadata
-//! "obj:{uuid}:br:{branch_key}:manifest"                   → postcard branch manifest
-//! "obj:{uuid}:br:{branch_key}:seg:{segment_id}"           → postcard branch segment
+//! "obj:{uuid}:br:{branch_key}:manifest"                   → custom binary branch manifest
+//! "obj:{uuid}:br:{branch_key}:seg:{segment_id}"           → custom binary branch segment
 //! "ack:{commit_hex}"                                      → JSON HashSet<DurabilityTier>
 //! "catman:{app_uuid}:op:{object_uuid}"                    → JSON CatalogueManifestOp
 //! "idx:{table}:{col}:{branch_key}:{hex_encoded_value}:{uuid}" → empty (existence is the signal)
