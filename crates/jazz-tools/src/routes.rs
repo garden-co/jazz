@@ -94,8 +94,10 @@ struct PublishMigrationRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PublishTableLens {
     table: String,
+    renamed_from: Option<String>,
     operations: Vec<PublishLensOp>,
 }
 
@@ -1079,6 +1081,15 @@ async fn publish_migration_handler(
     let mut forward = LensTransform::new();
     for table_lens in request.forward {
         let table_name = table_lens.table;
+        if let Some(renamed_from) = table_lens.renamed_from {
+            forward.push(
+                LensOp::RenameTable {
+                    old_name: renamed_from,
+                    new_name: table_name.clone(),
+                },
+                false,
+            );
+        }
         for operation in table_lens.operations {
             let op = match operation {
                 PublishLensOp::Introduce {
@@ -2435,6 +2446,85 @@ mod tests {
         assert!(
             lens.is_some(),
             "published lens should be registered in schema manager"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_migration_persists_table_rename_ops() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email_address", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let state = make_state_with_schema(v2).await;
+        state
+            .runtime
+            .add_known_schema(v1)
+            .expect("seed known schema for publish test");
+        let app = make_test_router(state.clone());
+
+        let request_body = serde_json::json!({
+            "fromHash": v1_hash.to_string(),
+            "toHash": v2_hash.to_string(),
+            "forward": [{
+                "table": "people",
+                "renamedFrom": "users",
+                "operations": [{
+                    "type": "rename",
+                    "column": "email",
+                    "value": "email_address"
+                }]
+            }]
+        });
+
+        let created = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/admin/migrations")
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::from(request_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        let lens = state
+            .runtime
+            .with_schema_manager(|schema_manager| {
+                schema_manager.get_lens(&v1_hash, &v2_hash).cloned()
+            })
+            .expect("read schema manager lens")
+            .expect("published lens should be registered in schema manager");
+
+        assert_eq!(
+            lens.forward.ops,
+            vec![
+                LensOp::RenameTable {
+                    old_name: "users".to_string(),
+                    new_name: "people".to_string(),
+                },
+                LensOp::RenameColumn {
+                    table: "people".to_string(),
+                    old_name: "email".to_string(),
+                    new_name: "email_address".to_string(),
+                },
+            ]
         );
     }
 

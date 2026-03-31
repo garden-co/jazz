@@ -214,6 +214,7 @@ export type PublishedMigrationOp =
 
 export interface PublishedTableLens {
   table: string;
+  renamedFrom?: string;
   operations: PublishedMigrationOp[];
 }
 
