@@ -119,6 +119,9 @@ Use whatever column fits your schema&hairsp;—&hairsp;`owner_id`, `author_id`, 
 Jazz also records authorship and edit times through the edit metadata magic columns `$createdBy`,
 `$createdAt`, `$updatedBy`, and `$updatedAt`.
 
+See [Queries](/docs/reading/queries#edit-metadata-columns) for how to select and filter on these
+columns.
+
 On clients, writes are automatically attributed to the current session user. On backends,
 `context.forRequest(...)` and `context.forSession(...)` both run as that user for permissions and
 also stamp authorship as that user.
