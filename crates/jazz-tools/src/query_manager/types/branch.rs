@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
@@ -309,6 +312,28 @@ impl BatchOrd {
     }
 }
 
+/// Stable compact identifier for a shared branch prefix.
+///
+/// Derived deterministically from `{env}-{schemaHash}-{userBranch}` so storage
+/// and in-memory indices can use the same compact branch identity without
+/// reparsing branch strings on the hot path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PrefixId(pub [u8; 16]);
+
+impl PrefixId {
+    pub fn from_prefix_name(prefix_name: BranchName) -> Self {
+        Self::from_prefix_str(prefix_name.as_str())
+    }
+
+    pub fn from_prefix_str(prefix: &str) -> Self {
+        Self(*Uuid::new_v5(&Uuid::NAMESPACE_URL, prefix.as_bytes()).as_bytes())
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+}
+
 impl BatchId {
     pub fn new() -> Self {
         Self::from_uuid(Uuid::now_v7())
@@ -440,6 +465,11 @@ impl std::fmt::Display for BranchPrefixName {
     }
 }
 
+thread_local! {
+    static BATCH_BRANCH_KEY_CACHE: RefCell<HashMap<BranchName, BatchBranchKey>> =
+        RefCell::new(HashMap::new());
+}
+
 /// Internal branch reference used by query compilation and index access.
 ///
 /// `BatchBranchKey` is the compact identity form used in hot in-memory maps.
@@ -447,6 +477,7 @@ impl std::fmt::Display for BranchPrefixName {
 /// operate on string-shaped branch ids.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BatchBranchKey {
+    prefix_id: PrefixId,
     prefix_name: BranchName,
     batch_id: BatchId,
 }
@@ -454,15 +485,27 @@ pub struct BatchBranchKey {
 impl BatchBranchKey {
     pub fn try_from_branch_name(branch_name: impl Into<BranchName>) -> Option<Self> {
         let branch_name = branch_name.into();
+        if let Some(cached) =
+            BATCH_BRANCH_KEY_CACHE.with(|cache| cache.borrow().get(&branch_name).copied())
+        {
+            return Some(cached);
+        }
+
         let (prefix_name, batch_segment) = branch_name.as_str().rsplit_once('-')?;
-        Some(Self {
+        let key = Self {
+            prefix_id: PrefixId::from_prefix_name(BranchName::new(prefix_name)),
             prefix_name: BranchName::new(prefix_name),
             batch_id: BatchId::parse_segment(batch_segment)?,
-        })
+        };
+        BATCH_BRANCH_KEY_CACHE.with(|cache| {
+            cache.borrow_mut().insert(branch_name, key);
+        });
+        Some(key)
     }
 
     pub fn from_prefix_and_batch(prefix: &BranchPrefixName, batch_id: BatchId) -> Self {
         Self {
+            prefix_id: PrefixId::from_prefix_str(&prefix.branch_prefix()),
             prefix_name: BranchName::new(prefix.branch_prefix()),
             batch_id,
         }
@@ -470,6 +513,7 @@ impl BatchBranchKey {
 
     pub fn from_prefix_name_and_batch(prefix_name: BranchName, batch_id: BatchId) -> Self {
         Self {
+            prefix_id: PrefixId::from_prefix_name(prefix_name),
             prefix_name,
             batch_id,
         }
@@ -486,6 +530,10 @@ impl BatchBranchKey {
 
     pub fn prefix_name(&self) -> BranchName {
         self.prefix_name
+    }
+
+    pub fn prefix_id(&self) -> PrefixId {
+        self.prefix_id
     }
 
     pub fn batch_id(&self) -> BatchId {

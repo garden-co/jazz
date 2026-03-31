@@ -996,6 +996,52 @@ pub fn test_alice_bob_concurrent_branches(factory: &dyn Fn() -> Box<dyn Storage>
     assert!(draft_alice.is_empty());
 }
 
+pub fn test_index_composed_prefix_isolation_with_same_batch_id(
+    factory: &dyn Fn() -> Box<dyn Storage>,
+) {
+    let mut storage = factory();
+    let schema_a = SchemaHash::from_bytes([0x11; 32]);
+    let schema_b = SchemaHash::from_bytes([0x22; 32]);
+    let shared_batch = BatchId::parse_segment("b0000000000000000000000000000002a").unwrap();
+
+    let branch_a = crate::query_manager::types::BranchPrefixName::new("dev", schema_a, "main")
+        .with_batch_id(shared_batch)
+        .to_branch_name();
+    let branch_b = crate::query_manager::types::BranchPrefixName::new("dev", schema_b, "main")
+        .with_batch_id(shared_batch)
+        .to_branch_name();
+
+    let row_a = ObjectId::new();
+    let row_b = ObjectId::new();
+
+    storage
+        .compat_index_insert(
+            "users",
+            "name",
+            branch_a,
+            &Value::Text("alice".to_string()),
+            row_a,
+        )
+        .unwrap();
+    storage
+        .compat_index_insert(
+            "users",
+            "name",
+            branch_b,
+            &Value::Text("alice".to_string()),
+            row_b,
+        )
+        .unwrap();
+
+    let results_a =
+        storage.compat_index_lookup("users", "name", branch_a, &Value::Text("alice".to_string()));
+    assert_eq!(results_a, vec![row_a]);
+
+    let results_b =
+        storage.compat_index_lookup("users", "name", branch_b, &Value::Text("alice".to_string()));
+    assert_eq!(results_b, vec![row_b]);
+}
+
 // ============================================================================
 // Macros
 // ============================================================================
@@ -1101,6 +1147,11 @@ macro_rules! storage_conformance_tests {
             #[test]
             fn index_cross_branch_isolation() {
                 conformance::test_index_cross_branch_isolation(&$factory);
+            }
+
+            #[test]
+            fn index_composed_prefix_isolation_with_same_batch_id() {
+                conformance::test_index_composed_prefix_isolation_with_same_batch_id(&$factory);
             }
 
             #[test]

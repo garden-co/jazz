@@ -59,17 +59,18 @@ fn index_key_too_large_error(
 }
 
 pub(super) fn encode_index_branch_key(branch: &QueryBranchRef) -> String {
-    format!("c{}", branch.batch_id().branch_segment())
-}
-
-fn encode_branch_prefix_storage_id(prefix: &str) -> String {
-    hex::encode(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, prefix.as_bytes()).as_bytes())
+    let prefix_id = branch.batch_branch_key().prefix_id();
+    format!(
+        "c{}:{}",
+        hex::encode(prefix_id.as_bytes()),
+        branch.batch_id().branch_segment()
+    )
 }
 
 pub(super) fn encode_object_branch_key(branch: &QueryBranchRef) -> String {
     format!(
         "c{}:{}",
-        encode_branch_prefix_storage_id(branch.prefix_name().as_str()),
+        hex::encode(branch.batch_branch_key().prefix_id().as_bytes()),
         branch.batch_id().branch_segment()
     )
 }
@@ -430,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn composed_branch_index_keys_only_store_batch_segment() {
+    fn composed_branch_index_keys_store_prefix_id_and_batch_only() {
         let branch = BranchName::new(batch_branch_name(1));
         let branch_ref = QueryBranchRef::from_branch_name(branch);
         let key = index_entry_key(
@@ -442,7 +443,8 @@ mod tests {
         )
         .expect("key should encode");
 
-        assert!(key.contains(":cb00000000000000000000000000000001:"));
+        assert!(key.contains(":c"));
+        assert!(key.contains(":b00000000000000000000000000000001:"));
         assert!(!key.contains(branch.as_str()));
     }
 

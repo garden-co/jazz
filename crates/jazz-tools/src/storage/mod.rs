@@ -29,7 +29,7 @@ use smolset::SmolSet;
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId, PrefixBatchCatalog, PrefixBatchMeta};
 use crate::query_manager::types::{
-    BatchBranchKey, BatchId, BatchOrd, QueryBranchRef, SchemaHash, ScopedObject, Value,
+    BatchBranchKey, BatchId, BatchOrd, PrefixId, QueryBranchRef, SchemaHash, ScopedObject, Value,
 };
 use crate::sync_manager::DurabilityTier;
 
@@ -720,8 +720,8 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 // MemoryStorage - In-memory implementation for testing and main thread
 // ============================================================================
 
-/// Index key: (table, column, compact branch key).
-type IndexKey = (String, String, String);
+/// Index key: (table, column, compact prefix id, batch id).
+type IndexKey = (String, String, PrefixId, BatchId);
 
 /// Index storage: encoded_value -> row_ids. BTreeMap for correct range query ordering.
 type IndexEntries = BTreeMap<Vec<u8>, HashSet<ObjectId>>;
@@ -873,6 +873,11 @@ impl MemoryStorage {
 
     fn composed_table_batch(branch: &QueryBranchRef) -> (BranchName, BatchId) {
         (branch.prefix_name(), branch.batch_id())
+    }
+
+    fn index_branch_key(branch: &QueryBranchRef) -> (PrefixId, BatchId) {
+        let branch_key = branch.batch_branch_key();
+        (branch_key.prefix_id(), branch_key.batch_id())
     }
 }
 
@@ -1237,12 +1242,8 @@ impl Storage for MemoryStorage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
-        validate_index_value_size(table, column, branch, value)?;
-        let key = (
-            table.to_string(),
-            column.to_string(),
-            key_codec::encode_index_branch_key(branch),
-        );
+        let (prefix_id, batch_id) = Self::index_branch_key(branch);
+        let key = (table.to_string(), column.to_string(), prefix_id, batch_id);
         let index = self.indices.entry(key).or_default();
         let encoded = encode_value(value);
         let inserted = index.entry(encoded).or_default().insert(row_id);
@@ -1264,17 +1265,8 @@ impl Storage for MemoryStorage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
-        if matches!(
-            validate_index_value_size(table, column, branch, value),
-            Err(StorageError::IndexKeyTooLarge { .. })
-        ) {
-            return Ok(());
-        }
-        let key = (
-            table.to_string(),
-            column.to_string(),
-            key_codec::encode_index_branch_key(branch),
-        );
+        let (prefix_id, batch_id) = Self::index_branch_key(branch);
+        let key = (table.to_string(), column.to_string(), prefix_id, batch_id);
         let mut removed = false;
         if let Some(index) = self.indices.get_mut(&key) {
             let encoded = encode_value(value);
@@ -1308,11 +1300,8 @@ impl Storage for MemoryStorage {
         branch: &QueryBranchRef,
         value: &Value,
     ) -> Vec<ObjectId> {
-        let key = (
-            table.to_string(),
-            column.to_string(),
-            key_codec::encode_index_branch_key(branch),
-        );
+        let (prefix_id, batch_id) = Self::index_branch_key(branch);
+        let key = (table.to_string(), column.to_string(), prefix_id, batch_id);
         let Some(index) = self.indices.get(&key) else {
             return Vec::new();
         };
@@ -1343,11 +1332,8 @@ impl Storage for MemoryStorage {
         start: Bound<&Value>,
         end: Bound<&Value>,
     ) -> Vec<ObjectId> {
-        let key = (
-            table.to_string(),
-            column.to_string(),
-            key_codec::encode_index_branch_key(branch),
-        );
+        let (prefix_id, batch_id) = Self::index_branch_key(branch);
+        let key = (table.to_string(), column.to_string(), prefix_id, batch_id);
         let Some(index) = self.indices.get(&key) else {
             return Vec::new();
         };
@@ -1389,11 +1375,8 @@ impl Storage for MemoryStorage {
     }
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &QueryBranchRef) -> Vec<ObjectId> {
-        let key = (
-            table.to_string(),
-            column.to_string(),
-            key_codec::encode_index_branch_key(branch),
-        );
+        let (prefix_id, batch_id) = Self::index_branch_key(branch);
+        let key = (table.to_string(), column.to_string(), prefix_id, batch_id);
         let Some(index) = self.indices.get(&key) else {
             return Vec::new();
         };
@@ -1658,6 +1641,56 @@ mod tests {
         assert_eq!(
             storage.load_table_prefix_batches("users", &prefix).unwrap(),
             HashSet::new()
+        );
+    }
+
+    #[test]
+    fn memory_storage_keeps_same_batch_id_isolated_across_prefixes() {
+        let mut storage = MemoryStorage::new();
+        let shared_batch = BatchId::parse_segment("b0000000000000000000000000000002a").unwrap();
+        let prefix_a = format!("dev-{}-main", SchemaHash::from_bytes([0x11; 32]));
+        let prefix_b = format!("dev-{}-main", SchemaHash::from_bytes([0x22; 32]));
+        let branch_a = format!("{prefix_a}-{}", shared_batch.branch_segment());
+        let branch_b = format!("{prefix_b}-{}", shared_batch.branch_segment());
+        let row_a = ObjectId::new();
+        let row_b = ObjectId::new();
+
+        storage
+            .index_insert(
+                "users",
+                "name",
+                &branch_a,
+                &Value::Text("alice".to_string()),
+                row_a,
+            )
+            .unwrap();
+        storage
+            .index_insert(
+                "users",
+                "name",
+                &branch_b,
+                &Value::Text("alice".to_string()),
+                row_b,
+            )
+            .unwrap();
+
+        assert_eq!(
+            storage.index_lookup(
+                "users",
+                "name",
+                &branch_a,
+                &Value::Text("alice".to_string())
+            ),
+            vec![row_a]
+        );
+        assert_eq!(
+            storage.index_lookup(
+                "users",
+                "name",
+                &branch_b,
+                &Value::Text("alice".to_string())
+            ),
+            vec![row_b]
         );
     }
 
