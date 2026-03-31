@@ -2024,6 +2024,24 @@ async fn run_worker_loop(
                     } else {
                         Err(format!("app runtime already exists for {app_id}"))
                     };
+
+                    #[cfg(feature = "otel")]
+                    if result.is_ok() {
+                        let meter = opentelemetry::global::meter("jazz-cloud-server");
+                        let created = meter.u64_counter("jazz.app.runtime.created").build();
+                        created.add(
+                            1,
+                            &[
+                                opentelemetry::KeyValue::new("app_id", app_id.to_string()),
+                                opentelemetry::KeyValue::new("worker", worker as i64),
+                            ],
+                        );
+                        let apps_active =
+                            meter.i64_up_down_counter("jazz.worker.apps.active").build();
+                        apps_active
+                            .add(1, &[opentelemetry::KeyValue::new("worker", worker as i64)]);
+                    }
+
                     if response.send(result).is_err() {
                         warn!(worker, app_id = %app_id, "create runtime response receiver dropped");
                     }
@@ -2302,6 +2320,15 @@ async fn run_worker_loop(
                     &[
                         opentelemetry::KeyValue::new("command_type", cmd_type),
                         opentelemetry::KeyValue::new("app_id", cmd_app_id),
+                        opentelemetry::KeyValue::new("worker", worker as i64),
+                    ],
+                );
+
+                let commands_counter = meter.u64_counter("jazz.worker.commands.total").build();
+                commands_counter.add(
+                    1,
+                    &[
+                        opentelemetry::KeyValue::new("command_type", cmd_type),
                         opentelemetry::KeyValue::new("worker", worker as i64),
                     ],
                 );
