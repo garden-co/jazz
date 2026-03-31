@@ -2429,7 +2429,8 @@ mod tests {
         let encoded = encode_lens_transform(&transform);
         let decoded = decode_lens_transform(&encoded).unwrap();
 
-        assert_eq!(decoded.ops.len(), 4);
+        assert_eq!(decoded.ops.len(), 6);
+        assert_eq!(decoded.ops, transform.ops);
     }
 
     #[test]
