@@ -105,10 +105,16 @@ impl QueryManager {
             ));
         };
 
-        // Compile query graph with schema context
-        let graph =
-            Self::compile_graph(&query, &self.schema, session.clone(), &self.schema_context)
-                .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
+        let uses_explicit_authorization_filtering =
+            self.local_subscription_uses_explicit_authorization(session.as_ref());
+        let compile_schema = self.local_subscription_compile_schema(session.as_ref());
+        let graph = Self::compile_graph(
+            &query,
+            &compile_schema,
+            session.clone(),
+            &self.schema_context,
+        )
+        .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -134,7 +140,10 @@ impl QueryManager {
                 has_pending_local_updates: false,
                 achieved_tiers,
                 current_ordered_ids: Vec::new(),
+                current_visible_rows: HashMap::new(),
+                uses_explicit_authorization_filtering,
                 propagation,
+                reported_schema_warnings: HashSet::new(),
             },
         );
 
@@ -160,6 +169,15 @@ impl QueryManager {
         schema_context: &crate::schema_manager::SchemaContext,
         session: Option<Session>,
     ) -> Result<QuerySubscriptionId, QueryError> {
+        let compile_schema: Schema = schema
+            .iter()
+            .map(|(table_name, table_schema)| {
+                let mut structural = table_schema.clone();
+                structural.policies = crate::query_manager::types::TablePolicies::default();
+                (*table_name, structural)
+            })
+            .collect();
+
         // Determine branches from query or context
         let branches: Vec<String> = if !query.branches.is_empty() {
             query.branches.clone()
@@ -172,7 +190,7 @@ impl QueryManager {
         };
 
         // Compile query graph with explicit schema context
-        let graph = Self::compile_graph(&query, schema, session.clone(), schema_context)
+        let graph = Self::compile_graph(&query, &compile_schema, session.clone(), schema_context)
             .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
@@ -192,7 +210,10 @@ impl QueryManager {
                 has_pending_local_updates: false,
                 achieved_tiers: HashSet::new(),
                 current_ordered_ids: Vec::new(),
+                current_visible_rows: HashMap::new(),
+                uses_explicit_authorization_filtering: false,
                 propagation: QueryPropagation::Full,
+                reported_schema_warnings: HashSet::new(),
             },
         );
 
@@ -297,7 +318,18 @@ impl QueryManager {
     /// This ensures subscriptions that became active before the server connection
     /// are forwarded once the server is available.
     pub fn add_server(&mut self, server_id: ServerId) {
-        self.sync_manager.add_server(server_id);
+        self.add_server_with_catalogue_match(server_id, false);
+    }
+
+    /// Add an upstream server and optionally skip replaying catalogue objects
+    /// when the remote side already has the same catalogue state.
+    pub fn add_server_with_catalogue_match(
+        &mut self,
+        server_id: ServerId,
+        skip_catalogue_sync: bool,
+    ) {
+        self.sync_manager
+            .add_server_with_catalogue_match(server_id, skip_catalogue_sync);
         self.replay_active_query_subscriptions_to_server(server_id);
     }
 
@@ -498,11 +530,18 @@ impl QueryManager {
         };
 
         let descriptor = &subscription.graph.combined_descriptor;
+        let rows: Vec<_> = if subscription.uses_explicit_authorization_filtering {
+            subscription
+                .current_ordered_ids
+                .iter()
+                .filter_map(|id| subscription.current_visible_rows.get(id))
+                .cloned()
+                .collect()
+        } else {
+            subscription.graph.current_result()
+        };
 
-        subscription
-            .graph
-            .current_result()
-            .iter()
+        rows.iter()
             .filter_map(|row| {
                 decode_row(descriptor, &row.data)
                     .ok()

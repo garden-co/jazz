@@ -1,5 +1,5 @@
 import { createDb, resolveClientSession, type DbConfig } from "jazz-tools";
-import { app } from "../schema/session-app.js";
+import { app } from "../session-app.js";
 
 export async function authSessionExamples(config: DbConfig) {
   const db = await createDb(config);
@@ -13,9 +13,7 @@ export async function authSessionExamples(config: DbConfig) {
   // #endregion auth-session-ts-user-id
 
   // #region auth-session-ts-query
-  const ownedTodos = sessionUserId
-    ? await db.all(app.todos.where({ owner_id: sessionUserId }))
-    : [];
+  const ownedTodos = sessionUserId ? await db.all(app.todos.where({ ownerId: sessionUserId })) : [];
   // #endregion auth-session-ts-query
 
   // #region auth-session-ts-insert
@@ -25,7 +23,7 @@ export async function authSessionExamples(config: DbConfig) {
     db.insert(app.todos, {
       title,
       done: false,
-      owner_id: sessionUserId,
+      ownerId: sessionUserId,
     });
   }
   // #endregion auth-session-ts-insert

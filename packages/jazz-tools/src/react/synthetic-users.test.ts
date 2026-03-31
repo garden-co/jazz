@@ -32,13 +32,14 @@ describe("synthetic-users", () => {
     const storage = new MemoryStorage();
     const initial = loadSyntheticUserStore("app-2", { storage });
     const target = initial.profiles[1];
+    expect(target).toBeDefined();
 
-    const updated = setActiveSyntheticProfile("app-2", target.id, { storage });
-    expect(updated.activeProfileId).toBe(target.id);
+    const updated = setActiveSyntheticProfile("app-2", target!.id, { storage });
+    expect(updated.activeProfileId).toBe(target!.id);
 
     const auth = getActiveSyntheticAuth("app-2", { storage });
-    expect(auth.localAuthToken).toBe(target.token);
-    expect(auth.localAuthMode).toBe(target.mode);
+    expect(auth.localAuthToken).toBe(target!.token);
+    expect(auth.localAuthMode).toBe(target!.mode);
   });
 
   it("saves and reloads explicit stores", () => {

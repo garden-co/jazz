@@ -7,9 +7,11 @@
 use super::encoding::{
     column_bytes, column_is_null, compare_column_to_value, decode_column, encode_value,
 };
+use super::magic_columns::{MagicColumnKind, magic_column_kind};
 use super::relation_ir::{PredicateExpr, RelExpr, RowIdRef, ValueRef};
 use super::session::Session;
 use super::types::{RowDescriptor, Value};
+use crate::metadata::RowProvenance;
 use serde::{Deserialize, Serialize};
 
 /// Comparison operators for policy expressions.
@@ -87,17 +89,36 @@ pub enum PolicyExpr {
         value: PolicyValue,
     },
 
+    /// Compare a session value against a literal value.
+    SessionCmp {
+        path: Vec<String>,
+        op: CmpOp,
+        value: Value,
+    },
+
     /// Check if a column is NULL.
     IsNull { column: String },
 
+    /// Check if a session value is NULL.
+    SessionIsNull { path: Vec<String> },
+
     /// Check if a column is NOT NULL.
     IsNotNull { column: String },
+
+    /// Check if a session value is NOT NULL.
+    SessionIsNotNull { path: Vec<String> },
 
     /// Check if a column contains a value.
     ///
     /// - For TEXT columns this means substring containment.
     /// - For ARRAY columns this means element membership.
     Contains { column: String, value: PolicyValue },
+
+    /// Check if a session value contains a literal value.
+    ///
+    /// - For TEXT session values this means substring containment.
+    /// - For ARRAY session values this means element membership.
+    SessionContains { path: Vec<String>, value: Value },
 
     /// Check if a column value is in a session array.
     /// The session_path must point to an array in the session claims.
@@ -110,6 +131,12 @@ pub enum PolicyExpr {
     InList {
         column: String,
         values: Vec<PolicyValue>,
+    },
+
+    /// Check if a scalar session value is contained in a list of literal values.
+    SessionInList {
+        path: Vec<String>,
+        values: Vec<Value>,
     },
 
     /// Check if a subquery returns any rows.
@@ -200,15 +227,30 @@ enum PolicyExprSerde {
         op: CmpOp,
         value: PolicyValue,
     },
+    SessionCmp {
+        path: Vec<String>,
+        op: CmpOp,
+        value: Value,
+    },
     IsNull {
         column: String,
+    },
+    SessionIsNull {
+        path: Vec<String>,
     },
     IsNotNull {
         column: String,
     },
+    SessionIsNotNull {
+        path: Vec<String>,
+    },
     Contains {
         column: String,
         value: PolicyValue,
+    },
+    SessionContains {
+        path: Vec<String>,
+        value: Value,
     },
     In {
         column: String,
@@ -217,6 +259,10 @@ enum PolicyExprSerde {
     InList {
         column: String,
         values: Vec<PolicyValue>,
+    },
+    SessionInList {
+        path: Vec<String>,
+        values: Vec<Value>,
     },
     Exists {
         table: String,
@@ -253,9 +299,17 @@ impl From<PolicyExprSerde> for PolicyExpr {
     fn from(value: PolicyExprSerde) -> Self {
         match value {
             PolicyExprSerde::Cmp { column, op, value } => PolicyExpr::Cmp { column, op, value },
+            PolicyExprSerde::SessionCmp { path, op, value } => {
+                PolicyExpr::SessionCmp { path, op, value }
+            }
             PolicyExprSerde::IsNull { column } => PolicyExpr::IsNull { column },
+            PolicyExprSerde::SessionIsNull { path } => PolicyExpr::SessionIsNull { path },
             PolicyExprSerde::IsNotNull { column } => PolicyExpr::IsNotNull { column },
+            PolicyExprSerde::SessionIsNotNull { path } => PolicyExpr::SessionIsNotNull { path },
             PolicyExprSerde::Contains { column, value } => PolicyExpr::Contains { column, value },
+            PolicyExprSerde::SessionContains { path, value } => {
+                PolicyExpr::SessionContains { path, value }
+            }
             PolicyExprSerde::In {
                 column,
                 session_path,
@@ -264,6 +318,9 @@ impl From<PolicyExprSerde> for PolicyExpr {
                 session_path,
             },
             PolicyExprSerde::InList { column, values } => PolicyExpr::InList { column, values },
+            PolicyExprSerde::SessionInList { path, values } => {
+                PolicyExpr::SessionInList { path, values }
+            }
             PolicyExprSerde::Exists { table, condition } => PolicyExpr::Exists {
                 table,
                 condition: Box::new((*condition).into()),
@@ -306,9 +363,17 @@ impl From<PolicyExpr> for PolicyExprSerde {
     fn from(value: PolicyExpr) -> Self {
         match value {
             PolicyExpr::Cmp { column, op, value } => PolicyExprSerde::Cmp { column, op, value },
+            PolicyExpr::SessionCmp { path, op, value } => {
+                PolicyExprSerde::SessionCmp { path, op, value }
+            }
             PolicyExpr::IsNull { column } => PolicyExprSerde::IsNull { column },
+            PolicyExpr::SessionIsNull { path } => PolicyExprSerde::SessionIsNull { path },
             PolicyExpr::IsNotNull { column } => PolicyExprSerde::IsNotNull { column },
+            PolicyExpr::SessionIsNotNull { path } => PolicyExprSerde::SessionIsNotNull { path },
             PolicyExpr::Contains { column, value } => PolicyExprSerde::Contains { column, value },
+            PolicyExpr::SessionContains { path, value } => {
+                PolicyExprSerde::SessionContains { path, value }
+            }
             PolicyExpr::In {
                 column,
                 session_path,
@@ -317,6 +382,9 @@ impl From<PolicyExpr> for PolicyExprSerde {
                 session_path,
             },
             PolicyExpr::InList { column, values } => PolicyExprSerde::InList { column, values },
+            PolicyExpr::SessionInList { path, values } => {
+                PolicyExprSerde::SessionInList { path, values }
+            }
             PolicyExpr::Exists { table, condition } => PolicyExprSerde::Exists {
                 table,
                 condition: Box::new((*condition).into()),
@@ -513,18 +581,20 @@ where
 pub fn evaluate_with_context<F>(
     expr: &PolicyExpr,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     ctx: &mut EvalContext<F>,
 ) -> bool
 where
     F: FnMut(ObjectId) -> Option<Vec<u8>>,
 {
-    evaluate_recursive(expr, content, descriptor, ctx, 0)
+    evaluate_recursive(expr, content, provenance, descriptor, ctx, 0)
 }
 
 fn evaluate_recursive<F>(
     expr: &PolicyExpr,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     ctx: &mut EvalContext<F>,
     depth: usize,
@@ -541,48 +611,82 @@ where
         PolicyExpr::True => true,
         PolicyExpr::False => false,
 
-        PolicyExpr::Cmp { column, op, value } => {
-            evaluate_cmp(column, op, value, content, descriptor, ctx.session)
+        PolicyExpr::Cmp { column, op, value } => evaluate_cmp(
+            column,
+            op,
+            value,
+            content,
+            provenance,
+            descriptor,
+            ctx.session,
+        ),
+        PolicyExpr::SessionCmp { path, op, value } => {
+            evaluate_session_cmp(path, op, value, ctx.session)
         }
 
-        PolicyExpr::IsNull { column } => {
-            if let Some(col_index) = descriptor.column_index(column) {
-                column_is_null(descriptor, content, col_index).unwrap_or(false)
-            } else {
-                false
-            }
+        PolicyExpr::IsNull { column } => magic_column_value(column, provenance)
+            .map(|value| value.is_null())
+            .unwrap_or_else(|| {
+                if let Some(col_index) = descriptor.column_index(column) {
+                    column_is_null(descriptor, content, col_index).unwrap_or(false)
+                } else {
+                    false
+                }
+            }),
+        PolicyExpr::SessionIsNull { path } => {
+            matches!(resolve_session_value(path, ctx.session), Some(Value::Null))
         }
 
-        PolicyExpr::IsNotNull { column } => {
-            if let Some(col_index) = descriptor.column_index(column) {
-                !column_is_null(descriptor, content, col_index).unwrap_or(true)
-            } else {
-                false
-            }
+        PolicyExpr::IsNotNull { column } => magic_column_value(column, provenance)
+            .map(|value| !value.is_null())
+            .unwrap_or_else(|| {
+                if let Some(col_index) = descriptor.column_index(column) {
+                    !column_is_null(descriptor, content, col_index).unwrap_or(true)
+                } else {
+                    false
+                }
+            }),
+        PolicyExpr::SessionIsNotNull { path } => {
+            matches!(resolve_session_value(path, ctx.session), Some(value) if !value.is_null())
         }
 
         PolicyExpr::Contains { column, value } => {
-            evaluate_contains(column, value, content, descriptor, ctx.session)
+            evaluate_contains(column, value, content, provenance, descriptor, ctx.session)
+        }
+        PolicyExpr::SessionContains { path, value } => {
+            evaluate_session_contains(path, value, ctx.session)
         }
 
         PolicyExpr::In {
             column,
             session_path,
-        } => evaluate_in(column, session_path, content, descriptor, ctx.session),
+        } => evaluate_in(
+            column,
+            session_path,
+            content,
+            provenance,
+            descriptor,
+            ctx.session,
+        ),
 
         PolicyExpr::InList { column, values } => {
-            evaluate_in_list(column, values, content, descriptor, ctx.session)
+            evaluate_in_list(column, values, content, provenance, descriptor, ctx.session)
+        }
+        PolicyExpr::SessionInList { path, values } => {
+            evaluate_session_in_list(path, values, ctx.session)
         }
 
         PolicyExpr::And(exprs) => exprs
             .iter()
-            .all(|e| evaluate_recursive(e, content, descriptor, ctx, depth)),
+            .all(|e| evaluate_recursive(e, content, provenance, descriptor, ctx, depth)),
 
         PolicyExpr::Or(exprs) => exprs
             .iter()
-            .any(|e| evaluate_recursive(e, content, descriptor, ctx, depth)),
+            .any(|e| evaluate_recursive(e, content, provenance, descriptor, ctx, depth)),
 
-        PolicyExpr::Not(inner) => !evaluate_recursive(inner, content, descriptor, ctx, depth),
+        PolicyExpr::Not(inner) => {
+            !evaluate_recursive(inner, content, provenance, descriptor, ctx, depth)
+        }
 
         PolicyExpr::Exists { .. } => {
             // EXISTS is an internal representation, not directly used
@@ -598,7 +702,7 @@ where
             via_column,
             max_depth,
         } => evaluate_inherits(
-            *operation, via_column, *max_depth, content, descriptor, ctx, depth,
+            *operation, via_column, *max_depth, content, provenance, descriptor, ctx, depth,
         ),
         PolicyExpr::InheritsReferencing { .. } => {
             // Requires table/index context not available in EvalContext.
@@ -608,11 +712,13 @@ where
 }
 
 /// Evaluate INHERITS by loading the parent row and checking its policy.
+#[allow(clippy::too_many_arguments)]
 fn evaluate_inherits<F>(
     operation: Operation,
     via_column: &str,
     max_depth: Option<usize>,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     ctx: &mut EvalContext<F>,
     depth: usize,
@@ -687,6 +793,7 @@ where
     evaluate_recursive(
         parent_policy,
         &parent_content,
+        provenance,
         &parent_schema.columns,
         ctx,
         depth + 1,
@@ -698,15 +805,17 @@ where
 pub fn evaluate_policy_expr(
     expr: &PolicyExpr,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
 ) -> bool {
-    evaluate_expr_simple(expr, content, descriptor, session, 0)
+    evaluate_expr_simple(expr, content, provenance, descriptor, session, 0)
 }
 
 fn evaluate_expr_simple(
     expr: &PolicyExpr,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
     depth: usize,
@@ -719,33 +828,65 @@ fn evaluate_expr_simple(
         PolicyExpr::True => true,
         PolicyExpr::False => false,
         PolicyExpr::Cmp { column, op, value } => {
-            evaluate_cmp(column, op, value, content, descriptor, session)
+            evaluate_cmp(column, op, value, content, provenance, descriptor, session)
         }
-        PolicyExpr::IsNull { column } => descriptor
-            .column_index(column)
-            .map(|i| column_is_null(descriptor, content, i).unwrap_or(false))
-            .unwrap_or(false),
-        PolicyExpr::IsNotNull { column } => descriptor
-            .column_index(column)
-            .map(|i| !column_is_null(descriptor, content, i).unwrap_or(true))
-            .unwrap_or(false),
+        PolicyExpr::SessionCmp { path, op, value } => {
+            evaluate_session_cmp(path, op, value, session)
+        }
+        PolicyExpr::IsNull { column } => magic_column_value(column, provenance)
+            .map(|value| value.is_null())
+            .unwrap_or_else(|| {
+                descriptor
+                    .column_index(column)
+                    .map(|i| column_is_null(descriptor, content, i).unwrap_or(false))
+                    .unwrap_or(false)
+            }),
+        PolicyExpr::SessionIsNull { path } => {
+            matches!(resolve_session_value(path, session), Some(Value::Null))
+        }
+        PolicyExpr::IsNotNull { column } => magic_column_value(column, provenance)
+            .map(|value| !value.is_null())
+            .unwrap_or_else(|| {
+                descriptor
+                    .column_index(column)
+                    .map(|i| !column_is_null(descriptor, content, i).unwrap_or(true))
+                    .unwrap_or(false)
+            }),
+        PolicyExpr::SessionIsNotNull { path } => {
+            matches!(resolve_session_value(path, session), Some(value) if !value.is_null())
+        }
         PolicyExpr::Contains { column, value } => {
-            evaluate_contains(column, value, content, descriptor, session)
+            evaluate_contains(column, value, content, provenance, descriptor, session)
+        }
+        PolicyExpr::SessionContains { path, value } => {
+            evaluate_session_contains(path, value, session)
         }
         PolicyExpr::In {
             column,
             session_path,
-        } => evaluate_in(column, session_path, content, descriptor, session),
+        } => evaluate_in(
+            column,
+            session_path,
+            content,
+            provenance,
+            descriptor,
+            session,
+        ),
         PolicyExpr::InList { column, values } => {
-            evaluate_in_list(column, values, content, descriptor, session)
+            evaluate_in_list(column, values, content, provenance, descriptor, session)
+        }
+        PolicyExpr::SessionInList { path, values } => {
+            evaluate_session_in_list(path, values, session)
         }
         PolicyExpr::And(exprs) => exprs
             .iter()
-            .all(|e| evaluate_expr_simple(e, content, descriptor, session, depth)),
+            .all(|e| evaluate_expr_simple(e, content, provenance, descriptor, session, depth)),
         PolicyExpr::Or(exprs) => exprs
             .iter()
-            .any(|e| evaluate_expr_simple(e, content, descriptor, session, depth)),
-        PolicyExpr::Not(inner) => !evaluate_expr_simple(inner, content, descriptor, session, depth),
+            .any(|e| evaluate_expr_simple(e, content, provenance, descriptor, session, depth)),
+        PolicyExpr::Not(inner) => {
+            !evaluate_expr_simple(inner, content, provenance, descriptor, session, depth)
+        }
         PolicyExpr::Exists { .. } => true,
         PolicyExpr::ExistsRel { .. } => true,
         PolicyExpr::Inherits { .. } => true, // No row loader - permissive
@@ -757,11 +898,50 @@ fn evaluate_expr_simple(
 pub fn evaluate_expr_recursive(
     expr: &PolicyExpr,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
     depth: usize,
 ) -> bool {
-    evaluate_expr_simple(expr, content, descriptor, session, depth)
+    evaluate_expr_simple(expr, content, provenance, descriptor, session, depth)
+}
+
+fn provenance_value(kind: MagicColumnKind, provenance: &RowProvenance) -> Value {
+    match kind {
+        MagicColumnKind::CreatedBy => Value::Text(provenance.created_by.clone()),
+        MagicColumnKind::CreatedAt => Value::Timestamp(provenance.created_at),
+        MagicColumnKind::UpdatedBy => Value::Text(provenance.updated_by.clone()),
+        MagicColumnKind::UpdatedAt => Value::Timestamp(provenance.updated_at),
+        MagicColumnKind::CanRead | MagicColumnKind::CanEdit | MagicColumnKind::CanDelete => {
+            Value::Null
+        }
+    }
+}
+
+fn magic_column_value(column: &str, provenance: &RowProvenance) -> Option<Value> {
+    match magic_column_kind(column)? {
+        MagicColumnKind::CreatedBy
+        | MagicColumnKind::CreatedAt
+        | MagicColumnKind::UpdatedBy
+        | MagicColumnKind::UpdatedAt => {
+            Some(provenance_value(magic_column_kind(column)?, provenance))
+        }
+        MagicColumnKind::CanRead | MagicColumnKind::CanEdit | MagicColumnKind::CanDelete => None,
+    }
+}
+
+fn decode_policy_column_value(
+    column: &str,
+    provenance: &RowProvenance,
+    content: &[u8],
+    descriptor: &RowDescriptor,
+) -> Option<Value> {
+    if let Some(value) = magic_column_value(column, provenance) {
+        return Some(value);
+    }
+
+    let col_index = descriptor.column_index(column)?;
+    decode_column(descriptor, content, col_index).ok()
 }
 
 /// Evaluate a comparison expression. Public for use by PolicyFilterNode.
@@ -770,9 +950,17 @@ pub fn evaluate_cmp(
     op: &CmpOp,
     value: &PolicyValue,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
 ) -> bool {
+    if let Some(left) = magic_column_value(column, provenance) {
+        let Some(right) = resolve_policy_value(value, session) else {
+            return false;
+        };
+        return compare_values(&left, op, &right);
+    }
+
     let col_index = match descriptor.column_index(column) {
         Some(idx) => idx,
         None => return false,
@@ -783,6 +971,20 @@ pub fn evaluate_cmp(
         Some(v) => v,
         None => return false,
     };
+
+    if cmp_value.is_null() {
+        return match column_is_null(descriptor, content, col_index) {
+            Ok(is_null) => match op {
+                CmpOp::Eq => is_null,
+                CmpOp::Ne => !is_null,
+                CmpOp::Lt => false,
+                CmpOp::Le => is_null,
+                CmpOp::Gt => !is_null,
+                CmpOp::Ge => true,
+            },
+            Err(_) => false,
+        };
+    }
 
     // Encode the comparison value to bytes
     let encoded = encode_value(&cmp_value);
@@ -821,6 +1023,58 @@ pub fn evaluate_cmp(
                 Ok(std::cmp::Ordering::Greater) | Ok(std::cmp::Ordering::Equal)
             )
         }
+    }
+}
+
+fn evaluate_session_cmp(path: &[String], op: &CmpOp, value: &Value, session: &Session) -> bool {
+    let Some(session_value) = resolve_session_value(path, session) else {
+        return false;
+    };
+    compare_values(&session_value, op, value)
+}
+
+fn compare_values(left: &Value, op: &CmpOp, right: &Value) -> bool {
+    match op {
+        CmpOp::Eq => left == right,
+        CmpOp::Ne => left != right,
+        CmpOp::Lt => compare_values_for_ordering(left, right)
+            .map(|ordering| ordering == std::cmp::Ordering::Less)
+            .unwrap_or(false),
+        CmpOp::Le => compare_values_for_ordering(left, right)
+            .map(|ordering| {
+                matches!(
+                    ordering,
+                    std::cmp::Ordering::Less | std::cmp::Ordering::Equal
+                )
+            })
+            .unwrap_or(false),
+        CmpOp::Gt => compare_values_for_ordering(left, right)
+            .map(|ordering| ordering == std::cmp::Ordering::Greater)
+            .unwrap_or(false),
+        CmpOp::Ge => compare_values_for_ordering(left, right)
+            .map(|ordering| {
+                matches!(
+                    ordering,
+                    std::cmp::Ordering::Greater | std::cmp::Ordering::Equal
+                )
+            })
+            .unwrap_or(false),
+    }
+}
+
+fn compare_values_for_ordering(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+    match (left, right) {
+        (Value::Integer(a), Value::Integer(b)) => Some(a.cmp(b)),
+        (Value::BigInt(a), Value::BigInt(b)) => Some(a.cmp(b)),
+        (Value::Double(a), Value::Double(b)) => Some(a.total_cmp(b)),
+        (Value::Boolean(a), Value::Boolean(b)) => Some(a.cmp(b)),
+        (Value::Text(a), Value::Text(b)) => Some(a.cmp(b)),
+        (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
+        (Value::Uuid(a), Value::Uuid(b)) => Some(a.cmp(b)),
+        (Value::Null, Value::Null) => Some(std::cmp::Ordering::Equal),
+        (Value::Null, _) => Some(std::cmp::Ordering::Less),
+        (_, Value::Null) => Some(std::cmp::Ordering::Greater),
+        _ => None,
     }
 }
 
@@ -890,12 +1144,23 @@ pub fn bind_outer_row_refs(
                 value: bound_value,
             })
         }
+        PolicyExpr::SessionCmp { path, op, value } => Some(PolicyExpr::SessionCmp {
+            path: path.clone(),
+            op: op.clone(),
+            value: value.clone(),
+        }),
         PolicyExpr::IsNull { column } => Some(PolicyExpr::IsNull {
             column: column.clone(),
         }),
+        PolicyExpr::SessionIsNull { path } => {
+            Some(PolicyExpr::SessionIsNull { path: path.clone() })
+        }
         PolicyExpr::IsNotNull { column } => Some(PolicyExpr::IsNotNull {
             column: column.clone(),
         }),
+        PolicyExpr::SessionIsNotNull { path } => {
+            Some(PolicyExpr::SessionIsNotNull { path: path.clone() })
+        }
         PolicyExpr::Contains { column, value } => {
             let bound_value = match value {
                 PolicyValue::Literal(v) => PolicyValue::Literal(v.clone()),
@@ -918,6 +1183,10 @@ pub fn bind_outer_row_refs(
                 value: bound_value,
             })
         }
+        PolicyExpr::SessionContains { path, value } => Some(PolicyExpr::SessionContains {
+            path: path.clone(),
+            value: value.clone(),
+        }),
         PolicyExpr::In {
             column,
             session_path,
@@ -955,6 +1224,10 @@ pub fn bind_outer_row_refs(
                 values: bound_values,
             })
         }
+        PolicyExpr::SessionInList { path, values } => Some(PolicyExpr::SessionInList {
+            path: path.clone(),
+            values: values.clone(),
+        }),
         PolicyExpr::Exists { table, condition } => Some(PolicyExpr::Exists {
             table: table.clone(),
             // Keep nested EXISTS conditions unbound at this level so they can be
@@ -1273,17 +1546,13 @@ pub fn evaluate_in(
     column: &str,
     session_path: &[String],
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
 ) -> bool {
-    let col_index = match descriptor.column_index(column) {
-        Some(idx) => idx,
-        None => return false,
-    };
-
     // Get the column value
-    let col_value = match decode_column(descriptor, content, col_index) {
-        Ok(v) if !matches!(v, Value::Null) => v,
+    let col_value = match decode_policy_column_value(column, provenance, content, descriptor) {
+        Some(v) if !matches!(v, Value::Null) => v,
         _ => return false,
     };
 
@@ -1299,7 +1568,7 @@ pub fn evaluate_in(
         Value::Integer(i) => session_array.iter().any(|v| v.as_i64() == Some(*i as i64)),
         Value::BigInt(i) => session_array.iter().any(|v| v.as_i64() == Some(*i)),
         Value::Uuid(id) => {
-            let id_str = format!("{:?}", id);
+            let id_str = id.to_string();
             session_array.iter().any(|v| v.as_str() == Some(&id_str))
         }
         _ => false,
@@ -1311,22 +1580,18 @@ pub fn evaluate_contains(
     column: &str,
     value: &PolicyValue,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
 ) -> bool {
-    let col_index = match descriptor.column_index(column) {
-        Some(idx) => idx,
-        None => return false,
-    };
-
     let right_value = match resolve_policy_value(value, session) {
         Some(v) => v,
         None => return false,
     };
 
-    let column_value = match decode_column(descriptor, content, col_index) {
-        Ok(v) => v,
-        Err(_) => return false,
+    let column_value = match decode_policy_column_value(column, provenance, content, descriptor) {
+        Some(v) => v,
+        None => return false,
     };
 
     match column_value {
@@ -1344,6 +1609,7 @@ pub fn evaluate_in_list(
     column: &str,
     values: &[PolicyValue],
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
 ) -> bool {
@@ -1351,13 +1617,8 @@ pub fn evaluate_in_list(
         return false;
     }
 
-    let col_index = match descriptor.column_index(column) {
-        Some(idx) => idx,
-        None => return false,
-    };
-
-    let column_value = match decode_column(descriptor, content, col_index) {
-        Ok(v) if !matches!(v, Value::Null) => v,
+    let column_value = match decode_policy_column_value(column, provenance, content, descriptor) {
+        Some(v) if !matches!(v, Value::Null) => v,
         _ => return false,
     };
 
@@ -1368,19 +1629,34 @@ pub fn evaluate_in_list(
     })
 }
 
+fn evaluate_session_in_list(path: &[String], values: &[Value], session: &Session) -> bool {
+    let Some(session_value) = resolve_session_value(path, session) else {
+        return false;
+    };
+    if matches!(session_value, Value::Null) {
+        return false;
+    }
+
+    values.iter().any(|candidate| candidate == &session_value)
+}
+
 /// Resolve a session path to a Value. Public for use by PolicyFilterNode.
 pub fn resolve_session_value(path: &[String], session: &Session) -> Option<Value> {
     if path.is_empty() {
         return None;
     }
 
-    if path[0] == "user_id" && path.len() == 1 {
+    if is_user_id_path(path) {
         return Some(Value::Text(session.user_id.clone()));
     }
 
     // For claims paths, convert JSON to Value
     let json_value = session.get_path(path)?;
     json_to_value(json_value)
+}
+
+fn is_user_id_path(path: &[String]) -> bool {
+    matches!(path, [segment] if segment == "user_id" || segment == "userId")
 }
 
 fn json_to_value(json: &serde_json::Value) -> Option<Value> {
@@ -1400,6 +1676,26 @@ fn json_to_value(json: &serde_json::Value) -> Option<Value> {
         serde_json::Value::Bool(b) => Some(Value::Boolean(*b)),
         serde_json::Value::Null => Some(Value::Null),
         _ => None,
+    }
+}
+
+fn evaluate_session_contains(path: &[String], value: &Value, session: &Session) -> bool {
+    if let Some(text) = session.get_string(path) {
+        return matches!(value, Value::Text(substr) if text.contains(substr));
+    }
+
+    let Some(json_value) = session.get_path(path) else {
+        return false;
+    };
+
+    match json_value {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|entry| json_to_value(entry).is_some_and(|candidate| candidate == *value)),
+        serde_json::Value::String(text) => {
+            matches!(value, Value::Text(substr) if text.contains(substr))
+        }
+        _ => false,
     }
 }
 
@@ -1481,15 +1777,17 @@ impl SimpleEvalResult {
 pub fn evaluate_simple_parts(
     expr: &PolicyExpr,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
 ) -> SimpleEvalResult {
-    evaluate_simple_recursive(expr, content, descriptor, session, 0)
+    evaluate_simple_recursive(expr, content, provenance, descriptor, session, 0)
 }
 
 fn evaluate_simple_recursive(
     expr: &PolicyExpr,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
     depth: usize,
@@ -1504,7 +1802,14 @@ fn evaluate_simple_recursive(
         PolicyExpr::False => SimpleEvalResult::fail(),
 
         PolicyExpr::Cmp { column, op, value } => {
-            if evaluate_cmp(column, op, value, content, descriptor, session) {
+            if evaluate_cmp(column, op, value, content, provenance, descriptor, session) {
+                SimpleEvalResult::pass()
+            } else {
+                SimpleEvalResult::fail()
+            }
+        }
+        PolicyExpr::SessionCmp { path, op, value } => {
+            if evaluate_session_cmp(path, op, value, session) {
                 SimpleEvalResult::pass()
             } else {
                 SimpleEvalResult::fail()
@@ -1512,11 +1817,22 @@ fn evaluate_simple_recursive(
         }
 
         PolicyExpr::IsNull { column } => {
-            let result = descriptor
-                .column_index(column)
-                .map(|i| column_is_null(descriptor, content, i).unwrap_or(false))
-                .unwrap_or(false);
+            let result = magic_column_value(column, provenance)
+                .map(|value| value.is_null())
+                .unwrap_or_else(|| {
+                    descriptor
+                        .column_index(column)
+                        .map(|i| column_is_null(descriptor, content, i).unwrap_or(false))
+                        .unwrap_or(false)
+                });
             if result {
+                SimpleEvalResult::pass()
+            } else {
+                SimpleEvalResult::fail()
+            }
+        }
+        PolicyExpr::SessionIsNull { path } => {
+            if matches!(resolve_session_value(path, session), Some(Value::Null)) {
                 SimpleEvalResult::pass()
             } else {
                 SimpleEvalResult::fail()
@@ -1524,11 +1840,22 @@ fn evaluate_simple_recursive(
         }
 
         PolicyExpr::IsNotNull { column } => {
-            let result = descriptor
-                .column_index(column)
-                .map(|i| !column_is_null(descriptor, content, i).unwrap_or(true))
-                .unwrap_or(false);
+            let result = magic_column_value(column, provenance)
+                .map(|value| !value.is_null())
+                .unwrap_or_else(|| {
+                    descriptor
+                        .column_index(column)
+                        .map(|i| !column_is_null(descriptor, content, i).unwrap_or(true))
+                        .unwrap_or(false)
+                });
             if result {
+                SimpleEvalResult::pass()
+            } else {
+                SimpleEvalResult::fail()
+            }
+        }
+        PolicyExpr::SessionIsNotNull { path } => {
+            if matches!(resolve_session_value(path, session), Some(value) if !value.is_null()) {
                 SimpleEvalResult::pass()
             } else {
                 SimpleEvalResult::fail()
@@ -1536,7 +1863,14 @@ fn evaluate_simple_recursive(
         }
 
         PolicyExpr::Contains { column, value } => {
-            if evaluate_contains(column, value, content, descriptor, session) {
+            if evaluate_contains(column, value, content, provenance, descriptor, session) {
+                SimpleEvalResult::pass()
+            } else {
+                SimpleEvalResult::fail()
+            }
+        }
+        PolicyExpr::SessionContains { path, value } => {
+            if evaluate_session_contains(path, value, session) {
                 SimpleEvalResult::pass()
             } else {
                 SimpleEvalResult::fail()
@@ -1547,7 +1881,21 @@ fn evaluate_simple_recursive(
             column,
             session_path,
         } => {
-            if evaluate_in(column, session_path, content, descriptor, session) {
+            if evaluate_in(
+                column,
+                session_path,
+                content,
+                provenance,
+                descriptor,
+                session,
+            ) {
+                SimpleEvalResult::pass()
+            } else {
+                SimpleEvalResult::fail()
+            }
+        }
+        PolicyExpr::SessionInList { path, values } => {
+            if evaluate_session_in_list(path, values, session) {
                 SimpleEvalResult::pass()
             } else {
                 SimpleEvalResult::fail()
@@ -1555,7 +1903,7 @@ fn evaluate_simple_recursive(
         }
 
         PolicyExpr::InList { column, values } => {
-            if evaluate_in_list(column, values, content, descriptor, session) {
+            if evaluate_in_list(column, values, content, provenance, descriptor, session) {
                 SimpleEvalResult::pass()
             } else {
                 SimpleEvalResult::fail()
@@ -1565,7 +1913,8 @@ fn evaluate_simple_recursive(
         PolicyExpr::And(exprs) => {
             let mut all_complex = Vec::new();
             for e in exprs {
-                let result = evaluate_simple_recursive(e, content, descriptor, session, depth);
+                let result =
+                    evaluate_simple_recursive(e, content, provenance, descriptor, session, depth);
                 if !result.passed {
                     return SimpleEvalResult::fail();
                 }
@@ -1586,7 +1935,8 @@ fn evaluate_simple_recursive(
             let mut all_complex = Vec::new();
 
             for e in exprs {
-                let result = evaluate_simple_recursive(e, content, descriptor, session, depth);
+                let result =
+                    evaluate_simple_recursive(e, content, provenance, descriptor, session, depth);
                 if result.passed && result.complex_clauses.is_empty() {
                     // Simple pass - entire OR passes
                     has_simple_pass = true;
@@ -1613,7 +1963,8 @@ fn evaluate_simple_recursive(
         }
 
         PolicyExpr::Not(inner) => {
-            let result = evaluate_simple_recursive(inner, content, descriptor, session, depth);
+            let result =
+                evaluate_simple_recursive(inner, content, provenance, descriptor, session, depth);
             if !result.complex_clauses.is_empty() {
                 // NOT of complex clause is complex - can't evaluate simply
                 // Return as needing graph evaluation
@@ -1675,6 +2026,29 @@ fn evaluate_simple_recursive(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn test_row_provenance() -> RowProvenance {
+        RowProvenance::for_insert("jazz:test", 0)
+    }
+
+    fn evaluate_policy_expr(
+        expr: &PolicyExpr,
+        content: &[u8],
+        descriptor: &RowDescriptor,
+        session: &Session,
+    ) -> bool {
+        super::evaluate_policy_expr(expr, content, &test_row_provenance(), descriptor, session)
+    }
+
+    fn evaluate_simple_parts(
+        expr: &PolicyExpr,
+        content: &[u8],
+        descriptor: &RowDescriptor,
+        session: &Session,
+    ) -> SimpleEvalResult {
+        super::evaluate_simple_parts(expr, content, &test_row_provenance(), descriptor, session)
+    }
 
     #[test]
     fn test_policy_expr_builders() {
@@ -2000,6 +2374,28 @@ mod tests {
         .unwrap()
     }
 
+    fn nullable_descriptor() -> RowDescriptor {
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("owner_id", ColumnType::Text),
+            ColumnDescriptor::new("deleted_at", ColumnType::Text).nullable(),
+        ])
+    }
+
+    fn make_nullable_row_content(owner: &str, deleted_at: Option<&str>) -> Vec<u8> {
+        let desc = nullable_descriptor();
+        encode_row(
+            &desc,
+            &[
+                Value::Text(owner.into()),
+                match deleted_at {
+                    Some(value) => Value::Text(value.into()),
+                    None => Value::Null,
+                },
+            ],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn test_simple_parts_true_false() {
         let desc = test_descriptor();
@@ -2030,6 +2426,161 @@ mod tests {
         let content2 = make_row_content("user2", "eng", "active");
         let result = evaluate_simple_parts(&expr, &content2, &desc, &session);
         assert!(!result.passed);
+    }
+
+    #[test]
+    fn test_row_null_literal_comparisons_use_value_level_semantics() {
+        let desc = nullable_descriptor();
+        let session = Session::new("user1");
+        let null_content = make_nullable_row_content("user1", None);
+        let non_null_content = make_nullable_row_content("user1", Some("2026-03-30T12:00:00Z"));
+
+        let eq_null = PolicyExpr::eq_literal("deleted_at", Value::Null);
+        let eq_simple = evaluate_simple_parts(&eq_null, &null_content, &desc, &session);
+        assert!(eq_simple.passed);
+        assert!(eq_simple.complex_clauses.is_empty());
+        assert!(evaluate_policy_expr(
+            &eq_null,
+            &null_content,
+            &desc,
+            &session
+        ));
+        assert!(!evaluate_policy_expr(
+            &eq_null,
+            &non_null_content,
+            &desc,
+            &session,
+        ));
+
+        let ne_null = PolicyExpr::Cmp {
+            column: "deleted_at".into(),
+            op: CmpOp::Ne,
+            value: PolicyValue::Literal(Value::Null),
+        };
+        assert!(!evaluate_policy_expr(
+            &ne_null,
+            &null_content,
+            &desc,
+            &session
+        ));
+        assert!(evaluate_policy_expr(
+            &ne_null,
+            &non_null_content,
+            &desc,
+            &session,
+        ));
+
+        let lt_null = PolicyExpr::Cmp {
+            column: "deleted_at".into(),
+            op: CmpOp::Lt,
+            value: PolicyValue::Literal(Value::Null),
+        };
+        assert!(!evaluate_policy_expr(
+            &lt_null,
+            &null_content,
+            &desc,
+            &session
+        ));
+        assert!(!evaluate_policy_expr(
+            &lt_null,
+            &non_null_content,
+            &desc,
+            &session,
+        ));
+
+        let le_null = PolicyExpr::Cmp {
+            column: "deleted_at".into(),
+            op: CmpOp::Le,
+            value: PolicyValue::Literal(Value::Null),
+        };
+        assert!(evaluate_policy_expr(
+            &le_null,
+            &null_content,
+            &desc,
+            &session
+        ));
+        assert!(!evaluate_policy_expr(
+            &le_null,
+            &non_null_content,
+            &desc,
+            &session,
+        ));
+
+        let gt_null = PolicyExpr::Cmp {
+            column: "deleted_at".into(),
+            op: CmpOp::Gt,
+            value: PolicyValue::Literal(Value::Null),
+        };
+        assert!(!evaluate_policy_expr(
+            &gt_null,
+            &null_content,
+            &desc,
+            &session
+        ));
+        assert!(evaluate_policy_expr(
+            &gt_null,
+            &non_null_content,
+            &desc,
+            &session,
+        ));
+
+        let ge_null = PolicyExpr::Cmp {
+            column: "deleted_at".into(),
+            op: CmpOp::Ge,
+            value: PolicyValue::Literal(Value::Null),
+        };
+        assert!(evaluate_policy_expr(
+            &ge_null,
+            &null_content,
+            &desc,
+            &session
+        ));
+        assert!(evaluate_policy_expr(
+            &ge_null,
+            &non_null_content,
+            &desc,
+            &session,
+        ));
+    }
+
+    #[test]
+    fn test_row_explicit_null_checks() {
+        let desc = nullable_descriptor();
+        let session = Session::new("user1");
+        let null_content = make_nullable_row_content("user1", None);
+        let non_null_content = make_nullable_row_content("user1", Some("2026-03-30T12:00:00Z"));
+
+        let is_null = PolicyExpr::IsNull {
+            column: "deleted_at".into(),
+        };
+        assert!(evaluate_policy_expr(
+            &is_null,
+            &null_content,
+            &desc,
+            &session
+        ));
+        assert!(!evaluate_policy_expr(
+            &is_null,
+            &non_null_content,
+            &desc,
+            &session,
+        ));
+
+        let is_not_null = PolicyExpr::IsNotNull {
+            column: "deleted_at".into(),
+        };
+        assert!(!evaluate_policy_expr(
+            &is_not_null,
+            &null_content,
+            &desc,
+            &session,
+        ));
+        assert!(evaluate_policy_expr(
+            &is_not_null,
+            &non_null_content,
+            &desc,
+            &session,
+        ));
     }
 
     #[test]
@@ -2107,6 +2658,156 @@ mod tests {
         };
         let result = evaluate_simple_parts(&empty_in_list, &content, &desc, &session);
         assert!(!result.passed);
+    }
+
+    #[test]
+    fn test_session_left_scalar_comparisons_and_identity_aliases() {
+        let desc = test_descriptor();
+        let content = make_row_content("user1", "eng", "active");
+        let session = Session::new("user1").with_claims(json!({
+            "role": "manager",
+            "login_count": 7,
+            "beta": true,
+        }));
+
+        assert!(evaluate_policy_expr(
+            &PolicyExpr::SessionCmp {
+                path: vec!["claims".into(), "role".into()],
+                op: CmpOp::Eq,
+                value: Value::Text("manager".into()),
+            },
+            &content,
+            &desc,
+            &session,
+        ));
+        assert!(evaluate_policy_expr(
+            &PolicyExpr::SessionCmp {
+                path: vec!["claims".into(), "login_count".into()],
+                op: CmpOp::Gt,
+                value: Value::Integer(3),
+            },
+            &content,
+            &desc,
+            &session,
+        ));
+        assert!(evaluate_policy_expr(
+            &PolicyExpr::SessionCmp {
+                path: vec!["claims".into(), "beta".into()],
+                op: CmpOp::Eq,
+                value: Value::Boolean(true),
+            },
+            &content,
+            &desc,
+            &session,
+        ));
+        assert!(evaluate_policy_expr(
+            &PolicyExpr::SessionCmp {
+                path: vec!["user_id".into()],
+                op: CmpOp::Eq,
+                value: Value::Text("user1".into()),
+            },
+            &content,
+            &desc,
+            &session,
+        ));
+        assert!(evaluate_policy_expr(
+            &PolicyExpr::SessionCmp {
+                path: vec!["userId".into()],
+                op: CmpOp::Eq,
+                value: Value::Text("user1".into()),
+            },
+            &content,
+            &desc,
+            &session,
+        ));
+        assert!(!evaluate_policy_expr(
+            &PolicyExpr::SessionCmp {
+                path: vec!["claims".into(), "role".into()],
+                op: CmpOp::Eq,
+                value: Value::Text("viewer".into()),
+            },
+            &content,
+            &desc,
+            &session,
+        ));
+    }
+
+    #[test]
+    fn test_session_left_in_list_contains_and_null_semantics() {
+        let desc = test_descriptor();
+        let content = make_row_content("user1", "eng", "active");
+        let session = Session::new("user1").with_claims(json!({
+            "plan": "pro",
+            "teamIds": ["team_a", "team_b"],
+            "bio": "manager for the platform team",
+            "deleted_at": null,
+        }));
+
+        assert!(evaluate_policy_expr(
+            &PolicyExpr::SessionInList {
+                path: vec!["claims".into(), "plan".into()],
+                values: vec![
+                    Value::Text("free".into()),
+                    Value::Text("pro".into()),
+                    Value::Text("enterprise".into()),
+                ],
+            },
+            &content,
+            &desc,
+            &session,
+        ));
+        assert!(evaluate_policy_expr(
+            &PolicyExpr::SessionContains {
+                path: vec!["claims".into(), "teamIds".into()],
+                value: Value::Text("team_a".into()),
+            },
+            &content,
+            &desc,
+            &session,
+        ));
+        assert!(evaluate_policy_expr(
+            &PolicyExpr::SessionContains {
+                path: vec!["claims".into(), "bio".into()],
+                value: Value::Text("platform".into()),
+            },
+            &content,
+            &desc,
+            &session,
+        ));
+        assert!(evaluate_policy_expr(
+            &PolicyExpr::SessionIsNull {
+                path: vec!["claims".into(), "deleted_at".into()],
+            },
+            &content,
+            &desc,
+            &session,
+        ));
+        assert!(!evaluate_policy_expr(
+            &PolicyExpr::SessionInList {
+                path: vec!["claims".into(), "deleted_at".into()],
+                values: vec![Value::Null, Value::Text("fallback".into())],
+            },
+            &content,
+            &desc,
+            &session,
+        ));
+        assert!(!evaluate_policy_expr(
+            &PolicyExpr::SessionIsNull {
+                path: vec!["claims".into(), "missing".into()],
+            },
+            &content,
+            &desc,
+            &session,
+        ));
+        assert!(!evaluate_policy_expr(
+            &PolicyExpr::SessionContains {
+                path: vec!["claims".into(), "teamIds".into()],
+                value: Value::Text("team_c".into()),
+            },
+            &content,
+            &desc,
+            &session,
+        ));
     }
 
     #[test]
@@ -2194,6 +2895,36 @@ mod tests {
         ]);
         let result = evaluate_simple_parts(&expr, &content, &desc, &session);
         assert!(!result.passed);
+    }
+
+    #[test]
+    fn test_simple_parts_treats_session_left_predicates_as_simple_clauses() {
+        let desc = test_descriptor();
+        let content = make_row_content("user1", "eng", "active");
+        let session = Session::new("user1").with_claims(json!({
+            "role": "manager",
+        }));
+
+        let expr = PolicyExpr::And(vec![
+            PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
+            PolicyExpr::SessionCmp {
+                path: vec!["claims".into(), "role".into()],
+                op: CmpOp::Eq,
+                value: Value::Text("manager".into()),
+            },
+        ]);
+        let result = evaluate_simple_parts(&expr, &content, &desc, &session);
+        assert!(result.passed);
+        assert!(result.complex_clauses.is_empty());
+
+        let denied = evaluate_simple_parts(
+            &expr,
+            &make_row_content("user2", "eng", "active"),
+            &desc,
+            &session,
+        );
+        assert!(!denied.passed);
+        assert!(denied.complex_clauses.is_empty());
     }
 
     #[test]

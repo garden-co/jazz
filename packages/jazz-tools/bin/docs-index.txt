@@ -14,11 +14,6 @@ Browser clients default to anonymous local auth when no JWT/backend auth is conf
 On first load, Jazz auto-generates a device token and persists it in `localStorage`.
 
     ```tsx
-const anonymousAuthClient = createJazzClient({
-  appId: "my-app",
-  env: "dev",
-  userBranch: "main",
-});
 
   return (
 
@@ -73,11 +68,6 @@ const client = createJazzClient({
 If you want to force a specific device token, pass `localAuthToken` as an explicit override:
 
     ```tsx
-const anonymousAuthWithTokenClient = createJazzClient({
-  appId: "my-app",
-  localAuthMode: "anonymous",
-  localAuthToken: "device-token-123",
-});
 
   return (
 
@@ -138,12 +128,6 @@ When you want to test multi-user flows locally, switch to `demo` profiles and ex
     ```tsx
 const demoAuthAppId = "my-app";
 const demoAuthActive = getActiveSyntheticAuth(demoAuthAppId, { defaultMode: "demo" });
-const demoAuthClient = createJazzClient({
-  appId: demoAuthAppId,
-  serverUrl: "http://127.0.0.1:4200",
-  localAuthMode: demoAuthActive.localAuthMode,
-  localAuthToken: demoAuthActive.localAuthToken,
-});
 
   return (
     <>
@@ -242,15 +226,6 @@ Use `useLinkExternalIdentity` right after sign-in to preserve anon/demo-created 
 const externalAuthAppId = "my-app";
 const externalAuthServerUrl = "http://127.0.0.1:4200";
 const externalAuthProviderJwt = "<provider-jwt>";
-const externalAuthLocalClient = createJazzClient({
-  appId: externalAuthAppId,
-  serverUrl: externalAuthServerUrl,
-});
-const externalAuthJwtClient = createJazzClient({
-  appId: externalAuthAppId,
-  serverUrl: externalAuthServerUrl,
-  jwtToken: externalAuthProviderJwt,
-});
 
   const [hasJwt, setHasJwt] = useState(false);
   const linkExternalIdentity = useLinkExternalIdentity({
@@ -372,6 +347,122 @@ Use `JazzClient.linkExternalIdentity(...)` directly:
 
 After linking, external JWT sessions resolve to the same principal.
 
+## Use the Current Session in Client Code
+
+When you want to attach rows to the current user, or fetch only the rows relevant to that
+user, read the resolved session in your client and derive a user id from it.
+
+### 1. Get the Session and User ID
+
+    ```tsx
+  const session = useSession();
+```
+    ```tsx
+  const sessionUserId = session?.user_id ?? null;
+```
+
+    ```vue
+const session = useSession();
+```
+    ```vue
+const sessionUserId = session?.user_id ?? null;
+```
+
+    ```svelte
+	const session = getSession();
+```
+    ```svelte
+	const sessionUserId = $derived(session?.user_id ?? null);
+```
+
+    ```ts
+  const session = await resolveClientSession(config);
+```
+    ```ts
+  const sessionUserId = session?.user_id ?? null;
+```
+
+### 2. Read Rows Relevant to the Current User
+
+Use your framework's normal reactive read primitive with the same user-scoped filter.
+
+    ```tsx
+  const ownedTodos =
+    useAll(sessionUserId ? app.todos.where({ ownerId: sessionUserId }) : undefined) ?? [];
+```
+
+    ```vue
+const ownedTodos = useAll(app.todos.where({ ownerId: sessionUserId ?? "__no-session__" }));
+```
+
+    ```svelte
+	const ownedTodos = new QuerySubscription(
+		app.todos.where({ ownerId: sessionUserId ?? '__no-session__' }),
+	);
+```
+
+    ```ts
+  const ownedTodos = sessionUserId ? await db.all(app.todos.where({ ownerId: sessionUserId })) : [];
+```
+
+### 3. Insert a User-Owned Row
+
+    ```tsx
+  function addOwnedTodo(title: string) {
+    if (!sessionUserId) return;
+
+    db.insert(app.todos, {
+      title,
+      done: false,
+      ownerId: sessionUserId,
+    });
+  }
+```
+
+    ```vue
+function addOwnedTodo(title: string) {
+  if (!sessionUserId) return;
+
+  db.insert(app.todos, {
+    title,
+    done: false,
+    ownerId: sessionUserId,
+  });
+}
+```
+
+    ```svelte
+	function addOwnedTodo(title: string) {
+		if (!sessionUserId) return;
+
+		db.insert(app.todos, {
+			title,
+			done: false,
+			ownerId: sessionUserId,
+		});
+	}
+```
+
+    ```ts
+  function addOwnedTodo(title: string) {
+    if (!sessionUserId) return;
+
+    db.insert(app.todos, {
+      title,
+      done: false,
+      ownerId: sessionUserId,
+    });
+  }
+```
+
+Use whatever column matches your schema, such as `owner_id`, `author_id`, `assignee_id`, or
+`user_id`. The same pattern works whether a row is strictly owned by one user or simply scoped
+to a user.
+
+These client-side filters are useful for UX, but they do not make data private on their own.
+Use [Permissions](/docs/permissions) to define row-level policies that actually enforce which
+sessions can read or mutate a row.
+
 ## Session Resolution Order
 
 For `jazz-tools server`:
@@ -408,7 +499,6 @@ jazz-tools server "$JAZZ_APP_ID" \
 ### Offline-only mode
 
     ```tsx
-const offlineOnlyAuthClient = createJazzClient({ appId: "my-app" });
 
   return (
 
@@ -448,6 +538,410 @@ const client = createJazzClient({ appId: "my-app" });
 
   return createDb({ appId: "my-app" });
 }
+```
+
+===PAGE:files-and-blobs===
+TITLE:Files & Blobs
+DESCRIPTION:Chunked browser Blob and stream storage using conventional files and file_parts tables.
+
+This page explains how to store images and other binary blobs in Jazz using browser `Blob`,
+`File`, and `ReadableStream` values. These files benefit from the same sync, local-first storage,
+and permission model as the rest of your structured data.
+
+Use plain `s.bytes()` when the binary value is small, naturally belongs on the row itself, and
+should always load together with the rest of that row.
+
+## Add the Conventional Tables
+
+`db.createFileFromBlob`, `db.createFileFromStream`, `db.loadFileAsBlob`, and
+`db.loadFileAsStream` currently expect these exact table and column names on `app`:
+
+```ts
+  file_parts: s.table({
+    data: s.bytes(),
+  }),
+  files: s.table({
+    name: s.string().optional(),
+    mimeType: s.string(),
+    partIds: s.array(s.ref("file_parts")),
+    partSizes: s.array(s.int()),
+  }),
+  uploads: s.table({
+    ownerId: s.string(),
+    label: s.string(),
+    fileId: s.ref("files"),
+  }),
+```
+
+`file_parts.data` stores the raw chunk bytes. `files.partIds` keeps the ordered chunk ids, and
+`files.partSizes` stores each chunk's byte length in the same order.
+
+In the example above, `uploads.file` is your app-owned reference to a stored file. `files.name`
+is optional metadata; `createFileFromBlob(...)` fills it from `File.name` when available.
+
+## Add Permissions
+
+```ts
+
+  policy.uploads.allowRead.where({ ownerId: session.user_id });
+  policy.uploads.allowInsert.where({ ownerId: session.user_id });
+  policy.uploads.allowUpdate.where({ ownerId: session.user_id });
+  policy.uploads.allowDelete.where({ ownerId: session.user_id });
+
+  // Files are created before the parent upload row exists, so inserts are direct for now.
+  policy.files.allowInsert.where({});
+  policy.file_parts.allowInsert.where({});
+
+  policy.files.allowRead.where(allowedTo.readReferencing(policy.uploads, "fileId"));
+  policy.file_parts.allowRead.where(allowedTo.readReferencing(policy.files, "partIds"));
+
+  policy.files.allowDelete.where(allowedTo.deleteReferencing(policy.uploads, "fileId"));
+  policy.file_parts.allowDelete.where(allowedTo.deleteReferencing(policy.files, "partIds"));
+});
+```
+
+`uploads` owns access. `files` inherit read and delete access from `uploads.file`, and
+`file_parts` inherit from `files.partIds`.
+
+  `createFileFromBlob(...)` and `createFileFromStream(...)` create `file_parts` and `files` before
+  your parent row exists, so insert inheritance does not naturally apply yet. In this MVP, grant
+  direct insert access to the clients that may upload, or perform uploads in a trusted backend
+  context.
+
+Files are write-once in this MVP, so `files` and `file_parts` normally do not need update
+policies.
+
+## Create from a Blob
+
+```ts
+
+  const file = await db.createFileFromBlob(app, blob, { tier: "edge" });
+
+  return db.insertDurable(
+    app.uploads,
+    {
+      ownerId: EXAMPLE_OWNER_ID,
+      label: "Profile photo",
+      fileId: file.id,
+    },
+    { tier: "edge" },
+  );
+}
+```
+
+The helper chunks the blob, creates the `file_parts` rows first, then creates the `files` row,
+and returns that file row so you can store its id on your own table.
+
+## Create from a ReadableStream
+
+```ts
+
+  const file = await db.createFileFromStream(app, stream, {
+    tier: "edge",
+    name: "camera.raw",
+    mimeType: "application/octet-stream",
+  });
+
+  return db.insertDurable(
+    app.uploads,
+    {
+      ownerId: EXAMPLE_OWNER_ID,
+      label: "Camera import",
+      fileId: file.id,
+    },
+    { tier: "edge" },
+  );
+}
+```
+
+## Load as a Blob
+
+```ts
+
+  const upload = await db.one(app.uploads.where({ id: uploadId }), { tier: "edge" });
+  if (!upload) {
+    return null;
+  }
+
+  const blob = await db.loadFileAsBlob(app, upload.fileId, { tier: "edge" });
+  return blob;
+}
+```
+
+## Load as a ReadableStream
+
+```ts
+
+  const upload = await db.one(app.uploads.where({ id: uploadId }), { tier: "edge" });
+  if (!upload) {
+    return null;
+  }
+
+  const stream = await db.loadFileAsStream(app, upload.fileId, { tier: "edge" });
+  return stream;
+}
+```
+
+`loadFileAsBlob(...)` and `loadFileAsStream(...)` first fetch the `files` row without includes,
+then query each referenced `file_parts` row one at a time. That keeps loading naive and
+sequential instead of eager-loading every chunk into one query.
+
+## Durability and Incomplete Local Data
+
+The file helpers forward normal Jazz durability options:
+
+- Pass `tier` to `createFileFromBlob(...)` or `createFileFromStream(...)`.
+- Pass query options like `{ tier: "edge" }` to `loadFileAsBlob(...)` or `loadFileAsStream(...)`.
+
+If the requested tier does not have the full file yet, `loadFileAsBlob(...)` fails the whole
+read and `loadFileAsStream(...)` errors when it reaches the missing part. Use `edge` or `global`
+when you need the read to wait for a more complete remote snapshot than local OPFS currently has.
+
+## No Automatic Cascade Yet
+
+Until file cascade delete lands, delete the chunk rows and the `files` row before deleting your
+parent app row so the inherited delete policies still match:
+
+```ts
+
+  const upload = await db.one(app.uploads.where({ id: uploadId }), { tier: "edge" });
+  if (!upload) {
+    return;
+  }
+
+  const file = await db.one(app.files.where({ id: upload.fileId }), { tier: "edge" });
+
+  if (file) {
+    // Delete chunks and the file while the parent upload row still exists.
+    for (const partId of file.partIds) {
+      db.delete(app.file_parts, partId);
+    }
+    db.delete(app.files, file.id);
+  }
+
+  db.delete(app.uploads, uploadId);
+}
+```
+
+===PAGE:guides/framework-patterns===
+TITLE:Framework Patterns
+DESCRIPTION:Side-by-side reference for React, Vue, and Svelte Jazz APIs — subscriptions, database access, and dependency injection.
+
+## API equivalents
+
+| Concept         | React / Expo                     | Vue                               | Svelte                          |
+| --------------- | -------------------------------- | --------------------------------- | ------------------------------- |
+| Provider        | `` | `` | `` |
+| Live query      | `useAll(query)`                  | `useAll(query)`                   | `new QuerySubscription(query)`  |
+| DB access       | `useDb()`                        | `useDb()`                         | `getDb()`                       |
+| Session         | `useSession()`                   | `useSession()`                    | `getSession()`                  |
+| Client creation | `createJazzClient(config)`       | `createJazzClient(config)`        | `createJazzClient(config)`      |
+
+## Provider setup
+
+All frameworks wrap the app in a provider that makes the database available to every
+component in the tree — no prop drilling required.
+
+```tsx
+
+  return (
+    Loading...</p>}>
+
+  );
+}
+````
+
+```vue
+<script setup lang="ts">
+
+const client = createJazzClient(config);
+
+</script>
+
+<template>
+
+    <template #fallback>
+      <p>Loading...</p>
+    </template>
+
+</template>
+````
+
+```svelte
+<script lang="ts">
+  import { createJazzClient, JazzSvelteProvider } from "jazz-tools/svelte";
+  const client = createJazzClient(config);
+</script>
+
+```
+
+## Live queries
+
+React and Vue use composition hooks; Svelte uses a class with a reactive `.current` property.
+
+```tsx
+const tasks = useAll(app.tasks.where({ done: false }));
+
+// undefined = not yet connected; [] = connected, no rows; [...] = rows present
+if (tasks === undefined) return ;
+
+````
+
+```vue
+<script setup lang="ts">
+
+const tasks = useAll(app.tasks.where({ done: false }));
+// undefined = not yet connected; [] = connected, no rows; [...] = rows present
+</script>
+
+<template>
+
+</template>
+````
+
+```svelte
+<script lang="ts">
+  import { QuerySubscription } from "jazz-tools/svelte";
+  const tasks = new QuerySubscription(
+    app.tasks.where({ done: false }),
+  );
+</script>
+
+{#each tasks.current ?? [] as task}
+
+{/each}
+```
+
+The `?? []` guard handles the `undefined` (not yet connected) case. See
+[Reading Data: First delivery and the undefined signal](/docs/reading-data#first-delivery-and-the-undefined-signal) for patterns that depend on this signal.
+
+In Vue, `useAll` returns a `ShallowRef` — it unwraps automatically in templates, but in
+`<script setup>` you would access it as `tasks.value`.
+
+## Accessing the database for writes
+
+```tsx
+// Must be called at component top level (rules of hooks)
+
+const db = useDb();
+
+await db.insert(app.messages, { text, createdAt: Date.now() });
+
+````
+
+```ts
+// Must be called inside setup() or <script setup>
+
+const db = useDb();
+
+await db.insert(app.messages, { text, createdAt: Date.now() });
+````
+
+```ts
+// Callable anywhere — component, store, or utility module
+
+const db = getDb();
+
+await db.insert(app.messages, { text, createdAt: Date.now() });
+
+````
+
+`getDb()` in Svelte can be called outside of component lifecycle — useful in event handlers,
+class methods, and utility modules. `useDb()` in React and Vue must follow the rules of hooks.
+
+## Session / user identity
+
+```tsx
+
+const session = useSession(); // { user_id: string } | null
+````
+
+```ts
+
+const session = useSession(); // { user_id: string } | null
+```
+
+```ts
+
+const session = getSession(); // { user_id: string } | null
+```
+
+===PAGE:guides/where-operators===
+TITLE:WHERE Operators
+DESCRIPTION:Full reference for filter operators available in Jazz query builders, with examples for each column kind.
+
+## Summary
+
+## Operator reference by column type
+
+## Examples
+
+### Equality and inequality
+
+```ts
+// Exact match (shorthand — no operator object needed)
+db.all(app.orders.where({ status: "pending" }));
+
+// Not equal
+db.all(app.users.where({ id: { ne: currentUserId } }));
+
+// One of a set
+db.all(app.orders.where({ status: { in: ["pending", "processing"] } }));
+```
+
+### Numeric comparisons
+
+```ts
+// Greater than / less than
+db.all(app.sessions.where({ lastSeen: { gt: staleCutoff } }));
+db.all(app.orders.where({ total: { gte: 1000 } }));
+db.all(app.products.where({ stock: { lt: 10 } }));
+```
+
+### String contains
+
+```ts
+// Substring match (case-sensitive)
+db.all(app.messages.where({ text: { contains: searchTerm } }));
+```
+
+### Null checks on optional references
+
+```ts
+// Rows where the optional ref is not set
+db.all(app.tasks.where({ assignedTo: { isNull: true } }));
+
+// Rows where it is set
+db.all(app.tasks.where({ assignedTo: { isNull: false } }));
+```
+
+### Multiple conditions (AND)
+
+All predicates passed to `where(...)` are AND-combined:
+
+```ts
+// done AND assigned to this user
+db.all(
+  app.tasks.where({
+    done: true,
+    assignedTo: userId,
+  }),
+);
+```
+
+### Combining with ordering and limits
+
+```ts
+db.all(app.messages.where({ threadId }).orderBy("createdAt", "asc").limit(50));
+```
+
+## Live subscriptions with WHERE
+
+`useAll` and `QuerySubscription` accept the same query builders as `db.all`. The subscription
+stays active and re-delivers results whenever any row enters or exits the filter:
+
+```ts
+const pending = useAll(app.tasks.where({ done: false }));
 ```
 
 ===PAGE:index===
@@ -550,79 +1044,166 @@ Slugs match the URL path under `/docs/` — for example `schemas`, `reading-data
 
 ===PAGE:migrations===
 TITLE:Migrations
-DESCRIPTION:Schema evolution workflow and generated migration stubs.
+DESCRIPTION:Review and publish typed compatibility edges between schema hashes.
 
 If you are trying to get your first app running, you can skip this page and return later.
 
-## Traditional Migrations vs Jazz Lenses
+## Why Jazz Migrations Are Different
 
-- Traditional migration systems run a linear sequence and require all peers to converge before old versions stop writing.
-- Jazz migration lenses are evaluated at read/write time, so mixed-version clients can continue operating while data is translated across schema versions.
-- This enables incremental rollouts where older and newer app versions overlap safely during migration windows.
+- Traditional migration systems run a linear sequence and require peers to converge before older versions stop writing.
+- Jazz migration lenses are applied at read/write time, so mixed-version clients can keep operating while data is translated between schema hashes.
+- Schemas still auto-publish on connect. Migrations do not: they are always reviewed and pushed explicitly.
 
-## CLI Workflow
+## Workflow
+
+All Jazz apps use the same migration workflow, including Rust backends.
 
     ```bash
 #!/usr/bin/env bash
 
-# 1) Edit schema/current.ts.
-# 2) Generate migration stubs from the updated schema.
-npx jazz-tools@alpha build
+# 1) Edit schema.ts during development and watch for Jazz migration warnings.
+
+# 2) Generate a typed migration stub after Jazz reports the old/new hashes.
+npx jazz-tools@alpha migrations create <fromHash> <toHash>
+
+# 3) Fill in migrate, rename the file, then publish the reviewed edge.
+npx jazz-tools@alpha migrations push <fromHash> <toHash>
 
 ```
 
     ```bash
 #!/usr/bin/env bash
 
-# 1) Edit schema/current.sql.
-# 2) Generate migration stubs from the updated schema.
-npx jazz-tools@alpha build
+# 1) Edit schema.ts during development and watch for Jazz migration warnings.
+
+# 2) Generate a typed migration stub after Jazz reports the old/new hashes.
+npx jazz-tools@alpha migrations create <fromHash> <toHash>
+
+# 3) Fill in migrate, rename the file, then publish the reviewed edge.
+npx jazz-tools@alpha migrations push <fromHash> <toHash>
 
 ```
 
-For TypeScript DSL migrations, one generated file can define both forward and backward behavior in the same stub.
-For SQL migrations, keep explicit forward/backward files and edit each direction intentionally.
+When Jazz encounters rows whose schema hash is no longer reachable from the current app schema, it logs a warning with the exact short-hash `migrations create <fromHash> <toHash>` command to run next.
 
-## Generated Stubs
+## Generated Stub
 
-    ```ts
+`migrations create` writes a copy-pastable file with short `fromHash`, `toHash`, and minimal typed `from` / `to` witnesses. You only need to fill in `migrate`, then rename the file.
 
-migrate("todos", {
-  description: col.add().string({ default: "" }),
+```ts
+
+  migrate: {
+    todos: {
+      description: s.add.string({ default: null }),
+    },
+  },
+  fromHash: "a01f5c72ec47",
+  toHash: "311995e9a178",
+  from: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
+  },
+  to: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
+  },
 });
 
 ```
 
-    Forward:
-    ```sql
-ALTER TABLE todos ADD COLUMN description TEXT DEFAULT '';
-```
-    Backward:
-    ```sql
-ALTER TABLE todos DROP COLUMN description;
-```
+## Edited Stub
 
-## Edited Stubs
+After review, keep the same hashes and adjust the `migrate` object as needed:
 
-    ```ts
+```ts
 
 // Example of editing a generated migration stub.
-migrate("todos", {
-  description: col.add().string({ default: "No description" }),
+
+  migrate: {
+    todos: {
+      description: s.add.string({ default: "No description" }),
+    },
+  },
+  fromHash: "a01f5c72ec47",
+  toHash: "311995e9a178",
+  from: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
+  },
+  to: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
+  },
 });
 
 ```
 
-    Forward:
-    ```sql
--- Example of editing a generated migration stub.
-ALTER TABLE todos ADD COLUMN description TEXT DEFAULT 'No description';
+## Backwards Defaults
+
+When a newer schema drops a column that older clients still expect, define a backwards default in the migration edge:
+
+```ts
+
+// Example: dropping a column with a backwards default.
+// Clients still on the older schema continue seeing legacy_priority.
+
+  migrate: {
+    todos: {
+      legacy_priority: s.drop.int({ backwardsDefault: 0 }),
+    },
+  },
+  fromHash: "311995e9a178",
+  toHash: "73b65d082ab8",
+  from: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+      legacy_priority: s.int(),
+    }),
+  },
+  to: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
+  },
+});
 
 ```
-    Backward:
-    ```sql
-ALTER TABLE todos DROP COLUMN description;
-```
+
+## Rust Apps Use the Same Files
+
+Rust services still author and ship TypeScript migrations. The Rust runtime consumes the compiled internal schema representation through the CLI and low-level APIs; it does not maintain a separate SQL migration format.
 
 ===PAGE:permissions===
 TITLE:Permissions
@@ -630,33 +1211,33 @@ DESCRIPTION:Fast RLS (ReBAC), simple policies, combinators, and inherited access
 
 ## Schema Policy Syntax
 
-Define policies in `schema/permissions.ts` for TypeScript DSL apps, or directly in SQL.
+Define policies in a root `permissions.ts` next to `schema.ts`. This applies to every Jazz app, including Rust backends that consume the compiled schema via the CLI.
 
-    Assuming the following schema:
+Assuming the following schema:
 
-    ```ts
-table("projects", {
-  name: col.string(),
-  owner_id: col.string(),
-});
-
-table("todos", {
-  title: col.string(),
-  done: col.boolean(),
-  project: col.ref("projects").optional(),
-  owner_id: col.string(),
-});
-
-table("todoShares", {
-  todo: col.ref("todos"),
-  user_id: col.string(),
-  can_read: col.boolean(),
-});
+```ts
+const schema = {
+  projects: s.table({
+    name: s.string(),
+    ownerId: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    projectId: s.ref("projects").optional(),
+    owner_id: s.string(),
+  }),
+  todoShares: s.table({
+    todoId: s.ref("todos"),
+    userId: s.string(),
+    can_read: s.boolean(),
+  }),
+};
 ```
 
-    Define permissions in `schema/permissions.ts`:
+Define permissions in `permissions.ts`:
 
-    ```ts
+```ts
 
   policy.todos.allowRead.where({ owner_id: session.user_id });
   policy.todos.allowInsert.where({ owner_id: session.user_id });
@@ -666,32 +1247,12 @@ table("todoShares", {
 
 ```
 
-    ```sql
-CREATE TABLE projects (
-    name TEXT NOT NULL
-);
-
-CREATE TABLE todos (
-    title TEXT NOT NULL,
-    done BOOLEAN NOT NULL,
-    description TEXT,
-    parent UUID REFERENCES todos,
-    project UUID REFERENCES projects,
-    owner_id TEXT NOT NULL
-);
-CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);
-CREATE POLICY todos_insert_policy ON todos FOR INSERT WITH CHECK (owner_id = @session.user_id);
-CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (owner_id = @session.user_id) WITH CHECK (owner_id = @session.user_id);
-CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session.user_id);
-
-```
-
-Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.where({})` / `USING (TRUE)`).
+Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})`).
 
 ## Simple Policies
 
-    ```ts
-definePermissions(app, ({ policy, allOf, session }) => {
+```ts
+s.definePermissions(app, ({ policy, allOf, session }) => {
   policy.todos.allowRead.where({ owner_id: session.user_id });
   policy.todos.allowInsert.where({ owner_id: session.user_id });
   policy.todos.allowUpdate
@@ -701,25 +1262,36 @@ definePermissions(app, ({ policy, allOf, session }) => {
 });
 ```
 
-    ```sql
--- #region permissions-simple-sql
-CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);
-CREATE POLICY todos_insert_policy ON todos FOR INSERT WITH CHECK (owner_id = @session.user_id);
-CREATE POLICY todos_update_policy ON todos FOR UPDATE USING ((owner_id = @session.user_id) AND (done = FALSE)) WITH CHECK (owner_id = @session.user_id);
-CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session.user_id);
--- #endregion permissions-simple-sql
+## Explicitly Allow an Operation (`.always()`)
 
--- #region permissions-inherits-sql
-CREATE POLICY todos_select_policy ON todos FOR SELECT USING ((done = FALSE) OR (INHERITS SELECT VIA project));
-CREATE POLICY todos_update_policy ON todos FOR UPDATE USING ((INHERITS UPDATE VIA project) AND (done = FALSE)) WITH CHECK (INHERITS UPDATE VIA project);
--- #endregion permissions-inherits-sql
+Use `.always()` when an operation should always be permitted. It is equivalent to `.where({})`.
 
+```ts
+s.definePermissions(app, ({ policy }) => {
+  policy.todos.allowRead.always();
+  policy.todos.allowInsert.always();
+  policy.todos.allowUpdate.always();
+  policy.todos.allowDelete.always();
+});
+```
+
+## Explicitly Deny an Operation (`.never()`)
+
+Use `.never()` when an operation should be impossible. It is equivalent to `.where(anyOf([]))`.
+
+```ts
+s.definePermissions(app, ({ policy }) => {
+  policy.todos.allowRead.never();
+  policy.todos.allowInsert.never();
+  policy.todos.allowUpdate.never();
+  policy.todos.allowDelete.never();
+});
 ```
 
 ## Combining Conditions (`allOf` / `anyOf`)
 
     ```ts
-definePermissions(app, ({ policy, allOf, anyOf, allowedTo, session }) => {
+s.definePermissions(app, ({ policy, allOf, anyOf, allowedTo, session }) => {
   policy.todos.allowRead.where(
     anyOf([{ owner_id: session.user_id }, allOf([{ done: false }, allowedTo.read("project")])]),
   );
@@ -740,12 +1312,24 @@ pub fn combinator_policy() -> TablePolicies {
 
 `allOf([...])` compiles to logical `AND`, and `anyOf([...])` compiles to logical `OR`.
 
+## JWT Session Claims
+
+When external auth JWTs carry claims, `session.where(...)` lets you check them directly in permissions without mapping them onto row columns first.
+
+```ts
+s.definePermissions(app, ({ policy, anyOf, session }) => {
+  policy.todos.allowRead.where(
+    anyOf([{ owner_id: session.user_id }, session.where({ "claims.role": "manager" })]),
+  );
+});
+```
+
 ## Inherited Access Policies (`allowedTo.*`)
 
-TypeScript DSL exposes inherited access via `allowedTo.read/insert/update/delete(...)`, which compiles to `INHERITS` policy expressions.
+`allowedTo.read/insert/update/delete(...)` lets one table inherit access from another through relationships.
 
-    ```ts
-definePermissions(app, ({ policy, anyOf, allOf, allowedTo }) => {
+```ts
+s.definePermissions(app, ({ policy, anyOf, allOf, allowedTo }) => {
   policy.todos.allowRead.where(anyOf([{ done: false }, allowedTo.read("project")]));
   policy.todos.allowUpdate
     .whereOld(allOf([allowedTo.update("project"), { done: false }]))
@@ -753,27 +1337,12 @@ definePermissions(app, ({ policy, anyOf, allOf, allowedTo }) => {
 });
 ```
 
-    ```sql
--- #region permissions-simple-sql
-CREATE POLICY todos_select_policy ON todos FOR SELECT USING (owner_id = @session.user_id);
-CREATE POLICY todos_insert_policy ON todos FOR INSERT WITH CHECK (owner_id = @session.user_id);
-CREATE POLICY todos_update_policy ON todos FOR UPDATE USING ((owner_id = @session.user_id) AND (done = FALSE)) WITH CHECK (owner_id = @session.user_id);
-CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (owner_id = @session.user_id);
--- #endregion permissions-simple-sql
-
--- #region permissions-inherits-sql
-CREATE POLICY todos_select_policy ON todos FOR SELECT USING ((done = FALSE) OR (INHERITS SELECT VIA project));
-CREATE POLICY todos_update_policy ON todos FOR UPDATE USING ((INHERITS UPDATE VIA project) AND (done = FALSE)) WITH CHECK (INHERITS UPDATE VIA project);
--- #endregion permissions-inherits-sql
-
-```
-
 ## Advanced: Recursive INHERITS
 
 Use depth-bounded inherited access when foreign keys can form recursive chains.
 
     ```ts
-definePermissions(app, ({ policy, allowedTo }) => {
+s.definePermissions(app, ({ policy, allowedTo }) => {
   policy.todos.allowRead.where(allowedTo.read("parent"));
   policy.todos.allowUpdate
     .whereOld(allowedTo.update("parent", { maxDepth: 5 }))
@@ -794,16 +1363,14 @@ pub fn recursive_inherits_policy() -> TablePolicies {
 
 ## Policy Enforcement and Request Context
 
-Jazz permissions use relationship-based policy evaluation with requester session context.
-Backend endpoints should scope a client/session per request before reads and writes.
-Frontend clients are evaluated with the auth/session identity used to initialize context.
+Jazz permissions use relationship-based policy evaluation with requester session context. Backend endpoints should scope a client/session per request before reads and writes.
 
     ```ts
 
   try {
     const rows = await context
       .forRequest(req, schemaApp)
-      .query(schemaApp.todos.where({ done: true }));
+      .all(schemaApp.todos.where({ done: true }));
     res.json(rows);
   } catch {
     sendQueryError(res);
@@ -840,27 +1407,80 @@ Install dependencies in your Expo app:
 
 For full environment and server setup options, see [Setup](/docs/setup).
 
+## Project configuration
+
+### Polyfills
+
+Jazz requires a few global polyfills for networking and streams on React Native. Import them as the very first line in your entry point (`index.js`), before any other code:
+
+```js
+
+registerRootComponent(App);
+
+```
+
+### Babel
+
+Create a `babel.config.cjs` with the Expo preset and `import.meta` transform enabled:
+
+```js
+module.exports = function (api) {
+  api.cache(true);
+  return {
+    presets: [["babel-preset-expo", { unstable_transformImportMeta: true }]],
+  };
+};
+
+```
+
+### Metro
+
+Create a `metro.config.js` that extends Expo's defaults. If you use **pnpm**, enable symlink support:
+
+```js
+
+const require = createRequire(import.meta.url);
+const { getDefaultConfig } = require("expo/metro-config");
+
+const __filename = fileURLToPath(import.meta.url);
+const projectRoot = path.dirname(__filename);
+
+const config = getDefaultConfig(projectRoot);
+
+// So Metro uses our Babel config (babel.config.cjs); it doesn't auto-detect .cjs
+config.transformer = config.transformer || {};
+config.transformer.extendsBabelConfigPath = path.resolve(projectRoot, "babel.config.cjs");
+
+// pnpm uses symlinks for hoisted packages
+config.resolver.unstable_enableSymlinks = true;
+
+```
+
 ## Define your schema
 
-Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
+Create `schema.ts` at the root of your project. This is the source of truth for your data model.
 
 ```ts
 
-table("projects", {
-  name: col.string(),
-});
+const schema = {
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    ownerId: s.string(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
+  }),
+};
 
-table("todos", {
-  title: col.string(),
-  done: col.boolean(),
-  description: col.string().optional(),
-  owner_id: col.string(),
-  parent: col.ref("todos").optional(),
-  project: col.ref("projects").optional(),
-});
+type AppSchema = s.Schema<typeof schema>;
+
 ```
 
-### Run codegen
+### Validate schema
 
 Deep dive: [Schemas](/docs/schemas).
 
@@ -869,12 +1489,6 @@ Deep dive: [Schemas](/docs/schemas).
 `JazzProvider` initializes the Jazz runtime and makes the database available to descendant components via React context.
 
 ```tsx
-const client = createJazzClient({
-  appId: "00000000-0000-0000-0000-000000000002",
-  serverUrl: "http://10.0.2.2:1625",
-  localAuthMode: "demo",
-  // jwtToken: authToken, // Use this (instead of localAuthMode) for external auth.
-});
 
   return (
 
@@ -917,7 +1531,7 @@ Query builders are fluent and immutable. Chain `.where()`, `.orderBy()`, `.limit
   }
 ```
 
-By default `useAll` returns results immediately from the local replica. Use durability options when you need explicit confirmation boundaries.
+By default `useAll` returns results immediately from the local replica. Use query options when you need explicit confirmation boundaries.
 
 Deep dive: [Reading Data](/docs/reading-data).
 
@@ -926,19 +1540,19 @@ Deep dive: [Reading Data](/docs/reading-data).
 `useDb` returns the `Db` handle for mutations. Mutations apply locally first and return promises that resolve at the selected durability tier.
 
 ```tsx
-  const addTodo = async () => {
+  const addTodo = () => {
     const trimmed = title.trim();
     if (!trimmed || !sessionUserId) return;
-    await db.insert(app.todos, { title: trimmed, done: false, owner_id: sessionUserId });
+    db.insert(app.todos, { title: trimmed, done: false, ownerId: sessionUserId });
     setTitle("");
   };
 
-  const toggleTodo = async (todo: Todo) => {
-    await db.update(app.todos, todo.id, { done: !todo.done });
+  const toggleTodo = (todo: Todo) => {
+    db.update(app.todos, todo.id, { done: !todo.done });
   };
 
-  const removeTodo = async (id: string) => {
-    await db.delete(app.todos, id);
+  const removeTodo = (id: string) => {
+    db.delete(app.todos, id);
   };
 ```
 
@@ -953,7 +1567,7 @@ Mutation API details: [Writing Data](/docs/writing-data).
 
 ### Reading with a durability tier
 
-Use `db.subscribeAll` (or `db.all`) with a durability tier when you need tier-gated delivery.
+Inside components, use `useAll(query, options)` with the same `QueryOptions` as `db.subscribeAll`. Outside components, use `db.subscribeAll` (or `db.all`) directly when you need tier-gated delivery or deltas.
 
 ```ts
 
@@ -975,8 +1589,8 @@ Use durable mutation APIs with `{ tier }` when you need explicit write durabilit
     {
       title: todoTitle,
       done: false,
-      owner_id: EXAMPLE_OWNER_ID,
-      project: EXAMPLE_PROJECT_ID,
+      ownerId: EXAMPLE_OWNER_ID,
+      projectId: EXAMPLE_PROJECT_ID,
     },
     { tier: "worker" },
   );
@@ -1016,7 +1630,7 @@ Outside components (or when you need deltas), use `db.subscribeAll` directly:
 
 ### Relations with include
 
-If your schema has `col.ref()` columns, codegen produces typed include interfaces. Use `.include()` to load related rows in one query.
+If your schema has `s.ref()` columns, Jazz infers typed include interfaces directly from `schema.ts`. Use `.include()` to load related rows in one query.
 
 ```ts
 
@@ -1087,10 +1701,6 @@ More query patterns: [Reading Data](/docs/reading-data).
 If you provide no `jwtToken` or explicit local auth fields, Jazz uses local synthetic auth:
 
 ```tsx
-const anonymousAuthExpoClient = createJazzClient({
-  appId: "my-app",
-  serverUrl: "http://127.0.0.1:4200",
-});
 
   return (
 
@@ -1101,11 +1711,6 @@ const anonymousAuthExpoClient = createJazzClient({
 If needed, you can explicitly override the local token:
 
 ```tsx
-const anonymousAuthWithTokenExpoClient = createJazzClient({
-  appId: "my-app",
-  localAuthMode: "anonymous",
-  localAuthToken: "device-token-123",
-});
 
   return (
 
@@ -1120,12 +1725,6 @@ Use demo-mode synthetic profiles for local multi-user testing:
 ```tsx
 const demoAuthExpoAppId = "my-app";
 const demoAuthExpoActive = getActiveSyntheticAuth(demoAuthExpoAppId, { defaultMode: "demo" });
-const demoAuthExpoClient = createJazzClient({
-  appId: demoAuthExpoAppId,
-  serverUrl: "http://127.0.0.1:4200",
-  localAuthMode: demoAuthExpoActive.localAuthMode,
-  localAuthToken: demoAuthExpoActive.localAuthToken,
-});
 
   return (
 
@@ -1141,15 +1740,6 @@ After provider sign-in, link the current local identity so existing local data s
 const externalAuthExpoAppId = "my-app";
 const externalAuthExpoServerUrl = "http://127.0.0.1:4200";
 const externalAuthExpoProviderJwt = "<provider-jwt>";
-const externalAuthExpoLocalClient = createJazzClient({
-  appId: externalAuthExpoAppId,
-  serverUrl: externalAuthExpoServerUrl,
-});
-const externalAuthExpoJwtClient = createJazzClient({
-  appId: externalAuthExpoAppId,
-  serverUrl: externalAuthExpoServerUrl,
-  jwtToken: externalAuthExpoProviderJwt,
-});
 
   const [hasJwt, setHasJwt] = useState(false);
   const linkExternalIdentity = useLinkExternalIdentity({
@@ -1193,7 +1783,6 @@ jazz-tools server "$JAZZ_APP_ID" \
 Omit `serverUrl` to keep all data local:
 
 ```tsx
-const offlineOnlyAuthExpoClient = createJazzClient({ appId: "my-app" });
 
   return (
 
@@ -1205,19 +1794,19 @@ Full auth flows and server behavior: [Authentication](/docs/authentication).
 
 ## Permissions
 
-Define row-level policies in `schema/permissions.ts` with `definePermissions(...)`:
+Define row-level policies in `permissions.ts` with `s.definePermissions(...)`:
 
 ```ts
 
   // Each user only sees their own rows.
-  policy.todos.allowRead.where({ owner_id: session.user_id }),
+  policy.todos.allowRead.where({ ownerId: session.user_id }),
   // New rows must belong to the current user.
-  policy.todos.allowInsert.where({ owner_id: session.user_id }),
+  policy.todos.allowInsert.where({ ownerId: session.user_id }),
   // Users can only mutate their own incomplete todos.
   policy.todos.allowUpdate
-    .whereOld(allOf([{ owner_id: session.user_id }, { done: false }]))
-    .whereNew({ owner_id: session.user_id }),
-  policy.todos.allowDelete.where(allOf([{ owner_id: session.user_id }, { done: false }])),
+    .whereOld(allOf([{ ownerId: session.user_id }, { done: false }]))
+    .whereNew({ ownerId: session.user_id }),
+  policy.todos.allowDelete.where(allOf([{ ownerId: session.user_id }, { done: false }])),
 ]);
 ```
 
@@ -1244,24 +1833,28 @@ For full environment and server setup options, see [Setup](/docs/setup).
 
 ## Define your schema
 
-Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
+Create `schema.ts` at the root of your project. This is the source of truth for your data model.
 
 ```ts
 
-table("projects", {
-  name: col.string(),
-});
+const schema = {
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
+  }),
+};
 
-table("todos", {
-  title: col.string(),
-  done: col.boolean(),
-  description: col.string().optional(),
-  parent: col.ref("todos").optional(),
-  project: col.ref("projects").optional(),
-});
+type AppSchema = s.Schema<typeof schema>;
+
 ```
 
-### Run codegen
+### Validate schema
 
 Deep dive: [Schemas](/docs/schemas).
 
@@ -1270,12 +1863,6 @@ Deep dive: [Schemas](/docs/schemas).
 `JazzProvider` initializes the Jazz runtime and makes the database available to descendant components via React context.
 
 ```tsx
-const client = createJazzClient({
-  appId: "todo-react-example",
-  serverUrl: "http://127.0.0.1:1625",
-  localAuthMode: "anonymous",
-  // jwtToken: authToken, // Use this (instead of localAuthMode) for external auth.
-});
 
   return (
 
@@ -1313,7 +1900,7 @@ Query builders are fluent and immutable. Chain `.where()`, `.orderBy()`, `.limit
   );
 ```
 
-By default `useAll` returns results immediately from the local replica. Use durability options when you need explicit confirmation boundaries.
+By default `useAll` returns results immediately from the local replica. Use query options when you need explicit confirmation boundaries.
 
 Deep dive: [Reading Data](/docs/reading-data).
 
@@ -1322,16 +1909,16 @@ Deep dive: [Reading Data](/docs/reading-data).
 `useDb` returns the `Db` handle for mutations. Mutations apply locally first and return promises that resolve at the selected durability tier.
 
 ```tsx
-  async function addTodo(todoTitle: string) {
-    await db.insert(app.todos, { title: todoTitle, done: false });
+  function addTodo(todoTitle: string) {
+    db.insert(app.todos, { title: todoTitle, done: false });
   }
 
-  async function toggleTodo(todo: { id: string; done: boolean }) {
-    await db.update(app.todos, todo.id, { done: !todo.done });
+  function toggleTodo(todo: { id: string; done: boolean }) {
+    db.update(app.todos, todo.id, { done: !todo.done });
   }
 
-  async function removeTodo(id: string) {
-    await db.delete(app.todos, id);
+  function removeTodo(id: string) {
+    db.delete(app.todos, id);
   }
 ```
 
@@ -1347,7 +1934,7 @@ Mutation API details: [Writing Data](/docs/writing-data).
 
 ### Reading with a durability tier
 
-Use `db.subscribeAll` (or `db.all`) with a durability tier when you need tier-gated delivery.
+Inside components, use `useAll(query, options)` with the same `QueryOptions` as `db.subscribeAll`. Outside components, use `db.subscribeAll` (or `db.all`) directly when you need tier-gated delivery or deltas.
 
 ```ts
 
@@ -1364,7 +1951,11 @@ Use durable mutation APIs with `{ tier }` to wait for specific durability tiers:
 
 ```ts
 
-  const { id } = await db.insertDurable(app.todos, { title: todoTitle, done: false }, { tier: "edge" });
+  const { id } = await db.insertDurable(
+    app.todos,
+    { title: todoTitle, done: false },
+    { tier: "edge" },
+  );
   await db.updateDurable(app.todos, id, { done: true }, { tier: "edge" });
   await db.deleteDurable(app.todos, id, { tier: "global" });
 }
@@ -1400,7 +1991,7 @@ Outside components (or when you need deltas), use `db.subscribeAll` directly:
 
 ### Relations with include
 
-If your schema has `col.ref()` columns, codegen produces typed include interfaces. Use `.include()` to load related rows in one query.
+If your schema has `s.ref()` columns, Jazz infers typed include interfaces directly from `schema.ts`. Use `.include()` to load related rows in one query.
 
 ```ts
 
@@ -1473,11 +2064,6 @@ For browser clients, `anonymous` is the default when no external JWT/local auth 
 If you provide no `jwtToken` or explicit local auth fields, Jazz auto-generates an anonymous token on first load and persists it in local storage.
 
 ```tsx
-const anonymousAuthClient = createJazzClient({
-  appId: "my-app",
-  env: "dev",
-  userBranch: "main",
-});
 
   return (
 
@@ -1488,11 +2074,6 @@ const anonymousAuthClient = createJazzClient({
 If needed, you can explicitly override the local token:
 
 ```tsx
-const anonymousAuthWithTokenClient = createJazzClient({
-  appId: "my-app",
-  localAuthMode: "anonymous",
-  localAuthToken: "device-token-123",
-});
 
   return (
 
@@ -1507,12 +2088,6 @@ Use synthetic user profiles for local multi-user testing:
 ```tsx
 const demoAuthAppId = "my-app";
 const demoAuthActive = getActiveSyntheticAuth(demoAuthAppId, { defaultMode: "demo" });
-const demoAuthClient = createJazzClient({
-  appId: demoAuthAppId,
-  serverUrl: "http://127.0.0.1:4200",
-  localAuthMode: demoAuthActive.localAuthMode,
-  localAuthToken: demoAuthActive.localAuthToken,
-});
 
   return (
     <>
@@ -1530,15 +2105,6 @@ After provider sign-in, link the current local identity so existing local data s
 const externalAuthAppId = "my-app";
 const externalAuthServerUrl = "http://127.0.0.1:4200";
 const externalAuthProviderJwt = "<provider-jwt>";
-const externalAuthLocalClient = createJazzClient({
-  appId: externalAuthAppId,
-  serverUrl: externalAuthServerUrl,
-});
-const externalAuthJwtClient = createJazzClient({
-  appId: externalAuthAppId,
-  serverUrl: externalAuthServerUrl,
-  jwtToken: externalAuthProviderJwt,
-});
 
   const [hasJwt, setHasJwt] = useState(false);
   const linkExternalIdentity = useLinkExternalIdentity({
@@ -1581,7 +2147,6 @@ jazz-tools server "$JAZZ_APP_ID" \
 Omit `serverUrl` to keep all data local:
 
 ```tsx
-const offlineOnlyAuthClient = createJazzClient({ appId: "my-app" });
 
   return (
 
@@ -1593,7 +2158,7 @@ Full auth flows and server behavior: [Authentication](/docs/authentication).
 
 ## Permissions
 
-Define row-level policies in `schema/permissions.ts` with `definePermissions(...)`:
+Define row-level policies in `permissions.ts` with `s.definePermissions(...)`:
 
 ```ts
 
@@ -1631,24 +2196,28 @@ For full environment and server setup options, see [Setup](/docs/setup).
 
 ## Define your schema
 
-Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
+Create `schema.ts` at the root of your project. This is the source of truth for your data model.
 
 ```ts
 
-table("projects", {
-  name: col.string(),
-});
+const schema = {
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
+  }),
+};
 
-table("todos", {
-  title: col.string(),
-  done: col.boolean(),
-  description: col.string().optional(),
-  parent: col.ref("todos").optional(),
-  project: col.ref("projects").optional(),
-});
+type AppSchema = s.Schema<typeof schema>;
+
 ```
 
-### Run codegen
+### Validate schema
 
 Deep dive: [Schemas](/docs/schemas).
 
@@ -1660,7 +2229,11 @@ Call `createJazzClient` with your config outside the component tree, then pass t
 
 <script lang="ts">
 	import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
+	import AuthSessionExamples from './AuthSessionExamples.svelte';
 	import TodoList from './TodoList.svelte';
+
+	// Keep docs-only auth snippets in the compiled example app.
+	void AuthSessionExamples;
 
 	const client = createJazzClient({
 		appId: 'todo-svelte-example',
@@ -1720,7 +2293,7 @@ Deep dive: [Reading Data](/docs/reading-data).
 
 <script lang="ts">
 	import { getDb, QuerySubscription } from 'jazz-tools/svelte';
-	import { app } from '../schema/app.js';
+	import { app } from '../schema.js';
 
 	const db = getDb();
 	const todos = new QuerySubscription(app.todos);
@@ -1729,25 +2302,25 @@ Deep dive: [Reading Data](/docs/reading-data).
 		app.todos.where({ done: false }).orderBy('title', 'asc').limit(50),
 	);
 
-	const confirmedTodos = new QuerySubscription(app.todos, 'edge');
+	const confirmedTodos = new QuerySubscription(app.todos, { tier: 'edge' });
 
 	let title = $state('');
 
-	async function handleSubmit(e: SubmitEvent) {
+	function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
 		if (!title.trim()) return;
 
-		await db.insert(app.todos, { title: title.trim(), done: false });
+		db.insert(app.todos, { title: title.trim(), done: false });
 
 		title = '';
 	}
 
-	async function toggleTodo(todo: { id: string; done: boolean }) {
-		await db.update(app.todos, todo.id, { done: !todo.done });
+	function toggleTodo(todo: { id: string; done: boolean }) {
+		db.update(app.todos, todo.id, { done: !todo.done });
 	}
 
-	async function removeTodo(id: string) {
-		await db.delete(app.todos, id);
+	function removeTodo(id: string) {
+		db.delete(app.todos, id);
 	}
 
 	async function addImportantTodo(todoTitle: string) {
@@ -1795,12 +2368,12 @@ Mutation API details: [Writing Data](/docs/writing-data).
   has synced to the nearest server. Use `global` when you need the broadest server-side durability
   acknowledgement.
 
-### Reading with a tier
+### Reading with query options
 
-Pass a tier as the second argument to `QuerySubscription` to gate initial delivery.
+Pass `QueryOptions` as the second argument to `QuerySubscription` to control subscription delivery. Use `tier` when you need to gate initial delivery.
 
 ```ts
-	const confirmedTodos = new QuerySubscription(app.todos, 'edge');
+	const confirmedTodos = new QuerySubscription(app.todos, { tier: 'edge' });
 ```
 
 ### Writing with a durability tier
@@ -1847,7 +2420,7 @@ Outside components (or when you need deltas), use `db.subscribeAll` directly:
 
 ### Relations with include
 
-If your schema has `col.ref()` columns, codegen produces typed include interfaces. Use `.include()` to load related rows in one query.
+If your schema has `s.ref()` columns, Jazz infers typed include interfaces directly from `schema.ts`. Use `.include()` to load related rows in one query.
 
 ```ts
 
@@ -2070,7 +2643,7 @@ Full auth flows and server behavior: [Authentication](/docs/authentication).
 
 ## Permissions
 
-Define row-level policies in `schema/permissions.ts` with `definePermissions(...)`:
+Define row-level policies in `permissions.ts` with `s.definePermissions(...)`:
 
 ```ts
 
@@ -2094,6 +2667,98 @@ Think about permissions in four checks:
 
 For advanced policy patterns and Rust parity, see [Permissions](/docs/permissions).
 
+===PAGE:quickstarts/typescript-browser===
+TITLE:TypeScript (Browser)
+DESCRIPTION:Build a local-first browser app with Jazz using plain TypeScript. Schema, subscriptions, and mutations without a framework.
+
+## Install
+
+Install the runtime package:
+
+`pnpm add jazz-tools`
+
+For full environment and server setup options, see [Setup](/docs/setup).
+
+## Define your schema
+
+Create `schema.ts` at the root of your project. This is the source of truth for your data model.
+
+```ts
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    ownerId: s.string().optional(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
+  }),
+```
+
+### Validate schema
+
+Deep dive: [Schemas](/docs/schemas).
+For chunked browser file storage, see [Files & Blobs](/docs/files-and-blobs).
+
+## Create a client
+
+`createDb` initialises the Jazz runtime and returns a `Db` instance. Call it once at app startup.
+
+```ts
+  const db = await createDb({
+    appId: readEnvAppId() ?? "todo-client-example",
+    env: "dev",
+    userBranch: "main",
+    ...config,
+  });
+```
+
+- `appId` identifies the app namespace for storage and sync.
+- `serverUrl` enables sync; omit it for offline-only mode.
+
+## Read data
+
+### Subscriptions
+
+`subscribeAll` streams live results into a callback whenever the data changes.
+
+```ts
+
+  return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onCount(all.length));
+}
+```
+
+The callback receives `{ all }` — an array of the current matching rows. Call the returned function to unsubscribe.
+
+### One-shot reads
+
+```ts
+
+  return db.all(app.todos.where({ done: false }));
+}
+```
+
+Deep dive: [Reading Data](/docs/reading-data).
+
+## Write data
+
+```ts
+
+  db.insert(app.todos, {
+    title: "Write docs",
+    done: false,
+    ownerId: EXAMPLE_OWNER_ID,
+    projectId: EXAMPLE_PROJECT_ID,
+  });
+  db.update(app.todos, todoId, { done: true });
+  db.delete(app.todos, todoId);
+}
+```
+
+Mutation API details: [Writing Data](/docs/writing-data).
+
 ===PAGE:quickstarts/typescript-server===
 TITLE:TypeScript Server
 DESCRIPTION:Build a server-side TypeScript API with Jazz. Schema, request-scoped queries, streaming, and mutations.
@@ -2108,61 +2773,67 @@ For full environment and server setup options, see [Setup](/docs/setup).
 
 ## Define your schema
 
-Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
+Create `schema.ts` at the root of your project. This is the source of truth for your data model.
 
 ```ts
 
-table("projects", {
-  name: col.string(),
-});
+const schema = {
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
+    owner_id: s.string(),
+  }),
+};
 
-table("todos", {
-  title: col.string(),
-  done: col.boolean(),
-  description: col.string().optional(),
-  parent: col.ref("todos").optional(),
-  project: col.ref("projects").optional(),
-  owner_id: col.string(),
-});
+type AppSchema = s.Schema<typeof schema>;
 
 ```
 
-### Run codegen
+### Validate schema
 
 Deep dive: [Schemas](/docs/schemas).
 
 ## Create a server context
 
-Initialize a Jazz context once at process startup and lazily create a shared server client:
+Initialize a Jazz context once at process startup and lazily create a shared `Db`:
 
 ```ts
 const context = createJazzContext({
   appId: "todo-server-ts",
   app: schemaApp,
-  dataPath: "./data/jazz.db",
+  permissions,
+  driver: { type: "persistent", dataPath: "./data/jazz.db" },
   serverUrl: process.env.JAZZ_SERVER_URL,
   backendSecret: process.env.JAZZ_BACKEND_SECRET,
 });
-const client = context.client();
+const db = context.db();
+void db;
 ```
 
 - `appId` identifies the app namespace for storage and sync.
-- `app` is your generated schema DSL export (`app.wasmSchema` is loaded for runtime setup).
-- `serverUrl` + `backendSecret` enable request-scoped API operations via `context.forRequest(req)`.
+- `app` is your typed schema export (`app.wasmSchema` is loaded for runtime setup).
+- `context.db()` gives you a high-level `Db` using the context's configured runtime/auth.
+- `serverUrl` + `backendSecret` enable backend-authenticated handles via `context.asBackend()` and `context.forRequest(req)`.
 - Runtime storage path controls where local server state persists.
 
 For more server context options, see [Setup](/docs/setup#backend-context-setup).
 
 ## Read data in API handlers
 
-Use `context.forRequest(req)` so each request is scoped to the requester session.
+Use `context.forRequest(req)` so each request gets a requester-scoped `Db`.
 
 ### One-shot reads
 
 ```ts
 
   const requester = context.forRequest(req);
-  const rows = await requester.query(
+  const rows = await requester.all(
     schemaApp.todos.where({ done: false }).orderBy("title", "asc").limit(100),
   );
   res.json(rows);
@@ -2181,15 +2852,15 @@ Use `context.forRequest(req)` so each request is scoped to the requester session
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
 
-  const snapshot = await requester.query(query);
+  const snapshot = await requester.all(query);
   res.write(`data: ${JSON.stringify({ type: "snapshot", rows: snapshot })}\n\n`);
 
-  const subscriptionId = requester.subscribe(query, (delta) => {
+  const unsubscribe = requester.subscribeAll(query, (delta) => {
     res.write(`data: ${JSON.stringify({ type: "delta", delta })}\n\n`);
   });
 
   req.on("close", () => {
-    client.unsubscribe(subscriptionId);
+    unsubscribe();
   });
 }
 ```
@@ -2198,7 +2869,7 @@ Deep dive: [Reading Data](/docs/reading-data).
 
 ## Write data behind API routes
 
-Mutations should also use `context.forRequest(req)` so policies evaluate against the requester context.
+Mutations should also use `context.forRequest(req)` so policies evaluate against the requester context while keeping the same high-level `Db` API.
 
 ```ts
 
@@ -2214,24 +2885,15 @@ Mutations should also use `context.forRequest(req)` so policies evaluate against
     return;
   }
 
-  const values: Value[] = [
-    { type: "Text", value: title },
-    { type: "Boolean", value: false },
-    { type: "Text", value: req.body.description?.trim() ?? "" },
-    { type: "Null" },
-    { type: "Null" },
-    { type: "Text", value: userId },
-  ];
-
   const requester = context.forRequest(req);
-  const id = await requester.create("todos", values);
-
-  res.status(201).json({
-    id,
+  const todo = requester.insert(schemaApp.todos, {
     title,
     done: false,
+    description: req.body.description?.trim() || undefined,
     owner_id: userId,
   });
+
+  res.status(201).json(todo);
 }
 ```
 
@@ -2275,7 +2937,7 @@ Full auth flows and session resolution: [Authentication](/docs/authentication).
 
 ## Permissions
 
-Define row-level policies in `schema/permissions.ts`:
+Define row-level policies in `permissions.ts`:
 
 ```ts
 
@@ -2303,24 +2965,28 @@ For full environment and server setup options, see [Setup](/docs/setup).
 
 ## Define your schema
 
-Create `schema/current.ts` at the root of your project. This is the source of truth for your data model.
+Create `schema.ts` at the root of your project. This is the source of truth for your data model.
 
 ```ts
 
-table("projects", {
-  name: col.string(),
-});
+const schema = {
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
+  }),
+};
 
-table("todos", {
-  title: col.string(),
-  done: col.boolean(),
-  description: col.string().optional(),
-  parent: col.ref("todos").optional(),
-  project: col.ref("projects").optional(),
-});
+type AppSchema = s.Schema<typeof schema>;
+
 ```
 
-### Run codegen
+### Validate schema
 
 Deep dive: [Schemas](/docs/schemas).
 
@@ -2330,6 +2996,9 @@ Deep dive: [Schemas](/docs/schemas).
 
 ```vue
 <script setup lang="ts">
+
+// Keep docs-only auth snippets in the compiled example app.
+void AuthSessionExamples;
 
 const client = createJazzClient({
   appId: "todo-vue-example",
@@ -2386,15 +3055,15 @@ Deep dive: [Reading Data](/docs/reading-data).
 `useDb` returns the shared `Db` handle for mutations. Mutations apply locally first and return promises that resolve at the selected durability tier.
 
 ```ts
-async function addTodo(todoTitle: string) {
-  await db.insert(app.todos, { title: todoTitle, done: false });
+function addTodo(todoTitle: string) {
+  db.insert(app.todos, { title: todoTitle, done: false });
 }
 
-async function toggleTodo(todo: { id: string; done: boolean }) {
-  await db.update(app.todos, todo.id, { done: !todo.done });
+function toggleTodo(todo: { id: string; done: boolean }) {
+  db.update(app.todos, todo.id, { done: !todo.done });
 }
 
-async function removeTodo(id: string) {
+function removeTodo(id: string) {
   db.delete(app.todos, id);
 }
 ```
@@ -2428,7 +3097,11 @@ Use durable mutation APIs with `{ tier }` to wait for specific durability tiers:
 
 ```ts
 
-  const { id } = await db.insertDurable(app.todos, { title: todoTitle, done: false }, { tier: "edge" });
+  const { id } = await db.insertDurable(
+    app.todos,
+    { title: todoTitle, done: false },
+    { tier: "edge" },
+  );
   await db.updateDurable(app.todos, id, { done: true }, { tier: "edge" });
   await db.deleteDurable(app.todos, id, { tier: "global" });
 }
@@ -2464,7 +3137,7 @@ Outside components (or when you need deltas), use `db.subscribeAll` directly:
 
 ### Relations with include
 
-If your schema has `col.ref()` columns, codegen produces typed include interfaces. Use `.include()` to load related rows in one query.
+If your schema has `s.ref()` columns, Jazz infers typed include interfaces directly from `schema.ts`. Use `.include()` to load related rows in one query.
 
 ```ts
 
@@ -2673,7 +3346,7 @@ Full auth flows and server behavior: [Authentication](/docs/authentication).
 
 ## Permissions
 
-Define row-level policies in `schema/permissions.ts` with `definePermissions(...)`:
+Define row-level policies in `permissions.ts` with `s.definePermissions(...)`:
 
 ```ts
 
@@ -2766,6 +3439,135 @@ const todos = useAll(app.todos);
 	const todos = new QuerySubscription(app.todos);
 ```
 
+### First delivery and the undefined signal
+
+`useAll` and `QuerySubscription` return `undefined` until the subscription has received its
+first response from the server. Once the server has delivered an initial snapshot, the value
+becomes an array — empty (`[]`) if no rows match, or populated.
+
+```ts
+// undefined = still connecting to the sync server
+// []        = connected, no matching rows yet
+// [...]     = connected, rows present
+```
+
+Any initialisation that depends on a consistent remote view can check `undefined` directly:
+
+```ts
+useEffect(() => {
+  if (rows === undefined) return; // wait for server snapshot before acting
+  reconcile();
+}, [rows]);
+```
+
+### Running queries conditionally
+
+There are some cases where you want to defer running a query. This could happen if the query depends on an input the user hasn't provided yet,
+or on the output of a previous query. In these cases, you can pass `undefined` to `useAll` to defer the query until the condition is met.
+
+```ts
+const [filter, setFilter] = useState<string | null>(null);
+const rows = useAll(filter ? app.todos.where({ title: { contains: filter } }) : undefined);
+```
+
+When an undefined query is passed to `useAll`, it will return `undefined` until the query is provided.
+
+### React Suspense and Transitions
+
+The docs React example app includes a Suspense-based list that keeps the previous result visible
+while a filter or page change resolves by moving the query behind a `Suspense` boundary and
+reading it with `useAllSuspense(query)`.
+
+```tsx
+
+  const db = useDb();
+  const [title, setTitle] = useState("");
+  const [filterTitle, setFilterTitle] = useState("");
+  const [showDoneOnly, setShowDoneOnly] = useState(false);
+  const [page, setPage] = useState(0);
+  const [isPending, startTransition] = useTransition();
+  const deferredFilterTitle = useDeferredValue(filterTitle);
+
+  let query = app.todos
+    .orderBy("id", "desc")
+    .limit(25)
+    .offset(page * 25);
+
+  if (deferredFilterTitle.trim()) {
+    query = query.where({ title: { contains: deferredFilterTitle.trim() } });
+  }
+  if (showDoneOnly) {
+    query = query.where({ done: true });
+  }
+
+  const isLoading = isPending || deferredFilterTitle !== filterTitle;
+
+  function updatePage(nextPage: number) {
+    startTransition(() => {
+      setPage(nextPage);
+    });
+  }
+
+  function handleFilterChange(e: React.ChangeEvent) {
+    setFilterTitle(e.target.value);
+    startTransition(() => {
+      setPage(0);
+    });
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmedTitle = title.trim();
+
+    if (!trimmedTitle) {
+      return;
+    }
+
+    await db.insert(app.todos, { title: trimmedTitle, done: false });
+    setTitle("");
+  }
+
+  return (
+    <>
+      <form onSubmit={(e) => void handleSubmit(e)}>
+        <input
+          type="text"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder="What needs to be done?"
+          required
+        />
+        <button type="submit">Add</button>
+      </form>
+
+      <div>
+        <input
+          type="text"
+          value={filterTitle}
+          onChange={handleFilterChange}
+          placeholder="Filter by title (contains)"
+          aria-label="Filter by title"
+        />
+        <label>
+          <input
+            type="checkbox"
+            checked={showDoneOnly}
+            onChange={(e) => setShowDoneOnly(e.target.checked)}
+          />
+          Done only
+        </label>
+      </div>
+
+      Loading todos...</p>}>
+        <div style={{ opacity: isLoading ? 0.5 : 1, transition: "opacity 0.2s" }}>
+
+        </div>
+
+    </>
+  );
+}
+```
+
 ## Filters
 
 ### API Reference
@@ -2785,7 +3587,7 @@ const todos = useAll(app.todos);
 
   await db.all(app.todos.where({ done: false }));
   await db.all(app.todos.where({ title: { contains: "milk" } }));
-  await db.all(app.todos.where({ project: { ne: EXAMPLE_PROJECT_ID } }));
+  await db.all(app.todos.where({ projectId: { ne: EXAMPLE_PROJECT_ID } }));
 }
 ```
 
@@ -2869,41 +3671,48 @@ pub async fn read_todo_page(
 - **Behavior:** `include(...)` loads related rows and returns nested objects in one query result.
 - **Parameters (TypeScript):** `include({ relationName: true | nestedInclude | queryBuilder })`.
 - **Nested includes:** pass nested objects to load multi-hop relations.
+- **Missing forward references:** included forward relations may be `undefined` at runtime, even when the FK column is non-nullable. Jazz cannot guarantee referential integrity at read time: a referenced row may be deleted, not synced locally yet, or hidden by permissions.
+- **Required forward includes (TypeScript):** call `requireIncludes()` after `include(...)` to drop rows whose included references cannot be resolved.
+- **Nullable scalar FKs:** `requireIncludes()` does not drop a row just because a nullable FK is `null`; in that case the included relation remains `undefined`.
+- **Reverse relations:** `requireIncludes()` does not force reverse includes to be non-empty and does not filter on them.
+- **Forward array refs:** without `requireIncludes()`, missing referenced members are skipped from the included array. With `requireIncludes()`, the row is dropped if any referenced member is unavailable.
+
+For chunked files stored in the conventional `files` / `file_parts` tables, prefer
+`db.loadFileAsBlob(...)` or `db.loadFileAsStream(...)` over eager `include(...)` loading of
+parts. See [Files & Blobs](/docs/files-and-blobs).
 
 Schema references used by the include examples:
 
     ```ts
-
-table("projects", {
-  name: col.string(),
-});
-
-table("todos", {
-  title: col.string(),
-  done: col.boolean(),
-  description: col.string().optional(),
-  parent: col.ref("todos").optional(),
-  project: col.ref("projects").optional(),
-});
-
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    ownerId: s.string().optional(),
+    parentId: s.ref("todos").optional(),
+    projectId: s.ref("projects").optional(),
+  }),
 ```
 
-    ```sql
-CREATE TABLE projects (
-    name TEXT NOT NULL
-);
+    ```ts
 
-CREATE TABLE todos (
-    title TEXT NOT NULL,
-    done BOOLEAN NOT NULL,
-    description TEXT,
-    parent UUID REFERENCES todos,
-    project UUID REFERENCES projects
-);
-CREATE POLICY todos_select_policy ON todos FOR SELECT USING (TRUE);
-CREATE POLICY todos_insert_policy ON todos FOR INSERT WITH CHECK (TRUE);
-CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (TRUE) WITH CHECK (TRUE);
-CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (TRUE);
+const schema = {
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    parent: s.ref("todos").optional(),
+    project: s.ref("projects").optional(),
+  }),
+};
+
+type AppSchema = s.Schema<typeof schema>;
 
 ```
 
@@ -2926,6 +3735,58 @@ pub async fn read_todos_with_related_rows(client: &JazzClient) -> jazz_tools::Re
 }
 ```
 
+## Picking Columns via select
+
+### API Reference
+
+- **Availability:** generated TypeScript query builders.
+- **Behavior:** `select(...)` narrows the root row to `id` plus the columns you pick.
+- **With includes:** `include(...)` still works after `select(...)`.
+- **Selecting in included rows:** pass a query builder inside `include(...)`, for example `include({ project: app.projects.select("name") })`.
+
+```ts
+
+  return db.all(
+    app.todos
+      .select("title")
+      .where({ done: false })
+      .include({ project: app.projects.select("name") }),
+  );
+}
+```
+
+## Magic Columns
+
+### Permission Introspection
+
+Permission introspection columns are computed for the current session and are omitted from
+`select("*")`, so you opt into them explicitly.
+
+For example, `select("*", "$canDelete")` returns the normal row columns plus `$canDelete`.
+
+- `$canRead` reflects whether the current session can read the row. Since read policies already
+  gate which rows appear, returned rows will usually show `$canRead: true`.
+- `$canEdit` reflects whether the current session passes the row's `UPDATE USING` policy.
+- `$canDelete` reflects whether the current session passes the row's `DELETE USING` policy.
+- Without a session, permission introspection columns return `null`.
+
+```ts
+
+  return db.all(
+    app.todos.select("title", "$canRead", "$canEdit", "$canDelete").orderBy("title", "asc"),
+  );
+}
+
+  return db.all(app.todos.select("*", "$canDelete").orderBy("title", "asc"));
+}
+
+  return db.all(app.todos.where({ $canEdit: true }).select("title", "$canEdit"));
+}
+
+  return db.all(app.todos.where({ $canDelete: true }).select("title", "$canDelete"));
+}
+```
+
 ## Advanced: Recursive Queries
 
 Recursive queries compute bounded transitive closures from a seed row set.
@@ -2934,7 +3795,7 @@ Recursive queries compute bounded transitive closures from a seed row set.
 
   return app.todos.gather({
     start: { done: false },
-    step: ({ current }) => app.todos.where({ parent: current }).hopTo("parent"),
+    step: ({ current }) => app.todos.where({ parentId: current }).hopTo("parent"),
     maxDepth: 10,
   });
 }
@@ -2947,8 +3808,12 @@ Recursive queries compute bounded transitive closures from a seed row set.
 - `db.all(query, options?)`
 - `db.one(query, options?)`
 - `db.subscribeAll(query, callback, options?)`
+- `useAll(query, options?)`
+- `useAllSuspense(query, options?)`
+- `new QuerySubscription(query, options?)`
 - `options.tier`: `"worker" | "edge" | "global"`
 - `options.localUpdates`: `"immediate" | "deferred"` (default: `"immediate"`)
+- `options.propagation`: `"full" | "local-only"` (default: `"full"`)
 
 Durability tiers control when initial query delivery is considered confirmed:
 
@@ -2961,6 +3826,7 @@ Defaults:
 - Browser/client default tier is `worker`.
 - Backend/server-connected default tier is `edge`.
 - `localUpdates: "immediate"` keeps local subscription updates synchronous after the first tier-confirmed snapshot. The initial delivery remains tier-gated.
+- `propagation: "full"` sends query updates through the normal local+remote path. `propagation: "local-only"` limits delivery to local changes.
 
 Tradeoff summary:
 
@@ -2987,140 +3853,272 @@ Read durability options pair naturally with write durability tiers:
 
 - Use write durability tiers to gate mutation durability checkpoints.
 - Use read durability options to gate query/subscription delivery checkpoints.
+- React hooks forward these options to the underlying `db.subscribeAll(...)` subscription.
+- Svelte `QuerySubscription` forwards these options to the underlying `db.subscribeAll(...)` subscription.
 
 See [Write Durability Tiers](/docs/writing-data#write-durability-tiers) for write-side semantics.
 
+### Seeding and one-time setup
+
+For one-off setup (seeding default data, initialising a user record on first sign-in), you
+often need to ensure no other client has already done the same work before writing. Use
+`db.all` with `{ tier: "global" }` to wait until the global core has been consulted before
+reading — this prevents duplicate seeding from concurrent fresh clients.
+
+```ts
+// Reads nothing until globally consistent — prevents duplicate seeding
+// from concurrent fresh clients on first visit.
+const existing = await db.all(app.settings, { tier: "global" });
+
+if (existing.length === 0) {
+  for (const seed of DEFAULT_SETTINGS) {
+    await db.insert(app.settings, seed);
+  }
+}
+```
+
+| Call                                | Waits for                 | Use when                                          |
+| ----------------------------------- | ------------------------- | ------------------------------------------------- |
+| `db.all(query)`                     | Local worker (OPFS)       | Reading cached local state                        |
+| `db.all(query, { tier: "global" })` | Global core snapshot      | Seeding or one-time setup that must not duplicate |
+| `useAll(query)`                     | Local snapshot, then live | Live UI that re-renders on every change           |
+
+For most subscriptions, omitting a tier is the right choice: Jazz delivers results from local
+storage immediately and streams in remote updates as they arrive, giving users the fastest
+possible experience. Reserve explicit tiers for the cases above where eventual consistency is
+not acceptable.
+
 ===PAGE:schemas===
 TITLE:Schemas
-DESCRIPTION:Define tables and relationships in TS DSL or SQL, then use the CLI for generated artifacts.
+DESCRIPTION:Define tables and relationships in root schema.ts, then review migration edges as your app evolves.
 
 ## Table Definitions
 
+Every Jazz app defines its schema in a root `schema.ts`, including Rust backends.
+
     ```ts
 
-table("projects", {
-  name: col.string(),
-});
+const schema = {
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    parent: s.ref("todos").optional(),
+    project: s.ref("projects").optional(),
+  }),
+};
 
-table("todos", {
-  title: col.string(),
-  done: col.boolean(),
-  description: col.string().optional(),
-  parent: col.ref("todos").optional(),
-  project: col.ref("projects").optional(),
-});
+type AppSchema = s.Schema<typeof schema>;
+
+```
+
+    Rust apps use the same `schema.ts` file. The schema definition language is still TypeScript, and Rust consumes the compiled internal schema representation through the CLI and low-level APIs.
+
+    ```ts
+
+const schema = {
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+    description: s.string().optional(),
+    parent: s.ref("todos").optional(),
+    project: s.ref("projects").optional(),
+  }),
+};
+
+type AppSchema = s.Schema<typeof schema>;
 
 ```
 
-    ```sql
-CREATE TABLE projects (
-    name TEXT NOT NULL
-);
+    In practice, a Rust app runs the schema export command and deserializes the JSON into Jazz's Rust `Schema` type:
 
-CREATE TABLE todos (
-    title TEXT NOT NULL,
-    done BOOLEAN NOT NULL,
-    description TEXT,
-    parent UUID REFERENCES todos,
-    project UUID REFERENCES projects
-);
-CREATE POLICY todos_select_policy ON todos FOR SELECT USING (TRUE);
-CREATE POLICY todos_insert_policy ON todos FOR INSERT WITH CHECK (TRUE);
-CREATE POLICY todos_update_policy ON todos FOR UPDATE USING (TRUE) WITH CHECK (TRUE);
-CREATE POLICY todos_delete_policy ON todos FOR DELETE USING (TRUE);
+    ```bash
+    npx jazz-tools schema export --format json
+    ```
 
-```
+    The Rust examples shell out to this command at startup, so the schema definition stays unified even when the app itself is written in Rust. See [Setup](/docs/setup) for the end-to-end backend context pattern.
+
+Each top-level property of the `schema` object is a table. In the example above, `projects` and `todos` become tables, and each nested property becomes a column on that table.
+
+The `type AppSchema = s.Schema<typeof schema>; export const app: s.App = s.defineApp(schema);` pattern is there to keep TypeScript hovers short and readable. Without that alias boundary, TypeScript tends to expand the entire schema literal when you hover `app`, `app.todos`, or derived row/query types.
 
 ## Datatypes and References
 
-- TypeScript DSL defaults to `col.string`, `col.boolean`, and `col.ref` for relationships.
-- SQL keeps the same model via `TEXT`, `BOOLEAN`, and `UUID REFERENCES ...`.
-- Use SQL as the alternate path when your project is Rust-first.
+- Use `s.string()`, `s.boolean()`, `s.int()`, `s.timestamp()`, and `s.bytes()` for scalar fields.
+- Use `s.ref("tableName")` for foreign keys. Jazz infers typed `.include(...)` relations directly from `schema.ts`.
+- For browser files and large uploaded blobs, define the conventional `files` / `file_parts` tables and store a normal reference to `files` from your app rows. See [Files & Blobs](/docs/files-and-blobs).
 
 ### Available column types
 
-## Jazz CLI and Generated Files
+## Workflow and Schema Evolution
 
-### TS Client Codegen
+### Edit `schema.ts` during development
+
+Most of the time, schema evolution starts with a normal edit to `schema.ts`. New writes use the new schema immediately.
+
+When older rows are no longer reachable from the current schema graph, Jazz logs a warning with the exact hashes you need next. These warnings can appear in browser logs, backend logs, or be forwarded from upstream servers. A typical warning looks like this, wrapped for readability:
+
+```text
+[client] Detected 3 rows of todos with differing schema versions.
+[client] To ensure data visibility and forward/backward compatibility please create
+         a new migration with:
+         npx jazz-tools migrations create \
+           a01f5c72ec47 \
+           311995e9a178
+```
+
+That warning is the handoff from day-to-day schema editing to reviewed compatibility work.
+
+### Generate a migration edge with `migrations create`
+
+`migrations create` connects to your Jazz server, loads both schema hashes, and writes a prefilled file into `migrations/{dateCreated}-unnamed-{fromHash}-{toHash}.ts`.
 
 ```bash
-#!/usr/bin/env bash
-
-# Regenerate SQL and typed TS bindings from schema/current.ts.
-npx jazz-tools@alpha build
-
+npx jazz-tools migrations create <fromHash> <toHash>
 ```
 
-Run this from a normal app root. It regenerates `schema/current.sql` and typed client bindings (for example `schema/app.ts`) from `schema/current.ts`.
+The generated file already contains `fromHash`, `toHash`, and minimal typed `from` / `to` witnesses. In most cases, the only manual work is to fill in `migrate` and replace `unnamed` in the filename with a real migration name.
 
-### Generated migration stubs
+### Publish a reviewed edge with `migrations push`
 
-TypeScript migration stubs encode both forward and backward behavior in one file.
-SQL migrations are split into explicit forward and backward files.
+Publishing is the explicit gate. New schema hashes are still learned automatically when clients connect, but Jazz never auto-pushes migrations.
 
-    ```ts
+```bash
+npx jazz-tools migrations push <fromHash> <toHash>
+```
 
-migrate("todos", {
-  description: col.add().string({ default: "" }),
+Run this after reviewing the migration file. Once pushed, that edge becomes available to make data visible across those schema hashes.
+
+## Example Migration Files
+
+Migration files live in `migrations/` and are always TypeScript, even for Rust apps.
+
+### Generated stub
+
+```ts
+
+  migrate: {
+    todos: {
+      description: s.add.string({ default: null }),
+    },
+  },
+  fromHash: "a01f5c72ec47",
+  toHash: "311995e9a178",
+  from: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
+  },
+  to: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
+  },
 });
 
 ```
 
-    Forward:
-    ```sql
-ALTER TABLE todos ADD COLUMN description TEXT DEFAULT '';
-```
-    Backward:
-    ```sql
-ALTER TABLE todos DROP COLUMN description;
-```
+### Edited stub
 
-### Edited stubs (example customization)
-
-    ```ts
+```ts
 
 // Example of editing a generated migration stub.
-migrate("todos", {
-  description: col.add().string({ default: "No description" }),
+
+  migrate: {
+    todos: {
+      description: s.add.string({ default: "No description" }),
+    },
+  },
+  fromHash: "a01f5c72ec47",
+  toHash: "311995e9a178",
+  from: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
+  },
+  to: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
+  },
 });
 
 ```
 
-    ```sql
--- Example of editing a generated migration stub.
-ALTER TABLE todos ADD COLUMN description TEXT DEFAULT 'No description';
+### Backwards default example
 
-```
-
-### Backwards default examples
-
-Backwards defaults define what older-schema clients see for fields dropped in newer schemas.
-When new clients write rows without that field, the backward lens supplies the configured default to old clients.
-In TypeScript, the same migration stub carries both forward and backward translation behavior.
-In SQL, the backward lens file explicitly reintroduces dropped columns with a default.
-
-    ```ts
+```ts
 
 // Example: dropping a column with a backwards default.
-// Clients still on v1 continue seeing legacy_priority.
-// For rows written by v2 clients, the lens supplies this default value.
-migrate("todos", {
-  legacy_priority: col.drop().int({ backwardsDefault: 0 }),
+// Clients still on the older schema continue seeing legacy_priority.
+
+  migrate: {
+    todos: {
+      legacy_priority: s.drop.int({ backwardsDefault: 0 }),
+    },
+  },
+  fromHash: "311995e9a178",
+  toHash: "73b65d082ab8",
+  from: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+      legacy_priority: s.int(),
+    }),
+  },
+  to: {
+    todos: s.table({
+      title: s.string(),
+      done: s.boolean(),
+      description: s.string().optional(),
+      parentId: s.ref("todos").optional(),
+      projectId: s.ref("projects").optional(),
+      owner_id: s.string(),
+    }),
+  },
 });
 
 ```
 
-    Forward:
-    ```sql
--- Example: drop a column in the forward direction.
-ALTER TABLE todos DROP COLUMN legacy_priority;
+## Permissions
 
-```
-    Backward:
-    ```sql
--- Example: old-schema clients still read legacy_priority via this backward lens.
--- Rows written by new clients are translated to legacy_priority = 0.
-ALTER TABLE todos ADD COLUMN legacy_priority INTEGER DEFAULT 0;
+To define row-level policies, add a sibling `permissions.ts` next to `schema.ts`.
+
+```ts
+
+  policy.todos.allowRead.where({ owner_id: session.user_id });
+  policy.todos.allowInsert.where({ owner_id: session.user_id });
+  policy.todos.allowUpdate.where({ owner_id: session.user_id });
+  policy.todos.allowDelete.where({ owner_id: session.user_id });
+});
 
 ```
 
@@ -3175,12 +4173,6 @@ Use `JAZZ_APP_ID` as the app ID configuration key across environments.
 For auth modes and upgrade/link flow, see [Authentication](/docs/authentication).
 
     ```tsx
-const client = createJazzClient({
-  appId: "todo-react-example",
-  serverUrl: "http://127.0.0.1:1625",
-  localAuthMode: "anonymous",
-  // jwtToken: authToken, // Use this (instead of localAuthMode) for external auth.
-});
 
   return (
 
@@ -3192,6 +4184,9 @@ const client = createJazzClient({
 
     ```vue
 <script setup lang="ts">
+
+// Keep docs-only auth snippets in the compiled example app.
+void AuthSessionExamples;
 
 const client = createJazzClient({
   appId: "todo-vue-example",
@@ -3217,7 +4212,11 @@ const client = createJazzClient({
 
 <script lang="ts">
 	import { createJazzClient, JazzSvelteProvider } from 'jazz-tools/svelte';
+	import AuthSessionExamples from './AuthSessionExamples.svelte';
 	import TodoList from './TodoList.svelte';
+
+	// Keep docs-only auth snippets in the compiled example app.
+	void AuthSessionExamples;
 
 	const client = createJazzClient({
 		appId: 'todo-svelte-example',
@@ -3257,11 +4256,12 @@ For React Native/Expo clients, make sure `serverUrl` points to a host your runti
   const context = createJazzContext({
     appId,
     app: schemaApp,
-    dataPath: dbPath,
+    permissions,
+    driver: { type: "persistent", dataPath: dbPath },
     env: "dev",
     userBranch: "main",
   });
-  const client = context.client();
+  const db = context.db();
 ```
 
     ```rs
@@ -3280,8 +4280,8 @@ For React Native/Expo clients, make sure `serverUrl` points to a host your runti
 ### Backend Identity Pattern
 
 Client-side usage enforces permissions for the local user context.
-Backend usage should derive a requester-scoped client directly from the request.
-In TypeScript backends, use `createJazzContext(...)` once at startup, then `context.forRequest(req)` to extract the bearer JWT payload and scope the client.
+Backend usage can either use `context.db()` for the configured runtime identity or derive a requester-scoped `Db` directly from the request.
+In TypeScript backends, create the context once at startup with both `app` and `permissions`, then call `context.forRequest(req)` when you need a bearer-JWT-scoped high-level `Db`.
 
 #### Per-request user-scoped client
 
@@ -3290,7 +4290,7 @@ In TypeScript backends, use `createJazzContext(...)` once at startup, then `cont
   try {
     const rows = await context
       .forRequest(req, schemaApp)
-      .query(schemaApp.todos.where({ done: true }));
+      .all(schemaApp.todos.where({ done: true }));
     res.json(rows);
   } catch {
     sendQueryError(res);
@@ -3334,54 +4334,59 @@ DESCRIPTION:Insert, update, and delete APIs with local-first execution, framewor
 `insert`, `update`, and `delete` apply immediately in the local runtime.
 That keeps UI latency low because local state updates do not wait for any network hop.
 
-Mutation methods return promises that resolve when the requested durability tier is reached.
+`insertDurable`, `updateDurable`, and `deleteDurable` return promises that
+resolve when the requested durability tier is reached.
+
+For browser `Blob`, `File`, or `ReadableStream` uploads, use `db.createFileFromBlob(...)`
+or `db.createFileFromStream(...)` and then store the returned file id on your own row. See
+[Files & Blobs](/docs/files-and-blobs).
 
 ## Mutating from Framework Context
 
 Use the framework context binding to access the shared `Db` instance and execute mutations.
 
     ```tsx
-  async function addTodo(todoTitle: string) {
-    await db.insert(app.todos, { title: todoTitle, done: false });
+  function addTodo(todoTitle: string) {
+    db.insert(app.todos, { title: todoTitle, done: false });
   }
 
-  async function toggleTodo(todo: { id: string; done: boolean }) {
-    await db.update(app.todos, todo.id, { done: !todo.done });
+  function toggleTodo(todo: { id: string; done: boolean }) {
+    db.update(app.todos, todo.id, { done: !todo.done });
   }
 
-  async function removeTodo(id: string) {
-    await db.delete(app.todos, id);
+  function removeTodo(id: string) {
+    db.delete(app.todos, id);
   }
 ```
 
     ```ts
-async function addTodo(todoTitle: string) {
-  await db.insert(app.todos, { title: todoTitle, done: false });
+function addTodo(todoTitle: string) {
+  db.insert(app.todos, { title: todoTitle, done: false });
 }
 
-async function toggleTodo(todo: { id: string; done: boolean }) {
-  await db.update(app.todos, todo.id, { done: !todo.done });
+function toggleTodo(todo: { id: string; done: boolean }) {
+  db.update(app.todos, todo.id, { done: !todo.done });
 }
 
-async function removeTodo(id: string) {
+function removeTodo(id: string) {
   db.delete(app.todos, id);
 }
 ```
 
     ```tsx
-  const addTodo = async () => {
+  const addTodo = () => {
     const trimmed = title.trim();
     if (!trimmed || !sessionUserId) return;
-    await db.insert(app.todos, { title: trimmed, done: false, owner_id: sessionUserId });
+    db.insert(app.todos, { title: trimmed, done: false, ownerId: sessionUserId });
     setTitle("");
   };
 
-  const toggleTodo = async (todo: Todo) => {
-    await db.update(app.todos, todo.id, { done: !todo.done });
+  const toggleTodo = (todo: Todo) => {
+    db.update(app.todos, todo.id, { done: !todo.done });
   };
 
-  const removeTodo = async (id: string) => {
-    await db.delete(app.todos, id);
+  const removeTodo = (id: string) => {
+    db.delete(app.todos, id);
   };
 ```
 
@@ -3393,12 +4398,12 @@ async function removeTodo(id: string) {
 ```
 
     ```svelte
-	async function toggleTodo(todo: { id: string; done: boolean }) {
-		await db.update(app.todos, todo.id, { done: !todo.done });
+	function toggleTodo(todo: { id: string; done: boolean }) {
+		db.update(app.todos, todo.id, { done: !todo.done });
 	}
 
-	async function removeTodo(id: string) {
-		await db.delete(app.todos, id);
+	function removeTodo(id: string) {
+		db.delete(app.todos, id);
 	}
 ```
 
@@ -3406,14 +4411,14 @@ async function removeTodo(id: string) {
 
     ```ts
 
-  await db.insert(app.todos, {
+  db.insert(app.todos, {
     title: "Write docs",
     done: false,
-    owner_id: EXAMPLE_OWNER_ID,
-    project: EXAMPLE_PROJECT_ID,
+    ownerId: EXAMPLE_OWNER_ID,
+    projectId: EXAMPLE_PROJECT_ID,
   });
-  await db.update(app.todos, todoId, { done: true });
-  await db.delete(app.todos, todoId);
+  db.update(app.todos, todoId, { done: true });
+  db.delete(app.todos, todoId);
 }
 ```
 
@@ -3427,7 +4432,7 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
         Value::Null,
     ];
 
-    let _new_id = client.create("todos", values).await?;
+    let _new_row = client.create("todos", values).await?;
     client
         .update(
             existing_id,
@@ -3436,6 +4441,20 @@ pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz
         .await?;
     client.delete(existing_id).await?;
     Ok(())
+}
+```
+
+### Partial Updates and Nullable Fields
+
+`update(...)` and `updateDurable(...)` only modify the keys you pass.
+Omitted fields, and fields explicitly set to `undefined`, are left unchanged.
+To clear a nullable column in TypeScript, pass `null`.
+Required fields cannot be set to `null`.
+
+```ts
+
+  db.update(app.todos, todoId, { ownerId: null }); // clears the nullable FK
+  db.update(app.todos, todoId, { description: undefined }); // leaves the field unchanged
 }
 ```
 
@@ -3457,33 +4476,70 @@ Notes:
 
 ## Write Durability Tiers
 
+The tier on a write controls _where the promise resolves_. Writes flow upward — from the
+local OPFS worker, to the nearest edge server, to the global core — and the tier determines
+how far the write must travel before the call returns.
+
+Data flows back down on demand. An edge server only fetches data from the global core when a
+client connected to it subscribes to that data. Edge nodes are demand-driven caches; the
+global core is the most durable tier and the point all others reconcile against. Two clients
+on different edge nodes may never share data unless one of them subscribes to data the other
+has written.
+
+### Data consistency
+
+Jazz uses last-write-wins CRDT merge strategies, so any tier may hold more recent
+unreconciled writes than the global core at a given moment. The global core represents the
+most durable snapshot, not necessarily the most current one. You can get closer to strongly
+consistent reads by using `global`-tier writes and reads exclusively, but under normal
+operation the system converges quickly.
+
 ### API Reference
 
-- `insert(table, data, options?)`
-- `update(table, id, data, options?)`
-- `delete(table, id, options?)`
+- `insert(table, data)`
+- `update(table, id, data)`
+- `delete(table, id)`
+- `insertDurable(table, data, { tier })`
+- `updateDurable(table, id, data, options?)`
+- `deleteDurable(table, id, options?)`
 - `options.tier`: `"worker" | "edge" | "global"`
-
-Durability tiers control when the returned promise resolves:
-
-- `worker`: waits until the local worker/storage tier acknowledges the write.
-- `edge`: waits until the edge server acknowledges the write.
-- `global`: waits until the global server acknowledges the write.
 
 Defaults:
 
 - Browser/client default tier is `worker`.
 - Backend/server-connected default tier is `edge`.
 
-Tradeoff summary:
+### Which tier to use
 
-- Lower tier: lower latency, lower durability scope.
-- Higher tier: higher latency, wider durability scope.
+**`"worker"` (default)** — the write is persisted to the local OPFS database. The promise
+resolves as soon as the WASM worker confirms it. Other tabs on the same device see the change
+immediately; remote clients do not yet.
 
-In practical terms:
+Use `worker` for:
 
-- Local-first updates remain immediate for UI/subscription state.
-- Mutation promises resolve at the selected durability checkpoint.
+- Local-only state (draft text, UI prefs)
+- Any write where you do not need remote confirmation
+
+**`"edge"`** — the write has reached the nearest sync server and been acknowledged. Clients
+connected to the same edge server will see the write immediately via their subscriptions.
+Clients on other edge nodes will see it once their edge fetches the update from the global
+core, which happens when they subscribe to the relevant data.
+
+Use `edge` for:
+
+- Any write that other clients must receive (messages, shared state, user actions)
+- Writes that depend on remote acknowledgement before continuing
+
+**`"global"`** — the write has propagated to the global core and is globally durable. Any
+client that subscribes to the relevant data will receive it, regardless of which edge node
+they are connected to. Highest latency; use only when edge-level acknowledgement is not
+sufficient.
+
+Use `global` for:
+
+- Seeding default data or one-time setup that must not duplicate across concurrent clients
+- Financial or audit records
+- Actions that must survive edge server failure
 
     ```ts
 
@@ -3492,8 +4548,8 @@ In practical terms:
     {
       title: "Write docs with durability tier",
       done: false,
-      owner_id: EXAMPLE_OWNER_ID,
-      project: EXAMPLE_PROJECT_ID,
+      ownerId: EXAMPLE_OWNER_ID,
+      projectId: EXAMPLE_PROJECT_ID,
     },
     { tier: "edge" },
   );
@@ -3507,7 +4563,7 @@ In practical terms:
 pub async fn write_todo_with_default_durability(
     client: &JazzClient,
 ) -> jazz_tools::Result {
-    let id = client
+    let (id, _row_values) = client
         .create(
             "todos",
             vec![
@@ -3525,6 +4581,32 @@ pub async fn write_todo_with_default_durability(
     Ok(id)
 }
 ```
+
+### When remote clients see your writes
+
+All writes propagate upward through the infrastructure tiers and will eventually reach remote
+clients that subscribe to the relevant data. The tier only controls when the promise resolves
+and what timing guarantee you get.
+
+A `worker`-tier write resolves as soon as the local OPFS worker acknowledges it. The write
+will propagate to the edge and onward, but with no timing guarantee — it sits in the local
+database until the sync layer flushes it. Remote clients will see it eventually, but not
+necessarily by the time your promise resolves.
+
+An `edge`-tier write resolves only after the nearest sync server has acknowledged it. Clients
+connected to the same edge node will see the write as soon as the promise resolves. Clients on
+other edge nodes will see it once their edge fetches the update from the global core.
+
+```ts
+// Remote clients will see this eventually — no timing guarantee on delivery
+db.update(app.tasks, id, { done: true, completedBy: userId });
+
+// Remote clients on this edge see this as soon as the promise resolves
+await db.updateDurable(app.tasks, id, { done: true, completedBy: userId }, { tier: "edge" });
+```
+
+If remote clients are not reacting to a write promptly, check whether the tier is `"edge"` or
+higher.
 
 ## Combining Write Durability with Read Durability
 

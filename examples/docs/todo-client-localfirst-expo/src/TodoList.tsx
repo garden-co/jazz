@@ -10,7 +10,7 @@ import {
   type ListRenderItem,
 } from "react-native";
 import { useAll, useDb, useSession } from "jazz-tools/react-native";
-import { app, type Todo } from "../schema/app";
+import { app, type Todo } from "../schema";
 
 // #region read-write-expo
 export function TodoList() {
@@ -40,7 +40,7 @@ export function TodoList() {
   const addTodo = () => {
     const trimmed = title.trim();
     if (!trimmed || !sessionUserId) return;
-    db.insert(app.todos, { title: trimmed, done: false, owner_id: sessionUserId });
+    db.insert(app.todos, { title: trimmed, done: false, ownerId: sessionUserId });
     setTitle("");
   };
 

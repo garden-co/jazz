@@ -10,15 +10,55 @@ use std::collections::HashMap;
 use crate::object::ObjectId;
 use crate::query_manager::policy::{CmpOp, Operation, PolicyExpr, PolicyValue};
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnName, ColumnType, RowDescriptor, Schema, TableName, TablePolicies,
-    TableSchema, Value,
+    ColumnDescriptor, ColumnName, ColumnType, RowDescriptor, Schema, SchemaHash, TableName,
+    TablePolicies, TableSchema, Value,
 };
 
 use super::lens::{LensOp, LensTransform};
 
 /// Current encoding version.
-const SCHEMA_VERSION: u8 = 3;
-const LENS_VERSION: u8 = 1;
+const SCHEMA_VERSION: u8 = SchemaEncodingVersion::V4 as u8;
+const LENS_VERSION: u8 = 2;
+const PERMISSIONS_VERSION: u8 = 1;
+const PERMISSIONS_BUNDLE_VERSION: u8 = 2;
+const PERMISSIONS_HEAD_VERSION: u8 = 2;
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+#[repr(u8)]
+enum SchemaEncodingVersion {
+    // v1 schemas did not encode policies.
+    V1 = 1,
+    // v2 schemas include policies, but no legacy inherit-policy byte.
+    V2 = 2,
+    // v3 schemas include policies and a legacy inherit-policy byte.
+    V3 = 3,
+    // v4 schemas include column defaults.
+    V4 = 4,
+}
+
+impl SchemaEncodingVersion {
+    fn from_byte(version: u8) -> Option<Self> {
+        match version {
+            1 => Some(Self::V1),
+            2 => Some(Self::V2),
+            3 => Some(Self::V3),
+            4 => Some(Self::V4),
+            _ => None,
+        }
+    }
+
+    fn has_table_policies(self) -> bool {
+        matches!(self, Self::V2 | Self::V3)
+    }
+
+    fn has_legacy_inherit_policy_byte(self) -> bool {
+        !matches!(self, Self::V2)
+    }
+
+    fn has_column_defaults(self) -> bool {
+        matches!(self, Self::V4)
+    }
+}
 
 /// Encoding errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,7 +113,8 @@ impl std::error::Error for CatalogueEncodingError {}
 /// Tables are sorted by name for deterministic encoding.
 pub fn encode_schema(schema: &Schema) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(SCHEMA_VERSION);
+    let version = SchemaEncodingVersion::V4;
+    buf.push(version as u8);
 
     // Sort tables by name for deterministic ordering
     let mut tables: Vec<_> = schema.iter().collect();
@@ -82,7 +123,7 @@ pub fn encode_schema(schema: &Schema) -> Vec<u8> {
     write_u32(&mut buf, tables.len() as u32);
 
     for (name, table_schema) in tables {
-        encode_table_entry(&mut buf, name, table_schema);
+        encode_table_entry_with_version(&mut buf, name, table_schema, version);
     }
 
     buf
@@ -97,67 +138,42 @@ pub fn decode_schema(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
         });
     }
 
-    let version = data[0];
-    match version {
-        // v1 schemas did not encode policies.
-        1 => decode_schema_v1(data),
-        // v2 schemas include policies, but no legacy inherit-policy byte.
-        2 => decode_schema_v2(data),
-        // v3 schemas include policies and a legacy inherit-policy byte.
-        SCHEMA_VERSION => decode_schema_v3(data),
-        _ => Err(CatalogueEncodingError::UnsupportedVersion {
-            found: version,
+    let Some(version) = SchemaEncodingVersion::from_byte(data[0]) else {
+        return Err(CatalogueEncodingError::UnsupportedVersion {
+            found: data[0],
             expected: SCHEMA_VERSION,
-        }),
+        });
+    };
+
+    decode_schema_with_version(data, version)
+}
+
+fn encode_table_entry_with_version(
+    buf: &mut Vec<u8>,
+    name: &TableName,
+    schema: &TableSchema,
+    version: SchemaEncodingVersion,
+) {
+    write_string(buf, name.as_str());
+    encode_row_descriptor_with_version(buf, &schema.columns, version);
+    if version.has_table_policies() {
+        encode_table_policies(buf, &schema.policies);
     }
 }
 
-fn encode_table_entry(buf: &mut Vec<u8>, name: &TableName, schema: &TableSchema) {
-    write_string(buf, name.as_str());
-    encode_row_descriptor(buf, &schema.columns);
-    encode_table_policies(buf, &schema.policies);
-}
-
-fn decode_table_entry(
+fn decode_table_entry_with_version(
     data: &[u8],
     offset: &mut usize,
+    version: SchemaEncodingVersion,
 ) -> Result<(TableName, TableSchema), CatalogueEncodingError> {
     let name = read_string(data, offset, "table_name")?;
-    let descriptor = decode_row_descriptor(data, offset)?;
-    let policies = decode_table_policies(data, offset)?;
-
-    Ok((
-        TableName::new(name),
-        TableSchema {
-            columns: descriptor,
-            policies,
-        },
-    ))
-}
-
-fn decode_table_entry_v2(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<(TableName, TableSchema), CatalogueEncodingError> {
-    let name = read_string(data, offset, "table_name")?;
-    let descriptor = decode_row_descriptor_v2(data, offset)?;
-    let policies = decode_table_policies(data, offset)?;
-
-    Ok((
-        TableName::new(name),
-        TableSchema {
-            columns: descriptor,
-            policies,
-        },
-    ))
-}
-
-fn decode_table_entry_v1(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<(TableName, TableSchema), CatalogueEncodingError> {
-    let name = read_string(data, offset, "table_name")?;
-    let descriptor = decode_row_descriptor(data, offset)?;
+    let descriptor = decode_row_descriptor_with_version(data, offset, version)?;
+    if version.has_table_policies() {
+        // Legacy schema versions encoded policies inline, but structural schema
+        // decode intentionally drops them now that permissions are catalogued
+        // separately.
+        decode_table_policies(data, offset)?;
+    }
 
     Ok((
         TableName::new(name),
@@ -168,87 +184,61 @@ fn decode_table_entry_v1(
     ))
 }
 
-fn decode_schema_v1(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
+fn decode_schema_with_version(
+    data: &[u8],
+    version: SchemaEncodingVersion,
+) -> Result<Schema, CatalogueEncodingError> {
     let mut offset = 1;
     let table_count = read_u32(data, &mut offset)?;
 
     let mut schema = HashMap::new();
     for _ in 0..table_count {
-        let (name, table_schema) = decode_table_entry_v1(data, &mut offset)?;
+        let (name, table_schema) = decode_table_entry_with_version(data, &mut offset, version)?;
         schema.insert(name, table_schema);
     }
 
     Ok(schema)
 }
 
-fn decode_schema_v2(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
-    let mut offset = 1;
-    let table_count = read_u32(data, &mut offset)?;
-
-    let mut schema = HashMap::new();
-    for _ in 0..table_count {
-        let (name, table_schema) = decode_table_entry_v2(data, &mut offset)?;
-        schema.insert(name, table_schema);
-    }
-
-    Ok(schema)
-}
-
-fn decode_schema_v3(data: &[u8]) -> Result<Schema, CatalogueEncodingError> {
-    let mut offset = 1;
-    let table_count = read_u32(data, &mut offset)?;
-
-    let mut schema = HashMap::new();
-    for _ in 0..table_count {
-        let (name, table_schema) = decode_table_entry(data, &mut offset)?;
-        schema.insert(name, table_schema);
-    }
-
-    Ok(schema)
-}
-
-fn encode_row_descriptor(buf: &mut Vec<u8>, desc: &RowDescriptor) {
+fn encode_row_descriptor_with_version(
+    buf: &mut Vec<u8>,
+    desc: &RowDescriptor,
+    version: SchemaEncodingVersion,
+) {
     // Sort columns by name for deterministic encoding
     let mut columns: Vec<_> = desc.columns.iter().collect();
     columns.sort_by_key(|c| c.name.as_str());
 
     write_u32(buf, columns.len() as u32);
     for col in columns {
-        encode_column_descriptor(buf, col);
+        encode_column_descriptor_with_version(buf, col, version);
     }
 }
 
-fn decode_row_descriptor(
+fn decode_row_descriptor_with_version(
     data: &[u8],
     offset: &mut usize,
+    version: SchemaEncodingVersion,
 ) -> Result<RowDescriptor, CatalogueEncodingError> {
     let count = read_u32(data, offset)?;
     let mut columns = Vec::with_capacity(count as usize);
 
     for _ in 0..count {
-        columns.push(decode_column_descriptor(data, offset)?);
+        columns.push(decode_column_descriptor_with_version(
+            data, offset, version,
+        )?);
     }
 
     Ok(RowDescriptor::new(columns))
 }
 
-fn decode_row_descriptor_v2(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<RowDescriptor, CatalogueEncodingError> {
-    let count = read_u32(data, offset)?;
-    let mut columns = Vec::with_capacity(count as usize);
-
-    for _ in 0..count {
-        columns.push(decode_column_descriptor_v2(data, offset)?);
-    }
-
-    Ok(RowDescriptor::new(columns))
-}
-
-fn encode_column_descriptor(buf: &mut Vec<u8>, col: &ColumnDescriptor) {
+fn encode_column_descriptor_with_version(
+    buf: &mut Vec<u8>,
+    col: &ColumnDescriptor,
+    version: SchemaEncodingVersion,
+) {
     write_string(buf, col.name.as_str());
-    encode_column_type(buf, &col.column_type);
+    encode_column_type_with_version(buf, &col.column_type, version);
     buf.push(if col.nullable { 1 } else { 0 });
 
     // References (FK)
@@ -261,16 +251,28 @@ fn encode_column_descriptor(buf: &mut Vec<u8>, col: &ColumnDescriptor) {
             buf.push(0);
         }
     }
-    // Legacy reserved byte kept for backward compatibility with v3 encoding.
-    buf.push(0);
+    if version.has_legacy_inherit_policy_byte() {
+        // Legacy reserved byte kept for backward compatibility with v3 encoding.
+        buf.push(0);
+    }
+    if version.has_column_defaults() {
+        match &col.default {
+            Some(default) => {
+                buf.push(1);
+                encode_value(buf, default);
+            }
+            None => buf.push(0),
+        }
+    }
 }
 
-fn decode_column_descriptor(
+fn decode_column_descriptor_with_version(
     data: &[u8],
     offset: &mut usize,
+    version: SchemaEncodingVersion,
 ) -> Result<ColumnDescriptor, CatalogueEncodingError> {
     let name = read_string(data, offset, "column_name")?;
-    let column_type = decode_column_type(data, offset)?;
+    let column_type = decode_column_type_with_version(data, offset, version)?;
     let nullable = read_u8(data, offset)? != 0;
     let has_ref = read_u8(data, offset)? != 0;
     let references = if has_ref {
@@ -278,26 +280,16 @@ fn decode_column_descriptor(
     } else {
         None
     };
-    let _legacy_inherit_policy = read_u8(data, offset)? != 0;
-
-    Ok(ColumnDescriptor {
-        name: ColumnName::new(name),
-        column_type,
-        nullable,
-        references,
-    })
-}
-
-fn decode_column_descriptor_v2(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<ColumnDescriptor, CatalogueEncodingError> {
-    let name = read_string(data, offset, "column_name")?;
-    let column_type = decode_column_type(data, offset)?;
-    let nullable = read_u8(data, offset)? != 0;
-    let has_ref = read_u8(data, offset)? != 0;
-    let references = if has_ref {
-        Some(TableName::new(read_string(data, offset, "column_ref")?))
+    if version.has_legacy_inherit_policy_byte() {
+        let _legacy_inherit_policy = read_u8(data, offset)? != 0;
+    }
+    let default = if version.has_column_defaults() {
+        let has_default = read_u8(data, offset)? != 0;
+        if has_default {
+            Some(decode_value(data, offset)?)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -307,6 +299,7 @@ fn decode_column_descriptor_v2(
         column_type,
         nullable,
         references,
+        default,
     })
 }
 
@@ -324,7 +317,11 @@ const TYPE_DOUBLE: u8 = 10;
 const TYPE_BYTEA: u8 = 11;
 const TYPE_JSON: u8 = 12;
 
-fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
+fn encode_column_type_with_version(
+    buf: &mut Vec<u8>,
+    col_type: &ColumnType,
+    version: SchemaEncodingVersion,
+) {
     match col_type {
         ColumnType::Integer => buf.push(TYPE_INTEGER),
         ColumnType::BigInt => buf.push(TYPE_BIGINT),
@@ -358,18 +355,19 @@ fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
         }
         ColumnType::Array { element: elem } => {
             buf.push(TYPE_ARRAY);
-            encode_column_type(buf, elem);
+            encode_column_type_with_version(buf, elem, version);
         }
         ColumnType::Row { columns: desc } => {
             buf.push(TYPE_ROW);
-            encode_row_descriptor(buf, desc);
+            encode_row_descriptor_with_version(buf, desc, version);
         }
     }
 }
 
-fn decode_column_type(
+fn decode_column_type_with_version(
     data: &[u8],
     offset: &mut usize,
+    version: SchemaEncodingVersion,
 ) -> Result<ColumnType, CatalogueEncodingError> {
     let tag = read_u8(data, offset)?;
     match tag {
@@ -407,13 +405,13 @@ fn decode_column_type(
             Ok(ColumnType::Enum { variants })
         }
         TYPE_ARRAY => {
-            let elem = decode_column_type(data, offset)?;
+            let elem = decode_column_type_with_version(data, offset, version)?;
             Ok(ColumnType::Array {
                 element: Box::new(elem),
             })
         }
         TYPE_ROW => {
-            let desc = decode_row_descriptor(data, offset)?;
+            let desc = decode_row_descriptor_with_version(data, offset, version)?;
             Ok(ColumnType::Row {
                 columns: Box::new(desc),
             })
@@ -423,6 +421,28 @@ fn decode_column_type(
             context: "column_type",
         }),
     }
+}
+
+fn encode_row_descriptor(buf: &mut Vec<u8>, desc: &RowDescriptor) {
+    encode_row_descriptor_with_version(buf, desc, SchemaEncodingVersion::V3);
+}
+
+fn decode_row_descriptor(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<RowDescriptor, CatalogueEncodingError> {
+    decode_row_descriptor_with_version(data, offset, SchemaEncodingVersion::V3)
+}
+
+fn encode_column_type(buf: &mut Vec<u8>, col_type: &ColumnType) {
+    encode_column_type_with_version(buf, col_type, SchemaEncodingVersion::V3);
+}
+
+fn decode_column_type(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<ColumnType, CatalogueEncodingError> {
+    decode_column_type_with_version(data, offset, SchemaEncodingVersion::V3)
 }
 
 // ============================================================================
@@ -464,30 +484,14 @@ pub fn decode_lens_transform(data: &[u8]) -> Result<LensTransform, CatalogueEnco
     }
 
     let version = data[0];
-    if version != LENS_VERSION {
-        return Err(CatalogueEncodingError::UnsupportedVersion {
+    match version {
+        1 => decode_lens_transform_v1(data),
+        LENS_VERSION => decode_lens_transform_v2(data),
+        _ => Err(CatalogueEncodingError::UnsupportedVersion {
             found: version,
             expected: LENS_VERSION,
-        });
+        }),
     }
-
-    let mut offset = 1;
-
-    // Ops
-    let op_count = read_u32(data, &mut offset)?;
-    let mut ops = Vec::with_capacity(op_count as usize);
-    for _ in 0..op_count {
-        ops.push(decode_lens_op(data, &mut offset)?);
-    }
-
-    // Draft indices
-    let draft_count = read_u32(data, &mut offset)?;
-    let mut draft_ops = Vec::with_capacity(draft_count as usize);
-    for _ in 0..draft_count {
-        draft_ops.push(read_u32(data, &mut offset)? as usize);
-    }
-
-    Ok(LensTransform { ops, draft_ops })
 }
 
 /// LensOp type tags.
@@ -600,9 +604,98 @@ fn decode_lens_op(data: &[u8], offset: &mut usize) -> Result<LensOp, CatalogueEn
     }
 }
 
+fn decode_lens_transform_v1(data: &[u8]) -> Result<LensTransform, CatalogueEncodingError> {
+    let mut offset = 1;
+
+    let op_count = read_u32(data, &mut offset)?;
+    let mut ops = Vec::with_capacity(op_count as usize);
+    for _ in 0..op_count {
+        ops.push(decode_lens_op_v1(data, &mut offset)?);
+    }
+
+    let draft_count = read_u32(data, &mut offset)?;
+    let mut draft_ops = Vec::with_capacity(draft_count as usize);
+    for _ in 0..draft_count {
+        draft_ops.push(read_u32(data, &mut offset)? as usize);
+    }
+
+    Ok(LensTransform { ops, draft_ops })
+}
+
+fn decode_lens_transform_v2(data: &[u8]) -> Result<LensTransform, CatalogueEncodingError> {
+    let mut offset = 1;
+
+    let op_count = read_u32(data, &mut offset)?;
+    let mut ops = Vec::with_capacity(op_count as usize);
+    for _ in 0..op_count {
+        ops.push(decode_lens_op(data, &mut offset)?);
+    }
+
+    let draft_count = read_u32(data, &mut offset)?;
+    let mut draft_ops = Vec::with_capacity(draft_count as usize);
+    for _ in 0..draft_count {
+        draft_ops.push(read_u32(data, &mut offset)? as usize);
+    }
+
+    Ok(LensTransform { ops, draft_ops })
+}
+
+fn decode_lens_op_v1(data: &[u8], offset: &mut usize) -> Result<LensOp, CatalogueEncodingError> {
+    let tag = read_u8(data, offset)?;
+    match tag {
+        OP_ADD_COLUMN => {
+            let table = read_string(data, offset, "table")?;
+            let column = read_string(data, offset, "column")?;
+            let column_type = decode_column_type(data, offset)?;
+            let default = decode_value(data, offset)?;
+            Ok(LensOp::AddColumn {
+                table,
+                column,
+                column_type,
+                default,
+            })
+        }
+        OP_REMOVE_COLUMN => {
+            let table = read_string(data, offset, "table")?;
+            let column = read_string(data, offset, "column")?;
+            let column_type = decode_column_type(data, offset)?;
+            let default = decode_value(data, offset)?;
+            Ok(LensOp::RemoveColumn {
+                table,
+                column,
+                column_type,
+                default,
+            })
+        }
+        OP_RENAME_COLUMN => {
+            let table = read_string(data, offset, "table")?;
+            let old_name = read_string(data, offset, "old_name")?;
+            let new_name = read_string(data, offset, "new_name")?;
+            Ok(LensOp::RenameColumn {
+                table,
+                old_name,
+                new_name,
+            })
+        }
+        OP_ADD_TABLE => {
+            let table = read_string(data, offset, "table")?;
+            let schema = decode_table_schema_v1(data, offset)?;
+            Ok(LensOp::AddTable { table, schema })
+        }
+        OP_REMOVE_TABLE => {
+            let table = read_string(data, offset, "table")?;
+            let schema = decode_table_schema_v1(data, offset)?;
+            Ok(LensOp::RemoveTable { table, schema })
+        }
+        _ => Err(CatalogueEncodingError::InvalidTypeTag {
+            tag,
+            context: "lens_op",
+        }),
+    }
+}
+
 fn encode_table_schema(buf: &mut Vec<u8>, schema: &TableSchema) {
     encode_row_descriptor(buf, &schema.columns);
-    encode_table_policies(buf, &schema.policies);
 }
 
 fn decode_table_schema(
@@ -610,10 +703,21 @@ fn decode_table_schema(
     offset: &mut usize,
 ) -> Result<TableSchema, CatalogueEncodingError> {
     let descriptor = decode_row_descriptor(data, offset)?;
-    let policies = decode_table_policies(data, offset)?;
     Ok(TableSchema {
         columns: descriptor,
-        policies,
+        policies: TablePolicies::default(),
+    })
+}
+
+fn decode_table_schema_v1(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<TableSchema, CatalogueEncodingError> {
+    let descriptor = decode_row_descriptor(data, offset)?;
+    decode_table_policies(data, offset)?;
+    Ok(TableSchema {
+        columns: descriptor,
+        policies: TablePolicies::default(),
     })
 }
 
@@ -637,6 +741,11 @@ const POLICY_EXPR_EXISTS_REL: u8 = 13;
 const POLICY_EXPR_INHERITS_REFERENCING: u8 = 14;
 const POLICY_EXPR_CONTAINS: u8 = 15;
 const POLICY_EXPR_IN_LIST: u8 = 16;
+const POLICY_EXPR_SESSION_CMP: u8 = 17;
+const POLICY_EXPR_SESSION_IS_NULL: u8 = 18;
+const POLICY_EXPR_SESSION_IS_NOT_NULL: u8 = 19;
+const POLICY_EXPR_SESSION_CONTAINS: u8 = 20;
+const POLICY_EXPR_SESSION_IN_LIST: u8 = 21;
 
 const POLICY_VALUE_LITERAL: u8 = 1;
 const POLICY_VALUE_SESSION_REF: u8 = 2;
@@ -658,6 +767,245 @@ fn decode_table_policies(
         update: decode_operation_policy(data, offset)?,
         delete: decode_operation_policy(data, offset)?,
     })
+}
+
+pub fn encode_permissions(permissions: &HashMap<TableName, TablePolicies>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.push(PERMISSIONS_VERSION);
+
+    let mut entries: Vec<_> = permissions.iter().collect();
+    entries.sort_by_key(|(name, _)| name.as_str());
+    write_u32(&mut buf, entries.len() as u32);
+
+    for (table_name, policies) in entries {
+        write_string(&mut buf, table_name.as_str());
+        encode_table_policies(&mut buf, policies);
+    }
+
+    buf
+}
+
+pub fn decode_permissions(
+    data: &[u8],
+) -> Result<HashMap<TableName, TablePolicies>, CatalogueEncodingError> {
+    if data.is_empty() {
+        return Err(CatalogueEncodingError::TruncatedData {
+            expected: 1,
+            actual: 0,
+        });
+    }
+
+    let version = data[0];
+    if version != PERMISSIONS_VERSION {
+        return Err(CatalogueEncodingError::UnsupportedVersion {
+            found: version,
+            expected: PERMISSIONS_VERSION,
+        });
+    }
+
+    let mut offset = 1;
+    let table_count = read_u32(data, &mut offset)?;
+    let mut permissions = HashMap::new();
+
+    for _ in 0..table_count {
+        let table_name = TableName::new(read_string(data, &mut offset, "table_name")?);
+        let policies = decode_table_policies(data, &mut offset)?;
+        permissions.insert(table_name, policies);
+    }
+
+    Ok(permissions)
+}
+
+pub fn encode_permissions_bundle(
+    schema_hash: SchemaHash,
+    version: u64,
+    parent_bundle_object_id: Option<ObjectId>,
+    permissions: &HashMap<TableName, TablePolicies>,
+) -> Vec<u8> {
+    let encoded_permissions = encode_permissions(permissions);
+    let mut buf = Vec::with_capacity(1 + 32 + 8 + 1 + 16 + 4 + encoded_permissions.len());
+    buf.push(PERMISSIONS_BUNDLE_VERSION);
+    buf.extend_from_slice(schema_hash.as_bytes());
+    write_u64(&mut buf, version);
+    match parent_bundle_object_id {
+        Some(parent_bundle_object_id) => {
+            buf.push(1);
+            buf.extend_from_slice(parent_bundle_object_id.uuid().as_bytes());
+        }
+        None => buf.push(0),
+    }
+    write_u32(&mut buf, encoded_permissions.len() as u32);
+    buf.extend_from_slice(&encoded_permissions);
+    buf
+}
+
+type DecodedPermissionsBundle = (
+    SchemaHash,
+    u64,
+    Option<ObjectId>,
+    HashMap<TableName, TablePolicies>,
+);
+
+pub fn decode_permissions_bundle(
+    data: &[u8],
+) -> Result<DecodedPermissionsBundle, CatalogueEncodingError> {
+    if data.is_empty() {
+        return Err(CatalogueEncodingError::TruncatedData {
+            expected: 1,
+            actual: 0,
+        });
+    }
+
+    let version = data[0];
+    match version {
+        1 => decode_permissions_bundle_v1(data),
+        PERMISSIONS_BUNDLE_VERSION => decode_permissions_bundle_v2(data),
+        _ => Err(CatalogueEncodingError::UnsupportedVersion {
+            found: version,
+            expected: PERMISSIONS_BUNDLE_VERSION,
+        }),
+    }
+}
+
+fn decode_permissions_bundle_v1(
+    data: &[u8],
+) -> Result<DecodedPermissionsBundle, CatalogueEncodingError> {
+    let mut offset = 1;
+    let schema_hash = SchemaHash::from_bytes(
+        read_bytes(data, &mut offset, 32)?
+            .try_into()
+            .expect("schema hash length should be exact"),
+    );
+    let payload_len = read_u32(data, &mut offset)? as usize;
+    let payload = read_bytes(data, &mut offset, payload_len)?;
+    let permissions = decode_permissions(payload)?;
+    Ok((schema_hash, 1, None, permissions))
+}
+
+fn decode_permissions_bundle_v2(
+    data: &[u8],
+) -> Result<DecodedPermissionsBundle, CatalogueEncodingError> {
+    let mut offset = 1;
+    let schema_hash = SchemaHash::from_bytes(
+        read_bytes(data, &mut offset, 32)?
+            .try_into()
+            .expect("schema hash length should be exact"),
+    );
+    let version = read_u64(data, &mut offset)?;
+    let has_parent = read_u8(data, &mut offset)? != 0;
+    let parent_bundle_object_id = if has_parent {
+        let parent_uuid =
+            uuid::Uuid::from_slice(read_bytes(data, &mut offset, 16)?).map_err(|err| {
+                CatalogueEncodingError::DecodeError {
+                    message: format!("invalid parent permissions bundle object id: {err}"),
+                }
+            })?;
+        Some(ObjectId::from_uuid(parent_uuid))
+    } else {
+        None
+    };
+    let payload_len = read_u32(data, &mut offset)? as usize;
+    let payload = read_bytes(data, &mut offset, payload_len)?;
+    let permissions = decode_permissions(payload)?;
+    Ok((schema_hash, version, parent_bundle_object_id, permissions))
+}
+
+pub fn encode_permissions_head(
+    schema_hash: SchemaHash,
+    version: u64,
+    parent_bundle_object_id: Option<ObjectId>,
+    bundle_object_id: ObjectId,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + 32 + 8 + 1 + 16 + 16);
+    buf.push(PERMISSIONS_HEAD_VERSION);
+    buf.extend_from_slice(schema_hash.as_bytes());
+    write_u64(&mut buf, version);
+    match parent_bundle_object_id {
+        Some(parent_bundle_object_id) => {
+            buf.push(1);
+            buf.extend_from_slice(parent_bundle_object_id.uuid().as_bytes());
+        }
+        None => buf.push(0),
+    }
+    buf.extend_from_slice(bundle_object_id.uuid().as_bytes());
+    buf
+}
+
+type DecodedPermissionsHead = (SchemaHash, u64, Option<ObjectId>, ObjectId);
+
+pub fn decode_permissions_head(
+    data: &[u8],
+) -> Result<DecodedPermissionsHead, CatalogueEncodingError> {
+    if data.is_empty() {
+        return Err(CatalogueEncodingError::TruncatedData {
+            expected: 1,
+            actual: 0,
+        });
+    }
+
+    let version = data[0];
+    match version {
+        1 => decode_permissions_head_v1(data),
+        PERMISSIONS_HEAD_VERSION => decode_permissions_head_v2(data),
+        _ => Err(CatalogueEncodingError::UnsupportedVersion {
+            found: version,
+            expected: PERMISSIONS_HEAD_VERSION,
+        }),
+    }
+}
+
+fn decode_permissions_head_v1(
+    data: &[u8],
+) -> Result<DecodedPermissionsHead, CatalogueEncodingError> {
+    let mut offset = 1;
+    let schema_hash = SchemaHash::from_bytes(
+        read_bytes(data, &mut offset, 32)?
+            .try_into()
+            .expect("schema hash length should be exact"),
+    );
+    let bundle_uuid =
+        uuid::Uuid::from_slice(read_bytes(data, &mut offset, 16)?).map_err(|err| {
+            CatalogueEncodingError::DecodeError {
+                message: format!("invalid permissions bundle object id: {err}"),
+            }
+        })?;
+    Ok((schema_hash, 1, None, ObjectId::from_uuid(bundle_uuid)))
+}
+
+fn decode_permissions_head_v2(
+    data: &[u8],
+) -> Result<DecodedPermissionsHead, CatalogueEncodingError> {
+    let mut offset = 1;
+    let schema_hash = SchemaHash::from_bytes(
+        read_bytes(data, &mut offset, 32)?
+            .try_into()
+            .expect("schema hash length should be exact"),
+    );
+    let version = read_u64(data, &mut offset)?;
+    let has_parent = read_u8(data, &mut offset)? != 0;
+    let parent_bundle_object_id = if has_parent {
+        let parent_uuid =
+            uuid::Uuid::from_slice(read_bytes(data, &mut offset, 16)?).map_err(|err| {
+                CatalogueEncodingError::DecodeError {
+                    message: format!("invalid parent permissions bundle object id: {err}"),
+                }
+            })?;
+        Some(ObjectId::from_uuid(parent_uuid))
+    } else {
+        None
+    };
+    let bundle_uuid =
+        uuid::Uuid::from_slice(read_bytes(data, &mut offset, 16)?).map_err(|err| {
+            CatalogueEncodingError::DecodeError {
+                message: format!("invalid permissions bundle object id: {err}"),
+            }
+        })?;
+    Ok((
+        schema_hash,
+        version,
+        parent_bundle_object_id,
+        ObjectId::from_uuid(bundle_uuid),
+    ))
 }
 
 fn encode_operation_policy(
@@ -708,18 +1056,49 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             encode_cmp_op(buf, op);
             encode_policy_value(buf, value);
         }
+        PolicyExpr::SessionCmp { path, op, value } => {
+            buf.push(POLICY_EXPR_SESSION_CMP);
+            write_u32(buf, path.len() as u32);
+            for part in path {
+                write_string(buf, part);
+            }
+            encode_cmp_op(buf, op);
+            encode_value(buf, value);
+        }
         PolicyExpr::IsNull { column } => {
             buf.push(POLICY_EXPR_IS_NULL);
             write_string(buf, column);
+        }
+        PolicyExpr::SessionIsNull { path } => {
+            buf.push(POLICY_EXPR_SESSION_IS_NULL);
+            write_u32(buf, path.len() as u32);
+            for part in path {
+                write_string(buf, part);
+            }
         }
         PolicyExpr::IsNotNull { column } => {
             buf.push(POLICY_EXPR_IS_NOT_NULL);
             write_string(buf, column);
         }
+        PolicyExpr::SessionIsNotNull { path } => {
+            buf.push(POLICY_EXPR_SESSION_IS_NOT_NULL);
+            write_u32(buf, path.len() as u32);
+            for part in path {
+                write_string(buf, part);
+            }
+        }
         PolicyExpr::Contains { column, value } => {
             buf.push(POLICY_EXPR_CONTAINS);
             write_string(buf, column);
             encode_policy_value(buf, value);
+        }
+        PolicyExpr::SessionContains { path, value } => {
+            buf.push(POLICY_EXPR_SESSION_CONTAINS);
+            write_u32(buf, path.len() as u32);
+            for part in path {
+                write_string(buf, part);
+            }
+            encode_value(buf, value);
         }
         PolicyExpr::In {
             column,
@@ -738,6 +1117,17 @@ fn encode_policy_expr(buf: &mut Vec<u8>, expr: &PolicyExpr) {
             write_u32(buf, values.len() as u32);
             for value in values {
                 encode_policy_value(buf, value);
+            }
+        }
+        PolicyExpr::SessionInList { path, values } => {
+            buf.push(POLICY_EXPR_SESSION_IN_LIST);
+            write_u32(buf, path.len() as u32);
+            for part in path {
+                write_string(buf, part);
+            }
+            write_u32(buf, values.len() as u32);
+            for value in values {
+                encode_value(buf, value);
             }
         }
         PolicyExpr::Exists { table, condition } => {
@@ -820,18 +1210,57 @@ fn decode_policy_expr(
             let value = decode_policy_value(data, offset)?;
             Ok(PolicyExpr::Cmp { column, op, value })
         }
+        POLICY_EXPR_SESSION_CMP => {
+            let count = read_u32(data, offset)? as usize;
+            let mut path = Vec::with_capacity(count);
+            for _ in 0..count {
+                path.push(read_string(data, offset, "policy_session_cmp_path")?);
+            }
+            let op = decode_cmp_op(data, offset)?;
+            let value = decode_value(data, offset)?;
+            Ok(PolicyExpr::SessionCmp { path, op, value })
+        }
         POLICY_EXPR_IS_NULL => {
             let column = read_string(data, offset, "policy_is_null_column")?;
             Ok(PolicyExpr::IsNull { column })
+        }
+        POLICY_EXPR_SESSION_IS_NULL => {
+            let count = read_u32(data, offset)? as usize;
+            let mut path = Vec::with_capacity(count);
+            for _ in 0..count {
+                path.push(read_string(data, offset, "policy_session_is_null_path")?);
+            }
+            Ok(PolicyExpr::SessionIsNull { path })
         }
         POLICY_EXPR_IS_NOT_NULL => {
             let column = read_string(data, offset, "policy_is_not_null_column")?;
             Ok(PolicyExpr::IsNotNull { column })
         }
+        POLICY_EXPR_SESSION_IS_NOT_NULL => {
+            let count = read_u32(data, offset)? as usize;
+            let mut path = Vec::with_capacity(count);
+            for _ in 0..count {
+                path.push(read_string(
+                    data,
+                    offset,
+                    "policy_session_is_not_null_path",
+                )?);
+            }
+            Ok(PolicyExpr::SessionIsNotNull { path })
+        }
         POLICY_EXPR_CONTAINS => {
             let column = read_string(data, offset, "policy_contains_column")?;
             let value = decode_policy_value(data, offset)?;
             Ok(PolicyExpr::Contains { column, value })
+        }
+        POLICY_EXPR_SESSION_CONTAINS => {
+            let count = read_u32(data, offset)? as usize;
+            let mut path = Vec::with_capacity(count);
+            for _ in 0..count {
+                path.push(read_string(data, offset, "policy_session_contains_path")?);
+            }
+            let value = decode_value(data, offset)?;
+            Ok(PolicyExpr::SessionContains { path, value })
         }
         POLICY_EXPR_IN => {
             let column = read_string(data, offset, "policy_in_column")?;
@@ -853,6 +1282,19 @@ fn decode_policy_expr(
                 values.push(decode_policy_value(data, offset)?);
             }
             Ok(PolicyExpr::InList { column, values })
+        }
+        POLICY_EXPR_SESSION_IN_LIST => {
+            let path_count = read_u32(data, offset)? as usize;
+            let mut path = Vec::with_capacity(path_count);
+            for _ in 0..path_count {
+                path.push(read_string(data, offset, "policy_session_in_list_path")?);
+            }
+            let value_count = read_u32(data, offset)? as usize;
+            let mut values = Vec::with_capacity(value_count);
+            for _ in 0..value_count {
+                values.push(decode_value(data, offset)?);
+            }
+            Ok(PolicyExpr::SessionInList { path, values })
         }
         POLICY_EXPR_EXISTS => {
             let table = read_string(data, offset, "policy_exists_table")?;
@@ -1178,9 +1620,18 @@ fn write_u32(buf: &mut Vec<u8>, n: u32) {
     buf.extend_from_slice(&n.to_le_bytes());
 }
 
+fn write_u64(buf: &mut Vec<u8>, n: u64) {
+    buf.extend_from_slice(&n.to_le_bytes());
+}
+
 fn read_u32(data: &[u8], offset: &mut usize) -> Result<u32, CatalogueEncodingError> {
     let bytes = read_bytes(data, offset, 4)?;
     Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+}
+
+fn read_u64(data: &[u8], offset: &mut usize) -> Result<u64, CatalogueEncodingError> {
+    let bytes = read_bytes(data, offset, 8)?;
+    Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
 }
 
 fn read_u8(data: &[u8], offset: &mut usize) -> Result<u8, CatalogueEncodingError> {
@@ -1369,6 +1820,34 @@ mod tests {
     }
 
     #[test]
+    fn schema_roundtrip_with_column_defaults() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("todos")
+                    .column_with_default("done", ColumnType::Boolean, Value::Boolean(false))
+                    .column_with_default("priority", ColumnType::Integer, Value::Integer(0))
+                    .nullable_column("note", ColumnType::Text),
+            )
+            .build();
+
+        let encoded = encode_schema(&schema);
+        assert_eq!(encoded[0], SCHEMA_VERSION);
+
+        let decoded = decode_schema(&encoded).unwrap();
+        let todos = decoded.get(&TableName::new("todos")).unwrap();
+
+        assert_eq!(
+            todos.columns.column("done").unwrap().default,
+            Some(Value::Boolean(false))
+        );
+        assert_eq!(
+            todos.columns.column("priority").unwrap().default,
+            Some(Value::Integer(0))
+        );
+        assert_eq!(todos.columns.column("note").unwrap().default, None);
+    }
+
+    #[test]
     fn schema_roundtrip_with_fk_reference() {
         let mut schema = Schema::new();
         schema.insert(
@@ -1396,6 +1875,7 @@ mod tests {
             .column("image")
             .unwrap();
         assert_eq!(image_col.references, Some(TableName::new("files")));
+        assert_eq!(image_col.default, None);
     }
 
     #[test]
@@ -1457,6 +1937,64 @@ mod tests {
             .column("image")
             .unwrap();
         assert_eq!(image_col.references, Some(TableName::new("files")));
+        assert_eq!(image_col.default, None);
+    }
+
+    #[test]
+    fn decode_v3_schema_defaults_to_none() {
+        fn encode_schema_v3_for_test(schema: &Schema) -> Vec<u8> {
+            let mut buf = Vec::new();
+            buf.push(3);
+
+            let mut tables: Vec<_> = schema.iter().collect();
+            tables.sort_by_key(|(name, _)| name.as_str());
+            write_u32(&mut buf, tables.len() as u32);
+
+            for (name, table_schema) in tables {
+                write_string(&mut buf, name.as_str());
+
+                let mut columns: Vec<_> = table_schema.columns.columns.iter().collect();
+                columns.sort_by_key(|c| c.name.as_str());
+                write_u32(&mut buf, columns.len() as u32);
+                for col in columns {
+                    write_string(&mut buf, col.name.as_str());
+                    encode_column_type(&mut buf, &col.column_type);
+                    buf.push(if col.nullable { 1 } else { 0 });
+                    match &col.references {
+                        Some(table) => {
+                            buf.push(1);
+                            write_string(&mut buf, table.as_str());
+                        }
+                        None => buf.push(0),
+                    }
+                    buf.push(0);
+                }
+
+                encode_table_policies(&mut buf, &table_schema.policies);
+            }
+
+            buf
+        }
+
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("todos")
+                    .column("title", ColumnType::Text)
+                    .fk_column("image", "files"),
+            )
+            .table(TableSchema::builder("files").column("name", ColumnType::Text))
+            .build();
+
+        let encoded_v3 = encode_schema_v3_for_test(&schema);
+        let decoded = decode_schema(&encoded_v3).unwrap();
+        let todos = decoded.get(&TableName::new("todos")).unwrap();
+
+        assert_eq!(todos.columns.column("title").unwrap().default, None);
+        assert_eq!(todos.columns.column("image").unwrap().default, None);
+        assert_eq!(
+            todos.columns.column("image").unwrap().references,
+            Some(TableName::new("files"))
+        );
     }
 
     #[test]
@@ -1492,7 +2030,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_roundtrip_with_policies_preserves_hash() {
+    fn schema_roundtrip_strips_policies_but_preserves_hash() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("todos")
@@ -1518,65 +2056,190 @@ mod tests {
 
         let decoded_todos = decoded.get(&TableName::new("todos")).unwrap();
         assert!(
-            decoded_todos.policies.select.using.is_some(),
-            "Policy should survive roundtrip"
+            decoded_todos.policies == TablePolicies::default(),
+            "Stored schema encoding should be structural-only"
         );
     }
 
     #[test]
-    fn schema_roundtrip_with_contains_and_in_list_policy() {
+    fn permissions_roundtrip_preserves_complex_policies() {
+        let expected = PolicyExpr::And(vec![
+            PolicyExpr::Contains {
+                column: "owner_id".to_string(),
+                value: PolicyValue::Literal(Value::Text("ali".to_string())),
+            },
+            PolicyExpr::InList {
+                column: "status".to_string(),
+                values: vec![
+                    PolicyValue::Literal(Value::Text("active".to_string())),
+                    PolicyValue::SessionRef(vec!["user_id".to_string()]),
+                ],
+            },
+            PolicyExpr::SessionCmp {
+                path: vec!["claims".to_string(), "role".to_string()],
+                op: CmpOp::Eq,
+                value: Value::Text("manager".to_string()),
+            },
+            PolicyExpr::SessionInList {
+                path: vec!["claims".to_string(), "plan".to_string()],
+                values: vec![
+                    Value::Text("pro".to_string()),
+                    Value::Text("enterprise".to_string()),
+                ],
+            },
+            PolicyExpr::SessionContains {
+                path: vec!["claims".to_string(), "teamIds".to_string()],
+                value: Value::Text("team_a".to_string()),
+            },
+            PolicyExpr::SessionIsNull {
+                path: vec!["claims".to_string(), "deleted_at".to_string()],
+            },
+            PolicyExpr::SessionIsNotNull {
+                path: vec!["userId".to_string()],
+            },
+        ]);
+        let permissions = HashMap::from([(
+            TableName::new("todos"),
+            TablePolicies::new().with_select(expected.clone()),
+        )]);
+
+        let encoded = encode_permissions(&permissions);
+        let decoded = decode_permissions(&encoded).expect("permissions should decode");
+
+        assert_eq!(
+            decoded.get(&TableName::new("todos")),
+            permissions.get(&TableName::new("todos"))
+        );
+    }
+
+    #[test]
+    fn permissions_bundle_roundtrip_preserves_target_schema() {
+        let schema_hash = SchemaHash::compute(
+            &SchemaBuilder::new()
+                .table(TableSchema::builder("todos").column("title", ColumnType::Text))
+                .build(),
+        );
+        let version = 7;
+        let parent_bundle_object_id = Some(ObjectId::new());
+        let permissions = HashMap::from([(
+            TableName::new("todos"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+
+        let encoded =
+            encode_permissions_bundle(schema_hash, version, parent_bundle_object_id, &permissions);
+        let (decoded_hash, decoded_version, decoded_parent_bundle_object_id, decoded_permissions) =
+            decode_permissions_bundle(&encoded).expect("bundle should decode");
+
+        assert_eq!(decoded_hash, schema_hash);
+        assert_eq!(decoded_version, version);
+        assert_eq!(decoded_parent_bundle_object_id, parent_bundle_object_id);
+        assert_eq!(decoded_permissions, permissions);
+    }
+
+    #[test]
+    fn permissions_head_roundtrip_preserves_bundle_pointer() {
+        let schema_hash = SchemaHash::compute(
+            &SchemaBuilder::new()
+                .table(TableSchema::builder("todos").column("title", ColumnType::Text))
+                .build(),
+        );
+        let version = 7;
+        let parent_bundle_object_id = Some(ObjectId::new());
+        let bundle_object_id = ObjectId::new();
+
+        let encoded = encode_permissions_head(
+            schema_hash,
+            version,
+            parent_bundle_object_id,
+            bundle_object_id,
+        );
+        let (
+            decoded_hash,
+            decoded_version,
+            decoded_parent_bundle_object_id,
+            decoded_bundle_object_id,
+        ) = decode_permissions_head(&encoded).expect("head should decode");
+
+        assert_eq!(decoded_hash, schema_hash);
+        assert_eq!(decoded_version, version);
+        assert_eq!(decoded_parent_bundle_object_id, parent_bundle_object_id);
+        assert_eq!(decoded_bundle_object_id, bundle_object_id);
+    }
+
+    #[test]
+    fn decode_v2_schema_discards_policies() {
+        fn encode_schema_v2_with_policies(schema: &Schema) -> Vec<u8> {
+            let mut buf = Vec::new();
+            buf.push(2);
+
+            let mut tables: Vec<_> = schema.iter().collect();
+            tables.sort_by_key(|(name, _)| name.as_str());
+            write_u32(&mut buf, tables.len() as u32);
+
+            for (name, table_schema) in tables {
+                write_string(&mut buf, name.as_str());
+
+                let mut columns: Vec<_> = table_schema.columns.columns.iter().collect();
+                columns.sort_by_key(|c| c.name.as_str());
+                write_u32(&mut buf, columns.len() as u32);
+                for col in columns {
+                    write_string(&mut buf, col.name.as_str());
+                    encode_column_type(&mut buf, &col.column_type);
+                    buf.push(if col.nullable { 1 } else { 0 });
+                    match &col.references {
+                        Some(table) => {
+                            buf.push(1);
+                            write_string(&mut buf, table.as_str());
+                        }
+                        None => buf.push(0),
+                    }
+                }
+
+                encode_table_policies(&mut buf, &table_schema.policies);
+            }
+
+            buf
+        }
+
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("todos")
                     .column("id", ColumnType::Uuid)
-                    .column("owner_id", ColumnType::Text)
-                    .column("status", ColumnType::Text)
-                    .policies(TablePolicies::new().with_select(PolicyExpr::And(vec![
-                        PolicyExpr::Contains {
-                            column: "owner_id".to_string(),
-                            value: PolicyValue::Literal(Value::Text("ali".to_string())),
-                        },
-                        PolicyExpr::InList {
-                            column: "status".to_string(),
-                            values: vec![
-                                PolicyValue::Literal(Value::Text("active".to_string())),
-                                PolicyValue::SessionRef(vec!["user_id".to_string()]),
-                            ],
-                        },
-                    ]))),
+                    .column("owner_id", ColumnType::Uuid)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::eq_session(
+                        "owner_id",
+                        vec!["user_id".to_string()],
+                    ))),
             )
             .build();
 
-        let encoded = encode_schema(&schema);
-        let decoded = decode_schema(&encoded).expect("schema should decode");
-        let using = decoded
-            .get(&TableName::new("todos"))
-            .expect("todos table should exist")
-            .policies
-            .select
-            .using
-            .as_ref()
-            .expect("select policy should exist");
-        assert!(matches!(
-            using,
-            PolicyExpr::And(exprs) if matches!(
-                (&exprs[0], &exprs[1]),
-                (
-                    PolicyExpr::Contains {
-                        column,
-                        value: PolicyValue::Literal(Value::Text(v)),
-                    },
-                    PolicyExpr::InList { column: in_column, values },
-                ) if column == "owner_id"
-                    && v == "ali"
-                    && in_column == "status"
-                    && values
-                        == &vec![
-                            PolicyValue::Literal(Value::Text("active".to_string())),
-                            PolicyValue::SessionRef(vec!["user_id".to_string()]),
-                        ]
-            )
-        ));
+        let decoded = decode_schema(&encode_schema_v2_with_policies(&schema)).unwrap();
+        assert_eq!(
+            decoded.get(&TableName::new("todos")).unwrap().policies,
+            TablePolicies::default()
+        );
+    }
+
+    #[test]
+    fn lens_roundtrip_strips_table_policies() {
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::AddTable {
+                table: "todos".to_string(),
+                schema: TableSchema::builder("todos")
+                    .column("id", ColumnType::Uuid)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True))
+                    .build(),
+            },
+            false,
+        );
+
+        let decoded = decode_lens_transform(&encode_lens_transform(&transform)).unwrap();
+        let LensOp::AddTable { schema, .. } = &decoded.ops[0] else {
+            panic!("expected add-table op");
+        };
+        assert_eq!(schema.policies, TablePolicies::default());
     }
 
     #[test]

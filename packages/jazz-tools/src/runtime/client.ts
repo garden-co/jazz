@@ -6,7 +6,7 @@
  */
 
 import type { AppContext, Session } from "./context.js";
-import type { Value, RowDelta, WasmSchema } from "../drivers/types.js";
+import type { InsertValues, Value, RowDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
 import {
   sendSyncPayload,
@@ -25,6 +25,7 @@ import {
 import { resolveLocalAuthDefaults } from "./local-auth.js";
 import { resolveClientSessionSync } from "./client-session.js";
 import { translateQuery } from "./query-adapter.js";
+import { isHiddenIncludeColumnName, resolveSelectedColumns } from "./select-projection.js";
 
 /**
  * Minimal request shape supported by `JazzClient.forRequest()`.
@@ -44,30 +45,30 @@ export interface RequestLike {
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
-  insert(table: string, values: any): Row;
-  insertWithSession?(table: string, values: any, session_json?: string | null): Row;
-  insertDurable(table: string, values: any, tier: string): Promise<Row>;
+  insert(table: string, values: InsertValues): Row;
+  insertWithSession?(table: string, values: InsertValues, write_context_json?: string | null): Row;
+  insertDurable(table: string, values: InsertValues, tier: string): Promise<Row>;
   insertDurableWithSession?(
     table: string,
-    values: any,
-    session_json: string | null | undefined,
+    values: InsertValues,
+    write_context_json: string | null | undefined,
     tier: string,
   ): Promise<Row>;
   update(object_id: string, values: any): void;
-  updateWithSession?(object_id: string, values: any, session_json?: string | null): void;
+  updateWithSession?(object_id: string, values: any, write_context_json?: string | null): void;
   updateDurable(object_id: string, values: any, tier: string): Promise<void>;
   updateDurableWithSession?(
     object_id: string,
     values: any,
-    session_json: string | null | undefined,
+    write_context_json: string | null | undefined,
     tier: string,
   ): Promise<void>;
   delete(object_id: string): void;
-  deleteWithSession?(object_id: string, session_json?: string | null): void;
+  deleteWithSession?(object_id: string, write_context_json?: string | null): void;
   deleteDurable(object_id: string, tier: string): Promise<void>;
   deleteDurableWithSession?(
     object_id: string,
-    session_json: string | null | undefined,
+    write_context_json: string | null | undefined,
     tier: string,
   ): Promise<void>;
   query(
@@ -93,7 +94,7 @@ export interface Runtime {
   unsubscribe(handle: number): void;
   onSyncMessageReceived(payload: Uint8Array | string): void;
   onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
-  addServer(): void;
+  addServer(serverCatalogueStateHash?: string | null): void;
   removeServer(): void;
   addClient(): string;
   getSchema(): any;
@@ -138,6 +139,11 @@ export interface WriteDurabilityOptions {
 export interface Row {
   id: string;
   values: Value[];
+}
+
+interface WriteContextPayload {
+  session?: Session;
+  attribution?: string;
 }
 
 /**
@@ -360,7 +366,9 @@ function getScheduler(): (task: () => void) => void {
     };
   }
 
-  return queueMicrotask;
+  // Wrap rather than returning queueMicrotask directly: the native function
+  // throws "Illegal invocation" when called without globalThis as receiver.
+  return (task: () => void) => queueMicrotask(task);
 }
 
 function encodeQueryExecutionOptions(options: QueryExecutionOptions): string | undefined {
@@ -442,10 +450,14 @@ export function sessionFromRequest(request: RequestLike): Session {
   if (parts.length < 2) {
     throw new Error("Invalid JWT format");
   }
+  const payloadPart = parts[1];
+  if (payloadPart === undefined) {
+    throw new Error("Invalid JWT format");
+  }
 
   let payload: unknown;
   try {
-    payload = JSON.parse(decodeBase64Url(parts[1]));
+    payload = JSON.parse(decodeBase64Url(payloadPart));
   } catch {
     throw new Error("Invalid JWT payload");
   }
@@ -487,7 +499,7 @@ export class SessionClient {
   /**
    * Create a new row as this session's user.
    */
-  async create(table: string, values: Value[]): Promise<string> {
+  async create(table: string, values: InsertValues): Promise<string> {
     if (!this.client.getServerUrl()) {
       throw new Error("No server connection");
     }
@@ -730,7 +742,10 @@ export class JazzClient {
    * ```typescript
    * const userSession = { user_id: "user-123", claims: {} };
    * const userClient = client.forSession(userSession);
-   * const id = await userClient.create("todos", [{ type: "Text", value: "Buy milk" }]);
+   * const id = await userClient.create("todos", {
+   *   title: { type: "Text", value: "Buy milk" },
+   *   done: { type: "Boolean", value: false },
+   * });
    * ```
    */
   forSession(session: Session): SessionClient {
@@ -801,8 +816,32 @@ export class JazzClient {
     return options?.tier ?? this.defaultDurabilityTier;
   }
 
-  private encodeSession(session?: Session): string | undefined {
-    return session ? JSON.stringify(session) : undefined;
+  private encodeWriteContext(session?: Session, attribution?: string): string | undefined {
+    if (!session && attribution === undefined) {
+      return undefined;
+    }
+    if (attribution === undefined && session) {
+      return JSON.stringify(session);
+    }
+
+    const payload: WriteContextPayload = {};
+    if (session) {
+      payload.session = session;
+    }
+    if (attribution !== undefined) {
+      payload.attribution = attribution;
+    }
+    return JSON.stringify(payload);
+  }
+
+  private resolveWriteSession(session?: Session, attribution?: string): Session | undefined {
+    if (session) {
+      return session;
+    }
+    if (attribution !== undefined) {
+      return undefined;
+    }
+    return this.resolvedSession ?? undefined;
   }
 
   private requireSessionWriteMethod<
@@ -837,20 +876,20 @@ export class JazzClient {
       return values;
     }
 
-    const projectedBaseColumnCount =
+    const projectedVisibleColumnCount =
       selectColumns.length > 0
-        ? selectColumns.filter((columnName) =>
-            declaredTable.columns.some((column) => column.name === columnName),
+        ? resolveSelectedColumns(table, this.context.schema, selectColumns).filter(
+            (columnName) => !isHiddenIncludeColumnName(columnName),
           ).length
         : 0;
 
-    if (projectedBaseColumnCount > 0) {
-      if (values.length < projectedBaseColumnCount) {
+    if (projectedVisibleColumnCount > 0) {
+      if (values.length < projectedVisibleColumnCount) {
         return values;
       }
 
-      const projectedValues = values.slice(0, projectedBaseColumnCount);
-      const trailingValues = values.slice(projectedBaseColumnCount);
+      const projectedValues = values.slice(0, projectedVisibleColumnCount);
+      const trailingValues = values.slice(projectedVisibleColumnCount);
       if (arraySubqueries.length === 0) {
         return projectedValues.concat(trailingValues);
       }
@@ -873,6 +912,9 @@ export class JazzClient {
     const valuesByColumn = new Map<string, Value>();
     for (let index = 0; index < runtimeTable.columns.length; index += 1) {
       const column = runtimeTable.columns[index];
+      if (!column) {
+        return values;
+      }
       const value = values[index];
       if (value === undefined) {
         return values;
@@ -994,7 +1036,7 @@ export class JazzClient {
   /**
    * Insert a new row into a table without waiting for durability.
    */
-  create(table: string, values: Value[]): Row {
+  create(table: string, values: InsertValues): Row {
     return this.createInternal(table, values);
   }
 
@@ -1002,14 +1044,21 @@ export class JazzClient {
    * Insert a new row into a table with an optional session for policy checks.
    * @internal
    */
-  createInternal(table: string, values: Value[], session?: Session): Row {
-    const row = session
-      ? this.requireSessionWriteMethod("insertWithSession")(
-          table,
-          values,
-          this.encodeSession(session),
-        )
-      : this.runtime.insert(table, values);
+  createInternal(
+    table: string,
+    values: InsertValues,
+    session?: Session,
+    attribution?: string,
+  ): Row {
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const row =
+      effectiveSession || attribution !== undefined
+        ? this.requireSessionWriteMethod("insertWithSession")(
+            table,
+            values,
+            this.encodeWriteContext(effectiveSession, attribution),
+          )
+        : this.runtime.insert(table, values);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
@@ -1021,10 +1070,10 @@ export class JazzClient {
    */
   async createDurable(
     table: string,
-    values: Value[],
+    values: InsertValues,
     options?: WriteDurabilityOptions,
   ): Promise<Row> {
-    return this.createDurableInternal(table, values, undefined, options);
+    return this.createDurableInternal(table, values, undefined, undefined, options);
   }
 
   /**
@@ -1033,19 +1082,22 @@ export class JazzClient {
    */
   async createDurableInternal(
     table: string,
-    values: Value[],
+    values: InsertValues,
     session?: Session,
+    attribution?: string,
     options?: WriteDurabilityOptions,
   ): Promise<Row> {
     const tier = this.resolveWriteTier(options);
-    const row = session
-      ? await this.requireSessionWriteMethod("insertDurableWithSession")(
-          table,
-          values,
-          this.encodeSession(session),
-          tier,
-        )
-      : await this.runtime.insertDurable(table, values, tier);
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const row =
+      effectiveSession || attribution !== undefined
+        ? await this.requireSessionWriteMethod("insertDurableWithSession")(
+            table,
+            values,
+            this.encodeWriteContext(effectiveSession, attribution),
+            tier,
+          )
+        : await this.runtime.insertDurable(table, values, tier);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
@@ -1097,12 +1149,18 @@ export class JazzClient {
    * Update a row by ID without waiting for durability, optionally scoped to a session.
    * @internal
    */
-  updateInternal(objectId: string, updates: Record<string, Value>, session?: Session): void {
-    if (session) {
+  updateInternal(
+    objectId: string,
+    updates: Record<string, Value>,
+    session?: Session,
+    attribution?: string,
+  ): void {
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    if (effectiveSession || attribution !== undefined) {
       this.requireSessionWriteMethod("updateWithSession")(
         objectId,
         updates,
-        this.encodeSession(session),
+        this.encodeWriteContext(effectiveSession, attribution),
       );
       return;
     }
@@ -1117,7 +1175,7 @@ export class JazzClient {
     updates: Record<string, Value>,
     options?: WriteDurabilityOptions,
   ): Promise<void> {
-    await this.updateDurableInternal(objectId, updates, undefined, options);
+    await this.updateDurableInternal(objectId, updates, undefined, undefined, options);
   }
 
   /**
@@ -1128,14 +1186,16 @@ export class JazzClient {
     objectId: string,
     updates: Record<string, Value>,
     session?: Session,
+    attribution?: string,
     options?: WriteDurabilityOptions,
   ): Promise<void> {
     const tier = this.resolveWriteTier(options);
-    if (session) {
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    if (effectiveSession || attribution !== undefined) {
       await this.requireSessionWriteMethod("updateDurableWithSession")(
         objectId,
         updates,
-        this.encodeSession(session),
+        this.encodeWriteContext(effectiveSession, attribution),
         tier,
       );
       return;
@@ -1154,9 +1214,13 @@ export class JazzClient {
    * Delete a row by ID without waiting for durability, optionally scoped to a session.
    * @internal
    */
-  deleteInternal(objectId: string, session?: Session): void {
-    if (session) {
-      this.requireSessionWriteMethod("deleteWithSession")(objectId, this.encodeSession(session));
+  deleteInternal(objectId: string, session?: Session, attribution?: string): void {
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    if (effectiveSession || attribution !== undefined) {
+      this.requireSessionWriteMethod("deleteWithSession")(
+        objectId,
+        this.encodeWriteContext(effectiveSession, attribution),
+      );
       return;
     }
     this.runtime.delete(objectId);
@@ -1166,7 +1230,7 @@ export class JazzClient {
    * Delete a row by ID and wait for durability at the requested tier.
    */
   async deleteDurable(objectId: string, options?: WriteDurabilityOptions): Promise<void> {
-    await this.deleteDurableInternal(objectId, undefined, options);
+    await this.deleteDurableInternal(objectId, undefined, undefined, options);
   }
 
   /**
@@ -1176,13 +1240,15 @@ export class JazzClient {
   async deleteDurableInternal(
     objectId: string,
     session?: Session,
+    attribution?: string,
     options?: WriteDurabilityOptions,
   ): Promise<void> {
     const tier = this.resolveWriteTier(options);
-    if (session) {
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    if (effectiveSession || attribution !== undefined) {
       await this.requireSessionWriteMethod("deleteDurableWithSession")(
         objectId,
-        this.encodeSession(session),
+        this.encodeWriteContext(effectiveSession, attribution),
         tier,
       );
       return;

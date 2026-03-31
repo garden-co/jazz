@@ -3,6 +3,7 @@ use std::hash::{Hash, Hasher};
 use ahash::AHashSet;
 
 use crate::commit::CommitId;
+use crate::metadata::RowProvenance;
 use crate::object::{BranchName, ObjectId};
 
 use super::encoding::{decode_row, encode_row};
@@ -23,6 +24,7 @@ pub enum TupleElement {
         id: ObjectId,
         content: Vec<u8>,
         commit_id: CommitId,
+        row_provenance: RowProvenance,
     },
 }
 
@@ -56,12 +58,21 @@ impl TupleElement {
         }
     }
 
+    /// Get row provenance if materialized.
+    pub fn row_provenance(&self) -> Option<&RowProvenance> {
+        match self {
+            TupleElement::Id(_) => None,
+            TupleElement::Row { row_provenance, .. } => Some(row_provenance),
+        }
+    }
+
     /// Create a TupleElement from a Row.
     pub fn from_row(row: &Row) -> Self {
         TupleElement::Row {
             id: row.id,
             content: row.data.clone(),
             commit_id: row.commit_id,
+            row_provenance: row.provenance.clone(),
         }
     }
 
@@ -73,7 +84,13 @@ impl TupleElement {
                 id,
                 content,
                 commit_id,
-            } => Some(Row::new(*id, content.clone(), *commit_id)),
+                row_provenance,
+            } => Some(Row::new(
+                *id,
+                content.clone(),
+                *commit_id,
+                row_provenance.clone(),
+            )),
         }
     }
 }
@@ -90,14 +107,21 @@ pub type TupleProvenance = AHashSet<ScopedObject>;
 pub struct LoadedRow {
     pub data: Vec<u8>,
     pub commit_id: CommitId,
+    pub row_provenance: RowProvenance,
     pub provenance: TupleProvenance,
 }
 
 impl LoadedRow {
-    pub fn new(data: Vec<u8>, commit_id: CommitId, provenance: TupleProvenance) -> Self {
+    pub fn new(
+        data: Vec<u8>,
+        commit_id: CommitId,
+        row_provenance: RowProvenance,
+        provenance: TupleProvenance,
+    ) -> Self {
         Self {
             data,
             commit_id,
+            row_provenance,
             provenance,
         }
     }
@@ -134,7 +158,12 @@ impl Tuple {
 
     /// Get all IDs in the tuple.
     pub fn ids(&self) -> Vec<ObjectId> {
-        self.0.iter().map(|e| e.id()).collect()
+        self.id_iter().collect()
+    }
+
+    /// Iterate over the IDs that define tuple identity.
+    pub fn id_iter(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.0.iter().map(TupleElement::id)
     }
 
     /// Get the first ID (convenience for single-table queries).
@@ -212,12 +241,14 @@ impl Tuple {
         // Use first element's ID as the "primary" ID for the flattened row
         let first_id = self.first_id()?;
         let commit_id = first_commit_id.unwrap_or(CommitId([0; 32]));
+        let row_provenance = self.0.first()?.row_provenance()?.clone();
 
         Some(
             Tuple::new(vec![TupleElement::Row {
                 id: first_id,
                 content: combined_content,
                 commit_id,
+                row_provenance,
             }])
             .with_provenance(self.provenance().clone()),
         )
@@ -260,8 +291,8 @@ impl Tuple {
 // for set membership, while updates track content changes separately.
 impl Hash for Tuple {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        for element in &self.0 {
-            element.id().hash(state);
+        for id in self.id_iter() {
+            id.hash(state);
         }
     }
 }
@@ -271,10 +302,7 @@ impl PartialEq for Tuple {
         if self.0.len() != other.0.len() {
             return false;
         }
-        self.0
-            .iter()
-            .zip(other.0.iter())
-            .all(|(a, b)| a.id() == b.id())
+        self.id_iter().eq(other.id_iter())
     }
 }
 

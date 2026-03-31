@@ -82,6 +82,7 @@ export interface Column {
   name: string;
   sqlType: SqlType;
   nullable: boolean;
+  default?: unknown;
   references?: string; // Target table name for foreign key
 }
 
@@ -98,6 +99,8 @@ export type PolicyValue =
       path: string[];
     };
 
+export type PolicyLiteralValue = Extract<PolicyValue, { type: "Literal" }>;
+
 export type PolicyExpr =
   | {
       type: "Cmp";
@@ -106,17 +109,36 @@ export type PolicyExpr =
       value: PolicyValue;
     }
   | {
+      type: "SessionCmp";
+      path: string[];
+      op: PolicyCmpOp;
+      value: PolicyLiteralValue;
+    }
+  | {
       type: "IsNull";
       column: string;
+    }
+  | {
+      type: "SessionIsNull";
+      path: string[];
     }
   | {
       type: "IsNotNull";
       column: string;
     }
   | {
+      type: "SessionIsNotNull";
+      path: string[];
+    }
+  | {
       type: "Contains";
       column: string;
       value: PolicyValue;
+    }
+  | {
+      type: "SessionContains";
+      path: string[];
+      value: PolicyLiteralValue;
     }
   | {
       type: "In";
@@ -127,6 +149,11 @@ export type PolicyExpr =
       type: "InList";
       column: string;
       values: PolicyValue[];
+    }
+  | {
+      type: "SessionInList";
+      path: string[];
+      values: PolicyLiteralValue[];
     }
   | {
       type: "Exists";
@@ -192,21 +219,21 @@ export interface Schema {
 }
 
 // Migration operation types
-export interface AddOp {
+export interface AddOp<TSqlType extends SqlType = SqlType, TDefault = unknown> {
   _type: "add";
-  sqlType: SqlType;
-  default: unknown;
+  sqlType: TSqlType;
+  default: TDefault;
 }
 
-export interface DropOp {
+export interface DropOp<TSqlType extends SqlType = SqlType, TBackwardsDefault = unknown> {
   _type: "drop";
-  sqlType: SqlType;
-  backwardsDefault: unknown;
+  sqlType: TSqlType;
+  backwardsDefault: TBackwardsDefault;
 }
 
-export interface RenameOp {
+export interface RenameOp<TOldName extends string = string> {
   _type: "rename";
-  oldName: string;
+  oldName: TOldName;
 }
 
 export type MigrationOp = AddOp | DropOp | RenameOp;
@@ -247,7 +274,9 @@ export type LensOp = IntroduceLensOp | DropLensOp | RenameLensOp;
 
 export type LensOpType = LensOp["type"];
 
-export interface Lens {
+export interface TableLens {
   table: string;
   operations: LensOp[];
 }
+
+export type Lens = TableLens;

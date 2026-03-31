@@ -114,6 +114,7 @@ impl ProjectNode {
                         column_type: source_column.column_type.clone(),
                         nullable: source_column.nullable,
                         references: source_column.references,
+                        default: source_column.default.clone(),
                     }
                 }
                 ProjectionSource::RowId { .. } => ColumnDescriptor {
@@ -121,6 +122,7 @@ impl ProjectNode {
                     column_type: ColumnType::Uuid,
                     nullable: false,
                     references: None,
+                    default: None,
                 },
             };
 
@@ -199,12 +201,17 @@ impl ProjectNode {
             .iter()
             .find_map(TupleElement::commit_id)
             .unwrap_or(CommitId([0; 32]));
+        let row_provenance = tuple
+            .iter()
+            .find_map(TupleElement::row_provenance)
+            .cloned()?;
 
         Some(
             Tuple::new(vec![TupleElement::Row {
                 id,
                 content: projected_content,
                 commit_id,
+                row_provenance,
             }])
             .with_provenance(tuple.provenance().clone()),
         )
@@ -302,6 +309,7 @@ mod tests {
             id,
             content: data,
             commit_id: CommitId([0; 32]),
+            row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
 
@@ -477,11 +485,13 @@ mod tests {
                 id: user_id,
                 content: user_row,
                 commit_id: CommitId([1; 32]),
+                row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },
             TupleElement::Row {
                 id: post_id,
                 content: post_row,
                 commit_id: CommitId([2; 32]),
+                row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },
         ]);
 

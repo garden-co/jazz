@@ -8,6 +8,7 @@ import type {
   SqlType,
   TablePolicies as DslTablePolicies,
   PolicyExpr as DslPolicyExpr,
+  PolicyLiteralValue as DslPolicyLiteralValue,
   PolicyValue as DslPolicyValue,
 } from "../schema.js";
 import type {
@@ -17,9 +18,11 @@ import type {
   TableSchema,
   TablePolicies,
   PolicyExpr,
+  PolicyLiteralValue,
   PolicyValue,
   Value,
 } from "../drivers/types.js";
+import { toValue } from "../runtime/value-converter.js";
 
 const map: Record<ScalarSqlType, ColumnType> = {
   TEXT: { type: "Text" },
@@ -89,6 +92,10 @@ function clonePolicyValue(value: DslPolicyValue): PolicyValue {
   return { type: "Literal", value: literalToWasmValue(value.value) };
 }
 
+function clonePolicyLiteralValue(value: DslPolicyLiteralValue): PolicyLiteralValue {
+  return literalToWasmValue(value.value);
+}
+
 function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
   switch (expr.type) {
     case "Cmp":
@@ -98,15 +105,32 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
         op: expr.op,
         value: clonePolicyValue(expr.value),
       };
+    case "SessionCmp":
+      return {
+        type: "SessionCmp",
+        path: [...expr.path],
+        op: expr.op,
+        value: clonePolicyLiteralValue(expr.value),
+      };
     case "IsNull":
       return { type: "IsNull", column: expr.column };
+    case "SessionIsNull":
+      return { type: "SessionIsNull", path: [...expr.path] };
     case "IsNotNull":
       return { type: "IsNotNull", column: expr.column };
+    case "SessionIsNotNull":
+      return { type: "SessionIsNotNull", path: [...expr.path] };
     case "Contains":
       return {
         type: "Contains",
         column: expr.column,
         value: clonePolicyValue(expr.value),
+      };
+    case "SessionContains":
+      return {
+        type: "SessionContains",
+        path: [...expr.path],
+        value: clonePolicyLiteralValue(expr.value),
       };
     case "In":
       return {
@@ -119,6 +143,12 @@ function clonePolicyExpr(expr: DslPolicyExpr): PolicyExpr {
         type: "InList",
         column: expr.column,
         values: expr.values.map(clonePolicyValue),
+      };
+    case "SessionInList":
+      return {
+        type: "SessionInList",
+        path: [...expr.path],
+        values: expr.values.map(clonePolicyLiteralValue),
       };
     case "Exists":
       return {
@@ -193,11 +223,15 @@ export function schemaToWasm(schema: Schema): WasmSchema {
 
   for (const table of schema.tables) {
     const columns: ColumnDescriptor[] = table.columns.map((col) => {
+      const columnType = sqlTypeToWasm(col.sqlType);
       const descriptor: ColumnDescriptor = {
         name: col.name,
-        column_type: sqlTypeToWasm(col.sqlType),
+        column_type: columnType,
         nullable: col.nullable,
       };
+      if (col.default !== undefined) {
+        descriptor.default = toValue(col.default, columnType);
+      }
       if (col.references) {
         descriptor.references = col.references;
       }

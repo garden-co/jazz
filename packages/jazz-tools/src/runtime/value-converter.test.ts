@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { toValue, toValueArray, toUpdateRecord } from "./value-converter.js";
+import { toInsertRecord, toValue, toUpdateRecord } from "./value-converter.js";
 import type { WasmSchema, ColumnType } from "../drivers/types.js";
 
 describe("toValue", () => {
@@ -155,7 +155,7 @@ describe("toValue", () => {
   });
 });
 
-describe("toValueArray", () => {
+describe("toInsertRecord", () => {
   const schema: WasmSchema = {
     todos: {
       columns: [
@@ -166,41 +166,53 @@ describe("toValueArray", () => {
     },
   };
 
-  it("converts Init object to Value array in column order", () => {
+  it("converts Init object to a named insert record", () => {
     const data = { title: "Buy milk", done: false, priority: 1 };
-    const result = toValueArray(data, schema, "todos");
+    const result = toInsertRecord(data, schema, "todos");
 
-    expect(result).toEqual([
-      { type: "Text", value: "Buy milk" },
-      { type: "Boolean", value: false },
-      { type: "Integer", value: 1 },
-    ]);
+    expect(result).toEqual({
+      title: { type: "Text", value: "Buy milk" },
+      done: { type: "Boolean", value: false },
+      priority: { type: "Integer", value: 1 },
+    });
   });
 
-  it("handles nullable fields with null value", () => {
+  it("includes nullable fields with null value", () => {
     const data = { title: "Buy milk", done: false, priority: null };
-    const result = toValueArray(data, schema, "todos");
+    const result = toInsertRecord(data, schema, "todos");
 
-    expect(result).toEqual([
-      { type: "Text", value: "Buy milk" },
-      { type: "Boolean", value: false },
-      { type: "Null" },
-    ]);
+    expect(result).toEqual({
+      title: { type: "Text", value: "Buy milk" },
+      done: { type: "Boolean", value: false },
+      priority: { type: "Null" },
+    });
   });
 
-  it("handles nullable fields with undefined value", () => {
+  it("skips undefined fields so Rust can apply defaults", () => {
     const data = { title: "Buy milk", done: false };
-    const result = toValueArray(data as Record<string, unknown>, schema, "todos");
+    const result = toInsertRecord(data as Record<string, unknown>, schema, "todos");
 
-    expect(result).toEqual([
-      { type: "Text", value: "Buy milk" },
-      { type: "Boolean", value: false },
-      { type: "Null" },
-    ]);
+    expect(result).toEqual({
+      title: { type: "Text", value: "Buy milk" },
+      done: { type: "Boolean", value: false },
+    });
+    expect(result).not.toHaveProperty("priority");
   });
 
   it("throws for unknown table", () => {
-    expect(() => toValueArray({}, schema, "nonexistent")).toThrow('Unknown table "nonexistent"');
+    expect(() => toInsertRecord({}, schema, "nonexistent")).toThrow('Unknown table "nonexistent"');
+  });
+
+  it("throws for unknown column", () => {
+    expect(() => toInsertRecord({ nope: 1 }, schema, "todos")).toThrow(
+      'Unknown column "nope" on table "todos"',
+    );
+  });
+
+  it("throws when null is used for a required field", () => {
+    expect(() => toInsertRecord({ title: null }, schema, "todos")).toThrow(
+      "Cannot set required field 'title' to null",
+    );
   });
 });
 
@@ -251,6 +263,13 @@ describe("toUpdateRecord", () => {
     expect(result).toEqual({
       priority: { type: "Null" },
     });
+  });
+
+  it("throws when null is used to unset a required field", () => {
+    const data = { title: null };
+    expect(() => toUpdateRecord(data, schema, "todos")).toThrow(
+      "Cannot set required field 'title' to null",
+    );
   });
 
   it("throws for unknown column", () => {

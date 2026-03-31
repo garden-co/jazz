@@ -1,0 +1,176 @@
+---
+title: Permissions
+description: Jazz's approach to row-level security using relationship-based access controls, and how to build policies of varying complexity.
+reviewedAt: "14cd73f0"
+---
+
+import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
+
+Permissions control who can read, insert, update, and delete rows. Jazz enforces them server-side using row-level policies defined in `permissions.ts`. Clients that fail a policy check have their writes rejected and their reads filtered.
+
+## Authoring workflow
+
+Permissions are authored in TypeScript.
+
+If we have the following schema:
+
+<include cwd lang="ts" meta='title="schema.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-schema-ts
+</include>
+
+We can define permissions in `permissions.ts`:
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/permissions.ts
+</include>
+
+<Callout type="info">
+  Author permissions in the root `permissions.ts` next to `schema.ts`. `npx jazz-tools@alpha
+  validate` is a useful local sanity check before publishing. Permission-only changes do not require
+  migrations, but they do still require `npx jazz-tools@alpha permissions push`.
+</Callout>
+
+Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})`).
+
+## Basic policies
+
+### Simple conditions
+
+Use the policy helpers `allowRead`, `allowInsert`, `allowUpdate`, and `allowDelete` with [`.where(...)`](/docs/reference/where-operators) to restrict access based on column values.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-simple-ts
+</include>
+
+### `.always()`
+
+Use `.always()` when an operation should always be permitted. It is equivalent to `.where({})`.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-always-ts
+</include>
+
+### `.never()`
+
+Use `.never()` when an operation should be impossible. It is equivalent to
+`.where(anyOf([]))`.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-never-ts
+</include>
+
+## Composing policies
+
+### Combining conditions (`allOf` / `anyOf`)
+
+Combine conditions with `allOf` (all must match) or `anyOf` (any can match).
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-combinators-ts
+</include>
+
+### JWT session claims
+
+When external auth JWTs carry claims, `session.where(...)` lets you check them directly in permissions without mapping them onto row columns first.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
+</include>
+
+### Inherited access (`allowedTo.*`)
+
+A row can inherit its access from a related row. Use
+`allowedTo.read/insert/update/delete(...)` to express that inheritance.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-allowed-to-ts
+</include>
+
+### Share-based access
+
+Sometimes access isn't determined by ownership or a parent relationship, but by a separate "shares" table. Use `policy.<table>.exists.where(...)` to check whether a matching row exists in another table.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-shares-ts
+</include>
+
+The callback form `(todo) => ...` gives you access to the current row, so you can correlate it with rows in other tables.
+
+<Accordions type="single">
+<Accordion title="Recursive inheritance">
+
+If a table references itself (e.g. a comment that can have sub-comments), you can inherit access recursively up to a fixed depth.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-recursive-inherits-ts
+</include>
+
+`maxDepth` must be a positive integer.
+
+</Accordion>
+</Accordions>
+
+## Policy enforcement and request context
+
+Every policy is evaluated against the current user's session. On the frontend, this is the authenticated user. In a backend handler, create a scoped session per request so queries run with the right identity.
+
+<include cwd lang="ts" meta='title="handler.ts"'>
+  ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-handler-ts
+</include>
+
+See [Setup](/docs/reference/server-setup) for context setup details.
+
+<Callout type="info">
+  Policies are enforced on the sync server, not on the client. A client can write any data locally,
+  but the server will reject writes that violate policies when they sync. Reads are filtered
+  server-side before data is sent to the client.
+</Callout>
+
+## Magic columns
+
+Jazz exposes a small set of system-provided magic columns at query time. They do not exist in your
+schema, and they are omitted from `select("*")`, so opt in explicitly when you want them.
+
+### Permission introspection columns
+
+- `$canRead`&hairsp;—&hairsp;whether the current session can read the row. Since read policies already gate which rows appear, this will usually be `true`.
+- `$canEdit`&hairsp;—&hairsp;whether the current session passes the row's `UPDATE USING` policy.
+- `$canDelete`&hairsp;—&hairsp;whether the current session passes the row's `DELETE USING` policy.
+- Without a session, all three return `null`.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-magic-columns-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-magic-columns-rust
+    </include>
+  </Tab>
+</Tabs>
+
+### Edit metadata columns
+
+Jazz also tracks row authorship and timestamps automatically:
+
+- `$createdBy`&hairsp;—&hairsp;the Jazz principal that created the row
+- `$createdAt`&hairsp;—&hairsp;when the row was first created
+- `$updatedBy`&hairsp;—&hairsp;the Jazz principal that last updated the row
+- `$updatedAt`&hairsp;—&hairsp;when the row was last updated
+
+All four edit metadata columns are always present. Backend writes that are not attributed to a user
+are authored as `jazz:system`.
+
+### Authorship-based policies
+
+You can use these edit metadata magic columns directly in `permissions.ts`. This is useful for simple
+"creator can read/edit/delete their own rows" policies without adding explicit `owner_id` columns.
+
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-created-by-ts
+</include>
+
+For more dynamic sharing or ownership models, prefer explicit tables and relations rather than
+encoding extra meaning into authorship alone.

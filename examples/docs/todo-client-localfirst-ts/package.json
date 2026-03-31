@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node ../../../packages/jazz-tools/dist/cli.js build && vite build",
+    "build": "node ../../../packages/jazz-tools/dist/cli.js validate && vite build",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.browser.ts"
   },
@@ -16,9 +16,9 @@
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
     "typescript": "catalog:default",
-    "vite": "^6.0.0",
-    "vite-plugin-top-level-await": "^1.6.0",
-    "vite-plugin-wasm": "^3.5.0",
+    "vite": "catalog:default",
+    "vite-plugin-top-level-await": "catalog:default",
+    "vite-plugin-wasm": "catalog:default",
     "vitest": "catalog:default"
   }
 }

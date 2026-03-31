@@ -1,5 +1,16 @@
 {
   "version": 1,
-  "updated_at": "2026-03-13T23:28:11.432Z",
-  "entries": []
+  "updated_at": "2026-03-31T13:23:00.461Z",
+  "entries": [
+    {
+      "id": "native-criterion:r4_fanout_updates",
+      "suite": "native",
+      "label": "Criterion R4 fanout updates",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-03-29T14:42:07.952Z",
+      "last_observed_at": "2026-03-29T14:42:07.952Z",
+      "observations": 1
+    }
+  ]
 }

@@ -123,6 +123,7 @@ impl ArraySubqueryNode {
             column_type: element_type,
             nullable: false,
             references: None,
+            default: None,
         });
 
         let output_descriptor = RowDescriptor::new(output_columns);
@@ -397,6 +398,7 @@ impl ArraySubqueryNode {
         let outer_id = element.id();
         let outer_content = element.content()?;
         let commit_id = element.commit_id()?;
+        let row_provenance = element.row_provenance()?.clone();
 
         // Decode outer values
         let outer_row_desc = self.outer_descriptor.combined_descriptor();
@@ -416,6 +418,7 @@ impl ArraySubqueryNode {
                 id: outer_id,
                 content: output_content,
                 commit_id,
+                row_provenance,
             }],
             provenance,
         ))
@@ -688,6 +691,7 @@ mod tests {
             id: ObjectId::new(),
             content: user_data,
             commit_id: CommitId([0; 32]),
+            row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }]);
 
         let correlation = node.extract_correlation_value(&user_tuple);
@@ -730,6 +734,7 @@ mod tests {
             id: row_id,
             content: user_data,
             commit_id: CommitId([0; 32]),
+            row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }]);
 
         let correlation = node.extract_correlation_value(&user_tuple);

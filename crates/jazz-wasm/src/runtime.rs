@@ -61,7 +61,7 @@ use jazz_tools::query_manager::encoding::decode_row;
 use jazz_tools::query_manager::manager::LocalUpdates;
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::query::Query;
-use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::session::{Session, WriteContext};
 #[cfg(target_arch = "wasm32")]
 use jazz_tools::query_manager::types::{Row, RowDescriptor};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, Value};
@@ -123,6 +123,22 @@ fn parse_session_json(session_json: Option<String>) -> Result<Option<Session>, J
         let session = serde_json::from_str::<Session>(&json)
             .map_err(|e| JsError::new(&format!("Invalid session JSON: {}", e)))?;
         Ok(Some(session))
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_write_context_json(
+    write_context_json: Option<String>,
+) -> Result<Option<WriteContext>, JsError> {
+    if let Some(json) = write_context_json {
+        match jazz_tools::binding_support::parse_write_context_input(Some(&json)) {
+            Ok(context) => Ok(context),
+            Err(err) => Err(JsError::new(&format!(
+                "Invalid write context JSON: {}",
+                err
+            ))),
+        }
     } else {
         Ok(None)
     }
@@ -461,7 +477,6 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
 
         let schema: Schema = wasm_schema;
-
         // Parse optional tier
         let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
 
@@ -590,12 +605,11 @@ impl WasmRuntime {
     #[wasm_bindgen]
     pub fn insert(&self, table: &str, values: JsValue) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::insert", tier = self.tier_label, table).entered();
-        let wasm_values: Vec<Value> = serde_wasm_bindgen::from_value(values)?;
-        let groove_values: Vec<Value> = wasm_values;
+        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
 
         let mut core = self.core.borrow_mut();
         let (object_id, row_values) = core
-            .insert(table, groove_values, None)
+            .insert(table, named_values, None)
             .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?;
 
         let row = SubscriptionRow {
@@ -614,16 +628,15 @@ impl WasmRuntime {
         &self,
         table: &str,
         values: JsValue,
-        session_json: Option<String>,
+        write_context_json: Option<String>,
     ) -> Result<JsValue, JsError> {
         let _span = debug_span!("wasm::insertWithSession", tier = self.tier_label, table).entered();
-        let wasm_values: Vec<Value> = serde_wasm_bindgen::from_value(values)?;
-        let groove_values: Vec<Value> = wasm_values;
-        let session = parse_session_json(session_json)?;
+        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+        let write_context = parse_write_context_json(write_context_json)?;
 
         let mut core = self.core.borrow_mut();
         let (object_id, row_values) = core
-            .insert(table, groove_values, session.as_ref())
+            .insert(table, named_values, write_context.as_ref())
             .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?;
 
         let row = SubscriptionRow {
@@ -713,20 +726,20 @@ impl WasmRuntime {
         &self,
         object_id: &str,
         values: JsValue,
-        session_json: Option<String>,
+        write_context_json: Option<String>,
     ) -> Result<(), JsError> {
         let _span =
             debug_span!("wasm::updateWithSession", tier = self.tier_label, object_id).entered();
         let uuid = uuid::Uuid::parse_str(object_id)
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
-        let session = parse_session_json(session_json)?;
+        let write_context = parse_write_context_json(write_context_json)?;
 
         let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
         let updates: Vec<(String, Value)> = partial_values.into_iter().collect();
 
         let mut core = self.core.borrow_mut();
-        core.update(oid, updates, session.as_ref())
+        core.update(oid, updates, write_context.as_ref())
             .map_err(|e| JsError::new(&format!("Update failed: {e}")))?;
 
         tracing::debug!(object_id, "updated_with_session");
@@ -754,17 +767,17 @@ impl WasmRuntime {
     pub fn delete_with_session(
         &self,
         object_id: &str,
-        session_json: Option<String>,
+        write_context_json: Option<String>,
     ) -> Result<(), JsError> {
         let _span =
             debug_span!("wasm::deleteWithSession", tier = self.tier_label, object_id).entered();
         let uuid = uuid::Uuid::parse_str(object_id)
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
-        let session = parse_session_json(session_json)?;
+        let write_context = parse_write_context_json(write_context_json)?;
 
         let mut core = self.core.borrow_mut();
-        core.delete(oid, session.as_ref())
+        core.delete(oid, write_context.as_ref())
             .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?;
 
         tracing::debug!(object_id, "deleted_with_session");
@@ -787,12 +800,11 @@ impl WasmRuntime {
     ) -> Result<js_sys::Promise, JsError> {
         let persistence_tier = parse_tier(tier)?;
 
-        let wasm_values: Vec<Value> = serde_wasm_bindgen::from_value(values)?;
-        let groove_values: Vec<Value> = wasm_values;
+        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
 
         let ((object_id, row_values), receiver) = {
             let mut core = self.core.borrow_mut();
-            core.insert_persisted(table, groove_values, None, persistence_tier)
+            core.insert_persisted(table, named_values, None, persistence_tier)
                 .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?
         };
 
@@ -817,18 +829,22 @@ impl WasmRuntime {
         &self,
         table: &str,
         values: JsValue,
-        session_json: Option<String>,
+        write_context_json: Option<String>,
         tier: &str,
     ) -> Result<js_sys::Promise, JsError> {
         let persistence_tier = parse_tier(tier)?;
-        let wasm_values: Vec<Value> = serde_wasm_bindgen::from_value(values)?;
-        let groove_values: Vec<Value> = wasm_values;
-        let session = parse_session_json(session_json)?;
+        let named_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
+        let write_context = parse_write_context_json(write_context_json)?;
 
         let ((object_id, row_values), receiver) = {
             let mut core = self.core.borrow_mut();
-            core.insert_persisted(table, groove_values, session.as_ref(), persistence_tier)
-                .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?
+            core.insert_persisted(
+                table,
+                named_values,
+                write_context.as_ref(),
+                persistence_tier,
+            )
+            .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?
         };
 
         let row = SubscriptionRow {
@@ -883,7 +899,7 @@ impl WasmRuntime {
         &self,
         object_id: &str,
         values: JsValue,
-        session_json: Option<String>,
+        write_context_json: Option<String>,
         tier: &str,
     ) -> Result<js_sys::Promise, JsError> {
         let persistence_tier = parse_tier(tier)?;
@@ -891,14 +907,14 @@ impl WasmRuntime {
         let uuid = uuid::Uuid::parse_str(object_id)
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
-        let session = parse_session_json(session_json)?;
+        let write_context = parse_write_context_json(write_context_json)?;
 
         let partial_values: HashMap<String, Value> = serde_wasm_bindgen::from_value(values)?;
         let updates: Vec<(String, Value)> = partial_values.into_iter().collect();
 
         let receiver = {
             let mut core = self.core.borrow_mut();
-            core.update_persisted(oid, updates, session.as_ref(), persistence_tier)
+            core.update_persisted(oid, updates, write_context.as_ref(), persistence_tier)
                 .map_err(|e| JsError::new(&format!("Update failed: {:?}", e)))?
         };
 
@@ -939,7 +955,7 @@ impl WasmRuntime {
     pub fn delete_durable_with_session(
         &self,
         object_id: &str,
-        session_json: Option<String>,
+        write_context_json: Option<String>,
         tier: &str,
     ) -> Result<js_sys::Promise, JsError> {
         let persistence_tier = parse_tier(tier)?;
@@ -947,11 +963,11 @@ impl WasmRuntime {
         let uuid = uuid::Uuid::parse_str(object_id)
             .map_err(|e| JsError::new(&format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
-        let session = parse_session_json(session_json)?;
+        let write_context = parse_write_context_json(write_context_json)?;
 
         let receiver = {
             let mut core = self.core.borrow_mut();
-            core.delete_persisted(oid, session.as_ref(), persistence_tier)
+            core.delete_persisted(oid, write_context.as_ref(), persistence_tier)
                 .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?
         };
 
@@ -1078,7 +1094,7 @@ impl WasmRuntime {
     /// catalogue sync messages (from queue_full_sync_to_server) are sent
     /// before the call returns, rather than being deferred to a microtask.
     #[wasm_bindgen(js_name = addServer)]
-    pub fn add_server(&self) {
+    pub fn add_server(&self, server_catalogue_state_hash: Option<String>) {
         let _span = info_span!("wasm::addServer", tier = self.tier_label).entered();
         let server_id = {
             let mut slot = self.upstream_server_id.borrow_mut();
@@ -1094,7 +1110,10 @@ impl WasmRuntime {
         // Re-attach semantics: remove existing upstream edge then add again so
         // replay/full-sync runs on every successful reconnect.
         core.remove_server(server_id);
-        core.add_server(server_id);
+        core.add_server_with_catalogue_state_hash(
+            server_id,
+            server_catalogue_state_hash.as_deref(),
+        );
         core.batched_tick();
     }
 
@@ -1295,7 +1314,6 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Invalid schema JSON: {}", e)))?;
 
         let schema: Schema = wasm_schema;
-
         // Parse optional node durability tiers
         let node_tiers = parse_node_durability_tiers(tier.as_deref())?;
 
