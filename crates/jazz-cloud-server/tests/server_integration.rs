@@ -26,6 +26,7 @@ struct AppSummaryResponse {
     allow_anonymous: bool,
     allow_demo: bool,
     status: String,
+    env: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +39,7 @@ struct CreateAppResponse {
     backend_secret: String,
     admin_secret: String,
     status: String,
+    env: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -814,4 +816,87 @@ async fn schema_catalogue_sync_and_retrieval_round_trip() {
     let schema_json: Value = schema_response.json().await.expect("schema json");
     let expected_schema_json = serde_json::to_value(schema.clone()).expect("expected schema json");
     assert_eq!(schema_json, expected_schema_json);
+}
+
+#[tokio::test]
+async fn management_api_env_field_defaults_and_custom_values() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let server = ServerProcess::start(temp_dir.path()).await;
+    let auth_header = basic_auth_header("admin", INTERNAL_API_SECRET);
+
+    // Create an app with a custom env value
+    let create_staging = server
+        .client
+        .post(format!("{}/manage/api/apps", server.base_url()))
+        .header("Authorization", &auth_header)
+        .json(&json!({
+            "app_name": "staging-app",
+            "jwks_endpoint": "http://example.invalid/jwks",
+            "env": "staging"
+        }))
+        .send()
+        .await
+        .expect("create staging app request");
+    assert_eq!(create_staging.status(), StatusCode::OK);
+    let staging: CreateAppResponse = create_staging
+        .json()
+        .await
+        .expect("parse staging create response");
+    assert_eq!(staging.app_name, "staging-app");
+    assert_eq!(
+        staging.env, "staging",
+        "custom env should be returned on create"
+    );
+
+    // Create an app without specifying env — should default to "prod"
+    let create_default = server
+        .client
+        .post(format!("{}/manage/api/apps", server.base_url()))
+        .header("Authorization", &auth_header)
+        .json(&json!({
+            "app_name": "default-env-app",
+            "jwks_endpoint": "http://example.invalid/jwks"
+        }))
+        .send()
+        .await
+        .expect("create default env app request");
+    assert_eq!(create_default.status(), StatusCode::OK);
+    let default_app: CreateAppResponse = create_default
+        .json()
+        .await
+        .expect("parse default env create response");
+    assert_eq!(default_app.app_name, "default-env-app");
+    assert_eq!(
+        default_app.env, "prod",
+        "omitted env should default to prod"
+    );
+
+    // List apps and verify both env values are present
+    let list_response = server
+        .client
+        .get(format!("{}/manage/api/apps", server.base_url()))
+        .header("Authorization", &auth_header)
+        .send()
+        .await
+        .expect("list apps request");
+    assert_eq!(list_response.status(), StatusCode::OK);
+    let listed: Vec<AppSummaryResponse> = list_response.json().await.expect("parse app list");
+
+    let listed_staging = listed
+        .iter()
+        .find(|app| app.app_id == staging.app_id)
+        .expect("staging app should appear in list");
+    assert_eq!(
+        listed_staging.env, "staging",
+        "staging env should persist in listing"
+    );
+
+    let listed_default = listed
+        .iter()
+        .find(|app| app.app_id == default_app.app_id)
+        .expect("default env app should appear in list");
+    assert_eq!(
+        listed_default.env, "prod",
+        "default env should be prod in listing"
+    );
 }
