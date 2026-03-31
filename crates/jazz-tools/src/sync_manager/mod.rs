@@ -34,6 +34,7 @@ pub use types::*;
 pub struct SyncManager {
     pub object_manager: ObjectManager,
     pub(super) catalogue_objects: HashSet<ObjectId>,
+    pub(super) allow_unprivileged_schema_catalogue_writes: bool,
 
     pub(super) servers: HashMap<ServerId, ServerState>,
     pub(super) clients: HashMap<ClientId, ClientState>,
@@ -68,6 +69,10 @@ impl std::fmt::Debug for SyncManager {
         f.debug_struct("SyncManager")
             .field("object_manager", &self.object_manager)
             .field("catalogue_objects", &self.catalogue_objects)
+            .field(
+                "allow_unprivileged_schema_catalogue_writes",
+                &self.allow_unprivileged_schema_catalogue_writes,
+            )
             .field("servers", &self.servers)
             .field("clients", &self.clients)
             .field("inbox", &self.inbox)
@@ -115,6 +120,7 @@ impl SyncManager {
         Self {
             object_manager,
             catalogue_objects,
+            allow_unprivileged_schema_catalogue_writes: false,
             servers: HashMap::new(),
             clients: HashMap::new(),
             inbox: Vec::new(),
@@ -134,6 +140,13 @@ impl SyncManager {
     /// Add a durability identity for this node (enables durability notifications).
     pub fn with_durability_tier(mut self, tier: DurabilityTier) -> Self {
         self.my_tiers.insert(tier);
+        self
+    }
+
+    /// Allow authenticated user clients to publish structural schema catalogue
+    /// objects directly. Intended for development servers only.
+    pub fn with_unprivileged_schema_catalogue_writes(mut self) -> Self {
+        self.allow_unprivileged_schema_catalogue_writes = true;
         self
     }
 

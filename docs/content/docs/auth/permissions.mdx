@@ -27,7 +27,9 @@ We can define permissions in `permissions.ts`:
 <Callout type="info">
   Author permissions in the root `permissions.ts` next to `schema.ts`. `npx jazz-tools@alpha
   validate` is a useful local sanity check before publishing. Permission-only changes do not require
-  migrations, but they do still require `npx jazz-tools@alpha permissions push`.
+  migrations, but they do still require `npx jazz-tools@alpha permissions push`. Development-mode
+  schema auto-push only publishes the structural schema from `schema.ts`; it does not publish
+  permissions for you.
 </Callout>
 
 Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})`).
