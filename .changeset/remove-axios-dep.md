@@ -2,4 +2,4 @@
 "jazz-wasm": patch
 ---
 
-Remove axios from dependency tree by installing wasm-pack via cargo instead of npm
+Remove npm wasm-pack dependency in favour of cargo-installed wasm-pack, eliminating axios from the dependency tree
