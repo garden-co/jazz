@@ -61,6 +61,10 @@ case "$JAZZ_RN_PLATFORM" in
     ;;
 esac
 
+if ! command -v wasm-pack >/dev/null 2>&1; then
+  cargo install wasm-pack --locked
+fi
+
 if is_truthy "$JAZZ_SKIP_RN_DEPS"; then
   echo "Skipping React Native dependency bootstrap (JAZZ_SKIP_RN_DEPS=$JAZZ_SKIP_RN_DEPS)."
   echo "Jazz prerequisites installed."

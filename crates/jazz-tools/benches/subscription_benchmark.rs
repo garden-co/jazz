@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use common::{create_runtime, create_session, current_timestamp, setup_data};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use jazz_tools::query_manager::query::{Query, QueryBuilder};
+use jazz_tools::query_manager::session::WriteContext;
 use jazz_tools::query_manager::types::Value;
 
 const USER_ID: &str = "benchmark_user";
@@ -38,6 +39,7 @@ fn single_subscription_latency(c: &mut Criterion) {
             let mut core = create_runtime();
             let data = setup_data(&mut core, scale, USER_ID);
             let session = create_session(USER_ID);
+            let write_context = WriteContext::from_session(session.clone());
 
             // Track updates via callback
             let update_count = Arc::new(AtomicUsize::new(0));
@@ -76,7 +78,7 @@ fn single_subscription_latency(c: &mut Criterion) {
                             ("author_id", Value::Text(USER_ID.to_string())),
                             ("created_at", Value::Timestamp(timestamp)),
                         ]),
-                        Some(&session),
+                        Some(&write_context),
                     )
                     .expect("insert");
 
@@ -132,6 +134,7 @@ fn fanout_latency(c: &mut Criterion) {
                 update_count.store(0, Ordering::SeqCst); // Clear initial
 
                 let session = create_session(USER_ID);
+                let write_context = WriteContext::from_session(session.clone());
                 let folder_id = data.owned_folders[0];
                 let mut doc_counter = 0u64;
 
@@ -150,7 +153,7 @@ fn fanout_latency(c: &mut Criterion) {
                                 ("author_id", Value::Text(USER_ID.to_string())),
                                 ("created_at", Value::Timestamp(timestamp)),
                             ]),
-                            Some(&session),
+                            Some(&write_context),
                         )
                         .expect("insert");
 
@@ -237,6 +240,7 @@ fn filtered_subscription_latency(c: &mut Criterion) {
                 let mut core = create_runtime();
                 let data = setup_data(&mut core, scale, USER_ID);
                 let session = create_session(USER_ID);
+                let write_context = WriteContext::from_session(session.clone());
 
                 let update_count = Arc::new(AtomicUsize::new(0));
                 let update_count_clone = update_count.clone();
@@ -279,7 +283,7 @@ fn filtered_subscription_latency(c: &mut Criterion) {
                                 ("author_id", Value::Text(USER_ID.to_string())),
                                 ("created_at", Value::Timestamp(timestamp)),
                             ]),
-                            Some(&session),
+                            Some(&write_context),
                         )
                         .expect("insert");
 
@@ -311,6 +315,7 @@ fn batch_insert_subscription_latency(c: &mut Criterion) {
                 let mut core = create_runtime();
                 let data = setup_data(&mut core, scale, USER_ID);
                 let session = create_session(USER_ID);
+                let write_context = WriteContext::from_session(session.clone());
 
                 let update_count = Arc::new(AtomicUsize::new(0));
                 let update_count_clone = update_count.clone();
@@ -361,7 +366,7 @@ fn batch_insert_subscription_latency(c: &mut Criterion) {
                                     ("author_id", Value::Text(USER_ID.to_string())),
                                     ("created_at", Value::Timestamp(timestamp + i as u64)),
                                 ]),
-                                Some(&session),
+                                Some(&write_context),
                             )
                             .expect("insert");
                     }

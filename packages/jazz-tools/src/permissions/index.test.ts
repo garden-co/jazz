@@ -25,6 +25,8 @@ interface TodoWhere {
   archived?: boolean;
   done?: boolean;
   projectId?: string;
+  $createdBy?: string;
+  $updatedBy?: string;
 }
 
 interface Project {
@@ -372,6 +374,43 @@ describe("permissions DSL", () => {
     expect(compiled.todos!.delete?.using).toEqual({
       type: "Cmp",
       column: "ownerId",
+      op: "Eq",
+      value: {
+        type: "SessionRef",
+        path: ["userId"],
+      },
+    });
+  });
+
+  it("compiles provenance magic column policies", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => [
+      policy.todos.allowRead.where({ $createdBy: session.userId }),
+      policy.todos.allowUpdate
+        .whereOld({ $createdBy: session.userId })
+        .whereNew({ $updatedBy: session.userId }),
+    ]);
+
+    expect(compiled.todos!.select?.using).toEqual({
+      type: "Cmp",
+      column: "$createdBy",
+      op: "Eq",
+      value: {
+        type: "SessionRef",
+        path: ["userId"],
+      },
+    });
+    expect(compiled.todos!.update?.using).toEqual({
+      type: "Cmp",
+      column: "$createdBy",
+      op: "Eq",
+      value: {
+        type: "SessionRef",
+        path: ["userId"],
+      },
+    });
+    expect(compiled.todos!.update?.with_check).toEqual({
+      type: "Cmp",
+      column: "$updatedBy",
       op: "Eq",
       value: {
         type: "SessionRef",

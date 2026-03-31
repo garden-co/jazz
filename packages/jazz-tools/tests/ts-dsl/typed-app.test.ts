@@ -85,6 +85,28 @@ describe("typed app prototype", () => {
     });
   });
 
+  it("serializes provenance magic columns and infers their projected types", () => {
+    const provenanceQuery = app.todos
+      .where({ $createdBy: "alice" })
+      .select("title", "$createdBy", "$updatedAt");
+
+    expect(JSON.parse(provenanceQuery._build())).toEqual({
+      table: "todos",
+      conditions: [{ column: "$createdBy", op: "eq", value: "alice" }],
+      includes: {},
+      select: ["title", "$createdBy", "$updatedAt"],
+      orderBy: [],
+      hops: [],
+    });
+
+    type ProvenanceRow = s.RowOf<typeof provenanceQuery>;
+    const row = {} as ProvenanceRow;
+
+    expectTypeOf(row.title).toEqualTypeOf<string>();
+    expectTypeOf(row.$createdBy).toEqualTypeOf<string>();
+    expectTypeOf(row.$updatedAt).toEqualTypeOf<Date>();
+  });
+
   it("infers rows, init payloads, where inputs, and include names from schema literals", () => {
     const todoWithProjectQuery = app.todos.include({ project: true });
     const projectWithTitlesQuery = app.projects.include({

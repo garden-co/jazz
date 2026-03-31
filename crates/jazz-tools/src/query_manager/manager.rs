@@ -5,7 +5,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::commit::CommitId;
-use crate::metadata::{MetadataKey, ObjectType};
+use crate::metadata::{MetadataKey, ObjectType, RowProvenance};
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::AllObjectUpdate;
 use crate::schema_manager::{
@@ -916,12 +916,16 @@ impl QueryManager {
                         return None;
                     }
                     let obj = obj?;
-                    let mut best: Option<(u64, CommitId, Vec<u8>, String, bool)> = None;
+                    let mut best: Option<(u64, CommitId, Vec<u8>, String, bool, RowProvenance)> =
+                        None;
 
                     for branch_name in &branches {
                         if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
                             for &tip_id in &branch.tips {
                                 if let Some(commit) = branch.commits.get(&tip_id) {
+                                    let Some(row_provenance) = commit.row_provenance() else {
+                                        continue;
+                                    };
                                     let is_soft_deleted = commit.is_soft_deleted();
                                     match &best {
                                         None => {
@@ -931,9 +935,10 @@ impl QueryManager {
                                                 commit.content.clone(),
                                                 branch_name.clone(),
                                                 is_soft_deleted,
+                                                row_provenance,
                                             ));
                                         }
-                                        Some((best_ts, best_id, _, _, _))
+                                        Some((best_ts, best_id, _, _, _, _))
                                             if (commit.timestamp, tip_id)
                                                 > (*best_ts, *best_id) =>
                                         {
@@ -943,6 +948,7 @@ impl QueryManager {
                                                 commit.content.clone(),
                                                 branch_name.clone(),
                                                 is_soft_deleted,
+                                                row_provenance,
                                             ));
                                         }
                                         _ => {}
@@ -952,8 +958,8 @@ impl QueryManager {
                         }
                     }
 
-                    let (_, commit_id, content, source_branch, is_soft_deleted) =
-                        best.filter(|(_, _, content, _, _)| !content.is_empty())?;
+                    let (_, commit_id, content, source_branch, is_soft_deleted, row_provenance) =
+                        best.filter(|(_, _, content, _, _, _)| !content.is_empty())?;
                     let current_table = obj
                         .metadata
                         .get(MetadataKey::Table.as_str())
@@ -975,6 +981,7 @@ impl QueryManager {
                                 return Some(LoadedRow::new(
                                     result.data,
                                     commit_id,
+                                    row_provenance.clone(),
                                     [(id, BranchName::new(&source_branch))]
                                         .into_iter()
                                         .collect(),
@@ -1008,6 +1015,7 @@ impl QueryManager {
                     Some(LoadedRow::new(
                         content,
                         commit_id,
+                        row_provenance,
                         [(id, BranchName::new(&source_branch))]
                             .into_iter()
                             .collect(),
