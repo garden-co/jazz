@@ -14,6 +14,7 @@ use std::collections::HashMap;
 
 use common::{create_runtime, create_session, current_timestamp, setup_data};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use jazz_tools::query_manager::session::WriteContext;
 use jazz_tools::query_manager::types::Value;
 
 const USER_ID: &str = "benchmark_user";
@@ -35,6 +36,7 @@ fn insert_own_folder(c: &mut Criterion) {
             let mut core = create_runtime();
             let data = setup_data(&mut core, scale, USER_ID);
             let session = create_session(USER_ID);
+            let write_context = WriteContext::from_session(session);
 
             // Pick a folder owned by the user
             let folder_id = data.owned_folders[0];
@@ -54,7 +56,7 @@ fn insert_own_folder(c: &mut Criterion) {
                         ("author_id", Value::Text(USER_ID.to_string())),
                         ("created_at", Value::Timestamp(timestamp)),
                     ]),
-                    Some(&session),
+                    Some(&write_context),
                 );
                 core.immediate_tick();
 
@@ -78,6 +80,7 @@ fn insert_team_folder(c: &mut Criterion) {
             let mut core = create_runtime();
             let data = setup_data(&mut core, scale, USER_ID);
             let session = create_session(USER_ID);
+            let write_context = WriteContext::from_session(session);
 
             // Use a folder from owned teams (which exercises INHERITS chain)
             let folder_id = data.owned_folders[data.owned_folders.len() / 2];
@@ -98,7 +101,7 @@ fn insert_team_folder(c: &mut Criterion) {
                         ("author_id", Value::Text("other_author".to_string())),
                         ("created_at", Value::Timestamp(timestamp)),
                     ]),
-                    Some(&session),
+                    Some(&write_context),
                 );
                 core.immediate_tick();
 
@@ -123,6 +126,7 @@ fn insert_batch(c: &mut Criterion) {
                 let mut core = create_runtime();
                 let data = setup_data(&mut core, scale, USER_ID);
                 let session = create_session(USER_ID);
+                let write_context = WriteContext::from_session(session);
 
                 let folder_ids: Vec<_> = data
                     .owned_folders
@@ -151,7 +155,7 @@ fn insert_batch(c: &mut Criterion) {
                                 ("author_id", Value::Text(USER_ID.to_string())),
                                 ("created_at", Value::Timestamp(timestamp + i as u64)),
                             ]),
-                            Some(&session),
+                            Some(&write_context),
                         );
                         result.expect("batch insert should succeed");
                     }

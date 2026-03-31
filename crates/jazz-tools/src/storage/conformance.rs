@@ -6,10 +6,10 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
 
-use crate::commit::{Commit, CommitAckState, CommitId};
+use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{SchemaHash, Value};
-use crate::storage::{CatalogueLensSeen, CatalogueManifestOp, LoadedBranch, Storage, StorageError};
+use crate::storage::{CatalogueLensSeen, CatalogueManifestOp, Storage};
 use crate::sync_manager::DurabilityTier;
 
 /// Factory type for persistence tests that reopen storage at a given path.
@@ -21,7 +21,7 @@ pub fn make_commit(content: &[u8], author: ObjectId, parents: &[CommitId]) -> Co
         parents: parents.iter().copied().collect(),
         content: content.to_vec(),
         timestamp: 1_700_000_000_000_000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: Default::default(),
         ack_state: Default::default(),

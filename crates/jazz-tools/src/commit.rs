@@ -4,8 +4,7 @@ use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
-use crate::metadata::{DeleteKind, MetadataKey};
-use crate::object::ObjectId;
+use crate::metadata::{DeleteKind, MetadataKey, RowProvenance, row_provenance_from_metadata};
 use crate::sync_manager::DurabilityTier;
 
 /// BLAKE3 hash identifying a commit.
@@ -38,7 +37,7 @@ pub struct Commit {
     pub content: Vec<u8>,
     /// Microseconds since Unix epoch.
     pub timestamp: u64,
-    pub author: ObjectId,
+    pub author: String,
     pub metadata: Option<BTreeMap<String, String>>,
     /// Storage state (runtime only, not serialized).
     #[serde(skip, default)]
@@ -67,7 +66,7 @@ impl Commit {
         hasher.update(&self.timestamp.to_le_bytes());
 
         // Hash author
-        hasher.update(self.author.uuid().as_bytes());
+        hasher.update(self.author.as_bytes());
 
         // Hash metadata
         if let Some(meta) = &self.metadata {
@@ -101,13 +100,16 @@ impl Commit {
             .map(|v| v == DeleteKind::Hard.as_str())
             .unwrap_or(false)
     }
+
+    pub fn row_provenance(&self) -> Option<RowProvenance> {
+        row_provenance_from_metadata(self.metadata.as_ref(), &self.author, self.timestamp)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use smallvec::smallvec;
-    use uuid::Uuid;
 
     #[test]
     fn commit_id_is_deterministic() {
@@ -115,7 +117,7 @@ mod tests {
             parents: smallvec![],
             content: b"hello".to_vec(),
             timestamp: 1234567890,
-            author: ObjectId::from_uuid(Uuid::nil()),
+            author: "jazz:test".to_string(),
             metadata: None,
             stored_state: StoredState::default(),
             ack_state: CommitAckState::default(),
@@ -132,7 +134,7 @@ mod tests {
             parents: smallvec![],
             content: b"hello".to_vec(),
             timestamp: 1234567890,
-            author: ObjectId::from_uuid(Uuid::nil()),
+            author: "jazz:test".to_string(),
             metadata: None,
             stored_state: StoredState::default(),
             ack_state: CommitAckState::default(),
@@ -142,7 +144,7 @@ mod tests {
             parents: smallvec![],
             content: b"world".to_vec(),
             timestamp: 1234567890,
-            author: ObjectId::from_uuid(Uuid::nil()),
+            author: "jazz:test".to_string(),
             metadata: None,
             stored_state: StoredState::default(),
             ack_state: CommitAckState::default(),
@@ -157,7 +159,7 @@ mod tests {
             parents: smallvec![],
             content: b"hello".to_vec(),
             timestamp: 1234567890,
-            author: ObjectId::from_uuid(Uuid::nil()),
+            author: "jazz:test".to_string(),
             metadata: None,
             stored_state: StoredState::Pending,
             ack_state: CommitAckState::default(),
@@ -167,7 +169,7 @@ mod tests {
             parents: smallvec![],
             content: b"hello".to_vec(),
             timestamp: 1234567890,
-            author: ObjectId::from_uuid(Uuid::nil()),
+            author: "jazz:test".to_string(),
             metadata: None,
             stored_state: StoredState::Stored,
             ack_state: CommitAckState::default(),
@@ -182,7 +184,7 @@ mod tests {
             parents: smallvec![],
             content: b"hello".to_vec(),
             timestamp: 1234567890,
-            author: ObjectId::from_uuid(Uuid::nil()),
+            author: "jazz:test".to_string(),
             metadata: None,
             stored_state: StoredState::default(),
             ack_state: CommitAckState::default(),
@@ -196,12 +198,27 @@ mod tests {
             parents: smallvec![],
             content: b"hello".to_vec(),
             timestamp: 1234567890,
-            author: ObjectId::from_uuid(Uuid::nil()),
+            author: "jazz:test".to_string(),
             metadata: None,
             stored_state: StoredState::default(),
             ack_state,
         };
 
         assert_eq!(commit1.id(), commit2.id());
+    }
+
+    #[test]
+    fn row_provenance_requires_explicit_edit_metadata() {
+        let commit = Commit {
+            parents: smallvec![],
+            content: b"hello".to_vec(),
+            timestamp: 1234567890,
+            author: "jazz:test".to_string(),
+            metadata: None,
+            stored_state: StoredState::default(),
+            ack_state: CommitAckState::default(),
+        };
+
+        assert_eq!(commit.row_provenance(), None);
     }
 }
