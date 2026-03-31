@@ -182,7 +182,7 @@ export class StorageApiAsync implements StorageAPI {
 
       if (lastSignature?.signature !== sessionRow.lastSignature) {
         signatures.push({
-          idx: sessionRow.lastIdx,
+          idx: sessionRow.lastIdx - 1,
           signature: sessionRow.lastSignature,
         });
       }
