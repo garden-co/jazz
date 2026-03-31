@@ -276,6 +276,36 @@ function changedTableNames(fromSchema: WasmSchema, toSchema: WasmSchema): string
   );
 }
 
+type TableRenameSuggestion = {
+  oldTableName: string;
+  newTableName: string;
+};
+
+function detectPossibleTableRename(
+  fromSchema: WasmSchema,
+  toSchema: WasmSchema,
+): TableRenameSuggestion | undefined {
+  const removedTables = Object.keys(fromSchema)
+    .filter((tableName) => !toSchema[tableName])
+    .sort();
+  const addedTables = Object.keys(toSchema)
+    .filter((tableName) => !fromSchema[tableName])
+    .sort();
+
+  if (removedTables.length !== 1 || addedTables.length !== 1) {
+    return undefined;
+  }
+
+  const [oldTableName] = removedTables;
+  const [newTableName] = addedTables;
+
+  if (!tableSchemasEqual(fromSchema[oldTableName], toSchema[newTableName])) {
+    return undefined;
+  }
+
+  return { oldTableName, newTableName };
+}
+
 function ensurePermissionsProject(compiled: LoadedSchemaProject): LoadedSchemaProject & {
   permissions: NonNullable<LoadedSchemaProject["permissions"]>;
   permissionsFile: string;
@@ -316,8 +346,9 @@ async function resolveStoredStructuralSchemaHash(
 }
 
 function pickWitnessSchema(schema: WasmSchema, tableNames: readonly string[]): WasmSchema {
+  const uniqueTableNames = [...new Set(tableNames)];
   return Object.fromEntries(
-    tableNames
+    uniqueTableNames
       .filter((tableName) => schema[tableName])
       .map((tableName) => [tableName, schema[tableName]!]),
   );
@@ -595,13 +626,25 @@ function inferTableSuggestions(
 function renderMigrationBody(
   fromSchema: WasmSchema,
   toSchema: WasmSchema,
-): { body: string; witnessFrom: WasmSchema; witnessTo: WasmSchema } {
+): {
+  migrateBody?: string;
+  renameTablesBody?: string;
+  witnessFrom: WasmSchema;
+  witnessTo: WasmSchema;
+} {
+  const renameSuggestion = detectPossibleTableRename(fromSchema, toSchema);
   const changedTables = changedTableNames(fromSchema, toSchema);
   const migratableTables = changedTables.filter(
     (tableName) => fromSchema[tableName] !== undefined && toSchema[tableName] !== undefined,
   );
-  const witnessFrom = pickWitnessSchema(fromSchema, migratableTables);
-  const witnessTo = pickWitnessSchema(toSchema, migratableTables);
+  const witnessFromTables = [...migratableTables];
+  const witnessToTables = [...migratableTables];
+  if (renameSuggestion) {
+    witnessFromTables.push(renameSuggestion.oldTableName);
+    witnessToTables.push(renameSuggestion.newTableName);
+  }
+  const witnessFrom = pickWitnessSchema(fromSchema, witnessFromTables);
+  const witnessTo = pickWitnessSchema(toSchema, witnessToTables);
   const lines: string[] = [];
 
   for (const tableName of migratableTables) {
@@ -624,15 +667,20 @@ function renderMigrationBody(
   }
 
   if (lines.length === 0) {
-    lines.push(
-      changedTables.length === 0
-        ? "// TODO: No schema differences were detected."
-        : "// TODO: No column-level migration steps were required for the detected schema changes.",
-    );
+    if (!renameSuggestion) {
+      lines.push(
+        changedTables.length === 0
+          ? "// TODO: No schema differences were detected."
+          : "// TODO: No column-level migration steps were required for the detected schema changes.",
+      );
+    }
   }
 
   return {
-    body: lines.join("\n").trimEnd(),
+    migrateBody: lines.length > 0 ? lines.join("\n").trimEnd() : undefined,
+    renameTablesBody: renameSuggestion
+      ? `${renameSuggestion.newTableName}: s.renameTableFrom(${JSON.stringify(renameSuggestion.oldTableName)}),`
+      : undefined,
     witnessFrom,
     witnessTo,
   };
@@ -666,16 +714,25 @@ function renderMigrationStub(input: {
   toSchema: WasmSchema;
 }): string {
   const rendered = renderMigrationBody(input.fromSchema, input.toSchema);
+  const sections: string[] = [];
+
+  if (rendered.renameTablesBody) {
+    sections.push(`  renameTables: {\n${indentBlock(rendered.renameTablesBody, 4)}\n  },`);
+  }
+
+  if (rendered.migrateBody) {
+    sections.push(`  migrate: {\n${indentBlock(rendered.migrateBody, 4)}\n  },`);
+  }
+
+  sections.push(`  fromHash: ${JSON.stringify(shortSchemaHash(input.fromHash))},`);
+  sections.push(`  toHash: ${JSON.stringify(shortSchemaHash(input.toHash))},`);
+  sections.push(`  from: ${renderSchemaWitness(rendered.witnessFrom)},`);
+  sections.push(`  to: ${renderSchemaWitness(rendered.witnessTo)},`);
+
   return `import { schema as s } from "jazz-tools";
 
 export default s.defineMigration({
-  migrate: {
-${indentBlock(rendered.body, 4)}
-  },
-  fromHash: ${JSON.stringify(shortSchemaHash(input.fromHash))},
-  toHash: ${JSON.stringify(shortSchemaHash(input.toHash))},
-  from: ${renderSchemaWitness(rendered.witnessFrom)},
-  to: ${renderSchemaWitness(rendered.witnessTo)},
+${sections.join("\n")}
 });
 `;
 }

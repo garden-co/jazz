@@ -437,6 +437,63 @@ describe("cli migrations", () => {
     expect(generated).not.toContain('"users"');
   });
 
+  it("suggests renameTables for a single exact table rename", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef";
+    const toHash = "1212121212121212121212121212121212121212121212121212121212121212";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${fromHash}`)) {
+        return new Response(
+          JSON.stringify({
+            users: {
+              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      if (input.endsWith(`/schema/${toHash}`)) {
+        return new Response(
+          JSON.stringify({
+            people: {
+              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const filePath = await createMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    const generated = await readFile(filePath, "utf8");
+    expect(generated).toContain("renameTables: {");
+    expect(generated).toContain('people: s.renameTableFrom("users"),');
+    expect(generated).toContain("from: {");
+    expect(generated).toContain('"users": s.table({');
+    expect(generated).toContain("to: {");
+    expect(generated).toContain('"people": s.table({');
+    expect(generated).not.toContain("migrate: {");
+  });
+
   it("pushes a reviewed migration via the admin migrations endpoint", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
