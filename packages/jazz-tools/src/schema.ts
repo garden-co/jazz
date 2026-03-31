@@ -281,6 +281,8 @@ export type LensOpType = LensOp["type"];
 
 export interface TableLens {
   table: string;
+  added?: boolean;
+  removed?: boolean;
   renamedFrom?: string;
   operations: LensOp[];
 }

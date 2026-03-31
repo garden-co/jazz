@@ -191,6 +191,57 @@ describe("schema-fetch", () => {
     });
   });
 
+  it("publishes migrations with added and removed table markers when provided", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 201,
+      statusText: "Created",
+      json: async () => ({
+        objectId: "11111111-1111-1111-1111-111111111111",
+        fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      }),
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await publishStoredMigration("http://localhost:1625/", {
+      adminSecret: "admin-secret",
+      pathPrefix: "/apps/app-123",
+      fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      forward: [
+        {
+          table: "profiles",
+          added: true,
+          operations: [],
+        },
+        {
+          table: "legacy_profiles",
+          removed: true,
+          operations: [],
+        },
+      ],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toEqual({
+      fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      forward: [
+        {
+          table: "profiles",
+          added: true,
+          operations: [],
+        },
+        {
+          table: "legacy_profiles",
+          removed: true,
+          operations: [],
+        },
+      ],
+    });
+  });
+
   it("throws a descriptive error when server subscription fetch fails", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
