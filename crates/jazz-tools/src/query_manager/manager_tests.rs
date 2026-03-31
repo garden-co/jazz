@@ -7269,23 +7269,20 @@ fn server_subscription_uses_current_permissions_after_table_rename_lens_transfor
         .sync_manager_mut()
         .object_manager
         .create(&mut storage, Some(metadata));
-    server_qm
-        .sync_manager_mut()
-        .object_manager
-        .add_commit(
-            &mut storage,
-            document_id,
-            &legacy_branch,
-            vec![],
-            encode_row(
-                &RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)]),
-                &[Value::Text("Legacy doc".into())],
-            )
-            .unwrap(),
-            author,
-            None,
+    add_row_commit(
+        &mut server_qm,
+        &mut storage,
+        document_id,
+        &legacy_branch,
+        vec![],
+        encode_row(
+            &RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)]),
+            &[Value::Text("Legacy doc".into())],
         )
-        .unwrap();
+        .unwrap(),
+        1000,
+        author.to_string(),
+    );
 
     let alice = ClientId::new();
     server_qm.sync_manager_mut().add_client(alice);
