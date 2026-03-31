@@ -36,7 +36,7 @@ export interface LinkExternalResponse {
 
 /** Callbacks for stream events. */
 export interface StreamCallbacks {
-  onSyncMessage(payloadJson: string): void;
+  onSyncMessage(payload: Uint8Array | string): void;
   onConnected?(clientId: string, catalogueStateHash?: string | null): void;
 }
 
@@ -47,7 +47,7 @@ export interface SyncStreamControllerOptions {
   setClientId(clientId: string): void;
   onConnected(catalogueStateHash?: string | null): void;
   onDisconnected(): void;
-  onSyncMessage(payloadJson: string): void;
+  onSyncMessage(payload: Uint8Array | string): void;
 }
 
 /**
@@ -56,7 +56,7 @@ export interface SyncStreamControllerOptions {
 export interface RuntimeSyncTarget {
   addServer(serverCatalogueStateHash?: string | null): void;
   removeServer(): void;
-  onSyncMessageReceived(payload: string): void;
+  onSyncMessageReceived(payload: Uint8Array | string): void;
 }
 
 export interface RuntimeSyncStreamControllerOptions {
@@ -508,7 +508,7 @@ export function applySyncAuthHeaders(headers: Record<string, string>, auth: Sync
 async function postSyncBatch(
   url: string,
   headers: Record<string, string>,
-  body: string,
+  body: BodyInit,
   logPrefix: string,
 ): Promise<void> {
   let response: Response;
@@ -536,6 +536,181 @@ async function postSyncBatch(
   }
 }
 
+function toBinaryBody(bytes: Uint8Array): Blob {
+  return new Blob([Uint8Array.from(bytes)]);
+}
+
+function encodeUtf8(value: string): Uint8Array {
+  return new TextEncoder().encode(value);
+}
+
+function decodeUtf8(bytes: Uint8Array, label: string): string {
+  try {
+    return new TextDecoder().decode(bytes);
+  } catch (error) {
+    throw new Error(`Invalid UTF-8 in ${label}: ${String(error)}`);
+  }
+}
+
+function parseUuidString(uuid: string): Uint8Array {
+  const compact = uuid.replace(/-/g, "");
+  if (!/^[0-9a-fA-F]{32}$/.test(compact)) {
+    throw new Error(`Invalid client id for binary sync batch: ${uuid}`);
+  }
+
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i += 1) {
+    bytes[i] = Number.parseInt(compact.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+function writeU32(view: DataView, offset: number, value: number): number {
+  view.setUint32(offset, value, false);
+  return offset + 4;
+}
+
+function writeU64(view: DataView, offset: number, value: number): number {
+  view.setBigUint64(offset, BigInt(value), false);
+  return offset + 8;
+}
+
+function readU32(view: DataView, offset: number, label: string): [number, number] {
+  if (offset + 4 > view.byteLength) {
+    throw new Error(`Truncated binary field: ${label}`);
+  }
+  return [view.getUint32(offset, false), offset + 4];
+}
+
+function readU64(view: DataView, offset: number, label: string): [number, number] {
+  if (offset + 8 > view.byteLength) {
+    throw new Error(`Truncated binary field: ${label}`);
+  }
+  const value = Number(view.getBigUint64(offset, false));
+  return [value, offset + 8];
+}
+
+function readBytes(
+  view: DataView,
+  bytes: Uint8Array,
+  offset: number,
+  label: string,
+): [Uint8Array, number] {
+  const [len, nextOffset] = readU32(view, offset, label);
+  if (nextOffset + len > view.byteLength) {
+    throw new Error(`Truncated binary field: ${label}`);
+  }
+  return [bytes.slice(nextOffset, nextOffset + len), nextOffset + len];
+}
+
+function readOptionalU64(view: DataView, offset: number, label: string): [number | null, number] {
+  if (offset + 1 > view.byteLength) {
+    throw new Error(`Truncated binary field: ${label}`);
+  }
+  const present = view.getUint8(offset);
+  if (present === 0) return [null, offset + 1];
+  if (present !== 1) {
+    throw new Error(`Invalid optional marker for ${label}`);
+  }
+  return readU64(view, offset + 1, label);
+}
+
+function readOptionalString(
+  view: DataView,
+  bytes: Uint8Array,
+  offset: number,
+  label: string,
+): [string | null, number] {
+  if (offset + 1 > view.byteLength) {
+    throw new Error(`Truncated binary field: ${label}`);
+  }
+  const present = view.getUint8(offset);
+  if (present === 0) return [null, offset + 1];
+  if (present !== 1) {
+    throw new Error(`Invalid optional marker for ${label}`);
+  }
+  const [valueBytes, nextOffset] = readBytes(view, bytes, offset + 1, label);
+  return [decodeUtf8(valueBytes, label), nextOffset];
+}
+
+function encodeBinarySyncBatchRequest(clientId: string, payloads: Uint8Array[]): Uint8Array {
+  const clientIdBytes = parseUuidString(clientId);
+  const totalLength = 16 + 4 + payloads.reduce((sum, payload) => sum + 4 + payload.length, 0);
+  const out = new Uint8Array(totalLength);
+  const view = new DataView(out.buffer);
+  let offset = 0;
+  out.set(clientIdBytes, offset);
+  offset += 16;
+  offset = writeU32(view, offset, payloads.length);
+  for (const payload of payloads) {
+    offset = writeU32(view, offset, payload.length);
+    out.set(payload, offset);
+    offset += payload.length;
+  }
+  return out;
+}
+
+type DecodedBinaryServerEvent =
+  | {
+      type: "Connected";
+      clientId: string;
+      catalogueStateHash: string | null;
+    }
+  | {
+      type: "SyncUpdate";
+      payload: Uint8Array;
+    }
+  | {
+      type: "Subscribed";
+    }
+  | {
+      type: "Error";
+      message: string;
+      code: number;
+    }
+  | {
+      type: "Heartbeat";
+    };
+
+function decodeBinaryServerEvent(frame: Uint8Array): DecodedBinaryServerEvent {
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  if (view.byteLength < 1) {
+    throw new Error("Truncated binary server event");
+  }
+  let offset = 1;
+  switch (view.getUint8(0)) {
+    case 1: {
+      [, offset] = readU64(view, offset, "connection_id");
+      const [clientIdBytes, clientIdOffset] = readBytes(view, frame, offset, "client_id");
+      offset = clientIdOffset;
+      const clientId = decodeUtf8(clientIdBytes, "client_id");
+      [, offset] = readOptionalU64(view, offset, "next_sync_seq");
+      const [catalogueStateHash] = readOptionalString(view, frame, offset, "catalogue_state_hash");
+      return { type: "Connected", clientId, catalogueStateHash };
+    }
+    case 2:
+      return { type: "Subscribed" };
+    case 3: {
+      [, offset] = readOptionalU64(view, offset, "seq");
+      const [payload] = readBytes(view, frame, offset, "sync_payload");
+      return { type: "SyncUpdate", payload };
+    }
+    case 4: {
+      if (offset + 1 > view.byteLength) {
+        throw new Error("Truncated binary field: error_code");
+      }
+      const code = view.getUint8(offset);
+      offset += 1;
+      const [message] = readBytes(view, frame, offset, "error_message");
+      return { type: "Error", code, message: decodeUtf8(message, "error_message") };
+    }
+    case 5:
+      return { type: "Heartbeat" };
+    default:
+      throw new Error(`Invalid binary server event tag: ${view.getUint8(0)}`);
+  }
+}
+
 /**
  * POST a sync payload to the server.
  *
@@ -544,7 +719,7 @@ async function postSyncBatch(
  */
 export async function sendSyncPayload(
   serverUrl: string,
-  payloadJson: string,
+  payload: Uint8Array | string,
   isCatalogue: boolean,
   auth: SyncAuth,
   logPrefix = "",
@@ -553,14 +728,20 @@ export async function sendSyncPayload(
     return;
   }
 
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const isBinary = payload instanceof Uint8Array;
+  const headers: Record<string, string> = {
+    "Content-Type": isBinary ? "application/octet-stream" : "application/json",
+  };
   if (isCatalogue) {
     headers["X-Jazz-Admin-Secret"] = auth.adminSecret!;
   } else {
     applySyncAuthHeaders(headers, auth);
   }
 
-  const body = `{"payloads":[${payloadJson}],"client_id":${JSON.stringify(auth.clientId ?? fallbackClientId)}}`;
+  const body =
+    payload instanceof Uint8Array
+      ? toBinaryBody(encodeBinarySyncBatchRequest(auth.clientId ?? fallbackClientId, [payload]))
+      : `{"payloads":[${payload}],"client_id":${JSON.stringify(auth.clientId ?? fallbackClientId)}}`;
   await postSyncBatch(
     buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix),
     headers,
@@ -579,16 +760,28 @@ export async function sendSyncPayload(
  */
 export async function sendSyncPayloadBatch(
   serverUrl: string,
-  payloads: string[],
+  payloads: Array<Uint8Array | string>,
   auth: SyncAuth,
   logPrefix = "",
 ): Promise<void> {
   if (payloads.length === 0) return;
 
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const binaryPayloads = payloads.filter(
+    (payload): payload is Uint8Array => payload instanceof Uint8Array,
+  );
+  const allBinary = binaryPayloads.length === payloads.length;
+  const allJson = binaryPayloads.length === 0;
+  if (!allBinary && !allJson) {
+    throw new Error("Mixed sync payload encodings are not supported in a single batch");
+  }
+  const headers: Record<string, string> = {
+    "Content-Type": allBinary ? "application/octet-stream" : "application/json",
+  };
   applySyncAuthHeaders(headers, auth);
 
-  const body = `{"payloads":[${payloads.join(",")}],"client_id":${JSON.stringify(auth.clientId ?? fallbackClientId)}}`;
+  const body = allBinary
+    ? toBinaryBody(encodeBinarySyncBatchRequest(auth.clientId ?? fallbackClientId, binaryPayloads))
+    : `{"payloads":[${payloads.join(",")}],"client_id":${JSON.stringify(auth.clientId ?? fallbackClientId)}}`;
   await postSyncBatch(
     buildEndpointUrl(serverUrl, "/sync", auth.pathPrefix),
     headers,
@@ -654,7 +847,7 @@ export async function linkExternalIdentity(
 /**
  * Read length-prefixed binary frames from a ReadableStreamDefaultReader.
  *
- * Each frame is: 4-byte big-endian length + UTF-8 JSON payload.
+ * Each frame is: 4-byte big-endian length + binary event payload.
  * Calls `callbacks.onSyncMessage` for SyncUpdate events and
  * `callbacks.onConnected` for Connected events.
  *
@@ -681,23 +874,52 @@ export async function readBinaryFrames(
     while (buffer.length >= 4) {
       const len = new DataView(buffer.buffer, buffer.byteOffset).getUint32(0, false);
       if (buffer.length < 4 + len) break;
-      const json = new TextDecoder().decode(buffer.slice(4, 4 + len));
+      const frame = buffer.slice(4, 4 + len);
       buffer = buffer.slice(4 + len);
 
-      let event: any;
+      let decodedEvent:
+        | { type: "Connected"; clientId: string; catalogueStateHash: string | null }
+        | { type: "SyncUpdate"; payload: Uint8Array | string }
+        | null = null;
       try {
-        event = JSON.parse(json);
+        if (frame[0] === 123) {
+          const json = new TextDecoder().decode(frame);
+          const event = JSON.parse(json);
+          if (event.type === "Connected" && event.client_id) {
+            decodedEvent = {
+              type: "Connected",
+              clientId: event.client_id,
+              catalogueStateHash: event.catalogue_state_hash ?? null,
+            };
+          } else if (event.type === "SyncUpdate") {
+            logSchemaWarningPayload(event.payload, logPrefix);
+            decodedEvent = {
+              type: "SyncUpdate",
+              payload: JSON.stringify(event.payload),
+            };
+          }
+        } else {
+          const event = decodeBinaryServerEvent(frame);
+          if (event.type === "Connected") {
+            decodedEvent = event;
+          } else if (event.type === "SyncUpdate") {
+            decodedEvent = event;
+          }
+        }
       } catch (error) {
         console.error(`${logPrefix}Stream parse error:`, error);
         continue;
       }
 
+      if (!decodedEvent) {
+        continue;
+      }
+
       try {
-        if (event.type === "Connected" && event.client_id) {
-          callbacks.onConnected?.(event.client_id, event.catalogue_state_hash ?? null);
-        } else if (event.type === "SyncUpdate") {
-          logSchemaWarningPayload(event.payload, logPrefix);
-          callbacks.onSyncMessage(JSON.stringify(event.payload));
+        if (decodedEvent.type === "Connected") {
+          callbacks.onConnected?.(decodedEvent.clientId, decodedEvent.catalogueStateHash);
+        } else {
+          callbacks.onSyncMessage(decodedEvent.payload);
         }
       } catch (error) {
         console.error(`${logPrefix}Stream callback error:`, error);

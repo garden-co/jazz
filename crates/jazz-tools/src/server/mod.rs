@@ -8,7 +8,7 @@ use crate::middleware::auth::JwksCache;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::AppId;
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, SyncPayload};
+use crate::sync_manager::{ClientId, SyncConnectionCodec, SyncPayload};
 
 mod builder;
 mod external_identity_store;
@@ -50,6 +50,7 @@ pub struct ServerState {
     #[allow(dead_code)]
     pub app_id: AppId,
     pub connections: RwLock<HashMap<u64, ConnectionState>>,
+    pub sync_request_codecs: RwLock<HashMap<ClientId, SyncConnectionCodec>>,
     pub next_connection_id: std::sync::atomic::AtomicU64,
     /// Broadcast channel for sending sync payloads to SSE clients.
     pub sync_broadcast: broadcast::Sender<(ClientId, SyncPayload)>,

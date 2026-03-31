@@ -111,6 +111,7 @@ impl ServerBuilder {
             runtime,
             app_id: self.app_id,
             connections: RwLock::new(HashMap::new()),
+            sync_request_codecs: RwLock::new(HashMap::new()),
             next_connection_id: std::sync::atomic::AtomicU64::new(1),
             sync_broadcast,
             auth_config,

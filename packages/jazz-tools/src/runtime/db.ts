@@ -514,7 +514,7 @@ export class Db {
         {
           // Worker-bridged runtimes exchange postcard payloads with peers;
           // direct browser/server routing keeps JSON payloads.
-          useBinaryEncoding: this.worker !== null,
+          useBinaryEncoding: this.worker !== null || Boolean(this.config.serverUrl),
         },
       );
 

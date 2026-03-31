@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::jazz_tokio::{SubscriptionHandle as RuntimeSubHandle, TokioRuntime};
-use crate::jazz_transport::ServerEvent;
+use crate::jazz_transport::{DecodedServerEvent, ServerEvent, decode_binary_server_event_frame};
 use crate::query_manager::manager::LocalUpdates;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
@@ -15,7 +15,8 @@ use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_manifest};
 use crate::storage::{FjallStorage, MemoryStorage, Storage, StorageError};
 use crate::sync_manager::{
-    ClientId, Destination, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
+    ClientId, Destination, DurabilityTier, InboxEntry, ServerId, Source, SyncConnectionCodec,
+    SyncManager, SyncPayload,
 };
 use base64::Engine;
 use bytes::BytesMut;
@@ -223,6 +224,7 @@ impl JazzClient {
 
                             let mut body = response.bytes_stream();
                             let mut buffer = BytesMut::new();
+                            let mut sync_codec = SyncConnectionCodec::default();
 
                             while let Some(chunk_result) = body.next().await {
                                 match chunk_result {
@@ -237,25 +239,65 @@ impl JazzClient {
                                             if buffer.len() < 4 + len {
                                                 break; // Incomplete frame
                                             }
-                                            let json = &buffer[4..4 + len];
-
-                                            match serde_json::from_slice::<ServerEvent>(json) {
-                                                Ok(event) => {
-                                                    if matches!(
-                                                        &event,
-                                                        ServerEvent::Connected { .. }
-                                                    ) && let Some(tx) =
-                                                        initial_stream_ready_tx.take()
-                                                    {
-                                                        let catalogue_state_hash = match &event {
+                                            match decode_binary_server_event_frame(
+                                                &buffer[..4 + len],
+                                            ) {
+                                                Ok(Some((event, _))) => {
+                                                    let event = match event {
+                                                        DecodedServerEvent::Connected {
+                                                            connection_id,
+                                                            client_id,
+                                                            next_sync_seq,
+                                                            catalogue_state_hash,
+                                                        } => {
+                                                            if let Some(tx) =
+                                                                initial_stream_ready_tx.take()
+                                                            {
+                                                                let _ = tx.send(
+                                                                    catalogue_state_hash.clone(),
+                                                                );
+                                                            }
                                                             ServerEvent::Connected {
+                                                                connection_id,
+                                                                client_id,
+                                                                next_sync_seq,
                                                                 catalogue_state_hash,
-                                                                ..
-                                                            } => catalogue_state_hash.clone(),
-                                                            _ => None,
-                                                        };
-                                                        let _ = tx.send(catalogue_state_hash);
-                                                    }
+                                                            }
+                                                        }
+                                                        DecodedServerEvent::Subscribed {
+                                                            query_id,
+                                                        } => ServerEvent::Subscribed { query_id },
+                                                        DecodedServerEvent::SyncUpdate {
+                                                            seq,
+                                                            payload,
+                                                        } => {
+                                                            let payload = match sync_codec
+                                                                .decode_payload(&payload)
+                                                            {
+                                                                Ok(payload) => payload,
+                                                                Err(error) => {
+                                                                    tracing::warn!(
+                                                                        "Failed to decode sync payload: {}",
+                                                                        error
+                                                                    );
+                                                                    let _ =
+                                                                        buffer.split_to(4 + len);
+                                                                    continue;
+                                                                }
+                                                            };
+                                                            ServerEvent::SyncUpdate {
+                                                                seq,
+                                                                payload: Box::new(payload),
+                                                            }
+                                                        }
+                                                        DecodedServerEvent::Error {
+                                                            message,
+                                                            code,
+                                                        } => ServerEvent::Error { message, code },
+                                                        DecodedServerEvent::Heartbeat => {
+                                                            ServerEvent::Heartbeat
+                                                        }
+                                                    };
                                                     if let Err(e) = handle_server_event(
                                                         event,
                                                         &runtime_for_stream,
@@ -266,6 +308,11 @@ impl JazzClient {
                                                             e
                                                         );
                                                     }
+                                                }
+                                                Ok(None) => {
+                                                    tracing::warn!(
+                                                        "Binary server frame was unexpectedly incomplete"
+                                                    );
                                                 }
                                                 Err(e) => {
                                                     tracing::warn!(

@@ -17,8 +17,8 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use crate::jazz_transport::{
-    ConnectionId, ErrorResponse, ServerEvent, SyncBatchRequest, SyncBatchResponse,
-    SyncPayloadResult,
+    BinarySyncBatchRequest, ConnectionId, ErrorResponse, ServerEvent, SyncBatchRequest,
+    SyncBatchResponse, SyncPayloadResult, encode_binary_server_event_frame,
 };
 use crate::middleware::auth::{
     derive_local_principal_id, extract_session, parse_local_auth_headers, validate_admin_secret,
@@ -30,7 +30,7 @@ use crate::query_manager::types::{
 };
 use crate::schema_manager::{AppId, Lens, LensOp, LensTransform};
 use crate::server::{CatalogueAuthorityMode, ConnectionState, ServerState};
-use crate::sync_manager::ClientId;
+use crate::sync_manager::{ClientId, SyncConnectionCodec};
 
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
@@ -267,13 +267,8 @@ fn authority_endpoint_url(base_url: &str, path: &str) -> Result<String, String> 
 /// Encode a ServerEvent as a length-prefixed binary frame.
 ///
 /// Format: [4 bytes: u32 big-endian length][N bytes: JSON]
-fn encode_frame(event: &ServerEvent) -> Bytes {
-    let json = serde_json::to_vec(event).unwrap_or_default();
-    let len = (json.len() as u32).to_be_bytes();
-    let mut buf = Vec::with_capacity(4 + json.len());
-    buf.extend_from_slice(&len);
-    buf.extend_from_slice(&json);
-    Bytes::from(buf)
+fn encode_frame(event: &ServerEvent, payload_bytes: Option<&[u8]>) -> Bytes {
+    Bytes::from(encode_binary_server_event_frame(event, payload_bytes))
 }
 
 /// Binary streaming events endpoint - clients connect here for all updates.
@@ -366,6 +361,11 @@ async fn events_handler(
             },
         );
     }
+    state
+        .sync_request_codecs
+        .write()
+        .await
+        .insert(client_id, SyncConnectionCodec::default());
 
     // Clone state for cleanup on drop
     let state_cleanup = state.clone();
@@ -377,6 +377,7 @@ async fn events_handler(
 
     // Create stream that emits length-prefixed binary frames
     let stream = async_stream::stream! {
+        let mut sync_codec = SyncConnectionCodec::default();
         // Send Connected frame
         let connected = ServerEvent::Connected {
             connection_id: ConnectionId(connection_id),
@@ -384,7 +385,7 @@ async fn events_handler(
             next_sync_seq: None,
             catalogue_state_hash: catalogue_state_hash.clone(),
         };
-        yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected));
+        yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected, None));
 
         // Heartbeat interval
         let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
@@ -397,11 +398,14 @@ async fn events_handler(
                         Ok((target_client_id, payload)) => {
                             // Only emit if this is for our client
                             if target_client_id == client_id {
+                                let payload_bytes = sync_codec
+                                    .encode_payload(payload.clone())
+                                    .expect("stream sync payload encoding must succeed");
                                 let event = ServerEvent::SyncUpdate {
                                     seq: None,
                                     payload: Box::new(payload),
                                 };
-                                yield Ok(encode_frame(&event));
+                                yield Ok(encode_frame(&event, Some(&payload_bytes)));
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -417,7 +421,7 @@ async fn events_handler(
                 // Send periodic heartbeat
                 _ = heartbeat_interval.tick() => {
                     let heartbeat = ServerEvent::Heartbeat;
-                    yield Ok(encode_frame(&heartbeat));
+                    yield Ok(encode_frame(&heartbeat, None));
                 }
             }
         }
@@ -450,13 +454,68 @@ async fn events_handler(
 async fn sync_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-    Json(request): Json<SyncBatchRequest>,
+    body: Bytes,
 ) -> impl IntoResponse {
     use crate::sync_manager::{InboxEntry, Source};
 
+    let is_binary = headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/octet-stream"));
+
+    let (request_client_id, payloads) = if is_binary {
+        let request = match BinarySyncBatchRequest::decode(&body) {
+            Ok(request) => request,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::bad_request(format!(
+                        "invalid binary sync batch: {error}"
+                    ))),
+                )
+                    .into_response();
+            }
+        };
+        let decoded_payloads = {
+            let mut codecs = state.sync_request_codecs.write().await;
+            let codec = codecs.entry(request.client_id).or_default();
+            let mut decoded = Vec::with_capacity(request.payloads.len());
+            for payload_bytes in request.payloads {
+                match codec.decode_payload(&payload_bytes) {
+                    Ok(payload) => decoded.push(payload),
+                    Err(error) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse::bad_request(format!(
+                                "invalid binary sync payload: {error}"
+                            ))),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            decoded
+        };
+        (request.client_id, decoded_payloads)
+    } else {
+        let request: SyncBatchRequest = match serde_json::from_slice(&body) {
+            Ok(request) => request,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::bad_request(format!(
+                        "invalid sync batch json: {error}"
+                    ))),
+                )
+                    .into_response();
+            }
+        };
+        (request.client_id, request.payloads)
+    };
+
     tracing::debug!(
-        client_id = %request.client_id,
-        payload_count = request.payloads.len(),
+        client_id = %request_client_id,
+        payload_count = payloads.len(),
         "sync batch request",
     );
 
@@ -479,7 +538,7 @@ async fn sync_handler(
     // Admin-authenticated requests (server-to-server catalogue sync) don't need a session.
     // Regular clients must provide JWT or backend secret.
     if is_admin {
-        if let Err(e) = state.runtime.ensure_client_as_admin(request.client_id) {
+        if let Err(e) = state.runtime.ensure_client_as_admin(request_client_id) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::internal(e.to_string())),
@@ -495,7 +554,7 @@ async fn sync_handler(
         if let Err((status, msg)) = validate_backend_secret(backend_secret, &state.auth_config) {
             return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
         }
-        if let Err(e) = state.runtime.ensure_client_as_backend(request.client_id) {
+        if let Err(e) = state.runtime.ensure_client_as_backend(request_client_id) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse::internal(e.to_string())),
@@ -519,7 +578,7 @@ async fn sync_handler(
                 Ok(None) => {
                     tracing::error!(
                         "Sync request rejected: no session (client_id={}). Client must send auth headers.",
-                        request.client_id
+                        request_client_id
                     );
                     return (
                         StatusCode::UNAUTHORIZED,
@@ -538,7 +597,7 @@ async fn sync_handler(
         // Ensure client is registered with session bound
         if let Err(e) = state
             .runtime
-            .ensure_client_with_session(request.client_id, session)
+            .ensure_client_with_session(request_client_id, session)
         {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -549,10 +608,10 @@ async fn sync_handler(
     }
 
     // Apply each payload in order, collecting per-payload results.
-    let mut results = Vec::with_capacity(request.payloads.len());
-    for payload in request.payloads {
+    let mut results = Vec::with_capacity(payloads.len());
+    for payload in payloads {
         let entry = InboxEntry {
-            source: Source::Client(request.client_id),
+            source: Source::Client(request_client_id),
             payload,
         };
         match state.runtime.push_sync_inbox(entry) {
@@ -1478,6 +1537,7 @@ mod tests {
     use crate::query_manager::types::{
         ColumnType, SchemaBuilder, TableSchema, Value as QueryValue,
     };
+    use crate::sync_manager::types::SyncConnectionCodec;
     use crate::sync_manager::{
         ClientId, InboxEntry, QueryId, QueryPropagation, Source, SyncPayload,
     };
@@ -1624,6 +1684,64 @@ mod tests {
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Backend-Secret", "test-backend-secret")
                     .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+
+        let results = json["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["ok"], true);
+        assert_eq!(results[1]["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn sync_batch_accepts_binary_payloads_and_returns_ok_results() {
+        // alice batches two sync payloads through the binary transport path.
+        //
+        //  alice codec           server codec
+        //    encode p1,p2 ─────► /sync (octet-stream)
+        //                        decode p1,p2 → apply → ok,ok
+        //    ◄────────────────── {results:[ok,ok]}
+
+        let app = make_sync_test_app("test-backend-secret").await;
+        let client_id = ClientId::new();
+        let mut codec = SyncConnectionCodec::default();
+        let payloads = [
+            serde_json::from_value::<SyncPayload>(object_updated_payload(
+                "00000000-0000-0000-0000-000000000011",
+            ))
+            .expect("payload 1"),
+            serde_json::from_value::<SyncPayload>(object_updated_payload(
+                "00000000-0000-0000-0000-000000000012",
+            ))
+            .expect("payload 2"),
+        ];
+        let encoded_payloads = payloads
+            .into_iter()
+            .map(|payload| codec.encode_payload(payload).expect("encode payload"))
+            .collect();
+        let body = BinarySyncBatchRequest {
+            client_id,
+            payloads: encoded_payloads,
+        }
+        .encode();
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/sync")
+                    .header("Content-Type", "application/octet-stream")
+                    .header("X-Jazz-Backend-Secret", "test-backend-secret")
+                    .body(axum::body::Body::from(body))
                     .unwrap(),
             )
             .await
