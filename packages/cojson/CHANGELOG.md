@@ -1,5 +1,33 @@
 # cojson
 
+## 0.20.16
+
+### Patch Changes
+
+- 8b40b3a: Fix InvalidSignature errors when loading from storage with a concurrent writer
+
+  The storage load path read session metadata and transaction rows in separate
+  non-transactional queries. The transaction query used `idx <= lastIdx` where
+  `lastIdx` is a count, not an index. When a concurrent writer committed a new
+  transaction at that index between the two reads, the query picked up the extra
+  row and paired it with a signature that didn't cover it.
+
+  Convert `lastIdx` to an index (`lastIdx - 1`) so the query matches the
+  convention used by `signatureAfter` entries. This ensures a stale session read
+  never overshoots the signature boundary, even under concurrent writes.
+
+- f45aca2: Add cursor-based time travel for CoValues
+
+  Introduces the ability to create cursors (frontier snapshots) on loaded CoValues and later reload them at that exact point in time. Cursors encode the full frontier state of a CoValue and its resolved children, enabling read-only historical views.
+  - Add `createCursor()` and `cursor` getter to CoValue instances
+  - Support loading CoValues by cursor via `load()` and `ensureLoaded()`
+  - Add `useCurrentCursor` option to capture the current state as a cursor
+  - Prevent mutations on cursor-loaded (time-travel) CoValues
+  - Validate cursor root ID and resolve query compatibility (subset check)
+  - cojson-core-wasm@0.20.16
+  - cojson-core-rn@0.20.16
+  - cojson-core-napi@0.20.16
+
 ## 0.20.15
 
 ### Patch Changes
