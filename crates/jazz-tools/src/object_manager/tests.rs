@@ -1,10 +1,222 @@
 use super::*;
 use crate::commit::CommitAckState;
+use crate::object::PrefixBatchCatalog;
 use crate::query_manager::types::{
-    BatchId, BatchOrd, BranchPrefixName, ComposedBranchName, QueryBranchRef, SchemaHash,
+    BatchId, BatchOrd, BranchPrefixName, ComposedBranchName, QueryBranchRef, SchemaHash, Value,
 };
-use crate::storage::MemoryStorage;
+use crate::storage::{
+    CatalogueManifest, CatalogueManifestOp, LoadedBranch, LoadedBranchTips, MemoryStorage, Storage,
+    StorageError,
+};
+use crate::sync_manager::DurabilityTier;
+use std::cell::Cell;
+use std::ops::Bound;
 use uuid::Uuid;
+
+#[derive(Default)]
+struct CountingLoadStorage {
+    inner: MemoryStorage,
+    load_object_metadata_calls: Cell<usize>,
+    load_branch_calls: Cell<usize>,
+    load_branch_tips_calls: Cell<usize>,
+}
+
+impl CountingLoadStorage {
+    fn load_counts(&self) -> (usize, usize, usize) {
+        (
+            self.load_object_metadata_calls.get(),
+            self.load_branch_calls.get(),
+            self.load_branch_tips_calls.get(),
+        )
+    }
+}
+
+impl Storage for CountingLoadStorage {
+    fn create_object(
+        &mut self,
+        id: ObjectId,
+        metadata: HashMap<String, String>,
+    ) -> Result<(), StorageError> {
+        self.inner.create_object(id, metadata)
+    }
+
+    fn load_object_metadata(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<HashMap<String, String>>, StorageError> {
+        self.load_object_metadata_calls
+            .set(self.load_object_metadata_calls.get() + 1);
+        self.inner.load_object_metadata(id)
+    }
+
+    fn load_branch(
+        &self,
+        object_id: ObjectId,
+        branch: &QueryBranchRef,
+    ) -> Result<Option<LoadedBranch>, StorageError> {
+        self.load_branch_calls.set(self.load_branch_calls.get() + 1);
+        self.inner.load_branch(object_id, branch)
+    }
+
+    fn load_branch_tips(
+        &self,
+        object_id: ObjectId,
+        branch: &QueryBranchRef,
+    ) -> Result<Option<LoadedBranchTips>, StorageError> {
+        self.load_branch_tips_calls
+            .set(self.load_branch_tips_calls.get() + 1);
+        self.inner.load_branch_tips(object_id, branch)
+    }
+
+    fn load_commit_branch(
+        &self,
+        object_id: ObjectId,
+        commit_id: CommitId,
+    ) -> Result<Option<QueryBranchRef>, StorageError> {
+        self.inner.load_commit_branch(object_id, commit_id)
+    }
+
+    fn load_prefix_batch_catalog(
+        &self,
+        object_id: ObjectId,
+        prefix: &str,
+    ) -> Result<Option<PrefixBatchCatalog>, StorageError> {
+        self.inner.load_prefix_batch_catalog(object_id, prefix)
+    }
+
+    fn load_table_prefix_batch_keys(
+        &self,
+        table: &str,
+        prefix: BranchName,
+    ) -> Result<Vec<BatchBranchKey>, StorageError> {
+        self.inner.load_table_prefix_batch_keys(table, prefix)
+    }
+
+    fn append_commit(
+        &mut self,
+        object_id: ObjectId,
+        branch: &QueryBranchRef,
+        commit: Commit,
+        prefix_batch_update: Option<PrefixBatchUpdate>,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .append_commit(object_id, branch, commit, prefix_batch_update)
+    }
+
+    fn replace_branch(
+        &mut self,
+        object_id: ObjectId,
+        branch: &QueryBranchRef,
+        commits: Vec<Commit>,
+        tails: HashSet<CommitId>,
+    ) -> Result<(), StorageError> {
+        self.inner.replace_branch(object_id, branch, commits, tails)
+    }
+
+    fn store_ack_tier(
+        &mut self,
+        commit_id: CommitId,
+        tier: DurabilityTier,
+    ) -> Result<(), StorageError> {
+        self.inner.store_ack_tier(commit_id, tier)
+    }
+
+    fn append_catalogue_manifest_op(
+        &mut self,
+        app_id: ObjectId,
+        op: CatalogueManifestOp,
+    ) -> Result<(), StorageError> {
+        self.inner.append_catalogue_manifest_op(app_id, op)
+    }
+
+    fn append_catalogue_manifest_ops(
+        &mut self,
+        app_id: ObjectId,
+        ops: &[CatalogueManifestOp],
+    ) -> Result<(), StorageError> {
+        self.inner.append_catalogue_manifest_ops(app_id, ops)
+    }
+
+    fn load_catalogue_manifest(
+        &self,
+        app_id: ObjectId,
+    ) -> Result<Option<CatalogueManifest>, StorageError> {
+        self.inner.load_catalogue_manifest(app_id)
+    }
+
+    fn index_insert(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &QueryBranchRef,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        <MemoryStorage as Storage>::index_insert(
+            &mut self.inner,
+            table,
+            column,
+            branch,
+            value,
+            row_id,
+        )
+    }
+
+    fn index_remove(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &QueryBranchRef,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        <MemoryStorage as Storage>::index_remove(
+            &mut self.inner,
+            table,
+            column,
+            branch,
+            value,
+            row_id,
+        )
+    }
+
+    fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &QueryBranchRef,
+        value: &Value,
+    ) -> Vec<ObjectId> {
+        <MemoryStorage as Storage>::index_lookup(&self.inner, table, column, branch, value)
+    }
+
+    fn index_range(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &QueryBranchRef,
+        start: Bound<&Value>,
+        end: Bound<&Value>,
+    ) -> Vec<ObjectId> {
+        <MemoryStorage as Storage>::index_range(&self.inner, table, column, branch, start, end)
+    }
+
+    fn index_scan_all(&self, table: &str, column: &str, branch: &QueryBranchRef) -> Vec<ObjectId> {
+        <MemoryStorage as Storage>::index_scan_all(&self.inner, table, column, branch)
+    }
+
+    fn flush(&self) {
+        self.inner.flush();
+    }
+
+    fn flush_wal(&self) {
+        self.inner.flush_wal();
+    }
+
+    fn close(&self) -> Result<(), StorageError> {
+        self.inner.close()
+    }
+}
 
 fn test_batch_prefix() -> BranchPrefixName {
     BranchPrefixName::new("dev", SchemaHash::from_bytes([7; 32]), "main")
@@ -247,6 +459,140 @@ fn add_commit_with_valid_parent_succeeds() {
     let commits = manager.get_commits(object_id, main_branch()).unwrap();
     assert!(commits.contains_key(&child_id));
     assert_eq!(commits[&child_id].parents.as_slice(), &[parent_id]);
+}
+
+#[test]
+fn add_commit_on_loaded_branch_does_not_reload_storage() {
+    let mut io = CountingLoadStorage::default();
+    let mut manager = ObjectManager::new();
+    let object_id = manager.create(&mut io, None);
+    let author = ObjectId::new();
+
+    let parent_id = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            main_branch(),
+            vec![],
+            b"initial".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let load_counts_before = io.load_counts();
+
+    let child_id = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            main_branch(),
+            vec![parent_id],
+            b"child".to_vec(),
+            author,
+            None,
+        )
+        .expect("should append using loaded branch state only");
+
+    assert_eq!(io.load_counts(), load_counts_before);
+    assert!(
+        manager
+            .get(object_id)
+            .and_then(|object| object.branches.get(&main_branch()))
+            .is_some_and(|branch| branch.commits.contains_key(&child_id))
+    );
+}
+
+#[test]
+fn add_commit_on_fresh_batch_root_merge_does_not_reload_storage() {
+    let mut io = CountingLoadStorage::default();
+    let mut manager = ObjectManager::new();
+    let object_id = manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let prefix = test_batch_prefix();
+    let batch1 = test_batch_branch(&prefix, 1);
+    let batch2 = test_batch_branch(&prefix, 2);
+
+    let parent_id = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            batch1,
+            vec![],
+            b"initial".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let load_counts_before = io.load_counts();
+
+    let merge_root_id = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            batch2,
+            vec![parent_id],
+            b"branch-2-root".to_vec(),
+            author,
+            None,
+        )
+        .expect("should create a fresh batch root merge without reloading branch state");
+
+    assert_eq!(io.load_counts(), load_counts_before);
+    assert!(
+        manager
+            .get(object_id)
+            .and_then(|object| object.branches.get(&batch2))
+            .is_some_and(|branch| branch.commits.contains_key(&merge_root_id))
+    );
+}
+
+#[test]
+fn receive_commit_on_fresh_batch_root_merge_does_not_reload_storage() {
+    let mut io = CountingLoadStorage::default();
+    let mut manager = ObjectManager::new();
+    let object_id = manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let prefix = test_batch_prefix();
+    let batch1 = test_batch_branch(&prefix, 1);
+    let batch2 = test_batch_branch(&prefix, 2);
+
+    let parent_id = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            batch1,
+            vec![],
+            b"initial".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let merge_root = Commit {
+        parents: vec![parent_id].into(),
+        content: b"branch-2-root".to_vec(),
+        timestamp: 42,
+        author,
+        metadata: None,
+        stored_state: StoredState::Pending,
+        ack_state: Default::default(),
+    };
+
+    let load_counts_before = io.load_counts();
+
+    let merge_root_id = manager
+        .receive_commit(&mut io, object_id, batch2, merge_root)
+        .expect("should receive a fresh batch root merge without reloading branch state");
+
+    assert_eq!(io.load_counts(), load_counts_before);
+    assert!(
+        manager
+            .get(object_id)
+            .and_then(|object| object.branches.get(&batch2))
+            .is_some_and(|branch| branch.commits.contains_key(&merge_root_id))
+    );
 }
 
 // --- tips management tests ---

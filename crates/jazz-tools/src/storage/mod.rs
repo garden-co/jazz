@@ -753,7 +753,7 @@ pub struct MemoryStorage {
 #[derive(Debug, Clone, Default)]
 struct ObjectData {
     metadata: HashMap<String, String>,
-    branches: HashMap<BranchName, BranchData>,
+    branches: HashMap<BatchBranchKey, BranchData>,
     commit_branches: HashMap<CommitId, BatchBranchKey>,
     prefix_batches: HashMap<String, PrefixBatchCatalog>,
 }
@@ -1014,7 +1014,7 @@ impl Storage for MemoryStorage {
         let Some(obj) = self.objects.get(&object_id) else {
             return Ok(None);
         };
-        let Some(branch_data) = obj.branches.get(&branch.branch_name()) else {
+        let Some(branch_data) = obj.branches.get(&branch.batch_branch_key()) else {
             return Ok(None);
         };
         let mut commits = branch_data.commits.clone();
@@ -1037,7 +1037,7 @@ impl Storage for MemoryStorage {
         let Some(obj) = self.objects.get(&object_id) else {
             return Ok(None);
         };
-        let Some(branch_data) = obj.branches.get(&branch.branch_name()) else {
+        let Some(branch_data) = obj.branches.get(&branch.batch_branch_key()) else {
             return Ok(None);
         };
 
@@ -1103,9 +1103,8 @@ impl Storage for MemoryStorage {
         prefix_batch_update: Option<PrefixBatchUpdate>,
     ) -> Result<(), StorageError> {
         let obj = self.objects.entry(object_id).or_default();
-        let branch_name = branch.branch_name();
-        let branch_data = obj.branches.entry(branch_name).or_default();
         let branch_key = branch.batch_branch_key();
+        let branch_data = obj.branches.entry(branch_key).or_default();
 
         let commit_id = commit.id();
 
@@ -1144,9 +1143,8 @@ impl Storage for MemoryStorage {
         tails: HashSet<CommitId>,
     ) -> Result<(), StorageError> {
         if let Some(obj) = self.objects.get_mut(&object_id) {
-            let branch_name = branch.branch_name();
-            let branch_data = obj.branches.entry(branch_name).or_default();
             let branch_key = branch.batch_branch_key();
+            let branch_data = obj.branches.entry(branch_key).or_default();
             let old_commit_ids: HashSet<CommitId> =
                 branch_data.commits.iter().map(Commit::id).collect();
             let new_commit_ids: HashSet<CommitId> = commits.iter().map(Commit::id).collect();

@@ -273,46 +273,51 @@ impl ObjectManager {
         self.objects.get(&id)
     }
 
-    fn get_or_load_with_mode(
-        &mut self,
-        id: ObjectId,
-        storage: &dyn Storage,
-        branches: &[String],
-        full_history: bool,
-    ) -> Option<&Object> {
-        let _span = tracing::trace_span!("OM::get_or_load", %id, full_history).entered();
-        if let std::collections::hash_map::Entry::Vacant(entry) = self.objects.entry(id) {
-            let metadata = match storage.load_object_metadata(id) {
-                Ok(Some(m)) => m,
-                Ok(None) => {
-                    tracing::trace!(%id, "get_or_load: no metadata in storage");
-                    return None;
-                }
-                Err(e) => {
-                    tracing::warn!(%id, error = ?e, "get_or_load: storage error");
-                    return None;
-                }
-            };
+    fn ensure_object_cached(&mut self, id: ObjectId, storage: &dyn Storage) -> Option<()> {
+        if self.objects.contains_key(&id) {
+            return Some(());
+        }
 
-            entry.insert(Object {
+        let metadata = match storage.load_object_metadata(id) {
+            Ok(Some(m)) => m,
+            Ok(None) => {
+                tracing::trace!(%id, "get_or_load: no metadata in storage");
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!(%id, error = ?e, "get_or_load: storage error");
+                return None;
+            }
+        };
+
+        self.objects.insert(
+            id,
+            Object {
                 id,
                 metadata,
                 branches: ObjectBranches::default(),
                 commit_branches: HashMap::new(),
                 prefix_batches: HashMap::new(),
-            });
-        }
+            },
+        );
+        Some(())
+    }
+
+    fn get_or_load_with_mode_keys(
+        &mut self,
+        id: ObjectId,
+        storage: &dyn Storage,
+        branch_keys: &[BatchBranchKey],
+        full_history: bool,
+    ) -> Option<&Object> {
+        let _span = tracing::trace_span!("OM::get_or_load", %id, full_history).entered();
+        self.ensure_object_cached(id, storage)?;
 
         let object = self.objects.get_mut(&id)?;
-        for branch_name in branches {
-            let Some(bn) = Self::normalize_loaded_branch_name(BranchName::new(branch_name)) else {
-                tracing::warn!(%id, branch = %branch_name, "skipping invalid branch name");
-                continue;
-            };
-            let branch_key = BatchBranchKey::from_branch_name(bn);
+        for branch_key in branch_keys {
             let needs_load = match object
                 .branches
-                .get_by_key(branch_key)
+                .get_by_key(*branch_key)
                 .map(|branch| branch.loaded_state)
             {
                 Some(BranchLoadedState::AllCommits) => false,
@@ -331,16 +336,16 @@ impl ObjectManager {
                         let branch = Self::branch_from_loaded(loaded);
                         let commit_ids_for_branch: Vec<_> =
                             branch.commits.keys().copied().collect();
-                        object.branches.insert_by_key(branch_key, branch);
+                        object.branches.insert_by_key(*branch_key, branch);
                         for commit_id in commit_ids_for_branch {
-                            object.commit_branches.insert(commit_id, branch_key);
+                            object.commit_branches.insert(commit_id, *branch_key);
                         }
                     }
                     Ok(None) => {}
                     Err(err) => {
                         tracing::warn!(
                             %id,
-                            branch = %bn,
+                            branch = %branch_ref,
                             error = ?err,
                             "get_or_load: failed to hydrate requested branch"
                         );
@@ -352,16 +357,16 @@ impl ObjectManager {
                         let branch = Self::branch_from_loaded_tips(loaded);
                         let commit_ids_for_branch: Vec<_> =
                             branch.commits.keys().copied().collect();
-                        object.branches.insert_by_key(branch_key, branch);
+                        object.branches.insert_by_key(*branch_key, branch);
                         for commit_id in commit_ids_for_branch {
-                            object.commit_branches.insert(commit_id, branch_key);
+                            object.commit_branches.insert(commit_id, *branch_key);
                         }
                     }
                     Ok(None) => {}
                     Err(err) => {
                         tracing::warn!(
                             %id,
-                            branch = %bn,
+                            branch = %branch_ref,
                             error = ?err,
                             "get_or_load: failed to hydrate requested branch"
                         );
@@ -375,6 +380,24 @@ impl ObjectManager {
         let commit_count: usize = object.branches.values().map(|b| b.commits.len()).sum();
         tracing::trace!(%id, branch_count, commit_count, "get_or_load: loaded from storage");
         Some(object)
+    }
+
+    fn get_or_load_with_mode(
+        &mut self,
+        id: ObjectId,
+        storage: &dyn Storage,
+        branches: &[String],
+        full_history: bool,
+    ) -> Option<&Object> {
+        let mut branch_keys = Vec::with_capacity(branches.len());
+        for branch_name in branches {
+            let Some(bn) = Self::normalize_loaded_branch_name(BranchName::new(branch_name)) else {
+                tracing::warn!(%id, branch = %branch_name, "skipping invalid branch name");
+                continue;
+            };
+            branch_keys.push(BatchBranchKey::from_branch_name(bn));
+        }
+        self.get_or_load_with_mode_keys(id, storage, &branch_keys, full_history)
     }
 
     /// Get an object, loading full branch history from storage if needed.
@@ -395,6 +418,24 @@ impl ObjectManager {
         branches: &[String],
     ) -> Option<&Object> {
         self.get_or_load_with_mode(id, storage, branches, false)
+    }
+
+    fn get_or_load_keys(
+        &mut self,
+        id: ObjectId,
+        storage: &dyn Storage,
+        branch_keys: &[BatchBranchKey],
+    ) -> Option<&Object> {
+        self.get_or_load_with_mode_keys(id, storage, branch_keys, true)
+    }
+
+    fn get_or_load_tips_keys(
+        &mut self,
+        id: ObjectId,
+        storage: &dyn Storage,
+        branch_keys: &[BatchBranchKey],
+    ) -> Option<&Object> {
+        self.get_or_load_with_mode_keys(id, storage, branch_keys, false)
     }
 
     /// Get mutable object by id.
@@ -512,6 +553,100 @@ impl ObjectManager {
         })
     }
 
+    fn ensure_branch_ready_for_add_commit<H: Storage>(
+        &mut self,
+        io: &H,
+        object_id: ObjectId,
+        branch_key: BatchBranchKey,
+        parents: &[CommitId],
+    ) -> Result<(), Error> {
+        if let Some(object) = self.get(object_id) {
+            match object
+                .branches
+                .get_by_key(branch_key)
+                .map(|branch| branch.loaded_state)
+            {
+                Some(BranchLoadedState::AllCommits) => return Ok(()),
+                None if parents.is_empty() => return Ok(()),
+                None => {
+                    let has_same_branch_parent =
+                        parents.iter().try_fold(false, |found, parent| {
+                            if found {
+                                return Ok(true);
+                            }
+                            Ok(
+                                Self::resolve_commit_branch_key(object, io, object_id, *parent)?
+                                    .is_some_and(|parent_branch_key| {
+                                        parent_branch_key == branch_key
+                                    }),
+                            )
+                        })?;
+                    if !has_same_branch_parent {
+                        return Ok(());
+                    }
+                }
+                Some(BranchLoadedState::TipsOnly) | Some(BranchLoadedState::NotLoaded) => {}
+            }
+        }
+
+        let requested_branches = [branch_key];
+        let _ = self.get_or_load_keys(object_id, io, &requested_branches);
+        self.get(object_id)
+            .map(|_| ())
+            .ok_or(Error::ObjectNotFound(object_id))
+    }
+
+    fn ensure_branch_ready_for_received_commit<H: Storage>(
+        &mut self,
+        io: &H,
+        object_id: ObjectId,
+        branch_key: BatchBranchKey,
+        commit_id: CommitId,
+        parents: &[CommitId],
+    ) -> Result<(), Error> {
+        if let Some(object) = self.get(object_id) {
+            match object
+                .branches
+                .get_by_key(branch_key)
+                .map(|branch| branch.loaded_state)
+            {
+                Some(BranchLoadedState::AllCommits) => return Ok(()),
+                None => {
+                    if io
+                        .load_commit_branch(object_id, commit_id)
+                        .map_err(Error::StorageError)?
+                        .is_none()
+                    {
+                        let has_same_branch_parent =
+                            parents.iter().try_fold(false, |found, parent| {
+                                if found {
+                                    return Ok(true);
+                                }
+                                Ok(
+                                    Self::resolve_commit_branch_key(
+                                        object, io, object_id, *parent,
+                                    )?
+                                    .is_some_and(
+                                        |parent_branch_key| parent_branch_key == branch_key,
+                                    ),
+                                )
+                            })?;
+                        if !has_same_branch_parent {
+                            return Ok(());
+                        }
+                    }
+                }
+                Some(BranchLoadedState::TipsOnly) | Some(BranchLoadedState::NotLoaded) => {}
+            }
+        }
+
+        let requested_branches = [branch_key];
+        let _ = self.get_or_load_keys(object_id, io, &requested_branches);
+        self.get(object_id)
+            .map(|_| ())
+            .ok_or(Error::ObjectNotFound(object_id))
+    }
+
     /// Get a mutable reference to a specific commit.
     pub fn get_commit_mut(
         &mut self,
@@ -550,8 +685,7 @@ impl ObjectManager {
         let branch_name = Self::normalize_branch_name(branch_name.into())?;
         let branch_key = BatchBranchKey::from_branch_name(branch_name);
         let _span = tracing::debug_span!("OM::add_commit", %object_id, %branch_name).entered();
-        let requested_branches = [branch_name.as_str().to_string()];
-        let _ = self.get_or_load(object_id, io, &requested_branches);
+        self.ensure_branch_ready_for_add_commit(io, object_id, branch_key, &parents)?;
 
         // Capture previous state BEFORE mutation for AllObjectUpdate and validate
         // parent visibility before we mutate storage/memory.
@@ -912,9 +1046,10 @@ impl ObjectManager {
         storage: &H,
     ) -> Result<Option<(BranchName, CommitId, Commit)>, Error> {
         let branch_name = Self::normalize_branch_name(branch_name.into())?;
-        let requested_branches = [branch_name.as_str().to_string()];
+        let branch_key = BatchBranchKey::from_branch_name(branch_name);
+        let requested_branches = [branch_key];
         if self
-            .get_or_load_tips(object_id, storage, &requested_branches)
+            .get_or_load_tips_keys(object_id, storage, &requested_branches)
             .is_none()
         {
             return Ok(None);
@@ -933,18 +1068,18 @@ impl ObjectManager {
         let leaf_heads =
             self.get_leaf_head_ids_for_prefix(object_id, &composed_branch.prefix(), storage)?;
 
-        let missing_leaf_branches: Vec<String> = {
+        let missing_leaf_branches: Vec<BatchBranchKey> = {
             let object = self
                 .get(object_id)
                 .ok_or(Error::ObjectNotFound(object_id))?;
             leaf_heads
                 .keys()
                 .filter(|leaf_branch_name| !object.branches.contains_key(leaf_branch_name))
-                .map(|leaf_branch_name| leaf_branch_name.as_str().to_string())
+                .map(|leaf_branch_name| BatchBranchKey::from_branch_name(*leaf_branch_name))
                 .collect()
         };
         if !missing_leaf_branches.is_empty() {
-            self.get_or_load_tips(object_id, storage, &missing_leaf_branches);
+            self.get_or_load_tips_keys(object_id, storage, &missing_leaf_branches);
         }
 
         let object = self
@@ -969,9 +1104,10 @@ impl ObjectManager {
         storage: &H,
     ) -> Result<Vec<CommitId>, Error> {
         let branch_name = Self::normalize_branch_name(branch_name.into())?;
-        let requested_branches = [branch_name.as_str().to_string()];
+        let branch_key = BatchBranchKey::from_branch_name(branch_name);
+        let requested_branches = [branch_key];
         if self
-            .get_or_load_tips(object_id, storage, &requested_branches)
+            .get_or_load_tips_keys(object_id, storage, &requested_branches)
             .is_none()
         {
             return Err(Error::ObjectNotFound(object_id));
@@ -1035,8 +1171,13 @@ impl ObjectManager {
         let branch_name = Self::normalize_branch_name(branch_name.into())?;
         let branch_key = BatchBranchKey::from_branch_name(branch_name);
         let commit_id = commit.id();
-        let requested_branches = [branch_name.as_str().to_string()];
-        let _ = self.get_or_load(object_id, io, &requested_branches);
+        self.ensure_branch_ready_for_received_commit(
+            io,
+            object_id,
+            branch_key,
+            commit_id,
+            &commit.parents,
+        )?;
 
         // Capture previous state BEFORE mutation for AllObjectUpdate.
         let (previous_commit_ids, old_content, already_exists) = {
