@@ -457,12 +457,21 @@ impl Storage for RocksDBStorage {
     }
 
     fn flush(&self) {
-        // RocksDB with TransactionDB writes through the WAL by default;
-        // no explicit memtable flush API is exposed on TransactionDB.
+        let _ = self.with_inner(|inner| {
+            inner
+                .db
+                .flush()
+                .map_err(|e| StorageError::IoError(format!("rocksdb flush: {e}")))
+        });
     }
 
     fn flush_wal(&self) {
-        // Same as flush: WAL is written synchronously on commit.
+        let _ = self.with_inner(|inner| {
+            inner
+                .db
+                .flush_wal(true)
+                .map_err(|e| StorageError::IoError(format!("rocksdb flush_wal: {e}")))
+        });
     }
 
     fn close(&self) -> Result<(), StorageError> {
