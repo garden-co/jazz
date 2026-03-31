@@ -817,6 +817,36 @@ impl WorkerCommand {
     }
 }
 
+#[cfg(feature = "otel")]
+fn worker_command_meta(cmd: &WorkerCommand) -> (&'static str, String) {
+    match cmd {
+        WorkerCommand::CreateRuntime { app_id, .. } => ("CreateRuntime", app_id.to_string()),
+        WorkerCommand::EnsureClientWithSession { app_id, .. } => {
+            ("EnsureClientWithSession", app_id.to_string())
+        }
+        WorkerCommand::EnsureClientAsBackend { app_id, .. } => {
+            ("EnsureClientAsBackend", app_id.to_string())
+        }
+        WorkerCommand::SyncAsSession { app_id, .. } => ("SyncAsSession", app_id.to_string()),
+        WorkerCommand::SyncAsBackend { app_id, .. } => ("SyncAsBackend", app_id.to_string()),
+        WorkerCommand::SyncAsAdmin { app_id, .. } => ("SyncAsAdmin", app_id.to_string()),
+        WorkerCommand::GetCatalogueSchema { app_id, .. } => {
+            ("GetCatalogueSchema", app_id.to_string())
+        }
+        WorkerCommand::PublishSchema { app_id, .. } => ("PublishSchema", app_id.to_string()),
+        WorkerCommand::PublishPermissions { app_id, .. } => {
+            ("PublishPermissions", app_id.to_string())
+        }
+        WorkerCommand::GetPermissionsHead { app_id, .. } => {
+            ("GetPermissionsHead", app_id.to_string())
+        }
+        WorkerCommand::GetSchemaHashes { app_id, .. } => ("GetSchemaHashes", app_id.to_string()),
+        WorkerCommand::GetCatalogueStateHash { app_id, .. } => {
+            ("GetCatalogueStateHash", app_id.to_string())
+        }
+    }
+}
+
 #[derive(Debug)]
 struct FairAppQueue<T> {
     pending_by_app: HashMap<AppId, VecDeque<T>>,
@@ -1969,6 +1999,12 @@ async fn run_worker_loop(
         };
 
         for command in batch {
+            #[cfg(feature = "otel")]
+            let cmd_start = std::time::Instant::now();
+
+            #[cfg(feature = "otel")]
+            let (cmd_type, cmd_app_id) = worker_command_meta(&command);
+
             match command {
                 WorkerCommand::CreateRuntime {
                     app_id,
@@ -2252,6 +2288,23 @@ async fn run_worker_loop(
                         );
                     }
                 }
+            }
+
+            #[cfg(feature = "otel")]
+            {
+                let meter = opentelemetry::global::meter("jazz-cloud-server");
+                let duration = meter
+                    .f64_histogram("jazz.worker.command.duration_ms")
+                    .build();
+                let elapsed = cmd_start.elapsed().as_secs_f64() * 1000.0;
+                duration.record(
+                    elapsed,
+                    &[
+                        opentelemetry::KeyValue::new("command_type", cmd_type),
+                        opentelemetry::KeyValue::new("app_id", cmd_app_id),
+                        opentelemetry::KeyValue::new("worker", worker as i64),
+                    ],
+                );
             }
         }
 
@@ -3957,6 +4010,9 @@ async fn sync_handler(
         "unknown"
     };
 
+    #[cfg(feature = "otel")]
+    let handler_start = std::time::Instant::now();
+
     for payload in request.payloads {
         #[cfg(feature = "otel")]
         {
@@ -4014,6 +4070,21 @@ async fn sync_handler(
                 });
             }
         }
+    }
+
+    #[cfg(feature = "otel")]
+    {
+        let meter = opentelemetry::global::meter("jazz-cloud-server");
+        let duration = meter.f64_histogram("jazz.sync.handler.duration_ms").build();
+        let elapsed = handler_start.elapsed().as_secs_f64() * 1000.0;
+        duration.record(
+            elapsed,
+            &[
+                opentelemetry::KeyValue::new("app_id", app_id.to_string()),
+                opentelemetry::KeyValue::new("env", cfg.env.clone()),
+                opentelemetry::KeyValue::new("auth_type", sync_auth_type),
+            ],
+        );
     }
 
     Json(SyncBatchResponse { results }).into_response()
