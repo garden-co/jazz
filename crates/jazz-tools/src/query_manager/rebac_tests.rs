@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use smallvec::smallvec;
 
 use crate::commit::Commit;
-use crate::metadata::{MetadataKey, SYSTEM_PRINCIPAL_ID};
+use crate::metadata::{
+    DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
+};
 use crate::object::{BranchName, ObjectId};
 use crate::storage::MemoryStorage;
 use crate::sync_manager::{
@@ -42,6 +44,57 @@ fn create_query_manager(sync_manager: SyncManager, schema: Schema) -> QueryManag
 /// Get the schema context's branch name.
 fn get_branch(qm: &QueryManager) -> String {
     qm.schema_context().branch_name().as_str().to_string()
+}
+
+fn stored_row_commit(
+    parents: smallvec::SmallVec<[crate::commit::CommitId; 2]>,
+    content: Vec<u8>,
+    timestamp: u64,
+    author: impl Into<String>,
+    delete_kind: Option<DeleteKind>,
+) -> Commit {
+    let author = author.into();
+    Commit {
+        parents,
+        content,
+        timestamp,
+        metadata: Some(row_provenance_metadata(
+            &RowProvenance::for_insert(author.clone(), timestamp),
+            delete_kind,
+        )),
+        author,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    }
+}
+
+fn add_row_commit(
+    qm: &mut QueryManager,
+    storage: &mut MemoryStorage,
+    object_id: ObjectId,
+    branch: &str,
+    parents: Vec<crate::commit::CommitId>,
+    content: Vec<u8>,
+    timestamp: u64,
+    author: impl Into<String>,
+) -> crate::commit::CommitId {
+    let author = author.into();
+    qm.sync_manager_mut()
+        .object_manager
+        .add_commit_with_timestamp(
+            storage,
+            object_id,
+            branch,
+            parents,
+            content,
+            timestamp,
+            author.clone(),
+            Some(row_provenance_metadata(
+                &RowProvenance::for_insert(author, timestamp),
+                None,
+            )),
+        )
+        .unwrap()
 }
 
 /// Schema for ReBAC tests: documents with owner_id policy + folders for INHERITS
@@ -328,18 +381,16 @@ fn seed_folder_on_branch(
         .object_manager
         .create(storage, Some(folder_metadata()));
     let folder_content = encode_folder(owner_id, name);
-    qm.sync_manager_mut()
-        .object_manager
-        .add_commit(
-            storage,
-            folder_id,
-            branch,
-            vec![],
-            folder_content.clone(),
-            ObjectId::new(),
-            None,
-        )
-        .unwrap();
+    add_row_commit(
+        qm,
+        storage,
+        folder_id,
+        branch,
+        vec![],
+        folder_content.clone(),
+        1000,
+        ObjectId::new().to_string(),
+    );
     QueryManager::update_indices_for_insert_on_branch(
         storage,
         "folders",
@@ -360,15 +411,13 @@ fn enqueue_inherited_insert(
     folder_id: ObjectId,
     title: &str,
 ) -> Commit {
-    let commit = Commit {
-        parents: smallvec![],
-        content: encode_document("alice", title, Some(folder_id)),
-        timestamp: 1000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit = stored_row_commit(
+        smallvec![],
+        encode_document("alice", title, Some(folder_id)),
+        1000,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
@@ -458,15 +507,13 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
     )
     .unwrap();
 
-    let update_commit = Commit {
-        parents: smallvec![grand_handle.row_commit_id],
-        content: update_content,
-        timestamp: 4200,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let update_commit = stored_row_commit(
+        smallvec![grand_handle.row_commit_id],
+        update_content,
+        4200,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     let object_metadata = qm
         .sync_manager()
@@ -542,15 +589,13 @@ fn rebac_insert_allowed_by_simple_policy() {
     let content = encode_document("alice", "My Doc", None);
 
     // Client sends insert
-    let commit = Commit {
-        parents: smallvec![],
+    let commit = stored_row_commit(
+        smallvec![],
         content,
-        timestamp: 1000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+        1000,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
@@ -611,15 +656,13 @@ fn rebac_insert_denied_by_simple_policy() {
     let content = encode_document("bob", "Stolen Doc", None);
 
     // Client sends insert
-    let commit = Commit {
-        parents: smallvec![],
+    let commit = stored_row_commit(
+        smallvec![],
         content,
-        timestamp: 1000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+        1000,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
@@ -710,15 +753,13 @@ fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
         .set_client_query_scope(client_id, QueryId(1), scope, None);
     qm.sync_manager_mut().take_outbox();
 
-    let commit = Commit {
-        parents: smallvec![],
-        content: encode_document("bob", "Should Be Denied", None),
-        timestamp: 1000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit = stored_row_commit(
+        smallvec![],
+        encode_document("bob", "Should Be Denied", None),
+        1000,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
@@ -786,15 +827,13 @@ fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
     // New row object: metadata exists only in payload, not in ObjectManager.
     let obj_id = ObjectId::new();
     let metadata = document_metadata();
-    let commit = Commit {
-        parents: smallvec![],
-        content: encode_document("bob", "Should Be Denied", None),
-        timestamp: 1000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit = stored_row_commit(
+        smallvec![],
+        encode_document("bob", "Should Be Denied", None),
+        1000,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
@@ -1004,19 +1043,16 @@ fn rebac_inherited_insert_hydrates_requested_branch_instead_of_reusing_cached_br
         "Main Folder",
         &folders_descriptor,
     );
-    seed_qm
-        .sync_manager_mut()
-        .object_manager
-        .add_commit(
-            &mut storage,
-            folder_id,
-            &branch,
-            vec![],
-            encode_folder("alice", "Dev Folder"),
-            ObjectId::new(),
-            None,
-        )
-        .unwrap();
+    add_row_commit(
+        &mut seed_qm,
+        &mut storage,
+        folder_id,
+        &branch,
+        vec![],
+        encode_folder("alice", "Dev Folder"),
+        1000,
+        ObjectId::new().to_string(),
+    );
     QueryManager::update_indices_for_insert_on_branch(
         &mut storage,
         "folders",
@@ -1129,15 +1165,13 @@ fn rebac_insert_waits_for_schema_then_denies_for_composed_branch() {
 
     let obj_id = ObjectId::new();
     let metadata = document_metadata();
-    let commit = Commit {
-        parents: smallvec![],
-        content: encode_document("bob", "Should Be Denied", None),
-        timestamp: 1000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit = stored_row_commit(
+        smallvec![],
+        encode_document("bob", "Should Be Denied", None),
+        1000,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
@@ -1220,15 +1254,13 @@ fn rebac_insert_denied_when_schema_never_arrives_before_timeout() {
 
     let obj_id = ObjectId::new();
     let metadata = document_metadata();
-    let commit = Commit {
-        parents: smallvec![],
-        content: encode_document("bob", "Should Time Out", None),
-        timestamp: 1000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit = stored_row_commit(
+        smallvec![],
+        encode_document("bob", "Should Time Out", None),
+        1000,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
@@ -1305,15 +1337,13 @@ fn rebac_insert_denied_when_schema_unresolved_for_branch() {
 
     let obj_id = ObjectId::new();
     let metadata = document_metadata();
-    let commit = Commit {
-        parents: smallvec![],
-        content: encode_document("bob", "Should Be Denied", None),
-        timestamp: 1000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit = stored_row_commit(
+        smallvec![],
+        encode_document("bob", "Should Be Denied", None),
+        1000,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     // Plain "main" branch without schema hash context can fail schema resolution.
     qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -1389,15 +1419,13 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
 
     let obj_id = ObjectId::new();
     let metadata = document_metadata();
-    let commit = Commit {
-        parents: smallvec![],
-        content: encode_document("bob", "Should Be Denied", None),
-        timestamp: 1000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit = stored_row_commit(
+        smallvec![],
+        encode_document("bob", "Should Be Denied", None),
+        1000,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     // Simulate write on an unresolved branch. Prior behavior could fall back to stale
     // self.schema (permissive) and incorrectly allow this insert.
@@ -1480,15 +1508,13 @@ fn rebac_table_without_policy_allows_all_writes() {
     let content = encode_row(&notes_desc, &[Value::Text("A note".into())]).unwrap();
 
     // Client sends insert
-    let commit = Commit {
-        parents: smallvec![],
+    let commit = stored_row_commit(
+        smallvec![],
         content,
-        timestamp: 1000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+        1000,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
@@ -1694,27 +1720,23 @@ fn rebac_two_clients_different_sessions() {
 
     // Alice's document
     let content1 = encode_document("alice", "Alice's Doc", None);
-    let commit1 = Commit {
-        parents: smallvec![],
-        content: content1,
-        timestamp: 1000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit1 = stored_row_commit(
+        smallvec![],
+        content1,
+        1000,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     // Bob's document
     let content2 = encode_document("bob", "Bob's Doc", None);
-    let commit2 = Commit {
-        parents: smallvec![],
-        content: content2,
-        timestamp: 1000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit2 = stored_row_commit(
+        smallvec![],
+        content2,
+        1000,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     // Both clients send their documents
     qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -1829,15 +1851,13 @@ fn rebac_exists_clause_denies_non_matching_insert() {
     let content = encode_row(&protected_desc, &[Value::Text("secret data".into())]).unwrap();
 
     // Non-admin tries to insert
-    let commit = Commit {
-        parents: smallvec![],
+    let commit = stored_row_commit(
+        smallvec![],
         content,
-        timestamp: 1000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+        1000,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
@@ -1941,19 +1961,16 @@ fn rebac_update_denied_by_using_policy() {
     )
     .unwrap();
     let author = ObjectId::new();
-    let initial_commit = qm
-        .sync_manager_mut()
-        .object_manager
-        .add_commit(
-            &mut storage,
-            obj_id,
-            "main",
-            vec![],
-            alice_content,
-            author,
-            None,
-        )
-        .unwrap();
+    let initial_commit = add_row_commit(
+        &mut qm,
+        &mut storage,
+        obj_id,
+        "main",
+        vec![],
+        alice_content,
+        1000,
+        author.to_string(),
+    );
 
     // Now Bob connects and tries to update Alice's document
     let bob_client = ClientId::new();
@@ -1979,15 +1996,13 @@ fn rebac_update_denied_by_using_policy() {
     )
     .unwrap();
 
-    let update_commit = Commit {
-        parents: smallvec![initial_commit],
-        content: bob_update_content,
-        timestamp: 2000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let update_commit = stored_row_commit(
+        smallvec![initial_commit],
+        bob_update_content,
+        2000,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(bob_client),
@@ -2117,18 +2132,16 @@ fn rebac_inherits_filters_select_query_results() {
     )
     .unwrap();
     let author = ObjectId::new();
-    qm.sync_manager_mut()
-        .object_manager
-        .add_commit(
-            &mut storage,
-            folder_id,
-            "main",
-            vec![],
-            folder_content,
-            author,
-            None,
-        )
-        .unwrap();
+    add_row_commit(
+        &mut qm,
+        &mut storage,
+        folder_id,
+        "main",
+        vec![],
+        folder_content,
+        1000,
+        author.to_string(),
+    );
 
     // Create Bob's document in Alice's folder
     let mut doc_meta = std::collections::HashMap::new();
@@ -2147,18 +2160,16 @@ fn rebac_inherits_filters_select_query_results() {
         ],
     )
     .unwrap();
-    qm.sync_manager_mut()
-        .object_manager
-        .add_commit(
-            &mut storage,
-            doc_id,
-            "main",
-            vec![],
-            doc_content,
-            author,
-            None,
-        )
-        .unwrap();
+    add_row_commit(
+        &mut qm,
+        &mut storage,
+        doc_id,
+        "main",
+        vec![],
+        doc_content,
+        1000,
+        author.to_string(),
+    );
 
     // Charlie subscribes to documents query with his session
     let charlie_session = Session::new("charlie");
@@ -2514,15 +2525,13 @@ fn rebac_update_denied_by_using_exists_policy() {
         &[Value::Text("hacked by bob".into())],
     )
     .unwrap();
-    let bob_commit = Commit {
-        parents: smallvec![initial_commit],
-        content: bob_update_content,
-        timestamp: 2000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let bob_commit = stored_row_commit(
+        smallvec![initial_commit],
+        bob_update_content,
+        2000,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(bob_client),
@@ -2589,15 +2598,13 @@ fn rebac_update_denied_by_using_exists_policy() {
         &[Value::Text("updated by admin alice".into())],
     )
     .unwrap();
-    let alice_commit = Commit {
-        parents: smallvec![initial_commit],
-        content: alice_update_content,
-        timestamp: 3000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let alice_commit = stored_row_commit(
+        smallvec![initial_commit],
+        alice_update_content,
+        3000,
+        ObjectId::new().to_string(),
+        None,
+    );
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(alice_client),
@@ -3213,15 +3220,13 @@ fn synced_soft_delete_should_use_delete_policy() {
 
     let delete_content =
         encode_row(&protected_descriptor, &[Value::Text("initial".into())]).unwrap();
-    let delete_commit = Commit {
-        parents: smallvec![protected.row_commit_id],
-        content: delete_content,
-        timestamp: 2000,
-        author: ObjectId::new().to_string(),
-        metadata: Some(crate::metadata::soft_delete_metadata()),
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let delete_commit = stored_row_commit(
+        smallvec![protected.row_commit_id],
+        delete_content,
+        2000,
+        ObjectId::new().to_string(),
+        Some(DeleteKind::Soft),
+    );
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(bob_client),

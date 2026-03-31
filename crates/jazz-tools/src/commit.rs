@@ -102,14 +102,7 @@ impl Commit {
     }
 
     pub fn row_provenance(&self) -> Option<RowProvenance> {
-        row_provenance_from_metadata(self.metadata.as_ref(), &self.author, self.timestamp).or_else(
-            || {
-                Some(RowProvenance::for_insert(
-                    self.author.clone(),
-                    self.timestamp,
-                ))
-            },
-        )
+        row_provenance_from_metadata(self.metadata.as_ref(), &self.author, self.timestamp)
     }
 }
 
@@ -215,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn row_provenance_falls_back_to_commit_author_and_timestamp() {
+    fn row_provenance_requires_explicit_edit_metadata() {
         let commit = Commit {
             parents: smallvec![],
             content: b"hello".to_vec(),
@@ -226,9 +219,6 @@ mod tests {
             ack_state: CommitAckState::default(),
         };
 
-        assert_eq!(
-            commit.row_provenance(),
-            Some(RowProvenance::for_insert("jazz:test", 1234567890))
-        );
+        assert_eq!(commit.row_provenance(), None);
     }
 }
