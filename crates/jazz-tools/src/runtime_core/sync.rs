@@ -8,7 +8,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Push a sync message to the inbox (from network).
     pub fn push_sync_inbox(&mut self, entry: InboxEntry) {
         if let Some(ref tracer) = self.sync_tracer {
-            tracer.record_incoming(&entry.source, self.tier_label, &entry.payload);
+            tracer.record_incoming(&entry.source, self.sync_tracer_label(), &entry.payload);
         }
         self.schema_manager
             .query_manager_mut()

@@ -38,7 +38,9 @@ export declare class NapiRuntime {
   flush(): void
   /** Flush and close the underlying storage, releasing filesystem locks. */
   close(): void
-  enableSyncTracer(): void
+  enableSyncTracer(name?: string | undefined | null): void
+  syncTracerRegisterObject(objectId: string, name: string): void
+  syncTracerMessagesJson(): string | null
   syncTracerDump(): string | null
   syncTracerTally(): string | null
   syncTracerSummary(): string | null

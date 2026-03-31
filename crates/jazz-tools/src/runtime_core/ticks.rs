@@ -176,7 +176,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         }
         for msg in outbox {
             if let Some(ref tracer) = self.sync_tracer {
-                tracer.record_outgoing(self.tier_label, &msg.destination, &msg.payload);
+                tracer.record_outgoing(self.sync_tracer_label(), &msg.destination, &msg.payload);
             }
             self.sync_sender.send_sync_message(msg);
         }
@@ -197,7 +197,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         }
         for msg in outbox {
             if let Some(ref tracer) = self.sync_tracer {
-                tracer.record_outgoing(self.tier_label, &msg.destination, &msg.payload);
+                tracer.record_outgoing(self.sync_tracer_label(), &msg.destination, &msg.payload);
             }
             self.sync_sender.send_sync_message(msg);
         }
@@ -275,7 +275,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     pub fn park_sync_message(&mut self, message: InboxEntry) {
         trace!(source = ?message.source, payload = message.payload.variant_name(), "parking sync message");
         if let Some(ref tracer) = self.sync_tracer {
-            tracer.record_incoming(&message.source, self.tier_label, &message.payload);
+            tracer.record_incoming(&message.source, self.sync_tracer_label(), &message.payload);
         }
         self.parked_sync_messages.push(message);
         self.scheduler.schedule_batched_tick();

@@ -1358,10 +1358,36 @@ impl WasmRuntime {
     // =========================================================================
 
     /// Enable sync message tracing. Call before performing operations.
+    /// Pass a name (e.g. "alice") to label this runtime in the trace.
     /// Messages are recorded until `syncTracerClear()` is called.
     #[wasm_bindgen(js_name = enableSyncTracer)]
-    pub fn enable_sync_tracer(&self) {
-        self.core.borrow_mut().enable_sync_tracer();
+    pub fn enable_sync_tracer(&self, name: Option<String>) {
+        let mut core = self.core.borrow_mut();
+        if let Some(name) = name {
+            core.enable_sync_tracer_with_name(&name);
+        } else {
+            core.enable_sync_tracer();
+        }
+    }
+
+    /// Name an object for readable trace output.
+    /// e.g. `registerTracerObject("019d3fc7-...", "alice-todo")`
+    #[wasm_bindgen(js_name = syncTracerRegisterObject)]
+    pub fn sync_tracer_register_object(&self, object_id: &str, name: &str) {
+        if let Some(tracer) = self.core.borrow().sync_tracer() {
+            if let Ok(uuid) = uuid::Uuid::parse_str(object_id) {
+                tracer.register_object(jazz_tools::object::ObjectId::from_uuid(uuid), name);
+            }
+        }
+    }
+
+    /// All messages as JSON array (for JS-side aggregation).
+    #[wasm_bindgen(js_name = syncTracerMessagesJson)]
+    pub fn sync_tracer_messages_json(&self) -> Option<String> {
+        self.core
+            .borrow()
+            .sync_tracer()
+            .map(|t| serde_json::to_string(&t.messages_json()).unwrap_or_default())
     }
 
     /// Full formatted trace with timing.

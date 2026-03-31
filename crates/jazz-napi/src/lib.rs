@@ -1141,12 +1141,42 @@ impl NapiRuntime {
     // =========================================================================
 
     #[napi(js_name = "enableSyncTracer")]
-    pub fn enable_sync_tracer(&self) -> napi::Result<()> {
-        self.core
+    pub fn enable_sync_tracer(&self, name: Option<String>) -> napi::Result<()> {
+        let mut core = self
+            .core
             .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?
-            .enable_sync_tracer();
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        if let Some(name) = name {
+            core.enable_sync_tracer_with_name(&name);
+        } else {
+            core.enable_sync_tracer();
+        }
         Ok(())
+    }
+
+    #[napi(js_name = "syncTracerRegisterObject")]
+    pub fn sync_tracer_register_object(&self, object_id: String, name: String) -> napi::Result<()> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        if let Some(tracer) = core.sync_tracer()
+            && let Ok(uuid) = uuid::Uuid::parse_str(&object_id)
+        {
+            tracer.register_object(jazz_tools::object::ObjectId::from_uuid(uuid), name);
+        }
+        Ok(())
+    }
+
+    #[napi(js_name = "syncTracerMessagesJson")]
+    pub fn sync_tracer_messages_json(&self) -> napi::Result<Option<String>> {
+        let core = self
+            .core
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?;
+        Ok(core
+            .sync_tracer()
+            .map(|t| serde_json::to_string(&t.messages_json()).unwrap_or_default()))
     }
 
     #[napi(js_name = "syncTracerDump")]

@@ -155,6 +155,17 @@ impl SyncMessage {
     }
 }
 
+/// JSON-serializable message for export to JS.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncMessageJson {
+    pub seq: usize,
+    pub elapsed_ms: u64,
+    pub from: String,
+    pub to: String,
+    pub side: String,
+    pub payload_type: String,
+}
+
 /// Snapshot of tracer output — all views captured at one point in time.
 /// Returned by `JazzClient::sync_tracer()` to avoid holding the lock.
 #[derive(Debug, Clone)]
@@ -296,6 +307,24 @@ impl SyncTracer {
     /// All recorded messages.
     pub fn messages(&self) -> Vec<SyncMessage> {
         self.inner.lock().unwrap().messages.clone()
+    }
+
+    /// All messages as JSON-serializable structs (for WASM/NAPI export).
+    pub fn messages_json(&self) -> Vec<SyncMessageJson> {
+        self.inner
+            .lock()
+            .unwrap()
+            .messages
+            .iter()
+            .map(|m| SyncMessageJson {
+                seq: m.seq,
+                elapsed_ms: m.elapsed_ms,
+                from: m.from.name().to_string(),
+                to: m.to.name().to_string(),
+                side: m.side.to_string(),
+                payload_type: m.payload.variant_name().to_string(),
+            })
+            .collect()
     }
 
     /// Messages sent by a specific participant.

@@ -97,7 +97,9 @@ declare module "jazz-wasm" {
     onSyncMessageReceivedFromClient?(clientId: string, messageJson: string): void;
 
     // Sync tracer — call enableSyncTracer() first, then read results.
-    enableSyncTracer(): void;
+    enableSyncTracer(name?: string): void;
+    syncTracerRegisterObject(objectId: string, name: string): void;
+    syncTracerMessagesJson(): string | undefined;
     syncTracerDump(): string | undefined;
     syncTracerTally(): string | undefined;
     syncTracerSummary(): string | undefined;

@@ -40,8 +40,5 @@
 ## Projects
 
 - [**ordered-index-topk-query-path**](todo/projects/ordered-index-topk-query-path/)
-<<<<<<< HEAD
 - [**storage-backend-alternatives**](todo/projects/storage-backend-alternatives/)
-=======
 - [**sync-protocol-reliability**](todo/projects/sync-protocol-reliability/)
->>>>>>> ab92bd45 (feat: first shaping sync protocol reliability)

@@ -258,6 +258,8 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
 
     /// Optional sync message tracer — off by default, enabled via `enable_sync_tracer()`.
     sync_tracer: Option<crate::sync_tracer::SyncTracer>,
+    /// Custom participant name for the tracer (overrides tier_label).
+    sync_tracer_name: Option<String>,
 }
 
 impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
@@ -279,6 +281,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             ack_watchers: HashMap::new(),
             tier_label: "unknown",
             sync_tracer: None,
+            sync_tracer_name: None,
         }
     }
 
@@ -287,9 +290,21 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         self.sync_tracer = Some(crate::sync_tracer::SyncTracer::new());
     }
 
+    /// Enable sync message tracing with a custom participant name.
+    /// The name replaces `tier_label` in trace output (e.g. "alice" instead of "unknown").
+    pub fn enable_sync_tracer_with_name(&mut self, name: &str) {
+        self.sync_tracer = Some(crate::sync_tracer::SyncTracer::new());
+        self.sync_tracer_name = Some(name.to_string());
+    }
+
     /// Access the sync tracer if enabled.
     pub fn sync_tracer(&self) -> Option<&crate::sync_tracer::SyncTracer> {
         self.sync_tracer.as_ref()
+    }
+
+    /// The participant name used by the tracer (custom name or tier_label fallback).
+    pub fn sync_tracer_label(&self) -> &str {
+        self.sync_tracer_name.as_deref().unwrap_or(self.tier_label)
     }
 
     /// Set the tier label used in tracing spans.
