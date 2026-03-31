@@ -219,6 +219,67 @@ mod tests {
     }
 
     #[test]
+    fn auto_lens_table_rename_is_draft() {
+        let old = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let new = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let lens = generate_lens(&old, &new);
+
+        assert_eq!(lens.forward.ops.len(), 1);
+        assert_eq!(
+            lens.forward.ops[0],
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            }
+        );
+        assert!(lens.is_draft());
+    }
+
+    #[test]
+    fn auto_lens_pairs_multiple_unique_table_renames() {
+        let old = SchemaBuilder::new()
+            .table(TableSchema::builder("orgs").column("name", ColumnType::Text))
+            .table(TableSchema::builder("users").column("email", ColumnType::Text))
+            .build();
+
+        let new = SchemaBuilder::new()
+            .table(TableSchema::builder("companies").column("name", ColumnType::Text))
+            .table(TableSchema::builder("people").column("email", ColumnType::Text))
+            .build();
+
+        let lens = generate_lens(&old, &new);
+
+        assert_eq!(
+            lens.forward.ops,
+            vec![
+                LensOp::RenameTable {
+                    old_name: "orgs".to_string(),
+                    new_name: "companies".to_string(),
+                },
+                LensOp::RenameTable {
+                    old_name: "users".to_string(),
+                    new_name: "people".to_string(),
+                },
+            ]
+        );
+        assert!(lens.is_draft());
+    }
+
+    #[test]
     fn auto_lens_complex_migration() {
         let old = SchemaBuilder::new()
             .table(
