@@ -1138,6 +1138,130 @@ fn user_catalogue_write_rejected() {
 }
 
 #[test]
+fn user_schema_catalogue_write_allowed_when_enabled() {
+    let mut sm = SyncManager::new().with_unprivileged_schema_catalogue_writes();
+    let mut io = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("alice"));
+
+    let obj_id = ObjectId::new();
+    let author = ObjectId::new();
+    let commit = Commit {
+        parents: smallvec![],
+        content: b"schema data".to_vec(),
+        timestamp: 1000,
+        author: author.to_string(),
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    let mut cat_metadata = HashMap::new();
+    cat_metadata.insert(
+        crate::metadata::MetadataKey::Type.to_string(),
+        crate::metadata::ObjectType::CatalogueSchema.to_string(),
+    );
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: Some(ObjectMetadata {
+                id: obj_id,
+                metadata: cat_metadata,
+            }),
+            branch_name: "main".into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    assert!(
+        sm.take_outbox().is_empty(),
+        "schema catalogue writes should apply directly when enabled"
+    );
+    assert!(
+        sm.take_pending_permission_checks().is_empty(),
+        "schema catalogue writes should not go through row permission checks"
+    );
+
+    let object = sm
+        .object_manager
+        .get(obj_id)
+        .expect("schema catalogue object should be stored");
+    assert_eq!(
+        object
+            .metadata
+            .get(crate::metadata::MetadataKey::Type.as_str())
+            .map(String::as_str),
+        Some(crate::metadata::ObjectType::CatalogueSchema.as_str())
+    );
+    let tips = sm
+        .object_manager
+        .get_tip_ids(obj_id, "main")
+        .expect("schema branch should exist");
+    assert!(tips.contains(&commit.id()));
+}
+
+#[test]
+fn user_non_schema_catalogue_write_still_rejected_when_enabled() {
+    let mut sm = SyncManager::new().with_unprivileged_schema_catalogue_writes();
+    let mut io = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("alice"));
+
+    let obj_id = ObjectId::new();
+    let author = ObjectId::new();
+    let commit = Commit {
+        parents: smallvec![],
+        content: b"lens data".to_vec(),
+        timestamp: 1000,
+        author: author.to_string(),
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    let mut cat_metadata = HashMap::new();
+    cat_metadata.insert(
+        crate::metadata::MetadataKey::Type.to_string(),
+        crate::metadata::ObjectType::CatalogueLens.to_string(),
+    );
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: Some(ObjectMetadata {
+                id: obj_id,
+                metadata: cat_metadata,
+            }),
+            branch_name: "main".into(),
+            commits: vec![commit],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+    assert!(matches!(
+        &outbox[0],
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload:
+                SyncPayload::Error(SyncError::CatalogueWriteDenied { object_id, branch_name }),
+        } if *id == client_id && *object_id == obj_id && branch_name.as_str() == "main"
+    ));
+    assert!(sm.object_manager.get(obj_id).is_none());
+}
+
+#[test]
 fn add_client_then_set_peer_role() {
     let mut sm = SyncManager::new();
     let client_id = ClientId::new();

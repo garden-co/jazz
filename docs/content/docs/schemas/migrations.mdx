@@ -16,6 +16,9 @@ Traditional migration systems run a linear sequence and require peers to converg
 
 1. Edit `schema.ts` when you are changing data shape.
 2. Optionally run `npx jazz-tools@alpha validate` to catch local authoring errors.
+   On development-like servers, clients auto-publish the latest structural schema when they
+   connect, but that only teaches the server the new hash. It does not create compatibility edges
+   for existing data.
 3. Once Jazz reports an old and new structural hash pair, generate a migration stub:
 
 <include cwd lang="bash">
