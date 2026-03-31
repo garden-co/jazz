@@ -26,8 +26,5 @@
   },
   "scripts": {
     "build": "wasm-pack build --target web --profiling"
-  },
-  "devDependencies": {
-    "wasm-pack": "^0.14.0"
   }
 }
