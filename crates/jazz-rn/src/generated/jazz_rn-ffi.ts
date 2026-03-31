@@ -72,7 +72,7 @@ interface NativeModuleInterface {
     objectId: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
-  ubrn_uniffi_jazz_rn_fn_method_rnruntime_delete_with_session(
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
     ptr: bigint,
     objectId: Uint8Array,
     writeContextJson: Uint8Array,

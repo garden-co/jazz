@@ -907,7 +907,7 @@ export class RnRuntime
         FfiConverterTypeJazzRnError
       ),
       /*caller:*/ (callStatus) => {
-        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_delete_with_session(
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
           uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
           FfiConverterString.lower(objectId),
           FfiConverterOptionalString.lower(writeContextJson),
