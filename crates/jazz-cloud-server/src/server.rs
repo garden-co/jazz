@@ -2335,6 +2335,16 @@ async fn run_worker_loop(
             }
         }
 
+        #[cfg(feature = "otel")]
+        {
+            let meter = opentelemetry::global::meter("jazz-cloud-server");
+            let depth = meter.i64_gauge("jazz.worker.queue.depth").build();
+            depth.record(
+                fair_queue.pending_total as i64,
+                &[opentelemetry::KeyValue::new("worker", worker as i64)],
+            );
+        }
+
         tokio::task::yield_now().await;
     }
 }
