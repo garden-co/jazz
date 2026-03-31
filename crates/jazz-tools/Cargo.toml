@@ -22,11 +22,11 @@ rocksdb = ["dep:rocksdb"]
 runtime-tokio = ["dep:tokio"]
 transport = []
 transport-http = ["transport", "dep:reqwest", "dep:base64", "dep:bytes"]
-client = ["runtime-tokio", "transport-http", "fjall", "dep:thiserror", "dep:tokio"]
+client = ["runtime-tokio", "transport-http", "rocksdb", "dep:thiserror", "dep:tokio"]
 cli = [
   "runtime-tokio",
   "transport",
-  "fjall",
+  "rocksdb",
   "dep:tokio",
   "dep:axum",
   "dep:clap",
@@ -39,7 +39,7 @@ cli = [
   "dep:reqwest",
 ]
 test-utils = ["cli", "client"]
-test = ["test-utils", "rocksdb"]
+test = ["test-utils"]
 otel = [
   "cli",
   "dep:opentelemetry",
