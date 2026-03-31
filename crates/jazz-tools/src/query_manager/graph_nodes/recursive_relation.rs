@@ -9,6 +9,7 @@ use ahash::{AHashMap, AHashSet};
 use uuid::Uuid;
 
 use crate::commit::CommitId;
+use crate::metadata::{RowProvenance, SYSTEM_PRINCIPAL_ID};
 use crate::object::ObjectId;
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::types::{
@@ -221,14 +222,22 @@ impl RecursiveRelationNode {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
     ) -> AHashSet<Tuple> {
-        let mut seen_rows = AHashMap::<ObjectId, (Vec<u8>, CommitId, TupleProvenance)>::new();
+        let mut seen_rows =
+            AHashMap::<ObjectId, (Vec<u8>, CommitId, RowProvenance, TupleProvenance)>::new();
         let mut frontier = Vec::<(ObjectId, Vec<u8>, TupleProvenance)>::new();
 
         for tuple in self.seed_tuples.values() {
-            if let Some((id, content, commit_id)) = self.normalize_seed_tuple_with_id(tuple) {
+            if let Some((id, content, commit_id, row_provenance)) =
+                self.normalize_seed_tuple_with_id(tuple)
+            {
                 let provenance = tuple.provenance().clone();
                 let enqueue = match seen_rows.get_mut(&id) {
-                    Some((existing_content, existing_commit_id, existing_provenance)) => {
+                    Some((
+                        existing_content,
+                        existing_commit_id,
+                        existing_row_provenance,
+                        existing_provenance,
+                    )) => {
                         let previous_len = existing_provenance.len();
                         existing_provenance.extend(provenance.iter().copied());
                         let changed =
@@ -236,18 +245,27 @@ impl RecursiveRelationNode {
                         if changed {
                             *existing_content = content.clone();
                             *existing_commit_id = commit_id;
+                            *existing_row_provenance = row_provenance.clone();
                         }
                         changed || existing_provenance.len() > previous_len
                     }
                     None => {
-                        seen_rows.insert(id, (content.clone(), commit_id, provenance.clone()));
+                        seen_rows.insert(
+                            id,
+                            (
+                                content.clone(),
+                                commit_id,
+                                row_provenance,
+                                provenance.clone(),
+                            ),
+                        );
                         true
                     }
                 };
                 if enqueue {
                     let frontier_provenance = seen_rows
                         .get(&id)
-                        .map(|(_, _, provenance)| provenance.clone())
+                        .map(|(_, _, _, provenance)| provenance.clone())
                         .unwrap_or(provenance);
                     frontier.push((id, content, frontier_provenance));
                 }
@@ -267,7 +285,7 @@ impl RecursiveRelationNode {
                 let corr = Value::Uuid(row_id);
 
                 for (step_row, step_provenance) in self.evaluate_step_rows(&corr, io, row_loader) {
-                    let Some((next_id, next_content, next_commit_id)) =
+                    let Some((next_id, next_content, next_commit_id, next_row_provenance)) =
                         self.normalize_step_row(&step_desc, &step_row)
                     else {
                         continue;
@@ -277,7 +295,12 @@ impl RecursiveRelationNode {
                     combined_provenance.extend(step_provenance.iter().copied());
 
                     let enqueue = match seen_rows.get_mut(&next_id) {
-                        Some((existing_content, existing_commit_id, existing_provenance)) => {
+                        Some((
+                            existing_content,
+                            existing_commit_id,
+                            existing_row_provenance,
+                            existing_provenance,
+                        )) => {
                             let previous_len = existing_provenance.len();
                             existing_provenance.extend(combined_provenance.iter().copied());
                             let changed = *existing_content != next_content
@@ -285,6 +308,7 @@ impl RecursiveRelationNode {
                             if changed {
                                 *existing_content = next_content.clone();
                                 *existing_commit_id = next_commit_id;
+                                *existing_row_provenance = next_row_provenance.clone();
                             }
                             changed || existing_provenance.len() > previous_len
                         }
@@ -294,6 +318,7 @@ impl RecursiveRelationNode {
                                 (
                                     next_content.clone(),
                                     next_commit_id,
+                                    next_row_provenance,
                                     combined_provenance.clone(),
                                 ),
                             );
@@ -303,7 +328,7 @@ impl RecursiveRelationNode {
                     if enqueue {
                         let frontier_provenance = seen_rows
                             .get(&next_id)
-                            .map(|(_, _, provenance)| provenance.clone())
+                            .map(|(_, _, _, provenance)| provenance.clone())
                             .unwrap_or(combined_provenance);
                         next_frontier.push((next_id, next_content, frontier_provenance));
                     }
@@ -315,12 +340,13 @@ impl RecursiveRelationNode {
 
         seen_rows
             .into_iter()
-            .map(|(id, (content, commit_id, provenance))| {
+            .map(|(id, (content, commit_id, row_provenance, provenance))| {
                 Tuple::new_with_provenance(
                     vec![TupleElement::Row {
                         id,
                         content,
                         commit_id,
+                        row_provenance,
                     }],
                     provenance,
                 )
@@ -337,14 +363,22 @@ impl RecursiveRelationNode {
             return AHashSet::new();
         };
 
-        let mut seen_rows = AHashMap::<ObjectId, (Vec<u8>, CommitId, TupleProvenance)>::new();
+        let mut seen_rows =
+            AHashMap::<ObjectId, (Vec<u8>, CommitId, RowProvenance, TupleProvenance)>::new();
         let mut frontier = Vec::<(ObjectId, Vec<u8>, TupleProvenance)>::new();
 
         for tuple in self.seed_tuples.values() {
-            if let Some((id, content, commit_id)) = self.normalize_seed_tuple_with_id(tuple) {
+            if let Some((id, content, commit_id, row_provenance)) =
+                self.normalize_seed_tuple_with_id(tuple)
+            {
                 let provenance = tuple.provenance().clone();
                 let enqueue = match seen_rows.get_mut(&id) {
-                    Some((existing_content, existing_commit_id, existing_provenance)) => {
+                    Some((
+                        existing_content,
+                        existing_commit_id,
+                        existing_row_provenance,
+                        existing_provenance,
+                    )) => {
                         let previous_len = existing_provenance.len();
                         existing_provenance.extend(provenance.iter().copied());
                         let changed =
@@ -352,18 +386,27 @@ impl RecursiveRelationNode {
                         if changed {
                             *existing_content = content.clone();
                             *existing_commit_id = commit_id;
+                            *existing_row_provenance = row_provenance.clone();
                         }
                         changed || existing_provenance.len() > previous_len
                     }
                     None => {
-                        seen_rows.insert(id, (content.clone(), commit_id, provenance.clone()));
+                        seen_rows.insert(
+                            id,
+                            (
+                                content.clone(),
+                                commit_id,
+                                row_provenance,
+                                provenance.clone(),
+                            ),
+                        );
                         true
                     }
                 };
                 if enqueue {
                     let frontier_provenance = seen_rows
                         .get(&id)
-                        .map(|(_, _, provenance)| provenance.clone())
+                        .map(|(_, _, _, provenance)| provenance.clone())
                         .unwrap_or(provenance);
                     frontier.push((id, content, frontier_provenance));
                 }
@@ -404,7 +447,12 @@ impl RecursiveRelationNode {
                     combined_provenance.extend(target_row.provenance.iter().copied());
 
                     let enqueue = match seen_rows.get_mut(target_id) {
-                        Some((existing_content, existing_commit_id, existing_provenance)) => {
+                        Some((
+                            existing_content,
+                            existing_commit_id,
+                            existing_row_provenance,
+                            existing_provenance,
+                        )) => {
                             let previous_len = existing_provenance.len();
                             existing_provenance.extend(combined_provenance.iter().copied());
                             let changed = *existing_content != target_row.data
@@ -412,6 +460,7 @@ impl RecursiveRelationNode {
                             if changed {
                                 *existing_content = target_row.data.clone();
                                 *existing_commit_id = target_row.commit_id;
+                                *existing_row_provenance = target_row.row_provenance.clone();
                             }
                             changed || existing_provenance.len() > previous_len
                         }
@@ -421,6 +470,7 @@ impl RecursiveRelationNode {
                                 (
                                     target_row.data.clone(),
                                     target_row.commit_id,
+                                    target_row.row_provenance.clone(),
                                     combined_provenance.clone(),
                                 ),
                             );
@@ -430,7 +480,7 @@ impl RecursiveRelationNode {
                     if enqueue {
                         let frontier_provenance = seen_rows
                             .get(target_id)
-                            .map(|(_, _, provenance)| provenance.clone())
+                            .map(|(_, _, _, provenance)| provenance.clone())
                             .unwrap_or(combined_provenance);
                         next_frontier.push((*target_id, target_row.data, frontier_provenance));
                     }
@@ -442,12 +492,13 @@ impl RecursiveRelationNode {
 
         seen_rows
             .into_iter()
-            .map(|(id, (content, commit_id, provenance))| {
+            .map(|(id, (content, commit_id, row_provenance, provenance))| {
                 Tuple::new_with_provenance(
                     vec![TupleElement::Row {
                         id,
                         content,
                         commit_id,
+                        row_provenance,
                     }],
                     provenance,
                 )
@@ -466,12 +517,16 @@ impl RecursiveRelationNode {
         encode_row(&self.output_descriptor, &values).ok()
     }
 
-    fn normalize_seed_tuple_with_id(&self, tuple: &Tuple) -> Option<(ObjectId, Vec<u8>, CommitId)> {
+    fn normalize_seed_tuple_with_id(
+        &self,
+        tuple: &Tuple,
+    ) -> Option<(ObjectId, Vec<u8>, CommitId, RowProvenance)> {
         let element = tuple.get(0)?;
         let id = element.id();
         let commit_id = element.commit_id().unwrap_or(CommitId([0; 32]));
+        let row_provenance = element.row_provenance()?.clone();
         let content = self.normalize_seed_tuple(tuple)?;
-        Some((id, content, commit_id))
+        Some((id, content, commit_id, row_provenance))
     }
 
     fn extract_correlation_from_content(
@@ -531,13 +586,18 @@ impl RecursiveRelationNode {
         &self,
         step_descriptor: &RowDescriptor,
         step_row: &Row,
-    ) -> Option<(ObjectId, Vec<u8>, crate::commit::CommitId)> {
+    ) -> Option<(ObjectId, Vec<u8>, crate::commit::CommitId, RowProvenance)> {
         let values = decode_row(step_descriptor, &step_row.data).ok()?;
         if values.len() != self.output_descriptor.columns.len() {
             return None;
         }
         let normalized_content = encode_row(&self.output_descriptor, &values).ok()?;
-        Some((step_row.id, normalized_content, step_row.commit_id))
+        Some((
+            step_row.id,
+            normalized_content,
+            step_row.commit_id,
+            step_row.provenance.clone(),
+        ))
     }
 }
 
@@ -576,6 +636,7 @@ fn tuple_from_normalized_content(content: Vec<u8>, provenance: TupleProvenance) 
             id,
             content,
             commit_id,
+            row_provenance: RowProvenance::for_insert(SYSTEM_PRINCIPAL_ID, 0),
         }],
         provenance,
     )
@@ -701,6 +762,7 @@ mod tests {
             id: ObjectId::new(),
             content: seed,
             commit_id: CommitId([0; 32]),
+            row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }]);
         let mut input = TupleDelta::new();
         input.added.push(seed_tuple);

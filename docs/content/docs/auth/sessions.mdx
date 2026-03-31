@@ -114,6 +114,19 @@ Use the session's user ID with [`.where()`](/docs/reading/filters-and-sorting) t
 
 Use whatever column fits your schema&hairsp;—&hairsp;`owner_id`, `author_id`, `assignee_id`, etc.&hairsp;—&hairsp;the column names have no special significance.
 
+## Session identity and authorship
+
+Jazz also records who created and last updated each row through the provenance magic columns
+`$createdBy`, `$createdAt`, `$updatedBy`, and `$updatedAt`.
+
+On clients, writes are automatically attributed to the current session user. On backends,
+`context.forRequest(...)` and `context.forSession(...)` both run as that user for permissions and
+also stamp authorship as that user.
+
+If backend code should keep backend permissions but still record a user's identity in provenance,
+use `withAttribution(...)`, `withAttributionForSession(...)`, or `withAttributionForRequest(...)`
+from [Server Setup](/docs/reference/server-setup).
+
 <Callout type="info">
   Client-side filters are useful for UX, but they don't enforce access control on their own. Use
   [Permissions](/docs/auth/permissions) to define row-level policies that control which sessions can

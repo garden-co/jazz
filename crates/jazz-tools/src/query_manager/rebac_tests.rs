@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use smallvec::smallvec;
 
 use crate::commit::Commit;
-use crate::metadata::MetadataKey;
+use crate::metadata::{MetadataKey, SYSTEM_PRINCIPAL_ID};
 use crate::object::{BranchName, ObjectId};
 use crate::storage::MemoryStorage;
 use crate::sync_manager::{
@@ -22,10 +22,11 @@ use crate::query_manager::manager::QueryError;
 use crate::query_manager::manager::QueryManager;
 use crate::query_manager::policy::Operation;
 use crate::query_manager::policy::PolicyExpr;
+use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::relation_ir::{
     ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, ValueRef,
 };
-use crate::query_manager::session::Session;
+use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName,
     TablePolicies, TableSchema, Value,
@@ -119,6 +120,56 @@ fn magic_introspection_schema() -> Schema {
     );
 
     schema
+}
+
+fn provenance_notes_descriptor() -> RowDescriptor {
+    RowDescriptor::new(vec![ColumnDescriptor::new("title", ColumnType::Text)])
+}
+
+fn provenance_notes_schema() -> Schema {
+    let mut schema = Schema::new();
+    schema.insert(
+        TableName::new("notes"),
+        TableSchema::new(provenance_notes_descriptor()),
+    );
+    schema
+}
+
+fn authorship_permissions_schema() -> Schema {
+    let mut schema = Schema::new();
+    let created_by_is_session = PolicyExpr::eq_session("$createdBy", vec!["user_id".into()]);
+    let notes_policies = TablePolicies::new()
+        .with_select(created_by_is_session.clone())
+        .with_insert(created_by_is_session.clone())
+        .with_update(
+            Some(created_by_is_session.clone()),
+            created_by_is_session.clone(),
+        )
+        .with_delete(created_by_is_session);
+    schema.insert(
+        TableName::new("notes"),
+        TableSchema::with_policies(provenance_notes_descriptor(), notes_policies),
+    );
+    schema
+}
+
+fn query_rows(
+    qm: &mut QueryManager,
+    storage: &mut MemoryStorage,
+    query: Query,
+    session: Option<Session>,
+) -> Vec<(ObjectId, Vec<Value>)> {
+    let sub_id = qm
+        .subscribe_with_session(query, session, None)
+        .expect("query subscription should be created");
+
+    for _ in 0..10 {
+        qm.process(storage);
+    }
+
+    let results = qm.get_subscription_results(sub_id);
+    qm.unsubscribe_with_sync(sub_id);
+    results
 }
 
 fn recursive_folders_schema(max_depth: Option<usize>) -> Schema {
@@ -313,7 +364,7 @@ fn enqueue_inherited_insert(
         parents: smallvec![],
         content: encode_document("alice", title, Some(folder_id)),
         timestamp: 1000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -411,7 +462,7 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
         parents: smallvec![grand_handle.row_commit_id],
         content: update_content,
         timestamp: 4200,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -495,7 +546,7 @@ fn rebac_insert_allowed_by_simple_policy() {
         parents: smallvec![],
         content,
         timestamp: 1000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -564,7 +615,7 @@ fn rebac_insert_denied_by_simple_policy() {
         parents: smallvec![],
         content,
         timestamp: 1000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -663,7 +714,7 @@ fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
         parents: smallvec![],
         content: encode_document("bob", "Should Be Denied", None),
         timestamp: 1000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -739,7 +790,7 @@ fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
         parents: smallvec![],
         content: encode_document("bob", "Should Be Denied", None),
         timestamp: 1000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1082,7 +1133,7 @@ fn rebac_insert_waits_for_schema_then_denies_for_composed_branch() {
         parents: smallvec![],
         content: encode_document("bob", "Should Be Denied", None),
         timestamp: 1000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1173,7 +1224,7 @@ fn rebac_insert_denied_when_schema_never_arrives_before_timeout() {
         parents: smallvec![],
         content: encode_document("bob", "Should Time Out", None),
         timestamp: 1000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1258,7 +1309,7 @@ fn rebac_insert_denied_when_schema_unresolved_for_branch() {
         parents: smallvec![],
         content: encode_document("bob", "Should Be Denied", None),
         timestamp: 1000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1342,7 +1393,7 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
         parents: smallvec![],
         content: encode_document("bob", "Should Be Denied", None),
         timestamp: 1000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1433,7 +1484,7 @@ fn rebac_table_without_policy_allows_all_writes() {
         parents: smallvec![],
         content,
         timestamp: 1000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1499,7 +1550,7 @@ fn rebac_non_row_object_allowed() {
         parents: smallvec![],
         content: b"some data".to_vec(),
         timestamp: 1000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1569,7 +1620,7 @@ fn rebac_non_row_object_allowed_in_server_mode() {
         parents: smallvec![],
         content: b"some data".to_vec(),
         timestamp: 1000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1647,7 +1698,7 @@ fn rebac_two_clients_different_sessions() {
         parents: smallvec![],
         content: content1,
         timestamp: 1000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1659,7 +1710,7 @@ fn rebac_two_clients_different_sessions() {
         parents: smallvec![],
         content: content2,
         timestamp: 1000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1782,7 +1833,7 @@ fn rebac_exists_clause_denies_non_matching_insert() {
         parents: smallvec![],
         content,
         timestamp: 1000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1932,7 +1983,7 @@ fn rebac_update_denied_by_using_policy() {
         parents: smallvec![initial_commit],
         content: bob_update_content,
         timestamp: 2000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -2467,7 +2518,7 @@ fn rebac_update_denied_by_using_exists_policy() {
         parents: smallvec![initial_commit],
         content: bob_update_content,
         timestamp: 2000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -2542,7 +2593,7 @@ fn rebac_update_denied_by_using_exists_policy() {
         parents: smallvec![initial_commit],
         content: alice_update_content,
         timestamp: 3000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -3166,7 +3217,7 @@ fn synced_soft_delete_should_use_delete_policy() {
         parents: smallvec![protected.row_commit_id],
         content: delete_content,
         timestamp: 2000,
-        author: ObjectId::new(),
+        author: ObjectId::new().to_string(),
         metadata: Some(crate::metadata::soft_delete_metadata()),
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -3360,6 +3411,268 @@ fn magic_columns_return_null_without_session_and_do_not_change_default_output_sh
         .expect("filtered protected row");
     let filtered_values = decode_row(&filtered_update.descriptor, &filtered_row.data).unwrap();
     assert_eq!(filtered_values, vec![Value::Text("initial".into())]);
+}
+
+#[test]
+fn provenance_magic_columns_capture_insert_update_and_system_authors() {
+    let sync_manager = SyncManager::new();
+    let schema = provenance_notes_schema();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let alice_session = Session::new("alice");
+    let bob_attribution = WriteContext {
+        session: None,
+        attribution: Some("bob".into()),
+    };
+
+    let note = qm
+        .insert_with_session(
+            &mut storage,
+            "notes",
+            &[Value::Text("draft".into())],
+            Some(&alice_session),
+        )
+        .expect("alice-authored note should insert");
+
+    let initial = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("notes")
+            .filter_eq("title", Value::Text("draft".into()))
+            .select(&[
+                "title",
+                "$createdBy",
+                "$updatedBy",
+                "$createdAt",
+                "$updatedAt",
+            ])
+            .build(),
+        None,
+    );
+    assert_eq!(initial.len(), 1, "draft note should be queryable");
+    assert_eq!(
+        initial[0].1[0],
+        Value::Text("draft".into()),
+        "projected title should decode"
+    );
+    assert_eq!(initial[0].1[1], Value::Text("alice".into()));
+    assert_eq!(initial[0].1[2], Value::Text("alice".into()));
+    let Value::Timestamp(initial_created_at) = initial[0].1[3] else {
+        panic!("$createdAt should decode as a timestamp")
+    };
+    let Value::Timestamp(initial_updated_at) = initial[0].1[4] else {
+        panic!("$updatedAt should decode as a timestamp")
+    };
+    assert_eq!(
+        initial_created_at, initial_updated_at,
+        "fresh inserts should initialize created/updated timestamps together"
+    );
+
+    qm.update_with_write_context(
+        &mut storage,
+        note.row_id,
+        &[Value::Text("revised".into())],
+        Some(&bob_attribution),
+    )
+    .expect("attributed update should succeed without a session");
+
+    let updated = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("notes")
+            .filter_eq("title", Value::Text("revised".into()))
+            .select(&[
+                "title",
+                "$createdBy",
+                "$updatedBy",
+                "$createdAt",
+                "$updatedAt",
+            ])
+            .build(),
+        None,
+    );
+    assert_eq!(updated.len(), 1, "updated note should remain queryable");
+    assert_eq!(updated[0].1[0], Value::Text("revised".into()));
+    assert_eq!(updated[0].1[1], Value::Text("alice".into()));
+    assert_eq!(updated[0].1[2], Value::Text("bob".into()));
+    let Value::Timestamp(updated_created_at) = updated[0].1[3] else {
+        panic!("updated $createdAt should decode as a timestamp")
+    };
+    let Value::Timestamp(updated_updated_at) = updated[0].1[4] else {
+        panic!("updated $updatedAt should decode as a timestamp")
+    };
+    assert_eq!(
+        updated_created_at, initial_created_at,
+        "created_at should be preserved across updates"
+    );
+    assert!(
+        updated_updated_at >= initial_updated_at,
+        "updated_at should move forward on update"
+    );
+
+    let updated_by_bob = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("notes")
+            .filter_eq("$updatedBy", Value::Text("bob".into()))
+            .select(&["title", "$updatedBy"])
+            .build(),
+        None,
+    );
+    assert_eq!(updated_by_bob.len(), 1);
+    assert_eq!(
+        updated_by_bob[0].1,
+        vec![Value::Text("revised".into()), Value::Text("bob".into())]
+    );
+
+    qm.insert(&mut storage, "notes", &[Value::Text("system note".into())])
+        .expect("system-authored note should insert without a session");
+    let system = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("notes")
+            .filter_eq("title", Value::Text("system note".into()))
+            .select(&["title", "$createdBy", "$updatedBy"])
+            .build(),
+        None,
+    );
+    assert_eq!(system.len(), 1);
+    assert_eq!(
+        system[0].1,
+        vec![
+            Value::Text("system note".into()),
+            Value::Text(SYSTEM_PRINCIPAL_ID.into()),
+            Value::Text(SYSTEM_PRINCIPAL_ID.into()),
+        ]
+    );
+}
+
+#[test]
+fn created_by_permissions_allow_creators_and_hide_system_rows() {
+    let sync_manager = SyncManager::new();
+    let schema = authorship_permissions_schema();
+    let mut qm = create_query_manager(sync_manager, schema);
+    let mut storage = MemoryStorage::new();
+
+    let alice_session = Session::new("alice");
+    let bob_session = Session::new("bob");
+    let alice_attribution = WriteContext {
+        session: None,
+        attribution: Some("alice".into()),
+    };
+
+    let alice_owned = qm
+        .insert_with_session(
+            &mut storage,
+            "notes",
+            &[Value::Text("alice-owned".into())],
+            Some(&alice_session),
+        )
+        .expect("creator-based insert policy should allow alice");
+    let alice_attributed = qm
+        .insert_with_write_context(
+            &mut storage,
+            "notes",
+            &[Value::Text("alice-attributed".into())],
+            Some(&alice_attribution),
+        )
+        .expect("backend-attributed note should stamp alice as creator");
+    qm.insert(&mut storage, "notes", &[Value::Text("system-owned".into())])
+        .expect("system note should insert");
+
+    let alice_visible = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("notes")
+            .select(&["title", "$createdBy"])
+            .order_by("title")
+            .build(),
+        Some(alice_session.clone()),
+    );
+    assert_eq!(
+        alice_visible
+            .iter()
+            .map(|(_, values)| values.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            vec![
+                Value::Text("alice-attributed".into()),
+                Value::Text("alice".into()),
+            ],
+            vec![
+                Value::Text("alice-owned".into()),
+                Value::Text("alice".into())
+            ],
+        ],
+        "alice should only see notes authored as alice"
+    );
+
+    let bob_visible = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("notes").select(&["title"]).build(),
+        Some(bob_session.clone()),
+    );
+    assert!(
+        bob_visible.is_empty(),
+        "bob should not see alice/system notes"
+    );
+
+    let bob_update_err = qm
+        .update_with_session(
+            &mut storage,
+            alice_owned.row_id,
+            &[Value::Text("bob edit".into())],
+            Some(&bob_session),
+        )
+        .expect_err("non-creator update should be denied");
+    assert!(matches!(
+        bob_update_err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Update
+        } if table == TableName::new("notes")
+    ));
+
+    let bob_delete_err = qm
+        .delete_with_session(&mut storage, alice_owned.row_id, Some(&bob_session))
+        .expect_err("non-creator delete should be denied");
+    assert!(matches!(
+        bob_delete_err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Delete
+        } if table == TableName::new("notes")
+    ));
+
+    qm.update_with_session(
+        &mut storage,
+        alice_attributed.row_id,
+        &[Value::Text("alice-attributed-updated".into())],
+        Some(&alice_session),
+    )
+    .expect("creator should be able to update attributed rows");
+    qm.delete_with_session(&mut storage, alice_owned.row_id, Some(&alice_session))
+        .expect("creator should be able to delete her own row");
+
+    let alice_after_mutations = query_rows(
+        &mut qm,
+        &mut storage,
+        QueryBuilder::new("notes")
+            .select(&["title"])
+            .order_by("title")
+            .build(),
+        Some(alice_session),
+    );
+    assert_eq!(
+        alice_after_mutations
+            .iter()
+            .map(|(_, values)| values[0].clone())
+            .collect::<Vec<_>>(),
+        vec![Value::Text("alice-attributed-updated".into())],
+        "alice should retain access to the surviving creator-owned row"
+    );
 }
 
 // ============================================================================

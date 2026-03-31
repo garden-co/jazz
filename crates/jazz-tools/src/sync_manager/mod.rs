@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::commit::CommitId;
+use crate::metadata::SYSTEM_PRINCIPAL_ID;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::ObjectManager;
 use crate::query_manager::query::Query;
@@ -296,7 +297,7 @@ impl SyncManager {
             "main",
             Vec::new(), // No parents - root commit
             content,
-            ObjectId::from_uuid(uuid::Uuid::nil()), // System author
+            SYSTEM_PRINCIPAL_ID.to_string(),
             None,
         );
     }

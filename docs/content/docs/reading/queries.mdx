@@ -57,6 +57,19 @@ Queries are immutable and chainable. Each method returns a new query, so you can
 
 See [Filters & Sorting](/docs/reading/filters-and-sorting) for the full list of `where` operators, `orderBy`, `limit`, and `offset`.
 
+## Querying provenance
+
+You can select and filter on Jazz's provenance magic columns just like other columns. They are
+useful for showing who created a row, when it last changed, or building "my created items" views
+without storing duplicate ownership fields.
+
+<include cwd lang="ts" meta='title="app.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-provenance-magic-columns-ts
+</include>
+
+See [Permissions](/docs/auth/permissions) for the full set of magic columns, including the
+permission introspection columns and `$createdBy`-based policy examples.
+
 ## Framework hooks
 
 Each framework has a reactive binding that re-renders when query results change. See [Framework Patterns](/docs/reference/framework-patterns#query-subscriptions) for side-by-side examples.

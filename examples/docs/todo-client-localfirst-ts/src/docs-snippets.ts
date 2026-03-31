@@ -177,6 +177,19 @@ export async function readDeletableTodos(db: Db) {
 }
 // #endregion reading-magic-columns-ts
 
+// #region reading-provenance-magic-columns-ts
+export async function readTodoProvenance(db: Db, currentUserId: string, updatedSinceMs: number) {
+  return db.all(
+    app.todos
+      .where({
+        $createdBy: currentUserId,
+        $updatedAt: { gt: updatedSinceMs },
+      })
+      .select("title", "$createdBy", "$createdAt", "$updatedBy", "$updatedAt"),
+  );
+}
+// #endregion reading-provenance-magic-columns-ts
+
 // #region reading-recursive-ts
 export function buildTodoLineageQuery() {
   return app.todos.gather({
