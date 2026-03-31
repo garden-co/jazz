@@ -27,6 +27,7 @@ enum WriteSchemaResolution {
 
 pub(super) struct ResolvedSchemaRow {
     pub branch_name: BranchName,
+    pub branch_key: BatchBranchKey,
     pub commit_id: CommitId,
     pub content: Vec<u8>,
     pub is_soft_deleted: bool,
@@ -534,13 +535,18 @@ impl QueryManager {
         normalized
     }
 
+    fn schema_hash_for_branch_key(branch_key: BatchBranchKey) -> Option<super::types::SchemaHash> {
+        crate::query_manager::types::BranchPrefixName::parse(&branch_key.prefix_name())
+            .map(|prefix| prefix.schema_hash)
+    }
+
     pub(super) fn resolve_latest_row_with_schema_transform(
         id: ObjectId,
         obj: &crate::object::Object,
         branches: &[QueryBranchRef],
         context: &mut RowTransformContext<'_>,
     ) -> Option<ResolvedSchemaRow> {
-        let mut best: Option<(u64, CommitId, Vec<u8>, QueryBranchRef, bool)> = None;
+        let mut best: Option<(u64, CommitId, QueryBranchRef, bool)> = None;
 
         for branch_ref in branches {
             let Some(branch) = obj.branches.get_by_key(branch_ref.batch_branch_key()) else {
@@ -553,31 +559,21 @@ impl QueryManager {
                 let is_soft_deleted = commit.is_soft_deleted();
                 match &best {
                     None => {
-                        best = Some((
-                            commit.timestamp,
-                            tip_id,
-                            commit.content.clone(),
-                            *branch_ref,
-                            is_soft_deleted,
-                        ));
+                        best = Some((commit.timestamp, tip_id, *branch_ref, is_soft_deleted));
                     }
-                    Some((best_ts, best_id, _, _, _))
+                    Some((best_ts, best_id, _, _))
                         if (commit.timestamp, tip_id) > (*best_ts, *best_id) =>
                     {
-                        best = Some((
-                            commit.timestamp,
-                            tip_id,
-                            commit.content.clone(),
-                            *branch_ref,
-                            is_soft_deleted,
-                        ));
+                        best = Some((commit.timestamp, tip_id, *branch_ref, is_soft_deleted));
                     }
                     _ => {}
                 }
             }
         }
 
-        let (_, commit_id, content, branch_ref, is_soft_deleted) = best?;
+        let (_, commit_id, branch_ref, is_soft_deleted) = best?;
+        let branch = obj.branches.get_by_key(branch_ref.batch_branch_key())?;
+        let content = branch.commits.get(&commit_id)?.content.clone();
         if content.is_empty() {
             return None;
         }
@@ -585,7 +581,7 @@ impl QueryManager {
             id,
             content,
             commit_id,
-            branch_ref.branch_name(),
+            branch_ref,
             is_soft_deleted,
             context,
         )
@@ -595,11 +591,13 @@ impl QueryManager {
         id: ObjectId,
         content: Vec<u8>,
         commit_id: CommitId,
-        branch_name: BranchName,
+        branch_ref: QueryBranchRef,
         is_soft_deleted: bool,
         context: &mut RowTransformContext<'_>,
     ) -> Option<ResolvedSchemaRow> {
-        let source_hash = Self::schema_hash_for_branch_name(&branch_name);
+        let branch_name = branch_ref.branch_name();
+        let branch_key = branch_ref.batch_branch_key();
+        let source_hash = Self::schema_hash_for_branch_key(branch_key);
 
         if let Some(source_hash) = source_hash
             && source_hash != context.schema_context.current_hash
@@ -609,6 +607,7 @@ impl QueryManager {
                 Ok(result) => {
                     return Some(ResolvedSchemaRow {
                         branch_name,
+                        branch_key,
                         commit_id,
                         content: result.data,
                         is_soft_deleted,
@@ -636,6 +635,7 @@ impl QueryManager {
 
         Some(ResolvedSchemaRow {
             branch_name,
+            branch_key,
             commit_id,
             content,
             is_soft_deleted,
@@ -853,9 +853,7 @@ impl QueryManager {
                         Some(LoadedRow::new(
                             resolved.content,
                             resolved.commit_id,
-                            [(id, BatchBranchKey::from_branch_name(resolved.branch_name))]
-                                .into_iter()
-                                .collect(),
+                            [(id, resolved.branch_key)].into_iter().collect(),
                         ))
                     };
 
@@ -1027,9 +1025,7 @@ impl QueryManager {
                             Some(LoadedRow::new(
                                 resolved.content,
                                 resolved.commit_id,
-                                [(id, BatchBranchKey::from_branch_name(resolved.branch_name))]
-                                    .into_iter()
-                                    .collect(),
+                                [(id, resolved.branch_key)].into_iter().collect(),
                             ))
                         };
 
@@ -1684,9 +1680,7 @@ impl QueryManager {
                     Some(LoadedRow::new(
                         resolved.content,
                         resolved.commit_id,
-                        [(id, BatchBranchKey::from_branch_name(resolved.branch_name))]
-                            .into_iter()
-                            .collect(),
+                        [(id, resolved.branch_key)].into_iter().collect(),
                     ))
                 };
 
