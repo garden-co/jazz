@@ -1,0 +1,142 @@
+---
+title: Server Setup
+description: Hosted and self-hosted database server configuration, app provisioning, and runtime context setup.
+reviewedAt: "14cd73f0"
+---
+
+import CreateJazzClientReference from "../../partials/create-jazz-client-reference.mdx";
+
+## Hosted database server
+
+App IDs are provisioned on request. Ask in the `jazz2-adopters` Discord channel with your app name and JWKS endpoint.
+
+<Callout type="info">
+  This manual provisioning process is temporary while Jazz 2 is under heavy development.
+  Self-service onboarding is planned.
+</Callout>
+
+## Self-hosted database server
+
+<include cwd lang="bash" meta='title="Terminal"'>
+  ../examples/docs/todo-server-rs/docs/self-host-cli.sh#setup-self-host-cli
+</include>
+
+`jazz-tools server` currently supports:
+
+| Option                              | Purpose                                                     | Environment variable   | Default                   |
+| ----------------------------------- | ----------------------------------------------------------- | ---------------------- | ------------------------- |
+| `-p, --port <PORT>`                 | Listen port                                                 | -                      | `1625`                    |
+| `-d, --data-dir <DATA_DIR>`         | Persistent storage directory                                | -                      | `./data`                  |
+| `--jwks-url <JWKS_URL>`             | JWKS endpoint for external JWT validation                   | `JAZZ_JWKS_URL`        | unset                     |
+| `--allow-anonymous`                 | Allow local anonymous auth (`X-Jazz-Local-Mode: anonymous`) | `JAZZ_ALLOW_ANONYMOUS` | see `NODE_ENV` note below |
+| `--allow-demo`                      | Allow local demo auth (`X-Jazz-Local-Mode: demo`)           | `JAZZ_ALLOW_DEMO`      | see `NODE_ENV` note below |
+| `--backend-secret <BACKEND_SECRET>` | Enable backend session impersonation                        | `JAZZ_BACKEND_SECRET`  | unset                     |
+| `--admin-secret <ADMIN_SECRET>`     | Enable admin operations (schema/policy sync)                | `JAZZ_ADMIN_SECRET`    | unset                     |
+
+Local auth defaults depend on `NODE_ENV`:
+
+- `NODE_ENV=production`: anonymous/demo are disabled unless explicitly enabled (`--allow-anonymous` / `--allow-demo`)
+- non-production (`development`, unset, etc.): anonymous/demo are enabled by default
+
+## Context setup
+
+Every client and backend needs an app ID and server URL, passed when creating the client.
+For auth modes and upgrade/link flow, see [Authentication](/docs/auth/authentication).
+
+<Tabs
+  groupId="jazz-framework"
+  items={["React", "Vue", "Svelte", "Expo", "TypeScript"]}
+  persist
+  updateAnchor
+>
+  <Tab value="React">
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-react/src/setup-snippets.tsx#context-setup-react-minimal
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue" meta='title="App.vue"'>
+      ../examples/docs/todo-client-localfirst-vue/src/App.vue
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte" meta='title="App.svelte"'>
+      ../examples/docs/todo-client-localfirst-svelte/src/App.svelte#provider-svelte
+    </include>
+  </Tab>
+  <Tab value="Expo">
+    <include cwd lang="tsx" meta='title="App.tsx"'>
+      ../examples/docs/todo-client-localfirst-expo/src/setup-snippets.tsx#context-setup-expo-minimal
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/main.ts#context-setup-ts-client
+    </include>
+  </Tab>
+</Tabs>
+
+### Client config options
+
+<CreateJazzClientReference />
+
+In browser clients, omitting local auth fields defaults to anonymous synthetic auth with a persisted local token.
+For React Native/Expo clients, make sure `serverUrl` points to a host your runtime can reach (for example Android emulator often uses `10.0.2.2`).
+
+### Backend context setup
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/src/main.ts#context-setup-ts-backend
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/main.rs#context-setup-rust-backend
+    </include>
+  </Tab>
+</Tabs>
+
+### Backend identity pattern
+
+On the client side, queries automatically run as the logged-in user. On a server-connected backend,
+create the context once at startup, then choose whether work should run as the backend itself or as
+the caller.
+
+- `context.asBackend()` returns a `Db` that uses `backendSecret` for sync/auth when this process
+  talks to a Jazz server.
+- `context.forRequest(req)` returns a `Db` that runs queries as the authenticated user who made
+  the request, so permission policies apply to them rather than the process itself.
+- `context.db()` gives you a high-level `Db` using the context's configured runtime/auth. On
+  server-connected backends, prefer `context.asBackend()` or `context.forRequest(req)`; on
+  embedded or local-only setups, `context.db()` is the right choice.
+
+In TypeScript backends, create the context once with both `app` and `permissions`, then use
+`context.asBackend()` for server-owned work and `context.forRequest(req)` when you need a
+bearer-JWT-scoped high-level `Db`.
+
+`forRequest` reads authentication from standard HTTP headers, so `req` can be any object that exposes them: Express, Hono, Fastify, or a Web Fetch API `Request` all work.
+
+<Callout type="info">
+  For embedded or local-only runtime setups where your backend is not connected to a server, use
+  `context.db()` to get an unscoped, unauthenticated handle. This allows read/write access to the
+  database directly, without permissions being evaluated.
+</Callout>
+
+#### Per-request user-scoped client
+
+Pass `req` to run queries as the authenticated user, with all permission policies applied.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-handler-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#backend-request-handler-rust
+    </include>
+  </Tab>
+</Tabs>

@@ -62,20 +62,20 @@ export function DemoAuthExpoApp() {
 // #endregion auth-demo-expo
 
 // #region auth-external-expo
-const externalAuthExpoAppId = "my-app";
-const externalAuthExpoServerUrl = "http://127.0.0.1:4200";
-const externalAuthExpoProviderJwt = "<provider-jwt>";
+const appId = "my-app";
+const jazzServerUrl = "http://127.0.0.1:4200";
+const providerJwt = "<provider-jwt>";
 
 export function ExternalAuthExpoApp() {
   const [hasJwt, setHasJwt] = useState(false);
   const linkExternalIdentity = useLinkExternalIdentity({
-    appId: externalAuthExpoAppId,
-    serverUrl: externalAuthExpoServerUrl,
+    appId,
+    serverUrl: jazzServerUrl,
     defaultMode: "anonymous",
   });
 
   async function onSignedIn() {
-    await linkExternalIdentity({ jwtToken: externalAuthExpoProviderJwt });
+    await linkExternalIdentity({ jwtToken: providerJwt });
     setHasJwt(true);
   }
 
@@ -85,13 +85,13 @@ export function ExternalAuthExpoApp() {
       config={
         hasJwt
           ? {
-              appId: externalAuthExpoAppId,
-              serverUrl: externalAuthExpoServerUrl,
-              jwtToken: externalAuthExpoProviderJwt,
+              appId,
+              serverUrl: jazzServerUrl,
+              jwtToken: providerJwt,
             }
           : {
-              appId: externalAuthExpoAppId,
-              serverUrl: externalAuthExpoServerUrl,
+              appId,
+              serverUrl: jazzServerUrl,
             }
       }
     >

@@ -186,6 +186,42 @@ pub async fn read_todos_with_related_rows(client: &JazzClient) -> jazz_tools::Re
 }
 // #endregion reading-includes-rust
 
+// #region reading-select-rust
+pub async fn read_todo_titles(client: &JazzClient) -> jazz_tools::Result<usize> {
+    let query = QueryBuilder::new("todos")
+        .select(&["title", "done"])
+        .build();
+
+    let rows = client.query(query, None).await?;
+    Ok(rows.len())
+}
+// #endregion reading-select-rust
+
+// #region reading-magic-columns-rust
+pub async fn read_todos_with_permissions(client: &JazzClient) -> jazz_tools::Result<usize> {
+    let query = QueryBuilder::new("todos")
+        .select(&["title", "$canRead", "$canEdit", "$canDelete"])
+        .build();
+
+    let rows = client.query(query, None).await?;
+    Ok(rows.len())
+}
+// #endregion reading-magic-columns-rust
+
+// #region reading-recursive-rust
+pub fn build_todo_lineage_query() -> jazz_tools::Query {
+    QueryBuilder::new("todos")
+        .filter_eq("done", Value::Boolean(false))
+        .with_recursive(|r| {
+            r.from("todos")
+                .correlate("id", "parent_id")
+                .hop("todos", "parent_id")
+                .max_depth(10)
+        })
+        .build()
+}
+// #endregion reading-recursive-rust
+
 // #region writing-crud-rust
 pub async fn write_todo_crud(client: &JazzClient, existing_id: ObjectId) -> jazz_tools::Result<()> {
     let values = todo_values("Write docs", "");
@@ -218,3 +254,136 @@ pub async fn write_todo_with_default_durability(
     Ok(id)
 }
 // #endregion writing-durability-tier-rust
+
+pub async fn where_operator_examples(client: &JazzClient) -> jazz_tools::Result<()> {
+    let search_term = "milk";
+
+    // #region where-eq-ne-rust
+    // Exact match
+    let query = QueryBuilder::new("todos")
+        .filter_eq("done", Value::Boolean(false))
+        .build();
+    let incomplete_todos = client.query(query, None).await?;
+
+    // Not equal
+    let query = QueryBuilder::new("todos")
+        .filter_ne("title", Value::Text("Draft".into()))
+        .build();
+    let non_draft_todos = client.query(query, None).await?;
+    // #endregion where-eq-ne-rust
+
+    // #region where-numeric-rust
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let one_week_ago = Value::Timestamp(now_ms - 7 * 24 * 60 * 60 * 1000);
+
+    let query = QueryBuilder::new("todos")
+        .filter_gt("created_at", one_week_ago)
+        .build();
+    let recent_todos = client.query(query, None).await?;
+
+    let query = QueryBuilder::new("todos")
+        .filter_ge("priority", Value::Integer(3))
+        .build();
+    let high_priority = client.query(query, None).await?;
+
+    let query = QueryBuilder::new("todos")
+        .filter_lt("priority", Value::Integer(10))
+        .build();
+    let low_priority = client.query(query, None).await?;
+    // #endregion where-numeric-rust
+
+    // #region where-contains-rust
+    // Substring match (case-sensitive)
+    let query = QueryBuilder::new("todos")
+        .filter_contains("title", Value::Text(search_term.into()))
+        .build();
+    let matches = client.query(query, None).await?;
+    // #endregion where-contains-rust
+
+    // #region where-null-rust
+    // Rows where the optional ref is not set
+    let query = QueryBuilder::new("todos").filter_is_null("parent").build();
+    let unlinked_todos = client.query(query, None).await?;
+
+    // Rows where it is set
+    let query = QueryBuilder::new("todos")
+        .filter_is_not_null("parent")
+        .build();
+    let linked_todos = client.query(query, None).await?;
+    // #endregion where-null-rust
+
+    // #region where-and-rust
+    // Multiple filter calls are AND-combined
+    let query = QueryBuilder::new("todos")
+        .filter_eq("done", Value::Boolean(true))
+        .filter_is_not_null("project")
+        .build();
+    let done_with_project = client.query(query, None).await?;
+    // #endregion where-and-rust
+
+    // #region where-order-limit-rust
+    let query = QueryBuilder::new("todos")
+        .filter_eq("done", Value::Boolean(false))
+        .order_by("created_at")
+        .limit(50)
+        .build();
+    let recent_incomplete = client.query(query, None).await?;
+    // #endregion where-order-limit-rust
+
+    // #region where-subscription-rust
+    let query = QueryBuilder::new("todos")
+        .filter_eq("done", Value::Boolean(false))
+        .build();
+    let pending = client.subscribe(query).await?;
+    // #endregion where-subscription-rust
+
+    let _ = (
+        incomplete_todos,
+        non_draft_todos,
+        recent_todos,
+        high_priority,
+        low_priority,
+        matches,
+        unlinked_todos,
+        linked_todos,
+        done_with_project,
+        recent_incomplete,
+        pending,
+    );
+    Ok(())
+}
+
+// #region reading-composing-queries-rust
+pub fn composing_queries() {
+    // Build two views from the same base conditions.
+    let by_title = QueryBuilder::new("todos")
+        .filter_eq("done", Value::Boolean(false))
+        .order_by("title")
+        .limit(20)
+        .build();
+    let by_newest = QueryBuilder::new("todos")
+        .filter_eq("done", Value::Boolean(false))
+        .order_by_desc("id")
+        .build();
+
+    let _ = (by_title, by_newest);
+}
+// #endregion reading-composing-queries-rust
+
+// #region writing-nullable-update-rust
+pub async fn clear_nullable_fields(
+    client: &JazzClient,
+    todo_id: ObjectId,
+) -> jazz_tools::Result<()> {
+    // Set a nullable column to null
+    client
+        .update(todo_id, vec![("ownerId".to_string(), Value::Null)])
+        .await?;
+
+    // Only the specified columns are changed; omitted columns are left as-is.
+    Ok(())
+}
+// #endregion writing-nullable-update-rust
