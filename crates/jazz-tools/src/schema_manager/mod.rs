@@ -65,5 +65,6 @@ pub use manager::SchemaManager;
 pub use rehydrate::rehydrate_schema_manager_from_manifest;
 pub use transformer::{
     LensTransformer, TransformError, TransformResult, translate_column_for_index,
+    translate_table_for_schema,
 };
 pub use types::AppId;

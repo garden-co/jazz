@@ -7,7 +7,9 @@ use bitvec::prelude::*;
 use smallvec::SmallVec;
 
 use crate::object::{BranchName, ObjectId};
-use crate::schema_manager::{SchemaContext, translate_column_for_index};
+use crate::schema_manager::{
+    SchemaContext, translate_column_for_index, translate_table_for_schema,
+};
 
 use crate::storage::Storage;
 
@@ -176,6 +178,25 @@ fn natural_row_projection_element_index(
     }
 
     None
+}
+
+fn translate_scan_table_name(
+    schema_context: &SchemaContext,
+    table: &str,
+    branch_schema_hash: Option<SchemaHash>,
+) -> TableName {
+    let translated_table = if let Some(target_hash) = branch_schema_hash {
+        if target_hash != schema_context.current_hash {
+            translate_table_for_schema(schema_context, table, &target_hash)
+                .unwrap_or_else(|| table.to_string())
+        } else {
+            table.to_string()
+        }
+    } else {
+        table.to_string()
+    };
+
+    TableName::new(&translated_table)
 }
 
 fn push_unique_magic_ref(
@@ -603,6 +624,8 @@ impl QueryGraph {
         for branch in &branches {
             // Get schema hash for this branch to determine if column translation is needed
             let branch_schema_hash = branch_schema_map.get(branch).copied();
+            let scan_table_name =
+                translate_scan_table_name(schema_context, table_str, branch_schema_hash);
 
             for disjunct in &plan.disjuncts {
                 // Find best index condition for this disjunct
@@ -638,7 +661,7 @@ impl QueryGraph {
                 let scan_column_name = ColumnName::new(&translated_column);
 
                 let scan_node = IndexScanNode::new_with_branch(
-                    plan.table,
+                    scan_table_name,
                     scan_column_name,
                     branch,
                     scan_condition,
@@ -647,7 +670,7 @@ impl QueryGraph {
                 let scan_id = graph.add_node(GraphNode::IndexScan(scan_node));
                 graph
                     .index_scan_nodes
-                    .push((scan_id, plan.table, scan_column_name));
+                    .push((scan_id, scan_table_name, scan_column_name));
                 phase1_outputs.push(scan_id);
             }
 
@@ -655,7 +678,7 @@ impl QueryGraph {
             if plan.include_deleted {
                 let deleted_column = ColumnName::new("_id_deleted");
                 let deleted_scan_node = IndexScanNode::new_with_branch(
-                    plan.table,
+                    scan_table_name,
                     deleted_column,
                     branch,
                     ScanCondition::All,
@@ -664,7 +687,7 @@ impl QueryGraph {
                 let deleted_scan_id = graph.add_node(GraphNode::IndexScan(deleted_scan_node));
                 graph
                     .index_scan_nodes
-                    .push((deleted_scan_id, plan.table, deleted_column));
+                    .push((deleted_scan_id, scan_table_name, deleted_column));
                 phase1_outputs.push(deleted_scan_id);
             }
         }
@@ -1288,6 +1311,17 @@ impl QueryGraph {
         session: Option<Session>,
         schema_context: &SchemaContext,
     ) -> Option<Self> {
+        let mut branch_schema_map: HashMap<String, SchemaHash> = HashMap::new();
+        for schema_hash in schema_context.all_live_hashes() {
+            let branch_name = ComposedBranchName::new(
+                &schema_context.env,
+                schema_hash,
+                &schema_context.user_branch,
+            )
+            .to_branch_name();
+            branch_schema_map.insert(branch_name.as_str().to_string(), schema_hash);
+        }
+
         let base_table_schema = schema.get(&plan.table)?;
         let base_descriptor = base_table_schema.columns.clone();
         let mut graph = QueryGraph::new(plan.table, base_descriptor.clone());
@@ -1307,9 +1341,12 @@ impl QueryGraph {
         // Build pipeline for base table: per-branch IndexScan (+Union) -> Materialize.
         let mut base_scan_ids = Vec::new();
         for branch in &join_branches {
+            let branch_schema_hash = branch_schema_map.get(*branch).copied();
+            let base_scan_table =
+                translate_scan_table_name(schema_context, plan.table.as_str(), branch_schema_hash);
             let id_column = ColumnName::new("_id");
             let base_scan = IndexScanNode::new_with_branch(
-                plan.table,
+                base_scan_table,
                 id_column,
                 *branch,
                 ScanCondition::All,
@@ -1318,7 +1355,7 @@ impl QueryGraph {
             let base_scan_id = graph.add_node(GraphNode::IndexScan(base_scan));
             graph
                 .index_scan_nodes
-                .push((base_scan_id, plan.table, id_column));
+                .push((base_scan_id, base_scan_table, id_column));
             base_scan_ids.push(base_scan_id);
         }
         let base_scan_output = if base_scan_ids.len() > 1 {
@@ -1406,9 +1443,15 @@ impl QueryGraph {
             // Build pipeline for right table: per-branch IndexScan (+Union) -> Materialize.
             let mut right_scan_ids = Vec::new();
             for branch in &join_branches {
+                let branch_schema_hash = branch_schema_map.get(*branch).copied();
+                let right_scan_table = translate_scan_table_name(
+                    schema_context,
+                    join_spec.table.as_str(),
+                    branch_schema_hash,
+                );
                 let id_column = ColumnName::new("_id");
                 let right_scan = IndexScanNode::new_with_branch(
-                    join_spec.table,
+                    right_scan_table,
                     id_column,
                     *branch,
                     ScanCondition::All,
@@ -1417,7 +1460,7 @@ impl QueryGraph {
                 let right_scan_id = graph.add_node(GraphNode::IndexScan(right_scan));
                 graph
                     .index_scan_nodes
-                    .push((right_scan_id, join_spec.table, id_column));
+                    .push((right_scan_id, right_scan_table, id_column));
                 right_scan_ids.push(right_scan_id);
             }
             let right_scan_output = if right_scan_ids.len() > 1 {
