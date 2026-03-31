@@ -24,23 +24,6 @@ pub struct DiffResult {
     pub transform: LensTransform,
     /// Ambiguities that require manual review.
     pub ambiguities: Vec<Ambiguity>,
-    /// Table-level changes observed between the schemas.
-    pub table_changes: Vec<TableChange>,
-}
-
-/// A table-level change detected during schema diffing.
-#[derive(Debug, Clone, PartialEq)]
-pub enum TableChange {
-    Added {
-        table: String,
-    },
-    Removed {
-        table: String,
-    },
-    PossibleRename {
-        old_table: String,
-        new_table: String,
-    },
 }
 
 /// An ambiguity detected during schema diffing.
@@ -113,7 +96,6 @@ impl std::fmt::Display for Ambiguity {
 pub fn diff_schemas(old: &Schema, new: &Schema) -> DiffResult {
     let mut transform = LensTransform::new();
     let mut ambiguities = Vec::new();
-    let mut table_changes = Vec::new();
 
     // Collect all table names
     let old_tables: std::collections::HashSet<_> = old.keys().collect();
@@ -148,48 +130,32 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> DiffResult {
             old_table: old_table.clone(),
             new_table: new_table.clone(),
         });
-        table_changes.push(TableChange::PossibleRename {
-            old_table,
-            new_table,
-        });
     }
 
-    table_changes.extend(
-        removed_tables
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| !matched_removed.contains(idx))
-            .map(|(_, table_name)| {
-                transform.push(
-                    LensOp::RemoveTable {
-                        table: table_name.as_str().to_string(),
-                        schema: old[*table_name].clone(),
-                    },
-                    false,
-                );
-                TableChange::Removed {
-                    table: table_name.as_str().to_string(),
-                }
-            }),
-    );
-    table_changes.extend(
-        added_tables
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| !matched_added.contains(idx))
-            .map(|(_, table_name)| {
-                transform.push(
-                    LensOp::AddTable {
-                        table: table_name.as_str().to_string(),
-                        schema: new[*table_name].clone(),
-                    },
-                    false,
-                );
-                TableChange::Added {
-                    table: table_name.as_str().to_string(),
-                }
-            }),
-    );
+    for (idx, table_name) in removed_tables.iter().enumerate() {
+        if matched_removed.contains(&idx) {
+            continue;
+        }
+        transform.push(
+            LensOp::RemoveTable {
+                table: table_name.as_str().to_string(),
+                schema: old[*table_name].clone(),
+            },
+            false,
+        );
+    }
+    for (idx, table_name) in added_tables.iter().enumerate() {
+        if matched_added.contains(&idx) {
+            continue;
+        }
+        transform.push(
+            LensOp::AddTable {
+                table: table_name.as_str().to_string(),
+                schema: new[*table_name].clone(),
+            },
+            false,
+        );
+    }
     // Tables in both (need to diff columns)
     for table_name in old_tables.intersection(&new_tables) {
         let old_table = &old[*table_name];
@@ -206,7 +172,6 @@ pub fn diff_schemas(old: &Schema, new: &Schema) -> DiffResult {
     DiffResult {
         transform,
         ambiguities,
-        table_changes,
     }
 }
 
@@ -454,7 +419,6 @@ mod tests {
 
         assert!(result.transform.ops.is_empty());
         assert!(result.ambiguities.is_empty());
-        assert!(result.table_changes.is_empty());
     }
 
     #[test]
@@ -469,7 +433,6 @@ mod tests {
 
         assert_eq!(result.transform.ops.len(), 1);
         assert!(result.ambiguities.is_empty());
-        assert!(result.table_changes.is_empty());
 
         match &result.transform.ops[0] {
             LensOp::AddColumn {
@@ -498,7 +461,6 @@ mod tests {
 
         assert_eq!(result.transform.ops.len(), 1);
         assert!(result.ambiguities.is_empty());
-        assert!(result.table_changes.is_empty());
 
         match &result.transform.ops[0] {
             LensOp::RemoveColumn { table, column, .. } => {
@@ -561,7 +523,6 @@ mod tests {
         // Type changes don't generate ops, just ambiguities
         assert!(result.transform.ops.is_empty());
         assert_eq!(result.ambiguities.len(), 1);
-        assert!(result.table_changes.is_empty());
 
         match &result.ambiguities[0] {
             Ambiguity::TypeChange {
@@ -590,7 +551,6 @@ mod tests {
         assert_eq!(result.transform.ops.len(), 1);
         assert_eq!(result.ambiguities.len(), 1);
         assert!(result.transform.has_drafts());
-        assert!(result.table_changes.is_empty());
 
         match &result.transform.ops[0] {
             LensOp::RenameColumn {
@@ -641,13 +601,6 @@ mod tests {
                 new_table: "people".to_string(),
             }]
         );
-        assert_eq!(
-            result.table_changes,
-            vec![TableChange::PossibleRename {
-                old_table: "users".to_string(),
-                new_table: "people".to_string(),
-            }]
-        );
     }
 
     #[test]
@@ -685,19 +638,6 @@ mod tests {
                     new_table: "companies".to_string(),
                 },
                 Ambiguity::PossibleTableRename {
-                    old_table: "users".to_string(),
-                    new_table: "people".to_string(),
-                },
-            ]
-        );
-        assert_eq!(
-            result.table_changes,
-            vec![
-                TableChange::PossibleRename {
-                    old_table: "orgs".to_string(),
-                    new_table: "companies".to_string(),
-                },
-                TableChange::PossibleRename {
                     old_table: "users".to_string(),
                     new_table: "people".to_string(),
                 },
@@ -741,23 +681,6 @@ mod tests {
             "ambiguous same-shape tables should not be auto-paired, but should still emit explicit add/remove table ops"
         );
         assert!(result.ambiguities.is_empty());
-        assert_eq!(
-            result.table_changes,
-            vec![
-                TableChange::Removed {
-                    table: "admins".to_string(),
-                },
-                TableChange::Removed {
-                    table: "users".to_string(),
-                },
-                TableChange::Added {
-                    table: "members".to_string(),
-                },
-                TableChange::Added {
-                    table: "people".to_string(),
-                },
-            ]
-        );
     }
 
     #[test]
@@ -812,12 +735,6 @@ mod tests {
         assert_eq!(add_col, 1);
         assert_eq!(remove_col, 1);
         assert_eq!(add_table, 1);
-        assert_eq!(
-            result.table_changes,
-            vec![TableChange::Added {
-                table: "posts".to_string(),
-            }]
-        );
     }
 
     #[test]
