@@ -5,7 +5,7 @@
 
 use crate::commit::CommitId;
 use crate::query_manager::encoding::{decode_row, encode_row};
-use crate::query_manager::types::SchemaHash;
+use crate::query_manager::types::{SchemaHash, TableName};
 
 use super::context::SchemaContext;
 use super::lens::Direction;
@@ -108,8 +108,9 @@ impl<'a> LensTransformer<'a> {
                     target: self.context.current_hash,
                 })?;
 
-        let source_table_name = translate_table_for_schema(self.context, &self.table, &source_hash)
-            .ok_or_else(|| TransformError::TableNotFound(self.table.clone()))?;
+        let source_table_name =
+            translate_table_name_to_schema(self.context, &self.table, &source_hash)
+                .ok_or_else(|| TransformError::TableNotFound(self.table.clone()))?;
 
         let source_table = source_schema
             .get(&crate::query_manager::types::TableName::new(
@@ -188,7 +189,7 @@ impl<'a> LensTransformer<'a> {
 ///
 /// Used for index lookups: translates column names from current schema
 /// to the equivalent column in an old schema (backward direction).
-pub fn translate_table_for_schema(
+pub fn translate_table_name_to_schema(
     context: &SchemaContext,
     table: &str,
     target_hash: &SchemaHash,
@@ -208,6 +209,59 @@ pub fn translate_table_for_schema(
     }
 
     Some(current_table)
+}
+
+/// Translate a table name from a source schema forward into the current schema.
+pub fn translate_table_name_from_schema(
+    context: &SchemaContext,
+    table: &str,
+    source_hash: &SchemaHash,
+) -> Option<String> {
+    if source_hash == &context.current_hash {
+        return Some(table.to_string());
+    }
+
+    let lens_path = context.lens_path(source_hash).ok()?;
+    let mut current_table = table.to_string();
+    for (lens, direction) in lens_path {
+        current_table = lens.translate_table(&current_table, direction)?;
+    }
+
+    Some(current_table)
+}
+
+/// Resolve the logical current-schema table name from an object-level table hint.
+///
+/// This treats metadata as provenance, not authority. If the hinted table no longer exists
+/// in the current schema, we walk live schema versions and translate the old name forward.
+pub fn resolve_current_table_name(context: &SchemaContext, hinted_table: &str) -> Option<String> {
+    let hinted = TableName::new(hinted_table);
+    if context.current_schema.contains_key(&hinted) {
+        return Some(hinted_table.to_string());
+    }
+
+    let mut candidate: Option<String> = None;
+    for (hash, schema) in &context.live_schemas {
+        if !schema.contains_key(&hinted) {
+            continue;
+        }
+
+        let translated = translate_table_name_from_schema(context, hinted_table, hash)?;
+        if !context
+            .current_schema
+            .contains_key(&TableName::new(&translated))
+        {
+            continue;
+        }
+
+        match &candidate {
+            Some(existing) if existing != &translated => return None,
+            Some(_) => {}
+            None => candidate = Some(translated),
+        }
+    }
+
+    candidate
 }
 
 /// Translate a table/column pair through the lens chain for a target schema.

@@ -19,6 +19,15 @@ pub enum Direction {
     Backward,
 }
 
+impl Direction {
+    pub fn reverse(&self) -> Self {
+        match self {
+            Direction::Forward => Direction::Backward,
+            Direction::Backward => Direction::Forward,
+        }
+    }
+}
+
 /// A single lens operation representing a schema change.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LensOp {

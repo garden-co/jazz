@@ -8,7 +8,9 @@ use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::AllObjectUpdate;
-use crate::schema_manager::{LensTransformer, SchemaContext};
+use crate::schema_manager::{
+    LensTransformer, SchemaContext, resolve_current_table_name, translate_table_name_to_schema,
+};
 use crate::storage::{CatalogueManifestOp, Storage};
 use crate::sync_manager::{
     ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
@@ -1302,12 +1304,10 @@ impl QueryManager {
         }
 
         // Check if this is a row object
-        let table = match update.metadata.get(MetadataKey::Table.as_str()) {
+        let table_hint = match update.metadata.get(MetadataKey::Table.as_str()) {
             Some(t) => t.clone(),
             None => return,
         };
-
-        let table_name = TableName::new(&table);
         let branch = update.branch_name.as_str();
 
         // Look up the correct schema for this branch
@@ -1346,6 +1346,16 @@ impl QueryManager {
                 }
             }
         };
+
+        let current_table = resolve_current_table_name(&self.schema_context, &table_hint)
+            .unwrap_or_else(|| table_hint.clone());
+        let branch_table = if schema_hash == self.schema_context.current_hash {
+            current_table.clone()
+        } else {
+            translate_table_name_to_schema(&self.schema_context, &current_table, &schema_hash)
+                .unwrap_or_else(|| table_hint.clone())
+        };
+        let table_name = TableName::new(&branch_table);
 
         // Get the correct schema for this branch
         let table_schema = if schema_hash == self.schema_context.current_hash {
@@ -1394,7 +1404,7 @@ impl QueryManager {
                     panic!(
                         "missing old_content for historical sync update (hard delete): object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
                         update.object_id,
-                        table,
+                        branch_table,
                         branch,
                         update.previous_commit_ids.len(),
                         update.commit_ids.len(),
@@ -1406,14 +1416,14 @@ impl QueryManager {
             // Apply hard delete unconditionally
             let _ = Self::update_indices_for_hard_delete_on_branch(
                 storage,
-                &table,
+                &branch_table,
                 branch,
                 update.object_id,
                 old_data,
                 &descriptor,
             );
-            self.mark_subscriptions_dirty(&table);
-            self.mark_row_deleted_in_subscriptions(&table, update.object_id);
+            self.mark_subscriptions_dirty(&branch_table);
+            self.mark_row_deleted_in_subscriptions(&branch_table, update.object_id);
             return;
         }
 
@@ -1424,7 +1434,7 @@ impl QueryManager {
                     panic!(
                         "missing old_content for historical sync update (soft delete): object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
                         update.object_id,
-                        table,
+                        branch_table,
                         branch,
                         update.previous_commit_ids.len(),
                         update.commit_ids.len(),
@@ -1438,7 +1448,7 @@ impl QueryManager {
             if let Some(old_data) = old_data {
                 let _ = Self::update_indices_for_soft_delete_on_branch(
                     storage,
-                    &table,
+                    &branch_table,
                     branch,
                     update.object_id,
                     old_data,
@@ -1447,21 +1457,21 @@ impl QueryManager {
             } else {
                 // No old content - just remove from _id and add to _id_deleted
                 let _ = storage.index_remove(
-                    &table,
+                    &branch_table,
                     "_id",
                     branch,
                     &Value::Uuid(update.object_id),
                     update.object_id,
                 );
                 if let Err(error) = storage.index_insert(
-                    &table,
+                    &branch_table,
                     "_id_deleted",
                     branch,
                     &Value::Uuid(update.object_id),
                     update.object_id,
                 ) {
                     tracing::error!(
-                        table,
+                        table = branch_table,
                         branch,
                         object_id = %update.object_id,
                         %error,
@@ -1469,14 +1479,14 @@ impl QueryManager {
                     );
                 }
             }
-            self.mark_subscriptions_dirty(&table);
-            self.mark_row_deleted_in_subscriptions(&table, update.object_id);
+            self.mark_subscriptions_dirty(&branch_table);
+            self.mark_row_deleted_in_subscriptions(&branch_table, update.object_id);
             return;
         }
 
         // Check if this is an undelete (non-empty content for previously soft-deleted row)
         let was_soft_deleted =
-            self.row_is_deleted_on_branch(storage, &table, branch, update.object_id);
+            self.row_is_deleted_on_branch(storage, &branch_table, branch, update.object_id);
 
         // Extract current (new) data from the object on this branch
         let new_data = match self.load_row_from_object_on_branch(update.object_id, branch) {
@@ -1488,21 +1498,21 @@ impl QueryManager {
             // This is an undelete - remove from _id_deleted, add to _id and column indices
             if let Err(error) = Self::update_indices_for_undelete_on_branch(
                 storage,
-                &table,
+                &branch_table,
                 branch,
                 update.object_id,
                 &new_data,
                 &descriptor,
             ) {
                 tracing::error!(
-                    table,
+                    table = branch_table,
                     branch,
                     object_id = %update.object_id,
                     %error,
                     "failed to update indices for synced undelete"
                 );
             }
-            self.mark_subscriptions_dirty(&table);
+            self.mark_subscriptions_dirty(&branch_table);
             return;
         }
 
@@ -1511,14 +1521,14 @@ impl QueryManager {
             // First commit on branch (new object or synced first commit) - insert into all indices
             if let Err(error) = Self::update_indices_for_insert_on_branch(
                 storage,
-                &table,
+                &branch_table,
                 branch,
                 update.object_id,
                 &new_data,
                 &descriptor,
             ) {
                 tracing::error!(
-                    table,
+                    table = branch_table,
                     branch,
                     object_id = %update.object_id,
                     %error,
@@ -1530,7 +1540,7 @@ impl QueryManager {
             // TODO: Future merge strategies - currently last-writer-wins by timestamp
             if let Err(error) = Self::update_indices_for_update_on_branch(
                 storage,
-                &table,
+                &branch_table,
                 branch,
                 update.object_id,
                 &old_data,
@@ -1538,7 +1548,7 @@ impl QueryManager {
                 &descriptor,
             ) {
                 tracing::error!(
-                    table,
+                    table = branch_table,
                     branch,
                     object_id = %update.object_id,
                     %error,
@@ -1549,15 +1559,15 @@ impl QueryManager {
             panic!(
                 "missing old_content for historical sync update: object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
                 update.object_id,
-                table,
+                branch_table,
                 branch,
                 update.previous_commit_ids.len(),
                 update.commit_ids.len(),
             );
         }
 
-        self.mark_subscriptions_dirty(&table);
-        self.mark_row_updated_in_subscriptions(&table, update.object_id);
+        self.mark_subscriptions_dirty(&branch_table);
+        self.mark_row_updated_in_subscriptions(&branch_table, update.object_id);
     }
     /// Mark subscriptions dirty for a table based on update origin.
     fn mark_subscriptions_dirty_with_origin(&mut self, table: &str, local_update: bool) {

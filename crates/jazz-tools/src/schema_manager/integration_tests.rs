@@ -1190,6 +1190,142 @@ mod tests {
         );
     }
 
+    #[test]
+    fn table_rename_update_and_delete_copy_on_write() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("people")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let mut transform = LensTransform::new();
+        transform.push(
+            LensOp::RenameTable {
+                old_name: "users".to_string(),
+                new_name: "people".to_string(),
+            },
+            false,
+        );
+        let lens = Lens::new(v1_hash, v2_hash, transform);
+
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), v2.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+        manager.add_live_schema_with_lens(v1.clone(), lens).unwrap();
+
+        let mut storage = MemoryStorage::new();
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let current_branch = manager.branch_name().as_str().to_string();
+
+        let v1_table = v1.get(&TableName::new("users")).unwrap();
+        let row_id = ObjectId::new();
+        let row_data = encode_row(
+            &v1_table.columns,
+            &[
+                Value::Uuid(row_id),
+                Value::Text("alice@example.com".to_string()),
+            ],
+        )
+        .unwrap();
+
+        ingest_remote_row(
+            manager.query_manager_mut(),
+            &mut storage,
+            "users",
+            row_id,
+            &v1_branch,
+            row_data,
+            1_000,
+        );
+
+        manager
+            .update_with_session(
+                &mut storage,
+                row_id,
+                &[(
+                    "email".to_string(),
+                    Value::Text("alice+updated@example.com".to_string()),
+                )],
+                None,
+            )
+            .expect("rename-aware copy-on-write update should succeed");
+
+        assert!(
+            manager.query_manager().row_is_indexed_on_branch(
+                &storage,
+                "people",
+                &current_branch,
+                row_id
+            ),
+            "updated row should be indexed on the renamed table in the current branch"
+        );
+        assert!(
+            !manager.query_manager().row_is_indexed_on_branch(
+                &storage,
+                "users",
+                &current_branch,
+                row_id
+            ),
+            "current-branch indices should use the renamed table name"
+        );
+
+        let current_results = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("people")
+                .branch(current_branch.clone())
+                .build(),
+        );
+        assert_eq!(current_results.len(), 1);
+        assert_eq!(current_results[0].0, row_id);
+        assert!(
+            current_results[0]
+                .1
+                .iter()
+                .any(|value| value == &Value::Text("alice+updated@example.com".to_string())),
+            "updated row should carry the new email in its current-branch projection"
+        );
+
+        manager
+            .delete(&mut storage, row_id, None)
+            .expect("rename-aware copy-on-write delete should succeed");
+
+        assert!(
+            manager.query_manager().row_is_deleted_on_branch(
+                &storage,
+                "people",
+                &current_branch,
+                row_id
+            ),
+            "soft delete should be indexed under the renamed current-branch table"
+        );
+
+        let visible_after_delete = execute_query(
+            &mut manager,
+            &mut storage,
+            QueryBuilder::new("people")
+                .branch(current_branch.clone())
+                .build(),
+        );
+        assert!(
+            visible_after_delete.is_empty(),
+            "soft-deleted row should no longer appear in current-branch people queries"
+        );
+    }
+
     // ========================================================================
     // Catalogue Sync Tests
     // ========================================================================
