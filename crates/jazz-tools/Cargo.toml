@@ -39,7 +39,7 @@ cli = [
   "dep:reqwest",
 ]
 test-utils = ["cli", "client"]
-test = ["test-utils"]
+test = ["test-utils", "rocksdb"]
 otel = [
   "cli",
   "dep:opentelemetry",
