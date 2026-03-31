@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useDb, useSession } from "jazz-tools/react";
 import { navigate } from "@/hooks/useRouter";
 import { useMyProfile } from "@/hooks/useMyProfile";
-import { app } from "../../schema/app.js";
+import { app } from "../../schema.js";
 
 interface InviteHandlerProps {
   chatId: string;

@@ -3,7 +3,7 @@ import { useDb } from "jazz-tools/react";
 import { DownloadIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { downloadUrl } from "@/lib/utils";
-import { app, type Attachment } from "../../../schema/app.js";
+import { app, type Attachment } from "../../../schema.js";
 
 interface ChatImageProps {
   attachment: Attachment;

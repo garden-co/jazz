@@ -1,0 +1,113 @@
+---
+title: Writing Data
+description: Insert, update, and delete APIs with local-first execution, framework context hooks, and an intro to durability tiers.
+reviewedAt: "14cd73f0"
+---
+
+## Local-first writes
+
+All writes execute against the local database first. `insert`, `update`, and `delete` return immediately, while their `Durable` variants (`insertDurable`, `updateDurable`, `deleteDurable`) return a promise that resolves once the write reaches the requested [durability tier](#write-durability-tiers).
+
+<Callout type="info">
+For browser `Blob`, `File`, or `ReadableStream` uploads, use `db.createFileFromBlob(...)`
+or `db.createFileFromStream(...)` and store the returned file ID on your own row.
+
+See [Files & Blobs](/docs/writing/files-and-blobs) for more details.
+
+</Callout>
+
+## Getting a `Db` handle
+
+Every framework provides a hook to access the database handle. In plain TypeScript, use the `Db` returned by `createDb` directly.
+
+<Tabs
+  groupId="jazz-framework"
+  items={["React", "Vue", "Svelte", "TypeScript"]}
+  persist
+  updateAnchor
+>
+  <Tab value="React">
+    <include cwd lang="tsx">
+      ../examples/docs/todo-client-localfirst-react/src/GetDbExample.tsx#writing-get-db-react
+    </include>
+  </Tab>
+  <Tab value="Vue">
+    <include cwd lang="vue">
+      ../examples/docs/todo-client-localfirst-vue/src/GetDbExample.vue#writing-get-db-vue
+    </include>
+  </Tab>
+  <Tab value="Svelte">
+    <include cwd lang="svelte">
+      ../examples/docs/todo-client-localfirst-svelte/src/GetDbExample.svelte#writing-get-db-svelte
+    </include>
+  </Tab>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/GetDbExample.ts#writing-get-db-ts
+    </include>
+  </Tab>
+</Tabs>
+
+## Insert, update, delete
+
+Mutations are methods on the database handle. All three take a table as their first argument.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-crud-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-crud-rust
+    </include>
+  </Tab>
+</Tabs>
+
+### Partial updates and nullable fields
+
+`update(...)` and `updateDurable(...)` only modify the keys you pass.
+Omitted fields are left unchanged; explicitly passing `undefined` also leaves a field unchanged.
+To clear a nullable column in TypeScript, pass `null`.
+Required fields cannot be set to `null`.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-nullable-update-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-nullable-update-rust
+    </include>
+  </Tab>
+</Tabs>
+
+## Write durability tiers
+
+When using `insertDurable`, `updateDurable`, or `deleteDurable`, you need to pass a tier as an option. The tier specified controls how far the mutation must propagate before the promise resolves: locally on the client (`worker`), the nearest edge server (`edge`), or the global core (`global`).
+
+| Tier     | Resolves when                       | Default for    |
+| -------- | ----------------------------------- | -------------- |
+| `worker` | Persisted to local OPFS             | Browser/client |
+| `edge`   | Acknowledged by nearest sync server | Backend/server |
+| `global` | Propagated to global core           | —              |
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-durability-tier-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-durability-tier-rust
+    </include>
+  </Tab>
+</Tabs>
+
+See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including read durability, data flow between tiers, and consistency semantics.
+
+Need to clear local data during development? See [How do I reset browser storage?](/docs/reference/faq#reset-browser-storage)

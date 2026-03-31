@@ -6,7 +6,7 @@ use smolset::SmolSet;
 
 use crate::commit::{Commit, CommitId, StoredState};
 use crate::object::{Branch, BranchLoadedState, BranchName, Object, ObjectId};
-use crate::storage::{Storage, StorageError};
+use crate::storage::{LoadedBranch, Storage, StorageError};
 
 /// Unique identifier for a subscription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -169,6 +169,39 @@ impl ObjectManager {
         id
     }
 
+    fn branch_from_loaded(loaded: LoadedBranch) -> Branch {
+        let mut commits = HashMap::new();
+        // Compute tips correctly: a tip is a commit not referenced
+        // as a parent by any other commit in the branch.
+        let mut all_ids: HashSet<CommitId> = HashSet::new();
+        let mut parent_ids: HashSet<CommitId> = HashSet::new();
+        for commit in &loaded.commits {
+            all_ids.insert(commit.id());
+            for parent in &commit.parents {
+                parent_ids.insert(*parent);
+            }
+        }
+        let mut tips: SmolSet<[CommitId; 2]> = SmolSet::new();
+        for cid in &all_ids {
+            if !parent_ids.contains(cid) {
+                tips.insert(*cid);
+            }
+        }
+        for commit in loaded.commits {
+            commits.insert(commit.id(), commit);
+        }
+        Branch {
+            commits,
+            tips,
+            tails: if loaded.tails.is_empty() {
+                None
+            } else {
+                Some(loaded.tails.into_iter().collect())
+            },
+            loaded_state: BranchLoadedState::AllCommits,
+        }
+    }
+
     /// Get an object by id.
     pub fn get(&self, id: ObjectId) -> Option<&Object> {
         self.objects.get(&id)
@@ -203,53 +236,35 @@ impl ObjectManager {
             });
         }
 
-        let object = self.objects.get_mut(&id)?;
-        for branch_name in branches {
-            let bn = BranchName::new(branch_name);
-            if object.branches.contains_key(&bn) {
-                continue;
-            }
-            if let Ok(Some(loaded)) = storage.load_branch(id, &bn) {
-                let mut commits = HashMap::new();
-                // Compute tips correctly: a tip is a commit not referenced
-                // as a parent by any other commit in the branch.
-                let mut all_ids: HashSet<CommitId> = HashSet::new();
-                let mut parent_ids: HashSet<CommitId> = HashSet::new();
-                for commit in &loaded.commits {
-                    all_ids.insert(commit.id());
-                    for parent in &commit.parents {
-                        parent_ids.insert(*parent);
+        {
+            let object = self.objects.get_mut(&id)?;
+            for branch_name in branches {
+                let bn = BranchName::new(branch_name);
+                if object.branches.contains_key(&bn) {
+                    continue;
+                }
+                match storage.load_branch(id, &bn) {
+                    Ok(Some(loaded)) => {
+                        object.branches.insert(bn, Self::branch_from_loaded(loaded));
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            %id,
+                            branch = %bn,
+                            error = ?err,
+                            "get_or_load: failed to hydrate requested branch"
+                        );
                     }
                 }
-                let mut tips: SmolSet<[CommitId; 2]> = SmolSet::new();
-                for cid in &all_ids {
-                    if !parent_ids.contains(cid) {
-                        tips.insert(*cid);
-                    }
-                }
-                for commit in loaded.commits {
-                    commits.insert(commit.id(), commit);
-                }
-                object.branches.insert(
-                    bn,
-                    Branch {
-                        commits,
-                        tips,
-                        tails: if loaded.tails.is_empty() {
-                            None
-                        } else {
-                            Some(loaded.tails.into_iter().collect())
-                        },
-                        loaded_state: BranchLoadedState::AllCommits,
-                    },
-                );
             }
         }
 
+        let object = self.objects.get(&id)?;
         let branch_count = object.branches.len();
         let commit_count: usize = object.branches.values().map(|b| b.commits.len()).sum();
         tracing::trace!(%id, branch_count, commit_count, "get_or_load: loaded from storage");
-        self.objects.get(&id)
+        Some(object)
     }
 
     /// Get mutable object by id.

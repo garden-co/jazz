@@ -1,0 +1,85 @@
+---
+title: MCP Server
+description: Give your AI assistant direct access to Jazz documentation via the Model Context Protocol.
+reviewedAt: "14cd73f0"
+---
+
+The `jazz-tools` package ships with a built-in [MCP](https://modelcontextprotocol.io) server that
+exposes the Jazz docs as tools any MCP-compatible AI assistant can call during a conversation.
+
+The docs served are always matched to the version of `jazz-tools` you install, so your
+assistant is reading documentation for the exact API you have available. To use a different
+version's docs, specify a version in the npx command (e.g. `npx jazz-tools@2.0.0 mcp`).
+
+<Callout type="info">
+  Node 22.13 or later is recommended for the best search results. Earlier versions fall back to
+  basic keyword search.
+</Callout>
+
+## Installation
+
+<Tabs
+  groupId="jazz-mcp-client"
+  items={["Claude Code", "Gemini CLI", "Codex", "OpenCode"]}
+  persist
+  updateAnchor
+>
+  <Tab value="Claude Code">
+    <include lang="bash" meta='title="Terminal"'>
+      ../../partials/mcp/install.sh#claude-code
+    </include>
+  </Tab>
+  <Tab value="Gemini CLI">
+    <include lang="bash" meta='title="Terminal"'>
+      ../../partials/mcp/install.sh#gemini
+    </include>
+  </Tab>
+  <Tab value="Codex">
+    <include lang="bash" meta='title="Terminal"'>
+      ../../partials/mcp/install.sh#codex
+    </include>
+  </Tab>
+  <Tab value="OpenCode">
+    <include lang="bash" meta='title="Terminal"'>
+      ../../partials/mcp/install.sh#opencode
+    </include>
+  </Tab>
+</Tabs>
+
+Restart your assistant after running the command. The server starts automatically on launch.
+
+<Callout type="info" title="Tip">
+  To ensure your assistant uses the Jazz docs proactively, add a line to your project context file (e.g. `CLAUDE.md`):
+
+`Jazz docs are available via the jazz-docs MCP server. Use search_docs and get_doc to look up APIs before answering Jazz questions.`
+
+</Callout>
+
+## Tools
+
+### `list_pages`
+
+Returns a list of all documentation pages with their title, slug, and description.
+Useful for orientation&hairsp;—&hairsp;ask your assistant to list pages when you want an overview of what's covered.
+
+### `search_docs`
+
+Full-text search across all pages and sections.
+
+```ts
+search_docs(query: string, limit?: number)
+```
+
+Accepts plain keywords or FTS5 query syntax (`AND`, `OR`, `"exact phrase"`, `prefix*`).
+Results are ranked by relevance and include a snippet of the matching section.
+
+### `get_doc`
+
+Retrieves the full content of a single page by slug.
+
+```ts
+get_doc(slug: string)
+```
+
+Slugs match the URL path under `/docs/` — for example `schemas/defining-tables`, `reading/queries`, or
+`quickstarts/client`. Use `list_pages` to discover available slugs.

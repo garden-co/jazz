@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { useChatDisplayName } from "@/hooks/useChatDisplayName";
 import { inIframe } from "@/lib/utils";
 import { ChatSettings } from "./ChatSettings";
-import { app } from "../../../schema/app.js";
+import { app } from "../../../schema.js";
 
 interface ChatHeaderProps {
   chatId: string;

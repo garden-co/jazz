@@ -790,6 +790,7 @@ impl QueryManager {
             descriptor,
             &table_name,
             session,
+            branch,
         );
         if graphs.is_empty() {
             return true;
@@ -798,9 +799,10 @@ impl QueryManager {
         let branches = vec![branch.to_string()];
         let storage_ref: &dyn Storage = storage;
         let om = &mut self.sync_manager.object_manager;
+        let branch_name = BranchName::new(branch);
         let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
             let obj = om.get_or_load(id, storage_ref, &branches)?;
-            let branch_state = obj.branches.get(&BranchName::new(branch))?;
+            let branch_state = obj.branches.get(&branch_name)?;
             let tip_id = branch_state.tips.iter().next()?;
             let commit = branch_state.commits.get(tip_id)?;
             if commit.content.is_empty() {
@@ -809,7 +811,7 @@ impl QueryManager {
             Some(LoadedRow::new(
                 commit.content.clone(),
                 *tip_id,
-                [(id, BranchName::new(branch))].into_iter().collect(),
+                [(id, branch_name)].into_iter().collect(),
             ))
         };
 
