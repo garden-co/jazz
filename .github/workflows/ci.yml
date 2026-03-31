@@ -65,9 +65,13 @@ jobs:
       RUSTC_WRAPPER: sccache
       SCCACHE_DIR: /home/runner/.cache/sccache
       SCCACHE_CACHE_SIZE: 8G
+      LIBCLANG_PATH: /usr/lib/llvm-18/lib
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install libclang (needed by rocksdb bindgen)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -98,9 +102,6 @@ jobs:
         with:
           key: sccache-${{ github.repository_id }}-${{ runner.os }}-v1
           path: /home/runner/.cache/sccache
-
-      - name: Install libclang (needed by rocksdb bindgen)
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev
 
       - run: cargo test --workspace --lib --bins --tests --exclude jazz-rn --features test
 
