@@ -5219,6 +5219,7 @@ mod tests {
             .create_app(
                 app_id,
                 "Meta Store App".to_string(),
+                "prod".to_string(),
                 "https://issuer.example/jwks".to_string(),
                 45,
                 90,
