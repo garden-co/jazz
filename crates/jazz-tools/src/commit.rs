@@ -102,7 +102,14 @@ impl Commit {
     }
 
     pub fn row_provenance(&self) -> Option<RowProvenance> {
-        row_provenance_from_metadata(self.metadata.as_ref(), &self.author, self.timestamp)
+        row_provenance_from_metadata(self.metadata.as_ref(), &self.author, self.timestamp).or_else(
+            || {
+                Some(RowProvenance::for_insert(
+                    self.author.clone(),
+                    self.timestamp,
+                ))
+            },
+        )
     }
 }
 
@@ -205,5 +212,23 @@ mod tests {
         };
 
         assert_eq!(commit1.id(), commit2.id());
+    }
+
+    #[test]
+    fn row_provenance_falls_back_to_commit_author_and_timestamp() {
+        let commit = Commit {
+            parents: smallvec![],
+            content: b"hello".to_vec(),
+            timestamp: 1234567890,
+            author: "jazz:test".to_string(),
+            metadata: None,
+            stored_state: StoredState::default(),
+            ack_state: CommitAckState::default(),
+        };
+
+        assert_eq!(
+            commit.row_provenance(),
+            Some(RowProvenance::for_insert("jazz:test", 1234567890))
+        );
     }
 }
