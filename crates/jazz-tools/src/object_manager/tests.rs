@@ -1717,7 +1717,7 @@ fn get_head_ids_for_prefix_cold_loads_without_loading_branches() {
             .add_commit(
                 &mut io,
                 object_id,
-                batch1.clone(),
+                batch1,
                 vec![],
                 b"batch-1".to_vec(),
                 author,
@@ -1728,7 +1728,7 @@ fn get_head_ids_for_prefix_cold_loads_without_loading_branches() {
             .add_commit(
                 &mut io,
                 object_id,
-                batch2.clone(),
+                batch2,
                 vec![],
                 b"batch-2".to_vec(),
                 author,
@@ -1739,7 +1739,7 @@ fn get_head_ids_for_prefix_cold_loads_without_loading_branches() {
             .add_commit(
                 &mut io,
                 object_id,
-                batch3.clone(),
+                batch3,
                 vec![head1, head2],
                 b"batch-3-root".to_vec(),
                 author,

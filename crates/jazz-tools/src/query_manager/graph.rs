@@ -445,6 +445,10 @@ impl QueryGraph {
             .collect()
     }
 
+    pub fn has_pagination(&self) -> bool {
+        self.pagination_node.is_some()
+    }
+
     fn scope_from_tuples(&self, tuples: &[Tuple]) -> HashSet<super::types::ScopedObject> {
         tuples
             .iter()

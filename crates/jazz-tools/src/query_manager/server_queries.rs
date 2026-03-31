@@ -62,6 +62,48 @@ struct UpdatePermissionRequest<'a> {
 }
 
 impl QueryManager {
+    fn authorized_pagination_scope_from_graph(
+        &mut self,
+        storage: &dyn Storage,
+        graph: &super::graph::QueryGraph,
+        schema_context: &crate::schema_manager::SchemaContext,
+        session: Option<&Session>,
+    ) -> Option<HashSet<(ObjectId, BatchBranchKey)>> {
+        let Some((auth_schema, auth_context)) =
+            self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
+        else {
+            return (!self.authorization_schema_required).then(|| graph.sync_scope_object_keys());
+        };
+
+        if auth_schema
+            .values()
+            .all(|table_schema| table_schema.policies.select.using.is_none())
+        {
+            return Some(graph.sync_scope_object_keys());
+        }
+
+        let scope = graph.sync_scope_object_keys();
+        let mut authorization_cache: HashMap<(ObjectId, BatchBranchKey), bool> = HashMap::new();
+        scope
+            .iter()
+            .copied()
+            .all(|(object_id, branch_key)| {
+                *authorization_cache
+                    .entry((object_id, branch_key))
+                    .or_insert_with(|| {
+                        self.provenance_row_matches_current_select_policy(
+                            storage,
+                            object_id,
+                            branch_key.branch_name(),
+                            session,
+                            &auth_schema,
+                            &auth_context,
+                        )
+                    })
+            })
+            .then_some(scope)
+    }
+
     pub(super) fn build_server_subscription_context(
         &self,
         ctx: &crate::schema_manager::QuerySchemaContext,
@@ -370,6 +412,13 @@ impl QueryManager {
         schema_context: &crate::schema_manager::SchemaContext,
         session: Option<&Session>,
     ) -> Vec<Row> {
+        if graph.has_pagination() {
+            return self
+                .authorized_pagination_scope_from_graph(storage, graph, schema_context, session)
+                .map(|_| graph.current_result())
+                .unwrap_or_default();
+        }
+
         let Some((auth_schema, auth_context)) =
             self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
         else {
@@ -421,6 +470,12 @@ impl QueryManager {
         schema_context: &crate::schema_manager::SchemaContext,
         session: Option<&Session>,
     ) -> HashSet<(ObjectId, BatchBranchKey)> {
+        if graph.has_pagination() {
+            return self
+                .authorized_pagination_scope_from_graph(storage, graph, schema_context, session)
+                .unwrap_or_default();
+        }
+
         let Some((auth_schema, auth_context)) =
             self.authorization_schema_for_context(&schema_context.env, &schema_context.user_branch)
         else {

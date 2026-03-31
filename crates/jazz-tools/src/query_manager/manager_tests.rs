@@ -7627,6 +7627,60 @@ fn policy_filters_select_results() {
 }
 
 #[test]
+fn paginated_policy_query_drops_page_when_hidden_prefix_is_required() {
+    // Ordered rows:
+    //   1. "A-hidden"  (not visible to alice)
+    //   2. "B-visible" (visible to alice)
+    //
+    // Query:
+    //   ORDER BY title ASC OFFSET 1 LIMIT 1
+    //
+    // Alice cannot reproduce that page locally without the hidden prefix row,
+    // so the paginated result should be withheld entirely.
+    let sync_manager = SyncManager::new();
+    let schema = policy_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "documents",
+        &[
+            Value::Text("bob".into()),
+            Value::Text("sales".into()),
+            Value::Text("A-hidden".into()),
+        ],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "documents",
+        &[
+            Value::Text("alice".into()),
+            Value::Text("eng".into()),
+            Value::Text("B-visible".into()),
+        ],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("documents")
+        .order_by("title")
+        .offset(1)
+        .limit(1)
+        .build();
+    let sub_id = qm
+        .subscribe_with_session(query, Some(PolicySession::new("alice")), None)
+        .unwrap();
+
+    qm.process(&mut storage);
+
+    assert!(
+        qm.get_subscription_results(sub_id).is_empty(),
+        "paginated query should not reveal rows when an invisible ordered prefix row is required"
+    );
+}
+
+#[test]
 fn no_session_returns_all_rows() {
     let sync_manager = SyncManager::new();
     let schema = policy_schema();
