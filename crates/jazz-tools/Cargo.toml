@@ -94,9 +94,9 @@ reqwest = { version = "0.12", default-features = false, features = [
 thiserror = { version = "1", optional = true }
 
 opentelemetry = { version = "0.31", optional = true }
-opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic"], optional = true }
-opentelemetry-stdout = { version = "0.31", features = ["trace"], optional = true }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"], optional = true }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "metrics"], optional = true }
+opentelemetry-stdout = { version = "0.31", features = ["trace", "metrics"], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 
 [dev-dependencies]
