@@ -1,7 +1,7 @@
 use super::*;
 use crate::commit::CommitAckState;
 use crate::query_manager::types::{
-    BatchId, BranchPrefixName, ComposedBranchName, QueryBranchRef, SchemaHash,
+    BatchId, BatchOrd, BranchPrefixName, ComposedBranchName, QueryBranchRef, SchemaHash,
 };
 use crate::storage::MemoryStorage;
 use uuid::Uuid;
@@ -60,6 +60,54 @@ fn get_nonexistent_object_returns_none() {
     let fake_id = ObjectId::new();
 
     assert!(manager.get(fake_id).is_none());
+}
+
+#[test]
+fn apply_prefix_batch_update_mutates_catalog_in_place() {
+    let prefix = test_batch_prefix().branch_prefix();
+    let batch1 = BatchId::from_uuid(Uuid::from_u128(1));
+    let batch2 = BatchId::from_uuid(Uuid::from_u128(2));
+    let commit1 = CommitId([1; 32]);
+    let commit2 = CommitId([2; 32]);
+
+    let mut catalog = PrefixBatchCatalog::default();
+    catalog.insert_batch_meta(PrefixBatchMeta {
+        batch_id: batch1,
+        batch_ord: BatchOrd(0),
+        root_commit_id: commit1,
+        head_commit_id: commit1,
+        first_timestamp: 10,
+        last_timestamp: 10,
+        parent_batch_ords: Vec::new(),
+        child_count: 0,
+    });
+    catalog.insert_leaf_batch_ord(BatchOrd(0));
+
+    let update = PrefixBatchUpdate {
+        prefix,
+        batch_meta: PrefixBatchMeta {
+            batch_id: batch2,
+            batch_ord: BatchOrd(1),
+            root_commit_id: commit2,
+            head_commit_id: commit2,
+            first_timestamp: 20,
+            last_timestamp: 20,
+            parent_batch_ords: vec![BatchOrd(0)],
+            child_count: 0,
+        },
+        remove_leaf_batch_ords: [BatchOrd(0)].into_iter().collect(),
+        increment_parent_child_counts: vec![BatchOrd(0)],
+    };
+
+    ObjectManager::apply_prefix_batch_update(&mut catalog, &update);
+
+    assert_eq!(catalog.batch_meta(&batch1).unwrap().child_count, 1);
+    assert!(!catalog.contains_leaf_batch(&batch1));
+    assert!(catalog.contains_leaf_batch(&batch2));
+    assert_eq!(
+        catalog.batch_meta(&batch2).unwrap().parent_batch_ords,
+        vec![BatchOrd(0)]
+    );
 }
 
 // --- add_commit tests ---
@@ -1304,6 +1352,75 @@ fn get_leaf_head_ids_for_prefix_cold_loads_only_leaf_branches() {
             .get(&prefix.branch_prefix())
             .map(|catalog| catalog.leaf_batch_ids().collect::<HashSet<_>>()),
         Some(HashSet::from([batch3_id]))
+    );
+}
+
+#[test]
+fn get_head_ids_for_prefix_cold_loads_without_loading_branches() {
+    let mut io = MemoryStorage::new();
+    let author = ObjectId::new();
+    let prefix = test_batch_prefix();
+    let batch1 = test_batch_branch(&prefix, 21);
+    let batch2 = test_batch_branch(&prefix, 22);
+    let batch3 = test_batch_branch(&prefix, 23);
+
+    let (object_id, head1, head2, head3) = {
+        let mut manager = ObjectManager::new();
+        let object_id = manager.create(&mut io, None);
+        let head1 = manager
+            .add_commit(
+                &mut io,
+                object_id,
+                batch1.clone(),
+                vec![],
+                b"batch-1".to_vec(),
+                author,
+                None,
+            )
+            .unwrap();
+        let head2 = manager
+            .add_commit(
+                &mut io,
+                object_id,
+                batch2.clone(),
+                vec![],
+                b"batch-2".to_vec(),
+                author,
+                None,
+            )
+            .unwrap();
+        let head3 = manager
+            .add_commit(
+                &mut io,
+                object_id,
+                batch3.clone(),
+                vec![head1, head2],
+                b"batch-3-root".to_vec(),
+                author,
+                None,
+            )
+            .unwrap();
+        (object_id, head1, head2, head3)
+    };
+
+    let mut reloaded = ObjectManager::new();
+    let head_ids = reloaded
+        .get_head_ids_for_prefix(object_id, &prefix, &io)
+        .unwrap();
+
+    assert_eq!(head_ids.len(), 3);
+    assert_eq!(head_ids.get(&batch1), Some(&head1));
+    assert_eq!(head_ids.get(&batch2), Some(&head2));
+    assert_eq!(head_ids.get(&batch3), Some(&head3));
+
+    let object = reloaded.get(object_id).unwrap();
+    assert!(object.branches.is_empty());
+    assert_eq!(
+        object
+            .prefix_batches
+            .get(&prefix.branch_prefix())
+            .map(|catalog| catalog.batch_metas().count()),
+        Some(3)
     );
 }
 

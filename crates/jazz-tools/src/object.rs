@@ -7,9 +7,7 @@ use smolset::SmolSet;
 use uuid::Uuid;
 
 use crate::commit::{Commit, CommitId};
-use crate::query_manager::types::{
-    BatchBranchKey, BatchId, BatchOrd, ComposedBranchName, QueryBranchRef,
-};
+use crate::query_manager::types::{BatchBranchKey, BatchId, BatchOrd, QueryBranchRef};
 
 /// Interned UUIDv7 identifying an object.
 /// Pointer-sized (8 bytes), Copy, fast equality via pointer comparison.
@@ -158,10 +156,10 @@ pub struct ObjectBranches {
 
 impl ObjectBranches {
     fn split_branch_name(branch_name: &BranchName) -> Option<(BranchName, BatchId)> {
-        let composed = ComposedBranchName::parse(branch_name)?;
+        let (prefix_name, batch_segment) = branch_name.as_str().rsplit_once('-')?;
         Some((
-            BranchName::new(composed.prefix().branch_prefix()),
-            composed.batch_id,
+            BranchName::new(prefix_name),
+            BatchId::parse_segment(batch_segment)?,
         ))
     }
 
@@ -308,7 +306,7 @@ pub struct PrefixBatchMeta {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BatchOrdLookupEntry {
+pub(crate) struct BatchOrdLookupEntry {
     batch_id: BatchId,
     batch_ord: BatchOrd,
 }
@@ -322,6 +320,33 @@ pub struct PrefixBatchCatalog {
 }
 
 impl PrefixBatchCatalog {
+    pub(crate) fn from_persisted_parts(
+        batches_by_ord: Vec<PrefixBatchMeta>,
+        leaf_batch_ords: impl IntoIterator<Item = BatchOrd>,
+    ) -> Self {
+        let mut lookup_by_id: Vec<BatchOrdLookupEntry> = batches_by_ord
+            .iter()
+            .map(|meta| BatchOrdLookupEntry {
+                batch_id: meta.batch_id,
+                batch_ord: meta.batch_ord,
+            })
+            .collect();
+        lookup_by_id.sort_by_key(|entry| *entry.batch_id.as_bytes());
+
+        let mut compact_leaf_batch_ords = SmolSet::new();
+        for batch_ord in leaf_batch_ords {
+            if batches_by_ord.get(batch_ord.as_usize()).is_some() {
+                compact_leaf_batch_ords.insert(batch_ord);
+            }
+        }
+
+        Self {
+            lookup_by_id,
+            batches_by_ord,
+            leaf_batch_ords: compact_leaf_batch_ords,
+        }
+    }
+
     fn lookup_index(&self, batch_id: &BatchId) -> Result<usize, usize> {
         let key = *batch_id.as_bytes();
         self.lookup_by_id

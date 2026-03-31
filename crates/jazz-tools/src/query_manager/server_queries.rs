@@ -210,13 +210,14 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<LoadedRow> {
         let branches = vec![branch_name.as_str().to_string()];
+        let branch_key = BatchBranchKey::from_branch_name(branch_name);
         let (table, tip_commit_id, tip_content) = {
             let object = self
                 .sync_manager
                 .object_manager
                 .get_or_load(object_id, storage, &branches)?;
             let table = object.metadata.get(MetadataKey::Table.as_str())?.clone();
-            let branch = object.branches.get(&branch_name)?;
+            let branch = object.branches.get_by_key(branch_key)?;
             let tip = branch
                 .tips
                 .iter()
@@ -239,9 +240,7 @@ impl QueryManager {
         Some(LoadedRow::new(
             transformed,
             tip_commit_id,
-            [(object_id, BatchBranchKey::from_branch_name(branch_name))]
-                .into_iter()
-                .collect(),
+            [(object_id, branch_key)].into_iter().collect(),
         ))
     }
 
@@ -306,6 +305,7 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> bool {
         let branches = vec![branch_name.as_str().to_string()];
+        let branch_key = BatchBranchKey::from_branch_name(branch_name);
         let Some((table, tip_content)) = ({
             let Some(object) = self
                 .sync_manager
@@ -317,7 +317,7 @@ impl QueryManager {
             let Some(table) = object.metadata.get(MetadataKey::Table.as_str()).cloned() else {
                 return false;
             };
-            let Some(branch) = object.branches.get(&branch_name) else {
+            let Some(branch) = object.branches.get_by_key(branch_key) else {
                 return false;
             };
             let Some(tip_commit) = branch
@@ -485,11 +485,10 @@ impl QueryManager {
         branches: &[QueryBranchRef],
         context: &mut RowTransformContext<'_>,
     ) -> Option<ResolvedSchemaRow> {
-        let mut best: Option<(u64, CommitId, Vec<u8>, BranchName, bool)> = None;
+        let mut best: Option<(u64, CommitId, Vec<u8>, QueryBranchRef, bool)> = None;
 
         for branch_ref in branches {
-            let branch_name = branch_ref.branch_name();
-            let Some(branch) = obj.branches.get(&branch_name) else {
+            let Some(branch) = obj.branches.get_by_key(branch_ref.batch_branch_key()) else {
                 continue;
             };
             for &tip_id in &branch.tips {
@@ -503,7 +502,7 @@ impl QueryManager {
                             commit.timestamp,
                             tip_id,
                             commit.content.clone(),
-                            branch_name,
+                            *branch_ref,
                             is_soft_deleted,
                         ));
                     }
@@ -514,7 +513,7 @@ impl QueryManager {
                             commit.timestamp,
                             tip_id,
                             commit.content.clone(),
-                            branch_name,
+                            *branch_ref,
                             is_soft_deleted,
                         ));
                     }
@@ -523,7 +522,7 @@ impl QueryManager {
             }
         }
 
-        let (_, commit_id, content, branch_name, is_soft_deleted) = best?;
+        let (_, commit_id, content, branch_ref, is_soft_deleted) = best?;
         if content.is_empty() {
             return None;
         }
@@ -531,7 +530,7 @@ impl QueryManager {
             id,
             content,
             commit_id,
-            branch_name,
+            branch_ref.branch_name(),
             is_soft_deleted,
             context,
         )

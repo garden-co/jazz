@@ -1077,7 +1077,9 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get_or_load(row_id, storage, &branches)?;
-        let branch_state = obj.branches.get(&branch_name)?;
+        let branch_state = obj
+            .branches
+            .get_by_key(BatchBranchKey::from_branch_name(branch_name))?;
         let tip_id = branch_state.tips.iter().next()?;
         let commit = branch_state.commits.get(tip_id)?;
         if commit.content.is_empty() {

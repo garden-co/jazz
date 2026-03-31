@@ -263,7 +263,13 @@ fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
 /// Simple hex encoding/decoding (avoiding external crate).
 pub mod hex {
     pub fn encode(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{:02x}", b)).collect()
+        const LUT: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for &byte in bytes {
+            out.push(LUT[(byte >> 4) as usize] as char);
+            out.push(LUT[(byte & 0x0f) as usize] as char);
+        }
+        out
     }
 
     pub fn decode(s: &str) -> Result<Vec<u8>, &'static str> {
@@ -349,14 +355,24 @@ impl Default for BatchId {
 
 impl Serialize for BatchId {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.branch_segment())
+        if serializer.is_human_readable() {
+            serializer.serialize_str(&self.branch_segment())
+        } else {
+            self.0.serialize(serializer)
+        }
     }
 }
 
 impl<'de> Deserialize<'de> for BatchId {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        Self::parse_segment(&s).ok_or_else(|| serde::de::Error::custom("invalid BatchId segment"))
+        if deserializer.is_human_readable() {
+            let s = String::deserialize(deserializer)?;
+            Self::parse_segment(&s)
+                .ok_or_else(|| serde::de::Error::custom("invalid BatchId segment"))
+        } else {
+            let bytes = <[u8; 16]>::deserialize(deserializer)?;
+            Ok(Self(bytes))
+        }
     }
 }
 
@@ -436,6 +452,15 @@ pub struct BatchBranchKey {
 }
 
 impl BatchBranchKey {
+    pub fn try_from_branch_name(branch_name: impl Into<BranchName>) -> Option<Self> {
+        let branch_name = branch_name.into();
+        let (prefix_name, batch_segment) = branch_name.as_str().rsplit_once('-')?;
+        Some(Self {
+            prefix_name: BranchName::new(prefix_name),
+            batch_id: BatchId::parse_segment(batch_segment)?,
+        })
+    }
+
     pub fn from_prefix_and_batch(prefix: &BranchPrefixName, batch_id: BatchId) -> Self {
         Self {
             prefix_name: BranchName::new(prefix.branch_prefix()),
@@ -451,13 +476,8 @@ impl BatchBranchKey {
     }
 
     pub fn from_branch_name(branch_name: impl Into<BranchName>) -> Self {
-        let branch_name = branch_name.into();
-        let composed_branch = ComposedBranchName::parse(&branch_name)
-            .expect("branch names must use composed batch format");
-        Self {
-            prefix_name: BranchName::new(composed_branch.prefix().branch_prefix()),
-            batch_id: composed_branch.batch_id,
-        }
+        Self::try_from_branch_name(branch_name)
+            .expect("branch names must use composed batch format")
     }
 
     pub fn branch_name(&self) -> BranchName {

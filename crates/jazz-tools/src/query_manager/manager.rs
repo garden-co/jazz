@@ -1246,7 +1246,9 @@ impl QueryManager {
     ) -> Option<(Vec<u8>, CommitId)> {
         let obj = self.sync_manager.object_manager.get(row_id)?;
         let branch_name = self.resolve_branch_name(branch_name);
-        let branch = obj.branches.get(&branch_name)?;
+        let branch = obj
+            .branches
+            .get_by_key(BatchBranchKey::from_branch_name(branch_name))?;
         // Sort tips by (timestamp, CommitId) ascending, take last (newest = LWW winner)
         let mut tips: Vec<_> = branch.tips.iter().copied().collect();
         tips.sort_by_key(|id| {

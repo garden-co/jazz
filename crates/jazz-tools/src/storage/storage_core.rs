@@ -169,31 +169,16 @@ fn load_branch_segment(
 
 impl PersistedPrefixBatchCatalog {
     fn from_catalog(catalog: &PrefixBatchCatalog) -> Self {
+        let mut leaf_batch_ords: Vec<_> = catalog.leaf_batch_ords().collect();
+        leaf_batch_ords.sort_unstable();
         Self {
             batches: catalog.batch_metas().cloned().collect(),
-            leaf_batch_ords: catalog.leaf_batch_ords().collect(),
+            leaf_batch_ords,
         }
     }
 
     fn into_catalog(self) -> PrefixBatchCatalog {
-        let mut batches = self.batches;
-        batches.sort_by_key(|meta| meta.batch_ord);
-
-        let mut catalog = PrefixBatchCatalog::default();
-        for meta in batches {
-            catalog.insert_batch_meta(meta);
-        }
-
-        let mut leaf_batch_ords = self.leaf_batch_ords;
-        leaf_batch_ords.sort_unstable();
-        leaf_batch_ords.dedup();
-        for batch_ord in leaf_batch_ords {
-            if catalog.batch_meta_by_ord(batch_ord).is_some() {
-                catalog.insert_leaf_batch_ord(batch_ord);
-            }
-        }
-
-        catalog
+        PrefixBatchCatalog::from_persisted_parts(self.batches, self.leaf_batch_ords)
     }
 }
 

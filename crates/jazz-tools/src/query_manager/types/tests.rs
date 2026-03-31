@@ -740,6 +740,21 @@ fn batch_id_roundtrips_through_branch_segment() {
 }
 
 #[test]
+fn batch_id_postcard_roundtrips_compact_binary_form() {
+    let batch_id = BatchId::from_uuid(Uuid::from_u128(42));
+
+    let encoded = postcard::to_allocvec(&batch_id).expect("serialize batch id with postcard");
+    let decoded: BatchId =
+        postcard::from_bytes(&encoded).expect("deserialize batch id with postcard");
+
+    assert_eq!(decoded, batch_id);
+    assert!(
+        encoded.len() < batch_id.branch_segment().len(),
+        "binary postcard encoding should be smaller than the human branch segment"
+    );
+}
+
+#[test]
 fn branch_prefix_name_formats_prefix_and_batch_prefix_shapes() {
     let hash = SchemaHash::from_bytes([0xab; 32]);
     let prefix = BranchPrefixName::new("dev", hash, "feature-x");
