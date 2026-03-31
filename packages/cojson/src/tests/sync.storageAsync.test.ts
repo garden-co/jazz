@@ -1,4 +1,5 @@
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
+import Database from "libsql";
 
 import { emptyKnownState } from "../exports";
 import {
@@ -747,5 +748,176 @@ describe("client syncs with a server with storage", () => {
         "bob -> server | KNOWN Map sessions: header/1",
       ]
     `);
+  });
+
+  test("TOCTOU: extra transaction at idx=lastIdx does not cause InvalidSignature", async () => {
+    // loadCoValue reads session metadata (lastIdx, lastSignature) and
+    // transaction rows in separate non-transactional queries. The
+    // transaction query uses `idx <= lastIdx` where lastIdx is a COUNT.
+    // If a concurrent writer inserts a transaction at idx=lastIdx
+    // between the two reads, the query picks up the extra row and
+    // pairs it with a signature that doesn't cover it.
+
+    const dbPath = getDbPath();
+
+    const node1 = setupTestNode();
+    node1.connectToSyncServer();
+    await node1.addAsyncStorage({ ourName: "node1", filename: dbPath });
+
+    const group = jazzCloud.node.createGroup();
+    const map = group.createMap();
+    map.set("a", "1", "trusting");
+    map.set("b", "2", "trusting");
+    map.set("c", "3", "trusting");
+
+    const mapOnNode1 = await loadCoValueOrFail(node1.node, map.id);
+    await mapOnNode1.core.waitForSync();
+    await node1.node.gracefulShutdown();
+
+    // Inject a transaction at idx = lastIdx via raw SQL, simulating
+    // what the concurrent writer would have committed between the
+    // two non-transactional reads in loadCoValue.
+    const rawDb = new Database(dbPath);
+    rawDb.pragma("journal_mode = WAL");
+
+    const coValueRow = rawDb
+      .prepare("SELECT rowID FROM coValues WHERE id = ?")
+      .get(map.id) as { rowID: number };
+    assert(coValueRow, "CoValue not found in storage");
+
+    const sessions = rawDb
+      .prepare(
+        "SELECT rowID, lastIdx FROM sessions WHERE coValue = ?",
+      )
+      .all(coValueRow.rowID) as { rowID: number; lastIdx: number }[];
+
+    const targetSession = sessions.find((s) => s.lastIdx > 0);
+    assert(targetSession, "No session with transactions");
+
+    const existingTx = rawDb
+      .prepare("SELECT tx FROM transactions WHERE ses = ? AND idx = 0")
+      .get(targetSession.rowID) as { tx: string };
+
+    // Insert at idx = lastIdx (the off-by-one the <= query exposes)
+    rawDb
+      .prepare("INSERT INTO transactions (ses, idx, tx) VALUES (?, ?, ?)")
+      .run(targetSession.rowID, targetSession.lastIdx, existingTx.tx);
+    rawDb.close();
+
+    const consoleErrorSpy = vi.spyOn(console, "error");
+
+    const node2 = setupTestNode();
+    node2.connectToSyncServer();
+    await node2.addAsyncStorage({ ourName: "node2", filename: dbPath });
+
+    await loadCoValueOrFail(node2.node, map.id);
+
+    const signatureErrors = consoleErrorSpy.mock.calls.filter(
+      ([msg]) =>
+        typeof msg === "string" &&
+        msg.includes("Failed to add transactions"),
+    );
+
+    expect(signatureErrors).toEqual([]);
+    consoleErrorSpy.mockRestore();
+  });
+
+  test("TOCTOU: concurrent write between getCoValueSessions and getNewTransactionInSession does not cause InvalidSignature", async () => {
+    // Simulates the async gap in expo-sqlite by intercepting the
+    // storage client: after getCoValueSessions returns session
+    // metadata, a concurrent writer inserts a new transaction at
+    // idx=lastIdx before getNewTransactionInSession runs.
+
+    const dbPath = getDbPath();
+
+    const node1 = setupTestNode();
+    node1.connectToSyncServer();
+    await node1.addAsyncStorage({ ourName: "node1", filename: dbPath });
+
+    const group = jazzCloud.node.createGroup();
+    const map = group.createMap();
+    map.set("a", "1", "trusting");
+    map.set("b", "2", "trusting");
+
+    const mapOnNode1 = await loadCoValueOrFail(node1.node, map.id);
+    await mapOnNode1.core.waitForSync();
+    await node1.node.gracefulShutdown();
+
+    // Prepare the concurrent write payload: read the session state
+    // so we know what index to insert at.
+    const rawDb = new Database(dbPath);
+    rawDb.pragma("journal_mode = WAL");
+
+    const coValueRow = rawDb
+      .prepare("SELECT rowID FROM coValues WHERE id = ?")
+      .get(map.id) as { rowID: number };
+    assert(coValueRow, "CoValue not found");
+
+    const sessions = rawDb
+      .prepare(
+        "SELECT rowID, lastIdx FROM sessions WHERE coValue = ?",
+      )
+      .all(coValueRow.rowID) as { rowID: number; lastIdx: number }[];
+
+    const targetSession = sessions.find((s) => s.lastIdx > 0);
+    assert(targetSession, "No session with transactions");
+
+    // Grab an existing transaction as a template
+    const existingTx = rawDb
+      .prepare("SELECT tx FROM transactions WHERE ses = ? AND idx = 0")
+      .get(targetSession.rowID) as { tx: string };
+    rawDb.close();
+
+    // Create the loading node with a patched storage client
+    const consoleErrorSpy = vi.spyOn(console, "error");
+
+    const node2 = setupTestNode();
+    node2.connectToSyncServer();
+    const { storage } = await node2.addAsyncStorage({
+      ourName: "node2",
+      filename: dbPath,
+    });
+
+    // Patch getNewTransactionInSession to inject a concurrent write
+    // in the gap — this is exactly what happens with expo-sqlite's
+    // truly async native bridge between the two non-transactional reads.
+    const dbClient = (storage as any).dbClient;
+    const original = dbClient.getNewTransactionInSession.bind(dbClient);
+    let injected = false;
+
+    dbClient.getNewTransactionInSession = async (
+      sessionRowId: number,
+      fromIdx: number,
+      toIdx: number,
+    ) => {
+      if (!injected && sessionRowId === targetSession.rowID) {
+        injected = true;
+
+        // Simulate concurrent writer committing a new transaction
+        // at idx = lastIdx (the session count). The session metadata
+        // was already read by getCoValueSessions with the old lastIdx,
+        // but this INSERT lands before the transaction query runs.
+        const writer = new Database(dbPath);
+        writer.pragma("journal_mode = WAL");
+        writer
+          .prepare(
+            "INSERT INTO transactions (ses, idx, tx) VALUES (?, ?, ?)",
+          )
+          .run(targetSession.rowID, targetSession.lastIdx, existingTx.tx);
+        writer.close();
+      }
+      return original(sessionRowId, fromIdx, toIdx);
+    };
+
+    await loadCoValueOrFail(node2.node, map.id);
+
+    const signatureErrors = consoleErrorSpy.mock.calls.filter(
+      ([msg]) =>
+        typeof msg === "string" &&
+        msg.includes("Failed to add transactions"),
+    );
+
+    expect(signatureErrors).toEqual([]);
+    consoleErrorSpy.mockRestore();
   });
 });
