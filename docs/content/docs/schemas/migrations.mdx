@@ -14,15 +14,15 @@ Traditional migration systems run a linear sequence and require peers to converg
 
 ## Workflow
 
-1. Edit `schema.ts` when you are changing data shape.
-2. Optionally run `npx jazz-tools@alpha validate` to catch local authoring errors.
-3. Once Jazz reports an old and new structural hash pair, generate a migration stub:
+1. Edit `schema.ts`.
+2. Run `npx jazz-tools@alpha validate` to catch errors locally (optional, but recommended).
+3. Generate a migration between the old and new schemas.
 
 <include cwd lang="bash">
   ../examples/docs/todo-server-ts/docs/migrations-workflow.sh#migrations-workflow-ts
 </include>
 
-4. Review the generated file, rename it to something meaningful, then publish the reviewed edge.
+4. Review the generated file, rename it to something meaningful, then publish it.
 
 Permission-only changes in `permissions.ts` do not need migrations, but they do still require
 `npx jazz-tools@alpha permissions push`.

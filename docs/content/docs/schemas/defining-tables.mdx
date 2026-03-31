@@ -14,8 +14,6 @@ Tables are defined in `schema.ts` using the Jazz DSL. Each `s.table(...)` call r
   ../examples/docs/todo-client-localfirst-ts/schema.ts#schema-todo-client-ts
 </include>
 
-The TypeScript DSL uses `s.string`, `s.boolean`, `s.ref`, and the other builders documented in [Column Types](/docs/reference/column-types). Rust consumers read the compiled structural schema, but authoring lives in TypeScript today.
-
 <Callout type="warn">
   `s.ref()` columns must be named with an `Id` or `_id` suffix (for example `projectId` or
   `owner_id`). For `s.array(s.ref())`, use an `Ids` or `_ids` suffix instead. The runtime enforces
@@ -26,8 +24,6 @@ The TypeScript DSL uses `s.string`, `s.boolean`, `s.ref`, and the other builders
 
 <SchemaSetup />
 
-`schema.ts` is the source of truth. Jazz no longer generates `schema/app.ts` or `current.sql`.
-
-When you change your schema structurally on a shared app, create and push a reviewed migration edge. See [Migrations](/docs/schemas/migrations) for details.
+When you change your schema on a shared app, create and push a migration. See [Migrations](/docs/schemas/migrations) for details.
 
 If you need to clear local browser data after a schema change, see [How do I reset browser storage?](/docs/reference/faq#reset-browser-storage).

@@ -364,11 +364,9 @@ Update your client config to use the same app ID, and add `serverUrl`:
 }
 ```
 
-Clients learn the structural schema when they connect. If you later change `permissions.ts`,
-publish the new permissions bundle explicitly with `npx jazz-tools@alpha permissions push`.
-If you change `schema.ts` structurally after data already exists, create and push a
-[reviewed migration edge](/docs/schemas/migrations) before old and new clients mix on the same
-shared server.
+Clients pick up the schema from the server when they connect. If you update `schema.ts` you need to [create and push a migration to the new schema](/docs/schemas/migrations) so that clients can understand existing data with the new schema.
+
+Permissions can be updated without adding a new schema by using `npx jazz-tools@alpha permissions push`.
 
 For production deployment and hosting options, see [Server Setup](/docs/reference/server-setup).
 
