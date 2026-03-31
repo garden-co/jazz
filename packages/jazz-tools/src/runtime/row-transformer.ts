@@ -113,7 +113,7 @@ function transformIncludedValue(value: WasmValue, plan: IncludePlan, schema: Was
     );
   });
 
-  return plan.relation.isArray ? rows : rows[0];
+  return plan.relation.isArray ? rows : (rows[0] ?? null);
 }
 
 function transformRowValues(
@@ -182,7 +182,7 @@ export function unwrapValue(v: WasmValue, columnType?: ColumnType): unknown {
     case "Bytea":
       return toByteArray((v as { value: unknown }).value);
     case "Null":
-      return undefined;
+      return null;
     case "Array":
       if (columnType?.type === "Array") {
         return v.value.map((entry) => unwrapValue(entry, columnType.element));
