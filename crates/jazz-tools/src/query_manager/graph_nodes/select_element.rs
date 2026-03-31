@@ -186,11 +186,13 @@ mod tests {
                 id: left_id,
                 content: left_data,
                 commit_id: CommitId([0; 32]),
+                row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },
             TupleElement::Row {
                 id: right_id,
                 content: right_data,
                 commit_id: CommitId([0; 32]),
+                row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
             },
         ])
     }
