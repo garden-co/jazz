@@ -357,7 +357,7 @@ async fn connect_client(
         schema: benchmark_schema(),
         server_url: server_url.unwrap_or("").to_string(),
         data_dir,
-        storage: jazz_tools::ClientStorage::Fjall,
+        storage: jazz_tools::ClientStorage::Persistent,
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,

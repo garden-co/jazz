@@ -9,7 +9,6 @@ path = "src/main.rs"
 
 [dependencies]
 jazz_tools = { package = "jazz-tools", path = "../jazz-tools", features = [
-  "fjall",
   "runtime-tokio",
   "transport",
   "client",

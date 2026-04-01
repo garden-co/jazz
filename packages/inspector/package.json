@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && pnpm run build:web && pnpm run build:extension",
+    "build:vercel": "bash ../../scripts/install-vercel-deps.sh && pnpm --dir ../.. exec turbo run build:crates --filter=@jazz/rust && pnpm --dir ../.. exec turbo run build --filter=jazz-wasm && pnpm --dir ../.. exec turbo run build --filter=jazz-tools --only && pnpm run build:web",
     "build:web": "vite build --mode web",
     "build:extension": "vite build --mode extension",
     "preview": "vite preview",
