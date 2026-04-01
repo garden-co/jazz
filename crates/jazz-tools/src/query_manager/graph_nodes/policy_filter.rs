@@ -291,7 +291,14 @@ impl PolicyFilterNode {
             PolicyExpr::Not(inner) => !self.evaluate_expr(inner, row, depth),
 
             // All other expressions delegate to shared evaluation
-            _ => evaluate_expr_recursive(expr, &row.data, &self.descriptor, &self.session, depth),
+            _ => evaluate_expr_recursive(
+                expr,
+                &row.data,
+                &row.provenance,
+                &self.descriptor,
+                &self.session,
+                depth,
+            ),
         }
     }
 
@@ -435,7 +442,13 @@ fn tuple_to_row(tuple: &Tuple) -> Option<Row> {
             id,
             content,
             commit_id,
-        } => Some(Row::new(*id, content.clone(), *commit_id)),
+            row_provenance,
+        } => Some(Row::new(
+            *id,
+            content.clone(),
+            *commit_id,
+            row_provenance.clone(),
+        )),
         TupleElement::Id(_) => None, // Not materialized
     }
 }
@@ -469,7 +482,12 @@ mod tests {
             ],
         )
         .unwrap();
-        Row::new(ObjectId::new(), data, CommitId([0; 32]))
+        Row::new(
+            ObjectId::new(),
+            data,
+            CommitId([0; 32]),
+            crate::metadata::RowProvenance::for_insert("jazz:test", 0),
+        )
     }
 
     fn test_schema() -> Schema {

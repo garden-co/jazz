@@ -14,7 +14,11 @@ use crate::routes;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
 use crate::server::{CatalogueAuthorityMode, DynStorage, ExternalIdentityStore, ServerState};
-use crate::storage::{FjallStorage, MemoryStorage, Storage};
+#[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+use crate::storage::FjallStorage;
+#[cfg(feature = "rocksdb")]
+use crate::storage::RocksDBStorage;
+use crate::storage::{MemoryStorage, Storage};
 use crate::sync_manager::{ClientId, Destination, DurabilityTier, SyncManager, SyncPayload};
 
 const STORAGE_CACHE_SIZE_BYTES: usize = 64 * 1024 * 1024;
@@ -120,7 +124,28 @@ impl ServerBuilder {
             http_client,
             external_identity_store,
             external_identities: RwLock::new(external_identities),
+            disconnect_candidates: RwLock::new(HashMap::new()),
+            client_ttl: RwLock::new(Duration::from_secs(300)),
         });
+
+        // Spawn periodic client state sweep (uses Weak so the task exits
+        // when all strong refs to ServerState are dropped, e.g. in tests).
+        {
+            let weak_state = Arc::downgrade(&state);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    let Some(state) = weak_state.upgrade() else {
+                        break;
+                    };
+                    let reaped = state.run_sweep_once().await;
+                    if !reaped.is_empty() {
+                        tracing::info!(count = reaped.len(), "reaped stale disconnected clients");
+                    }
+                }
+            });
+        }
 
         let app = routes::create_router(state.clone());
         Ok(BuiltServer { state, app })
@@ -174,12 +199,24 @@ impl ServerBuilder {
                 std::fs::create_dir_all(data_dir)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", data_dir))?;
 
-                let db_path = Path::new(data_dir).join("jazz.fjall");
-                let storage =
-                    FjallStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES).map_err(|e| {
-                        format!("failed to open storage '{}': {e:?}", db_path.display())
-                    })?;
-                Ok(Box::new(storage))
+                #[cfg(feature = "rocksdb")]
+                {
+                    let db_path = Path::new(data_dir).join("jazz.rocksdb");
+                    let storage = RocksDBStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES)
+                        .map_err(|e| {
+                            format!("failed to open storage '{}': {e:?}", db_path.display())
+                        })?;
+                    Ok(Box::new(storage))
+                }
+                #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+                {
+                    let db_path = Path::new(data_dir).join("jazz.fjall");
+                    let storage =
+                        FjallStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES).map_err(|e| {
+                            format!("failed to open storage '{}': {e:?}", db_path.display())
+                        })?;
+                    Ok(Box::new(storage))
+                }
             }
             ServerStorageMode::InMemory => Ok(Box::new(MemoryStorage::new())),
         }
@@ -193,12 +230,24 @@ impl ServerBuilder {
                     format!("failed to create meta dir '{}': {e}", meta_dir.display())
                 })?;
 
-                let db_path = meta_dir.join("jazz.fjall");
-                let storage =
-                    FjallStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES).map_err(|e| {
-                        format!("failed to open meta storage '{}': {e:?}", db_path.display())
-                    })?;
-                ExternalIdentityStore::new_with_storage(Box::new(storage))
+                #[cfg(feature = "rocksdb")]
+                {
+                    let db_path = meta_dir.join("jazz.rocksdb");
+                    let storage = RocksDBStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES)
+                        .map_err(|e| {
+                            format!("failed to open meta storage '{}': {e:?}", db_path.display())
+                        })?;
+                    ExternalIdentityStore::new_with_storage(Box::new(storage))
+                }
+                #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+                {
+                    let db_path = meta_dir.join("jazz.fjall");
+                    let storage =
+                        FjallStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES).map_err(|e| {
+                            format!("failed to open meta storage '{}': {e:?}", db_path.display())
+                        })?;
+                    ExternalIdentityStore::new_with_storage(Box::new(storage))
+                }
             }
             ServerStorageMode::InMemory => {
                 ExternalIdentityStore::new_with_storage(Box::new(MemoryStorage::new()))
@@ -208,8 +257,21 @@ impl ServerBuilder {
 }
 
 fn server_sync_manager() -> SyncManager {
-    SyncManager::new()
-        .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer])
+    let sync_manager = SyncManager::new()
+        .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
+
+    if should_allow_unprivileged_schema_catalogue_writes() {
+        sync_manager.with_unprivileged_schema_catalogue_writes()
+    } else {
+        sync_manager
+    }
+}
+
+fn should_allow_unprivileged_schema_catalogue_writes() -> bool {
+    !matches!(
+        std::env::var("NODE_ENV"),
+        Ok(value) if value.eq_ignore_ascii_case("production")
+    )
 }
 
 async fn build_jwks_cache(auth_config: &AuthConfig) -> Result<Option<JwksCache>, String> {

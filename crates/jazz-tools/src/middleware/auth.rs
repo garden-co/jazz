@@ -868,8 +868,9 @@ pub fn validate_backend_secret(
 
 /// Check if admin secret is valid.
 ///
-/// Catalogue operations (schema/lens sync) require admin authentication.
-/// If admin_secret is not configured, catalogue sync is disabled.
+/// Admin publication endpoints require admin authentication. Development-mode
+/// schema auto-push from ordinary clients flows through `/sync` and does not
+/// use this helper.
 pub fn validate_admin_secret(
     provided: Option<&str>,
     config: &AuthConfig,
@@ -881,9 +882,6 @@ pub fn validate_admin_secret(
             StatusCode::UNAUTHORIZED,
             "Admin secret required for this operation",
         )),
-        // TODO: Consider making catalogue sync opt-in or handling this more gracefully.
-        // Currently, if admin auth isn't configured, clients can't sync schemas to server.
-        // This is correct for security but may cause silent failures in dev setups.
         (None, _) => Err((StatusCode::FORBIDDEN, "Admin auth not configured")),
     }
 }

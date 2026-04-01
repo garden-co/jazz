@@ -203,7 +203,12 @@ impl MaterializeNode {
                     let row_provenance_ref =
                         (!row_provenance.is_empty()).then_some(&row_provenance);
                     if let Some(loaded) = loader(*id, row_provenance_ref) {
-                        let row = Row::new(*id, loaded.data.clone(), loaded.commit_id);
+                        let row = Row::new(
+                            *id,
+                            loaded.data.clone(),
+                            loaded.commit_id,
+                            loaded.row_provenance.clone(),
+                        );
                         self.rows.insert(*id, row);
                         if tuple.len() == 1 {
                             materialized_provenance = loaded.provenance.clone();
@@ -214,6 +219,7 @@ impl MaterializeNode {
                             id: *id,
                             content: loaded.data,
                             commit_id: loaded.commit_id,
+                            row_provenance: loaded.row_provenance,
                         });
                     } else {
                         // Row unavailable - drop the entire tuple
@@ -224,9 +230,10 @@ impl MaterializeNode {
                     id,
                     content,
                     commit_id,
+                    row_provenance,
                 } => {
                     // Already materialized - update our cache
-                    let row = Row::new(*id, content.clone(), *commit_id);
+                    let row = Row::new(*id, content.clone(), *commit_id, row_provenance.clone());
                     self.rows.insert(*id, row);
                     materialized_elements.push(elem.clone());
                 }
@@ -321,7 +328,12 @@ impl MaterializeNode {
                 let row_provenance = tuple.provenance_for_id(id);
                 let row_provenance_ref = (!row_provenance.is_empty()).then_some(&row_provenance);
                 if let Some(loaded) = loader(id, row_provenance_ref) {
-                    let row = Row::new(id, loaded.data.clone(), loaded.commit_id);
+                    let row = Row::new(
+                        id,
+                        loaded.data.clone(),
+                        loaded.commit_id,
+                        loaded.row_provenance.clone(),
+                    );
                     self.rows.insert(id, row);
                     if tuple.len() == 1 {
                         rematerialized_provenance = loaded.provenance.clone();
@@ -332,6 +344,7 @@ impl MaterializeNode {
                         id,
                         content: loaded.data,
                         commit_id: loaded.commit_id,
+                        row_provenance: loaded.row_provenance,
                     }
                 } else {
                     // Couldn't load - keep as-is
@@ -374,6 +387,7 @@ fn has_content_changed(old: &Tuple, new: &Tuple) -> bool {
 mod tests {
     use super::*;
     use crate::commit::CommitId;
+    use crate::metadata::RowProvenance;
     use crate::query_manager::types::{ColumnDescriptor, ColumnType};
 
     fn test_descriptor() -> RowDescriptor {
@@ -388,7 +402,12 @@ mod tests {
     }
 
     fn make_loaded_row(data: Vec<u8>, commit_id: CommitId) -> LoadedRow {
-        LoadedRow::new(data, commit_id, Default::default())
+        LoadedRow::new(
+            data,
+            commit_id,
+            RowProvenance::for_insert("jazz:test", 0),
+            Default::default(),
+        )
     }
 
     fn make_tuple_delta_add(ids: &[ObjectId]) -> TupleDelta {

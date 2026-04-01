@@ -6,7 +6,7 @@ use serde_json::json;
 use smallvec::smallvec;
 use uuid::Uuid;
 
-use crate::metadata::MetadataKey;
+use crate::metadata::{MetadataKey, RowProvenance, row_provenance_metadata};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::manager::{QueryError, QueryManager};
@@ -193,6 +193,56 @@ fn create_query_manager_with_fjall(
 /// Get the current branch name from a QueryManager.
 fn get_branch(qm: &QueryManager) -> String {
     qm.schema_context().branch_name().as_str().to_string()
+}
+
+fn stored_row_commit(
+    parents: smallvec::SmallVec<[crate::commit::CommitId; 2]>,
+    content: Vec<u8>,
+    timestamp: u64,
+    author: impl Into<String>,
+) -> crate::commit::Commit {
+    let author = author.into();
+    crate::commit::Commit {
+        parents,
+        content,
+        timestamp,
+        metadata: Some(row_provenance_metadata(
+            &RowProvenance::for_insert(author.clone(), timestamp),
+            None,
+        )),
+        author,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    }
+}
+
+fn add_row_commit(
+    qm: &mut QueryManager,
+    storage: &mut MemoryStorage,
+    object_id: ObjectId,
+    branch: &str,
+    parents: Vec<crate::commit::CommitId>,
+    content: Vec<u8>,
+    timestamp: u64,
+    author: impl Into<String>,
+) -> crate::commit::CommitId {
+    let author = author.into();
+    qm.sync_manager_mut()
+        .object_manager
+        .add_commit_with_timestamp(
+            storage,
+            object_id,
+            branch,
+            parents,
+            content,
+            timestamp,
+            author.clone(),
+            Some(row_provenance_metadata(
+                &RowProvenance::for_insert(author, timestamp),
+                None,
+            )),
+        )
+        .unwrap()
 }
 
 use crate::query_manager::query::Query;
@@ -787,7 +837,7 @@ fn subscription_recompiles_when_external_batch_arrives_for_same_prefix() {
         parents: smallvec![],
         content: row_data,
         timestamp: 1_000,
-        author: row_id,
+        author: row_id.to_string(),
         metadata: None,
         stored_state: StoredState::Stored,
         ack_state: Default::default(),
@@ -1866,7 +1916,6 @@ fn local_update_updates_all_column_indices() {
 
 #[test]
 fn synced_update_updates_column_indices() {
-    use crate::commit::{Commit, StoredState};
     use crate::query_manager::encoding::encode_row;
     use std::collections::HashMap;
 
@@ -1904,15 +1953,7 @@ fn synced_update_updates_column_indices() {
     .unwrap();
 
     // Receive the first commit (insert)
-    let commit1 = Commit {
-        parents: smallvec![],
-        content: initial_data.clone(),
-        timestamp: 1000,
-        author,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit1 = stored_row_commit(smallvec![], initial_data.clone(), 1000, author.to_string());
     let commit1_id = qm
         .sync_manager_mut()
         .object_manager
@@ -1954,15 +1995,12 @@ fn synced_update_updates_column_indices() {
     .unwrap();
 
     // Receive the second commit (update)
-    let commit2 = Commit {
-        parents: smallvec![commit1_id],
-        content: updated_data.clone(),
-        timestamp: 2000,
-        author,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit2 = stored_row_commit(
+        smallvec![commit1_id],
+        updated_data.clone(),
+        2000,
+        author.to_string(),
+    );
     qm.sync_manager_mut()
         .object_manager
         .receive_commit(&mut storage, row_id, &branch, commit2)
@@ -2055,7 +2093,7 @@ fn synced_update_missing_old_content_reconciles_from_current_head() {
         parents: smallvec![],
         content: initial_data,
         timestamp: 1000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: StoredState::Stored,
         ack_state: Default::default(),
@@ -2076,7 +2114,7 @@ fn synced_update_missing_old_content_reconciles_from_current_head() {
         parents: smallvec![commit1_id],
         content: updated_data,
         timestamp: 2000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: StoredState::Stored,
         ack_state: Default::default(),
@@ -2133,7 +2171,6 @@ fn synced_update_missing_old_content_reconciles_from_current_head() {
 
 #[test]
 fn lens_transform_failure_drops_row_instead_of_fallback() {
-    use crate::commit::{Commit, StoredState};
     use crate::query_manager::encoding::encode_row;
     use std::collections::HashMap;
 
@@ -2183,15 +2220,7 @@ fn lens_transform_failure_drops_row_instead_of_fallback() {
         ],
     )
     .unwrap();
-    let commit = Commit {
-        parents: smallvec![],
-        content: live_data,
-        timestamp: 1000,
-        author: row_id,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit = stored_row_commit(smallvec![], live_data, 1000, row_id.to_string());
     qm.sync_manager_mut()
         .object_manager
         .receive_commit(&mut storage, row_id, &live_branch, commit)
@@ -2216,7 +2245,6 @@ fn lens_transform_failure_drops_row_instead_of_fallback() {
 
 #[test]
 fn synced_insert_appears_in_subscription_delta() {
-    use crate::commit::{Commit, StoredState};
     use crate::query_manager::encoding::{decode_row, encode_row};
     use std::collections::HashMap;
 
@@ -2258,15 +2286,7 @@ fn synced_insert_appears_in_subscription_delta() {
     .unwrap();
 
     // Receive the commit (insert)
-    let commit = Commit {
-        parents: smallvec![],
-        content: row_data,
-        timestamp: 1000,
-        author,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit = stored_row_commit(smallvec![], row_data, 1000, author.to_string());
     qm.sync_manager_mut()
         .object_manager
         .receive_commit(&mut storage, row_id, &branch, commit)
@@ -2294,7 +2314,6 @@ fn synced_insert_appears_in_subscription_delta() {
 
 #[test]
 fn synced_update_is_visible_in_query() {
-    use crate::commit::{Commit, StoredState};
     use crate::query_manager::encoding::encode_row;
 
     // Verify that synced updates (same row, new content) update indices correctly
@@ -2345,15 +2364,12 @@ fn synced_update_is_visible_in_query() {
     .unwrap();
 
     let author = row_id; // Self-authored for simplicity
-    let update_commit = Commit {
-        parents: smallvec![first_commit_id],
-        content: updated_data,
-        timestamp: 2000,
-        author,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let update_commit = stored_row_commit(
+        smallvec![first_commit_id],
+        updated_data,
+        2000,
+        author.to_string(),
+    );
     qm.sync_manager_mut()
         .object_manager
         .receive_commit(&mut storage, row_id, &branch, update_commit)
@@ -2391,7 +2407,6 @@ fn synced_update_is_visible_in_query() {
 
 #[test]
 fn synced_row_visible_in_filtered_subscription() {
-    use crate::commit::{Commit, StoredState};
     use crate::query_manager::encoding::{decode_row, encode_row};
     use std::collections::HashMap;
 
@@ -2436,15 +2451,7 @@ fn synced_row_visible_in_filtered_subscription() {
     )
     .unwrap();
 
-    let commit_1 = Commit {
-        parents: smallvec![],
-        content: data_1,
-        timestamp: 1000,
-        author: author_1,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit_1 = stored_row_commit(smallvec![], data_1, 1000, author_1.to_string());
     qm.sync_manager_mut()
         .object_manager
         .receive_commit(&mut storage, row_id_1, &branch, commit_1)
@@ -2488,15 +2495,7 @@ fn synced_row_visible_in_filtered_subscription() {
     )
     .unwrap();
 
-    let commit_2 = Commit {
-        parents: smallvec![],
-        content: data_2,
-        timestamp: 2000,
-        author: author_2,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit_2 = stored_row_commit(smallvec![], data_2, 2000, author_2.to_string());
     qm.sync_manager_mut()
         .object_manager
         .receive_commit(&mut storage, row_id_2, &branch, commit_2)
@@ -2595,7 +2594,6 @@ fn local_update_emits_subscription_delta() {
 
 #[test]
 fn synced_update_emits_subscription_delta() {
-    use crate::commit::{Commit, StoredState};
     use crate::query_manager::encoding::encode_row;
 
     // Verify that synced updates (receive_commit) cause subscription to emit update delta
@@ -2638,15 +2636,12 @@ fn synced_update_emits_subscription_delta() {
     .unwrap();
 
     let author = row_id;
-    let update_commit = Commit {
-        parents: smallvec![first_commit_id],
-        content: updated_data,
-        timestamp: 2000,
-        author,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let update_commit = stored_row_commit(
+        smallvec![first_commit_id],
+        updated_data,
+        2000,
+        author.to_string(),
+    );
     let branch = get_branch(&qm);
     qm.sync_manager_mut()
         .object_manager
@@ -3007,7 +3002,6 @@ fn insert_then_update_same_cycle() {
 fn sync_inbox_insert_flows_to_subscription_delta() {
     // End-to-end test: sync message → SyncManager inbox → QueryManager subscription
     // This tests the full path through push_inbox() → process_inbox() → process()
-    use crate::commit::{Commit, StoredState};
     use crate::query_manager::encoding::{decode_row, encode_row};
     use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
 
@@ -3050,15 +3044,7 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
     )
     .unwrap();
 
-    let commit = Commit {
-        parents: smallvec![],
-        content: row_data,
-        timestamp: 1000,
-        author,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit = stored_row_commit(smallvec![], row_data, 1000, author.to_string());
 
     // Object metadata marking it as a "users" table row
     let mut obj_metadata = std::collections::HashMap::new();
@@ -3104,7 +3090,6 @@ fn sync_inbox_insert_flows_to_subscription_delta() {
 #[test]
 fn sync_inbox_update_flows_to_subscription_delta() {
     // End-to-end test: sync update message → subscription emits update delta
-    use crate::commit::{Commit, StoredState};
     use crate::query_manager::encoding::{decode_row, encode_row};
     use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
 
@@ -3148,15 +3133,12 @@ fn sync_inbox_update_flows_to_subscription_delta() {
     )
     .unwrap();
 
-    let update_commit = Commit {
-        parents: smallvec![first_commit_id],
-        content: updated_data,
-        timestamp: 2000,
-        author: row_id,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let update_commit = stored_row_commit(
+        smallvec![first_commit_id],
+        updated_data,
+        2000,
+        row_id.to_string(),
+    );
 
     // Push the update through SyncManager inbox
     qm.sync_manager_mut().push_inbox(InboxEntry {
@@ -3243,7 +3225,7 @@ fn sync_inbox_update_on_external_batch_becomes_query_visible() {
         parents: smallvec![],
         content: row_data,
         timestamp: 1000,
-        author: row_id,
+        author: row_id.to_string(),
         metadata: None,
         stored_state: StoredState::Stored,
         ack_state: Default::default(),
@@ -3336,7 +3318,7 @@ fn peer_client_update_on_external_batch_becomes_query_visible() {
         parents: smallvec![],
         content: row_data,
         timestamp: 1000,
-        author: row_id,
+        author: row_id.to_string(),
         metadata: None,
         stored_state: StoredState::Stored,
         ack_state: Default::default(),
@@ -3368,7 +3350,6 @@ fn peer_client_update_on_external_batch_becomes_query_visible() {
 fn two_peer_sync_insert_reaches_subscription() {
     // Full two-peer test: Peer A inserts → (simulated sync) → Peer B subscription delta
     // This demonstrates the conceptual flow even though we construct the payload manually
-    use crate::commit::{Commit, StoredState};
     use crate::object::BranchName;
     use crate::query_manager::encoding::decode_row;
     use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
@@ -3420,15 +3401,7 @@ fn two_peer_sync_insert_reaches_subscription() {
     };
 
     // Construct the sync payload as it would appear on the wire
-    let commit = Commit {
-        parents: smallvec![],
-        content: row_data,
-        timestamp: 1000,
-        author: row_id,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit = stored_row_commit(smallvec![], row_data, 1000, row_id.to_string());
 
     // Send to Peer B via SyncManager inbox
     peer_b.sync_manager_mut().push_inbox(InboxEntry {
@@ -3642,11 +3615,14 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     )
     .unwrap();
     let commit_a = Commit {
-        author: handle.row_id,
+        author: handle.row_id.to_string(),
         parents: smallvec![parent],
         content: content_a,
         timestamp: 1000, // Lower timestamp
-        metadata: None,
+        metadata: Some(row_provenance_metadata(
+            &RowProvenance::for_insert(handle.row_id.to_string(), 1000),
+            None,
+        )),
         stored_state: StoredState::Pending,
         ack_state: Default::default(),
     };
@@ -3658,11 +3634,14 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
     )
     .unwrap();
     let commit_b = Commit {
-        author: handle.row_id,
+        author: handle.row_id.to_string(),
         parents: smallvec![parent],
         content: content_b.clone(),
         timestamp: 2000, // Higher timestamp - LWW winner
-        metadata: None,
+        metadata: Some(row_provenance_metadata(
+            &RowProvenance::for_insert(handle.row_id.to_string(), 2000),
+            None,
+        )),
         stored_state: StoredState::Pending,
         ack_state: Default::default(),
     };
@@ -8036,23 +8015,20 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
         .sync_manager_mut()
         .object_manager
         .create(&mut storage, Some(user_metadata));
-    server_qm
-        .sync_manager_mut()
-        .object_manager
-        .add_commit(
-            &mut storage,
-            user_id,
-            &branch,
-            vec![],
-            encode_row(
-                &RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
-                &[Value::Text("bob".into())],
-            )
-            .unwrap(),
-            author,
-            None,
+    add_row_commit(
+        &mut server_qm,
+        &mut storage,
+        user_id,
+        &branch,
+        vec![],
+        encode_row(
+            &RowDescriptor::new(vec![ColumnDescriptor::new("name", ColumnType::Text)]),
+            &[Value::Text("bob".into())],
         )
-        .unwrap();
+        .unwrap(),
+        1000,
+        author.to_string(),
+    );
 
     let mut post_metadata = HashMap::new();
     post_metadata.insert(MetadataKey::Table.to_string(), "posts".to_string());
@@ -8060,29 +8036,26 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
         .sync_manager_mut()
         .object_manager
         .create(&mut storage, Some(post_metadata));
-    server_qm
-        .sync_manager_mut()
-        .object_manager
-        .add_commit(
-            &mut storage,
-            post_id,
-            &branch,
-            vec![],
-            encode_row(
-                &RowDescriptor::new(vec![
-                    ColumnDescriptor::new("owner_name", ColumnType::Text),
-                    ColumnDescriptor::new("title", ColumnType::Text),
-                ]),
-                &[
-                    Value::Text("bob".into()),
-                    Value::Text("Bob private post".into()),
-                ],
-            )
-            .unwrap(),
-            author,
-            None,
+    add_row_commit(
+        &mut server_qm,
+        &mut storage,
+        post_id,
+        &branch,
+        vec![],
+        encode_row(
+            &RowDescriptor::new(vec![
+                ColumnDescriptor::new("owner_name", ColumnType::Text),
+                ColumnDescriptor::new("title", ColumnType::Text),
+            ]),
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Bob private post".into()),
+            ],
         )
-        .unwrap();
+        .unwrap(),
+        1000,
+        author.to_string(),
+    );
 
     let client_id = ClientId::new();
     server_qm.sync_manager_mut().add_client(client_id);
@@ -8294,7 +8267,6 @@ fn join_query_with_multiple_branches_reads_all_branches() {
 
 #[test]
 fn handle_object_update_respects_branch() {
-    use crate::commit::{Commit, StoredState};
     use crate::query_manager::encoding::encode_row;
     use crate::query_manager::types::{BatchId, ComposedBranchName, SchemaHash};
     use std::collections::HashMap;
@@ -8335,15 +8307,7 @@ fn handle_object_update_respects_branch() {
         .to_branch_name();
 
     // Receive commit on "other-branch" (not the schema's branch)
-    let commit = Commit {
-        parents: smallvec![],
-        content: row_data.clone(),
-        timestamp: 1000,
-        author,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit = stored_row_commit(smallvec![], row_data.clone(), 1000, author.to_string());
     qm.sync_manager_mut()
         .object_manager
         .receive_commit(&mut storage, row_id, other_branch, commit)
@@ -8368,15 +8332,7 @@ fn handle_object_update_respects_branch() {
         .object_manager
         .receive_object(&mut storage, row_id2, metadata2);
 
-    let commit2 = Commit {
-        parents: smallvec![],
-        content: row_data,
-        timestamp: 2000,
-        author: row_id2,
-        metadata: None,
-        stored_state: StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit2 = stored_row_commit(smallvec![], row_data, 2000, row_id2.to_string());
     qm.sync_manager_mut()
         .object_manager
         .receive_commit(&mut storage, row_id2, &schema_branch, commit2)
@@ -8433,7 +8389,7 @@ fn handle_object_update_in_server_mode_checks_hard_delete_on_update_branch() {
         parents: smallvec![],
         content: row_data,
         timestamp: 1_000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: StoredState::Stored,
         ack_state: Default::default(),
@@ -9915,7 +9871,6 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
 /// Test that objects from upstream are relayed to downstream clients with matching scope.
 #[test]
 fn mid_tier_relays_objects_to_clients_with_matching_scope() {
-    use crate::commit::Commit;
     use crate::object::ObjectId;
     use crate::sync_manager::{
         ClientId, Destination, InboxEntry, ObjectMetadata, ServerId, Source, SyncPayload,
@@ -9992,15 +9947,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
         .collect();
 
     let author = ObjectId::new();
-    let commit = Commit {
-        parents: current_tips,
-        content: row_data,
-        timestamp: 2000,
-        author,
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
+    let commit = stored_row_commit(current_tips, row_data, 2000, author.to_string());
 
     mid_tier.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Server(upstream_id),
@@ -10367,7 +10314,7 @@ fn e2e_client_subscription_replays_remote_fresh_batch_update() {
         )
         .unwrap(),
         timestamp: 2_000,
-        author: handle.row_id,
+        author: handle.row_id.to_string(),
         metadata: None,
         stored_state: StoredState::Stored,
         ack_state: Default::default(),
@@ -10501,7 +10448,7 @@ fn e2e_client_subscription_removes_row_after_remote_fresh_batch_update_leaves_fi
         )
         .unwrap(),
         timestamp: 2_000,
-        author: handle.row_id,
+        author: handle.row_id.to_string(),
         metadata: None,
         stored_state: StoredState::Stored,
         ack_state: Default::default(),
@@ -11401,4 +11348,221 @@ fn e2e_three_tier_untrusted_downstream_keeps_result_only_scope() {
         0,
         "Untrusted downstream should keep current result-only sync behavior"
     );
+}
+
+/// Push a query subscription inbox entry for a client.
+fn push_query_subscription(
+    qm: &mut QueryManager,
+    client_id: crate::sync_manager::ClientId,
+    query_id: u64,
+    query: crate::query_manager::query::Query,
+) {
+    use crate::sync_manager::{InboxEntry, QueryId, Source, SyncPayload};
+    let schema_context = qm.schema_context().query_context();
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(query_id),
+            query: Box::new(query),
+            schema_context,
+            session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+        },
+    });
+}
+
+#[test]
+fn remove_client_cleans_up_server_subscriptions() {
+    //
+    // alice (client) ──subscribes──▶ server
+    //
+    // alice subscribes to two queries, then disconnects.
+    // server_subscriptions should be empty after remove_client.
+    //
+    use crate::sync_manager::{ClientId, QueryId};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let alice = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_client(alice);
+
+    let query = server_qm.query("users").build();
+    push_query_subscription(&mut server_qm, alice, 1, query.clone());
+    push_query_subscription(&mut server_qm, alice, 2, query);
+    server_qm.process(&mut storage);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    assert!(
+        server_qm
+            .server_subscriptions
+            .contains_key(&(alice, QueryId(1)))
+    );
+    assert!(
+        server_qm
+            .server_subscriptions
+            .contains_key(&(alice, QueryId(2)))
+    );
+
+    server_qm.remove_client(alice);
+
+    assert!(
+        server_qm.server_subscriptions.is_empty(),
+        "server_subscriptions should be empty after client disconnect"
+    );
+    assert!(
+        server_qm.sync_manager().get_client(alice).is_none(),
+        "client should be removed from SyncManager"
+    );
+}
+
+#[test]
+fn remove_client_preserves_other_clients_subscriptions() {
+    //
+    // alice (client) ──subscribes──▶ server ◀──subscribes── bob (client)
+    //
+    // Both subscribe, then alice disconnects.
+    // bob's subscription should survive.
+    //
+    use crate::sync_manager::{ClientId, QueryId};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let alice = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let bob = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_client(alice);
+    server_qm.sync_manager_mut().add_client(bob);
+
+    let query = server_qm.query("users").build();
+    push_query_subscription(&mut server_qm, alice, 1, query.clone());
+    push_query_subscription(&mut server_qm, bob, 1, query);
+    server_qm.process(&mut storage);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    assert_eq!(server_qm.server_subscriptions.len(), 2);
+
+    server_qm.remove_client(alice);
+
+    assert_eq!(
+        server_qm.server_subscriptions.len(),
+        1,
+        "only bob's subscription should remain"
+    );
+    assert!(
+        server_qm
+            .server_subscriptions
+            .contains_key(&(bob, QueryId(1)))
+    );
+    assert!(server_qm.sync_manager().get_client(bob).is_some());
+}
+
+#[test]
+fn remove_client_cleans_active_policy_checks() {
+    //
+    // alice ──write──▶ server (policy check in-flight)
+    // bob   ──write──▶ server (policy check in-flight)
+    //
+    // alice disconnects → only bob's policy check remains.
+    //
+    use crate::query_manager::policy::Operation;
+    use crate::sync_manager::{ClientId, PendingPermissionCheck, PendingUpdateId, SyncPayload};
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, _storage) = create_query_manager(sync_manager, schema);
+
+    let alice = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let bob = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_client(alice);
+    server_qm.sync_manager_mut().add_client(bob);
+
+    let obj_id = crate::object::ObjectId::new();
+    let make_check = |id: u64, client_id: ClientId| PendingPermissionCheck {
+        id: PendingUpdateId(id),
+        client_id,
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: crate::object::BranchName::new("main"),
+            commits: vec![],
+        },
+        session: crate::query_manager::session::Session {
+            user_id: format!("{client_id}"),
+            claims: serde_json::Value::Null,
+        },
+        schema_wait_started_at: None,
+        metadata: Default::default(),
+        old_content: None,
+        new_content: None,
+        operation: Operation::Insert,
+    };
+
+    // Insert policy checks directly into the active_policy_checks map
+    use crate::query_manager::manager::PolicyCheckState;
+    server_qm.active_policy_checks.insert(
+        PendingUpdateId(1),
+        PolicyCheckState {
+            graphs: vec![],
+            table: "users".into(),
+            branch: crate::object::BranchName::new("main"),
+            pending_check: make_check(1, alice),
+        },
+    );
+    server_qm.active_policy_checks.insert(
+        PendingUpdateId(2),
+        PolicyCheckState {
+            graphs: vec![],
+            table: "users".into(),
+            branch: crate::object::BranchName::new("main"),
+            pending_check: make_check(2, bob),
+        },
+    );
+
+    assert_eq!(server_qm.active_policy_checks.len(), 2);
+
+    server_qm.remove_client(alice);
+
+    assert_eq!(
+        server_qm.active_policy_checks.len(),
+        1,
+        "only bob's policy check should remain"
+    );
+    assert!(
+        server_qm
+            .active_policy_checks
+            .contains_key(&PendingUpdateId(2))
+    );
+}
+
+#[test]
+fn remove_client_is_idempotent() {
+    //
+    // Calling remove_client twice should not panic or corrupt state.
+    //
+    use crate::sync_manager::ClientId;
+    use uuid::Uuid;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut server_qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let alice = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_client(alice);
+
+    let query = server_qm.query("users").build();
+    push_query_subscription(&mut server_qm, alice, 1, query);
+    server_qm.process(&mut storage);
+    let _ = server_qm.sync_manager_mut().take_outbox();
+
+    server_qm.remove_client(alice);
+    server_qm.remove_client(alice); // second call — should be a no-op
+
+    assert!(server_qm.server_subscriptions.is_empty());
+    assert!(server_qm.sync_manager().get_client(alice).is_none());
 }

@@ -687,6 +687,10 @@ export interface RnRuntimeInterface {
     tier: string | undefined
   ) /*throws*/ : /*u64*/ bigint;
   delete_(objectId: string) /*throws*/ : void;
+  deleteWithSession(
+    objectId: string,
+    writeContextJson: string | undefined
+  ) /*throws*/ : void;
   /**
    * Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick.
    */
@@ -698,6 +702,11 @@ export interface RnRuntimeInterface {
   getBatchId() /*throws*/ : string;
   getSchemaHash() /*throws*/ : string;
   insert(table: string, valuesJson: string) /*throws*/ : string;
+  insertWithSession(
+    table: string,
+    valuesJson: string,
+    writeContextJson: string | undefined
+  ) /*throws*/ : string;
   /**
    * Register a JS callback that schedules `batched_tick()` calls.
    */
@@ -734,6 +743,11 @@ export interface RnRuntimeInterface {
   ) /*throws*/ : /*u64*/ bigint;
   unsubscribe(handle: /*u64*/ bigint) /*throws*/ : void;
   update(objectId: string, valuesJson: string) /*throws*/ : void;
+  updateWithSession(
+    objectId: string,
+    valuesJson: string,
+    writeContextJson: string | undefined
+  ) /*throws*/ : void;
 }
 
 export class RnRuntime
@@ -885,6 +899,26 @@ export class RnRuntime
     );
   }
 
+  deleteWithSession(
+    objectId: string,
+    writeContextJson: string | undefined
+  ): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
+          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+          FfiConverterString.lower(objectId),
+          FfiConverterOptionalString.lower(writeContextJson),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
   /**
    * Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick.
    */
@@ -968,6 +1002,30 @@ export class RnRuntime
             uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
             FfiConverterString.lower(table),
             FfiConverterString.lower(valuesJson),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
+    );
+  }
+
+  insertWithSession(
+    table: string,
+    valuesJson: string,
+    writeContextJson: string | undefined
+  ): string /*throws*/ {
+    return FfiConverterString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_insert_with_session(
+            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+            FfiConverterString.lower(table),
+            FfiConverterString.lower(valuesJson),
+            FfiConverterOptionalString.lower(writeContextJson),
             callStatus
           );
         },
@@ -1166,6 +1224,28 @@ export class RnRuntime
           uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
           FfiConverterString.lower(objectId),
           FfiConverterString.lower(valuesJson),
+          callStatus
+        );
+      },
+      /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
+  updateWithSession(
+    objectId: string,
+    valuesJson: string,
+    writeContextJson: string | undefined
+  ): void /*throws*/ {
+    uniffiCaller.rustCallWithError(
+      /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+        FfiConverterTypeJazzRnError
+      ),
+      /*caller:*/ (callStatus) => {
+        nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
+          uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+          FfiConverterString.lower(objectId),
+          FfiConverterString.lower(valuesJson),
+          FfiConverterOptionalString.lower(writeContextJson),
           callStatus
         );
       },

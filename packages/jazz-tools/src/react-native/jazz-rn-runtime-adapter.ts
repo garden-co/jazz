@@ -21,10 +21,16 @@ export interface JazzRnRuntimeBinding {
   batchedTick(): void;
   close(): void;
   delete_(objectId: string): void;
+  deleteWithSession?(objectId: string, writeContextJson: string | undefined): void;
   flush(): void;
   getSchemaHash(): string;
   getBatchId(): string;
   insert(table: string, valuesJson: string): string;
+  insertWithSession?(
+    table: string,
+    valuesJson: string,
+    writeContextJson: string | undefined,
+  ): string;
   onBatchedTickNeeded(
     callback:
       | {
@@ -63,6 +69,11 @@ export interface JazzRnRuntimeBinding {
   ): bigint;
   unsubscribe(handle: bigint): void;
   update(objectId: string, valuesJson: string): void;
+  updateWithSession?(
+    objectId: string,
+    valuesJson: string,
+    writeContextJson: string | undefined,
+  ): void;
   uniffiDestroy?(): void;
 }
 
@@ -198,9 +209,32 @@ export class JazzRnRuntimeAdapter implements Runtime {
     });
   }
 
+  private requireWriteContextMethod<
+    T extends "insertWithSession" | "updateWithSession" | "deleteWithSession",
+  >(method: T): NonNullable<JazzRnRuntimeBinding[T]> {
+    const runtimeMethod = this.binding[method];
+    if (!runtimeMethod) {
+      throw new Error(`${method} is not supported by this RN runtime binding`);
+    }
+    return runtimeMethod.bind(this.binding) as NonNullable<JazzRnRuntimeBinding[T]>;
+  }
+
   insert(table: string, values: InsertValues): Row {
     try {
       const rowJson = this.binding.insert(table, JSON.stringify(values));
+      return JSON.parse(rowJson) as Row;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  insertWithSession(table: string, values: InsertValues, write_context_json?: string | null): Row {
+    try {
+      const rowJson = this.requireWriteContextMethod("insertWithSession")(
+        table,
+        JSON.stringify(values),
+        write_context_json ?? undefined,
+      );
       return JSON.parse(rowJson) as Row;
     } catch (error) {
       throw normalizeJazzRnError(error);
@@ -216,9 +250,34 @@ export class JazzRnRuntimeAdapter implements Runtime {
     }
   }
 
+  updateWithSession(object_id: string, values: any, write_context_json?: string | null): void {
+    try {
+      this.requireWriteContextMethod("updateWithSession")(
+        object_id,
+        JSON.stringify(values),
+        write_context_json ?? undefined,
+      );
+    } catch (error) {
+      if (swallowMissingObjectMutation("update", error)) return;
+      throw normalizeJazzRnError(error);
+    }
+  }
+
   delete(object_id: string): void {
     try {
       this.binding.delete_(object_id);
+    } catch (error) {
+      if (swallowMissingObjectMutation("delete", error)) return;
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  deleteWithSession(object_id: string, write_context_json?: string | null): void {
+    try {
+      this.requireWriteContextMethod("deleteWithSession")(
+        object_id,
+        write_context_json ?? undefined,
+      );
     } catch (error) {
       if (swallowMissingObjectMutation("delete", error)) return;
       throw normalizeJazzRnError(error);
@@ -314,6 +373,18 @@ export class JazzRnRuntimeAdapter implements Runtime {
     return Promise.resolve(row);
   }
 
+  insertDurableWithSession(
+    table: string,
+    values: InsertValues,
+    write_context_json: string | null | undefined,
+    tier: string,
+  ): Promise<Row> {
+    assertWorkerTier(tier);
+    const row = this.insertWithSession(table, values, write_context_json);
+    this.binding.flush();
+    return Promise.resolve(row);
+  }
+
   updateDurable(object_id: string, values: any, tier: string): Promise<void> {
     assertWorkerTier(tier);
     this.update(object_id, values);
@@ -321,9 +392,32 @@ export class JazzRnRuntimeAdapter implements Runtime {
     return Promise.resolve();
   }
 
+  updateDurableWithSession(
+    object_id: string,
+    values: any,
+    write_context_json: string | null | undefined,
+    tier: string,
+  ): Promise<void> {
+    assertWorkerTier(tier);
+    this.updateWithSession(object_id, values, write_context_json);
+    this.binding.flush();
+    return Promise.resolve();
+  }
+
   deleteDurable(object_id: string, tier: string): Promise<void> {
     assertWorkerTier(tier);
     this.delete(object_id);
+    this.binding.flush();
+    return Promise.resolve();
+  }
+
+  deleteDurableWithSession(
+    object_id: string,
+    write_context_json: string | null | undefined,
+    tier: string,
+  ): Promise<void> {
+    assertWorkerTier(tier);
+    this.deleteWithSession(object_id, write_context_json);
     this.binding.flush();
     return Promise.resolve();
   }

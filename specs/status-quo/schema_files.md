@@ -1,151 +1,69 @@
 # Schema Files — Status Quo
 
-This is the developer-facing layer for schema management. While the [Schema Manager](schema_manager.md) handles runtime concerns (multi-version queries, lens transforms, catalogue sync), this layer handles build-time concerns: how developers define schemas, how versions are tracked on disk, and how migrations are generated.
+This is the developer-facing layer for schema management. While the [Schema Manager](schema_manager.md) handles runtime concerns like multi-version reads, lens transforms, and schema catalogue sync, this layer is focused on what files developers edit locally and what `jazz-tools` commands they use to validate schemas and generate/push migrations.
 
-The design philosophy is "schemas as code": developers edit `current.sql` (or `current.ts`), run `jazz-tools build`, and the tool handles versioning, freezing, and migration generation automatically. Frozen schema files are immutable and content-hash-verified — if someone edits a frozen file, the build fails.
+## Project Layout
 
-## SQL Dialect
-
-### Schema DDL
-
-```sql
-CREATE TABLE todos (
-    title TEXT NOT NULL,
-    completed BOOLEAN NOT NULL
-);
+```text
+app-root/
+├── schema.ts
+├── permissions.ts
+└── migrations/
+    └── 20260331-unnamed-aaaaaaaaaaaa-bbbbbbbbbbbb.ts
 ```
 
-**Supported types**: `TEXT`, `INTEGER`, `BIGINT`, `BOOLEAN`, `TIMESTAMP`, `UUID`
+- `schema.ts` is the root structural schema.
+- `permissions.ts` is optional and must be separate from `schema.ts`.
+- `migrations/*.ts` contains reviewed migration modules.
 
-**Constraints**: `NOT NULL` (omitting means nullable)
+## `jazz-tools validate`
 
-### Migration DDL
+`jazz-tools validate` compiles the schema into the runtime `wasmSchema` form to make sure it is valid, and checks permissions comply with the schema.
 
-```sql
-ALTER TABLE users ADD COLUMN age INTEGER DEFAULT 0;
-ALTER TABLE users DROP COLUMN deprecated_field;
-ALTER TABLE users RENAME COLUMN email TO email_address;
-CREATE TABLE new_table (id TEXT NOT NULL);
-DROP TABLE old_table;
-```
+## Migrations
 
-> `crates/groove/src/schema_manager/sql.rs:556` (parse_schema), `582` (parse_lens)
+Migrations are a separate workflow from validation.
 
-## File Convention
+The current mental model is:
 
-```
-schema/
-├── current.sql                                           # Editable source of truth
-├── schema_v1_455a1f10a158.sql                            # Frozen v1
-├── schema_v2_add_description_357c464c4c43.sql            # Optional description
-├── migration_v1_v2_fwd_455a1f10a158_357c464c4c43.sql     # Forward migration
-├── migration_v1_v2_bwd_455a1f10a158_357c464c4c43.sql     # Backward migration
-└── ...
-```
+- schemas are stored on the server and identified by hash
+- `jazz-tools migrations create <fromHash> <toHash>` pulls two stored structural schemas and writes a typed migration stub into `migrations/`
+- the developer reviews and edits that file
+- `jazz-tools migrations push <fromHash> <toHash>` publishes the reviewed migration edge back to the server
 
-- Schema: `schema_vN_{description}_{hash}.sql` (description optional)
-- Migration: `migration_vA_vB_{fwd|bwd}_{hashA}_{hashB}.sql` (direction before hashes)
-- Hash: 12-char hex (6 bytes of BLAKE3) via `SchemaHash::short()`
-- Versions sequential from v1, no gaps allowed
-- Frozen schemas are immutable (content hash verified on build)
+Generated migrations use `defineMigration(...)` and carry:
 
-> `crates/groove/src/schema_manager/files.rs:374-542` (filename parsing and generation)
+- `fromHash`
+- `toHash`
+- `from` / `to` schema witnesses
+- a `migrate` object that describes the structural steps
 
-## CLI: `jazz-tools build`
-
-```bash
-jazz build [--schema-dir ./schema] [--ts]
-```
-
-Algorithm:
-
-1. Load and validate all `schema_v*_*.sql` files (verify content hash matches filename)
-2. Validate sequential versions
-3. Compute hash of `current.sql`
-4. If hash matches existing → "Schema unchanged"
-5. If new → create `schema_vN+1_{hash}.sql`
-6. Generate migrations for all adjacent version pairs (including cross-pair for branch merges)
-
-> `crates/jazz-tools/src/commands/build.rs:69-194`
-
-## TypeScript DSL
+Example shape:
 
 ```typescript
-import { table, col } from "jazz-tools";
+import { schema as s } from "jazz-tools";
 
-table("todos", {
-  title: col.string(),
-  done: col.boolean(),
-  description: col.string().optional(),
+export default s.defineMigration({
+  migrate: {
+    // reviewed structural steps go here
+  },
+  fromHash: "aaaaaaaaaaaa",
+  toHash: "bbbbbbbbbbbb",
+  from: {
+    /* schema witness */
+  },
+  to: {
+    /* schema witness */
+  },
 });
 ```
-
-Migration:
-
-```typescript
-import { migrate, col } from "jazz-tools";
-
-migrate("todos", {
-  description: col.add().string({ default: "" }),
-});
-```
-
-A stub may call `migrate()` multiple times when a schema change affects more than one table. Each call is collected and all tables are included in the generated SQL.
-
-Uses side-effect collection (no export needed).
-
-> `packages/jazz-tools/src/dsl.ts` (DSL implementation)
-> `examples/todo-server-ts/schema/current.ts` (real example)
-
-### TypeScript CLI: `node ./packages/jazz-tools/dist/cli.js build`
-
-1. Compiles `current.ts` → `current.sql`
-2. Compiles migration `.ts` → `_fwd.sql` + `_bwd.sql`
-3. Runs `jazz-tools build --ts` for validation and versioning
-
-> `packages/jazz-tools/src/cli.ts`
-
-### TypeScript Codegen
-
-Generates `app.ts` with TypeScript interfaces, init types, WhereInput types, and QueryBuilder classes.
-
-> `packages/jazz-tools/src/codegen/index.ts`
-> `examples/todo-client-localfirst-ts/schema/app.ts` (generated output)
-
-## Schema Diff
-
-`diff_schemas(old, new)` returns `DiffResult` with a `LensTransform` and any `Ambiguity` items (possible renames, type changes).
-
-> `crates/groove/src/schema_manager/diff.rs`
-
-## Git Branch Merge
-
-A subtle but important design: because frozen schema files include the content hash in their filename, two developers creating different v2 schemas on different git branches produce different files — no git conflict. After merge, both v2 variants coexist, and `jazz build` generates migrations from ALL v2 schemas to the new v3.
-
-Only `current.sql`/`current.ts` can conflict in git, which is resolved by the developer creating the merged schema.
-
-## API Summary
-
-| Function                            | Location           |
-| ----------------------------------- | ------------------ |
-| `parse_schema(sql)`                 | `sql.rs:556`       |
-| `parse_lens(sql)`                   | `sql.rs:582`       |
-| `schema_to_sql(schema)`             | `sql.rs:630`       |
-| `lens_to_sql(transform)`            | `sql.rs:656+`      |
-| `SchemaDirectory`                   | `files.rs:105-372` |
-| `diff_schemas(old, new)`            | `diff.rs:80`       |
-| `parse_versioned_schema_filename()` | `files.rs:379-414` |
-| `parse_migration_filename()`        | `files.rs:422-492` |
 
 ## Key Files
 
-| File                                        | Purpose                             |
-| ------------------------------------------- | ----------------------------------- |
-| `crates/groove/src/schema_manager/sql.rs`   | SQL parsing/generation (700+ lines) |
-| `crates/groove/src/schema_manager/files.rs` | File convention API (940+ lines)    |
-| `crates/groove/src/schema_manager/diff.rs`  | Schema diffing (150+ lines)         |
-| `crates/jazz-tools/src/commands/build.rs`   | CLI build command (370+ lines)      |
-| `packages/jazz-tools/src/cli.ts`            | TypeScript CLI                      |
-| `packages/jazz-tools/src/dsl.ts`            | TypeScript DSL                      |
-| `packages/jazz-tools/src/sql-gen.ts`        | TS → SQL generation                 |
-| `packages/jazz-tools/src/codegen/index.ts`  | TS codegen (app.ts)                 |
+| File                                              | Purpose                                                               |
+| ------------------------------------------------- | --------------------------------------------------------------------- |
+| `packages/jazz-tools/src/cli.ts`                  | `validate`, `migrations`, `permissions`, and `schema export` commands |
+| `packages/jazz-tools/src/schema-loader.ts`        | Loads `schema.ts` and `permissions.ts`, then compiles to `wasmSchema` |
+| `packages/jazz-tools/src/migrations.ts`           | Typed migration DSL and forward-lens construction                     |
+| `packages/jazz-tools/src/runtime/schema-fetch.ts` | Fetch/publish helpers for stored schemas and migrations               |
+| `packages/jazz-tools/bin/jazz-tools.js`           | Top-level CLI wrapper and `build` rejection                           |

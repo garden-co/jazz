@@ -19,6 +19,10 @@ pub use opfs_btree::OpfsBTreeStorage;
 mod fjall;
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 pub use fjall::FjallStorage;
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+mod rocksdb;
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+pub use rocksdb::RocksDBStorage;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
@@ -1411,7 +1415,7 @@ mod tests {
             parents: smallvec![],
             content: content.to_vec(),
             timestamp: 12345,
-            author: ObjectId::new(),
+            author: ObjectId::new().to_string(),
             metadata: None,
             stored_state: Default::default(),
             ack_state: Default::default(),

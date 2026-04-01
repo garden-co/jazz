@@ -701,12 +701,34 @@ function decodeBinaryServerEvent(frame: Uint8Array): DecodedBinaryServerEvent {
       throw new Error(`Invalid binary server event tag: ${view.getUint8(0)}`);
   }
 }
+function catalogueObjectTypeFromPayloadJson(payloadJson: string): string | null {
+  try {
+    const parsed = JSON.parse(payloadJson) as {
+      ObjectUpdated?: {
+        metadata?: {
+          metadata?: {
+            type?: unknown;
+          };
+        };
+      };
+    };
+    const kind = parsed.ObjectUpdated?.metadata?.metadata?.type;
+    return typeof kind === "string" ? kind : null;
+  } catch {
+    return null;
+  }
+}
 
+function isStructuralSchemaCataloguePayload(payloadJson: string): boolean {
+  return catalogueObjectTypeFromPayloadJson(payloadJson) === "catalogue_schema";
+}
 /**
  * POST a sync payload to the server.
  *
  * User auth headers are always applied first (JWT or local auth).
- * Catalogue payloads additionally include the admin-secret header when available.
+ * Structural schema catalogue payloads can also flow with ordinary user auth so
+ * development servers can learn schemas without exposing an admin secret to the client.
+ * Other catalogue payloads still require the admin secret.
  */
 export async function sendSyncPayload(
   serverUrl: string,
@@ -715,7 +737,11 @@ export async function sendSyncPayload(
   auth: SyncAuth,
   logPrefix = "",
 ): Promise<void> {
-  if (isCatalogue && !auth.adminSecret) {
+  const payloadJson = typeof payload === "string" ? payload : null;
+  const isSchemaCatalogue =
+    isCatalogue && payloadJson !== null && isStructuralSchemaCataloguePayload(payloadJson);
+
+  if (isCatalogue && !auth.adminSecret && !isSchemaCatalogue) {
     return;
   }
 
@@ -723,7 +749,7 @@ export async function sendSyncPayload(
   const headers: Record<string, string> = {
     "Content-Type": isBinary ? "application/octet-stream" : "application/json",
   };
-  if (isCatalogue) {
+  if (isCatalogue && auth.adminSecret) {
     headers["X-Jazz-Admin-Secret"] = auth.adminSecret!;
   } else {
     applySyncAuthHeaders(headers, auth);

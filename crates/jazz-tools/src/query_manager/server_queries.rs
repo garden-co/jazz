@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::commit::CommitId;
-use crate::metadata::MetadataKey;
+use crate::metadata::{MetadataKey, RowProvenance};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::graph_nodes::policy_eval::PolicyContextEvaluator;
 use crate::schema_manager::LensTransformer;
@@ -30,6 +30,7 @@ pub(super) struct ResolvedSchemaRow {
     pub branch_key: BatchBranchKey,
     pub commit_id: CommitId,
     pub content: Vec<u8>,
+    pub row_provenance: RowProvenance,
     pub is_soft_deleted: bool,
 }
 
@@ -47,6 +48,7 @@ pub(crate) struct AuthorizationPolicyRequest<'a> {
     pub(crate) table_name: TableName,
     pub(crate) policy: &'a PolicyExpr,
     pub(crate) content: &'a [u8],
+    pub(crate) provenance: &'a crate::metadata::RowProvenance,
     pub(crate) session: &'a Session,
     pub(crate) auth_schema: &'a Schema,
     pub(crate) auth_context: &'a crate::schema_manager::SchemaContext,
@@ -103,6 +105,38 @@ impl QueryManager {
                     })
             })
             .then_some(scope)
+    }
+
+    fn current_row_provenance(
+        &mut self,
+        storage: &dyn Storage,
+        object_id: ObjectId,
+        branch_name: BranchName,
+    ) -> Option<RowProvenance> {
+        let branches = vec![branch_name.as_str().to_string()];
+        let object = self
+            .sync_manager
+            .object_manager
+            .get_or_load(object_id, storage, &branches)?;
+        let branch = object
+            .branches
+            .get_by_key(BatchBranchKey::from_branch_name(branch_name))?;
+        branch
+            .tips
+            .iter()
+            .filter_map(|tip_id| branch.commits.get(tip_id))
+            .max_by_key(|commit| commit.timestamp)
+            .and_then(|commit| commit.row_provenance())
+    }
+
+    fn payload_tip_provenance(payload: &SyncPayload) -> Option<RowProvenance> {
+        match payload {
+            SyncPayload::ObjectUpdated { commits, .. } => commits
+                .iter()
+                .max_by_key(|commit| commit.timestamp)
+                .and_then(|commit| commit.row_provenance()),
+            _ => None,
+        }
     }
 
     pub(super) fn build_server_subscription_context(
@@ -254,7 +288,7 @@ impl QueryManager {
     ) -> Option<LoadedRow> {
         let branches = vec![branch_name.as_str().to_string()];
         let branch_key = BatchBranchKey::from_branch_name(branch_name);
-        let (table, tip_commit_id, tip_content) = {
+        let (table, tip_commit_id, tip_content, tip_provenance) = {
             let object = self
                 .sync_manager
                 .object_manager
@@ -269,7 +303,7 @@ impl QueryManager {
             if tip.1.content.is_empty() {
                 return None;
             }
-            Some((table, tip.0, tip.1.content.clone()))
+            Some((table, tip.0, tip.1.content.clone(), tip.1.row_provenance()?))
         }?;
 
         let transformed = self.transform_content_to_authorization_schema(
@@ -283,6 +317,7 @@ impl QueryManager {
         Some(LoadedRow::new(
             transformed,
             tip_commit_id,
+            tip_provenance,
             [(object_id, branch_key)].into_iter().collect(),
         ))
     }
@@ -298,6 +333,7 @@ impl QueryManager {
             table_name,
             policy,
             content,
+            provenance,
             session,
             auth_schema,
             auth_context,
@@ -317,7 +353,12 @@ impl QueryManager {
             return false;
         };
 
-        let row = Row::new(object_id, transformed, CommitId([0; 32]));
+        let row = Row::new(
+            object_id,
+            transformed,
+            CommitId([0; 32]),
+            provenance.clone(),
+        );
         let evaluator = PolicyContextEvaluator::new(auth_schema, session, branch_name.as_str());
         let mut visited = HashSet::new();
         let mut row_loader = |related_id: ObjectId, _provenance: Option<&TupleProvenance>| {
@@ -349,7 +390,7 @@ impl QueryManager {
     ) -> bool {
         let branches = vec![branch_name.as_str().to_string()];
         let branch_key = BatchBranchKey::from_branch_name(branch_name);
-        let Some((table, tip_content)) = ({
+        let Some((table, tip_content, tip_provenance)) = ({
             let Some(object) = self
                 .sync_manager
                 .object_manager
@@ -374,7 +415,10 @@ impl QueryManager {
             if tip_commit.content.is_empty() {
                 return false;
             }
-            Some((table, tip_commit.content.clone()))
+            let Some(tip_provenance) = tip_commit.row_provenance() else {
+                return false;
+            };
+            Some((table, tip_commit.content.clone(), tip_provenance))
         }) else {
             return false;
         };
@@ -398,6 +442,7 @@ impl QueryManager {
                 table_name,
                 policy: select_policy,
                 content: &tip_content,
+                provenance: &tip_provenance,
                 session,
                 auth_schema,
                 auth_context,
@@ -546,7 +591,7 @@ impl QueryManager {
         branches: &[QueryBranchRef],
         context: &mut RowTransformContext<'_>,
     ) -> Option<ResolvedSchemaRow> {
-        let mut best: Option<(u64, CommitId, QueryBranchRef, bool)> = None;
+        let mut best: Option<(u64, CommitId, QueryBranchRef, bool, RowProvenance)> = None;
 
         for branch_ref in branches {
             let Some(branch) = obj.branches.get_by_key(branch_ref.batch_branch_key()) else {
@@ -556,22 +601,37 @@ impl QueryManager {
                 let Some(commit) = branch.commits.get(&tip_id) else {
                     continue;
                 };
+                let Some(row_provenance) = commit.row_provenance() else {
+                    continue;
+                };
                 let is_soft_deleted = commit.is_soft_deleted();
                 match &best {
                     None => {
-                        best = Some((commit.timestamp, tip_id, *branch_ref, is_soft_deleted));
+                        best = Some((
+                            commit.timestamp,
+                            tip_id,
+                            *branch_ref,
+                            is_soft_deleted,
+                            row_provenance,
+                        ));
                     }
-                    Some((best_ts, best_id, _, _))
+                    Some((best_ts, best_id, _, _, _))
                         if (commit.timestamp, tip_id) > (*best_ts, *best_id) =>
                     {
-                        best = Some((commit.timestamp, tip_id, *branch_ref, is_soft_deleted));
+                        best = Some((
+                            commit.timestamp,
+                            tip_id,
+                            *branch_ref,
+                            is_soft_deleted,
+                            row_provenance,
+                        ));
                     }
                     _ => {}
                 }
             }
         }
 
-        let (_, commit_id, branch_ref, is_soft_deleted) = best?;
+        let (_, commit_id, branch_ref, is_soft_deleted, row_provenance) = best?;
         let branch = obj.branches.get_by_key(branch_ref.batch_branch_key())?;
         let content = branch.commits.get(&commit_id)?.content.clone();
         if content.is_empty() {
@@ -583,6 +643,7 @@ impl QueryManager {
             commit_id,
             branch_ref,
             is_soft_deleted,
+            row_provenance,
             context,
         )
     }
@@ -593,6 +654,7 @@ impl QueryManager {
         commit_id: CommitId,
         branch_ref: QueryBranchRef,
         is_soft_deleted: bool,
+        row_provenance: RowProvenance,
         context: &mut RowTransformContext<'_>,
     ) -> Option<ResolvedSchemaRow> {
         let branch_name = branch_ref.branch_name();
@@ -611,6 +673,7 @@ impl QueryManager {
                         commit_id,
                         content: result.data,
                         is_soft_deleted,
+                        row_provenance,
                     });
                 }
                 Err(err) => {
@@ -639,6 +702,7 @@ impl QueryManager {
             commit_id,
             content,
             is_soft_deleted,
+            row_provenance,
         })
     }
 
@@ -853,6 +917,7 @@ impl QueryManager {
                         Some(LoadedRow::new(
                             resolved.content,
                             resolved.commit_id,
+                            resolved.row_provenance,
                             [(id, resolved.branch_key)].into_iter().collect(),
                         ))
                     };
@@ -1025,6 +1090,7 @@ impl QueryManager {
                             Some(LoadedRow::new(
                                 resolved.content,
                                 resolved.commit_id,
+                                resolved.row_provenance,
                                 [(id, resolved.branch_key)].into_iter().collect(),
                             ))
                         };
@@ -1387,6 +1453,19 @@ impl QueryManager {
                 return;
             }
         };
+        let provenance = match check.operation {
+            Operation::Insert => Self::payload_tip_provenance(&check.payload),
+            Operation::Delete => self.current_row_provenance(storage, object_id, branch_name),
+            Operation::Update | Operation::Select => None,
+        };
+        let Some(provenance) = provenance else {
+            let reason = format!(
+                "{:?} denied on table {} - missing row provenance",
+                check.operation, table_name.0
+            );
+            self.sync_manager.reject_permission_check(check, reason);
+            return;
+        };
         if !self.evaluate_authorization_policy(
             storage,
             AuthorizationPolicyRequest {
@@ -1395,6 +1474,7 @@ impl QueryManager {
                 table_name,
                 policy,
                 content,
+                provenance: &provenance,
                 session: &check.session,
                 auth_schema: &auth_schema,
                 auth_context: &auth_context,
@@ -1455,6 +1535,8 @@ impl QueryManager {
         };
         let using_policy = table_schema.policies.update.using.as_ref();
         let check_policy = table_schema.policies.update.with_check.as_ref();
+        let old_provenance = self.current_row_provenance(storage, object_id, branch_name);
+        let new_provenance = Self::payload_tip_provenance(&check.payload);
         if using_policy.is_none() && check_policy.is_none() {
             self.sync_manager.approve_permission_check(storage, check);
             return;
@@ -1472,6 +1554,14 @@ impl QueryManager {
                     return;
                 }
             };
+            let Some(old_provenance) = old_provenance.as_ref() else {
+                let reason = format!(
+                    "Update denied by USING policy on table {} - missing old provenance",
+                    table_name.0
+                );
+                self.sync_manager.reject_permission_check(check, reason);
+                return;
+            };
 
             if !self.evaluate_authorization_policy(
                 storage,
@@ -1481,6 +1571,7 @@ impl QueryManager {
                     table_name,
                     policy: using,
                     content: old_content,
+                    provenance: old_provenance,
                     session: &check.session,
                     auth_schema,
                     auth_context,
@@ -1504,6 +1595,14 @@ impl QueryManager {
                     return;
                 }
             };
+            let Some(new_provenance) = new_provenance.as_ref() else {
+                let reason = format!(
+                    "Update denied by WITH CHECK policy on table {} - missing new provenance",
+                    table_name.0
+                );
+                self.sync_manager.reject_permission_check(check, reason);
+                return;
+            };
 
             if !self.evaluate_authorization_policy(
                 storage,
@@ -1513,6 +1612,7 @@ impl QueryManager {
                     table_name,
                     policy: with_check,
                     content: new_content,
+                    provenance: new_provenance,
                     session: &check.session,
                     auth_schema,
                     auth_context,
@@ -1680,6 +1780,7 @@ impl QueryManager {
                     Some(LoadedRow::new(
                         resolved.content,
                         resolved.commit_id,
+                        resolved.row_provenance,
                         [(id, resolved.branch_key)].into_iter().collect(),
                     ))
                 };

@@ -76,7 +76,7 @@ async function setupCreateClient(options: SetupOptions = {}) {
   const dbShutdown = vi.fn(async () => {});
   const db = { shutdown: dbShutdown };
 
-  mocks.resolveLocalAuthDefaults.mockImplementation((input: DbConfig) => resolvedConfig);
+  mocks.resolveLocalAuthDefaults.mockImplementation((_input: DbConfig) => resolvedConfig);
   mocks.resolveClientSession.mockImplementation(async () => {
     if (options.sessionError) {
       throw options.sessionError;

@@ -483,7 +483,7 @@ fn remotely_received_catalogue_replays_to_later_clients() {
                 parents: smallvec![],
                 content: b"schema".to_vec(),
                 timestamp: 1000,
-                author: ObjectId::new(),
+                author: ObjectId::new().to_string(),
                 metadata: None,
                 stored_state: StoredState::Stored,
                 ack_state: Default::default(),
@@ -744,7 +744,7 @@ fn peer_writes_applied_directly() {
         parents: smallvec![c1],
         content: b"update".to_vec(),
         timestamp: 2000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -790,7 +790,7 @@ fn admin_writes_catalogue_directly() {
         parents: smallvec![],
         content: b"schema data".to_vec(),
         timestamp: 1000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -859,7 +859,7 @@ fn admin_writes_row_directly() {
         parents: smallvec![c1],
         content: b"updated".to_vec(),
         timestamp: 2000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -917,7 +917,7 @@ fn backend_writes_row_directly() {
         parents: smallvec![c1],
         content: b"updated".to_vec(),
         timestamp: 2000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -961,7 +961,7 @@ fn backend_catalogue_writes_are_denied() {
         parents: smallvec![],
         content: b"schema data".to_vec(),
         timestamp: 1000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1031,7 +1031,7 @@ fn user_with_session_goes_to_permission_check() {
         parents: smallvec![c1],
         content: b"update".to_vec(),
         timestamp: 2000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1079,7 +1079,7 @@ fn user_without_session_rejected() {
         parents: smallvec![],
         content: b"data".to_vec(),
         timestamp: 1000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1139,7 +1139,7 @@ fn user_catalogue_write_rejected() {
         parents: smallvec![],
         content: b"schema data".to_vec(),
         timestamp: 1000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1193,6 +1193,130 @@ fn user_catalogue_write_rejected() {
 }
 
 #[test]
+fn user_schema_catalogue_write_allowed_when_enabled() {
+    let mut sm = SyncManager::new().with_unprivileged_schema_catalogue_writes();
+    let mut io = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("alice"));
+
+    let obj_id = ObjectId::new();
+    let author = ObjectId::new();
+    let commit = Commit {
+        parents: smallvec![],
+        content: b"schema data".to_vec(),
+        timestamp: 1000,
+        author: author.to_string(),
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    let mut cat_metadata = HashMap::new();
+    cat_metadata.insert(
+        crate::metadata::MetadataKey::Type.to_string(),
+        crate::metadata::ObjectType::CatalogueSchema.to_string(),
+    );
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: Some(ObjectMetadata {
+                id: obj_id,
+                metadata: cat_metadata,
+            }),
+            branch_name: "main".into(),
+            commits: vec![commit.clone()],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    assert!(
+        sm.take_outbox().is_empty(),
+        "schema catalogue writes should apply directly when enabled"
+    );
+    assert!(
+        sm.take_pending_permission_checks().is_empty(),
+        "schema catalogue writes should not go through row permission checks"
+    );
+
+    let object = sm
+        .object_manager
+        .get(obj_id)
+        .expect("schema catalogue object should be stored");
+    assert_eq!(
+        object
+            .metadata
+            .get(crate::metadata::MetadataKey::Type.as_str())
+            .map(String::as_str),
+        Some(crate::metadata::ObjectType::CatalogueSchema.as_str())
+    );
+    let tips = sm
+        .object_manager
+        .get_tip_ids(obj_id, "main")
+        .expect("schema branch should exist");
+    assert!(tips.contains(&commit.id()));
+}
+
+#[test]
+fn user_non_schema_catalogue_write_still_rejected_when_enabled() {
+    let mut sm = SyncManager::new().with_unprivileged_schema_catalogue_writes();
+    let mut io = MemoryStorage::new();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("alice"));
+
+    let obj_id = ObjectId::new();
+    let author = ObjectId::new();
+    let commit = Commit {
+        parents: smallvec![],
+        content: b"lens data".to_vec(),
+        timestamp: 1000,
+        author: author.to_string(),
+        metadata: None,
+        stored_state: crate::commit::StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    let mut cat_metadata = HashMap::new();
+    cat_metadata.insert(
+        crate::metadata::MetadataKey::Type.to_string(),
+        crate::metadata::ObjectType::CatalogueLens.to_string(),
+    );
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: Some(ObjectMetadata {
+                id: obj_id,
+                metadata: cat_metadata,
+            }),
+            branch_name: "main".into(),
+            commits: vec![commit],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+    assert!(matches!(
+        &outbox[0],
+        OutboxEntry {
+            destination: Destination::Client(id),
+            payload:
+                SyncPayload::Error(SyncError::CatalogueWriteDenied { object_id, branch_name }),
+        } if *id == client_id && *object_id == obj_id && branch_name.as_str() == "main"
+    ));
+    assert!(sm.object_manager.get(obj_id).is_none());
+}
+
+#[test]
 fn add_client_then_set_peer_role() {
     let mut sm = SyncManager::new();
     let client_id = ClientId::new();
@@ -1240,7 +1364,7 @@ fn write_with_session_goes_to_pending_permission_checks() {
         parents: smallvec![c1],
         content: b"new_content".to_vec(),
         timestamp: 2000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1303,7 +1427,7 @@ fn soft_delete_object_updated_is_queued_as_delete_permission_check() {
         parents: smallvec![c1],
         content: b"original".to_vec(),
         timestamp: 2000,
-        author,
+        author: author.to_string(),
         metadata: Some(crate::metadata::soft_delete_metadata()),
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1366,7 +1490,7 @@ fn fresh_batch_update_uses_prefix_head_for_permission_check() {
         parents: smallvec![alice_commit],
         content: b"hacked".to_vec(),
         timestamp: 2000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: StoredState::Stored,
         ack_state: Default::default(),
@@ -1423,7 +1547,7 @@ fn fresh_batch_delete_uses_prefix_head_for_permission_check() {
         parents: smallvec![alice_commit],
         content: b"original".to_vec(),
         timestamp: 2000,
-        author,
+        author: author.to_string(),
         metadata: Some(crate::metadata::soft_delete_metadata()),
         stored_state: StoredState::Stored,
         ack_state: Default::default(),
@@ -1486,7 +1610,7 @@ fn approve_permission_check_applies_write() {
         parents: smallvec![c1],
         content: b"allowed".to_vec(),
         timestamp: 2000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1557,7 +1681,7 @@ fn reject_permission_check_sends_error() {
         parents: smallvec![c1],
         content: b"denied".to_vec(),
         timestamp: 2000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1638,7 +1762,7 @@ fn server_update_forwarded_to_matching_clients() {
         parents: smallvec![],
         content: b"from server".to_vec(),
         timestamp: 1000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -1734,7 +1858,7 @@ fn client_update_forwarded_to_server_and_other_clients() {
         parents: smallvec![c1],
         content: b"from client1".to_vec(),
         timestamp: 2000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -2470,7 +2594,7 @@ fn make_test_commit(content: &[u8], parents: Vec<CommitId>) -> Commit {
         parents: parents.into(),
         content: content.to_vec(),
         timestamp: 1000,
-        author: ObjectId::from_uuid(uuid::Uuid::nil()),
+        author: ObjectId::from_uuid(uuid::Uuid::nil()).to_string(),
         metadata: None,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
@@ -2915,5 +3039,270 @@ fn query_subscription_demo_client_no_server_session_no_payload_session() {
     assert!(
         pending[0].session.is_none(),
         "anonymous client should produce session: None"
+    );
+}
+
+// ========================================================================
+// Client disconnect cleanup tests
+// ========================================================================
+
+#[test]
+fn remove_client_cleans_pending_permission_checks() {
+    //
+    // alice ──write──▶ server (pending policy check)
+    // bob   ──write──▶ server (pending policy check)
+    //
+    // alice disconnects → only bob's check remains.
+    //
+    let mut sm = SyncManager::new();
+
+    let alice = ClientId::new();
+    let bob = ClientId::new();
+    sm.add_client(alice);
+    sm.add_client(bob);
+
+    let obj_id = ObjectId::new();
+    let make_check = |id: u64, client_id: ClientId| PendingPermissionCheck {
+        id: PendingUpdateId(id),
+        client_id,
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: BranchName::new("main"),
+            commits: vec![],
+        },
+        session: crate::query_manager::session::Session {
+            user_id: format!("{client_id}"),
+            claims: serde_json::Value::Null,
+        },
+        schema_wait_started_at: None,
+        metadata: Default::default(),
+        old_content: None,
+        new_content: None,
+        operation: Operation::Insert,
+    };
+    sm.pending_permission_checks.push(make_check(1, alice));
+    sm.pending_permission_checks.push(make_check(2, bob));
+
+    let removed = sm.remove_client(alice);
+
+    assert!(removed, "should succeed — no inbox entries");
+    assert_eq!(sm.pending_permission_checks.len(), 1);
+    assert_eq!(sm.pending_permission_checks[0].client_id, bob);
+}
+
+#[test]
+fn remove_client_cleans_pending_query_subscriptions() {
+    //
+    // alice ──subscribe──▶ server (pending, not yet built)
+    // bob   ──subscribe──▶ server (pending, not yet built)
+    //
+    // alice disconnects → only bob's pending sub remains.
+    //
+    let mut sm = SyncManager::new();
+
+    let alice = ClientId::new();
+    let bob = ClientId::new();
+    sm.add_client(alice);
+    sm.add_client(bob);
+
+    let query = crate::query_manager::query::QueryBuilder::new("users").build();
+    sm.pending_query_subscriptions
+        .push(PendingQuerySubscription {
+            client_id: alice,
+            query_id: QueryId(1),
+            query: query.clone(),
+            schema_context: crate::schema_manager::QuerySchemaContext::new(
+                "dev",
+                SchemaHash::from_bytes([1; 32]),
+                "main",
+                BatchId([2; 16]),
+            ),
+            session: None,
+            propagation: QueryPropagation::Full,
+        });
+    sm.pending_query_subscriptions
+        .push(PendingQuerySubscription {
+            client_id: bob,
+            query_id: QueryId(1),
+            query,
+            schema_context: crate::schema_manager::QuerySchemaContext::new(
+                "dev",
+                SchemaHash::from_bytes([1; 32]),
+                "main",
+                BatchId([3; 16]),
+            ),
+            session: None,
+            propagation: QueryPropagation::Full,
+        });
+
+    sm.remove_client(alice);
+
+    assert_eq!(sm.pending_query_subscriptions.len(), 1);
+    assert_eq!(sm.pending_query_subscriptions[0].client_id, bob);
+}
+
+#[test]
+fn remove_client_cleans_pending_query_unsubscriptions() {
+    //
+    // alice ──unsubscribe──▶ server (pending cleanup)
+    // bob   ──unsubscribe──▶ server (pending cleanup)
+    //
+    // alice disconnects → only bob's pending unsub remains.
+    //
+    let mut sm = SyncManager::new();
+
+    let alice = ClientId::new();
+    let bob = ClientId::new();
+    sm.add_client(alice);
+    sm.add_client(bob);
+
+    sm.pending_query_unsubscriptions
+        .push(PendingQueryUnsubscription {
+            client_id: alice,
+            query_id: QueryId(1),
+        });
+    sm.pending_query_unsubscriptions
+        .push(PendingQueryUnsubscription {
+            client_id: bob,
+            query_id: QueryId(2),
+        });
+
+    sm.remove_client(alice);
+
+    assert_eq!(sm.pending_query_unsubscriptions.len(), 1);
+    assert_eq!(sm.pending_query_unsubscriptions[0].client_id, bob);
+}
+
+#[test]
+fn remove_client_cleans_outbox_entries() {
+    //
+    // server has queued messages for alice and bob.
+    // alice disconnects → only bob's messages remain.
+    //
+    let mut sm = SyncManager::new();
+
+    let alice = ClientId::new();
+    let bob = ClientId::new();
+    sm.add_client(alice);
+    sm.add_client(bob);
+
+    let obj_id = ObjectId::new();
+    let payload = SyncPayload::ObjectUpdated {
+        object_id: obj_id,
+        metadata: None,
+        branch_name: BranchName::new("main"),
+        commits: vec![],
+    };
+
+    sm.outbox.push(OutboxEntry {
+        destination: Destination::Client(alice),
+        payload: payload.clone(),
+    });
+    sm.outbox.push(OutboxEntry {
+        destination: Destination::Client(bob),
+        payload: payload.clone(),
+    });
+    // Server-destined messages should not be affected
+    let server_id = ServerId::new();
+    sm.outbox.push(OutboxEntry {
+        destination: Destination::Server(server_id),
+        payload,
+    });
+
+    sm.remove_client(alice);
+
+    assert_eq!(sm.outbox.len(), 2);
+    assert!(sm.outbox.iter().all(|e| match &e.destination {
+        Destination::Client(id) => *id != alice,
+        Destination::Server(_) => true,
+    }));
+}
+
+#[test]
+fn remove_client_skips_when_inbox_entries_exist() {
+    //
+    // alice ──msg──▶ server inbox (not yet processed)
+    //
+    // alice disconnects → remove_client returns false, state preserved.
+    //
+    let mut sm = SyncManager::new();
+
+    let alice = ClientId::new();
+    sm.add_client(alice);
+
+    let obj_id = ObjectId::new();
+    let payload = SyncPayload::ObjectUpdated {
+        object_id: obj_id,
+        metadata: None,
+        branch_name: BranchName::new("main"),
+        commits: vec![],
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(alice),
+        payload,
+    });
+
+    let removed = sm.remove_client(alice);
+
+    assert!(!removed, "should skip reap when inbox entries exist");
+    assert!(
+        sm.get_client(alice).is_some(),
+        "alice's ClientState should be preserved"
+    );
+    assert_eq!(sm.inbox.len(), 1, "inbox should be untouched");
+}
+
+#[test]
+fn remove_client_cleans_query_origin() {
+    //
+    // alice ──subscribe(q1)──▶ server   (query_origin: q1→{alice, bob})
+    // bob   ──subscribe(q1)──▶ server
+    //
+    // alice disconnects → query_origin: q1→{bob}
+    //
+    let mut sm = SyncManager::new();
+
+    let alice = ClientId::new();
+    let bob = ClientId::new();
+    sm.add_client(alice);
+    sm.add_client(bob);
+
+    let q1 = QueryId(42);
+    sm.query_origin.entry(q1).or_default().insert(alice);
+    sm.query_origin.entry(q1).or_default().insert(bob);
+
+    sm.remove_client(alice);
+
+    assert!(
+        sm.query_origin.contains_key(&q1),
+        "q1 should still exist (bob is still interested)"
+    );
+    let clients = &sm.query_origin[&q1];
+    assert!(!clients.contains(&alice), "alice should be removed");
+    assert!(clients.contains(&bob), "bob should remain");
+}
+
+#[test]
+fn remove_client_removes_query_origin_entry_when_last_client() {
+    //
+    // alice ──subscribe(q1)──▶ server   (query_origin: q1→{alice})
+    //
+    // alice disconnects → query_origin: empty
+    //
+    let mut sm = SyncManager::new();
+
+    let alice = ClientId::new();
+    sm.add_client(alice);
+
+    let q1 = QueryId(42);
+    sm.query_origin.entry(q1).or_default().insert(alice);
+
+    sm.remove_client(alice);
+
+    assert!(
+        !sm.query_origin.contains_key(&q1),
+        "q1 entry should be removed when last client disconnects"
     );
 }

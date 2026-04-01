@@ -7,7 +7,7 @@ use axum::{Json, Router, routing::get};
 use base64::Engine;
 use jazz_tools::object::BranchName;
 use jazz_tools::query_manager::types::{BranchPrefixName, SchemaHash};
-use jazz_tools::storage::{FjallStorage, Storage};
+use jazz_tools::storage::{RocksDBStorage, Storage};
 use jazz_tools::{
     AppContext, AppId, ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder,
     TableSchema, Value,
@@ -262,13 +262,27 @@ fn make_context(
         schema: test_schema(),
         server_url: format!("{server_url}/apps/{app_id}"),
         data_dir,
-        storage: jazz_tools::ClientStorage::Fjall,
+        storage: jazz_tools::ClientStorage::Persistent,
         jwt_token: Some(jwt_token),
         backend_secret: Some(BACKEND_SECRET.to_string()),
         admin_secret: Some(ADMIN_SECRET.to_string()),
     }
 }
 
+/// Wait for a query to reach the expected row count.
+///
+/// WORKAROUND: Opens a persistent subscription to keep the client in scope on
+/// the server. Without this, one-shot query polling creates subscription gaps
+/// where the server skips `ObjectUpdated` forwarding because
+/// `client.is_in_scope()` returns false during the gap. This causes deletes
+/// (and any update that exits scope) to be permanently missed by the polling
+/// client, since `set_client_query_scope` only handles newly-visible objects.
+///
+/// The real fix is to include result IDs in `QuerySettled` so the client can
+/// detect stale local cache entries.
+///
+/// See: todo/issues/stale-client-cache-after-scope-removal.md
+///      todo/ideas/1_mvp/sync-protocol-reliability.md (gap #2, #5)
 async fn wait_for_todos_count(
     client: &JazzClient,
     expected_count: usize,
@@ -276,6 +290,15 @@ async fn wait_for_todos_count(
     durability_tier: Option<DurabilityTier>,
 ) -> Vec<(jazz_tools::ObjectId, Vec<Value>)> {
     let query = QueryBuilder::new("todos").build();
+
+    // Keep a persistent subscription alive so the server maintains scope for
+    // forwarding updates to this client. The one-shot queries below read the
+    // actual data.
+    let _subscription_guard = client
+        .subscribe(query.clone())
+        .await
+        .expect("subscribe for wait_for_todos_count");
+
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last = Vec::new();
 
@@ -338,7 +361,7 @@ async fn wait_for_todos_count_on_disk(
     let db_path = data_root
         .join("apps")
         .join(app_id.to_string())
-        .join("jazz.fjall");
+        .join("jazz.rocksdb");
     let schema_hash = SchemaHash::compute(&test_schema());
     let prefix = BranchPrefixName::new("client", schema_hash, "main");
     let deadline = tokio::time::Instant::now() + timeout;
@@ -346,7 +369,7 @@ async fn wait_for_todos_count_on_disk(
 
     while tokio::time::Instant::now() < deadline {
         if db_path.exists()
-            && let Ok(storage) = FjallStorage::open(&db_path, 64 * 1024 * 1024)
+            && let Ok(storage) = RocksDBStorage::open(&db_path, 64 * 1024 * 1024)
         {
             let branches = storage
                 .load_table_prefix_batch_keys("todos", BranchName::new(prefix.branch_prefix()))
@@ -412,13 +435,13 @@ async fn wait_for_catalogue_manifest_schema_count_on_disk(
     let db_path = data_root
         .join("apps")
         .join(app_id.to_string())
-        .join("jazz.fjall");
+        .join("jazz.rocksdb");
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last_count = 0usize;
 
     while tokio::time::Instant::now() < deadline {
         if db_path.exists()
-            && let Ok(storage) = FjallStorage::open(&db_path, 64 * 1024 * 1024)
+            && let Ok(storage) = RocksDBStorage::open(&db_path, 64 * 1024 * 1024)
         {
             let manifest = storage
                 .load_catalogue_manifest(app_id.as_object_id())

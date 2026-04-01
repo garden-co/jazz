@@ -1,13 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
 
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use smallvec::SmallVec;
-use uuid::Uuid;
-
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId, PrefixBatchCatalog, PrefixBatchMeta};
 use crate::sync_manager::DurabilityTier;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use smallvec::SmallVec;
 
 use crate::query_manager::types::{BatchBranchKey, BatchId, BatchOrd, QueryBranchRef, Value};
 
@@ -205,7 +203,7 @@ fn encode_commit(out: &mut Vec<u8>, commit: &Commit, label: &str) -> Result<(), 
     }
     encode_bytes(out, label, &commit.content)?;
     encode_u64(out, commit.timestamp);
-    out.extend_from_slice(commit.author.uuid().as_bytes());
+    encode_string(out, label, &commit.author)?;
     match &commit.metadata {
         Some(metadata) => {
             out.push(1);
@@ -228,7 +226,7 @@ fn decode_commit(cursor: &mut BinaryCursor<'_>, label: &str) -> Result<Commit, S
     }
     let content = cursor.read_len_prefixed_bytes(label)?;
     let timestamp = cursor.read_u64(label)?;
-    let author = ObjectId::from_uuid(Uuid::from_bytes(cursor.read_fixed::<16>(label)?));
+    let author = cursor.read_string(label)?;
     let metadata = match cursor.read_u8(label)? {
         0 => None,
         1 => {
@@ -988,6 +986,7 @@ pub(super) fn index_range_core(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use uuid::Uuid;
 
     #[test]
     fn branch_ref_binary_codec_roundtrips() {
@@ -1008,7 +1007,7 @@ mod tests {
             parents: vec![CommitId([1; 32]), CommitId([2; 32])].into(),
             content: vec![3; 64],
             timestamp: 42,
-            author: ObjectId::from_uuid(Uuid::nil()),
+            author: ObjectId::from_uuid(Uuid::nil()).to_string(),
             metadata: Some(BTreeMap::from([("kind".to_string(), "merge".to_string())])),
             stored_state: Default::default(),
             ack_state: Default::default(),
@@ -1032,7 +1031,7 @@ mod tests {
                     parents: vec![CommitId([1; 32])].into(),
                     content: vec![2; 128],
                     timestamp: 11,
-                    author: ObjectId::from_uuid(Uuid::nil()),
+                    author: ObjectId::from_uuid(Uuid::nil()).to_string(),
                     metadata: None,
                     stored_state: Default::default(),
                     ack_state: Default::default(),
@@ -1041,7 +1040,7 @@ mod tests {
                     parents: vec![CommitId([3; 32]), CommitId([4; 32])].into(),
                     content: vec![5; 256],
                     timestamp: 12,
-                    author: ObjectId::from_uuid(Uuid::from_bytes([6; 16])),
+                    author: ObjectId::from_uuid(Uuid::from_bytes([6; 16])).to_string(),
                     metadata: Some(BTreeMap::from([
                         ("a".to_string(), "b".to_string()),
                         ("c".to_string(), "d".to_string()),

@@ -147,6 +147,17 @@ export const NATIVE_BENCHMARKS = [
       JAZZ_REALISTIC_VARIANT: "ci",
     },
   },
+  {
+    id: "native-criterion:r9_subscribed_write_path",
+    suite: "native",
+    label: "Criterion R9 subscribed write path",
+    kind: "criterion",
+    log_path: "logs/criterion_r9_subscribed_write_path.log",
+    criterion_filter: "realistic_phase1/subscribed_write_path",
+    env: {
+      JAZZ_REALISTIC_VARIANT: "ci",
+    },
+  },
 ];
 
 export const BROWSER_BENCHMARKS = [

@@ -414,6 +414,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install libclang (needed by rocksdb bindgen)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
@@ -594,10 +597,11 @@ jobs:
             target: x86_64-unknown-linux-gnu
             platform: linux-x64-gnu
             use_sccache: true
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            platform: win32-x64-msvc
-            use_sccache: false
+          # Windows disabled until libclang/bindgen setup is added for rocksdb
+          # - os: windows-latest
+          #   target: x86_64-pc-windows-msvc
+          #   platform: win32-x64-msvc
+          #   use_sccache: false
           - os: macos-14
             target: x86_64-apple-darwin
             platform: darwin-x64
@@ -627,6 +631,10 @@ jobs:
         with:
           toolchain: 1.93.1
           targets: ${{ matrix.target }}
+
+      - name: Install libclang (needed by rocksdb bindgen)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -1124,11 +1132,7 @@ jobs:
               ;;
           esac
 
-          node "${EXTRACT_DIR}/package/bin/jazz-tools.js" --help >/dev/null
-          test -x "${EXTRACT_DIR}/package/bin/native/${HOST_LINUX_BIN}" || {
-            echo "Packed native binary ${HOST_LINUX_BIN} is not executable after runtime bootstrap."
-            exit 1
-          }
+          node packages/jazz-tools/scripts/verify-packed-runtime-bootstrap.mjs "${EXTRACT_DIR}/package"
 
       - name: Verify packed jazz-rn manifest
         run: |

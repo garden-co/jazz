@@ -49,3 +49,19 @@ export async function listTodosWithInheritedPolicy(
   }
 }
 // #endregion permissions-inherits-ts
+
+// #region backend-attribution-ts
+export function createAttributedHandles(req: Request) {
+  const syntheticSession = {
+    user_id: "user_123",
+    claims: {},
+  };
+
+  return {
+    backendDb: context.asBackend(schemaApp),
+    attributedDb: context.withAttribution("user_123", schemaApp),
+    attributedSessionDb: context.withAttributionForSession(syntheticSession, schemaApp),
+    attributedRequestDb: context.withAttributionForRequest(req, schemaApp),
+  };
+}
+// #endregion backend-attribution-ts

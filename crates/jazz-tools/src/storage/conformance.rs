@@ -21,7 +21,7 @@ pub fn make_commit(content: &[u8], author: ObjectId, parents: &[CommitId]) -> Co
         parents: parents.iter().copied().collect(),
         content: content.to_vec(),
         timestamp: 1_700_000_000_000_000,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: Default::default(),
         ack_state: Default::default(),

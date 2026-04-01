@@ -244,8 +244,15 @@ impl SyncManager {
                             });
                             return;
                         };
-                        // User cannot write catalogue objects
+                        // User cannot write catalogue objects, except for
+                        // development-only structural schema auto-push.
                         if payload.is_catalogue() {
+                            if self.allow_unprivileged_schema_catalogue_writes
+                                && payload.is_structural_schema_catalogue()
+                            {
+                                self.apply_payload_from_client(storage, client_id, payload, false);
+                                return;
+                            }
                             self.outbox.push(OutboxEntry {
                                 destination: Destination::Client(client_id),
                                 payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {

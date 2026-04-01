@@ -85,6 +85,28 @@ describe("typed app prototype", () => {
     });
   });
 
+  it("serializes provenance magic columns and infers their projected types", () => {
+    const provenanceQuery = app.todos
+      .where({ $createdBy: "alice" })
+      .select("title", "$createdBy", "$updatedAt");
+
+    expect(JSON.parse(provenanceQuery._build())).toEqual({
+      table: "todos",
+      conditions: [{ column: "$createdBy", op: "eq", value: "alice" }],
+      includes: {},
+      select: ["title", "$createdBy", "$updatedAt"],
+      orderBy: [],
+      hops: [],
+    });
+
+    type ProvenanceRow = s.RowOf<typeof provenanceQuery>;
+    const row = {} as ProvenanceRow;
+
+    expectTypeOf(row.title).toEqualTypeOf<string>();
+    expectTypeOf(row.$createdBy).toEqualTypeOf<string>();
+    expectTypeOf(row.$updatedAt).toEqualTypeOf<Date>();
+  });
+
   it("infers rows, init payloads, where inputs, and include names from schema literals", () => {
     const todoWithProjectQuery = app.todos.include({ project: true });
     const projectWithTitlesQuery = app.projects.include({
@@ -106,7 +128,7 @@ describe("typed app prototype", () => {
     expectTypeOf(todoRow.done).toEqualTypeOf<boolean>();
     expectTypeOf(todoRow.tags).toEqualTypeOf<string[]>();
     expectTypeOf(todoRow.project).toEqualTypeOf<string>();
-    expectTypeOf(todoRow.owner).toEqualTypeOf<string | undefined>();
+    expectTypeOf(todoRow.owner).toEqualTypeOf<string | null>();
 
     expectTypeOf(todoInsert.title).toEqualTypeOf<string>();
     expectTypeOf(todoInsert.done).toEqualTypeOf<boolean>();
@@ -114,18 +136,18 @@ describe("typed app prototype", () => {
     expectTypeOf(todoInsert.project).toEqualTypeOf<string>();
     expectTypeOf(todoInsert.owner).toEqualTypeOf<string | null | undefined>();
 
-    expectTypeOf(undefined as TodoWhere["project"]).toEqualTypeOf<
+    expectTypeOf<TodoWhere["project"]>().toEqualTypeOf<
       string | { eq?: string; ne?: string } | undefined
     >();
-    expectTypeOf(undefined as TodoWhere["owner"]).toEqualTypeOf<
-      string | { eq?: string; ne?: string; isNull?: boolean } | undefined
+    expectTypeOf<TodoWhere["owner"]>().branded.toEqualTypeOf<
+      string | null | { eq?: string | null; ne?: string | null; isNull?: boolean } | undefined
     >();
-    expectTypeOf(undefined as TodoWhere["tags"]).toEqualTypeOf<
-      string[] | { eq?: string[]; contains?: string } | undefined
+    expectTypeOf<TodoWhere["tags"]>().branded.toEqualTypeOf<
+      string[] | { eq?: string[]; ne?: string[]; contains?: string } | undefined
     >();
 
-    const projectRecord: ProjectRecord | undefined = todoWithProject.project;
-    expectTypeOf(todoWithProject.owner).toEqualTypeOf<string | undefined>();
+    const projectRecord: ProjectRecord | null = todoWithProject.project;
+    expectTypeOf(todoWithProject.owner).toEqualTypeOf<string | null>();
     const todoTitleRecords: TodoTitleRecord[] = projectWithTitles.todosViaProject;
     const queryContract: QueryBuilder<TodoWithProject> = todoWithProjectQuery;
     const typedQueryContract: Query<"todos", { project: true }, any, AppSchema> =

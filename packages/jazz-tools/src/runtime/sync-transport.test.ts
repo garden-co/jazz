@@ -268,7 +268,7 @@ describe("sync-transport", () => {
     expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Local-Token");
   });
 
-  it("skips catalogue payload sync when admin secret is missing", async () => {
+  it("posts schema catalogue payloads with user auth when admin secret is missing", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
     (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
 
@@ -279,6 +279,33 @@ describe("sync-transport", () => {
           metadata: {
             metadata: {
               type: "catalogue_schema",
+            },
+          },
+        },
+      }),
+      true,
+      { jwtToken: "jwt-token" },
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
+      "Content-Type": "application/json",
+      Authorization: "Bearer jwt-token",
+    });
+    expect(fetchMock.mock.calls[0]![1].headers).not.toHaveProperty("X-Jazz-Admin-Secret");
+  });
+
+  it("still skips non-schema catalogue payload sync when admin secret is missing", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    await sendSyncPayload(
+      "http://localhost:3000",
+      JSON.stringify({
+        ObjectUpdated: {
+          metadata: {
+            metadata: {
+              type: "catalogue_lens",
             },
           },
         },

@@ -499,10 +499,10 @@ class DevToolsJazzClient implements JazzClient {
     this.fallbackSchema = schema;
   }
 
-  forSession(session: Session): SessionClient {
+  forSession(_session: Session): SessionClient {
     throw new Error("Method not implemented.");
   }
-  forRequest(request: RequestLike): SessionClient {
+  forRequest(_request: RequestLike): SessionClient {
     throw new Error("Method not implemented.");
   }
   create(table: string, values: InsertValues): Row {
