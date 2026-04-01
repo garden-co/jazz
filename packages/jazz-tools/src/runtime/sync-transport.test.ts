@@ -97,6 +97,20 @@ describe("sync-transport", () => {
     } as Response;
   }
 
+  function unauthenticatedResponse(code: "expired" | "missing" | "invalid" | "disabled"): Response {
+    return {
+      ok: false,
+      status: 401,
+      statusText: "Unauthorized",
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({
+        error: "unauthenticated",
+        code,
+        message: `auth failed: ${code}`,
+      }),
+    } as Response;
+  }
+
   afterEach(() => {
     (globalThis as { fetch: typeof fetch }).fetch = originalFetch;
     vi.useRealTimers();
@@ -391,6 +405,32 @@ describe("sync-transport", () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(onConnected).toHaveBeenCalledTimes(1));
     expect(clientId).toBe("server-client-2");
+
+    controller.stop();
+  });
+
+  it("stream controller stops reconnecting after structured auth failures", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    const fetchMock = vi.fn().mockResolvedValue(unauthenticatedResponse("expired"));
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const onAuthFailure = vi.fn();
+    const controller = new SyncStreamController({
+      getAuth: () => ({ jwtToken: "expired-jwt" }),
+      getClientId: () => "initial-client-id",
+      setClientId: vi.fn(),
+      onConnected: vi.fn(),
+      onDisconnected: vi.fn(),
+      onSyncMessage: vi.fn(),
+      onAuthFailure,
+    });
+
+    controller.start("http://localhost:3000");
+    await vi.waitFor(() => expect(onAuthFailure).toHaveBeenCalledWith("expired"));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
 
     controller.stop();
   });
@@ -760,6 +800,21 @@ describe("sync-transport", () => {
       await expect(
         sendSyncPayloadBatch("http://localhost:3000", [playerPayload("id-1")], {}),
       ).rejects.toThrow("503");
+    });
+
+    it("throws SyncAuthError on structured 401 responses", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(unauthenticatedResponse("invalid"));
+      (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        sendSyncPayloadBatch("http://localhost:3000", [playerPayload("id-1")], {
+          jwtToken: "broken-jwt",
+        }),
+      ).rejects.toMatchObject({
+        name: "SyncAuthError",
+        reason: "invalid",
+        message: "auth failed: invalid",
+      });
     });
   });
 });

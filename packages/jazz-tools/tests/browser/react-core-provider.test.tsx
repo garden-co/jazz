@@ -1,5 +1,5 @@
 import * as React from "react";
-import { afterEach, beforeEach, describe, it } from "vitest";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import {
   JazzClientProvider as JazzProvider,
@@ -144,6 +144,44 @@ describe("react-core provider/hooks browser coverage", () => {
     );
 
     await expectText("session", "user-123");
+  });
+
+  it("RCB-B04A: useSession reacts to db auth-state changes", async () => {
+    const db = createAuthAwareDb({ user_id: "alice", claims: { role: "reader" } });
+    const client = makeClient({ db, session: null });
+
+    render(
+      <JazzProvider client={client}>
+        <SessionView />
+      </JazzProvider>,
+    );
+
+    await expectText("session", "alice");
+
+    db.emitAuthChange(null);
+
+    await expectText("session", "null");
+  });
+
+  it("RCB-B04B: provider subscribes once for multiple session consumers", async () => {
+    const db = createAuthAwareDb({ user_id: "alice", claims: { role: "reader" } });
+    const client = makeClient({ db, session: null });
+
+    render(
+      <JazzProvider client={client}>
+        <SessionPairView />
+      </JazzProvider>,
+    );
+
+    await expectText("session-a", "alice");
+    await expectText("session-b", "alice");
+    expect(db.onAuthChanged).toHaveBeenCalledTimes(1);
+
+    db.emitAuthChange(null);
+
+    await expectText("session-a", "null");
+    await expectText("session-b", "null");
+    expect(db.onAuthChanged).toHaveBeenCalledTimes(1);
   });
 
   it("RCB-B05: useAll returns undefined during pending phase", async () => {
@@ -414,6 +452,17 @@ function SessionView() {
   return <div data-testid="session">{session ? session.user_id : "null"}</div>;
 }
 
+function SessionPairView() {
+  const sessionA = useSession();
+  const sessionB = useSession();
+  return (
+    <>
+      <div data-testid="session-a">{sessionA ? sessionA.user_id : "null"}</div>
+      <div data-testid="session-b">{sessionB ? sessionB.user_id : "null"}</div>
+    </>
+  );
+}
+
 function UseAllView({ query, options }: { query: QueryBuilder<Todo>; options?: QueryOptions }) {
   const rows = useAll(query, options);
   return (
@@ -454,10 +503,40 @@ function OutsideProviderUseAllSuspenseView() {
 
 function makeClient(opts?: TestClientOptions) {
   return {
-    db: opts?.db ?? { name: "default-db" },
+    db: opts?.db ?? {
+      name: "default-db",
+      onAuthChanged: () => () => {},
+    },
     manager: (opts?.manager ?? new ControlledManager()) as unknown as SubscriptionsOrchestrator,
     session: opts?.session,
     shutdown: async () => {},
+  };
+}
+
+function createAuthAwareDb(initialSession: Session | null) {
+  let session = initialSession;
+  const listeners = new Set<(state: { session: Session | null }) => void>();
+  const onAuthChanged = vi.fn((listener: (state: { session: Session | null }) => void) => {
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+    };
+  });
+
+  return {
+    getAuthState() {
+      return {
+        status: session ? "authenticated" : "unauthenticated",
+        session,
+      };
+    },
+    onAuthChanged,
+    emitAuthChange(nextSession: Session | null) {
+      session = nextSession;
+      for (const listener of listeners) {
+        listener({ session });
+      }
+    },
   };
 }
 

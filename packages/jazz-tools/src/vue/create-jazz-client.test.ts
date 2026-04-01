@@ -6,7 +6,6 @@ import { createJazzClient } from "./create-jazz-client.js";
 const mocks = vi.hoisted(() => {
   const resolveLocalAuthDefaults = vi.fn();
   const createDb = vi.fn();
-  const resolveClientSession = vi.fn();
   const trackPromise = vi.fn(<T>(promise: Promise<T>) => promise);
   const orchestratorInstances: Array<{
     config: { appId: string };
@@ -22,6 +21,7 @@ const mocks = vi.hoisted(() => {
         throw initError;
       }
     });
+    readonly setSession = vi.fn();
     readonly shutdown = vi.fn(async () => undefined);
 
     constructor(
@@ -35,7 +35,6 @@ const mocks = vi.hoisted(() => {
   return {
     resolveLocalAuthDefaults,
     createDb,
-    resolveClientSession,
     trackPromise,
     orchestratorInstances,
     MockSubscriptionsOrchestrator,
@@ -45,7 +44,6 @@ const mocks = vi.hoisted(() => {
     reset() {
       resolveLocalAuthDefaults.mockReset();
       createDb.mockReset();
-      resolveClientSession.mockReset();
       trackPromise.mockReset();
       orchestratorInstances.length = 0;
       initError = null;
@@ -62,17 +60,18 @@ vi.mock("../runtime/db.js", () => ({
   createDb: mocks.createDb,
 }));
 
-vi.mock("../runtime/client-session.js", () => ({
-  resolveClientSession: mocks.resolveClientSession,
-}));
-
 vi.mock("../subscriptions-orchestrator.js", () => ({
   SubscriptionsOrchestrator: mocks.MockSubscriptionsOrchestrator,
   trackPromise: mocks.trackPromise,
 }));
 
-function createMockDb() {
+function createMockDb(session: Session | null = null) {
   return {
+    getAuthState: vi.fn(() => ({
+      status: session ? "authenticated" : "unauthenticated",
+      session,
+    })),
+    onAuthChanged: vi.fn(() => () => {}),
     shutdown: vi.fn(async () => undefined),
   };
 }
@@ -94,18 +93,16 @@ describe("vue/create-jazz-client unit", () => {
       user_id: "local:test",
       claims: { auth_mode: "local", local_mode: "anonymous" },
     };
-    const db = createMockDb();
+    const db = createMockDb(session);
 
     mocks.resolveLocalAuthDefaults.mockReturnValue(resolvedConfig);
     mocks.createDb.mockResolvedValue(db);
-    mocks.resolveClientSession.mockResolvedValue(session);
 
     const client = await createJazzClient(config);
 
     expect(mocks.trackPromise).toHaveBeenCalledTimes(1);
     expect(mocks.resolveLocalAuthDefaults).toHaveBeenCalledWith(config);
     expect(mocks.createDb).toHaveBeenCalledWith(resolvedConfig);
-    expect(mocks.resolveClientSession).toHaveBeenCalledWith(resolvedConfig);
 
     expect(mocks.orchestratorInstances).toHaveLength(1);
     const manager = mocks.orchestratorInstances[0]!;
@@ -131,33 +128,18 @@ describe("vue/create-jazz-client unit", () => {
 
     mocks.resolveLocalAuthDefaults.mockReturnValue(config);
     mocks.createDb.mockRejectedValue(dbError);
-    mocks.resolveClientSession.mockResolvedValue(null);
 
     await expect(createJazzClient(config)).rejects.toBe(dbError);
     expect(mocks.orchestratorInstances).toHaveLength(0);
   });
 
-  it("VU-U03: rejects when session resolution fails", async () => {
+  it("VU-U03: rejects when orchestrator init fails", async () => {
     const config: DbConfig = { appId: "vue-client-unit-3" };
-    const sessionError = new Error("resolveClientSession failed");
-    const db = createMockDb();
-
-    mocks.resolveLocalAuthDefaults.mockReturnValue(config);
-    mocks.createDb.mockResolvedValue(db);
-    mocks.resolveClientSession.mockRejectedValue(sessionError);
-
-    await expect(createJazzClient(config)).rejects.toBe(sessionError);
-    expect(mocks.orchestratorInstances).toHaveLength(0);
-  });
-
-  it("VU-U04: rejects when orchestrator init fails", async () => {
-    const config: DbConfig = { appId: "vue-client-unit-4" };
     const initError = new Error("orchestrator init failed");
     const db = createMockDb();
 
     mocks.resolveLocalAuthDefaults.mockReturnValue(config);
     mocks.createDb.mockResolvedValue(db);
-    mocks.resolveClientSession.mockResolvedValue(null);
     mocks.setInitError(initError);
 
     await expect(createJazzClient(config)).rejects.toBe(initError);

@@ -75,20 +75,26 @@ describe("react-native Db", () => {
       tier: config.tier,
       dataPath: config.dataPath,
     });
-    expect(connectWithRuntimeSpy).toHaveBeenCalledWith(runtime, {
-      appId: config.appId,
-      schema,
-      serverUrl: config.serverUrl,
-      serverPathPrefix: config.serverPathPrefix,
-      env: config.env,
-      userBranch: config.userBranch,
-      jwtToken: config.jwtToken,
-      localAuthMode: config.localAuthMode,
-      localAuthToken: config.localAuthToken,
-      adminSecret: config.adminSecret,
-      tier: config.tier,
-      defaultDurabilityTier: config.tier,
-    });
+    expect(connectWithRuntimeSpy).toHaveBeenCalledWith(
+      runtime,
+      {
+        appId: config.appId,
+        schema,
+        serverUrl: config.serverUrl,
+        serverPathPrefix: config.serverPathPrefix,
+        env: config.env,
+        userBranch: config.userBranch,
+        jwtToken: config.jwtToken,
+        localAuthMode: config.localAuthMode,
+        localAuthToken: config.localAuthToken,
+        adminSecret: config.adminSecret,
+        tier: config.tier,
+        defaultDurabilityTier: config.tier,
+      },
+      {
+        onAuthFailure: expect.any(Function),
+      },
+    );
   });
 
   it("RNDB-U02 reuses cached clients for same schema key and creates new clients for distinct schemas", () => {

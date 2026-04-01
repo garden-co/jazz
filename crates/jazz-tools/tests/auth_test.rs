@@ -420,12 +420,16 @@ mod integration_tests {
     // ========================================================================
 
     fn make_jwt_with_kid(sub: &str, kid: &str, secret: &str) -> String {
+        make_jwt_with_kid_and_exp(sub, kid, secret, future_exp())
+    }
+
+    fn make_jwt_with_kid_and_exp(sub: &str, kid: &str, secret: &str, exp: u64) -> String {
         let jwt_claims = JwtClaims {
             sub: sub.to_string(),
             iss: None,
             jazz_principal_id: None,
             claims: json!({}),
-            exp: future_exp(),
+            exp,
         };
         let key = EncodingKey::from_secret(secret.as_bytes());
         let mut header = Header::new(jsonwebtoken::Algorithm::HS256);
@@ -507,6 +511,42 @@ mod integration_tests {
             2,
             "signature failure should trigger one refresh attempt"
         );
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "unauthenticated");
+        assert_eq!(body["code"], "invalid");
+    }
+
+    #[tokio::test]
+    async fn test_expired_jwt_returns_structured_401() {
+        let server = TestServer::start_with_jwks_responses(vec![test_server::hs256_jwks(
+            "kid-expired",
+            "secret-expired",
+        )])
+        .await;
+
+        let expired = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 60;
+        let token =
+            make_jwt_with_kid_and_exp("user-expired", "kid-expired", "secret-expired", expired);
+
+        let resp = client()
+            .post(format!("{}/sync", server.base_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(sync_body())
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "unauthenticated");
+        assert_eq!(body["code"], "expired");
     }
 
     /// Consecutive valid requests should use the cached JWKS without refetching.

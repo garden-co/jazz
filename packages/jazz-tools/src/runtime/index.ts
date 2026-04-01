@@ -29,7 +29,13 @@ export {
   type TableProxy,
 } from "./db.js";
 export { allRowsInTableQuery, type DynamicTableRow } from "./dynamic-query.js";
-export { deriveLocalPrincipalId, resolveClientSession } from "./client-session.js";
+export {
+  deriveLocalPrincipalId,
+  deriveLocalPrincipalIdSync,
+  resolveClientSessionSync,
+  resolveClientSessionStateSync,
+} from "./client-session.js";
+export type { AuthFailureReason, AuthState } from "./auth-state.js";
 export {
   fetchSchemaHashes,
   fetchStoredWasmSchema,

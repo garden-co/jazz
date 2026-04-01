@@ -1,5 +1,4 @@
 import type { Session } from "../runtime/context.js";
-import { resolveClientSession } from "../runtime/client-session.js";
 import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import { createDb } from "../runtime/db.js";
@@ -15,19 +14,23 @@ export interface JazzClient {
 
 async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
   const resolvedConfig = resolveLocalAuthDefaults(config);
-  const [db, session] = await Promise.all([
-    createDb(resolvedConfig),
-    resolveClientSession(resolvedConfig),
-  ]);
-
+  const db = await createDb(resolvedConfig);
+  let session = db.getAuthState().session;
   const manager = new SubscriptionsOrchestrator({ appId: resolvedConfig.appId }, db, session);
   await manager.init();
+  const stopSessionSync = db.onAuthChanged(({ session: nextSession }) => {
+    session = nextSession ?? null;
+    manager.setSession(nextSession ?? null);
+  });
 
   return {
     db,
-    session,
+    get session() {
+      return session;
+    },
     manager,
     async shutdown() {
+      stopSessionSync?.();
       await manager.shutdown();
       await db.shutdown();
     },
@@ -44,15 +47,22 @@ async function createExtensionJazzClientInternal(): Promise<JazzClient> {
   if (!connectedConfig) {
     throw new Error("DevTools bridge did not provide an inspected page config.");
   }
-
+  let session = db.getAuthState().session;
   const manager = new SubscriptionsOrchestrator({ appId: connectedConfig.appId }, db);
   await manager.init();
+  const stopSessionSync = db.onAuthChanged(({ session: nextSession }) => {
+    session = nextSession ?? null;
+    manager.setSession(nextSession ?? null);
+  });
 
   return {
     db,
-    session: null,
+    get session() {
+      return session;
+    },
     manager,
     async shutdown() {
+      stopSessionSync?.();
       await manager.shutdown();
       await db.shutdown();
     },

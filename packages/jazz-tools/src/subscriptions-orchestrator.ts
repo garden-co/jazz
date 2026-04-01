@@ -156,14 +156,25 @@ export class SubscriptionsOrchestrator {
   private readonly cleanupDelayMs = 30_000;
   private readonly entries = new Map<string, InternalCacheEntry<any>>();
   private readonly queryDefinitions = new Map<string, QueryDefinition<any>>();
+  private session?: Session | null;
 
   constructor(
     private readonly config: { appId: string },
     private readonly db: DbLike,
-    private readonly session?: Session | null,
-  ) {}
+    session?: Session | null,
+  ) {
+    this.session = session;
+  }
 
   async init(): Promise<void> {}
+
+  setSession(session: Session | null): void {
+    this.session = session;
+
+    for (const entry of this.entries.values()) {
+      this.resubscribeEntry(entry);
+    }
+  }
 
   async shutdown(): Promise<void> {
     for (const entry of this.entries.values()) {
@@ -266,9 +277,45 @@ export class SubscriptionsOrchestrator {
       },
     } as InternalCacheEntry<T>;
 
+    this.subscribeEntry(entry);
+
+    this.entries.set(key, entry);
+    return entry;
+  }
+
+  private scheduleCleanup(entry: InternalCacheEntry<any>): void {
+    this.cancelCleanup(entry);
+    entry.cleanupTimeoutId = setTimeout(() => {
+      if (entry.listeners.size === 0) {
+        this.destroyEntry(entry);
+      }
+    }, this.cleanupDelayMs);
+  }
+
+  private cancelCleanup(entry: InternalCacheEntry<any>): void {
+    if (!entry.cleanupTimeoutId) return;
+    clearTimeout(entry.cleanupTimeoutId);
+    entry.cleanupTimeoutId = null;
+  }
+
+  private destroyEntry(entry: InternalCacheEntry<any>): void {
+    if (entry.unsubscribe) {
+      entry.unsubscribe();
+    }
+    entry.unsubscribe = undefined;
+    entry.subscriptionManager?.clear();
+    entry.subscriptionManager = undefined;
+    entry.listeners.clear();
+    this.cancelCleanup(entry);
+    this.entries.delete(entry.key);
+    this.queryDefinitions.delete(entry.key);
+  }
+
+  private subscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
     try {
-      const subscriptionManager = new SubscriptionManager<T>();
-      entry.subscriptionManager = subscriptionManager;
+      if (!entry.subscriptionManager) {
+        entry.subscriptionManager = new SubscriptionManager<T>();
+      }
 
       entry.unsubscribe = this.db.subscribeAll<T>(
         entry.query,
@@ -307,37 +354,15 @@ export class SubscriptionsOrchestrator {
       }
       this.scheduleCleanup(entry);
     }
-
-    this.entries.set(key, entry);
-    return entry;
   }
 
-  private scheduleCleanup(entry: InternalCacheEntry<any>): void {
-    this.cancelCleanup(entry);
-    entry.cleanupTimeoutId = setTimeout(() => {
-      if (entry.listeners.size === 0) {
-        this.destroyEntry(entry);
-      }
-    }, this.cleanupDelayMs);
-  }
-
-  private cancelCleanup(entry: InternalCacheEntry<any>): void {
-    if (!entry.cleanupTimeoutId) return;
-    clearTimeout(entry.cleanupTimeoutId);
-    entry.cleanupTimeoutId = null;
-  }
-
-  private destroyEntry(entry: InternalCacheEntry<any>): void {
+  private resubscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
     if (entry.unsubscribe) {
       entry.unsubscribe();
+      entry.unsubscribe = undefined;
     }
-    entry.unsubscribe = undefined;
-    entry.subscriptionManager?.clear();
-    entry.subscriptionManager = undefined;
-    entry.listeners.clear();
-    this.cancelCleanup(entry);
-    this.entries.delete(entry.key);
-    this.queryDefinitions.delete(entry.key);
+
+    this.subscribeEntry(entry);
   }
 }
 

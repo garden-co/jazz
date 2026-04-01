@@ -40,6 +40,7 @@ use tracing::warn;
 use crate::query_manager::session::Session;
 use crate::schema_manager::AppId;
 use crate::server::ServerState;
+use crate::transport_protocol::{UnauthenticatedCode, UnauthenticatedResponse};
 
 const LOCAL_MODE_HEADER: &str = "X-Jazz-Local-Mode";
 const LOCAL_TOKEN_HEADER: &str = "X-Jazz-Local-Token";
@@ -134,6 +135,7 @@ pub struct VerifiedJwt {
     pub issuer: Option<String>,
     pub principal_id_claim: Option<String>,
     pub claims: serde_json::Value,
+    pub exp: Option<u64>,
 }
 
 /// JWT validation error.
@@ -141,6 +143,8 @@ pub struct VerifiedJwt {
 pub enum JwtError {
     /// No JWT validation key configured.
     NoKeyConfigured,
+    /// Token signature is valid but `exp` is in the past.
+    Expired,
     /// Invalid token format or signature.
     Invalid(String),
 }
@@ -149,7 +153,53 @@ impl std::fmt::Display for JwtError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             JwtError::NoKeyConfigured => write!(f, "No JWT validation key configured"),
+            JwtError::Expired => write!(f, "JWT has expired"),
             JwtError::Invalid(msg) => write!(f, "Invalid JWT: {}", msg),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthFailure {
+    pub code: UnauthenticatedCode,
+    pub message: String,
+}
+
+impl AuthFailure {
+    pub fn expired(message: impl Into<String>) -> Self {
+        Self {
+            code: UnauthenticatedCode::Expired,
+            message: message.into(),
+        }
+    }
+
+    pub fn missing(message: impl Into<String>) -> Self {
+        Self {
+            code: UnauthenticatedCode::Missing,
+            message: message.into(),
+        }
+    }
+
+    pub fn invalid(message: impl Into<String>) -> Self {
+        Self {
+            code: UnauthenticatedCode::Invalid,
+            message: message.into(),
+        }
+    }
+
+    pub fn disabled(message: impl Into<String>) -> Self {
+        Self {
+            code: UnauthenticatedCode::Disabled,
+            message: message.into(),
+        }
+    }
+
+    pub fn into_response(self) -> UnauthenticatedResponse {
+        match self.code {
+            UnauthenticatedCode::Expired => UnauthenticatedResponse::expired(self.message),
+            UnauthenticatedCode::Missing => UnauthenticatedResponse::missing(self.message),
+            UnauthenticatedCode::Invalid => UnauthenticatedResponse::invalid(self.message),
+            UnauthenticatedCode::Disabled => UnauthenticatedResponse::disabled(self.message),
         }
     }
 }
@@ -364,7 +414,7 @@ pub struct JwtAuth(pub Option<Session>);
 
 #[async_trait]
 impl FromRequestParts<Arc<ServerState>> for JwtAuth {
-    type Rejection = (StatusCode, &'static str);
+    type Rejection = (StatusCode, String);
 
     async fn from_request_parts(
         parts: &mut Parts,
@@ -381,8 +431,8 @@ impl FromRequestParts<Arc<ServerState>> for JwtAuth {
 
         let Some(token) = auth_value.strip_prefix("Bearer ") else {
             return Err((
-                StatusCode::BAD_REQUEST,
-                "Invalid Authorization header format",
+                StatusCode::UNAUTHORIZED,
+                "Invalid Authorization header format".to_string(),
             ));
         };
 
@@ -399,14 +449,18 @@ impl FromRequestParts<Arc<ServerState>> for JwtAuth {
                     state.app_id,
                     verified,
                     Some(&external_identities),
-                )?;
+                )
+                .map_err(|error| (StatusCode::UNAUTHORIZED, error.message))?;
                 Ok(JwtAuth(Some(session)))
             }
             Err(JwtError::NoKeyConfigured) => Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "JWT validation not configured",
+                StatusCode::UNAUTHORIZED,
+                "JWT auth is not enabled for this app".to_string(),
             )),
-            Err(JwtError::Invalid(_)) => Err((StatusCode::UNAUTHORIZED, "Invalid JWT")),
+            Err(JwtError::Expired) => {
+                Err((StatusCode::UNAUTHORIZED, "JWT has expired".to_string()))
+            }
+            Err(JwtError::Invalid(message)) => Err((StatusCode::UNAUTHORIZED, message)),
         }
     }
 }
@@ -464,7 +518,7 @@ pub struct RequestSession(pub Option<Session>);
 
 #[async_trait]
 impl FromRequestParts<Arc<ServerState>> for RequestSession {
-    type Rejection = (StatusCode, &'static str);
+    type Rejection = (StatusCode, String);
 
     async fn from_request_parts(
         parts: &mut Parts,
@@ -478,7 +532,8 @@ impl FromRequestParts<Arc<ServerState>> for RequestSession {
             Some(&external_identities),
             state.jwks_cache.as_ref(),
         )
-        .await?;
+        .await
+        .map_err(|error| (StatusCode::UNAUTHORIZED, error.message))?;
         Ok(RequestSession(session))
     }
 }
@@ -576,6 +631,7 @@ pub fn verify_jwt_signature_with_jwks(
                     issuer: data.claims.iss,
                     principal_id_claim: data.claims.jazz_principal_id,
                     claims: data.claims.claims,
+                    exp: data.claims.exp,
                 });
             }
             Err(e) => {
@@ -587,6 +643,23 @@ pub fn verify_jwt_signature_with_jwks(
     Err(JwtVerificationError::Retryable(last_error.unwrap_or_else(
         || "JWT signature verification failed".to_string(),
     )))
+}
+
+fn ensure_jwt_not_expired(verified: &VerifiedJwt) -> Result<(), JwtError> {
+    let Some(exp) = verified.exp else {
+        return Ok(());
+    };
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    if exp <= now {
+        return Err(JwtError::Expired);
+    }
+
+    Ok(())
 }
 
 /// Validate JWT with JWKS cache, including on-demand refresh on retryable errors.
@@ -605,7 +678,10 @@ pub async fn validate_jwt_with_cache(
     })?;
 
     match verify_jwt_signature_with_jwks(token, &cached_jwks) {
-        Ok(verified) => return Ok(verified),
+        Ok(verified) => {
+            ensure_jwt_not_expired(&verified)?;
+            return Ok(verified);
+        }
         Err(JwtVerificationError::Fatal(e)) => return Err(JwtError::Invalid(e)),
         Err(JwtVerificationError::Retryable(e)) => {
             warn!(
@@ -621,7 +697,10 @@ pub async fn validate_jwt_with_cache(
     })?;
 
     match verify_jwt_signature_with_jwks(token, &refreshed_jwks) {
-        Ok(verified) => Ok(verified),
+        Ok(verified) => {
+            ensure_jwt_not_expired(&verified)?;
+            Ok(verified)
+        }
         Err(JwtVerificationError::Retryable(e) | JwtVerificationError::Fatal(e)) => {
             warn!(error = %e, "JWT validation failed after JWKS refresh");
             Err(JwtError::Invalid(e))
@@ -634,10 +713,10 @@ pub fn resolve_verified_jwt_session(
     app_id: AppId,
     verified: VerifiedJwt,
     external_identities: Option<&ExternalIdentityMap>,
-) -> Result<Session, (StatusCode, &'static str)> {
+) -> Result<Session, AuthFailure> {
     let subject = verified.subject.trim();
     if subject.is_empty() {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid JWT subject"));
+        return Err(AuthFailure::invalid("Invalid JWT subject"));
     }
 
     let issuer = verified
@@ -661,10 +740,7 @@ pub fn resolve_verified_jwt_session(
     if let (Some(claim), Some(mapped)) = (principal_claim, mapped_principal.as_deref())
         && claim != mapped
     {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "External identity mapping conflict",
-        ));
+        return Err(AuthFailure::invalid("External identity mapping conflict"));
     }
 
     let principal_id = if let Some(claim) = principal_claim {
@@ -742,7 +818,7 @@ pub async fn extract_session(
     config: &AuthConfig,
     external_identities: Option<&ExternalIdentityMap>,
     jwks_cache: Option<&JwksCache>,
-) -> Result<Option<Session>, (StatusCode, &'static str)> {
+) -> Result<Option<Session>, AuthFailure> {
     // Priority 1: Backend impersonation
     if let Some(session_b64) = headers.get("X-Jazz-Session").and_then(|v| v.to_str().ok()) {
         let backend_secret = headers
@@ -752,20 +828,19 @@ pub async fn extract_session(
         match (&config.backend_secret, backend_secret) {
             (Some(expected), Some(got)) if expected == got => {
                 let session = decode_session_header(session_b64)
-                    .ok_or((StatusCode::BAD_REQUEST, "Invalid session format"))?;
+                    .ok_or_else(|| AuthFailure::invalid("Invalid session format"))?;
                 return Ok(Some(session));
             }
             (Some(_), Some(_)) => {
-                return Err((StatusCode::UNAUTHORIZED, "Invalid backend secret"));
+                return Err(AuthFailure::invalid("Invalid backend secret"));
             }
             (Some(_), None) => {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
+                return Err(AuthFailure::invalid(
                     "Backend secret required for session impersonation",
                 ));
             }
             (None, Some(_)) => {
-                return Err((StatusCode::FORBIDDEN, "Backend auth not configured"));
+                return Err(AuthFailure::disabled("Backend auth not configured"));
             }
             (None, None) => {
                 // Session header without secret - ignore and fall through to JWT
@@ -774,12 +849,14 @@ pub async fn extract_session(
     }
 
     // Priority 2: JWT auth
-    if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok())
-        && let Some(token) = auth_value.strip_prefix("Bearer ")
-    {
+    if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+        let Some(token) = auth_value.strip_prefix("Bearer ") else {
+            return Err(AuthFailure::invalid("Invalid Authorization header format"));
+        };
+
         let token = token.trim();
         if token.is_empty() {
-            return Err((StatusCode::UNAUTHORIZED, "Empty bearer token"));
+            return Err(AuthFailure::invalid("Empty bearer token"));
         }
 
         let jwt_result = if let Some(cache) = jwks_cache {
@@ -794,23 +871,27 @@ pub async fn extract_session(
                 return Ok(Some(session));
             }
             Err(JwtError::NoKeyConfigured) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "JWT validation not configured",
+                return Err(AuthFailure::disabled(
+                    "JWT auth is not enabled for this app",
                 ));
             }
-            Err(JwtError::Invalid(_)) => {
-                return Err((StatusCode::UNAUTHORIZED, "Invalid JWT"));
+            Err(JwtError::Expired) => {
+                return Err(AuthFailure::expired("JWT has expired"));
+            }
+            Err(JwtError::Invalid(message)) => {
+                return Err(AuthFailure::invalid(message));
             }
         }
     }
 
     // Priority 3: Local anonymous/demo token auth
-    if let Some((mode, token)) = parse_local_auth_headers(headers)? {
+    if let Some((mode, token)) = parse_local_auth_headers(headers)
+        .map_err(|(_status, message)| AuthFailure::invalid(message))?
+    {
         if !config.is_local_mode_enabled(mode) {
             return Err(match mode {
-                LocalAuthMode::Anonymous => (StatusCode::FORBIDDEN, "Anonymous auth disabled"),
-                LocalAuthMode::Demo => (StatusCode::FORBIDDEN, "Demo auth disabled"),
+                LocalAuthMode::Anonymous => AuthFailure::disabled("Anonymous auth disabled"),
+                LocalAuthMode::Demo => AuthFailure::disabled("Demo auth disabled"),
             });
         }
 
@@ -1039,7 +1120,7 @@ mod tests {
 
         let result = extract_session(&headers, test_app_id(), &config, None, None).await;
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().0, StatusCode::UNAUTHORIZED);
+        assert_eq!(result.unwrap_err().code, UnauthenticatedCode::Invalid);
     }
 
     #[tokio::test]
@@ -1134,7 +1215,7 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().0, StatusCode::UNAUTHORIZED);
+        assert_eq!(result.unwrap_err().code, UnauthenticatedCode::Invalid);
     }
 
     #[tokio::test]
@@ -1236,7 +1317,7 @@ mod tests {
 
         let result = extract_session(&headers, test_app_id(), &config, None, None).await;
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert_eq!(result.unwrap_err().code, UnauthenticatedCode::Invalid);
     }
 
     #[tokio::test]
@@ -1250,9 +1331,9 @@ mod tests {
 
         let result = extract_session(&headers, test_app_id(), &config, None, None).await;
         assert!(result.is_err());
-        let (status, message) = result.unwrap_err();
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(message, "Anonymous auth disabled");
+        let error = result.unwrap_err();
+        assert_eq!(error.code, UnauthenticatedCode::Disabled);
+        assert_eq!(error.message, "Anonymous auth disabled");
     }
 
     #[tokio::test]
@@ -1266,8 +1347,8 @@ mod tests {
 
         let result = extract_session(&headers, test_app_id(), &config, None, None).await;
         assert!(result.is_err());
-        let (status, message) = result.unwrap_err();
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(message, "Demo auth disabled");
+        let error = result.unwrap_err();
+        assert_eq!(error.code, UnauthenticatedCode::Disabled);
+        assert_eq!(error.message, "Demo auth disabled");
     }
 }

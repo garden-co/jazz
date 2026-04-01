@@ -3,8 +3,12 @@ import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
 import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
 
+type CoreJazzDb = {
+  onAuthChanged(listener: (state: { session: Session | null }) => void): () => void;
+};
+
 type CoreJazzClient = {
-  db: unknown;
+  db: CoreJazzDb;
   manager: SubscriptionsOrchestrator;
   session?: Session | null;
   shutdown: () => Promise<void>;
@@ -100,6 +104,14 @@ function releaseClient(configKey: string): void {
  * Useful if you need to create a Jazz client outside of the React component lifecycle.
  */
 export function JazzClientProvider({ client, children }: JazzClientProviderProps) {
+  const [, setAuthVersion] = useState(0);
+
+  useEffect(() => {
+    return client.db.onAuthChanged(() => {
+      setAuthVersion((version) => version + 1);
+    });
+  }, [client]);
+
   return <JazzContext.Provider value={client}>{children}</JazzContext.Provider>;
 }
 
