@@ -67,11 +67,20 @@ jobs:
         uses: KyleMayes/install-llvm-action@v2
         with:
           version: "18"
-      - name: Configure LLVM env for bindgen only
+      - name: Configure LLVM env for bindgen
         run: |
-          echo "LIBCLANG_PATH=${LLVM_PATH}/lib" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=" >> "$GITHUB_ENV"
-          echo "DYLD_LIBRARY_PATH=" >> "$GITHUB_ENV"
+          llvm_lib="${LLVM_PATH}/lib"
+          echo "LIBCLANG_PATH=${llvm_lib}" >> "$GITHUB_ENV"
+          if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+            echo "LD_LIBRARY_PATH=${llvm_lib}:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          else
+            echo "LD_LIBRARY_PATH=${llvm_lib}" >> "$GITHUB_ENV"
+          fi
+          if [ -n "${DYLD_LIBRARY_PATH:-}" ]; then
+            echo "DYLD_LIBRARY_PATH=${llvm_lib}:${DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          else
+            echo "DYLD_LIBRARY_PATH=${llvm_lib}" >> "$GITHUB_ENV"
+          fi
 
       - uses: actions/setup-node@v6
         with:
@@ -224,11 +233,20 @@ jobs:
         uses: KyleMayes/install-llvm-action@v2
         with:
           version: "18"
-      - name: Configure LLVM env for bindgen only
+      - name: Configure LLVM env for bindgen
         run: |
-          echo "LIBCLANG_PATH=${LLVM_PATH}/lib" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=" >> "$GITHUB_ENV"
-          echo "DYLD_LIBRARY_PATH=" >> "$GITHUB_ENV"
+          llvm_lib="${LLVM_PATH}/lib"
+          echo "LIBCLANG_PATH=${llvm_lib}" >> "$GITHUB_ENV"
+          if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+            echo "LD_LIBRARY_PATH=${llvm_lib}:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          else
+            echo "LD_LIBRARY_PATH=${llvm_lib}" >> "$GITHUB_ENV"
+          fi
+          if [ -n "${DYLD_LIBRARY_PATH:-}" ]; then
+            echo "DYLD_LIBRARY_PATH=${llvm_lib}:${DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          else
+            echo "DYLD_LIBRARY_PATH=${llvm_lib}" >> "$GITHUB_ENV"
+          fi
 
       - uses: actions/setup-node@v6
         with:
