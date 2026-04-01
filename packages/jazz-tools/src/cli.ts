@@ -631,8 +631,8 @@ function renderMigrationBody(
 ): {
   migrateBody?: string;
   renameTablesBody?: string;
-  addedTablesBody?: string;
-  removedTablesBody?: string;
+  createTablesBody?: string;
+  dropTablesBody?: string;
   witnessFrom: WasmSchema;
   witnessTo: WasmSchema;
 } {
@@ -698,11 +698,11 @@ function renderMigrationBody(
 
   return {
     migrateBody: lines.length > 0 ? lines.join("\n").trimEnd() : undefined,
-    addedTablesBody:
+    createTablesBody:
       explicitAddedTables.length > 0
         ? explicitAddedTables.map((tableName) => `${JSON.stringify(tableName)}: true,`).join("\n")
         : undefined,
-    removedTablesBody:
+    dropTablesBody:
       explicitRemovedTables.length > 0
         ? explicitRemovedTables.map((tableName) => `${JSON.stringify(tableName)}: true,`).join("\n")
         : undefined,
@@ -748,12 +748,12 @@ function renderMigrationStub(input: {
     sections.push(`  renameTables: {\n${indentBlock(rendered.renameTablesBody, 4)}\n  },`);
   }
 
-  if (rendered.addedTablesBody) {
-    sections.push(`  addedTables: {\n${indentBlock(rendered.addedTablesBody, 4)}\n  },`);
+  if (rendered.createTablesBody) {
+    sections.push(`  createTables: {\n${indentBlock(rendered.createTablesBody, 4)}\n  },`);
   }
 
-  if (rendered.removedTablesBody) {
-    sections.push(`  removedTables: {\n${indentBlock(rendered.removedTablesBody, 4)}\n  },`);
+  if (rendered.dropTablesBody) {
+    sections.push(`  dropTables: {\n${indentBlock(rendered.dropTablesBody, 4)}\n  },`);
   }
 
   if (rendered.migrateBody) {
