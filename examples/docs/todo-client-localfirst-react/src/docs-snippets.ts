@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools";
-import { app } from "../schema/app.js";
+import { app } from "../schema.js";
 
 const EXAMPLE_TODO_ID = "00000000-0000-0000-0000-000000000000";
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";
@@ -29,7 +29,7 @@ export async function whereExamples(db: Db) {
 
   // Explicit operators
   await db.all(app.todos.where({ title: { contains: "milk" } }));
-  await db.all(app.todos.where({ project: { ne: EXAMPLE_PROJECT_ID } }));
+  await db.all(app.todos.where({ projectId: { ne: EXAMPLE_PROJECT_ID } }));
 }
 // #endregion where-operators-react
 

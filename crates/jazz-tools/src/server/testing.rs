@@ -21,11 +21,68 @@ const DEFAULT_APP_ID_STR: &str = "00000000-0000-0000-0000-000000000001";
 const JWT_KID: &str = "test-jwks-kid";
 const JWT_SECRET: &str = "test-jwt-secret-for-integration";
 
+/// Builder for configuring and starting a [`TestingServer`].
 #[derive(Debug, Default)]
-pub struct TestingServerOptions {
-    pub port: Option<u16>,
-    pub app_id: Option<AppId>,
-    pub data_dir: Option<PathBuf>,
+pub struct TestingServerBuilder {
+    port: Option<u16>,
+    app_id: Option<AppId>,
+    data_dir: Option<PathBuf>,
+    schema: Option<Schema>,
+    persistent_storage: bool,
+    admin_secret: Option<String>,
+    backend_secret: Option<String>,
+    jwks_url: Option<String>,
+}
+
+impl TestingServerBuilder {
+    /// Creates a builder with the default test-server configuration.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = Some(port);
+        self
+    }
+
+    pub fn with_app_id(mut self, app_id: AppId) -> Self {
+        self.app_id = Some(app_id);
+        self
+    }
+
+    pub fn with_data_dir(mut self, data_dir: impl Into<PathBuf>) -> Self {
+        self.data_dir = Some(data_dir.into());
+        self
+    }
+
+    pub fn with_schema(mut self, schema: Schema) -> Self {
+        self.schema = Some(schema);
+        self
+    }
+
+    pub fn with_persistent_storage(mut self) -> Self {
+        self.persistent_storage = true;
+        self
+    }
+
+    pub fn with_admin_secret(mut self, secret: impl Into<String>) -> Self {
+        self.admin_secret = Some(secret.into());
+        self
+    }
+
+    pub fn with_backend_secret(mut self, secret: impl Into<String>) -> Self {
+        self.backend_secret = Some(secret.into());
+        self
+    }
+
+    pub fn with_jwks_url(mut self, jwks_url: impl Into<String>) -> Self {
+        self.jwks_url = Some(jwks_url.into());
+        self
+    }
+
+    pub async fn start(self) -> TestingServer {
+        TestingServer::start_from_builder(self).await
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -72,45 +129,85 @@ pub struct TestingServer {
     client: reqwest::Client,
     app_id: AppId,
     data_dir: PathBuf,
+    admin_secret: String,
+    backend_secret: String,
     default_client_user_id: String,
     client_data_dirs: Mutex<Vec<OwnedTempDir>>,
     _owned_data_dir: Option<OwnedTempDir>,
-    _jwks_server: TestingJwksServer,
+    embedded_jwks_server: Option<TestingJwksServer>,
 }
 
 impl TestingServer {
     pub const BACKEND_SECRET: &str = "backend-secret-for-integration-tests";
     pub const ADMIN_SECRET: &str = "admin-secret-for-integration-tests";
 
-    pub async fn start() -> Self {
-        Self::start_with_options(TestingServerOptions::default()).await
+    /// Creates a builder for configuring a test server before startup.
+    pub fn builder() -> TestingServerBuilder {
+        TestingServerBuilder::new()
     }
 
-    pub async fn start_with_options(options: TestingServerOptions) -> Self {
-        let port = options.port.unwrap_or_else(get_free_port);
-        let app_id = options.app_id.unwrap_or_else(Self::default_app_id);
-        let (data_dir, owned_data_dir) = prepare_data_dir(options.data_dir);
-        let jwks_server = TestingJwksServer::start().await;
+    pub async fn start() -> Self {
+        Self::builder().start().await
+    }
 
-        let auth_config = AuthConfig {
-            jwks_url: Some(jwks_server.endpoint()),
-            jwks_set: None,
-            allow_anonymous: true,
-            allow_demo: true,
-            backend_secret: Some(Self::BACKEND_SECRET.to_string()),
-            admin_secret: Some(Self::ADMIN_SECRET.to_string()),
+    pub async fn start_with_schema(schema: Schema) -> Self {
+        Self::builder().with_schema(schema).start().await
+    }
+
+    async fn start_from_builder(builder: TestingServerBuilder) -> Self {
+        let TestingServerBuilder {
+            port,
+            app_id,
+            data_dir,
+            schema,
+            persistent_storage,
+            admin_secret,
+            backend_secret,
+            jwks_url,
+        } = builder;
+
+        let app_id = app_id.unwrap_or_else(Self::default_app_id);
+        let (data_dir, owned_data_dir) = if persistent_storage {
+            prepare_data_dir(data_dir)
+        } else {
+            (PathBuf::new(), None)
+        };
+        let (jwks_url, embedded_jwks_server) = match jwks_url {
+            Some(jwks_url) => (jwks_url, None),
+            None => {
+                let jwks_server = TestingJwksServer::start().await;
+                let jwks_url = jwks_server.endpoint();
+                (jwks_url, Some(jwks_server))
+            }
         };
 
-        let built = ServerBuilder::new(app_id)
-            .with_auth_config(auth_config)
-            .with_persistent_storage(data_dir.to_string_lossy().into_owned())
-            .build()
-            .await
-            .expect("build test server");
+        let admin_secret = admin_secret.unwrap_or_else(|| Self::ADMIN_SECRET.to_string());
+        let backend_secret = backend_secret.unwrap_or_else(|| Self::BACKEND_SECRET.to_string());
 
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        let auth_config = AuthConfig {
+            jwks_url: Some(jwks_url),
+            allow_anonymous: true,
+            allow_demo: true,
+            backend_secret: Some(backend_secret.clone()),
+            admin_secret: Some(admin_secret.clone()),
+        };
+
+        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
+        server_builder = if persistent_storage {
+            server_builder.with_persistent_storage(data_dir.to_string_lossy().into_owned())
+        } else {
+            server_builder.with_in_memory_storage()
+        };
+
+        if let Some(schema) = schema {
+            server_builder = server_builder.with_schema(schema);
+        }
+        let built = server_builder.build().await.expect("build test server");
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port.unwrap_or(0)))
             .await
             .expect("bind test server listener");
+        let port = listener.local_addr().expect("local addr").port();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
             axum::serve(listener, built.app)
@@ -129,10 +226,12 @@ impl TestingServer {
             client: reqwest::Client::new(),
             app_id,
             data_dir,
+            admin_secret,
+            backend_secret,
             default_client_user_id: format!("testing-user-{}", Uuid::new_v4()),
             client_data_dirs: Mutex::new(Vec::new()),
             _owned_data_dir: owned_data_dir,
-            _jwks_server: jwks_server,
+            embedded_jwks_server,
         };
         server.wait_ready().await;
         server
@@ -143,9 +242,13 @@ impl TestingServer {
     }
 
     pub fn jwt_for_user(sub: &str) -> String {
+        Self::jwt_for_user_with_claims(sub, json!({"role": "user"}))
+    }
+
+    pub fn jwt_for_user_with_claims(sub: &str, claims: JsonValue) -> String {
         let claims = JwtClaims {
             sub: sub.to_string(),
-            claims: json!({"role": "user"}),
+            claims,
             exp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("clock drift")
@@ -168,8 +271,44 @@ impl TestingServer {
         self.app_id
     }
 
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
     pub fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
+    }
+
+    pub fn admin_secret(&self) -> &str {
+        &self.admin_secret
+    }
+
+    pub fn backend_secret(&self) -> &str {
+        &self.backend_secret
+    }
+
+    pub fn built_in_jwt_helpers_available(&self) -> bool {
+        self.embedded_jwks_server.is_some()
+    }
+
+    pub fn uses_external_jwks(&self) -> bool {
+        !self.built_in_jwt_helpers_available()
+    }
+
+    pub fn ensure_built_in_jwt_helpers_available(&self) -> Result<(), &'static str> {
+        if self.built_in_jwt_helpers_available() {
+            Ok(())
+        } else {
+            Err(
+                "TestingServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead.",
+            )
+        }
+    }
+
+    fn require_built_in_jwt_helpers(&self) {
+        if let Err(message) = self.ensure_built_in_jwt_helpers_available() {
+            panic!("{message}");
+        }
     }
 
     pub fn make_client_context(&self, schema: Schema) -> AppContext {
@@ -181,6 +320,8 @@ impl TestingServer {
         schema: Schema,
         user_id: impl AsRef<str>,
     ) -> AppContext {
+        self.require_built_in_jwt_helpers();
+
         let client_data_dir = OwnedTempDir::new("jazz-tools-testing-client");
         let data_dir = client_data_dir.path().to_path_buf();
         self.client_data_dirs
@@ -194,9 +335,10 @@ impl TestingServer {
             schema,
             server_url: self.base_url(),
             data_dir,
+            storage: crate::ClientStorage::Memory,
             jwt_token: Some(Self::jwt_for_user(user_id.as_ref())),
-            backend_secret: Some(Self::BACKEND_SECRET.to_string()),
-            admin_secret: Some(Self::ADMIN_SECRET.to_string()),
+            backend_secret: Some(self.backend_secret.clone()),
+            admin_secret: Some(self.admin_secret.clone()),
         }
     }
 
@@ -227,14 +369,13 @@ impl TestingServer {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        if let Some(mut task) = self.task.take() {
-            if tokio::time::timeout(Duration::from_millis(500), &mut task)
+        if let Some(mut task) = self.task.take()
+            && tokio::time::timeout(Duration::from_millis(500), &mut task)
                 .await
                 .is_err()
-            {
-                task.abort();
-                let _ = task.await;
-            }
+        {
+            task.abort();
+            let _ = task.await;
         }
         self.state
             .runtime
@@ -298,11 +439,6 @@ fn prepare_data_dir(data_dir: Option<PathBuf>) -> (PathBuf, Option<OwnedTempDir>
     }
 }
 
-fn get_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind port 0");
-    listener.local_addr().expect("local addr").port()
-}
-
 async fn jwks_handler() -> Json<JsonValue> {
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(JWT_SECRET.as_bytes());
     Json(json!({
@@ -315,4 +451,68 @@ async fn jwks_handler() -> Json<JsonValue> {
             }
         ]
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use reqwest::StatusCode;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn default_testing_server_keeps_built_in_jwt_helpers_enabled() {
+        let server = TestingServer::start().await;
+        let context = server.make_client_context_for_user(Schema::new(), "default-helper-user");
+
+        assert!(server.built_in_jwt_helpers_available());
+        assert!(!server.uses_external_jwks());
+        assert!(context.jwt_token.is_some());
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn external_jwks_url_disables_built_in_jwt_helpers() {
+        let external_jwks = TestingJwksServer::start().await;
+        let server = TestingServer::builder()
+            .with_jwks_url(external_jwks.endpoint())
+            .start()
+            .await;
+
+        assert!(!server.built_in_jwt_helpers_available());
+        assert!(server.uses_external_jwks());
+        assert_eq!(
+            server.ensure_built_in_jwt_helpers_available(),
+            Err(
+                "TestingServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
+            )
+        );
+
+        let health = reqwest::Client::new()
+            .get(format!("{}/health", server.base_url()))
+            .send()
+            .await
+            .expect("health request");
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            server.make_client_context_for_user(Schema::new(), "external-helper-user")
+        }))
+        .expect_err("external JWKS mode should reject built-in JWT helpers");
+        let message = if let Some(message) = panic.downcast_ref::<String>() {
+            message.as_str()
+        } else if let Some(message) = panic.downcast_ref::<&str>() {
+            message
+        } else {
+            panic!("unexpected panic payload");
+        };
+        assert_eq!(
+            message,
+            "TestingServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
+        );
+
+        server.shutdown().await;
+    }
 }

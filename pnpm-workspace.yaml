@@ -2,20 +2,25 @@ packages:
   - docs
   - packages/*
   - examples/*
-  - "!examples/rn-jazz-nitro"
   - examples/docs/*
+  - stress-tests/*
   - crates
   - crates/jazz-wasm
   - crates/jazz-napi
   - crates/jazz-rn
-  - crates/jazz-nitro
 
 catalogs:
   default:
-    "@vitest/browser": 4.0.18
-    "@vitest/browser-playwright": 4.0.18
-    typescript: 5.9.3
-    vitest: 4.0.18
+    "@sveltejs/vite-plugin-svelte": 7.0.0
+    "@vitest/browser": 4.1.0
+    "@vitest/browser-playwright": 4.1.0
+    "@vitejs/plugin-react": 6.0.1
+    "@vitejs/plugin-vue": 6.0.4
+    typescript: 6.0.2
+    vite: 8.0.1
+    "vite-plugin-top-level-await": 1.6.0
+    "vite-plugin-wasm": 3.6.0
+    vitest: 4.1.0
 
 ignoredBuiltDependencies:
   - blake3

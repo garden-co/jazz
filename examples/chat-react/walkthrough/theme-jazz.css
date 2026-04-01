@@ -1,0 +1,389 @@
+/* @theme jazz */
+
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Inter:wght@300;400;500&family=JetBrains+Mono:wght@400;500&display=swap");
+
+/* ── Palette ─────────────────────────────────────────────────────────────── */
+
+:root {
+  --bg: #ffffff;
+  --bg-raised: #f8f8fc;
+  --bg-code: #f5f5ff;
+  --border: #e0e0f0;
+  --border-dim: #ebebf5;
+  --accent: #146aff;
+  --accent-dim: rgba(20, 106, 255, 0.07);
+  --accent-mid: rgba(20, 106, 255, 0.2);
+  --text: #1a1a2e;
+  --text-dim: #6b7280;
+  --text-bright: #0f0f1a;
+}
+
+/* ── Base slide ──────────────────────────────────────────────────────────── */
+
+section {
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: "Inter", sans-serif;
+  font-size: 1rem;
+  font-weight: 400;
+  line-height: 1.65;
+  padding: 48px 72px 48px 72px;
+  width: 1280px;
+  height: 720px;
+  overflow: hidden;
+  position: relative;
+  box-sizing: border-box;
+  border-top: 3px solid var(--accent);
+}
+
+/* Dot matrix — covers bottom-right third, perspective receding upward */
+section::before {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 700px;
+  height: 520px;
+  background-image: radial-gradient(circle, rgba(20, 106, 255, 0.6) 1.5px, transparent 1.5px);
+  background-size: 22px 22px;
+  transform: perspective(600px) rotateX(28deg) rotateY(16deg);
+  transform-origin: bottom left;
+  -webkit-mask-image: linear-gradient(225deg, transparent 15%, rgba(0, 0, 0, 0.5) 50%, black 75%);
+  mask-image: linear-gradient(225deg, transparent 15%, rgba(0, 0, 0, 0.5) 50%, black 75%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ::after is reserved for page number (and hero horizon line) */
+
+section > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* ── Hero slide ──────────────────────────────────────────────────────────── */
+
+section.hero {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding-top: 72px;
+  padding-bottom: 100px;
+}
+
+section.hero h1 {
+  font-size: 3.6rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+  color: var(--text-bright);
+  margin: 0 0 1.4rem;
+}
+
+section.hero p {
+  font-size: 1.1rem;
+  color: var(--text-dim);
+  font-weight: 400;
+  max-width: 620px;
+  line-height: 1.75;
+  margin: 0;
+}
+
+/* Hero: dot matrix full-bleed across the top, receding into the distance */
+section.hero::before {
+  top: 0;
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: 100%;
+  height: 240px;
+  transform: perspective(500px) rotateX(-32deg);
+  transform-origin: top center;
+  -webkit-mask-image: linear-gradient(180deg, black 0%, rgba(0, 0, 0, 0.6) 50%, transparent 100%);
+  mask-image: linear-gradient(180deg, black 0%, rgba(0, 0, 0, 0.6) 50%, transparent 100%);
+}
+
+/* ── Headings ────────────────────────────────────────────────────────────── */
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: "Manrope", sans-serif;
+  color: var(--text-bright);
+  margin-top: 0;
+  margin-bottom: 0.7em;
+  font-weight: 700;
+}
+
+h2 {
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  padding-bottom: 0.5em;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1em;
+  color: var(--text-bright);
+}
+
+h3 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--accent);
+  margin-bottom: 0.4em;
+}
+
+h4 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 0.3em;
+}
+
+/* ── Body text ───────────────────────────────────────────────────────────── */
+
+p {
+  margin: 0 0 0.8em;
+}
+
+strong {
+  color: var(--text-bright);
+  font-weight: 600;
+}
+
+em {
+  color: var(--accent);
+  font-style: normal;
+  font-weight: 500;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid var(--accent-mid);
+}
+
+/* ── Inline code ─────────────────────────────────────────────────────────── */
+
+code {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.82em;
+  background: var(--bg-code);
+  color: var(--accent);
+  padding: 0.12em 0.4em;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  font-weight: 400;
+}
+
+/* ── Code blocks ─────────────────────────────────────────────────────────── */
+
+pre {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.78rem;
+  line-height: 1.65;
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 4px 4px 0;
+  padding: 1em 1.2em;
+  margin: 0.6em 0;
+  overflow: hidden;
+}
+
+pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+  color: var(--text);
+}
+
+/* ── Syntax highlighting (hljs) — light theme ────────────────────────────── */
+
+.hljs-keyword,
+.hljs-operator {
+  color: #146aff;
+  font-weight: 500;
+}
+
+.hljs-string,
+.hljs-template-string {
+  color: #15803d;
+}
+.hljs-number,
+.hljs-literal {
+  color: #c2410c;
+}
+.hljs-comment {
+  color: #9ca3af;
+  font-style: italic;
+}
+.hljs-function,
+.hljs-title.function_ {
+  color: #0051cc;
+  font-weight: 500;
+}
+.hljs-built_in,
+.hljs-class {
+  color: #0e7490;
+}
+.hljs-type,
+.hljs-title.class_ {
+  color: #6d28d9;
+}
+.hljs-attr,
+.hljs-property {
+  color: #57534e;
+}
+.hljs-variable,
+.hljs-params {
+  color: var(--text);
+}
+.hljs-tag,
+.hljs-name {
+  color: #146aff;
+}
+.hljs-selector-id,
+.hljs-selector-class {
+  color: #c2410c;
+}
+.hljs-punctuation {
+  color: #9ca3af;
+}
+
+/* ── Blockquotes ─────────────────────────────────────────────────────────── */
+
+blockquote {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-dim);
+  margin: 0.7em 0;
+  padding: 0.6em 1em;
+  border-radius: 0 4px 4px 0;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+blockquote strong {
+  color: var(--accent);
+}
+blockquote code {
+  color: var(--accent);
+  border-color: var(--accent-mid);
+}
+
+/* ── Lists ───────────────────────────────────────────────────────────────── */
+
+ul,
+ol {
+  padding-left: 1.4em;
+  margin: 0 0 0.6em;
+}
+
+li {
+  margin-bottom: 0.3em;
+  line-height: 1.55;
+}
+
+li::marker {
+  color: var(--accent);
+}
+
+/* ── Tables ──────────────────────────────────────────────────────────────── */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  margin: 0.5em 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+th {
+  font-family: "Manrope", sans-serif;
+  font-weight: 700;
+  font-size: 0.72rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--accent);
+  border-bottom: 1px solid var(--border);
+  padding: 0.55em 0.9em;
+  text-align: left;
+  background: var(--accent-dim);
+}
+
+td {
+  padding: 0.45em 0.9em;
+  border-bottom: 1px solid var(--border-dim);
+  vertical-align: top;
+  color: var(--text);
+}
+
+tr:last-child td {
+  border-bottom: none;
+}
+tr:hover td {
+  background: var(--bg-raised);
+}
+
+/* ── Images ──────────────────────────────────────────────────────────────── */
+
+img {
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+/* ── Background (split-layout) images ───────────────────────────────────── */
+
+/* Stacking fix for split-layout slides:
+   The photo is a background-image on <figure> — it paints at the figure's
+   in-flow level, not as a positioned element. On split slides, suppress the
+   content section's ::before and let the background section's ::before render
+   the matrix instead. The background section is a stacking context (Marp sets
+   z-index: 0). Within it, CSS painting order is:
+     1. Section background-color
+     2. ::before at z-index: -1 (the dot matrix)
+     3. In-flow descendants (figure + its background-image = the photo)
+   So the matrix sits between the white background and the photo. */
+section[data-marpit-advanced-background="content"]::before {
+  display: none;
+}
+section[data-marpit-advanced-background="background"]::before {
+  z-index: -1;
+}
+
+/* Vertical breathing room. Marpit's internal figure rule uses all:initial with
+   higher specificity (1,2,6 vs our 1,1,5), so !important is required. */
+section[data-marpit-advanced-background="background"]
+  > div[data-marpit-advanced-background-container]
+  > figure {
+  padding: 40px 0 !important;
+  background-origin: content-box !important;
+  background-clip: content-box !important;
+}
+
+/* ── Horizontal rule ─────────────────────────────────────────────────────── */
+
+hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1em 0;
+}
+
+/* ── Page number ─────────────────────────────────────────────────────────── */
+
+section[data-marpit-pagination]::after {
+  content: attr(data-marpit-pagination);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  z-index: 10;
+  opacity: 0.5;
+}

@@ -1,5 +1,6 @@
 import {
   ActiveQuerySubscriptionTrace,
+  InsertValues,
   JazzClient,
   DurabilityTier,
   QueryExecutionOptions,
@@ -485,7 +486,7 @@ class DevToolsDb extends Db {
   }
 
   protected getClient(schema: WasmSchema): JazzClient {
-    // @ts-expect-error proxy client intentionally implements query-only surface.
+    // @ts-expect-error proxy client intentionally implements a constrained bridge-backed surface.
     return new DevToolsJazzClient(schema);
   }
 }
@@ -498,14 +499,26 @@ class DevToolsJazzClient implements JazzClient {
     this.fallbackSchema = schema;
   }
 
-  forSession(session: Session): SessionClient {
+  forSession(_session: Session): SessionClient {
     throw new Error("Method not implemented.");
   }
-  forRequest(request: RequestLike): SessionClient {
+  forRequest(_request: RequestLike): SessionClient {
     throw new Error("Method not implemented.");
   }
-  createDurable(table: string, values: Value[], options?: { tier?: DurabilityTier }): Promise<Row> {
-    throw new Error("Method not implemented.");
+  create(table: string, values: InsertValues): Row {
+    throw new Error("DevTools client does not support non-durable create().");
+  }
+  async createDurable(
+    table: string,
+    values: InsertValues,
+    options?: { tier?: DurabilityTier },
+  ): Promise<Row> {
+    await ensureDevtoolsAnnounced();
+    return await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_INSERT_DURABLE, {
+      table,
+      values,
+      tier: options?.tier,
+    });
   }
   async query(query: string | QueryInput, options?: QueryExecutionOptions): Promise<Row[]> {
     await ensureDevtoolsAnnounced();
@@ -523,11 +536,30 @@ class DevToolsJazzClient implements JazzClient {
     objectId: string,
     updates: Record<string, Value>,
     options?: { tier?: DurabilityTier },
-  ): Promise<void> {
-    throw new Error("Method not implemented.");
+  ): void {
+    throw new Error("DevTools client does not support non-durable update().");
   }
-  delete(objectId: string, options?: { tier?: DurabilityTier }): Promise<void> {
-    throw new Error("Method not implemented.");
+  async updateDurable(
+    objectId: string,
+    updates: Record<string, Value>,
+    options?: { tier?: DurabilityTier },
+  ): Promise<void> {
+    await ensureDevtoolsAnnounced();
+    await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_UPDATE_DURABLE, {
+      objectId,
+      updates,
+      tier: options?.tier,
+    });
+  }
+  delete(objectId: string, options?: { tier?: DurabilityTier }): void {
+    throw new Error("DevTools client does not support non-durable delete().");
+  }
+  async deleteDurable(objectId: string, options?: { tier?: DurabilityTier }): Promise<void> {
+    await ensureDevtoolsAnnounced();
+    await sendDevtoolsRequest(DEVTOOLS_COMMANDS.CLIENT_DELETE_DURABLE, {
+      objectId,
+      tier: options?.tier,
+    });
   }
   subscribe(
     query: string | QueryInput,

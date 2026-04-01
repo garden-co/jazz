@@ -13,15 +13,16 @@ export interface DbConfigFormValues {
 
 interface DbConfigFormProps {
   onSubmit: (values: DbConfigFormValues, hashes: string[]) => void;
+  initialValues?: Partial<DbConfigFormValues>;
 }
 
-export function DbConfigForm({ onSubmit }: DbConfigFormProps) {
-  const [serverUrl, setServerUrl] = useState("");
-  const [appId, setAppId] = useState("");
-  const [adminSecret, setAdminSecret] = useState("");
-  const [env, setEnv] = useState("dev");
-  const [branch, setBranch] = useState("main");
-  const [serverPathPrefix, setServerPathPrefix] = useState("");
+export function DbConfigForm({ onSubmit, initialValues }: DbConfigFormProps) {
+  const [serverUrl, setServerUrl] = useState(initialValues?.serverUrl ?? "");
+  const [appId, setAppId] = useState(initialValues?.appId ?? "");
+  const [adminSecret, setAdminSecret] = useState(initialValues?.adminSecret ?? "");
+  const [env, setEnv] = useState(initialValues?.env ?? "dev");
+  const [branch, setBranch] = useState(initialValues?.branch ?? "main");
+  const [serverPathPrefix, setServerPathPrefix] = useState(initialValues?.serverPathPrefix ?? "");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 

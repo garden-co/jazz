@@ -22,7 +22,7 @@ npm run walkthrough        # Marp slideshow — Jazz patterns used in this app
 npm run walkthrough:shots  # Re-capture screenshots for the slideshow
 npm run test:e2e           # Playwright e2e tests
 npm run test               # Vitest unit tests
-npm run build              # Schema codegen + production build
+npm run build              # Validate schema.ts + production build
 ```
 
 ## How it works
@@ -37,7 +37,7 @@ npm run build              # Schema codegen + production build
 
 ## Schema
 
-Defined in `schema/current.ts` using the Jazz `table()` / `col.*` DSL. Running `pnpm build` generates the typed client (`schema/app.ts`) and SQL files.
+Defined in `schema.ts` using the Jazz typed schema DSL. Running `pnpm build` runs `jazz-tools validate` before the production build; the app imports the typed `app` export directly from that file.
 
 - **instruments** — name, sound (BYTEA), display_order
 - **jams** — created_at, transport_start (nullable), bpm, beat_count

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { app } from "./fixtures/basic/app";
+import { app } from "./fixtures/basic/schema";
 
-describe("generated TS DSL fixture", () => {
+describe("schema.ts TS DSL fixture", () => {
   it("serializes select metadata on generated query builders", () => {
     expect(JSON.parse(app.todos.select("title").include({ project: true })._build())).toEqual({
       table: "todos",
@@ -30,6 +30,17 @@ describe("generated TS DSL fixture", () => {
       conditions: [],
       includes: {},
       select: ["*"],
+      orderBy: [],
+      hops: [],
+    });
+  });
+
+  it('serializes mixed select("*", "$canDelete") metadata on generated query builders', () => {
+    expect(JSON.parse(app.todos.select("*", "$canDelete")._build())).toEqual({
+      table: "todos",
+      conditions: [],
+      includes: {},
+      select: ["*", "$canDelete"],
       orderBy: [],
       hops: [],
     });

@@ -25,6 +25,8 @@ interface TodoWhere {
   archived?: boolean;
   done?: boolean;
   projectId?: string;
+  $createdBy?: string;
+  $updatedBy?: string;
 }
 
 interface Project {
@@ -327,7 +329,7 @@ describe("permissions DSL", () => {
       policy.todos.allowDelete.where({ ownerId: session.userId }),
     ]);
 
-    expect(compiled.todos.select?.using).toEqual({
+    expect(compiled.todos!.select?.using).toEqual({
       type: "Cmp",
       column: "ownerId",
       op: "Eq",
@@ -336,7 +338,7 @@ describe("permissions DSL", () => {
         path: ["userId"],
       },
     });
-    expect(compiled.todos.insert?.with_check).toEqual({
+    expect(compiled.todos!.insert?.with_check).toEqual({
       type: "Cmp",
       column: "ownerId",
       op: "Eq",
@@ -345,7 +347,7 @@ describe("permissions DSL", () => {
         path: ["userId"],
       },
     });
-    expect(compiled.todos.update?.using).toEqual({
+    expect(compiled.todos!.update?.using).toEqual({
       type: "And",
       exprs: [
         {
@@ -364,14 +366,51 @@ describe("permissions DSL", () => {
         },
       ],
     });
-    expect(compiled.todos.update?.with_check).toEqual({
+    expect(compiled.todos!.update?.with_check).toEqual({
       type: "Inherits",
       operation: "Update",
       via_column: "projectId",
     });
-    expect(compiled.todos.delete?.using).toEqual({
+    expect(compiled.todos!.delete?.using).toEqual({
       type: "Cmp",
       column: "ownerId",
+      op: "Eq",
+      value: {
+        type: "SessionRef",
+        path: ["userId"],
+      },
+    });
+  });
+
+  it("compiles provenance magic column policies", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => [
+      policy.todos.allowRead.where({ $createdBy: session.userId }),
+      policy.todos.allowUpdate
+        .whereOld({ $createdBy: session.userId })
+        .whereNew({ $updatedBy: session.userId }),
+    ]);
+
+    expect(compiled.todos!.select?.using).toEqual({
+      type: "Cmp",
+      column: "$createdBy",
+      op: "Eq",
+      value: {
+        type: "SessionRef",
+        path: ["userId"],
+      },
+    });
+    expect(compiled.todos!.update?.using).toEqual({
+      type: "Cmp",
+      column: "$createdBy",
+      op: "Eq",
+      value: {
+        type: "SessionRef",
+        path: ["userId"],
+      },
+    });
+    expect(compiled.todos!.update?.with_check).toEqual({
+      type: "Cmp",
+      column: "$updatedBy",
       op: "Eq",
       value: {
         type: "SessionRef",
@@ -387,7 +426,7 @@ describe("permissions DSL", () => {
       policy.todos.allowInserts.where({ ownerId: session.userId }),
     ]);
 
-    expect(compiled.todos.select?.using).toEqual({
+    expect(compiled.todos!.select?.using).toEqual({
       type: "Or",
       exprs: [
         {
@@ -415,7 +454,7 @@ describe("permissions DSL", () => {
         },
       ],
     });
-    expect(compiled.todos.insert?.with_check).toEqual({
+    expect(compiled.todos!.insert?.with_check).toEqual({
       type: "Cmp",
       column: "ownerId",
       op: "Eq",
@@ -436,7 +475,7 @@ describe("permissions DSL", () => {
       ),
     ]);
 
-    expect(compiled.todos.select?.using).toEqual({
+    expect(compiled.todos!.select?.using).toEqual({
       type: "Exists",
       table: "todoShares",
       condition: {
@@ -471,12 +510,12 @@ describe("permissions DSL", () => {
       policy.todos.allowDelete.where(allowedTo.delete("projectId")),
     ]);
 
-    expect(compiled.todos.insert?.with_check).toEqual({
+    expect(compiled.todos!.insert?.with_check).toEqual({
       type: "Inherits",
       operation: "Insert",
       via_column: "projectId",
     });
-    expect(compiled.todos.delete?.using).toEqual({
+    expect(compiled.todos!.delete?.using).toEqual({
       type: "Inherits",
       operation: "Delete",
       via_column: "projectId",
@@ -491,11 +530,11 @@ describe("permissions DSL", () => {
       policy.todos.allowDelete.never(),
     ]);
 
-    expect(compiled.todos.select?.using).toEqual({ type: "False" });
-    expect(compiled.todos.insert?.with_check).toEqual({ type: "False" });
-    expect(compiled.todos.update?.using).toEqual({ type: "False" });
-    expect(compiled.todos.update?.with_check).toEqual({ type: "False" });
-    expect(compiled.todos.delete?.using).toEqual({ type: "False" });
+    expect(compiled.todos!.select?.using).toEqual({ type: "False" });
+    expect(compiled.todos!.insert?.with_check).toEqual({ type: "False" });
+    expect(compiled.todos!.update?.using).toEqual({ type: "False" });
+    expect(compiled.todos!.update?.with_check).toEqual({ type: "False" });
+    expect(compiled.todos!.delete?.using).toEqual({ type: "False" });
   });
 
   it("supports always() across read/insert/update/delete policies", () => {
@@ -506,11 +545,11 @@ describe("permissions DSL", () => {
       policy.todos.allowDelete.always(),
     ]);
 
-    expect(compiled.todos.select?.using).toEqual({ type: "True" });
-    expect(compiled.todos.insert?.with_check).toEqual({ type: "True" });
-    expect(compiled.todos.update?.using).toEqual({ type: "True" });
-    expect(compiled.todos.update?.with_check).toEqual({ type: "True" });
-    expect(compiled.todos.delete?.using).toEqual({ type: "True" });
+    expect(compiled.todos!.select?.using).toEqual({ type: "True" });
+    expect(compiled.todos!.insert?.with_check).toEqual({ type: "True" });
+    expect(compiled.todos!.update?.using).toEqual({ type: "True" });
+    expect(compiled.todos!.update?.with_check).toEqual({ type: "True" });
+    expect(compiled.todos!.delete?.using).toEqual({ type: "True" });
   });
 
   it("supports allowedTo.readReferencing helper", () => {
@@ -518,7 +557,7 @@ describe("permissions DSL", () => {
       policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "projectId")),
     ]);
 
-    expect(compiled.projects.select?.using).toEqual({
+    expect(compiled.projects!.select?.using).toEqual({
       type: "InheritsReferencing",
       operation: "Select",
       source_table: "todos",
@@ -533,7 +572,7 @@ describe("permissions DSL", () => {
       ),
     ]);
 
-    expect(compiled.projects.select?.using).toEqual({
+    expect(compiled.projects!.select?.using).toEqual({
       type: "InheritsReferencing",
       operation: "Select",
       source_table: "todos",
@@ -567,14 +606,14 @@ describe("permissions DSL", () => {
       policy.profiles.allowRead.where(allowedTo.readReferencing(policy.people, "profileId")),
     ]);
 
-    expect(compiled.profiles.select?.using).toEqual({
+    expect(compiled.profiles!.select?.using).toEqual({
       type: "InheritsReferencing",
       operation: "Select",
       source_table: "people",
       via_column: "profileId",
     });
 
-    const peopleUsing = compiled.people.select?.using;
+    const peopleUsing = compiled.people!.select?.using;
     expect(peopleUsing?.type).toBe("Or");
     if (!peopleUsing || peopleUsing.type !== "Or") {
       throw new Error("Expected people policy to compile to OR.");
@@ -609,7 +648,7 @@ describe("permissions DSL", () => {
       ),
     ]);
 
-    const using = compiled.profiles.select?.using;
+    const using = compiled.profiles!.select?.using;
     expect(using?.type).toBe("Or");
     if (!using || using.type !== "Or") {
       throw new Error("Expected profile policy to compile to OR.");
@@ -656,7 +695,7 @@ describe("permissions DSL", () => {
       ),
     ]);
 
-    const using = compiled.profiles.select?.using;
+    const using = compiled.profiles!.select?.using;
     expect(using?.type).toBe("Or");
     if (!using || using.type !== "Or") {
       throw new Error("Expected profile policy to compile to OR.");
@@ -692,7 +731,7 @@ describe("permissions DSL", () => {
       policy.todos.allowRead.where(allowedTo.read("projectId", { maxDepth: 3 })),
     ]);
 
-    expect(compiled.todos.select?.using).toEqual({
+    expect(compiled.todos!.select?.using).toEqual({
       type: "Inherits",
       operation: "Select",
       via_column: "projectId",
@@ -731,7 +770,7 @@ describe("permissions DSL", () => {
       return [policy.todos.allowRead.where((todo) => hasResourceRole(todo.id, "viewer"))];
     });
 
-    const using = toLegacyPolicyExprWithRelForTest(compiled.todos.select?.using);
+    const using = toLegacyPolicyExprWithRelForTest(compiled.todos!.select?.using);
     expect(using?.type).toBe("ExistsRel");
     if (!using || using.type !== "ExistsRel") {
       throw new Error("Expected compiled recursive expression to be ExistsRel.");
@@ -861,7 +900,7 @@ describe("permissions DSL", () => {
       ];
     });
 
-    const using = toLegacyPolicyExprWithRelForTest(compiled.todos.select?.using);
+    const using = toLegacyPolicyExprWithRelForTest(compiled.todos!.select?.using);
     expect(using).toMatchObject({
       type: "ExistsRel",
       rel: {
@@ -920,7 +959,7 @@ describe("permissions DSL", () => {
     const oldOnly = definePermissions(app, ({ policy, session }) => [
       policy.todos.allowUpdate.whereOld({ ownerId: session.userId }),
     ]);
-    expect(oldOnly.todos.update?.using).toEqual({
+    expect(oldOnly.todos!.update?.using).toEqual({
       type: "Cmp",
       column: "ownerId",
       op: "Eq",
@@ -929,12 +968,12 @@ describe("permissions DSL", () => {
         path: ["userId"],
       },
     });
-    expect(oldOnly.todos.update?.with_check).toEqual(oldOnly.todos.update?.using);
+    expect(oldOnly.todos!.update?.with_check).toEqual(oldOnly.todos!.update?.using);
 
     const newOnly = definePermissions(app, ({ policy, session }) => [
       policy.todos.allowUpdate.whereNew({ ownerId: session.userId }),
     ]);
-    expect(newOnly.todos.update?.with_check).toEqual({
+    expect(newOnly.todos!.update?.with_check).toEqual({
       type: "Cmp",
       column: "ownerId",
       op: "Eq",
@@ -943,14 +982,14 @@ describe("permissions DSL", () => {
         path: ["userId"],
       },
     });
-    expect(newOnly.todos.update?.using).toEqual(newOnly.todos.update?.with_check);
+    expect(newOnly.todos!.update?.using).toEqual(newOnly.todos!.update?.with_check);
   });
 
   it("supports contains and in where operators", () => {
     const containsCompiled = definePermissions(app, ({ policy }) => [
       policy.todos.allowRead.where({ ownerId: { contains: "ali" } } as unknown as TodoWhere),
     ]);
-    expect(containsCompiled.todos.select?.using).toEqual({
+    expect(containsCompiled.todos!.select?.using).toEqual({
       type: "Contains",
       column: "ownerId",
       value: {
@@ -962,7 +1001,7 @@ describe("permissions DSL", () => {
     const inListCompiled = definePermissions(app, ({ policy }) => [
       policy.todos.allowRead.where({ ownerId: { in: ["alice", "bob"] } } as unknown as TodoWhere),
     ]);
-    expect(inListCompiled.todos.select?.using).toEqual({
+    expect(inListCompiled.todos!.select?.using).toEqual({
       type: "InList",
       column: "ownerId",
       values: [
@@ -982,7 +1021,7 @@ describe("permissions DSL", () => {
         ownerId: { in: session["claims.teamIds"] },
       } as unknown as TodoWhere),
     ]);
-    expect(inSessionCompiled.todos.select?.using).toEqual({
+    expect(inSessionCompiled.todos!.select?.using).toEqual({
       type: "In",
       column: "ownerId",
       session_path: ["claims", "teamIds"],
@@ -991,7 +1030,125 @@ describe("permissions DSL", () => {
     const emptyInCompiled = definePermissions(app, ({ policy }) => [
       policy.todos.allowRead.where({ ownerId: { in: [] } } as unknown as TodoWhere),
     ]);
-    expect(emptyInCompiled.todos.select?.using).toEqual({ type: "False" });
+    expect(emptyInCompiled.todos!.select?.using).toEqual({ type: "False" });
+  });
+
+  it("compiles session.where(...) predicates and composes them with row predicates", () => {
+    const compiled = definePermissions(app, ({ policy, allOf, anyOf, session }) => [
+      policy.todos.allowRead.where(
+        allOf([
+          { ownerId: session.userId },
+          session.where({
+            "claims.role": "manager",
+            user_id: { ne: null },
+          }),
+        ]),
+      ),
+      policy.todos.allowRead.where(
+        anyOf([
+          session.where({ "claims.plan": { in: ["pro", "enterprise"] } }),
+          session.where({ "claims.teamIds": { contains: "team_a" } }),
+        ]),
+      ),
+    ]);
+
+    expect(compiled.todos!.select?.using).toEqual({
+      type: "Or",
+      exprs: [
+        {
+          type: "And",
+          exprs: [
+            {
+              type: "Cmp",
+              column: "ownerId",
+              op: "Eq",
+              value: {
+                type: "SessionRef",
+                path: ["userId"],
+              },
+            },
+            {
+              type: "And",
+              exprs: [
+                {
+                  type: "SessionCmp",
+                  path: ["claims", "role"],
+                  op: "Eq",
+                  value: {
+                    type: "Literal",
+                    value: "manager",
+                  },
+                },
+                {
+                  type: "SessionIsNotNull",
+                  path: ["user_id"],
+                },
+              ],
+            },
+          ],
+        },
+        {
+          type: "SessionInList",
+          path: ["claims", "plan"],
+          values: [
+            {
+              type: "Literal",
+              value: "pro",
+            },
+            {
+              type: "Literal",
+              value: "enterprise",
+            },
+          ],
+        },
+        {
+          type: "SessionContains",
+          path: ["claims", "teamIds"],
+          value: {
+            type: "Literal",
+            value: "team_a",
+          },
+        },
+      ],
+    });
+  });
+
+  it("rejects invalid session.where(...) value shapes", () => {
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.todos.allowRead.where(session.where({ "claims.role": session.userId })),
+      ]),
+    ).toThrow(/session references are not supported/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.todos.allowRead.where((todo) => session.where({ "claims.role": todo.ownerId })),
+      ]),
+    ).toThrow(/row references are not supported/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.todos.allowRead.where(session.where({ claims: { role: "manager" } })),
+      ]),
+    ).toThrow(/nested object claim syntax is not supported|dotted path keys/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.todos.allowRead.where(
+          session.where({ "claims.plan": { in: "pro" } as unknown as Record<string, unknown> }),
+        ),
+      ]),
+    ).toThrow(/expects an array of literal values/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy, session }) => [
+        policy.todos.allowRead.where(
+          session.where({
+            "claims.role": { startsWith: "man" } as unknown as Record<string, unknown>,
+          }),
+        ),
+      ]),
+    ).toThrow(/unsupported session\.where operator "startsWith"/i);
   });
 
   it("rejects unsupported where operators and invalid compound combinator inputs", () => {
@@ -1034,7 +1191,7 @@ describe("permissions DSL", () => {
       ),
     ]);
 
-    expect(compiled.todos.select?.using).toEqual({
+    expect(compiled.todos!.select?.using).toEqual({
       type: "Or",
       exprs: [
         {
@@ -1097,7 +1254,7 @@ describe("permissions DSL", () => {
       policy.todos.allowRead.where(manualExistsExpr),
     ]);
 
-    expect(compiled.todos.select?.using).toEqual(manualExistsExpr);
+    expect(compiled.todos!.select?.using).toEqual(manualExistsExpr);
   });
 
   it("rejects invalid nested inherits columns against exists table metadata", () => {

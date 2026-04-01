@@ -1,16 +1,35 @@
-import type { WasmSchema } from "../drivers/types.js";
+import type { InsertValues, WasmSchema } from "../drivers/types.js";
 import type { Row, Runtime } from "../runtime/client.js";
 import { OutboxDestinationKind } from "../runtime/sync-transport.js";
 
+export type JazzRnErrorTag =
+  | "InvalidJson"
+  | "InvalidUuid"
+  | "InvalidTier"
+  | "Schema"
+  | "Runtime"
+  | "Internal";
+
+export type JazzRnNormalizedError = Error & {
+  tag: JazzRnErrorTag;
+  cause?: unknown;
+};
+
 export interface JazzRnRuntimeBinding {
   addClient(): string;
-  addServer(): void;
+  addServer(serverCatalogueStateHash?: string | null): void;
   batchedTick(): void;
   close(): void;
   delete_(objectId: string): void;
+  deleteWithSession?(objectId: string, writeContextJson: string | undefined): void;
   flush(): void;
   getSchemaHash(): string;
   insert(table: string, valuesJson: string): string;
+  insertWithSession?(
+    table: string,
+    valuesJson: string,
+    writeContextJson: string | undefined,
+  ): string;
   onBatchedTickNeeded(
     callback:
       | {
@@ -49,6 +68,11 @@ export interface JazzRnRuntimeBinding {
   ): bigint;
   unsubscribe(handle: bigint): void;
   update(objectId: string, valuesJson: string): void;
+  updateWithSession?(
+    objectId: string,
+    valuesJson: string,
+    writeContextJson: string | undefined,
+  ): void;
   uniffiDestroy?(): void;
 }
 
@@ -92,6 +116,52 @@ function swallowMissingObjectMutation(context: string, error: unknown): boolean 
     // Ignore logging failures.
   }
   return true;
+}
+
+function isJazzRnErrorLike(
+  error: unknown,
+): error is { tag: string; inner?: { message?: unknown } } {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const candidate = error as { tag?: unknown; inner?: unknown };
+  return typeof candidate.tag === "string";
+}
+
+function normalizeJazzRnError(error: unknown): Error {
+  if (!isJazzRnErrorLike(error)) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+
+  const message =
+    typeof error.inner?.message === "string" && error.inner.message.length > 0
+      ? error.inner.message
+      : String(error);
+  const tag = error.tag as JazzRnErrorTag;
+  const normalized = createErrorWithCause(message, error);
+  normalized.name = `JazzRn${tag}Error`;
+  Object.defineProperty(normalized, "tag", {
+    value: tag,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+  return normalized as JazzRnNormalizedError;
+}
+
+function createErrorWithCause(message: string, cause: unknown): Error {
+  try {
+    return new Error(message, { cause });
+  } catch {
+    const fallback = new Error(message) as Error & { cause?: unknown };
+    Object.defineProperty(fallback, "cause", {
+      value: cause,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+    return fallback;
+  }
 }
 
 function assertSyncMessageArgs(
@@ -138,9 +208,36 @@ export class JazzRnRuntimeAdapter implements Runtime {
     });
   }
 
-  insert(table: string, values: any): Row {
-    const rowJson = this.binding.insert(table, JSON.stringify(values));
-    return JSON.parse(rowJson) as Row;
+  private requireWriteContextMethod<
+    T extends "insertWithSession" | "updateWithSession" | "deleteWithSession",
+  >(method: T): NonNullable<JazzRnRuntimeBinding[T]> {
+    const runtimeMethod = this.binding[method];
+    if (!runtimeMethod) {
+      throw new Error(`${method} is not supported by this RN runtime binding`);
+    }
+    return runtimeMethod.bind(this.binding) as NonNullable<JazzRnRuntimeBinding[T]>;
+  }
+
+  insert(table: string, values: InsertValues): Row {
+    try {
+      const rowJson = this.binding.insert(table, JSON.stringify(values));
+      return JSON.parse(rowJson) as Row;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  insertWithSession(table: string, values: InsertValues, write_context_json?: string | null): Row {
+    try {
+      const rowJson = this.requireWriteContextMethod("insertWithSession")(
+        table,
+        JSON.stringify(values),
+        write_context_json ?? undefined,
+      );
+      return JSON.parse(rowJson) as Row;
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
   }
 
   update(object_id: string, values: any): void {
@@ -148,7 +245,20 @@ export class JazzRnRuntimeAdapter implements Runtime {
       this.binding.update(object_id, JSON.stringify(values));
     } catch (error) {
       if (swallowMissingObjectMutation("update", error)) return;
-      throw error;
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  updateWithSession(object_id: string, values: any, write_context_json?: string | null): void {
+    try {
+      this.requireWriteContextMethod("updateWithSession")(
+        object_id,
+        JSON.stringify(values),
+        write_context_json ?? undefined,
+      );
+    } catch (error) {
+      if (swallowMissingObjectMutation("update", error)) return;
+      throw normalizeJazzRnError(error);
     }
   }
 
@@ -157,7 +267,19 @@ export class JazzRnRuntimeAdapter implements Runtime {
       this.binding.delete_(object_id);
     } catch (error) {
       if (swallowMissingObjectMutation("delete", error)) return;
-      throw error;
+      throw normalizeJazzRnError(error);
+    }
+  }
+
+  deleteWithSession(object_id: string, write_context_json?: string | null): void {
+    try {
+      this.requireWriteContextMethod("deleteWithSession")(
+        object_id,
+        write_context_json ?? undefined,
+      );
+    } catch (error) {
+      if (swallowMissingObjectMutation("delete", error)) return;
+      throw normalizeJazzRnError(error);
     }
   }
 
@@ -166,8 +288,12 @@ export class JazzRnRuntimeAdapter implements Runtime {
     session_json?: string | null,
     tier?: string | null,
   ): Promise<any> {
-    const rowsJson = this.binding.query(query_json, session_json ?? undefined, tier ?? undefined);
-    return JSON.parse(rowsJson);
+    try {
+      const rowsJson = this.binding.query(query_json, session_json ?? undefined, tier ?? undefined);
+      return JSON.parse(rowsJson);
+    } catch (error) {
+      throw normalizeJazzRnError(error);
+    }
   }
 
   createSubscription(
@@ -239,9 +365,21 @@ export class JazzRnRuntimeAdapter implements Runtime {
     this.handleMap.delete(handle);
   }
 
-  insertDurable(table: string, values: any, tier: string): Promise<Row> {
+  insertDurable(table: string, values: InsertValues, tier: string): Promise<Row> {
     assertWorkerTier(tier);
     const row = this.insert(table, values);
+    this.binding.flush();
+    return Promise.resolve(row);
+  }
+
+  insertDurableWithSession(
+    table: string,
+    values: InsertValues,
+    write_context_json: string | null | undefined,
+    tier: string,
+  ): Promise<Row> {
+    assertWorkerTier(tier);
+    const row = this.insertWithSession(table, values, write_context_json);
     this.binding.flush();
     return Promise.resolve(row);
   }
@@ -253,9 +391,32 @@ export class JazzRnRuntimeAdapter implements Runtime {
     return Promise.resolve();
   }
 
+  updateDurableWithSession(
+    object_id: string,
+    values: any,
+    write_context_json: string | null | undefined,
+    tier: string,
+  ): Promise<void> {
+    assertWorkerTier(tier);
+    this.updateWithSession(object_id, values, write_context_json);
+    this.binding.flush();
+    return Promise.resolve();
+  }
+
   deleteDurable(object_id: string, tier: string): Promise<void> {
     assertWorkerTier(tier);
     this.delete(object_id);
+    this.binding.flush();
+    return Promise.resolve();
+  }
+
+  deleteDurableWithSession(
+    object_id: string,
+    write_context_json: string | null | undefined,
+    tier: string,
+  ): Promise<void> {
+    assertWorkerTier(tier);
+    this.deleteWithSession(object_id, write_context_json);
     this.binding.flush();
     return Promise.resolve();
   }
@@ -283,7 +444,7 @@ export class JazzRnRuntimeAdapter implements Runtime {
     });
   }
 
-  addServer(): void {
+  addServer(_serverCatalogueStateHash?: string | null): void {
     if (this.closed) return;
     this.binding.addServer();
   }

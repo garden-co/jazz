@@ -1,5 +1,9 @@
 export { default as JazzSvelteProvider } from "./JazzSvelteProvider.svelte";
-export { createJazzClient, type JazzClient } from "./create-jazz-client.js";
+export {
+  createJazzClient,
+  createExtensionJazzClient,
+  type JazzClient,
+} from "./create-jazz-client.js";
 export { getDb, getSession, getJazzContext, type JazzContext } from "./context.svelte.js";
 export { QuerySubscription } from "./use-all.svelte.js";
 export { default as SyntheticUserSwitcher } from "./SyntheticUserSwitcher.svelte";
@@ -21,4 +25,5 @@ export {
   type SyntheticUserStorageOptions,
   type SyntheticUserStore,
 } from "../synthetic-users.js";
-export type { QueryOptions } from "../runtime/index.js";
+export { attachDevTools, type DevToolsAttachment } from "../dev-tools/dev-tools.js";
+export type { DurabilityTier, QueryOptions } from "../runtime/index.js";

@@ -1,5 +1,7 @@
 import { onDestroy } from "svelte";
 import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
+import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
+import { applyDelta } from "../reconcile-array.js";
 import { getJazzContext } from "./context.svelte.js";
 
 /**
@@ -34,21 +36,40 @@ export class QuerySubscription<T extends { id: string }> {
     this.current = options?.tier ? undefined : [];
 
     $effect(() => {
-      const db = ctx.db;
-      if (!db) return;
+      const manager = ctx.manager;
+      if (!manager) return;
 
       this.loading = true;
       this.error = null;
 
       try {
-        this.#unsubscribe = db.subscribeAll(
-          query,
-          (delta) => {
-            this.current = delta.all;
+        const key = manager.makeQueryKey(query, options);
+        const entry = manager.getCacheEntry<T>(key);
+
+        // Apply initial state from cache
+        if (entry.state.status === "fulfilled") {
+          this.current = entry.state.data;
+          this.loading = false;
+        }
+
+        this.#unsubscribe = entry.subscribe({
+          onfulfilled: (data: T[]) => {
+            this.current = data;
             this.loading = false;
           },
-          options,
-        );
+          onDelta: (delta: SubscriptionDelta<T>) => {
+            if (this.current) {
+              applyDelta(this.current, delta);
+            } else {
+              this.current = delta.all;
+            }
+          },
+          onError: (error: unknown) => {
+            this.error = error instanceof Error ? error : new Error(String(error));
+            this.current = undefined;
+            this.loading = false;
+          },
+        });
       } catch (e) {
         this.error = e instanceof Error ? e : new Error(String(e));
         this.loading = false;

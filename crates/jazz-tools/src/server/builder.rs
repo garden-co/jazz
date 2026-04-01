@@ -1,18 +1,19 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
-use jsonwebtoken::jwk::JwkSet;
 use tokio::sync::{RwLock, broadcast};
 use tracing::info;
 
 use crate::middleware::AuthConfig;
+use crate::middleware::auth::{JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache};
 use crate::query_manager::types::Schema;
 use crate::routes;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
-use crate::server::{DynStorage, ExternalIdentityStore, ServerState};
+use crate::server::{CatalogueAuthorityMode, DynStorage, ExternalIdentityStore, ServerState};
 use crate::storage::{FjallStorage, MemoryStorage, Storage};
 use crate::sync_manager::{ClientId, Destination, DurabilityTier, SyncManager, SyncPayload};
 
@@ -39,6 +40,7 @@ enum ServerStorageMode {
 pub struct ServerBuilder {
     app_id: AppId,
     auth_config: AuthConfig,
+    catalogue_authority: CatalogueAuthorityMode,
     schema_mode: ServerSchemaMode,
     storage_mode: ServerStorageMode,
 }
@@ -48,6 +50,7 @@ impl ServerBuilder {
         Self {
             app_id,
             auth_config: AuthConfig::default(),
+            catalogue_authority: CatalogueAuthorityMode::Local,
             schema_mode: ServerSchemaMode::Dynamic,
             storage_mode: ServerStorageMode::Persistent {
                 data_dir: "./data".to_string(),
@@ -57,6 +60,11 @@ impl ServerBuilder {
 
     pub fn with_auth_config(mut self, auth_config: AuthConfig) -> Self {
         self.auth_config = auth_config;
+        self
+    }
+
+    pub fn with_catalogue_authority(mut self, catalogue_authority: CatalogueAuthorityMode) -> Self {
+        self.catalogue_authority = catalogue_authority;
         self
     }
 
@@ -79,12 +87,16 @@ impl ServerBuilder {
     }
 
     pub async fn build(self) -> Result<BuiltServer, String> {
-        let mut auth_config = self.auth_config.clone();
-        preload_jwks(&mut auth_config).await?;
-        log_auth_config(&auth_config);
+        let auth_config = self.auth_config.clone();
+        validate_catalogue_authority(&auth_config, &self.catalogue_authority)?;
+        let jwks_cache = build_jwks_cache(&auth_config).await?;
+        log_auth_config(&auth_config, &self.catalogue_authority);
 
         let (runtime, sync_broadcast) = self.build_runtime()?;
         let external_identity_store = Arc::new(self.build_external_identity_store()?);
+        let http_client = reqwest::Client::builder()
+            .build()
+            .map_err(|e| format!("failed to build HTTP client: {e}"))?;
         let external_identity_rows = external_identity_store
             .list_external_identities(self.app_id)
             .await
@@ -102,6 +114,9 @@ impl ServerBuilder {
             next_connection_id: std::sync::atomic::AtomicU64::new(1),
             sync_broadcast,
             auth_config,
+            catalogue_authority: self.catalogue_authority.clone(),
+            jwks_cache,
+            http_client,
             external_identity_store,
             external_identities: RwLock::new(external_identities),
         });
@@ -110,6 +125,7 @@ impl ServerBuilder {
         Ok(BuiltServer { state, app })
     }
 
+    #[allow(clippy::type_complexity)]
     fn build_runtime(
         &self,
     ) -> Result<
@@ -191,39 +207,92 @@ impl ServerBuilder {
 }
 
 fn server_sync_manager() -> SyncManager {
-    SyncManager::new()
-        .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer])
+    let sync_manager = SyncManager::new()
+        .with_durability_tiers([DurabilityTier::EdgeServer, DurabilityTier::GlobalServer]);
+
+    if should_allow_unprivileged_schema_catalogue_writes() {
+        sync_manager.with_unprivileged_schema_catalogue_writes()
+    } else {
+        sync_manager
+    }
 }
 
-async fn preload_jwks(auth_config: &mut AuthConfig) -> Result<(), String> {
-    let Some(jwks_url) = auth_config.jwks_url.as_deref() else {
-        return Ok(());
+fn should_allow_unprivileged_schema_catalogue_writes() -> bool {
+    !matches!(
+        std::env::var("NODE_ENV"),
+        Ok(value) if value.eq_ignore_ascii_case("production")
+    )
+}
+
+async fn build_jwks_cache(auth_config: &AuthConfig) -> Result<Option<JwksCache>, String> {
+    let Some(jwks_url) = auth_config.jwks_url.as_ref() else {
+        return Ok(None);
     };
 
-    let jwks = reqwest::get(jwks_url)
+    let jwks_ttl = std::env::var("JAZZ_JWKS_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(JWKS_CACHE_TTL);
+    let jwks_max_stale = std::env::var("JAZZ_JWKS_MAX_STALE_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(JWKS_MAX_STALE);
+
+    let cache = JwksCache::new(
+        jwks_url.clone(),
+        reqwest::Client::new(),
+        jwks_ttl,
+        jwks_max_stale,
+    );
+    cache
+        .load(false)
         .await
-        .map_err(|e| format!("failed to fetch JWKS from {jwks_url}: {e}"))?
-        .json::<JwkSet>()
-        .await
-        .map_err(|e| format!("failed to decode JWKS from {jwks_url}: {e}"))?;
-    auth_config.jwks_set = Some(jwks);
+        .map_err(|e| format!("failed to fetch initial JWKS: {e}"))?;
+
+    Ok(Some(cache))
+}
+
+fn validate_catalogue_authority(
+    auth_config: &AuthConfig,
+    catalogue_authority: &CatalogueAuthorityMode,
+) -> Result<(), String> {
+    if matches!(catalogue_authority, CatalogueAuthorityMode::Local) {
+        return Ok(());
+    }
+
+    if auth_config.admin_secret.is_none() {
+        return Err(
+            "catalogue authority forwarding requires a local --admin-secret / JAZZ_ADMIN_SECRET"
+                .to_string(),
+        );
+    }
+
     Ok(())
 }
 
-fn log_auth_config(auth_config: &AuthConfig) {
+fn log_auth_config(auth_config: &AuthConfig, catalogue_authority: &CatalogueAuthorityMode) {
+    let authority_mode = match catalogue_authority {
+        CatalogueAuthorityMode::Local => "local".to_string(),
+        CatalogueAuthorityMode::Forward { base_url, .. } => {
+            format!("forward({base_url})")
+        }
+    };
     if auth_config.is_configured() {
         info!(
-            "Auth configured: anonymous={}, demo={}, jwks={}, backend={}, admin={}",
+            "Auth configured: anonymous={}, demo={}, jwks={}, backend={}, admin={}, catalogue_authority={}",
             auth_config.allow_anonymous,
             auth_config.allow_demo,
             auth_config.jwks_url.is_some(),
             auth_config.backend_secret.is_some(),
-            auth_config.admin_secret.is_some()
+            auth_config.admin_secret.is_some(),
+            authority_mode
         );
     } else {
         info!(
-            "Auth configured: anonymous={}, demo={}, jwks=false, backend=false, admin=false",
-            auth_config.allow_anonymous, auth_config.allow_demo
+            "Auth configured: anonymous={}, demo={}, jwks=false, backend=false, admin=false, catalogue_authority={}",
+            auth_config.allow_anonymous, auth_config.allow_demo, authority_mode
         );
     }
 }

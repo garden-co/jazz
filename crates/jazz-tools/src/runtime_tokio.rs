@@ -12,19 +12,21 @@
 //! - `TokioRuntime<S>` wraps `Arc<Mutex<RuntimeCore<...>>>`
 //! - Methods grab the lock, call RuntimeCore, and return
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::object::ObjectId;
 use crate::query_manager::query::Query;
-use crate::query_manager::session::Session;
+use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{Schema, SchemaHash, Value};
 pub use crate::runtime_core::SubscriptionHandle;
 use crate::runtime_core::{
     QueryFuture, ReadDurabilityOptions, RuntimeCore, RuntimeError as CoreRuntimeError, Scheduler,
     SubscriptionDelta, SyncSender,
 };
-use crate::schema_manager::{QuerySchemaContext, SchemaManager};
+use crate::schema_manager::manager::PermissionsHeadSummary;
+use crate::schema_manager::{Lens, QuerySchemaContext, SchemaManager};
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, InboxEntry, OutboxEntry, QueryPropagation, ServerId};
 
@@ -211,6 +213,37 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(core.persist_schema())
     }
 
+    /// Publish any schema object to the local catalogue and in-memory schema manager.
+    pub fn publish_schema(&self, schema: Schema) -> Result<ObjectId, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.publish_schema(schema))
+    }
+
+    pub fn publish_permissions_bundle(
+        &self,
+        schema_hash: crate::query_manager::types::SchemaHash,
+        permissions: std::collections::HashMap<
+            crate::query_manager::types::TableName,
+            crate::query_manager::types::TablePolicies,
+        >,
+        expected_parent_bundle_object_id: Option<ObjectId>,
+    ) -> Result<Option<ObjectId>, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.publish_permissions_bundle(schema_hash, permissions, expected_parent_bundle_object_id)
+            .map_err(|error| RuntimeError::WriteError(error.to_string()))
+    }
+
+    pub fn current_permissions_head(&self) -> Result<Option<PermissionsHeadSummary>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.schema_manager().current_permissions_head())
+    }
+
+    /// Publish a reviewed lens edge to the local catalogue and active schema manager.
+    pub fn publish_lens(&self, lens: &Lens) -> Result<ObjectId, RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.publish_lens(lens)?)
+    }
+
     // =========================================================================
     // CRUD Operations
     // =========================================================================
@@ -219,11 +252,12 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn insert(
         &self,
         table: &str,
-        values: Vec<Value>,
+        values: HashMap<String, Value>,
         session: Option<&Session>,
     ) -> Result<(ObjectId, Vec<Value>), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        let result = core.insert(table, values, session)?;
+        let owned = session.cloned().map(WriteContext::from_session);
+        let result = core.insert(table, values, owned.as_ref())?;
         Ok(result)
     }
 
@@ -235,7 +269,8 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         session: Option<&Session>,
     ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.update(object_id, values, session)?;
+        let owned = session.cloned().map(WriteContext::from_session);
+        core.update(object_id, values, owned.as_ref())?;
         Ok(())
     }
 
@@ -246,7 +281,8 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         session: Option<&Session>,
     ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.delete(object_id, session)?;
+        let owned = session.cloned().map(WriteContext::from_session);
+        core.delete(object_id, owned.as_ref())?;
         Ok(())
     }
 
@@ -373,8 +409,18 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
 
     /// Add a server connection.
     pub fn add_server(&self, server_id: ServerId) -> Result<(), RuntimeError> {
+        self.add_server_with_catalogue_state_hash(server_id, None)
+    }
+
+    /// Add a server connection, optionally comparing the upstream catalogue
+    /// digest first so unchanged catalogue objects are not replayed.
+    pub fn add_server_with_catalogue_state_hash(
+        &self,
+        server_id: ServerId,
+        remote_catalogue_state_hash: Option<&str>,
+    ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.add_server(server_id);
+        core.add_server_with_catalogue_state_hash(server_id, remote_catalogue_state_hash);
         Ok(())
     }
 
@@ -407,6 +453,20 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     ) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         core.ensure_client_with_session(client_id, session);
+        Ok(())
+    }
+
+    /// Ensure a client exists and is marked as Backend without resetting state.
+    pub fn ensure_client_as_backend(&self, client_id: ClientId) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.ensure_client_as_backend(client_id);
+        Ok(())
+    }
+
+    /// Ensure a client exists and is marked as Admin without resetting state.
+    pub fn ensure_client_as_admin(&self, client_id: ClientId) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.ensure_client_as_admin(client_id);
         Ok(())
     }
 
@@ -447,10 +507,23 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(core.schema_manager().known_schema_hashes())
     }
 
+    /// Return a canonical digest of the runtime's catalogue state.
+    pub fn catalogue_state_hash(&self) -> Result<String, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.schema_manager().catalogue_state_hash())
+    }
+
     /// Get a known schema by hash from catalogue state.
     pub fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(core.schema_manager().get_known_schema(schema_hash).cloned())
+    }
+
+    /// Seed an additional known schema into the in-memory schema manager.
+    pub fn add_known_schema(&self, schema: Schema) -> Result<(), RuntimeError> {
+        let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        core.schema_manager_mut().add_known_schema(schema);
+        Ok(())
     }
 
     /// Return grouped telemetry for active downstream server subscriptions.
@@ -471,6 +544,15 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn with_storage<R>(&self, f: impl FnOnce(&S) -> R) -> Result<R, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(f(core.storage()))
+    }
+
+    /// Access the underlying schema manager while holding the core lock.
+    pub fn with_schema_manager<R>(
+        &self,
+        f: impl FnOnce(&SchemaManager) -> R,
+    ) -> Result<R, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(f(core.schema_manager()))
     }
 
     /// Subscribe to a query with explicit schema context (for server use).
@@ -507,6 +589,17 @@ mod tests {
             .build()
     }
 
+    fn user_row_values(id: ObjectId, name: &str) -> Vec<Value> {
+        vec![Value::Uuid(id), Value::Text(name.to_string())]
+    }
+
+    fn user_insert_values(id: ObjectId, name: &str) -> HashMap<String, Value> {
+        HashMap::from([
+            ("id".to_string(), Value::Uuid(id)),
+            ("name".to_string(), Value::Text(name.to_string())),
+        ])
+    }
+
     #[tokio::test]
     async fn test_runtime_insert_query() {
         let schema = test_schema();
@@ -523,13 +616,13 @@ mod tests {
         });
 
         // Insert a row
-        let values = vec![
-            Value::Uuid(ObjectId::new()),
-            Value::Text("Alice".to_string()),
-        ];
-        let (object_id, row_values) = runtime.insert("users", values.clone(), None).unwrap();
+        let user_id = ObjectId::new();
+        let expected_values = user_row_values(user_id, "Alice");
+        let (object_id, row_values) = runtime
+            .insert("users", user_insert_values(user_id, "Alice"), None)
+            .unwrap();
         assert!(!object_id.0.is_nil());
-        assert_eq!(row_values, values);
+        assert_eq!(row_values, expected_values);
 
         // Query
         let query = Query::new("users");
@@ -552,8 +645,9 @@ mod tests {
         let runtime = TokioRuntime::new(schema_manager, MemoryStorage::new(), |_| {});
 
         // Insert
-        let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Bob".to_string())];
-        let (object_id, _row_values) = runtime.insert("users", values, None).unwrap();
+        let (object_id, _row_values) = runtime
+            .insert("users", user_insert_values(ObjectId::new(), "Bob"), None)
+            .unwrap();
 
         // Update
         let updates = vec![("name".to_string(), Value::Text("Charlie".to_string()))];
@@ -608,8 +702,9 @@ mod tests {
             .unwrap();
 
         // Insert a row - this should trigger the subscription callback
-        let values = vec![Value::Uuid(ObjectId::new()), Value::Text("Eve".to_string())];
-        let (_object_id, _row_values) = runtime.insert("users", values, None).unwrap();
+        let (_object_id, _row_values) = runtime
+            .insert("users", user_insert_values(ObjectId::new(), "Eve"), None)
+            .unwrap();
 
         // Verify callback was invoked
         let updates_vec = updates.lock().unwrap();

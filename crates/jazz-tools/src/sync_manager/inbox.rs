@@ -1,9 +1,30 @@
 use super::*;
 use crate::commit::{Commit, CommitId};
+use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
 use crate::storage::Storage;
 use std::collections::HashSet;
+
+fn short_hash(hash: &impl ToString) -> String {
+    hash.to_string().chars().take(12).collect()
+}
+
+fn log_schema_warning(origin: &str, warning: &SchemaWarning) {
+    tracing::warn!(
+        origin,
+        query_id = warning.query_id.0,
+        table = warning.table_name,
+        row_count = warning.row_count,
+        from_hash = %warning.from_hash,
+        to_hash = %warning.to_hash,
+        "Detected {} rows of {} with differing schema versions. To ensure data visibility and forward/backward compatibility please create a new migration with `npx jazz-tools migrations create {} {}`",
+        warning.row_count,
+        warning.table_name,
+        short_hash(&warning.from_hash),
+        short_hash(&warning.to_hash),
+    );
+}
 
 impl SyncManager {
     /// Process a single inbox entry.
@@ -133,6 +154,18 @@ impl SyncManager {
                     }
                 }
             }
+            SyncPayload::SchemaWarning(warning) => {
+                log_schema_warning("server", &warning);
+
+                if let Some(clients) = self.query_origin.get(&warning.query_id) {
+                    for &cid in clients {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Client(cid),
+                            payload: SyncPayload::SchemaWarning(warning.clone()),
+                        });
+                    }
+                }
+            }
             SyncPayload::Error(err) => {
                 // Log or handle server error
                 eprintln!("Error from server {:?}: {:?}", server_id, err);
@@ -159,6 +192,7 @@ impl SyncManager {
         match &payload {
             SyncPayload::ObjectUpdated {
                 object_id,
+                metadata,
                 branch_name,
                 commits,
                 ..
@@ -195,8 +229,15 @@ impl SyncManager {
                             });
                             return;
                         };
-                        // User cannot write catalogue objects
+                        // User cannot write catalogue objects, except for
+                        // development-only structural schema auto-push.
                         if payload.is_catalogue() {
+                            if self.allow_unprivileged_schema_catalogue_writes
+                                && payload.is_structural_schema_catalogue()
+                            {
+                                self.apply_payload_from_client(storage, client_id, payload, false);
+                                return;
+                            }
                             self.outbox.push(OutboxEntry {
                                 destination: Destination::Client(client_id),
                                 payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
@@ -207,7 +248,11 @@ impl SyncManager {
                             return;
                         }
                         // Row data — queue for ReBAC permission check
-                        let (metadata, old_content) = self
+                        let payload_metadata = metadata
+                            .as_ref()
+                            .map(|meta| meta.metadata.clone())
+                            .unwrap_or_default();
+                        let (stored_metadata, old_content) = self
                             .object_manager
                             .get(object_id)
                             .map(|obj| {
@@ -225,8 +270,22 @@ impl SyncManager {
                                 (obj.metadata.clone(), old)
                             })
                             .unwrap_or_default();
-                        let new_content = commits.last().map(|c| c.content.clone());
-                        let operation = if old_content.is_some() {
+                        // For brand-new rows, metadata may only be present in the inbound payload
+                        // because the object has not been applied to ObjectManager yet.
+                        let metadata = if old_content.is_none() && stored_metadata.is_empty() {
+                            payload_metadata
+                        } else {
+                            stored_metadata
+                        };
+                        let is_delete = Self::is_deleted_update(commits);
+                        let new_content = if is_delete {
+                            None
+                        } else {
+                            commits.last().map(|c| c.content.clone())
+                        };
+                        let operation = if is_delete {
+                            Operation::Delete
+                        } else if old_content.is_some() {
                             Operation::Update
                         } else {
                             Operation::Insert
@@ -316,22 +375,45 @@ impl SyncManager {
                 session,
                 propagation,
             } => {
-                // Warn if the payload carries a session that differs from the one established
-                // during the SSE handshake — this would indicate a spoofing attempt.
-                if let (Some(payload_session), Some(client_session)) = (session, &client.session)
-                    && payload_session != client_session
-                {
-                    tracing::warn!(
-                        %client_id,
-                        "QuerySubscription payload session does not match client session; using client session"
-                    );
-                }
-                // Prefer the server-established session (set from validated auth headers
-                // during the SSE handshake) over whatever the client claims in the payload.
-                // Fall back to the payload only for anonymous/demo clients whose
-                // client.session is None.  Note: despite the name, client.session is
-                // server-owned state — not a value the client can supply directly.
-                let effective_session = client.session.clone().or_else(|| session.clone());
+                // Build effective session: identity (user_id) comes from the
+                // server-established session (set during the SSE auth handshake) and
+                // cannot be overridden by the payload. However, ephemeral per-subscription
+                // claims supplied in the payload — such as a join_code for invite flows —
+                // are merged in when the user_id matches, so that policy conditions like
+                // `claims.join_code` evaluate correctly for this subscription.
+                let effective_session = match (&client.session, session) {
+                    (Some(client_session), Some(payload_session)) => {
+                        if client_session.user_id != payload_session.user_id {
+                            tracing::warn!(
+                                %client_id,
+                                "QuerySubscription payload session user_id does not match client session; ignoring payload session"
+                            );
+                            Some(client_session.clone())
+                        } else {
+                            // Same user: merge claims. Payload provides ephemeral claims
+                            // (e.g. join_code); client session claims take precedence so
+                            // auth-established values cannot be spoofed.
+                            let merged_claims = if let (
+                                serde_json::Value::Object(client_map),
+                                serde_json::Value::Object(payload_map),
+                            ) =
+                                (&client_session.claims, &payload_session.claims)
+                            {
+                                let mut merged = payload_map.clone();
+                                merged.extend(client_map.clone());
+                                serde_json::Value::Object(merged)
+                            } else {
+                                client_session.claims.clone()
+                            };
+                            Some(Session {
+                                user_id: client_session.user_id.clone(),
+                                claims: merged_claims,
+                            })
+                        }
+                    }
+                    (Some(client_session), None) => Some(client_session.clone()),
+                    (None, payload_session) => payload_session.clone(),
+                };
                 // Track origin for QuerySettled relay
                 self.query_origin
                     .entry(*query_id)
@@ -415,6 +497,13 @@ impl SyncManager {
             } => {
                 // Client relaying a QuerySettled from downstream
                 self.pending_query_settled.push((*query_id, *tier));
+            }
+            SyncPayload::SchemaWarning(warning) => {
+                tracing::warn!(
+                    %client_id,
+                    query_id = warning.query_id.0,
+                    "client attempted to send SchemaWarning payload; ignoring"
+                );
             }
             // Clients shouldn't send these
             SyncPayload::Error(_) => {}
@@ -500,6 +589,10 @@ impl SyncManager {
         branch_name: BranchName,
         commits: Vec<Commit>,
     ) -> HashSet<CommitId> {
+        if let Some(meta) = metadata.as_ref() {
+            self.track_catalogue_object(object_id, &meta.metadata);
+        }
+
         // If we don't have this object yet and metadata is provided, create it
         if self.object_manager.get(object_id).is_none() {
             if let Some(meta) = metadata {
@@ -530,5 +623,16 @@ impl SyncManager {
             }
         }
         persisted
+    }
+
+    /// Soft deletes travel over sync as `ObjectUpdated`; we infer them from the
+    /// newest commit carrying delete metadata on the payload's tip.
+    fn is_deleted_update(commits: &[Commit]) -> bool {
+        commits.last().is_some_and(|commit| {
+            commit
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.contains_key(MetadataKey::Delete.as_str()))
+        })
     }
 }

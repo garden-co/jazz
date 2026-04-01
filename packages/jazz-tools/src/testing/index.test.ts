@@ -3,7 +3,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { pushSchemaCatalogue, startLocalJazzServer } from "./index.js";
+import { TestingServer, pushSchemaCatalogue, startLocalJazzServer } from "./index.js";
 
 const tempRoots: string[] = [];
 
@@ -75,6 +75,85 @@ exit 13
   return binaryPath;
 }
 
+describe("TestingServer", () => {
+  it("starts and is reachable at /health", async () => {
+    const server = await TestingServer.start();
+    try {
+      const response = await fetch(`${server.url}/health`);
+      expect(response.status).toBe(200);
+    } finally {
+      await server.stop();
+    }
+  }, 15_000);
+
+  it("exposes appId, url, port, adminSecret, backendSecret", async () => {
+    const server = await TestingServer.start();
+    try {
+      expect(server.appId).toEqual(expect.any(String));
+      expect(server.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(server.port).toEqual(expect.any(Number));
+      expect(server.adminSecret).toEqual(expect.any(String));
+      expect(server.backendSecret).toEqual(expect.any(String));
+    } finally {
+      await server.stop();
+    }
+  }, 15_000);
+
+  it("respects custom adminSecret and backendSecret", async () => {
+    const adminSecret = "custom-admin-secret-test";
+    const backendSecret = "custom-backend-secret-test";
+    const server = await TestingServer.start({ adminSecret, backendSecret });
+    try {
+      expect(server.adminSecret).toBe(adminSecret);
+      expect(server.backendSecret).toBe(backendSecret);
+
+      const syncBody = {
+        client_id: "01234567-89ab-cdef-0123-456789abcdef",
+        payloads: [
+          {
+            ObjectUpdated: {
+              object_id: "01234567-89ab-cdef-0123-456789abcdef",
+              metadata: {
+                id: "01234567-89ab-cdef-0123-456789abcdef",
+                metadata: { type: "catalogue_schema" },
+              },
+              branch_name: "main",
+              commits: [],
+            },
+          },
+        ],
+      };
+
+      const allowed = await fetch(`${server.url}/sync`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "X-Jazz-Admin-Secret": adminSecret },
+        body: JSON.stringify(syncBody),
+      });
+      expect(allowed.status).toBe(200);
+
+      const denied = await fetch(`${server.url}/sync`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "X-Jazz-Admin-Secret": "wrong-secret" },
+        body: JSON.stringify(syncBody),
+      });
+      expect(denied.status).toBe(401);
+    } finally {
+      await server.stop();
+    }
+  }, 15_000);
+
+  it("generates valid JWTs via jwtForUser", async () => {
+    const server = await TestingServer.start();
+    try {
+      const token = server.jwtForUser("test-user");
+      expect(typeof token).toBe("string");
+      expect(token.split(".")).toHaveLength(3);
+    } finally {
+      await server.stop();
+    }
+  }, 15_000);
+});
+
 describe("startLocalJazzServer", () => {
   it("starts the process, waits for /health, and stops cleanly", async () => {
     const captureRoot = await createTempRoot("jazz-tools-testing-capture-");
@@ -95,6 +174,8 @@ describe("startLocalJazzServer", () => {
     const healthResponse = await fetch(`${server.url}/health`);
     expect(healthResponse.status).toBe(200);
     expect(server.dataDir).toBe(dataDir);
+    expect(server.adminSecret).toBe("test-admin-secret");
+    expect(server.backendSecret).toBe("test-backend-secret");
 
     await server.stop();
   }, 15_000);
@@ -238,21 +319,20 @@ describe("startLocalJazzServer", () => {
 });
 
 describe("pushSchemaCatalogue", () => {
-  it("reject if binary fails", async () => {
-    const binaryPath = await createFailingFakeJazzBinary("startup-failed-on-purpose");
+  it("rejects when no root schema.ts can be found", async () => {
+    const root = await createTempRoot("jazz-tools-testing-missing-schema-");
 
     await expect(
       pushSchemaCatalogue({
         serverUrl: "http://127.0.0.1:9999",
         appId: "00000000-0000-0000-0000-000000000001",
         adminSecret: "admin-secret",
-        schemaDir: "/tmp/schema",
-        binaryPath,
+        schemaDir: root,
       }),
-    ).rejects.toThrow(/startup-failed-on-purpose/);
+    ).rejects.toThrow(/schema file not found/i);
   });
 
-  it("pushes schema catalogue via schema directory using pushSchemaCatalogue", async () => {
+  it("publishes the current schema object via schema.ts using pushSchemaCatalogue", async () => {
     const port = await getAvailablePort();
     const adminSecret = "admin-secret";
 
@@ -263,14 +343,43 @@ describe("pushSchemaCatalogue", () => {
     });
 
     try {
+      const beforeResponse = await fetch(`${server.url}/schemas`, {
+        headers: {
+          "X-Jazz-Admin-Secret": adminSecret,
+        },
+      });
+      expect(beforeResponse.status).toBe(200);
+      const beforeBody = (await beforeResponse.json()) as { hashes?: string[] };
+
       await pushSchemaCatalogue({
         serverUrl: server.url,
         appId: "00000000-0000-0000-0000-000000000001",
-        adminSecret: adminSecret,
+        adminSecret,
         schemaDir: join(import.meta.dirname ?? __dirname, "fixtures/basic"),
       });
+
+      const response = await fetch(`${server.url}/schemas`, {
+        headers: {
+          "X-Jazz-Admin-Secret": adminSecret,
+        },
+      });
+      expect(response.status).toBe(200);
+
+      const body = (await response.json()) as { hashes?: string[] };
+      expect(body.hashes?.length).toBeGreaterThan(beforeBody.hashes?.length ?? 0);
     } finally {
       await server.stop();
     }
-  });
+  }, 30_000);
+
+  it("rejects when server is unreachable", async () => {
+    await expect(
+      pushSchemaCatalogue({
+        serverUrl: "http://127.0.0.1:9",
+        appId: "00000000-0000-0000-0000-000000000001",
+        adminSecret: "admin-secret",
+        schemaDir: join(import.meta.dirname ?? __dirname, "fixtures/basic"),
+      }),
+    ).rejects.toThrow();
+  }, 10_000);
 });

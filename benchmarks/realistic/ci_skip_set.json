@@ -1,5 +1,26 @@
 {
   "version": 1,
-  "updated_at": "2026-03-18T11:32:11.420Z",
-  "entries": []
+  "updated_at": "2026-03-31T21:38:11.595Z",
+  "entries": [
+    {
+      "id": "native-criterion:r4_fanout_updates",
+      "suite": "native",
+      "label": "Criterion R4 fanout updates",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-03-29T14:42:07.952Z",
+      "last_observed_at": "2026-03-29T14:42:07.952Z",
+      "observations": 1
+    },
+    {
+      "id": "native:w1_interactive",
+      "suite": "native",
+      "label": "W1 (interactive)",
+      "reason": "timed_out_over_budget",
+      "timeout_seconds": 60,
+      "first_observed_at": "2026-03-31T16:58:25.451Z",
+      "last_observed_at": "2026-03-31T16:58:25.451Z",
+      "observations": 1
+    }
+  ]
 }

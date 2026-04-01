@@ -1,7 +1,12 @@
 crates/jazz-rn/src/**
 examples/*/schema/app.ts
+examples/*/schema/migration_*.ts
 examples/docs/*/schema/app.ts
+examples/docs/*/schema/migration_*.ts
 crates/jazz-napi/index.d.ts
 crates/jazz-napi/index.js
 benchmarks/**/*.json
 benchmarks/**/*.html
+TODO.md
+packages/jazz-tools/tests/ts-dsl/fixtures/**
+examples/docs/*/src/**

@@ -1,4 +1,4 @@
-#![cfg(feature = "cli")]
+#![cfg(feature = "test")]
 
 //! E2E integration tests for jazz-tools server.
 //!
@@ -255,10 +255,15 @@ async fn test_stream_connection_receives_connected_event() {
         ServerEvent::Connected {
             connection_id,
             client_id,
+            catalogue_state_hash,
             ..
         } => {
             assert!(connection_id.0 > 0);
             assert!(!client_id.is_empty());
+            assert!(
+                catalogue_state_hash.is_some(),
+                "Connected event should advertise the server catalogue digest"
+            );
         }
         other => panic!("Expected Connected event, got {:?}", other.variant_name()),
     }

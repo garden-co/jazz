@@ -5,8 +5,8 @@ export declare class NapiRuntime {
   constructor(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, dataPath: string, tier?: string | undefined | null)
   /** Create a new NapiRuntime with in-memory storage (no local persistence). */
   static inMemory(schemaJson: string, appId: string, jazzEnv: string, userBranch: string, tier?: string | undefined | null): NapiRuntime
-  insert(table: string, values: any): any
-  insertWithSession(table: string, values: any, sessionJson?: string | undefined | null): any
+  insert(table: string, values: Record<string, unknown>): any
+  insertWithSession(table: string, values: Record<string, unknown>, sessionJson?: string | undefined | null): any
   update(objectId: string, values: any): void
   updateWithSession(objectId: string, values: any, sessionJson?: string | undefined | null): void
   delete(objectId: string): void
@@ -18,8 +18,8 @@ export declare class NapiRuntime {
   createSubscription(queryJson: string, sessionJson?: string | undefined | null, tier?: string | undefined | null, optionsJson?: string | undefined | null): number
   /** Phase 2 of 2-phase subscribe: compile, register, sync, attach callback, tick. */
   executeSubscription(handle: number, onUpdate: (...args: any[]) => any): void
-  insertDurable(table: string, values: any, tier: string): Promise<any>
-  insertDurableWithSession(table: string, values: any, sessionJson: string | undefined | null, tier: string): Promise<any>
+  insertDurable(table: string, values: Record<string, unknown>, tier: string): Promise<any>
+  insertDurableWithSession(table: string, values: Record<string, unknown>, sessionJson: string | undefined | null, tier: string): Promise<any>
   updateDurable(objectId: string, values: any, tier: string): Promise<void>
   updateDurableWithSession(objectId: string, values: any, sessionJson: string | undefined | null, tier: string): Promise<void>
   deleteDurable(objectId: string, tier: string): Promise<void>
@@ -28,7 +28,7 @@ export declare class NapiRuntime {
   /** Called by JS when a sync message arrives from a client (not a server). */
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void
   onSyncMessageToSend(callback: (...args: any[]) => any): void
-  addServer(): void
+  addServer(serverCatalogueStateHash?: string | undefined | null): void
   removeServer(): void
   addClient(): string
   /** Set a client's role ("user", "admin", or "peer"). */
@@ -38,6 +38,18 @@ export declare class NapiRuntime {
   flush(): void
   /** Flush and close the underlying storage, releasing filesystem locks. */
   close(): void
+}
+
+export declare class TestingServer {
+  static start(options?: { appId?: string; port?: number; dataDir?: string; persistentStorage?: boolean; adminSecret?: string; backendSecret?: string; jwksUrl?: string }): Promise<TestingServer>
+  get appId(): string
+  get url(): string
+  get port(): number
+  get dataDir(): string
+  get backendSecret(): string
+  get adminSecret(): string
+  jwtForUser(userId: string, claims?: Record<string, unknown> | undefined): string
+  stop(): Promise<void>
 }
 
 export declare function currentTimestamp(): number

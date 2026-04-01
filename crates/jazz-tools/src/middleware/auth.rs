@@ -19,6 +19,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     async_trait,
@@ -32,6 +34,8 @@ use jsonwebtoken::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::sync::RwLock;
+use tracing::warn;
 
 use crate::query_manager::session::Session;
 use crate::schema_manager::AppId;
@@ -39,6 +43,19 @@ use crate::server::ServerState;
 
 const LOCAL_MODE_HEADER: &str = "X-Jazz-Local-Mode";
 const LOCAL_TOKEN_HEADER: &str = "X-Jazz-Local-Token";
+
+/// JWKS cache TTL — 5 minutes, matching the cloud server.
+pub const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// Minimum interval between forced JWKS refreshes. Prevents unauthenticated
+/// callers from triggering unbounded outbound fetches by sending JWTs with
+/// fabricated key IDs.
+const JWKS_FORCED_REFRESH_COOLDOWN: Duration = Duration::from_secs(10);
+
+/// Maximum time a stale keyset is served after the TTL expires. Once the
+/// entry is older than TTL + max_stale, the stale-if-error fallback is
+/// refused and the fetch error propagates.
+pub const JWKS_MAX_STALE: Duration = Duration::from_secs(300);
 
 pub type ExternalIdentityMap = HashMap<(String, String), String>;
 
@@ -51,8 +68,6 @@ pub type ExternalIdentityMap = HashMap<(String, String), String>;
 pub struct AuthConfig {
     /// URL to fetch JWKS keys (production).
     pub jwks_url: Option<String>,
-    /// Cached JWKS set fetched at server startup.
-    pub jwks_set: Option<JwkSet>,
     /// Whether anonymous local auth mode is allowed.
     pub allow_anonymous: bool,
     /// Whether demo local auth mode is allowed.
@@ -139,6 +154,180 @@ impl std::fmt::Display for JwtError {
     }
 }
 
+/// JWT verification error with retry classification.
+///
+/// Retryable errors (unknown kid, signature mismatch) may succeed after a JWKS
+/// refresh — the identity provider may have rotated keys. Fatal errors (malformed
+/// token) will never succeed regardless of which keys we have.
+#[derive(Debug)]
+pub enum JwtVerificationError {
+    Retryable(String),
+    Fatal(String),
+}
+
+// ============================================================================
+// JWKS Cache
+// ============================================================================
+
+struct CachedJwksEntry {
+    endpoint: String,
+    fetched_at_us: u64,
+    set: JwkSet,
+}
+
+/// JWKS cache with TTL-based expiry and on-demand refresh.
+///
+/// Caches the keyset from a JWKS endpoint and transparently refetches when:
+/// - The TTL (5 min) has elapsed, or
+/// - A caller forces a refresh (e.g. after encountering an unknown kid).
+pub struct JwksCache {
+    endpoint: String,
+    http_client: reqwest::Client,
+    ttl: Duration,
+    max_stale: Duration,
+    cached: RwLock<Option<CachedJwksEntry>>,
+    last_forced_refresh_us: AtomicU64,
+}
+
+impl JwksCache {
+    pub fn new(
+        endpoint: String,
+        http_client: reqwest::Client,
+        ttl: Duration,
+        max_stale: Duration,
+    ) -> Self {
+        Self {
+            endpoint,
+            http_client,
+            ttl,
+            max_stale,
+            cached: RwLock::new(None),
+            last_forced_refresh_us: AtomicU64::new(0),
+        }
+    }
+
+    /// Create a cache pre-populated with a static keyset. For tests only —
+    /// the endpoint is unused since the cache is always fresh.
+    #[cfg(test)]
+    pub fn from_static(jwks: JwkSet) -> Self {
+        Self {
+            endpoint: String::new(),
+            http_client: reqwest::Client::new(),
+            ttl: JWKS_CACHE_TTL,
+            max_stale: JWKS_MAX_STALE,
+            cached: RwLock::new(Some(CachedJwksEntry {
+                endpoint: String::new(),
+                fetched_at_us: now_timestamp_us(),
+                set: jwks,
+            })),
+            last_forced_refresh_us: AtomicU64::new(0),
+        }
+    }
+
+    /// Load the JWKS, returning a cached copy if fresh or fetching anew.
+    ///
+    /// When `force_refresh` is true but a forced refresh happened within the
+    /// cooldown window (10s), the request is downgraded to a cache read. This
+    /// prevents unauthenticated callers from using fabricated key IDs to
+    /// trigger unbounded outbound fetches.
+    pub async fn load(&self, force_refresh: bool) -> Result<JwkSet, String> {
+        let ttl_us = self.ttl.as_micros().min(u128::from(u64::MAX)) as u64;
+        let cooldown_us = JWKS_FORCED_REFRESH_COOLDOWN
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+
+        // Downgrade forced refresh if within cooldown window.
+        let force_refresh = if force_refresh {
+            let last = self.last_forced_refresh_us.load(Ordering::SeqCst);
+            let age_us = now_timestamp_us().saturating_sub(last);
+            age_us > cooldown_us
+        } else {
+            false
+        };
+
+        if !force_refresh {
+            let guard = self.cached.read().await;
+            if let Some(ref entry) = *guard {
+                let age_us = now_timestamp_us().saturating_sub(entry.fetched_at_us);
+                if entry.endpoint == self.endpoint && age_us <= ttl_us {
+                    return Ok(entry.set.clone());
+                }
+            }
+        }
+
+        let max_stale_us = (self.ttl + self.max_stale)
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+
+        let jwks = match fetch_jwks(&self.http_client, &self.endpoint).await {
+            Ok(jwks) => jwks,
+            Err(e) => {
+                // Stale-if-error: serve the cached keyset if it's not too old.
+                let guard = self.cached.read().await;
+                if let Some(ref entry) = *guard {
+                    let age_us = now_timestamp_us().saturating_sub(entry.fetched_at_us);
+                    if age_us <= max_stale_us {
+                        warn!(
+                            error = %e,
+                            "JWKS fetch failed, serving stale cached keyset"
+                        );
+                        return Ok(entry.set.clone());
+                    }
+                    warn!(
+                        error = %e,
+                        "JWKS fetch failed and stale keyset has expired"
+                    );
+                }
+                return Err(e);
+            }
+        };
+
+        let now = now_timestamp_us();
+        if force_refresh {
+            self.last_forced_refresh_us.store(now, Ordering::SeqCst);
+        }
+
+        *self.cached.write().await = Some(CachedJwksEntry {
+            endpoint: self.endpoint.clone(),
+            fetched_at_us: now,
+            set: jwks.clone(),
+        });
+
+        Ok(jwks)
+    }
+}
+
+async fn fetch_jwks(http_client: &reqwest::Client, endpoint: &str) -> Result<JwkSet, String> {
+    let response = http_client
+        .get(endpoint)
+        .send()
+        .await
+        .map_err(|err| format!("JWKS request failed: {err}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("JWKS endpoint returned status {status}"));
+    }
+
+    let jwks = response
+        .json::<JwkSet>()
+        .await
+        .map_err(|err| format!("failed to parse JWKS response: {err}"))?;
+
+    if jwks.keys.is_empty() {
+        return Err("JWKS response contained no keys".to_string());
+    }
+
+    Ok(jwks)
+}
+
+fn now_timestamp_us() -> u64 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_micros().min(u128::from(u64::MAX)) as u64,
+        Err(_) => 0,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalAuthMode {
     Anonymous,
@@ -197,7 +386,13 @@ impl FromRequestParts<Arc<ServerState>> for JwtAuth {
             ));
         };
 
-        match validate_jwt_identity(token, &state.auth_config) {
+        let jwt_result = if let Some(ref cache) = state.jwks_cache {
+            validate_jwt_with_cache(token, cache).await
+        } else {
+            Err(JwtError::NoKeyConfigured)
+        };
+
+        match jwt_result {
             Ok(verified) => {
                 let external_identities = state.external_identities.read().await;
                 let session = resolve_verified_jwt_session(
@@ -281,7 +476,9 @@ impl FromRequestParts<Arc<ServerState>> for RequestSession {
             state.app_id,
             &state.auth_config,
             Some(&external_identities),
-        )?;
+            state.jwks_cache.as_ref(),
+        )
+        .await?;
         Ok(RequestSession(session))
     }
 }
@@ -340,13 +537,24 @@ fn select_jwk_candidates<'a>(jwks: &'a JwkSet, kid: Option<&str>, alg: Algorithm
     candidates
 }
 
-/// Validate a JWT signature and return identity claims.
-pub fn validate_jwt_identity(token: &str, config: &AuthConfig) -> Result<VerifiedJwt, JwtError> {
-    let jwks = config.jwks_set.as_ref().ok_or(JwtError::NoKeyConfigured)?;
-    let header = decode_header(token).map_err(|e| JwtError::Invalid(e.to_string()))?;
+/// Verify JWT signature with error classification for retry logic.
+///
+/// Returns `Retryable` for unknown kid or signature mismatch (may succeed after
+/// JWKS refresh) and `Fatal` for malformed tokens (will never succeed).
+pub fn verify_jwt_signature_with_jwks(
+    token: &str,
+    jwks: &JwkSet,
+) -> Result<VerifiedJwt, JwtVerificationError> {
+    let header = decode_header(token)
+        .map_err(|e| JwtVerificationError::Fatal(format!("invalid JWT header: {e}")))?;
+
     let candidates = select_jwk_candidates(jwks, header.kid.as_deref(), header.alg);
     if candidates.is_empty() {
-        return Err(JwtError::Invalid("no matching key in JWKS".to_string()));
+        let reason = match header.kid.as_deref() {
+            Some(kid) => format!("no JWKS key matched token kid '{kid}'"),
+            None => "no compatible JWKS key found for token algorithm".to_string(),
+        };
+        return Err(JwtVerificationError::Retryable(reason));
     }
 
     let validation = signature_only_validation(header.alg);
@@ -371,24 +579,54 @@ pub fn validate_jwt_identity(token: &str, config: &AuthConfig) -> Result<Verifie
                 });
             }
             Err(e) => {
-                last_error = Some(e.to_string());
+                last_error = Some(format!("JWT signature verification failed: {e}"));
             }
         }
     }
 
-    Err(JwtError::Invalid(last_error.unwrap_or_else(|| {
-        "JWT signature verification failed".to_string()
-    })))
+    Err(JwtVerificationError::Retryable(last_error.unwrap_or_else(
+        || "JWT signature verification failed".to_string(),
+    )))
 }
 
-/// Validate a JWT and extract a basic session (subject-only principal).
-#[allow(dead_code)]
-pub fn validate_jwt(token: &str, config: &AuthConfig) -> Result<Session, JwtError> {
-    let verified = validate_jwt_identity(token, config)?;
-    Ok(Session {
-        user_id: verified.subject,
-        claims: verified.claims,
-    })
+/// Validate JWT with JWKS cache, including on-demand refresh on retryable errors.
+///
+/// 1. Try with cached JWKS
+/// 2. On retryable error (unknown kid, signature mismatch), force one refresh
+/// 3. Retry with fresh JWKS
+/// 4. If still failing, return the error
+pub async fn validate_jwt_with_cache(
+    token: &str,
+    cache: &JwksCache,
+) -> Result<VerifiedJwt, JwtError> {
+    let cached_jwks = cache.load(false).await.map_err(|e| {
+        warn!(error = %e, "failed to load cached JWKS");
+        JwtError::Invalid("unable to load JWKS".to_string())
+    })?;
+
+    match verify_jwt_signature_with_jwks(token, &cached_jwks) {
+        Ok(verified) => return Ok(verified),
+        Err(JwtVerificationError::Fatal(e)) => return Err(JwtError::Invalid(e)),
+        Err(JwtVerificationError::Retryable(e)) => {
+            warn!(
+                error = %e,
+                "JWT validation failed with cached JWKS; forcing one refresh"
+            );
+        }
+    }
+
+    let refreshed_jwks = cache.load(true).await.map_err(|e| {
+        warn!(error = %e, "failed to refresh JWKS");
+        JwtError::Invalid("unable to refresh JWKS".to_string())
+    })?;
+
+    match verify_jwt_signature_with_jwks(token, &refreshed_jwks) {
+        Ok(verified) => Ok(verified),
+        Err(JwtVerificationError::Retryable(e) | JwtVerificationError::Fatal(e)) => {
+            warn!(error = %e, "JWT validation failed after JWKS refresh");
+            Err(JwtError::Invalid(e))
+        }
+    }
 }
 
 /// Resolve a session from validated JWT identity + optional external mappings.
@@ -494,11 +732,16 @@ pub fn parse_local_auth_headers(
 /// 1. Backend impersonation (X-Jazz-Backend-Secret + X-Jazz-Session)
 /// 2. JWT auth (Authorization: Bearer)
 /// 3. No session
-pub fn extract_session(
+///
+/// When `jwks_cache` is provided, JWT validation uses the cache with on-demand
+/// refresh on retryable errors (unknown kid, signature mismatch). Without a
+/// cache, JWT auth returns "not configured."
+pub async fn extract_session(
     headers: &HeaderMap,
     app_id: AppId,
     config: &AuthConfig,
     external_identities: Option<&ExternalIdentityMap>,
+    jwks_cache: Option<&JwksCache>,
 ) -> Result<Option<Session>, (StatusCode, &'static str)> {
     // Priority 1: Backend impersonation
     if let Some(session_b64) = headers.get("X-Jazz-Session").and_then(|v| v.to_str().ok()) {
@@ -539,7 +782,13 @@ pub fn extract_session(
             return Err((StatusCode::UNAUTHORIZED, "Empty bearer token"));
         }
 
-        match validate_jwt_identity(token, config) {
+        let jwt_result = if let Some(cache) = jwks_cache {
+            validate_jwt_with_cache(token, cache).await
+        } else {
+            Err(JwtError::NoKeyConfigured)
+        };
+
+        match jwt_result {
             Ok(verified) => {
                 let session = resolve_verified_jwt_session(app_id, verified, external_identities)?;
                 return Ok(Some(session));
@@ -619,8 +868,9 @@ pub fn validate_backend_secret(
 
 /// Check if admin secret is valid.
 ///
-/// Catalogue operations (schema/lens sync) require admin authentication.
-/// If admin_secret is not configured, catalogue sync is disabled.
+/// Admin publication endpoints require admin authentication. Development-mode
+/// schema auto-push from ordinary clients flows through `/sync` and does not
+/// use this helper.
 pub fn validate_admin_secret(
     provided: Option<&str>,
     config: &AuthConfig,
@@ -632,9 +882,6 @@ pub fn validate_admin_secret(
             StatusCode::UNAUTHORIZED,
             "Admin secret required for this operation",
         )),
-        // TODO: Consider making catalogue sync opt-in or handling this more gracefully.
-        // Currently, if admin auth isn't configured, clients can't sync schemas to server.
-        // This is correct for security but may cause silent failures in dev setups.
         (None, _) => Err((StatusCode::FORBIDDEN, "Admin auth not configured")),
     }
 }
@@ -654,7 +901,6 @@ mod tests {
     fn make_test_config() -> AuthConfig {
         AuthConfig {
             jwks_url: Some("https://example.test/.well-known/jwks.json".to_string()),
-            jwks_set: Some(make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET)),
             allow_anonymous: true,
             allow_demo: true,
             backend_secret: Some("backend-secret-12345".to_string()),
@@ -677,6 +923,10 @@ mod tests {
         .unwrap()
     }
 
+    fn test_jwks_cache() -> JwksCache {
+        JwksCache::from_static(make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET))
+    }
+
     fn make_jwt(claims: &JwtClaims, secret: &str, kid: &str) -> String {
         let key = EncodingKey::from_secret(secret.as_bytes());
         let mut header = Header::new(Algorithm::HS256);
@@ -686,7 +936,7 @@ mod tests {
 
     #[test]
     fn test_jwt_validation_valid() {
-        let config = make_test_config();
+        let jwks = make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET);
         let claims = JwtClaims {
             sub: "user-123".to_string(),
             iss: None,
@@ -697,14 +947,14 @@ mod tests {
         };
         let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
 
-        let session = validate_jwt(&token, &config).unwrap();
-        assert_eq!(session.user_id, "user-123");
-        assert_eq!(session.claims["role"], "admin");
+        let verified = verify_jwt_signature_with_jwks(&token, &jwks).unwrap();
+        assert_eq!(verified.subject, "user-123");
+        assert_eq!(verified.claims["role"], "admin");
     }
 
     #[test]
     fn test_jwt_validation_wrong_secret() {
-        let config = make_test_config();
+        let jwks = make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET);
         let claims = JwtClaims {
             sub: "user-123".to_string(),
             iss: None,
@@ -715,15 +965,25 @@ mod tests {
         };
         let token = make_jwt(&claims, "wrong-secret", TEST_JWKS_KID);
 
-        let result = validate_jwt(&token, &config);
-        assert!(matches!(result, Err(JwtError::Invalid(_))));
+        let result = verify_jwt_signature_with_jwks(&token, &jwks);
+        assert!(matches!(result, Err(JwtVerificationError::Retryable(_))));
     }
 
     #[test]
-    fn test_jwt_validation_no_config() {
-        let config = AuthConfig::default();
-        let result = validate_jwt("any-token", &config);
-        assert!(matches!(result, Err(JwtError::NoKeyConfigured)));
+    fn test_jwt_validation_empty_jwks() {
+        let jwks = JwkSet { keys: vec![] };
+        let claims = JwtClaims {
+            sub: "user-123".to_string(),
+            iss: None,
+            jazz_principal_id: None,
+            claims: serde_json::json!({}),
+            exp: None,
+            iat: None,
+        };
+        let token = make_jwt(&claims, "any-secret", TEST_JWKS_KID);
+
+        let result = verify_jwt_signature_with_jwks(&token, &jwks);
+        assert!(matches!(result, Err(JwtVerificationError::Retryable(_))));
     }
 
     #[test]
@@ -743,8 +1003,8 @@ mod tests {
         assert!(decode_session_header("bm90LWpzb24=").is_none()); // "not-json" in base64
     }
 
-    #[test]
-    fn test_extract_session_backend_impersonation() {
+    #[tokio::test]
+    async fn test_extract_session_backend_impersonation() {
         let config = make_test_config();
         let mut headers = HeaderMap::new();
 
@@ -758,13 +1018,15 @@ mod tests {
         );
         headers.insert("X-Jazz-Session", session_b64.parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None).unwrap();
+        let result = extract_session(&headers, test_app_id(), &config, None, None)
+            .await
+            .unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().user_id, "impersonated-user");
     }
 
-    #[test]
-    fn test_extract_session_backend_wrong_secret() {
+    #[tokio::test]
+    async fn test_extract_session_backend_wrong_secret() {
         let config = make_test_config();
         let mut headers = HeaderMap::new();
 
@@ -775,14 +1037,15 @@ mod tests {
         headers.insert("X-Jazz-Backend-Secret", "wrong-secret".parse().unwrap());
         headers.insert("X-Jazz-Session", session_b64.parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None);
+        let result = extract_session(&headers, test_app_id(), &config, None, None).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().0, StatusCode::UNAUTHORIZED);
     }
 
-    #[test]
-    fn test_extract_session_jwt_fallback() {
+    #[tokio::test]
+    async fn test_extract_session_jwt_fallback() {
         let config = make_test_config();
+        let cache = test_jwks_cache();
         let mut headers = HeaderMap::new();
 
         let claims = JwtClaims {
@@ -797,14 +1060,17 @@ mod tests {
 
         headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None).unwrap();
+        let result = extract_session(&headers, test_app_id(), &config, None, Some(&cache))
+            .await
+            .unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().user_id, "jwt-user");
     }
 
-    #[test]
-    fn test_extract_session_jwt_uses_external_mapping_fallback() {
+    #[tokio::test]
+    async fn test_extract_session_jwt_uses_external_mapping_fallback() {
         let config = make_test_config();
+        let cache = test_jwks_cache();
         let mut headers = HeaderMap::new();
         let mut mappings = ExternalIdentityMap::new();
         mappings.insert(
@@ -824,14 +1090,23 @@ mod tests {
 
         headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, Some(&mappings)).unwrap();
+        let result = extract_session(
+            &headers,
+            test_app_id(),
+            &config,
+            Some(&mappings),
+            Some(&cache),
+        )
+        .await
+        .unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().user_id, "local:mapped-principal");
     }
 
-    #[test]
-    fn test_extract_session_jwt_claim_conflict_with_mapping_is_rejected() {
+    #[tokio::test]
+    async fn test_extract_session_jwt_claim_conflict_with_mapping_is_rejected() {
         let config = make_test_config();
+        let cache = test_jwks_cache();
         let mut headers = HeaderMap::new();
         let mut mappings = ExternalIdentityMap::new();
         mappings.insert(
@@ -850,13 +1125,20 @@ mod tests {
         let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
         headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, Some(&mappings));
+        let result = extract_session(
+            &headers,
+            test_app_id(),
+            &config,
+            Some(&mappings),
+            Some(&cache),
+        )
+        .await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().0, StatusCode::UNAUTHORIZED);
     }
 
-    #[test]
-    fn test_extract_session_backend_takes_priority() {
+    #[tokio::test]
+    async fn test_extract_session_backend_takes_priority() {
         let config = make_test_config();
         let mut headers = HeaderMap::new();
 
@@ -882,17 +1164,21 @@ mod tests {
         let token = make_jwt(&claims, TEST_JWKS_SECRET, TEST_JWKS_KID);
         headers.insert(AUTHORIZATION, format!("Bearer {}", token).parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None).unwrap();
+        let result = extract_session(&headers, test_app_id(), &config, None, None)
+            .await
+            .unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().user_id, "backend-user"); // Backend wins
     }
 
-    #[test]
-    fn test_extract_session_no_auth() {
+    #[tokio::test]
+    async fn test_extract_session_no_auth() {
         let config = make_test_config();
         let headers = HeaderMap::new();
 
-        let result = extract_session(&headers, test_app_id(), &config, None).unwrap();
+        let result = extract_session(&headers, test_app_id(), &config, None, None)
+            .await
+            .unwrap();
         assert!(result.is_none());
     }
 
@@ -926,33 +1212,35 @@ mod tests {
         assert_eq!(result.unwrap_err().0, StatusCode::FORBIDDEN);
     }
 
-    #[test]
-    fn test_extract_session_local_anonymous() {
+    #[tokio::test]
+    async fn test_extract_session_local_anonymous() {
         let config = make_test_config();
         let mut headers = HeaderMap::new();
         headers.insert(LOCAL_MODE_HEADER, "anonymous".parse().unwrap());
         headers.insert(LOCAL_TOKEN_HEADER, "device-token-1".parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None).unwrap();
+        let result = extract_session(&headers, test_app_id(), &config, None, None)
+            .await
+            .unwrap();
         let session = result.unwrap();
         assert!(session.user_id.starts_with("local:"));
         assert_eq!(session.claims["auth_mode"], "local");
         assert_eq!(session.claims["local_mode"], "anonymous");
     }
 
-    #[test]
-    fn test_extract_session_local_requires_both_headers() {
+    #[tokio::test]
+    async fn test_extract_session_local_requires_both_headers() {
         let config = make_test_config();
         let mut headers = HeaderMap::new();
         headers.insert(LOCAL_MODE_HEADER, "demo".parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None);
+        let result = extract_session(&headers, test_app_id(), &config, None, None).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
     }
 
-    #[test]
-    fn test_extract_session_local_anonymous_disabled() {
+    #[tokio::test]
+    async fn test_extract_session_local_anonymous_disabled() {
         let mut config = make_test_config();
         config.allow_anonymous = false;
 
@@ -960,15 +1248,15 @@ mod tests {
         headers.insert(LOCAL_MODE_HEADER, "anonymous".parse().unwrap());
         headers.insert(LOCAL_TOKEN_HEADER, "device-token-1".parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None);
+        let result = extract_session(&headers, test_app_id(), &config, None, None).await;
         assert!(result.is_err());
         let (status, message) = result.unwrap_err();
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(message, "Anonymous auth disabled");
     }
 
-    #[test]
-    fn test_extract_session_local_demo_disabled() {
+    #[tokio::test]
+    async fn test_extract_session_local_demo_disabled() {
         let mut config = make_test_config();
         config.allow_demo = false;
 
@@ -976,7 +1264,7 @@ mod tests {
         headers.insert(LOCAL_MODE_HEADER, "demo".parse().unwrap());
         headers.insert(LOCAL_TOKEN_HEADER, "device-token-2".parse().unwrap());
 
-        let result = extract_session(&headers, test_app_id(), &config, None);
+        let result = extract_session(&headers, test_app_id(), &config, None, None).await;
         assert!(result.is_err());
         let (status, message) = result.unwrap_err();
         assert_eq!(status, StatusCode::FORBIDDEN);

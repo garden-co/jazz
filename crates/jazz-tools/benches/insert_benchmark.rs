@@ -6,13 +6,25 @@
 //! - Insert into own folder (simple WITH CHECK)
 //! - Insert into team folder (INHERITS chain evaluation)
 
+#![allow(clippy::single_element_loop)]
+
 mod common;
+
+use std::collections::HashMap;
 
 use common::{create_runtime, create_session, current_timestamp, setup_data};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use jazz_tools::query_manager::session::WriteContext;
 use jazz_tools::query_manager::types::Value;
 
 const USER_ID: &str = "benchmark_user";
+
+fn row<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
+    pairs
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+}
 
 fn insert_own_folder(c: &mut Criterion) {
     let mut group = c.benchmark_group("insert/own_folder");
@@ -24,6 +36,7 @@ fn insert_own_folder(c: &mut Criterion) {
             let mut core = create_runtime();
             let data = setup_data(&mut core, scale, USER_ID);
             let session = create_session(USER_ID);
+            let write_context = WriteContext::from_session(session);
 
             // Pick a folder owned by the user
             let folder_id = data.owned_folders[0];
@@ -36,14 +49,14 @@ fn insert_own_folder(c: &mut Criterion) {
                 // Insert with session - exercises WITH CHECK policy (INHERITS chain)
                 let result = core.insert(
                     "documents",
-                    vec![
-                        Value::Uuid(folder_id),
-                        Value::Text(format!("Bench Doc {}", doc_counter)),
-                        Value::Text("Benchmark content".to_string()),
-                        Value::Text(USER_ID.to_string()),
-                        Value::Timestamp(timestamp),
-                    ],
-                    Some(&session),
+                    row([
+                        ("folder_id", Value::Uuid(folder_id)),
+                        ("title", Value::Text(format!("Bench Doc {}", doc_counter))),
+                        ("content", Value::Text("Benchmark content".to_string())),
+                        ("author_id", Value::Text(USER_ID.to_string())),
+                        ("created_at", Value::Timestamp(timestamp)),
+                    ]),
+                    Some(&write_context),
                 );
                 core.immediate_tick();
 
@@ -67,6 +80,7 @@ fn insert_team_folder(c: &mut Criterion) {
             let mut core = create_runtime();
             let data = setup_data(&mut core, scale, USER_ID);
             let session = create_session(USER_ID);
+            let write_context = WriteContext::from_session(session);
 
             // Use a folder from owned teams (which exercises INHERITS chain)
             let folder_id = data.owned_folders[data.owned_folders.len() / 2];
@@ -80,14 +94,14 @@ fn insert_team_folder(c: &mut Criterion) {
                 // This exercises the INHERITS SELECT VIA folder_id chain
                 let result = core.insert(
                     "documents",
-                    vec![
-                        Value::Uuid(folder_id),
-                        Value::Text(format!("Team Doc {}", doc_counter)),
-                        Value::Text("Team benchmark content".to_string()),
-                        Value::Text("other_author".to_string()), // Different author
-                        Value::Timestamp(timestamp),
-                    ],
-                    Some(&session),
+                    row([
+                        ("folder_id", Value::Uuid(folder_id)),
+                        ("title", Value::Text(format!("Team Doc {}", doc_counter))),
+                        ("content", Value::Text("Team benchmark content".to_string())),
+                        ("author_id", Value::Text("other_author".to_string())),
+                        ("created_at", Value::Timestamp(timestamp)),
+                    ]),
+                    Some(&write_context),
                 );
                 core.immediate_tick();
 
@@ -112,6 +126,7 @@ fn insert_batch(c: &mut Criterion) {
                 let mut core = create_runtime();
                 let data = setup_data(&mut core, scale, USER_ID);
                 let session = create_session(USER_ID);
+                let write_context = WriteContext::from_session(session);
 
                 let folder_ids: Vec<_> = data
                     .owned_folders
@@ -130,14 +145,17 @@ fn insert_batch(c: &mut Criterion) {
                     for (i, &folder_id) in folder_ids.iter().enumerate() {
                         let result = core.insert(
                             "documents",
-                            vec![
-                                Value::Uuid(folder_id),
-                                Value::Text(format!("Batch {} Doc {}", batch_counter, i)),
-                                Value::Text("Batch content".to_string()),
-                                Value::Text(USER_ID.to_string()),
-                                Value::Timestamp(timestamp + i as u64),
-                            ],
-                            Some(&session),
+                            row([
+                                ("folder_id", Value::Uuid(folder_id)),
+                                (
+                                    "title",
+                                    Value::Text(format!("Batch {} Doc {}", batch_counter, i)),
+                                ),
+                                ("content", Value::Text("Batch content".to_string())),
+                                ("author_id", Value::Text(USER_ID.to_string())),
+                                ("created_at", Value::Timestamp(timestamp + i as u64)),
+                            ]),
+                            Some(&write_context),
                         );
                         result.expect("batch insert should succeed");
                     }

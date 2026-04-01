@@ -1,11 +1,11 @@
 /**
  * Convert JS values to WasmValue types for mutations.
  *
- * Used by Db.insert()/Db.insertDurable() and Db.update()/Db.updateDurable()
- * to convert typed Init objects into the Value[] format expected by JazzClient.
+ * Used by Db insert/update paths to convert typed Init objects into
+ * the runtime value format expected by JazzClient.
  */
 
-import type { WasmSchema, ColumnType, Value as WasmValue } from "../drivers/types.js";
+import type { WasmSchema, ColumnType, Value as WasmValue, InsertValues } from "../drivers/types.js";
 import { toJsonText } from "./json-text.js";
 
 function toTimestampMs(value: unknown): number {
@@ -94,27 +94,39 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
 }
 
 /**
- * Convert Init object to Value[] in schema column order.
+ * Convert an insert object to a named WasmValue record.
+ *
+ * Only includes fields that are present in the data object.
+ * Undefined values are skipped so Rust can apply schema defaults.
  *
  * @param data The Init object with field values
  * @param schema WasmSchema containing table definitions
  * @param tableName Name of the table to insert into
- * @returns Array of WasmValue in column order
+ * @returns Record mapping column names to WasmValues
  */
-export function toValueArray(
+export function toInsertRecord(
   data: Record<string, unknown>,
   schema: WasmSchema,
   tableName: string,
-): WasmValue[] {
+): InsertValues {
   const table = schema[tableName];
   if (!table) {
     throw new Error(`Unknown table "${tableName}"`);
   }
 
-  return table.columns.map((col) => {
-    const value = data[col.name];
-    return toValue(value, col.column_type);
-  });
+  const result: InsertValues = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (value === undefined) continue;
+    const col = table.columns.find((c) => c.name === key);
+    if (!col) {
+      throw new Error(`Unknown column "${key}" on table "${tableName}"`);
+    }
+    if (value === null && !col.nullable) {
+      throw new Error(`Cannot set required field '${key}' to null`);
+    }
+    result[key] = toValue(value, col.column_type);
+  }
+  return result;
 }
 
 /**
@@ -144,6 +156,9 @@ export function toUpdateRecord(
     const col = table.columns.find((c) => c.name === key);
     if (!col) {
       throw new Error(`Unknown column "${key}" on table "${tableName}"`);
+    }
+    if (value === null && !col.nullable) {
+      throw new Error(`Cannot set required field '${key}' to null`);
     }
     result[key] = toValue(value, col.column_type);
   }

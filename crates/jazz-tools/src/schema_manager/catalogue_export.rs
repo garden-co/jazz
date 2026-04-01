@@ -1,13 +1,14 @@
 #[cfg(test)]
 mod tests {
-    use crate::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
+    use crate::query_manager::types::{ColumnType, SchemaBuilder, TableSchema, Value};
 
     #[test]
-    fn catalogue_schema_response_serializes_tables_and_columns() {
+    fn catalogue_schema_response_serializes_tables_columns_and_defaults() {
         let schema = SchemaBuilder::new()
             .table(
                 TableSchema::builder("users")
                     .column("id", ColumnType::Uuid)
+                    .column_with_default("active", ColumnType::Boolean, Value::Boolean(true))
                     .nullable_column("email", ColumnType::Text),
             )
             .build();
@@ -18,8 +19,12 @@ mod tests {
         let users = &json["users"];
         assert_eq!(users["columns"][0]["name"], "id");
         assert_eq!(users["columns"][0]["column_type"]["type"], "Uuid");
-        assert_eq!(users["columns"][1]["name"], "email");
-        assert_eq!(users["columns"][1]["column_type"]["type"], "Text");
-        assert_eq!(users["columns"][1]["nullable"], true);
+        assert_eq!(users["columns"][1]["name"], "active");
+        assert_eq!(users["columns"][1]["default"]["type"], "Boolean");
+        assert_eq!(users["columns"][1]["default"]["value"], true);
+        assert_eq!(users["columns"][2]["name"], "email");
+        assert_eq!(users["columns"][2]["column_type"]["type"], "Text");
+        assert_eq!(users["columns"][2]["nullable"], true);
+        assert!(users["columns"][2].get("default").is_none());
     }
 }

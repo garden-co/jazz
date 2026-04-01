@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 /// Policy for a specific operation (SELECT, INSERT, UPDATE, DELETE).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OperationPolicy {
     /// USING clause - filters rows for SELECT/UPDATE/DELETE.
     /// For SELECT: rows not matching are silently filtered out.
@@ -42,6 +43,7 @@ impl OperationPolicy {
 
 /// Policies for all operations on a table.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TablePolicies {
     pub select: OperationPolicy,
     pub insert: OperationPolicy,
