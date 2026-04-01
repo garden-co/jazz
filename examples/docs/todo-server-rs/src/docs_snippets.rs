@@ -176,15 +176,42 @@ pub async fn read_todo_page(
 // #endregion reading-pagination-rust
 
 // #region reading-includes-rust
-pub async fn read_todos_with_related_rows(client: &JazzClient) -> jazz_tools::Result<usize> {
-    // Rust currently composes related data using additional queries.
-    // If rows carry foreign keys, query related tables and join in application code.
-    let rows = client
-        .query(QueryBuilder::new("todos").build(), None)
-        .await?;
+pub async fn read_todos_with_project(client: &JazzClient) -> jazz_tools::Result<usize> {
+    let query = QueryBuilder::new("todos")
+        .filter_eq("done", Value::Boolean(false))
+        .join("projects")
+        .on("todos.project_id", "projects._id")
+        .build();
+
+    let rows = client.query(query, None).await?;
     Ok(rows.len())
 }
 // #endregion reading-includes-rust
+
+// #region reading-reverse-relation-rust
+pub fn build_projects_with_todos_query() -> jazz_tools::Query {
+    QueryBuilder::new("projects")
+        .with_array("todos_via_project", |sub| {
+            sub.from("todos")
+                .correlate("project_id", "_id")
+                .filter_eq("done", Value::Boolean(false))
+        })
+        .build()
+}
+// #endregion reading-reverse-relation-rust
+
+// #region reading-require-includes-rust
+pub fn build_todos_with_required_project() -> jazz_tools::Query {
+    QueryBuilder::new("todos")
+        .filter_eq("done", Value::Boolean(false))
+        .with_array("project", |sub| {
+            sub.from("projects")
+                .correlate("_id", "project_id")
+                .require_result()
+        })
+        .build()
+}
+// #endregion reading-require-includes-rust
 
 // #region reading-select-rust
 pub async fn read_todo_titles(client: &JazzClient) -> jazz_tools::Result<usize> {
