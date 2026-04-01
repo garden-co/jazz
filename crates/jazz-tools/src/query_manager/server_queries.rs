@@ -60,7 +60,6 @@ fn translate_current_table_for_hash(
 }
 
 pub(super) struct RowTransformContext<'a> {
-    pub(super) table: &'a str,
     pub(super) branch_schema_map:
         &'a std::collections::HashMap<String, crate::query_manager::types::SchemaHash>,
     pub(super) schema_context: &'a crate::schema_manager::SchemaContext,
@@ -305,7 +304,7 @@ impl QueryManager {
                 .sync_manager
                 .object_manager
                 .get_or_load(object_id, storage, &branches)?;
-            let table = object.metadata.get(MetadataKey::Table.as_str())?.clone();
+            let table = object.table_name();
             let branch = object.branches.get(&branch_name)?;
             let tip = branch
                 .tips
@@ -318,7 +317,7 @@ impl QueryManager {
             Some((table, tip.0, tip.1.content.clone(), tip.1.row_provenance()?))
         }?;
 
-        let current_table = resolve_current_table_for_context(auth_context, &table_hint);
+        let current_table = resolve_current_table_for_context(auth_context, table_hint);
         let transformed = self.transform_content_to_authorization_schema(
             current_table.as_str(),
             &tip_content,
@@ -420,9 +419,7 @@ impl QueryManager {
             else {
                 return false;
             };
-            let Some(table) = object.metadata.get(MetadataKey::Table.as_str()).cloned() else {
-                return false;
-            };
+            let table = object.table_name();
             let Some(branch) = object.branches.get(&branch_name) else {
                 return false;
             };
@@ -445,7 +442,7 @@ impl QueryManager {
             return false;
         };
 
-        let table_name = resolve_current_table_for_context(auth_context, &table_hint);
+        let table_name = resolve_current_table_for_context(auth_context, table_hint);
         let Some(select_policy) = auth_schema
             .get(&table_name)
             .and_then(|table_schema| table_schema.policies.select.using.as_ref())
@@ -666,11 +663,8 @@ impl QueryManager {
         if content.is_empty() {
             return None;
         }
-        let current_table = obj
-            .metadata
-            .get(MetadataKey::Table.as_str())
-            .map(|table_hint| resolve_current_table_for_context(context.schema_context, table_hint))
-            .unwrap_or_else(|| TableName::new(context.table));
+        let current_table =
+            resolve_current_table_for_context(context.schema_context, obj.table_name());
         Self::transform_row_with_schema(
             id,
             current_table.as_str(),
@@ -780,9 +774,7 @@ impl QueryManager {
 
         let branch_names: Vec<BranchName> = branches.iter().map(BranchName::new).collect();
         for (object_id, object) in &object_manager.objects {
-            let Some(table_hint) = object.metadata.get(MetadataKey::Table.as_str()) else {
-                continue;
-            };
+            let table_hint = object.table_name();
             let current_table = resolve_current_table_for_context(schema_context, table_hint);
             if !policy_tables.iter().any(|table| *table == current_table) {
                 continue;
@@ -879,11 +871,9 @@ impl QueryManager {
 
             let branches =
                 Self::resolved_server_query_branches(&query_for_compile, &subscription_context);
-            let table = sub.query.table.as_str().to_string();
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let include_deleted = sub.query.include_deleted;
             let mut transform_context = RowTransformContext {
-                table: &table,
                 branch_schema_map: &branch_schema_map,
                 schema_context: &subscription_context,
                 schema_warnings: &mut schema_warnings,
@@ -1048,12 +1038,10 @@ impl QueryManager {
                 continue;
             };
             let branches = &sub.branches;
-            let table = sub.query.table.as_str().to_string();
             let include_deleted = sub.query.include_deleted;
             let branch_schema_map = Self::branch_schema_map_for_context(&sub.schema_context);
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let mut transform_context = RowTransformContext {
-                table: &table,
                 branch_schema_map: &branch_schema_map,
                 schema_context: &sub.schema_context,
                 schema_warnings: &mut schema_warnings,

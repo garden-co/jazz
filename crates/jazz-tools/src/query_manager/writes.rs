@@ -326,13 +326,12 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get_or_load(id, storage, branches)?;
-        let table_hint = obj.metadata.get(MetadataKey::Table.as_str())?.clone();
-        let current_table = resolve_table_name_for_context(schema_context, &table_hint)
+        let table_hint = obj.table_name();
+        let current_table = resolve_table_name_for_context(schema_context, table_hint)
             .as_str()
             .to_string();
         let mut schema_warnings = SchemaWarningAccumulator::default();
         let mut transform_context = RowTransformContext {
-            table: &current_table,
             branch_schema_map: &branch_schema_map,
             schema_context,
             schema_warnings: &mut schema_warnings,
@@ -1213,9 +1212,9 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .map(|obj| obj.table_name())
             .ok_or(QueryError::ObjectNotFound(id))?;
-        let table = self.resolve_current_table_name_from_hint(&table);
+        let table = self.resolve_current_table_name_from_hint(table);
 
         // Get old data from ObjectManager
         let (old_data, _commit_id) = self
@@ -1404,9 +1403,9 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .map(|obj| obj.table_name())
             .ok_or(QueryError::ObjectNotFound(id))?;
-        let table = self.resolve_current_table_name_from_hint(&table);
+        let table = self.resolve_current_table_name_from_hint(table);
 
         let table_name = TableName::new(&table);
 
@@ -1733,9 +1732,9 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .map(|obj| obj.table_name())
             .ok_or(QueryError::ObjectNotFound(id))?;
-        let table = self.resolve_current_table_name_from_hint(&table);
+        let table = self.resolve_current_table_name_from_hint(table);
 
         let table_name = TableName::new(&table);
 
@@ -1836,9 +1835,9 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .map(|obj| obj.table_name())
             .ok_or(QueryError::ObjectNotFound(id))?;
-        let table = self.resolve_current_table_name_from_hint(&table);
+        let table = self.resolve_current_table_name_from_hint(table);
 
         let table_name = TableName::new(&table);
 
@@ -1934,9 +1933,9 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .map(|obj| obj.table_name())
             .ok_or(QueryError::ObjectNotFound(id))?;
-        let table = self.resolve_current_table_name_from_hint(&table);
+        let table = self.resolve_current_table_name_from_hint(table);
 
         // Verify row is in _id_deleted index (soft-deleted)
         if !self.row_is_deleted(storage, &table, id) {
@@ -1952,14 +1951,8 @@ impl QueryManager {
     /// Returns decoded values and the table name if the row exists.
     pub fn get_row(&self, id: ObjectId) -> Option<(String, Vec<Value>)> {
         // Get table name from object metadata
-        let table = self
-            .sync_manager
-            .object_manager
-            .get(id)?
-            .metadata
-            .get(MetadataKey::Table.as_str())?
-            .clone();
-        let table = self.resolve_current_table_name_from_hint(&table);
+        let table = self.sync_manager.object_manager.get(id)?.table_name();
+        let table = self.resolve_current_table_name_from_hint(table);
         let table_name = TableName::new(&table);
 
         // Get row data from ObjectManager

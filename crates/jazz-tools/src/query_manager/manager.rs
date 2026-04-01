@@ -913,7 +913,6 @@ impl QueryManager {
 
             let _sub_span = tracing::trace_span!("settle_subscription", sub_id = sub_id.0, table = %subscription.graph.table).entered();
             let branches = subscription.branches.clone();
-            let table = subscription.graph.table.as_str().to_string();
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let include_deleted = subscription.query.include_deleted;
 
@@ -975,14 +974,9 @@ impl QueryManager {
 
                     let (_, commit_id, content, source_branch, is_soft_deleted, row_provenance) =
                         best.filter(|(_, _, content, _, _, _)| !content.is_empty())?;
-                    let current_table = obj
-                        .metadata
-                        .get(MetadataKey::Table.as_str())
-                        .and_then(|table_hint| {
-                            resolve_current_table_name(&schema_context, table_hint)
-                                .or_else(|| Some(table_hint.clone()))
-                        })
-                        .unwrap_or_else(|| table.clone());
+                    let obj_table_name: &str = obj.table_name();
+                    let current_table = resolve_current_table_name(&schema_context, obj_table_name)
+                        .unwrap_or(obj_table_name.to_string());
 
                     if let Some(&source_hash) = branch_schema_map.get(&source_branch)
                         && source_hash != schema_context.current_hash
