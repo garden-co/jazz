@@ -1,7 +1,7 @@
 ---
 title: Permissions
 description: Jazz's approach to row-level security using relationship-based access controls, and how to build policies of varying complexity.
-reviewedAt: "14cd73f0"
+reviewedAt: "4059cdef"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -25,11 +25,10 @@ We can define permissions in `permissions.ts`:
 </include>
 
 <Callout type="info">
-  Author permissions in the root `permissions.ts` next to `schema.ts`. `npx jazz-tools@alpha
-  validate` is a useful local sanity check before publishing. Permission-only changes do not require
-  migrations, but they do still require `npx jazz-tools@alpha permissions push`. Development-mode
-  schema auto-push only publishes the structural schema from `schema.ts`; it does not publish
-  permissions for you.
+  Write your permissions policies in `permissions.ts` at the root of your project (next to `schema.ts`).
+
+Run `npx jazz-tools@alpha validate` before publishing to identify any issues. You do not need to write a schema migration to update permissions policies. Push the updated policies by running `npx jazz-tools@alpha permissions push`.
+
 </Callout>
 
 Apps that do not need user-scoped filtering can still define explicit allow-all policies (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})`).
@@ -114,7 +113,7 @@ If a table references itself (e.g. a comment that can have sub-comments), you ca
 
 ## Policy enforcement and request context
 
-Every policy is evaluated against the current user's session. On the frontend, this is the authenticated user. In a backend handler, create a scoped session per request so queries run with the right identity.
+Every policy is evaluated against a session. On the frontend, this is the authenticated user's session. In a backend handler, create a scoped session per request so queries run with the right identity.
 
 <include cwd lang="ts" meta='title="handler.ts"'>
   ../examples/docs/todo-server-ts/src/request-context.ts#backend-request-handler-ts
@@ -136,8 +135,8 @@ schema, and they are omitted from `select("*")`, so opt in explicitly when you w
 ### Permission introspection columns
 
 - `$canRead`&hairsp;—&hairsp;whether the current session can read the row. Since read policies already gate which rows appear, this will usually be `true`.
-- `$canEdit`&hairsp;—&hairsp;whether the current session passes the row's `UPDATE USING` policy.
-- `$canDelete`&hairsp;—&hairsp;whether the current session passes the row's `DELETE USING` policy.
+- `$canEdit`&hairsp;—&hairsp;whether the current session passes the row's update policy.
+- `$canDelete`&hairsp;—&hairsp;whether the current session passes the row's delete policy.
 - Without a session, all three return `null`.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
@@ -162,8 +161,7 @@ Jazz also tracks row authorship and timestamps automatically:
 - `$updatedBy`&hairsp;—&hairsp;the Jazz principal that last updated the row
 - `$updatedAt`&hairsp;—&hairsp;when the row was last updated
 
-All four edit metadata columns are always present. Backend writes that are not attributed to a user
-are authored as `jazz:system`.
+Jazz always tracks this metadata; select the columns explicitly to include them in query results. Backend writes that are not attributed to a user are authored as `jazz:system`.
 
 ### Authorship-based policies
 

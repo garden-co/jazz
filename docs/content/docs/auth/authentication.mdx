@@ -1,7 +1,7 @@
 ---
 title: Authentication
 description: "How and when to use Jazz's three different auth modes: anonymous, demo, and external JWTs."
-reviewedAt: "14cd73f0"
+reviewedAt: "4059cdef"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -164,7 +164,7 @@ For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web
 | Flag                | Purpose                                                                                   | Development | Production                                                          |
 | ------------------- | ----------------------------------------------------------------------------------------- | ----------- | ------------------------------------------------------------------- |
 | `--port`            | Port to listen on (defaults to 1625)                                                      | Optional    | Optional                                                            |
-| `--data-dir`        | Directory for persistent storage                                                          | Required    | Required                                                            |
+| `--data-dir`        | Directory for persistent storage (defaults to `./data`)                                   | Optional    | Optional                                                            |
 | `--in-memory`       | Use in-memory storage instead of Fjall-backed files. Data is lost when the process exits. | Optional    | Optional                                                            |
 | `--jwks-url <url>`  | JWKS endpoint for JWT signature verification                                              | Optional    | Optional, but required if using JWT auth to validate JWT signatures |
 | `--backend-secret`  | Secret for backend session impersonation                                                  | Optional    | Optional                                                            |
