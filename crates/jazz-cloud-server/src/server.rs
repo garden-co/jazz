@@ -3876,6 +3876,29 @@ async fn events_handler(
         opentelemetry::KeyValue::new("auth_type", auth_type),
     ];
 
+    // Guard that decrements the active connection counter on drop.
+    // async_stream generators don't run post-loop cleanup when the stream is
+    // dropped (e.g. client disconnect), so we need a Drop guard to ensure
+    // the decrement always fires.
+    #[cfg(feature = "otel")]
+    struct ConnectionMetricsGuard {
+        attrs: Vec<opentelemetry::KeyValue>,
+    }
+    #[cfg(feature = "otel")]
+    impl Drop for ConnectionMetricsGuard {
+        fn drop(&mut self) {
+            let meter = opentelemetry::global::meter("jazz-cloud-server");
+            let active = meter
+                .i64_up_down_counter("jazz.sync.connections.active")
+                .build();
+            active.add(-1, &self.attrs);
+        }
+    }
+    #[cfg(feature = "otel")]
+    let _conn_guard = ConnectionMetricsGuard {
+        attrs: connect_attrs.clone(),
+    };
+
     let mut sync_rx = app.sync_broadcast.subscribe();
     let mut shutdown_rx = state.shutdown_tx.subscribe();
     let app_cleanup = app.clone();
@@ -4009,15 +4032,7 @@ async fn events_handler(
 
         let mut connections = app_cleanup.connections.write().await;
         connections.remove(&connection_id);
-
-        #[cfg(feature = "otel")]
-        {
-            let meter = opentelemetry::global::meter("jazz-cloud-server");
-            let active = meter
-                .i64_up_down_counter("jazz.sync.connections.active")
-                .build();
-            active.add(-1, &connect_attrs);
-        }
+        // Note: active connection decrement is handled by ConnectionMetricsGuard (Drop)
     };
 
     Ok(axum::response::Response::builder()
