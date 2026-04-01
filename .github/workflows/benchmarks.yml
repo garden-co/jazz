@@ -64,23 +64,7 @@ jobs:
           toolchain: 1.93.1
 
       - name: Install libclang (needed by rocksdb bindgen)
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: "18"
-      - name: Configure LLVM env for bindgen
-        run: |
-          llvm_lib="${LLVM_PATH}/lib"
-          echo "LIBCLANG_PATH=${llvm_lib}" >> "$GITHUB_ENV"
-          if [ -n "${LD_LIBRARY_PATH:-}" ]; then
-            echo "LD_LIBRARY_PATH=${llvm_lib}:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          else
-            echo "LD_LIBRARY_PATH=${llvm_lib}" >> "$GITHUB_ENV"
-          fi
-          if [ -n "${DYLD_LIBRARY_PATH:-}" ]; then
-            echo "DYLD_LIBRARY_PATH=${llvm_lib}:${DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          else
-            echo "DYLD_LIBRARY_PATH=${llvm_lib}" >> "$GITHUB_ENV"
-          fi
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
 
       - uses: actions/setup-node@v6
         with:
@@ -230,23 +214,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Install libclang (needed by rocksdb bindgen)
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: "18"
-      - name: Configure LLVM env for bindgen
-        run: |
-          llvm_lib="${LLVM_PATH}/lib"
-          echo "LIBCLANG_PATH=${llvm_lib}" >> "$GITHUB_ENV"
-          if [ -n "${LD_LIBRARY_PATH:-}" ]; then
-            echo "LD_LIBRARY_PATH=${llvm_lib}:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          else
-            echo "LD_LIBRARY_PATH=${llvm_lib}" >> "$GITHUB_ENV"
-          fi
-          if [ -n "${DYLD_LIBRARY_PATH:-}" ]; then
-            echo "DYLD_LIBRARY_PATH=${llvm_lib}:${DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          else
-            echo "DYLD_LIBRARY_PATH=${llvm_lib}" >> "$GITHUB_ENV"
-          fi
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
 
       - uses: actions/setup-node@v6
         with:
