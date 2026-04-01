@@ -13,3 +13,4 @@ members = [
 ]
 [patch.crates-io]
 fjall = { git = "https://github.com/garden-co/fjall.git", branch = "fjall-android-support" }
+rocksdb = { git = "https://github.com/garden-co/rust-rocksdb.git", branch = "feat/tdb-flush" }
