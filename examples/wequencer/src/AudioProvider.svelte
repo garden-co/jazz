@@ -372,10 +372,14 @@
 					player: undefined,
 				});
 
-				db.loadFileAsBlob(app, instrument.soundFileId, { tier: "edge" })
-					.then((blob) => {
+				db.loadFileAsBlob(app, instrument.soundFileId, { tier: 'edge' })
+					.then(async (blob) => {
 						const url = URL.createObjectURL(blob);
-						return loadPlayer(url, instrument.id);
+						try {
+							return await loadPlayer(url, instrument.id);
+						} finally {
+							URL.revokeObjectURL(url);
+						}
 					})
 					.then((player) => {
 						loadedPlayers.set(instrument.id, {
@@ -385,6 +389,7 @@
 					})
 					.catch((err) => {
 						console.error(`Failed to load player for ${instrument.name}:`, err);
+						loadedPlayers.delete(instrument.id);
 					});
 			}
 		});

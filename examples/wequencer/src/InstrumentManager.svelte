@@ -15,11 +15,11 @@
 		uploading = true;
 
 		try {
-			const jazzFile = await db.createFileFromBlob(app, file, { tier: "edge" });
+			const storedFile = await db.createFileFromBlob(app, file, { tier: 'edge' });
 			const maxOrder = Math.max(0, ...(instruments.current ?? []).map((i) => i.display_order));
 			db.insert(app.instruments, {
 				name: name.trim(),
-				soundFileId: jazzFile.id,
+				soundFileId: storedFile.id,
 				display_order: maxOrder + 1,
 			});
 			name = '';
@@ -30,7 +30,19 @@
 		}
 	}
 
-	function removeInstrument(id: string) {
+	async function removeInstrument(id: string) {
+		const instrument = await db.one(app.instruments.where({ id }));
+		const fileId = instrument?.soundFileId;
+		if (fileId) {
+			const storedFile = await db.one(app.files.where({ id: fileId }));
+			if (storedFile) {
+				for (const partId of storedFile.partIds) {
+					db.delete(app.file_parts, partId);
+				}
+				db.delete(app.files, storedFile.id);
+			}
+		}
+
 		db.delete(app.instruments, id);
 	}
 </script>
