@@ -63,10 +63,8 @@ jobs:
         with:
           toolchain: 1.93.1
 
-      - name: Install libclang (needed by rocksdb bindgen)
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: "18"
+      - name: Prepare local libclang bundle
+        run: benchmarks/realistic/prepare_libclang_env.sh
 
       - uses: actions/setup-node@v6
         with:
@@ -215,10 +213,8 @@ jobs:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
 
-      - name: Install libclang (needed by rocksdb bindgen)
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: "18"
+      - name: Prepare local libclang bundle
+        run: benchmarks/realistic/prepare_libclang_env.sh
 
       - uses: actions/setup-node@v6
         with:

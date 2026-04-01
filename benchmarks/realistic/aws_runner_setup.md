@@ -42,6 +42,7 @@ sudo RUNNER_TOKEN="<repo registration token>" \
 This script handles the details that bit us on the first live setup:
 
 - enables `corepack` as `root` so `pnpm` shims can be written under `/usr/bin`
+- installs `libclang-dev` so RocksDB bindgen builds work without ad-hoc workflow `sudo`
 - uses `/var/lib/cloud/data/instance-id` for naming, which works with IMDSv2 required
 - installs the GitHub runner service after `config.sh`, which is when current releases generate `svc.sh`
 - applies `benchmarks/realistic/harden_runner.sh` unless `SKIP_HARDENING=1`
