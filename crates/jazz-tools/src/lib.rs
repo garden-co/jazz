@@ -74,8 +74,10 @@ pub struct AppContext {
     pub schema: Schema,
     /// Server URL for sync (e.g., "http://localhost:1625").
     pub server_url: String,
-    /// Local data directory for Fjall storage.
+    /// Local data directory for persistent storage.
     pub data_dir: PathBuf,
+    /// Local storage backend.
+    pub storage: ClientStorage,
 
     // Authentication fields
     /// JWT token for frontend authentication.
@@ -87,6 +89,17 @@ pub struct AppContext {
     /// Admin secret for schema/policy sync.
     /// Required to sync catalogue objects.
     pub admin_secret: Option<String>,
+}
+
+/// Local storage backend for a client application.
+#[cfg(feature = "client")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClientStorage {
+    /// Persist client state to disk using Fjall under `AppContext::data_dir`.
+    #[default]
+    Fjall,
+    /// Keep all client state in memory for the lifetime of the process only.
+    Memory,
 }
 
 /// Errors from Jazz client operations.
@@ -136,13 +149,13 @@ pub struct SubscriptionHandle(pub u64);
 /// Stream of row deltas from a subscription.
 #[cfg(feature = "client")]
 pub struct SubscriptionStream {
-    receiver: tokio::sync::mpsc::Receiver<OrderedRowDelta>,
+    receiver: tokio::sync::mpsc::UnboundedReceiver<OrderedRowDelta>,
 }
 
 #[cfg(feature = "client")]
 impl SubscriptionStream {
     /// Create a new subscription stream.
-    pub(crate) fn new(receiver: tokio::sync::mpsc::Receiver<OrderedRowDelta>) -> Self {
+    pub(crate) fn new(receiver: tokio::sync::mpsc::UnboundedReceiver<OrderedRowDelta>) -> Self {
         Self { receiver }
     }
 

@@ -131,11 +131,12 @@ describe("MCP integration: full lifecycle", () => {
     const content = (
       (res.result as Record<string, unknown>).content as Array<{ type: string; text: string }>
     )[0];
-    expect(content.type).toBe("text");
+    expect(content).toBeDefined();
+    expect(content!.type).toBe("text");
     // Should find real results — "schema" and "table" appear throughout the docs
-    expect(content.text).not.toBe("No results found.");
+    expect(content!.text).not.toBe("No results found.");
     // eslint-disable-next-line no-control-regex
-    expect(content.text).toMatch(/\u001b\[1m\u001b\[36m/); // bold cyan heading present
+    expect(content!.text).toMatch(/\u001b\[1m\u001b\[36m/); // bold cyan heading present
   });
 
   it("get_doc → markdown with title heading and body content", async () => {
@@ -147,24 +148,28 @@ describe("MCP integration: full lifecycle", () => {
       params: { name: "list_pages", arguments: {} },
     });
     const listRes = await server.recv();
-    const listText = (
+    const listContent = (
       (listRes.result as Record<string, unknown>).content as Array<{ text: string }>
-    )[0].text;
+    )[0];
+    expect(listContent).toBeDefined();
+    const listText = listContent!.text;
     // Slug appears dim-wrapped: \u001b[2m{slug}\u001b[0m
     // eslint-disable-next-line no-control-regex
     const slugMatch = listText.match(/\u001b\[2m([^\u001b\n]+)\u001b\[0m/);
     expect(slugMatch).not.toBeNull();
-    const slug = slugMatch![1].trim();
+    const slug = slugMatch?.[1];
+    expect(slug).toBeDefined();
 
     server.send({
       jsonrpc: "2.0",
       id: 5,
       method: "tools/call",
-      params: { name: "get_doc", arguments: { slug } },
+      params: { name: "get_doc", arguments: { slug: slug!.trim() } },
     });
     const res = await server.recv();
-    const text = ((res.result as Record<string, unknown>).content as Array<{ text: string }>)[0]
-      .text;
+    const content = ((res.result as Record<string, unknown>).content as Array<{ text: string }>)[0];
+    expect(content).toBeDefined();
+    const text = content!.text;
     // Title appears bold-wrapped at the start
     // eslint-disable-next-line no-control-regex
     expect(text).toMatch(/\u001b\[1m\S/);
@@ -179,8 +184,9 @@ describe("MCP integration: full lifecycle", () => {
       params: { name: "list_pages", arguments: {} },
     });
     const res = await server.recv();
-    const text = ((res.result as Record<string, unknown>).content as Array<{ text: string }>)[0]
-      .text;
+    const content = ((res.result as Record<string, unknown>).content as Array<{ text: string }>)[0];
+    expect(content).toBeDefined();
+    const text = content!.text;
     expect(typeof text).toBe("string");
     expect(text.length).toBeGreaterThan(0);
     // Each page's title and slug appear in the output
@@ -200,7 +206,9 @@ describe("MCP integration: full lifecycle", () => {
     expect(res.error).toBeUndefined();
     const result = res.result as Record<string, unknown>;
     expect(result.isError).toBe(true);
-    const text = (result.content as Array<{ text: string }>)[0].text;
+    const content = (result.content as Array<{ text: string }>)[0];
+    expect(content).toBeDefined();
+    const text = content!.text;
     expect(text).toContain("no-such-page");
   });
 

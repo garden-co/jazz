@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools";
-import { app } from "../schema/app.js";
+import { app } from "../schema.js";
 
 export const SEED_INSTRUMENTS = [
   { name: "Kick", file: "/kick.mp3", display_order: 0 },
@@ -32,11 +32,10 @@ export async function ensureInstrumentsSeeded(db: Db): Promise<void> {
 
   for (const seed of missingSeeds(existingNames)) {
     const res = await fetch(seed.file);
-    const blob = await res.blob();
-    const file = await db.createFileFromBlob(app, blob, { tier: "edge" });
+    const buffer = await res.arrayBuffer();
     db.insert(app.instruments, {
       name: seed.name,
-      soundFileId: file.id,
+      sound: new Uint8Array(buffer),
       display_order: seed.display_order,
     });
   }
@@ -62,6 +61,5 @@ export async function getCurrentJam(db: Db): Promise<string> {
     return existing[0].id;
   }
 
-  const jam = db.insert(app.jams, { created_at: now, bpm: 95, beat_count: 16 });
-  return jam.id;
+  return db.insert(app.jams, { created_at: now, bpm: 95, beat_count: 16 }).id;
 }

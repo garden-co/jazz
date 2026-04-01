@@ -151,7 +151,12 @@ impl<'a> PolicyContextEvaluator<'a> {
                 continue;
             }
 
-            let source_row = Row::new(source_row_id, source_row.data, source_row.commit_id);
+            let source_row = Row::new(
+                source_row_id,
+                source_row.data,
+                source_row.commit_id,
+                source_row.row_provenance,
+            );
             if self.evaluate_row_access(
                 operation,
                 &source_row,
@@ -265,7 +270,14 @@ impl<'a> PolicyContextEvaluator<'a> {
                 visited,
                 visited_referencing,
             ),
-            _ => evaluate_expr_recursive(expr, &row.data, descriptor, self.session, depth),
+            _ => evaluate_expr_recursive(
+                expr,
+                &row.data,
+                &row.provenance,
+                descriptor,
+                self.session,
+                depth,
+            ),
         }
     }
 
@@ -339,7 +351,12 @@ impl<'a> PolicyContextEvaluator<'a> {
             None => return true,
         };
 
-        let parent_row = Row::new(parent_id, parent_row.data, parent_row.commit_id);
+        let parent_row = Row::new(
+            parent_id,
+            parent_row.data,
+            parent_row.commit_id,
+            parent_row.row_provenance,
+        );
         self.evaluate_expr_with_context(
             parent_policy,
             &parent_row,

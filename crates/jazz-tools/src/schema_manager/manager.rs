@@ -9,21 +9,54 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use blake3::Hasher;
+
 use crate::object::{BranchName, ObjectId};
+use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use crate::query_manager::query::{Query, QueryBuilder};
-use crate::query_manager::session::Session;
+use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{
-    ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName, Value,
+    ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
+use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
 use crate::storage::Storage;
 use crate::sync_manager::SyncManager;
+use uuid::Uuid;
 
 use super::auto_lens::generate_lens;
 use super::context::{QuerySchemaContext, SchemaContext, SchemaError};
-use super::encoding::{decode_lens_transform, decode_schema, encode_lens_transform, encode_schema};
+use super::encoding::{
+    decode_lens_transform, decode_permissions, decode_permissions_bundle, decode_permissions_head,
+    decode_schema, encode_lens_transform, encode_permissions, encode_permissions_bundle,
+    encode_permissions_head, encode_schema,
+};
 use super::lens::Lens;
 use super::types::AppId;
+
+#[derive(Clone, Debug, PartialEq)]
+struct PermissionsBundleState {
+    schema_hash: SchemaHash,
+    version: u64,
+    parent_bundle_object_id: Option<ObjectId>,
+    permissions: HashMap<TableName, TablePolicies>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PermissionsHeadState {
+    schema_hash: SchemaHash,
+    version: u64,
+    parent_bundle_object_id: Option<ObjectId>,
+    bundle_object_id: ObjectId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PermissionsHeadSummary {
+    pub schema_hash: SchemaHash,
+    pub version: u64,
+    pub parent_bundle_object_id: Option<ObjectId>,
+    pub bundle_object_id: ObjectId,
+}
 
 /// SchemaManager coordinates schema evolution with query execution.
 ///
@@ -55,7 +88,13 @@ use super::types::AppId;
 /// manager.persist_lens(&lens);
 ///
 /// // Insert data
-/// let handle = manager.insert("users", &[id, name])?;
+/// let handle = manager.insert(
+///     "users",
+///     std::collections::HashMap::from([
+///         ("id".to_string(), id),
+///         ("name".to_string(), name),
+///     ]),
+/// )?;
 ///
 /// // Query across all schema versions via subscription
 /// let sub_id = manager.query_manager_mut().subscribe(manager.query("users").build())?;
@@ -64,10 +103,12 @@ use super::types::AppId;
 /// manager.query_manager_mut().unsubscribe_with_sync(sub_id);
 /// ```
 pub struct SchemaManager {
-    declared_current_schema: Option<Schema>,
     context: SchemaContext,
     query_manager: QueryManager,
     app_id: AppId,
+    current_permissions_head: Option<PermissionsHeadState>,
+    known_permissions_bundles: HashMap<ObjectId, PermissionsBundleState>,
+    pending_permissions_head: Option<PermissionsHeadState>,
     /// Schemas known to this manager (for server mode).
     /// Server adds schemas here when received via catalogue sync.
     /// These are stored without requiring a lens path to current.
@@ -92,8 +133,8 @@ impl SchemaManager {
         env: &str,
         user_branch: &str,
     ) -> Result<Self, SchemaError> {
-        let declared_current_schema = schema.clone();
         let schema = normalize_schema(schema);
+        let structural_schema = strip_schema_policies(&schema);
 
         let context = SchemaContext::new(schema.clone(), env, user_branch);
         let current_hash = SchemaHash::compute(&schema);
@@ -104,13 +145,15 @@ impl SchemaManager {
 
         // Initialize known_schemas with current schema
         let mut known_schemas = HashMap::new();
-        known_schemas.insert(current_hash, schema);
+        known_schemas.insert(current_hash, structural_schema);
 
         Ok(Self {
-            declared_current_schema: Some(declared_current_schema),
             context,
             query_manager,
             app_id,
+            current_permissions_head: None,
+            known_permissions_bundles: HashMap::new(),
+            pending_permissions_head: None,
             known_schemas: Arc::new(known_schemas),
             known_schemas_dirty: true,
         })
@@ -137,10 +180,12 @@ impl SchemaManager {
     pub fn new_server(sync_manager: SyncManager, app_id: AppId, _env: &str) -> Self {
         let query_manager = QueryManager::new(sync_manager);
         Self {
-            declared_current_schema: None,
             context: SchemaContext::empty(),
             query_manager,
             app_id,
+            current_permissions_head: None,
+            known_permissions_bundles: HashMap::new(),
+            pending_permissions_head: None,
             known_schemas: Arc::new(HashMap::new()),
             known_schemas_dirty: false,
         }
@@ -160,6 +205,7 @@ impl SchemaManager {
     ///
     /// Also creates indices for all env/user_branch combinations if known.
     pub fn add_known_schema(&mut self, schema: Schema) {
+        let schema = strip_schema_policies(&normalize_schema(schema));
         let hash = SchemaHash::compute(&schema);
 
         // Skip if already known
@@ -175,6 +221,8 @@ impl SchemaManager {
             self.context.add_pending_schema(schema.clone());
             self.activate_pending_and_sync_to_query_manager();
         }
+
+        self.try_apply_pending_permissions_head();
     }
 
     /// Get a known schema by hash.
@@ -222,21 +270,51 @@ impl SchemaManager {
         &self.context.user_branch
     }
 
-    fn align_insert_values_to_runtime_schema(&self, table: &str, values: &[Value]) -> Vec<Value> {
-        let Some(declared_schema) = self.declared_current_schema.as_ref() else {
-            return values.to_vec();
-        };
-
+    fn get_insert_values_with_defaults(
+        &self,
+        table: &str,
+        mut values_by_column: HashMap<String, Value>,
+    ) -> Result<Vec<Value>, QueryError> {
         let table_name = TableName::new(table);
-        let Some(declared_table) = declared_schema.get(&table_name) else {
-            return values.to_vec();
-        };
-        let Some(runtime_table) = self.context.current_schema.get(&table_name) else {
-            return values.to_vec();
-        };
+        let table_schema = self
+            .current_schema()
+            .get(&table_name)
+            .ok_or(QueryError::TableNotFound(table_name))?;
 
-        reorder_values_by_column_name(&declared_table.columns, &runtime_table.columns, values)
-            .unwrap_or_else(|| values.to_vec())
+        for column in values_by_column.keys() {
+            if table_schema.columns.column(column.as_str()).is_none() {
+                return Err(QueryError::EncodingError(format!(
+                    "unknown column `{column}` on table `{table}`"
+                )));
+            }
+        }
+
+        let mut aligned_values = Vec::with_capacity(table_schema.columns.columns.len());
+        for column in &table_schema.columns.columns {
+            if let Some(value) = values_by_column.remove(column.name.as_str()) {
+                if value == Value::Null && !column.nullable {
+                    return Err(QueryError::EncodingError(format!(
+                        "cannot set required field `{}` to null",
+                        column.name
+                    )));
+                }
+                aligned_values.push(value);
+                continue;
+            }
+
+            if let Some(default) = &column.default {
+                aligned_values.push(default.clone());
+            } else if column.nullable {
+                aligned_values.push(Value::Null);
+            } else {
+                return Err(QueryError::EncodingError(format!(
+                    "missing required field `{}` on table `{table}`",
+                    column.name
+                )));
+            }
+        }
+
+        Ok(aligned_values)
     }
 
     /// Add a live schema version with auto-generated lens.
@@ -246,6 +324,7 @@ impl SchemaManager {
     ///
     /// Automatically updates QueryManager indices and marks subscriptions for recompile.
     pub fn add_live_schema(&mut self, old_schema: Schema) -> Result<&Lens, SchemaError> {
+        let old_schema = strip_schema_policies(&normalize_schema(old_schema));
         let lens = generate_lens(&old_schema, &self.context.current_schema);
 
         if lens.is_draft() {
@@ -285,6 +364,7 @@ impl SchemaManager {
         old_schema: Schema,
         lens: Lens,
     ) -> Result<(), SchemaError> {
+        let old_schema = strip_schema_policies(&normalize_schema(old_schema));
         if lens.is_draft() {
             return Err(SchemaError::DraftLensInPath {
                 source: lens.source_hash,
@@ -375,6 +455,59 @@ impl SchemaManager {
         self.context.lenses.keys().copied().collect()
     }
 
+    /// Compute a canonical digest of the catalogue state known to this manager.
+    pub fn catalogue_state_hash(&self) -> String {
+        let mut hasher = Hasher::new();
+        hasher.update(b"jazz-catalogue-state-v1");
+
+        let mut schemas: Vec<_> = self.known_schemas.iter().collect();
+        schemas.sort_by(|(left_hash, _), (right_hash, _)| {
+            left_hash.as_bytes().cmp(right_hash.as_bytes())
+        });
+        hasher.update(&(schemas.len() as u64).to_le_bytes());
+        for (hash, schema) in schemas {
+            hasher.update(b"schema");
+            hasher.update(hash.as_bytes());
+            let encoded = encode_schema(schema);
+            hash_len_prefixed(&mut hasher, &encoded);
+        }
+
+        let mut lenses: Vec<_> = self.context.lenses.values().collect();
+        lenses.sort_by(|left, right| {
+            left.source_hash
+                .as_bytes()
+                .cmp(right.source_hash.as_bytes())
+                .then_with(|| {
+                    left.target_hash
+                        .as_bytes()
+                        .cmp(right.target_hash.as_bytes())
+                })
+        });
+        hasher.update(&(lenses.len() as u64).to_le_bytes());
+        for lens in lenses {
+            hasher.update(b"lens");
+            hasher.update(lens.source_hash.as_bytes());
+            hasher.update(lens.target_hash.as_bytes());
+            let encoded = encode_lens_transform(&lens.forward);
+            hash_len_prefixed(&mut hasher, &encoded);
+        }
+
+        if let Some(head) = self.current_permissions_head
+            && let Some(bundle) = self.known_permissions_bundles.get(&head.bundle_object_id)
+        {
+            hasher.update(b"permissions");
+            hasher.update(head.schema_hash.as_bytes());
+            hasher.update(&head.version.to_le_bytes());
+            if let Some(parent_bundle_object_id) = head.parent_bundle_object_id {
+                hasher.update(parent_bundle_object_id.uuid().as_bytes());
+            }
+            let encoded = encode_permissions(&bundle.permissions);
+            hash_len_prefixed(&mut hasher, &encoded);
+        }
+
+        hasher.finalize().to_hex().to_string()
+    }
+
     /// Get access to the underlying context.
     pub fn context(&self) -> &SchemaContext {
         &self.context
@@ -393,6 +526,16 @@ impl SchemaManager {
     /// Get mutable reference to the internal QueryManager.
     pub fn query_manager_mut(&mut self) -> &mut QueryManager {
         &mut self.query_manager
+    }
+
+    pub fn current_permissions_head(&self) -> Option<PermissionsHeadSummary> {
+        self.current_permissions_head
+            .map(|head| PermissionsHeadSummary {
+                schema_hash: head.schema_hash,
+                version: head.version,
+                parent_bundle_object_id: head.parent_bundle_object_id,
+                bundle_object_id: head.bundle_object_id,
+            })
     }
 
     // =========================================================================
@@ -469,7 +612,7 @@ impl SchemaManager {
     pub fn persist_schema<H: Storage>(&mut self, storage: &mut H) -> ObjectId {
         let schema_hash = self.context.current_hash;
         let object_id = schema_hash.to_object_id();
-        let content = encode_schema(&self.context.current_schema);
+        let content = encode_schema(&strip_schema_policies(&self.context.current_schema));
 
         let metadata = self.schema_metadata(&schema_hash);
         self.query_manager
@@ -487,9 +630,10 @@ impl SchemaManager {
         storage: &mut H,
         schema: &Schema,
     ) -> ObjectId {
-        let schema_hash = SchemaHash::compute(schema);
+        let schema = strip_schema_policies(schema);
+        let schema_hash = SchemaHash::compute(&schema);
         let object_id = schema_hash.to_object_id();
-        let content = encode_schema(schema);
+        let content = encode_schema(&schema);
 
         let metadata = self.schema_metadata(&schema_hash);
         self.query_manager
@@ -518,6 +662,98 @@ impl SchemaManager {
         object_id
     }
 
+    pub fn persist_current_permissions<H: Storage>(&mut self, storage: &mut H) -> Option<ObjectId> {
+        let head = self.current_permissions_head?;
+        let bundle = self.known_permissions_bundles.get(&head.bundle_object_id)?;
+
+        let bundle_metadata = self.permissions_bundle_metadata();
+        let head_object_id = self.permissions_head_object_id();
+        let head_metadata = self.permissions_head_metadata();
+        let bundle_content = encode_permissions_bundle(
+            bundle.schema_hash,
+            bundle.version,
+            bundle.parent_bundle_object_id,
+            &bundle.permissions,
+        );
+        self.query_manager
+            .sync_manager_mut()
+            .create_object_with_content(
+                storage,
+                head.bundle_object_id,
+                bundle_metadata,
+                bundle_content,
+            );
+
+        let head_content = encode_permissions_head(
+            head.schema_hash,
+            head.version,
+            head.parent_bundle_object_id,
+            head.bundle_object_id,
+        );
+        self.query_manager
+            .sync_manager_mut()
+            .create_object_with_content(storage, head_object_id, head_metadata, head_content);
+
+        Some(head_object_id)
+    }
+
+    pub fn publish_permissions_bundle<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        schema_hash: SchemaHash,
+        permissions: HashMap<TableName, TablePolicies>,
+        expected_parent_bundle_object_id: Option<ObjectId>,
+    ) -> Result<Option<ObjectId>, SchemaError> {
+        let current_parent_bundle_object_id = self
+            .current_permissions_head
+            .map(|head| head.bundle_object_id);
+        if current_parent_bundle_object_id != expected_parent_bundle_object_id {
+            return Err(SchemaError::StalePermissionsParent {
+                expected: expected_parent_bundle_object_id,
+                current: current_parent_bundle_object_id,
+            });
+        }
+
+        let version = self
+            .current_permissions_head
+            .map(|head| head.version + 1)
+            .unwrap_or(1);
+        let bundle_state = PermissionsBundleState {
+            schema_hash,
+            version,
+            parent_bundle_object_id: current_parent_bundle_object_id,
+            permissions,
+        };
+        let bundle_object_id = self.permissions_bundle_object_id(&bundle_state);
+        self.known_permissions_bundles
+            .insert(bundle_object_id, bundle_state);
+        let head = PermissionsHeadState {
+            schema_hash,
+            version,
+            parent_bundle_object_id: current_parent_bundle_object_id,
+            bundle_object_id,
+        };
+        self.current_permissions_head = Some(head);
+        if self.apply_permissions_head(head) {
+            self.pending_permissions_head = None;
+        } else {
+            self.pending_permissions_head = Some(head);
+        }
+        Ok(self.persist_current_permissions(storage))
+    }
+
+    /// Register a reviewed lens in memory, activate any newly reachable schemas,
+    /// and persist the corresponding catalogue object for sync.
+    pub fn publish_lens<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        lens: &Lens,
+    ) -> Result<ObjectId, SchemaError> {
+        self.register_lens(lens.clone())?;
+        self.activate_pending_and_sync_to_query_manager();
+        Ok(self.persist_lens(storage, lens))
+    }
+
     /// Materialize known schema/lens catalogue objects into object storage for sync replay.
     ///
     /// Rehydration restores schema/lens knowledge into memory, but downstream sync replay
@@ -544,6 +780,8 @@ impl SchemaManager {
         for lens in lenses {
             self.persist_lens(storage, &lens);
         }
+
+        self.persist_current_permissions(storage);
     }
 
     /// Build metadata for a schema catalogue object.
@@ -560,6 +798,55 @@ impl SchemaManager {
         metadata.insert(
             crate::metadata::MetadataKey::SchemaHash.to_string(),
             schema_hash.to_string(),
+        );
+        metadata
+    }
+
+    pub(crate) fn permissions_head_object_id_for(app_id: AppId) -> ObjectId {
+        ObjectId::from_uuid(Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            format!("jazz-catalogue-permissions-head:{}", app_id.uuid()).as_bytes(),
+        ))
+    }
+
+    fn permissions_head_object_id(&self) -> ObjectId {
+        Self::permissions_head_object_id_for(self.app_id)
+    }
+
+    fn permissions_bundle_object_id(&self, bundle: &PermissionsBundleState) -> ObjectId {
+        let mut identity =
+            format!("jazz-catalogue-permissions-bundle:{}:", self.app_id.uuid()).into_bytes();
+        identity.extend_from_slice(&encode_permissions_bundle(
+            bundle.schema_hash,
+            bundle.version,
+            bundle.parent_bundle_object_id,
+            &bundle.permissions,
+        ));
+        ObjectId::from_uuid(Uuid::new_v5(&Uuid::NAMESPACE_DNS, &identity))
+    }
+
+    fn permissions_bundle_metadata(&self) -> HashMap<String, String> {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            crate::metadata::MetadataKey::Type.to_string(),
+            crate::metadata::ObjectType::CataloguePermissionsBundle.to_string(),
+        );
+        metadata.insert(
+            crate::metadata::MetadataKey::AppId.to_string(),
+            self.app_id.uuid().to_string(),
+        );
+        metadata
+    }
+
+    fn permissions_head_metadata(&self) -> HashMap<String, String> {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            crate::metadata::MetadataKey::Type.to_string(),
+            crate::metadata::ObjectType::CataloguePermissionsHead.to_string(),
+        );
+        metadata.insert(
+            crate::metadata::MetadataKey::AppId.to_string(),
+            self.app_id.uuid().to_string(),
         );
         metadata
     }
@@ -595,7 +882,7 @@ impl SchemaManager {
     /// For lenses: registered immediately, then pending schemas are checked.
     pub fn process_catalogue_update(
         &mut self,
-        _object_id: ObjectId,
+        object_id: ObjectId,
         metadata: &HashMap<String, String>,
         content: &[u8],
     ) -> Result<(), SchemaError> {
@@ -606,6 +893,15 @@ impl SchemaManager {
         match type_str.as_str() {
             t if t == crate::metadata::ObjectType::CatalogueSchema.as_str() => {
                 self.process_catalogue_schema(metadata, content)
+            }
+            t if t == crate::metadata::ObjectType::CataloguePermissionsBundle.as_str() => {
+                self.process_catalogue_permissions_bundle(object_id, metadata, content)
+            }
+            t if t == crate::metadata::ObjectType::CataloguePermissionsHead.as_str() => {
+                self.process_catalogue_permissions_head(metadata, content)
+            }
+            t if t == crate::metadata::ObjectType::CataloguePermissions.as_str() => {
+                self.process_catalogue_permissions_legacy(object_id, metadata, content)
             }
             t if t == crate::metadata::ObjectType::CatalogueLens.as_str() => {
                 self.process_catalogue_lens(metadata, content)
@@ -653,6 +949,124 @@ impl SchemaManager {
 
             // Try to activate in case we already have the lens path
             self.activate_pending_and_sync_to_query_manager();
+        }
+
+        self.try_apply_pending_permissions_head();
+
+        Ok(())
+    }
+
+    fn process_catalogue_permissions_bundle(
+        &mut self,
+        object_id: ObjectId,
+        metadata: &HashMap<String, String>,
+        content: &[u8],
+    ) -> Result<(), SchemaError> {
+        let app_id_str = metadata
+            .get(crate::metadata::MetadataKey::AppId.as_str())
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        if app_id_str != self.app_id.uuid().to_string() {
+            return Ok(());
+        }
+
+        let (schema_hash, version, parent_bundle_object_id, permissions) =
+            decode_permissions_bundle(content)
+                .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
+        self.known_permissions_bundles.insert(
+            object_id,
+            PermissionsBundleState {
+                schema_hash,
+                version,
+                parent_bundle_object_id,
+                permissions,
+            },
+        );
+
+        self.try_apply_pending_permissions_head();
+
+        Ok(())
+    }
+
+    fn process_catalogue_permissions_head(
+        &mut self,
+        metadata: &HashMap<String, String>,
+        content: &[u8],
+    ) -> Result<(), SchemaError> {
+        let app_id_str = metadata
+            .get(crate::metadata::MetadataKey::AppId.as_str())
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        if app_id_str != self.app_id.uuid().to_string() {
+            return Ok(());
+        }
+
+        let (schema_hash, version, parent_bundle_object_id, bundle_object_id) =
+            decode_permissions_head(content)
+                .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
+        let head = PermissionsHeadState {
+            schema_hash,
+            version,
+            parent_bundle_object_id,
+            bundle_object_id,
+        };
+        self.query_manager.require_authorization_schema();
+        if let Some(current_head) = self.current_permissions_head
+            && current_head.version > head.version
+        {
+            return Ok(());
+        }
+        self.current_permissions_head = Some(head);
+        if self.apply_permissions_head(head) {
+            self.pending_permissions_head = None;
+        } else {
+            self.pending_permissions_head = Some(head);
+        }
+
+        Ok(())
+    }
+
+    fn process_catalogue_permissions_legacy(
+        &mut self,
+        object_id: ObjectId,
+        metadata: &HashMap<String, String>,
+        content: &[u8],
+    ) -> Result<(), SchemaError> {
+        let app_id_str = metadata
+            .get(crate::metadata::MetadataKey::AppId.as_str())
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        if app_id_str != self.app_id.uuid().to_string() {
+            return Ok(());
+        }
+
+        let schema_hash = metadata
+            .get(crate::metadata::MetadataKey::SchemaHash.as_str())
+            .ok_or_else(|| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))
+            .and_then(|value| parse_schema_hash(value))?;
+        let permissions = decode_permissions(content)
+            .map_err(|_| SchemaError::SchemaNotFound(SchemaHash::from_bytes([0; 32])))?;
+        self.known_permissions_bundles.insert(
+            object_id,
+            PermissionsBundleState {
+                schema_hash,
+                version: 1,
+                parent_bundle_object_id: None,
+                permissions,
+            },
+        );
+        let head = PermissionsHeadState {
+            schema_hash,
+            version: 1,
+            parent_bundle_object_id: None,
+            bundle_object_id: object_id,
+        };
+        self.query_manager.require_authorization_schema();
+        self.current_permissions_head = Some(head);
+        if self.apply_permissions_head(head) {
+            self.pending_permissions_head = None;
+        } else {
+            self.pending_permissions_head = Some(head);
         }
 
         Ok(())
@@ -719,8 +1133,53 @@ impl SchemaManager {
 
         // Try to activate pending schemas that may now be reachable
         self.activate_pending_and_sync_to_query_manager();
+        self.try_apply_pending_permissions_head();
 
         Ok(())
+    }
+
+    fn schema_for_permissions_hash(&self, schema_hash: SchemaHash) -> Option<Schema> {
+        if self.context.is_initialized() && self.context.current_hash == schema_hash {
+            return Some(strip_schema_policies(&self.context.current_schema));
+        }
+
+        self.context
+            .get_schema(&schema_hash)
+            .map(strip_schema_policies)
+            .or_else(|| self.known_schemas.get(&schema_hash).cloned())
+    }
+
+    fn apply_permissions_head(&mut self, head: PermissionsHeadState) -> bool {
+        let Some(bundle) = self.known_permissions_bundles.get(&head.bundle_object_id) else {
+            return false;
+        };
+        if bundle.schema_hash != head.schema_hash {
+            return false;
+        }
+        if bundle.version != head.version {
+            return false;
+        }
+        if bundle.parent_bundle_object_id != head.parent_bundle_object_id {
+            return false;
+        }
+        let Some(schema) = self.schema_for_permissions_hash(head.schema_hash) else {
+            return false;
+        };
+
+        let authorization_schema = merge_permissions_into_schema(&schema, &bundle.permissions);
+        self.query_manager
+            .set_authorization_schema(authorization_schema);
+        true
+    }
+
+    fn try_apply_pending_permissions_head(&mut self) {
+        let Some(head) = self.pending_permissions_head else {
+            return;
+        };
+
+        if self.apply_permissions_head(head) {
+            self.pending_permissions_head = None;
+        }
     }
 
     /// Try to activate pending schemas that now have lens paths.
@@ -842,46 +1301,162 @@ impl SchemaManager {
         &mut self,
         storage: &mut H,
         table: &str,
-        values: &[Value],
+        values: HashMap<String, Value>,
     ) -> Result<InsertResult, QueryError> {
         let _span =
             tracing::debug_span!("SM::insert", table, schema_hash = %self.context.current_hash)
                 .entered();
-        self.insert_with_session(storage, table, values, None)
+        self.insert_with_write_context(storage, table, values, None)
     }
 
     /// Insert with session-based policy checking.
-    pub fn insert_with_session<H: Storage>(
+    ///
+    /// Omitted fields are filled from schema defaults or nullable nulls.
+    pub fn insert_with_write_context<H: Storage>(
         &mut self,
         storage: &mut H,
         table: &str,
-        values: &[Value],
-        session: Option<&Session>,
+        values: HashMap<String, Value>,
+        write_context: Option<&WriteContext>,
     ) -> Result<InsertResult, QueryError> {
-        let aligned_values = self.align_insert_values_to_runtime_schema(table, values);
-        self.query_manager.insert_on_branch_with_session(
+        let aligned_values = self.get_insert_values_with_defaults(table, values)?;
+        self.query_manager.insert_on_branch_with_write_context(
             storage,
             table,
             self.context.branch_name().as_str(),
             &aligned_values,
-            session,
+            write_context,
         )
     }
 
-    /// Delete a row (soft delete) from current schema's branch.
-    pub fn delete<H: Storage>(
+    pub fn insert_with_session<H: Storage>(
         &mut self,
         storage: &mut H,
         table: &str,
+        values: HashMap<String, Value>,
+        session: Option<&Session>,
+    ) -> Result<InsertResult, QueryError> {
+        let owned = session.cloned().map(WriteContext::from_session);
+        self.insert_with_write_context(storage, table, values, owned.as_ref())
+    }
+
+    /// Update a row using current-schema column names, performing copy-on-write
+    /// when the latest visible row version still lives on an older schema branch.
+    pub fn update_with_write_context<H: Storage>(
+        &mut self,
+        storage: &mut H,
         object_id: ObjectId,
+        values: &[(String, Value)],
+        write_context: Option<&WriteContext>,
+    ) -> Result<crate::commit::CommitId, QueryError> {
+        let current_branch = self.context.branch_name().as_str().to_string();
+        let branches = self.all_branch_strings();
+        let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
+            self.query_manager
+                .load_row_for_schema_update(storage, object_id, &branches)
+                .ok_or(QueryError::ObjectNotFound(object_id))?;
+
+        let table_name = TableName::new(&table);
+        let descriptor = self
+            .context
+            .current_schema
+            .get(&table_name)
+            .ok_or(QueryError::TableNotFound(table_name))?
+            .columns
+            .clone();
+
+        let mut current_values = decode_row(&descriptor, &old_current_data)
+            .map_err(|err| QueryError::EncodingError(format!("{err:?}")))?;
+
+        for (column_name, new_value) in values {
+            let Some(index) = descriptor.column_index(column_name) else {
+                return Err(QueryError::EncodingError(format!(
+                    "column '{column_name}' not found"
+                )));
+            };
+            current_values[index] = new_value.clone();
+        }
+
+        let commit_id = if source_branch == current_branch {
+            self.query_manager.update_with_write_context(
+                storage,
+                object_id,
+                &current_values,
+                write_context,
+            )?
+        } else {
+            self.query_manager
+                .write_existing_row_on_branch_with_write_context(
+                    storage,
+                    RowBranchWrite {
+                        table: &table,
+                        branch: &current_branch,
+                        id: object_id,
+                        values: &current_values,
+                        old_data_for_policy: &old_current_data,
+                        old_provenance_for_policy: &old_current_provenance,
+                    },
+                    write_context,
+                )?
+        };
+
+        Ok(commit_id)
+    }
+
+    pub fn update_with_session<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        object_id: ObjectId,
+        values: &[(String, Value)],
+        session: Option<&Session>,
+    ) -> Result<crate::commit::CommitId, QueryError> {
+        let owned = session.cloned().map(WriteContext::from_session);
+        self.update_with_write_context(storage, object_id, values, owned.as_ref())
+    }
+
+    /// Delete a row (soft delete), performing copy-on-write when the latest
+    /// visible row version still lives on an older schema branch.
+    pub fn delete<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        object_id: ObjectId,
+        write_context: Option<&WriteContext>,
     ) -> Result<DeleteHandle, QueryError> {
+        let current_branch = self.context.branch_name().as_str().to_string();
+        let branches = self.all_branch_strings();
+        let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
+            self.query_manager
+                .load_row_for_schema_update(storage, object_id, &branches)
+                .ok_or(QueryError::ObjectNotFound(object_id))?;
+
         let _span = tracing::debug_span!("SM::delete", table, %object_id, schema_hash = %self.context.current_hash).entered();
-        self.query_manager.delete_on_branch(
-            storage,
-            table,
-            self.context.branch_name().as_str(),
-            object_id,
-        )
+        if source_branch == current_branch {
+            self.query_manager
+                .delete_with_write_context(storage, object_id, write_context)
+        } else {
+            self.query_manager
+                .delete_existing_row_on_branch_with_write_context(
+                    storage,
+                    RowBranchDelete {
+                        table: &table,
+                        branch: &current_branch,
+                        id: object_id,
+                        old_data_for_policy: &old_current_data,
+                        old_provenance_for_policy: &old_current_provenance,
+                    },
+                    write_context,
+                )
+        }
+    }
+
+    pub fn delete_with_session<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        object_id: ObjectId,
+        session: Option<&Session>,
+    ) -> Result<DeleteHandle, QueryError> {
+        let owned = session.cloned().map(WriteContext::from_session);
+        self.delete(storage, object_id, owned.as_ref())
     }
 
     /// Process pending operations (drives SyncManager).
@@ -920,6 +1495,7 @@ impl SchemaManager {
     }
 }
 
+#[allow(dead_code)]
 fn reorder_values_by_column_name(
     source_descriptor: &RowDescriptor,
     target_descriptor: &RowDescriptor,
@@ -944,11 +1520,44 @@ fn reorder_values_by_column_name(
     Some(reordered_values)
 }
 
+fn merge_permissions_into_schema(
+    schema: &Schema,
+    permissions: &HashMap<TableName, TablePolicies>,
+) -> Schema {
+    schema
+        .iter()
+        .map(|(table_name, table_schema)| {
+            let mut merged = table_schema.clone();
+            if let Some(table_policies) = permissions.get(table_name) {
+                merged.policies = table_policies.clone();
+            } else {
+                merged.policies = TablePolicies::default();
+            }
+            (*table_name, merged)
+        })
+        .collect()
+}
+
+fn strip_schema_policies(schema: &Schema) -> Schema {
+    schema
+        .iter()
+        .map(|(table_name, table_schema)| {
+            let mut structural = table_schema.clone();
+            structural.policies = TablePolicies::default();
+            (*table_name, structural)
+        })
+        .collect()
+}
 fn normalize_schema(mut schema: Schema) -> Schema {
     for table_schema in schema.values_mut() {
         normalize_table_schema(table_schema);
     }
     schema
+}
+
+fn hash_len_prefixed(hasher: &mut Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
 }
 
 fn normalize_table_schema(table_schema: &mut crate::query_manager::types::TableSchema) {
@@ -973,7 +1582,11 @@ fn parse_schema_hash(hex_str: &str) -> Result<SchemaHash, SchemaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query_manager::types::{ColumnType, SchemaBuilder, TableSchema};
+    use crate::query_manager::policy::PolicyExpr;
+    use crate::query_manager::types::{
+        ColumnDescriptor, ColumnType, RowDescriptor, SchemaBuilder, SchemaHash, TableName,
+        TablePolicies, TableSchema,
+    };
 
     fn test_app_id() -> AppId {
         AppId::from_name("test-app")
@@ -998,6 +1611,21 @@ mod tests {
                     .nullable_column("email", ColumnType::Text),
             )
             .build()
+    }
+
+    fn make_schema_with_insert_defaults() -> Schema {
+        let mut schema = Schema::new();
+        schema.insert(
+            TableName::new("todos"),
+            TableSchema::new(RowDescriptor::new(vec![
+                ColumnDescriptor::new("title", ColumnType::Text),
+                ColumnDescriptor::new("done", ColumnType::Boolean).default(Value::Boolean(false)),
+                ColumnDescriptor::new("note", ColumnType::Text)
+                    .nullable()
+                    .default(Value::Text("from default".into())),
+            ])),
+        );
+        schema
     }
 
     #[test]
@@ -1241,6 +1869,96 @@ mod tests {
     }
 
     #[test]
+    fn permissions_head_waits_for_bundle_then_applies() {
+        let schema = make_schema_v2();
+        let schema_hash = SchemaHash::compute(&schema);
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let permissions = HashMap::from([(
+            TableName::new("users"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+        let bundle = PermissionsBundleState {
+            schema_hash,
+            version: 3,
+            parent_bundle_object_id: Some(ObjectId::new()),
+            permissions: permissions.clone(),
+        };
+        let bundle_object_id = manager.permissions_bundle_object_id(&bundle);
+        let head = PermissionsHeadState {
+            schema_hash,
+            version: bundle.version,
+            parent_bundle_object_id: bundle.parent_bundle_object_id,
+            bundle_object_id,
+        };
+
+        manager
+            .process_catalogue_update(
+                manager.permissions_head_object_id(),
+                &manager.permissions_head_metadata(),
+                &encode_permissions_head(
+                    schema_hash,
+                    bundle.version,
+                    bundle.parent_bundle_object_id,
+                    bundle_object_id,
+                ),
+            )
+            .expect("head should process");
+        assert_eq!(manager.current_permissions_head, Some(head));
+        assert_eq!(manager.pending_permissions_head, Some(head));
+
+        manager
+            .process_catalogue_update(
+                bundle_object_id,
+                &manager.permissions_bundle_metadata(),
+                &encode_permissions_bundle(
+                    schema_hash,
+                    bundle.version,
+                    bundle.parent_bundle_object_id,
+                    &permissions,
+                ),
+            )
+            .expect("bundle should process");
+
+        assert_eq!(manager.current_permissions_head, Some(head));
+        assert_eq!(manager.pending_permissions_head, None);
+        assert_eq!(
+            manager
+                .known_permissions_bundles
+                .get(&bundle_object_id)
+                .map(|state| state.permissions.clone()),
+            Some(permissions)
+        );
+    }
+
+    #[test]
+    fn publish_permissions_bundle_rejects_stale_parent() {
+        let schema = make_schema_v2();
+        let schema_hash = SchemaHash::compute(&schema);
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let mut storage = crate::storage::MemoryStorage::new();
+        let permissions = HashMap::from([(
+            TableName::new("users"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]);
+
+        manager
+            .publish_permissions_bundle(&mut storage, schema_hash, permissions.clone(), None)
+            .expect("initial permissions publish should succeed");
+
+        let stale =
+            manager.publish_permissions_bundle(&mut storage, schema_hash, permissions, None);
+        assert!(matches!(
+            stale,
+            Err(SchemaError::StalePermissionsParent {
+                expected: None,
+                current: Some(_),
+            })
+        ));
+    }
+
+    #[test]
     fn schema_manager_translate_column() {
         use crate::schema_manager::lens::{LensOp, LensTransform};
 
@@ -1316,9 +2034,13 @@ mod tests {
             .unwrap()
             .columns
             .clone();
-        let values = vec![id_val.clone(), name.clone(), email.clone()];
+        let values = HashMap::from([
+            ("id".to_string(), id_val.clone()),
+            ("name".to_string(), name.clone()),
+            ("email".to_string(), email.clone()),
+        ]);
 
-        let _handle = manager.insert(&mut storage, "users", &values).unwrap();
+        let _handle = manager.insert(&mut storage, "users", values).unwrap();
         manager.process(&mut storage);
 
         // Query via subscribe/process/unsubscribe pattern
@@ -1332,5 +2054,132 @@ mod tests {
         assert_eq!(results.len(), 1);
         let id_idx = descriptor.column_index("id").unwrap();
         assert_eq!(results[0].1[id_idx], id_val);
+    }
+
+    #[test]
+    fn schema_manager_insert_materializes_schema_defaults() {
+        use crate::storage::MemoryStorage;
+
+        let schema = make_schema_with_insert_defaults();
+        let mut storage = MemoryStorage::new();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        let handle = manager
+            .insert(
+                &mut storage,
+                "todos",
+                HashMap::from([("title".to_string(), Value::Text("ship default".into()))]),
+            )
+            .unwrap();
+
+        manager.process(&mut storage);
+        let stored = manager
+            .query_manager_mut()
+            .get_row(handle.row_id)
+            .expect("inserted row should be readable")
+            .1;
+
+        let descriptor = &manager.current_schema()[&TableName::new("todos")].columns;
+        let done_idx = descriptor.column_index("done").unwrap();
+        let note_idx = descriptor.column_index("note").unwrap();
+        let title_idx = descriptor.column_index("title").unwrap();
+
+        assert_eq!(stored[title_idx], Value::Text("ship default".into()));
+        assert_eq!(stored[done_idx], Value::Boolean(false));
+        assert_eq!(stored[note_idx], Value::Text("from default".into()));
+    }
+
+    #[test]
+    fn schema_manager_insert_explicit_null_bypasses_default_for_nullable_column() {
+        use crate::storage::MemoryStorage;
+
+        let schema = make_schema_with_insert_defaults();
+        let mut storage = MemoryStorage::new();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        let handle = manager
+            .insert(
+                &mut storage,
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text("keep null".into())),
+                    ("note".to_string(), Value::Null),
+                ]),
+            )
+            .unwrap();
+
+        let descriptor = &manager.current_schema()[&TableName::new("todos")].columns;
+        let note_idx = descriptor.column_index("note").unwrap();
+        let done_idx = descriptor.column_index("done").unwrap();
+
+        assert_eq!(handle.row_values[note_idx], Value::Null);
+        assert_eq!(handle.row_values[done_idx], Value::Boolean(false));
+    }
+
+    #[test]
+    fn schema_manager_insert_missing_required_non_defaulted_field_errors() {
+        use crate::storage::MemoryStorage;
+
+        let schema = make_schema_with_insert_defaults();
+        let mut storage = MemoryStorage::new();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        let err = manager
+            .insert(&mut storage, "todos", HashMap::new())
+            .unwrap_err();
+        assert!(
+            matches!(err, QueryError::EncodingError(ref msg) if msg.contains("missing required field `title`")),
+            "expected missing required field error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn schema_manager_insert_explicit_null_for_required_column_errors() {
+        use crate::storage::MemoryStorage;
+
+        let schema = make_schema_with_insert_defaults();
+        let mut storage = MemoryStorage::new();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        let err = manager
+            .insert(
+                &mut storage,
+                "todos",
+                HashMap::from([("title".to_string(), Value::Null)]),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, QueryError::EncodingError(ref msg) if msg.contains("cannot set required field `title` to null")),
+            "expected nullability error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn schema_manager_insert_unknown_column_errors() {
+        use crate::storage::MemoryStorage;
+
+        let schema = make_schema_with_insert_defaults();
+        let mut storage = MemoryStorage::new();
+        let mut manager =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+
+        let err = manager
+            .insert(
+                &mut storage,
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text("first".into())),
+                    ("bogus".to_string(), Value::Text("second".into())),
+                ]),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, QueryError::EncodingError(ref msg) if msg.contains("unknown column `bogus`")),
+            "expected unknown column error, got {err:?}"
+        );
     }
 }

@@ -21,6 +21,8 @@ struct AppSummaryResponse {
     app_id: String,
     app_name: String,
     jwks_endpoint: String,
+    jwks_cache_ttl_secs: u64,
+    jwks_max_stale_secs: u64,
     allow_anonymous: bool,
     allow_demo: bool,
     status: String,
@@ -31,6 +33,8 @@ struct CreateAppResponse {
     app_id: String,
     app_name: String,
     jwks_endpoint: String,
+    jwks_cache_ttl_secs: u64,
+    jwks_max_stale_secs: u64,
     backend_secret: String,
     admin_secret: String,
     status: String,
@@ -39,6 +43,8 @@ struct CreateAppResponse {
 #[derive(Debug, Deserialize)]
 struct UpdateAppResponse {
     app_id: String,
+    jwks_cache_ttl_secs: u64,
+    jwks_max_stale_secs: u64,
     status: String,
     backend_secret: Option<String>,
     admin_secret: Option<String>,
@@ -317,6 +323,8 @@ async fn backend_session_auth_works_and_secret_rotation_is_enforced() {
 
     assert_eq!(created.app_name, "lifecycle-app");
     assert_eq!(created.jwks_endpoint, "http://example.invalid/jwks");
+    assert_eq!(created.jwks_cache_ttl_secs, 300);
+    assert_eq!(created.jwks_max_stale_secs, 300);
     assert_eq!(created.backend_secret, "backend-v1");
     assert_eq!(created.admin_secret, "admin-v1");
     assert_eq!(created.status, "active");
@@ -332,6 +340,8 @@ async fn backend_session_auth_works_and_secret_rotation_is_enforced() {
     let summary: AppSummaryResponse = fetched.json().await.expect("summary json");
     assert_eq!(summary.app_id, created.app_id);
     assert_eq!(summary.app_name, "lifecycle-app");
+    assert_eq!(summary.jwks_cache_ttl_secs, 300);
+    assert_eq!(summary.jwks_max_stale_secs, 300);
     assert_eq!(summary.status, "active");
 
     let sync_ok = server
@@ -535,6 +545,8 @@ async fn management_api_create_list_and_status_update_work() {
         .json(&json!({
             "app_name": "managed-app",
             "jwks_endpoint": "http://example.invalid/jwks",
+            "jwks_cache_ttl_secs": 90,
+            "jwks_max_stale_secs": 30,
             "allow_anonymous": false,
             "allow_demo": true,
             "backend_secret": "managed-backend-secret",
@@ -549,6 +561,8 @@ async fn management_api_create_list_and_status_update_work() {
         .await
         .expect("parse manage create app response");
     assert_eq!(created.app_name, "managed-app");
+    assert_eq!(created.jwks_cache_ttl_secs, 90);
+    assert_eq!(created.jwks_max_stale_secs, 30);
     assert_eq!(created.status, "active");
 
     let reveal_response = server
@@ -584,7 +598,9 @@ async fn management_api_create_list_and_status_update_work() {
         .json(&json!({
             "allow_anonymous": true,
             "allow_demo": false,
-            "jwks_endpoint": ""
+            "jwks_endpoint": "",
+            "jwks_cache_ttl_secs": 10,
+            "jwks_max_stale_secs": 5
         }))
         .send()
         .await
@@ -595,6 +611,8 @@ async fn management_api_create_list_and_status_update_work() {
         .await
         .expect("parse auth update response");
     assert_eq!(auth_updated.app_id, created.app_id);
+    assert_eq!(auth_updated.jwks_cache_ttl_secs, 10);
+    assert_eq!(auth_updated.jwks_max_stale_secs, 5);
     assert_eq!(auth_updated.status, "active");
     assert!(auth_updated.backend_secret.is_none());
     assert!(auth_updated.admin_secret.is_none());
@@ -613,6 +631,8 @@ async fn management_api_create_list_and_status_update_work() {
         .find(|app| app.app_id == created.app_id)
         .expect("created app should exist in management list");
     assert_eq!(listed_created.jwks_endpoint, "");
+    assert_eq!(listed_created.jwks_cache_ttl_secs, 10);
+    assert_eq!(listed_created.jwks_max_stale_secs, 5);
     assert!(listed_created.allow_anonymous);
     assert!(!listed_created.allow_demo);
     assert_eq!(listed_created.status, "active");

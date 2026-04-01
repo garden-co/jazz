@@ -15,10 +15,23 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
 
     /// Add a server connection.
     pub fn add_server(&mut self, server_id: ServerId) {
+        self.add_server_with_catalogue_state_hash(server_id, None);
+    }
+
+    /// Add a server connection, optionally comparing the upstream catalogue
+    /// digest first so unchanged catalogue objects are not replayed.
+    pub fn add_server_with_catalogue_state_hash(
+        &mut self,
+        server_id: ServerId,
+        remote_catalogue_state_hash: Option<&str>,
+    ) {
         info!(%server_id, "adding server");
+        let local_catalogue_state_hash = self.schema_manager.catalogue_state_hash();
+        let skip_catalogue_sync = remote_catalogue_state_hash
+            .is_some_and(|remote_hash| remote_hash == local_catalogue_state_hash);
         self.schema_manager
             .query_manager_mut()
-            .add_server(server_id);
+            .add_server_with_catalogue_match(server_id, skip_catalogue_sync);
         self.immediate_tick();
     }
 
@@ -77,6 +90,19 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .set_client_role(client_id, ClientRole::Admin);
     }
 
+    /// Ensure a client exists and is marked as Admin without resetting state.
+    pub fn ensure_client_as_admin(&mut self, client_id: ClientId) {
+        use crate::sync_manager::ClientRole;
+        let sm = self.schema_manager.query_manager_mut().sync_manager_mut();
+        if sm.get_client(client_id).is_some() {
+            sm.set_client_role(client_id, ClientRole::Admin);
+        } else {
+            sm.add_client(client_id);
+            sm.set_client_role(client_id, ClientRole::Admin);
+            self.immediate_tick();
+        }
+    }
+
     /// Promote a client to Backend role (row access, no catalogue writes).
     pub fn set_client_backend(&mut self, client_id: ClientId) {
         use crate::sync_manager::ClientRole;
@@ -84,6 +110,19 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .query_manager_mut()
             .sync_manager_mut()
             .set_client_role(client_id, ClientRole::Backend);
+    }
+
+    /// Ensure a client exists and is marked as Backend without resetting state.
+    pub fn ensure_client_as_backend(&mut self, client_id: ClientId) {
+        use crate::sync_manager::ClientRole;
+        let sm = self.schema_manager.query_manager_mut().sync_manager_mut();
+        if sm.get_client(client_id).is_some() {
+            sm.set_client_role(client_id, ClientRole::Backend);
+        } else {
+            sm.add_client(client_id);
+            sm.set_client_role(client_id, ClientRole::Backend);
+            self.immediate_tick();
+        }
     }
 
     /// Set a client's role.

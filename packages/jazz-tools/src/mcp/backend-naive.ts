@@ -41,10 +41,13 @@ function parseTxt(content: string): ParsedPage[] {
 
   for (const chunk of chunks) {
     const lines = chunk.split("\n");
-    const slugMatch = lines[0].match(/^===PAGE:(.+)===$/);
+    const firstLine = lines[0];
+    if (!firstLine) continue;
+    const slugMatch = firstLine.match(/^===PAGE:(.+)===$/);
     if (!slugMatch) continue;
-
     const slug = slugMatch[1];
+    if (!slug) continue;
+
     const title = lines[1]?.replace(/^TITLE:/, "").trim() ?? slug;
     const description = lines[2]?.replace(/^DESCRIPTION:/, "").trim() ?? "";
     // lines[3] is blank, body starts at lines[4]

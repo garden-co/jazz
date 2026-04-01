@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::commit::CommitId;
+use crate::metadata::SYSTEM_PRINCIPAL_ID;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::ObjectManager;
 use crate::query_manager::query::Query;
@@ -32,6 +33,8 @@ pub use types::*;
 #[derive(Clone)]
 pub struct SyncManager {
     pub object_manager: ObjectManager,
+    pub(super) catalogue_objects: HashSet<ObjectId>,
+    pub(super) allow_unprivileged_schema_catalogue_writes: bool,
 
     pub(super) servers: HashMap<ServerId, ServerState>,
     pub(super) clients: HashMap<ClientId, ClientState>,
@@ -65,6 +68,11 @@ impl std::fmt::Debug for SyncManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SyncManager")
             .field("object_manager", &self.object_manager)
+            .field("catalogue_objects", &self.catalogue_objects)
+            .field(
+                "allow_unprivileged_schema_catalogue_writes",
+                &self.allow_unprivileged_schema_catalogue_writes,
+            )
             .field("servers", &self.servers)
             .field("clients", &self.clients)
             .field("inbox", &self.inbox)
@@ -101,8 +109,18 @@ impl SyncManager {
 
     /// Create with an existing ObjectManager.
     pub fn with_object_manager(object_manager: ObjectManager) -> Self {
+        let catalogue_objects = object_manager
+            .objects
+            .iter()
+            .filter_map(|(object_id, object)| {
+                Self::is_catalogue_metadata(&object.metadata).then_some(*object_id)
+            })
+            .collect();
+
         Self {
             object_manager,
+            catalogue_objects,
+            allow_unprivileged_schema_catalogue_writes: false,
             servers: HashMap::new(),
             clients: HashMap::new(),
             inbox: Vec::new(),
@@ -122,6 +140,13 @@ impl SyncManager {
     /// Add a durability identity for this node (enables durability notifications).
     pub fn with_durability_tier(mut self, tier: DurabilityTier) -> Self {
         self.my_tiers.insert(tier);
+        self
+    }
+
+    /// Allow authenticated user clients to publish structural schema catalogue
+    /// objects directly. Intended for development servers only.
+    pub fn with_unprivileged_schema_catalogue_writes(mut self) -> Self {
+        self.allow_unprivileged_schema_catalogue_writes = true;
         self
     }
 
@@ -159,7 +184,20 @@ impl SyncManager {
 
     /// Add a server connection. Queues all existing objects to sync.
     pub fn add_server(&mut self, server_id: ServerId) {
+        self.add_server_with_catalogue_match(server_id, false);
+    }
+
+    /// Add a server connection, optionally skipping catalogue replay when both
+    /// sides already advertise the same catalogue state.
+    pub fn add_server_with_catalogue_match(
+        &mut self,
+        server_id: ServerId,
+        skip_catalogue_sync: bool,
+    ) {
         self.servers.insert(server_id, ServerState::default());
+        if skip_catalogue_sync {
+            self.mark_catalogue_sent_for_server(server_id);
+        }
         self.queue_full_sync_to_server(server_id);
     }
 
@@ -171,6 +209,7 @@ impl SyncManager {
     /// Add a client connection.
     pub fn add_client(&mut self, client_id: ClientId) {
         self.clients.insert(client_id, ClientState::default());
+        self.queue_catalogue_sync_to_client(client_id);
     }
 
     /// Remove a client connection.
@@ -256,6 +295,8 @@ impl SyncManager {
         metadata: HashMap<String, String>,
         content: Vec<u8>,
     ) {
+        self.track_catalogue_object(object_id, &metadata);
+
         // Create the object if it doesn't exist
         if self.object_manager.get(object_id).is_none() {
             self.object_manager
@@ -269,7 +310,7 @@ impl SyncManager {
             "main",
             Vec::new(), // No parents - root commit
             content,
-            ObjectId::from_uuid(uuid::Uuid::nil()), // System author
+            SYSTEM_PRINCIPAL_ID.to_string(),
             None,
         );
     }
@@ -449,6 +490,14 @@ impl SyncManager {
                 },
             });
         }
+    }
+
+    /// Emit a schema warning to a client.
+    pub fn emit_schema_warning(&mut self, client_id: ClientId, warning: SchemaWarning) {
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(client_id),
+            payload: SyncPayload::SchemaWarning(warning),
+        });
     }
 
     /// Emit a query subscription rejection error to a client.

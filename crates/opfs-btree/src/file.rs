@@ -8,6 +8,8 @@ use serde::Serialize;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::wasm_bindgen;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
 
 pub trait SyncFile {
@@ -286,25 +288,51 @@ impl OpfsFile {
                 .dyn_into()
                 .map_err(|_| BTreeError::Io("failed to cast OPFS file handle".to_string()))?;
 
-        let handle: web_sys::FileSystemSyncAccessHandle =
-            JsFuture::from(file.create_sync_access_handle())
-                .await
-                .map_err(map_js_error)?
-                .dyn_into()
-                .map_err(|_| {
-                    BTreeError::Io("failed to cast OPFS sync access handle".to_string())
-                })?;
+        // Retry with exponential backoff: on rapid page refresh the previous
+        // worker may still hold the exclusive SyncAccessHandle.  The browser
+        // releases it once the old worker is GC'd, typically within a few
+        // hundred milliseconds.
+        // Only retries on DOMExceptions (handle conflicts); other errors fail immediately.
+        const MAX_RETRIES: u32 = 12;
+        const BASE_DELAY_MS: u32 = 50;
 
-        let read_options = web_sys::FileSystemReadWriteOptions::new();
-        let write_options = web_sys::FileSystemReadWriteOptions::new();
+        let mut last_err = None;
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                let delay = BASE_DELAY_MS * (1 << (attempt - 1));
+                sleep_ms(delay).await;
+            }
+            match JsFuture::from(file.create_sync_access_handle()).await {
+                Ok(val) => {
+                    let handle: web_sys::FileSystemSyncAccessHandle =
+                        val.dyn_into().map_err(|_| {
+                            BTreeError::Io("failed to cast OPFS sync access handle".to_string())
+                        })?;
+                    if attempt > 0 {
+                        tracing::info!(attempt, "acquired OPFS access handle after retry");
+                    }
 
-        Ok(Self {
-            inner: Rc::new(OpfsFileInner {
-                handle,
-                read_options,
-                write_options,
-            }),
-        })
+                    let read_options = web_sys::FileSystemReadWriteOptions::new();
+                    let write_options = web_sys::FileSystemReadWriteOptions::new();
+                    return Ok(Self {
+                        inner: Rc::new(OpfsFileInner {
+                            handle,
+                            read_options,
+                            write_options,
+                        }),
+                    });
+                }
+                Err(e) => {
+                    if !is_retryable_handle_conflict(&e) {
+                        return Err(map_js_error(e));
+                    }
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        // All retries exhausted — return the last error.
+        Err(map_js_error(last_err.unwrap()))
     }
 
     pub async fn destroy(namespace: &str) -> Result<(), BTreeError> {
@@ -420,6 +448,28 @@ fn truncate_handle(
         .call1(handle, &wasm_bindgen::JsValue::from_f64(len as f64))
         .map_err(map_js_error)?;
     Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+unsafe extern "C" {
+    #[wasm_bindgen(js_name = "setTimeout")]
+    fn set_timeout(handler: &js_sys::Function, timeout: i32);
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn sleep_ms(ms: u32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        set_timeout(&resolve, i32::try_from(ms).unwrap_or(i32::MAX));
+    });
+    let _ = JsFuture::from(promise).await;
+}
+
+/// Returns true if the JS error is a `DOMException`, which indicates a
+/// retryable handle conflict. Plain `Error`/`TypeError`/etc. fail immediately.
+#[cfg(target_arch = "wasm32")]
+fn is_retryable_handle_conflict(value: &wasm_bindgen::JsValue) -> bool {
+    value.is_instance_of::<web_sys::DomException>()
 }
 
 #[cfg(target_arch = "wasm32")]

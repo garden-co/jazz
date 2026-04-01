@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -23,6 +24,13 @@ const ADMIN_SECRET: &str = "integration-admin-secret";
 const BACKEND_SECRET: &str = "integration-backend-secret";
 const JWT_KID: &str = "integration-kid";
 const JWT_SECRET: &str = "integration-jwt-secret";
+
+fn todo_values(title: &str, completed: bool) -> HashMap<String, Value> {
+    HashMap::from([
+        ("title".to_string(), Value::Text(title.to_string())),
+        ("completed".to_string(), Value::Boolean(completed)),
+    ])
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct JwtClaims {
@@ -254,6 +262,7 @@ fn make_context(
         schema: test_schema(),
         server_url: format!("{server_url}/apps/{app_id}"),
         data_dir,
+        storage: jazz_tools::ClientStorage::Fjall,
         jwt_token: Some(jwt_token),
         backend_secret: Some(BACKEND_SECRET.to_string()),
         admin_secret: Some(ADMIN_SECRET.to_string()),
@@ -294,20 +303,30 @@ async fn wait_for_todos_count(
 async fn wait_for_edge_query_ready(client: &JazzClient, timeout: Duration) {
     let query = QueryBuilder::new("todos").build();
     let deadline = tokio::time::Instant::now() + timeout;
+    let mut last_error: Option<String> = None;
 
     while tokio::time::Instant::now() < deadline {
-        if let Ok(Ok(_)) = tokio::time::timeout(
+        match tokio::time::timeout(
             Duration::from_secs(8),
             client.query(query.clone(), Some(DurabilityTier::EdgeServer)),
         )
         .await
         {
-            return;
+            Ok(Ok(_)) => return,
+            Ok(Err(error)) => {
+                last_error = Some(error.to_string());
+            }
+            Err(_) => {
+                last_error = Some("query timed out".to_string());
+            }
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    panic!("timed out waiting for EdgeServer query readiness");
+    panic!(
+        "timed out waiting for EdgeServer query readiness, last_error={}",
+        last_error.unwrap_or_else(|| "<none>".to_string())
+    );
 }
 
 async fn wait_for_todos_count_on_disk(
@@ -439,13 +458,7 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
     wait_for_edge_query_ready(&client_b, Duration::from_secs(30)).await;
 
     let (row_id, _row_values) = client_a
-        .create(
-            "todos",
-            vec![
-                Value::Text("from-client-a".to_string()),
-                Value::Boolean(false),
-            ],
-        )
+        .create("todos", todo_values("from-client-a", false))
         .await
         .expect("client a create todo");
 
@@ -509,13 +522,7 @@ async fn jazz_tools_sender_side_objectupdated_delay_should_not_return_stale_sett
     wait_for_edge_query_ready(&client_a, Duration::from_secs(30)).await;
 
     client_a
-        .create(
-            "todos",
-            vec![
-                Value::Text("ordering-precision-seed".to_string()),
-                Value::Boolean(false),
-            ],
-        )
+        .create("todos", todo_values("ordering-precision-seed", false))
         .await
         .expect("client a create todo");
 
@@ -604,13 +611,7 @@ async fn jazz_tools_client_resyncs_after_server_restart_with_persisted_app_data(
         wait_for_edge_query_ready(&writer, Duration::from_secs(30)).await;
 
         writer
-            .create(
-                "todos",
-                vec![
-                    Value::Text("persisted-on-server".to_string()),
-                    Value::Boolean(false),
-                ],
-            )
+            .create("todos", todo_values("persisted-on-server", false))
             .await
             .expect("writer create");
 
@@ -670,13 +671,7 @@ async fn jazz_tools_existing_client_keeps_working_after_server_restart_without_c
     wait_for_edge_query_ready(&client, Duration::from_secs(30)).await;
 
     client
-        .create(
-            "todos",
-            vec![
-                Value::Text("before-restart".to_string()),
-                Value::Boolean(false),
-            ],
-        )
+        .create("todos", todo_values("before-restart", false))
         .await
         .expect("create before restart");
 
@@ -720,13 +715,7 @@ async fn jazz_tools_existing_client_keeps_working_after_server_restart_without_c
     );
 
     client
-        .create(
-            "todos",
-            vec![
-                Value::Text("after-restart".to_string()),
-                Value::Boolean(false),
-            ],
-        )
+        .create("todos", todo_values("after-restart", false))
         .await
         .expect("create after restart");
 
@@ -789,10 +778,7 @@ async fn jazz_tools_where_subscription_drops_row_when_remote_client_updates_it_o
 
     // Insert via client-a so it's visible in its own subscription immediately.
     let (row_id, _row_values) = client_a
-        .create(
-            "todos",
-            vec![Value::Text("buy milk".to_string()), Value::Boolean(false)],
-        )
+        .create("todos", todo_values("buy milk", false))
         .await
         .expect("client a create todo");
 

@@ -38,6 +38,7 @@ cli = [
   "dep:reqwest",
 ]
 test-utils = ["cli", "client"]
+test = ["test-utils"]
 otel = [
   "cli",
   "dep:opentelemetry",

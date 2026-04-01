@@ -106,9 +106,25 @@ impl MagicColumnsNode {
                 for kind in &requests.kinds {
                     descriptor.columns.push(ColumnDescriptor {
                         name: ColumnName::new(kind.column_name()),
-                        column_type: ColumnType::Boolean,
-                        nullable: true,
+                        column_type: match kind {
+                            MagicColumnKind::CanRead
+                            | MagicColumnKind::CanEdit
+                            | MagicColumnKind::CanDelete => ColumnType::Boolean,
+                            MagicColumnKind::CreatedBy | MagicColumnKind::UpdatedBy => {
+                                ColumnType::Text
+                            }
+                            MagicColumnKind::CreatedAt | MagicColumnKind::UpdatedAt => {
+                                ColumnType::Timestamp
+                            }
+                        },
+                        nullable: matches!(
+                            kind,
+                            MagicColumnKind::CanRead
+                                | MagicColumnKind::CanEdit
+                                | MagicColumnKind::CanDelete
+                        ),
                         references: None,
+                        default: None,
                     });
                 }
 
@@ -116,18 +132,33 @@ impl MagicColumnsNode {
                     && let Some(table_schema) = schema.get(&requests.table_name)
                 {
                     for kind in &requests.kinds {
-                        let policy = match kind {
-                            MagicColumnKind::CanRead => table_schema.policies.select.using.as_ref(),
-                            MagicColumnKind::CanEdit => table_schema.policies.update.using.as_ref(),
-                            MagicColumnKind::CanDelete => {
-                                table_schema.policies.effective_delete_using()
+                        if matches!(
+                            kind,
+                            MagicColumnKind::CanRead
+                                | MagicColumnKind::CanEdit
+                                | MagicColumnKind::CanDelete
+                        ) {
+                            let policy = match kind {
+                                MagicColumnKind::CanRead => {
+                                    table_schema.policies.select.using.as_ref()
+                                }
+                                MagicColumnKind::CanEdit => {
+                                    table_schema.policies.update.using.as_ref()
+                                }
+                                MagicColumnKind::CanDelete => {
+                                    table_schema.policies.effective_delete_using()
+                                }
+                                MagicColumnKind::CreatedBy
+                                | MagicColumnKind::CreatedAt
+                                | MagicColumnKind::UpdatedBy
+                                | MagicColumnKind::UpdatedAt => None,
+                            };
+                            if let Some(policy) = policy {
+                                dependency_tables.extend(collect_policy_dependency_tables(
+                                    policy,
+                                    &table_schema.columns,
+                                ));
                             }
-                        };
-                        if let Some(policy) = policy {
-                            dependency_tables.extend(collect_policy_dependency_tables(
-                                policy,
-                                &table_schema.columns,
-                            ));
                         }
                     }
                 }
@@ -323,6 +354,7 @@ impl MagicColumnsNode {
                 id: row.id,
                 content: new_content,
                 commit_id: row.commit_id,
+                row_provenance: row.provenance,
             };
         }
 
@@ -338,29 +370,41 @@ impl MagicColumnsNode {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
     ) -> Value {
-        let Some(session) = self.session.as_ref() else {
-            return Value::Null;
-        };
+        match kind {
+            MagicColumnKind::CreatedBy => Value::Text(row.provenance.created_by.clone()),
+            MagicColumnKind::CreatedAt => Value::Timestamp(row.provenance.created_at),
+            MagicColumnKind::UpdatedBy => Value::Text(row.provenance.updated_by.clone()),
+            MagicColumnKind::UpdatedAt => Value::Timestamp(row.provenance.updated_at),
+            MagicColumnKind::CanRead | MagicColumnKind::CanEdit | MagicColumnKind::CanDelete => {
+                let Some(session) = self.session.as_ref() else {
+                    return Value::Null;
+                };
 
-        let evaluator = PolicyContextEvaluator::new(&self.schema, session, &self.branch);
-        let operation = match kind {
-            MagicColumnKind::CanRead => Operation::Select,
-            MagicColumnKind::CanEdit => Operation::Update,
-            MagicColumnKind::CanDelete => Operation::Delete,
-        };
-        let mut visited = HashSet::new();
-        let allowed = evaluator.evaluate_row_access(
-            operation,
-            row,
-            descriptor,
-            table_name.as_str(),
-            None,
-            io,
-            row_loader,
-            0,
-            &mut visited,
-        );
-        Value::Boolean(allowed)
+                let evaluator = PolicyContextEvaluator::new(&self.schema, session, &self.branch);
+                let operation = match kind {
+                    MagicColumnKind::CanRead => Operation::Select,
+                    MagicColumnKind::CanEdit => Operation::Update,
+                    MagicColumnKind::CanDelete => Operation::Delete,
+                    MagicColumnKind::CreatedBy
+                    | MagicColumnKind::CreatedAt
+                    | MagicColumnKind::UpdatedBy
+                    | MagicColumnKind::UpdatedAt => unreachable!(),
+                };
+                let mut visited = HashSet::new();
+                let allowed = evaluator.evaluate_row_access(
+                    operation,
+                    row,
+                    descriptor,
+                    table_name.as_str(),
+                    None,
+                    io,
+                    row_loader,
+                    0,
+                    &mut visited,
+                );
+                Value::Boolean(allowed)
+            }
+        }
     }
 }
 

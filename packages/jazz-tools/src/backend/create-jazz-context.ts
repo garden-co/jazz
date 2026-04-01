@@ -1,10 +1,12 @@
 import { NapiRuntime } from "jazz-napi";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import type { CompiledPermissions } from "../permissions/index.js";
 import { JazzClient, sessionFromRequest, type RequestLike } from "../runtime/client.js";
 import type { AppContext, Session } from "../runtime/context.js";
 import { createDbFromClient, type Db, type DbConfig } from "../runtime/db.js";
 import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
+import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 
 export interface BackendSchemaSource {
   wasmSchema: WasmSchema;
@@ -26,22 +28,29 @@ export type BackendDriver =
       type: "memory";
     };
 
-export interface BackendContextConfig extends Omit<
-  AppContext,
-  "schema" | "driver" | "clientId" | "tier"
-> {
+type BackendContextSchemaConfig =
+  | {
+      /** Default app/schema source for the context. */
+      app: BackendSchemaSource;
+      /** Compiled row-level permissions paired with the app schema. */
+      permissions: CompiledPermissions;
+    }
+  | {
+      app?: undefined;
+      permissions?: undefined;
+    };
+
+export type BackendContextConfig = Omit<AppContext, "schema" | "driver" | "clientId" | "tier"> & {
   /** Server runtime driver mode and storage location. */
   driver: BackendDriver;
-  /** Optional default schema source (typically generated `app` export). */
-  app?: BackendSchemaSource;
   /** Optional node durability tier identity. */
   tier?: "worker" | "edge" | "global";
-}
+} & BackendContextSchemaConfig;
 
-interface ResolvedBackendContextConfig extends BackendContextConfig {
+type ResolvedBackendContextConfig = BackendContextConfig & {
   localAuthMode?: "anonymous" | "demo";
   localAuthToken?: string;
-}
+};
 
 function assertValidBackendConfig(config: BackendContextConfig): void {
   if (config.driver.type === "memory" && !config.serverUrl) {
@@ -86,7 +95,8 @@ function resolveSchema(input: BackendSchemaInput): WasmSchema {
  * Server-side Jazz context with lazy runtime setup.
  *
  * The first call to `db()`, `asBackend()`, `forRequest()`, or `forSession()`
- * initializes a NAPI runtime and backing client using the provided app/schema source.
+ * initializes a NAPI runtime and backing client using the provided app/schema
+ * source plus any compiled permissions.
  * Later calls reuse the same initialized runtime.
  */
 export class JazzContext {
@@ -109,7 +119,10 @@ export class JazzContext {
         "No schema source provided. Pass `app` to createJazzContext or provide a schema source when calling db()/asBackend()/forRequest()/forSession().",
       );
     }
-    return resolveSchema(selected);
+    const schema = resolveSchema(selected);
+    return this.config.permissions
+      ? mergePermissionsIntoWasmSchema(schema, this.config.permissions)
+      : schema;
   }
 
   private createClient(schema: WasmSchema): JazzClient {
@@ -171,8 +184,8 @@ export class JazzContext {
     };
   }
 
-  private wrapDb(client: JazzClient, session?: Session): Db {
-    return createDbFromClient(this.buildDbConfig(), client, session);
+  private wrapDb(client: JazzClient, session?: Session, attribution?: string): Db {
+    return createDbFromClient(this.buildDbConfig(), client, session, attribution);
   }
 
   /**
@@ -196,7 +209,7 @@ export class JazzContext {
   }
 
   /**
-   * Get a high-level `Db` using the context's configured auth/runtime identity.
+   * Get the shared high-level `Db` for this context with no per-request session attached.
    */
   db(source?: BackendSchemaInput): Db {
     return this.wrapDb(this.getClient(source));
@@ -207,6 +220,16 @@ export class JazzContext {
    */
   asBackend(source?: BackendSchemaInput): Db {
     return this.wrapDb(this.getClient(source).asBackend());
+  }
+
+  /**
+   * Build a backend-scoped `Db` that stamps write provenance as `principalId`
+   * without evaluating permissions as that user.
+   */
+  withAttribution(principalId: string, source?: BackendSchemaInput): Db {
+    const client = this.getClient(source);
+    this.enableBackendSyncIfConfigured(client);
+    return this.wrapDb(client, undefined, principalId);
   }
 
   /**
@@ -233,6 +256,24 @@ export class JazzContext {
     const session = sessionFromRequest(request);
     this.enableBackendSyncIfConfigured(client);
     return this.wrapDb(client, session);
+  }
+
+  /**
+   * Build a backend-scoped `Db` that stamps write provenance using the
+   * principal in `session` without switching permission evaluation to it.
+   */
+  withAttributionForSession(session: Session, source?: BackendSchemaInput): Db {
+    const client = this.getClient(source);
+    this.enableBackendSyncIfConfigured(client);
+    return this.wrapDb(client, undefined, session.user_id);
+  }
+
+  /**
+   * Build a backend-scoped `Db` that stamps write provenance using the
+   * authenticated principal from `request` without switching permissions.
+   */
+  withAttributionForRequest(request: RequestLike, source?: BackendSchemaInput): Db {
+    return this.withAttributionForSession(sessionFromRequest(request), source);
   }
 
   /**

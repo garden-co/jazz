@@ -14,6 +14,7 @@ declare module "jazz-wasm" {
         isCatalogue: boolean,
       ];
   type SyncOutboxCallback = (...args: SyncOutboxCallbackArgs) => void;
+  type InsertValues = Record<string, unknown>;
 
   export default function init(input?: unknown): Promise<void>;
   export function initSync(input?: unknown): void;
@@ -29,20 +30,20 @@ declare module "jazz-wasm" {
     );
     schedule?: (task: () => void) => void;
 
-    insert(table: string, values: unknown): { id: string; values: any[] };
+    insert(table: string, values: InsertValues): { id: string; values: any[] };
     insertWithSession(
       table: string,
-      values: unknown,
+      values: InsertValues,
       sessionJson?: string | null,
     ): { id: string; values: any[] };
     insertDurable(
       table: string,
-      values: unknown,
+      values: InsertValues,
       tier: string,
     ): Promise<{ id: string; values: any[] }>;
     insertDurableWithSession(
       table: string,
-      values: unknown,
+      values: InsertValues,
       sessionJson: string | null | undefined,
       tier: string,
     ): Promise<{ id: string; values: any[] }>;
@@ -86,7 +87,7 @@ declare module "jazz-wasm" {
     unsubscribe(handle: number): void;
     onSyncMessageReceived(messageJson: string): void;
     onSyncMessageToSend(callback: SyncOutboxCallback): void;
-    addServer(): void;
+    addServer(serverCatalogueStateHash?: string | null): void;
     removeServer(): void;
     addClient(): string;
     getSchema(): unknown;

@@ -5,16 +5,28 @@
 //! - Fan-out: time to notify 100 subscriptions
 //! - Cold start: time to receive initial result set
 
+#![allow(clippy::single_element_loop)]
+
 mod common;
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use common::{create_runtime, create_session, current_timestamp, setup_data};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use jazz_tools::query_manager::query::{Query, QueryBuilder};
+use jazz_tools::query_manager::session::WriteContext;
 use jazz_tools::query_manager::types::Value;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 const USER_ID: &str = "benchmark_user";
+
+fn row<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
+    pairs
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+}
 
 /// Measure latency from insert to subscription update.
 fn single_subscription_latency(c: &mut Criterion) {
@@ -27,6 +39,7 @@ fn single_subscription_latency(c: &mut Criterion) {
             let mut core = create_runtime();
             let data = setup_data(&mut core, scale, USER_ID);
             let session = create_session(USER_ID);
+            let write_context = WriteContext::from_session(session.clone());
 
             // Track updates via callback
             let update_count = Arc::new(AtomicUsize::new(0));
@@ -58,14 +71,14 @@ fn single_subscription_latency(c: &mut Criterion) {
                 let _id = core
                     .insert(
                         "documents",
-                        vec![
-                            Value::Uuid(folder_id),
-                            Value::Text(format!("Sub Doc {}", doc_counter)),
-                            Value::Text("Subscription test".to_string()),
-                            Value::Text(USER_ID.to_string()),
-                            Value::Timestamp(timestamp),
-                        ],
-                        Some(&session),
+                        row([
+                            ("folder_id", Value::Uuid(folder_id)),
+                            ("title", Value::Text(format!("Sub Doc {}", doc_counter))),
+                            ("content", Value::Text("Subscription test".to_string())),
+                            ("author_id", Value::Text(USER_ID.to_string())),
+                            ("created_at", Value::Timestamp(timestamp)),
+                        ]),
+                        Some(&write_context),
                     )
                     .expect("insert");
 
@@ -121,6 +134,7 @@ fn fanout_latency(c: &mut Criterion) {
                 update_count.store(0, Ordering::SeqCst); // Clear initial
 
                 let session = create_session(USER_ID);
+                let write_context = WriteContext::from_session(session.clone());
                 let folder_id = data.owned_folders[0];
                 let mut doc_counter = 0u64;
 
@@ -132,14 +146,14 @@ fn fanout_latency(c: &mut Criterion) {
                     let _id = core
                         .insert(
                             "documents",
-                            vec![
-                                Value::Uuid(folder_id),
-                                Value::Text(format!("Fanout Doc {}", doc_counter)),
-                                Value::Text("Fanout test".to_string()),
-                                Value::Text(USER_ID.to_string()),
-                                Value::Timestamp(timestamp),
-                            ],
-                            Some(&session),
+                            row([
+                                ("folder_id", Value::Uuid(folder_id)),
+                                ("title", Value::Text(format!("Fanout Doc {}", doc_counter))),
+                                ("content", Value::Text("Fanout test".to_string())),
+                                ("author_id", Value::Text(USER_ID.to_string())),
+                                ("created_at", Value::Timestamp(timestamp)),
+                            ]),
+                            Some(&write_context),
                         )
                         .expect("insert");
 
@@ -226,6 +240,7 @@ fn filtered_subscription_latency(c: &mut Criterion) {
                 let mut core = create_runtime();
                 let data = setup_data(&mut core, scale, USER_ID);
                 let session = create_session(USER_ID);
+                let write_context = WriteContext::from_session(session.clone());
 
                 let update_count = Arc::new(AtomicUsize::new(0));
                 let update_count_clone = update_count.clone();
@@ -258,14 +273,17 @@ fn filtered_subscription_latency(c: &mut Criterion) {
                     let _id = core
                         .insert(
                             "documents",
-                            vec![
-                                Value::Uuid(folder_id),
-                                Value::Text(format!("Filtered Doc {}", doc_counter)),
-                                Value::Text("Filtered test".to_string()),
-                                Value::Text(USER_ID.to_string()),
-                                Value::Timestamp(timestamp),
-                            ],
-                            Some(&session),
+                            row([
+                                ("folder_id", Value::Uuid(folder_id)),
+                                (
+                                    "title",
+                                    Value::Text(format!("Filtered Doc {}", doc_counter)),
+                                ),
+                                ("content", Value::Text("Filtered test".to_string())),
+                                ("author_id", Value::Text(USER_ID.to_string())),
+                                ("created_at", Value::Timestamp(timestamp)),
+                            ]),
+                            Some(&write_context),
                         )
                         .expect("insert");
 
@@ -297,6 +315,7 @@ fn batch_insert_subscription_latency(c: &mut Criterion) {
                 let mut core = create_runtime();
                 let data = setup_data(&mut core, scale, USER_ID);
                 let session = create_session(USER_ID);
+                let write_context = WriteContext::from_session(session.clone());
 
                 let update_count = Arc::new(AtomicUsize::new(0));
                 let update_count_clone = update_count.clone();
@@ -334,14 +353,20 @@ fn batch_insert_subscription_latency(c: &mut Criterion) {
                         let _id = core
                             .insert(
                                 "documents",
-                                vec![
-                                    Value::Uuid(folder_id),
-                                    Value::Text(format!("Batch {} Doc {}", batch_counter, i)),
-                                    Value::Text("Batch subscription test".to_string()),
-                                    Value::Text(USER_ID.to_string()),
-                                    Value::Timestamp(timestamp + i as u64),
-                                ],
-                                Some(&session),
+                                row([
+                                    ("folder_id", Value::Uuid(folder_id)),
+                                    (
+                                        "title",
+                                        Value::Text(format!("Batch {} Doc {}", batch_counter, i)),
+                                    ),
+                                    (
+                                        "content",
+                                        Value::Text("Batch subscription test".to_string()),
+                                    ),
+                                    ("author_id", Value::Text(USER_ID.to_string())),
+                                    ("created_at", Value::Timestamp(timestamp + i as u64)),
+                                ]),
+                                Some(&write_context),
                             )
                             .expect("insert");
                     }
