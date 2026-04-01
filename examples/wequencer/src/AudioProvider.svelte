@@ -26,6 +26,7 @@
 	type LoadedPlayer = {
 		instrumentId: string;
 		player: Player | undefined;
+		blobUrl: string | undefined;
 	};
 
 	type ChannelStrip = {
@@ -163,8 +164,9 @@
 	}
 
 	function cleanUpPlayers() {
-		loadedPlayers.forEach(({ player }) => {
+		loadedPlayers.forEach(({ player, blobUrl }) => {
 			player?.dispose();
+			if (blobUrl) URL.revokeObjectURL(blobUrl);
 		});
 		channelStrips.forEach(({ gain, panner }) => {
 			gain.dispose();
@@ -365,21 +367,19 @@
 				loadedPlayers.set(instrument.id, {
 					instrumentId: instrument.id,
 					player: undefined,
+					blobUrl: undefined,
 				});
 
 				db.loadFileAsBlob(app, instrument.soundFileId, { tier: 'edge' })
 					.then(async (blob) => {
 						const url = URL.createObjectURL(blob);
-						try {
-							return await loadPlayer(url, instrument.id);
-						} finally {
-							URL.revokeObjectURL(url);
-						}
+						return loadPlayer(url, instrument.id).then((player) => ({ player, url }));
 					})
-					.then((player) => {
+					.then(({ player, url }) => {
 						loadedPlayers.set(instrument.id, {
 							instrumentId: instrument.id,
 							player,
+							blobUrl: url,
 						});
 					})
 					.catch((err) => {
