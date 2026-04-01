@@ -7,9 +7,11 @@
 use super::encoding::{
     column_bytes, column_is_null, compare_column_to_value, decode_column, encode_value,
 };
+use super::magic_columns::{MagicColumnKind, magic_column_kind};
 use super::relation_ir::{PredicateExpr, RelExpr, RowIdRef, ValueRef};
 use super::session::Session;
 use super::types::{RowDescriptor, Value};
+use crate::metadata::RowProvenance;
 use serde::{Deserialize, Serialize};
 
 /// Comparison operators for policy expressions.
@@ -579,18 +581,20 @@ where
 pub fn evaluate_with_context<F>(
     expr: &PolicyExpr,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     ctx: &mut EvalContext<F>,
 ) -> bool
 where
     F: FnMut(ObjectId) -> Option<Vec<u8>>,
 {
-    evaluate_recursive(expr, content, descriptor, ctx, 0)
+    evaluate_recursive(expr, content, provenance, descriptor, ctx, 0)
 }
 
 fn evaluate_recursive<F>(
     expr: &PolicyExpr,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     ctx: &mut EvalContext<F>,
     depth: usize,
@@ -607,37 +611,47 @@ where
         PolicyExpr::True => true,
         PolicyExpr::False => false,
 
-        PolicyExpr::Cmp { column, op, value } => {
-            evaluate_cmp(column, op, value, content, descriptor, ctx.session)
-        }
+        PolicyExpr::Cmp { column, op, value } => evaluate_cmp(
+            column,
+            op,
+            value,
+            content,
+            provenance,
+            descriptor,
+            ctx.session,
+        ),
         PolicyExpr::SessionCmp { path, op, value } => {
             evaluate_session_cmp(path, op, value, ctx.session)
         }
 
-        PolicyExpr::IsNull { column } => {
-            if let Some(col_index) = descriptor.column_index(column) {
-                column_is_null(descriptor, content, col_index).unwrap_or(false)
-            } else {
-                false
-            }
-        }
+        PolicyExpr::IsNull { column } => magic_column_value(column, provenance)
+            .map(|value| value.is_null())
+            .unwrap_or_else(|| {
+                if let Some(col_index) = descriptor.column_index(column) {
+                    column_is_null(descriptor, content, col_index).unwrap_or(false)
+                } else {
+                    false
+                }
+            }),
         PolicyExpr::SessionIsNull { path } => {
             matches!(resolve_session_value(path, ctx.session), Some(Value::Null))
         }
 
-        PolicyExpr::IsNotNull { column } => {
-            if let Some(col_index) = descriptor.column_index(column) {
-                !column_is_null(descriptor, content, col_index).unwrap_or(true)
-            } else {
-                false
-            }
-        }
+        PolicyExpr::IsNotNull { column } => magic_column_value(column, provenance)
+            .map(|value| !value.is_null())
+            .unwrap_or_else(|| {
+                if let Some(col_index) = descriptor.column_index(column) {
+                    !column_is_null(descriptor, content, col_index).unwrap_or(true)
+                } else {
+                    false
+                }
+            }),
         PolicyExpr::SessionIsNotNull { path } => {
             matches!(resolve_session_value(path, ctx.session), Some(value) if !value.is_null())
         }
 
         PolicyExpr::Contains { column, value } => {
-            evaluate_contains(column, value, content, descriptor, ctx.session)
+            evaluate_contains(column, value, content, provenance, descriptor, ctx.session)
         }
         PolicyExpr::SessionContains { path, value } => {
             evaluate_session_contains(path, value, ctx.session)
@@ -646,10 +660,17 @@ where
         PolicyExpr::In {
             column,
             session_path,
-        } => evaluate_in(column, session_path, content, descriptor, ctx.session),
+        } => evaluate_in(
+            column,
+            session_path,
+            content,
+            provenance,
+            descriptor,
+            ctx.session,
+        ),
 
         PolicyExpr::InList { column, values } => {
-            evaluate_in_list(column, values, content, descriptor, ctx.session)
+            evaluate_in_list(column, values, content, provenance, descriptor, ctx.session)
         }
         PolicyExpr::SessionInList { path, values } => {
             evaluate_session_in_list(path, values, ctx.session)
@@ -657,13 +678,15 @@ where
 
         PolicyExpr::And(exprs) => exprs
             .iter()
-            .all(|e| evaluate_recursive(e, content, descriptor, ctx, depth)),
+            .all(|e| evaluate_recursive(e, content, provenance, descriptor, ctx, depth)),
 
         PolicyExpr::Or(exprs) => exprs
             .iter()
-            .any(|e| evaluate_recursive(e, content, descriptor, ctx, depth)),
+            .any(|e| evaluate_recursive(e, content, provenance, descriptor, ctx, depth)),
 
-        PolicyExpr::Not(inner) => !evaluate_recursive(inner, content, descriptor, ctx, depth),
+        PolicyExpr::Not(inner) => {
+            !evaluate_recursive(inner, content, provenance, descriptor, ctx, depth)
+        }
 
         PolicyExpr::Exists { .. } => {
             // EXISTS is an internal representation, not directly used
@@ -679,7 +702,7 @@ where
             via_column,
             max_depth,
         } => evaluate_inherits(
-            *operation, via_column, *max_depth, content, descriptor, ctx, depth,
+            *operation, via_column, *max_depth, content, provenance, descriptor, ctx, depth,
         ),
         PolicyExpr::InheritsReferencing { .. } => {
             // Requires table/index context not available in EvalContext.
@@ -689,11 +712,13 @@ where
 }
 
 /// Evaluate INHERITS by loading the parent row and checking its policy.
+#[allow(clippy::too_many_arguments)]
 fn evaluate_inherits<F>(
     operation: Operation,
     via_column: &str,
     max_depth: Option<usize>,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     ctx: &mut EvalContext<F>,
     depth: usize,
@@ -768,6 +793,7 @@ where
     evaluate_recursive(
         parent_policy,
         &parent_content,
+        provenance,
         &parent_schema.columns,
         ctx,
         depth + 1,
@@ -779,15 +805,17 @@ where
 pub fn evaluate_policy_expr(
     expr: &PolicyExpr,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
 ) -> bool {
-    evaluate_expr_simple(expr, content, descriptor, session, 0)
+    evaluate_expr_simple(expr, content, provenance, descriptor, session, 0)
 }
 
 fn evaluate_expr_simple(
     expr: &PolicyExpr,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
     depth: usize,
@@ -800,27 +828,35 @@ fn evaluate_expr_simple(
         PolicyExpr::True => true,
         PolicyExpr::False => false,
         PolicyExpr::Cmp { column, op, value } => {
-            evaluate_cmp(column, op, value, content, descriptor, session)
+            evaluate_cmp(column, op, value, content, provenance, descriptor, session)
         }
         PolicyExpr::SessionCmp { path, op, value } => {
             evaluate_session_cmp(path, op, value, session)
         }
-        PolicyExpr::IsNull { column } => descriptor
-            .column_index(column)
-            .map(|i| column_is_null(descriptor, content, i).unwrap_or(false))
-            .unwrap_or(false),
+        PolicyExpr::IsNull { column } => magic_column_value(column, provenance)
+            .map(|value| value.is_null())
+            .unwrap_or_else(|| {
+                descriptor
+                    .column_index(column)
+                    .map(|i| column_is_null(descriptor, content, i).unwrap_or(false))
+                    .unwrap_or(false)
+            }),
         PolicyExpr::SessionIsNull { path } => {
             matches!(resolve_session_value(path, session), Some(Value::Null))
         }
-        PolicyExpr::IsNotNull { column } => descriptor
-            .column_index(column)
-            .map(|i| !column_is_null(descriptor, content, i).unwrap_or(true))
-            .unwrap_or(false),
+        PolicyExpr::IsNotNull { column } => magic_column_value(column, provenance)
+            .map(|value| !value.is_null())
+            .unwrap_or_else(|| {
+                descriptor
+                    .column_index(column)
+                    .map(|i| !column_is_null(descriptor, content, i).unwrap_or(true))
+                    .unwrap_or(false)
+            }),
         PolicyExpr::SessionIsNotNull { path } => {
             matches!(resolve_session_value(path, session), Some(value) if !value.is_null())
         }
         PolicyExpr::Contains { column, value } => {
-            evaluate_contains(column, value, content, descriptor, session)
+            evaluate_contains(column, value, content, provenance, descriptor, session)
         }
         PolicyExpr::SessionContains { path, value } => {
             evaluate_session_contains(path, value, session)
@@ -828,20 +864,29 @@ fn evaluate_expr_simple(
         PolicyExpr::In {
             column,
             session_path,
-        } => evaluate_in(column, session_path, content, descriptor, session),
+        } => evaluate_in(
+            column,
+            session_path,
+            content,
+            provenance,
+            descriptor,
+            session,
+        ),
         PolicyExpr::InList { column, values } => {
-            evaluate_in_list(column, values, content, descriptor, session)
+            evaluate_in_list(column, values, content, provenance, descriptor, session)
         }
         PolicyExpr::SessionInList { path, values } => {
             evaluate_session_in_list(path, values, session)
         }
         PolicyExpr::And(exprs) => exprs
             .iter()
-            .all(|e| evaluate_expr_simple(e, content, descriptor, session, depth)),
+            .all(|e| evaluate_expr_simple(e, content, provenance, descriptor, session, depth)),
         PolicyExpr::Or(exprs) => exprs
             .iter()
-            .any(|e| evaluate_expr_simple(e, content, descriptor, session, depth)),
-        PolicyExpr::Not(inner) => !evaluate_expr_simple(inner, content, descriptor, session, depth),
+            .any(|e| evaluate_expr_simple(e, content, provenance, descriptor, session, depth)),
+        PolicyExpr::Not(inner) => {
+            !evaluate_expr_simple(inner, content, provenance, descriptor, session, depth)
+        }
         PolicyExpr::Exists { .. } => true,
         PolicyExpr::ExistsRel { .. } => true,
         PolicyExpr::Inherits { .. } => true, // No row loader - permissive
@@ -853,11 +898,50 @@ fn evaluate_expr_simple(
 pub fn evaluate_expr_recursive(
     expr: &PolicyExpr,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
     depth: usize,
 ) -> bool {
-    evaluate_expr_simple(expr, content, descriptor, session, depth)
+    evaluate_expr_simple(expr, content, provenance, descriptor, session, depth)
+}
+
+fn provenance_value(kind: MagicColumnKind, provenance: &RowProvenance) -> Value {
+    match kind {
+        MagicColumnKind::CreatedBy => Value::Text(provenance.created_by.clone()),
+        MagicColumnKind::CreatedAt => Value::Timestamp(provenance.created_at),
+        MagicColumnKind::UpdatedBy => Value::Text(provenance.updated_by.clone()),
+        MagicColumnKind::UpdatedAt => Value::Timestamp(provenance.updated_at),
+        MagicColumnKind::CanRead | MagicColumnKind::CanEdit | MagicColumnKind::CanDelete => {
+            Value::Null
+        }
+    }
+}
+
+fn magic_column_value(column: &str, provenance: &RowProvenance) -> Option<Value> {
+    match magic_column_kind(column)? {
+        MagicColumnKind::CreatedBy
+        | MagicColumnKind::CreatedAt
+        | MagicColumnKind::UpdatedBy
+        | MagicColumnKind::UpdatedAt => {
+            Some(provenance_value(magic_column_kind(column)?, provenance))
+        }
+        MagicColumnKind::CanRead | MagicColumnKind::CanEdit | MagicColumnKind::CanDelete => None,
+    }
+}
+
+fn decode_policy_column_value(
+    column: &str,
+    provenance: &RowProvenance,
+    content: &[u8],
+    descriptor: &RowDescriptor,
+) -> Option<Value> {
+    if let Some(value) = magic_column_value(column, provenance) {
+        return Some(value);
+    }
+
+    let col_index = descriptor.column_index(column)?;
+    decode_column(descriptor, content, col_index).ok()
 }
 
 /// Evaluate a comparison expression. Public for use by PolicyFilterNode.
@@ -866,9 +950,17 @@ pub fn evaluate_cmp(
     op: &CmpOp,
     value: &PolicyValue,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
 ) -> bool {
+    if let Some(left) = magic_column_value(column, provenance) {
+        let Some(right) = resolve_policy_value(value, session) else {
+            return false;
+        };
+        return compare_values(&left, op, &right);
+    }
+
     let col_index = match descriptor.column_index(column) {
         Some(idx) => idx,
         None => return false,
@@ -1454,17 +1546,13 @@ pub fn evaluate_in(
     column: &str,
     session_path: &[String],
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
 ) -> bool {
-    let col_index = match descriptor.column_index(column) {
-        Some(idx) => idx,
-        None => return false,
-    };
-
     // Get the column value
-    let col_value = match decode_column(descriptor, content, col_index) {
-        Ok(v) if !matches!(v, Value::Null) => v,
+    let col_value = match decode_policy_column_value(column, provenance, content, descriptor) {
+        Some(v) if !matches!(v, Value::Null) => v,
         _ => return false,
     };
 
@@ -1492,22 +1580,18 @@ pub fn evaluate_contains(
     column: &str,
     value: &PolicyValue,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
 ) -> bool {
-    let col_index = match descriptor.column_index(column) {
-        Some(idx) => idx,
-        None => return false,
-    };
-
     let right_value = match resolve_policy_value(value, session) {
         Some(v) => v,
         None => return false,
     };
 
-    let column_value = match decode_column(descriptor, content, col_index) {
-        Ok(v) => v,
-        Err(_) => return false,
+    let column_value = match decode_policy_column_value(column, provenance, content, descriptor) {
+        Some(v) => v,
+        None => return false,
     };
 
     match column_value {
@@ -1525,6 +1609,7 @@ pub fn evaluate_in_list(
     column: &str,
     values: &[PolicyValue],
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
 ) -> bool {
@@ -1532,13 +1617,8 @@ pub fn evaluate_in_list(
         return false;
     }
 
-    let col_index = match descriptor.column_index(column) {
-        Some(idx) => idx,
-        None => return false,
-    };
-
-    let column_value = match decode_column(descriptor, content, col_index) {
-        Ok(v) if !matches!(v, Value::Null) => v,
+    let column_value = match decode_policy_column_value(column, provenance, content, descriptor) {
+        Some(v) if !matches!(v, Value::Null) => v,
         _ => return false,
     };
 
@@ -1697,15 +1777,17 @@ impl SimpleEvalResult {
 pub fn evaluate_simple_parts(
     expr: &PolicyExpr,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
 ) -> SimpleEvalResult {
-    evaluate_simple_recursive(expr, content, descriptor, session, 0)
+    evaluate_simple_recursive(expr, content, provenance, descriptor, session, 0)
 }
 
 fn evaluate_simple_recursive(
     expr: &PolicyExpr,
     content: &[u8],
+    provenance: &RowProvenance,
     descriptor: &RowDescriptor,
     session: &Session,
     depth: usize,
@@ -1720,7 +1802,7 @@ fn evaluate_simple_recursive(
         PolicyExpr::False => SimpleEvalResult::fail(),
 
         PolicyExpr::Cmp { column, op, value } => {
-            if evaluate_cmp(column, op, value, content, descriptor, session) {
+            if evaluate_cmp(column, op, value, content, provenance, descriptor, session) {
                 SimpleEvalResult::pass()
             } else {
                 SimpleEvalResult::fail()
@@ -1735,10 +1817,14 @@ fn evaluate_simple_recursive(
         }
 
         PolicyExpr::IsNull { column } => {
-            let result = descriptor
-                .column_index(column)
-                .map(|i| column_is_null(descriptor, content, i).unwrap_or(false))
-                .unwrap_or(false);
+            let result = magic_column_value(column, provenance)
+                .map(|value| value.is_null())
+                .unwrap_or_else(|| {
+                    descriptor
+                        .column_index(column)
+                        .map(|i| column_is_null(descriptor, content, i).unwrap_or(false))
+                        .unwrap_or(false)
+                });
             if result {
                 SimpleEvalResult::pass()
             } else {
@@ -1754,10 +1840,14 @@ fn evaluate_simple_recursive(
         }
 
         PolicyExpr::IsNotNull { column } => {
-            let result = descriptor
-                .column_index(column)
-                .map(|i| !column_is_null(descriptor, content, i).unwrap_or(true))
-                .unwrap_or(false);
+            let result = magic_column_value(column, provenance)
+                .map(|value| !value.is_null())
+                .unwrap_or_else(|| {
+                    descriptor
+                        .column_index(column)
+                        .map(|i| !column_is_null(descriptor, content, i).unwrap_or(true))
+                        .unwrap_or(false)
+                });
             if result {
                 SimpleEvalResult::pass()
             } else {
@@ -1773,7 +1863,7 @@ fn evaluate_simple_recursive(
         }
 
         PolicyExpr::Contains { column, value } => {
-            if evaluate_contains(column, value, content, descriptor, session) {
+            if evaluate_contains(column, value, content, provenance, descriptor, session) {
                 SimpleEvalResult::pass()
             } else {
                 SimpleEvalResult::fail()
@@ -1791,7 +1881,14 @@ fn evaluate_simple_recursive(
             column,
             session_path,
         } => {
-            if evaluate_in(column, session_path, content, descriptor, session) {
+            if evaluate_in(
+                column,
+                session_path,
+                content,
+                provenance,
+                descriptor,
+                session,
+            ) {
                 SimpleEvalResult::pass()
             } else {
                 SimpleEvalResult::fail()
@@ -1806,7 +1903,7 @@ fn evaluate_simple_recursive(
         }
 
         PolicyExpr::InList { column, values } => {
-            if evaluate_in_list(column, values, content, descriptor, session) {
+            if evaluate_in_list(column, values, content, provenance, descriptor, session) {
                 SimpleEvalResult::pass()
             } else {
                 SimpleEvalResult::fail()
@@ -1816,7 +1913,8 @@ fn evaluate_simple_recursive(
         PolicyExpr::And(exprs) => {
             let mut all_complex = Vec::new();
             for e in exprs {
-                let result = evaluate_simple_recursive(e, content, descriptor, session, depth);
+                let result =
+                    evaluate_simple_recursive(e, content, provenance, descriptor, session, depth);
                 if !result.passed {
                     return SimpleEvalResult::fail();
                 }
@@ -1837,7 +1935,8 @@ fn evaluate_simple_recursive(
             let mut all_complex = Vec::new();
 
             for e in exprs {
-                let result = evaluate_simple_recursive(e, content, descriptor, session, depth);
+                let result =
+                    evaluate_simple_recursive(e, content, provenance, descriptor, session, depth);
                 if result.passed && result.complex_clauses.is_empty() {
                     // Simple pass - entire OR passes
                     has_simple_pass = true;
@@ -1864,7 +1963,8 @@ fn evaluate_simple_recursive(
         }
 
         PolicyExpr::Not(inner) => {
-            let result = evaluate_simple_recursive(inner, content, descriptor, session, depth);
+            let result =
+                evaluate_simple_recursive(inner, content, provenance, descriptor, session, depth);
             if !result.complex_clauses.is_empty() {
                 // NOT of complex clause is complex - can't evaluate simply
                 // Return as needing graph evaluation
@@ -1927,6 +2027,28 @@ fn evaluate_simple_recursive(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn test_row_provenance() -> RowProvenance {
+        RowProvenance::for_insert("jazz:test", 0)
+    }
+
+    fn evaluate_policy_expr(
+        expr: &PolicyExpr,
+        content: &[u8],
+        descriptor: &RowDescriptor,
+        session: &Session,
+    ) -> bool {
+        super::evaluate_policy_expr(expr, content, &test_row_provenance(), descriptor, session)
+    }
+
+    fn evaluate_simple_parts(
+        expr: &PolicyExpr,
+        content: &[u8],
+        descriptor: &RowDescriptor,
+        session: &Session,
+    ) -> SimpleEvalResult {
+        super::evaluate_simple_parts(expr, content, &test_row_provenance(), descriptor, session)
+    }
 
     #[test]
     fn test_policy_expr_builders() {

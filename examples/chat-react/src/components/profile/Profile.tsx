@@ -16,7 +16,7 @@ import {
 } from "@/components/ui/sheet";
 import { useMyProfile } from "@/hooks/useMyProfile";
 import { logOut } from "@/lib/utils";
-import { app } from "../../../schema/app.js";
+import { app } from "../../../schema.js";
 
 interface ProfileProps {
   onClose: () => void;

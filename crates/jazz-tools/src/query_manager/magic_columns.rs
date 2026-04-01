@@ -5,6 +5,10 @@ pub enum MagicColumnKind {
     CanRead,
     CanEdit,
     CanDelete,
+    CreatedBy,
+    CreatedAt,
+    UpdatedBy,
+    UpdatedAt,
 }
 
 impl MagicColumnKind {
@@ -13,6 +17,10 @@ impl MagicColumnKind {
             MagicColumnKind::CanRead => "$canRead",
             MagicColumnKind::CanEdit => "$canEdit",
             MagicColumnKind::CanDelete => "$canDelete",
+            MagicColumnKind::CreatedBy => "$createdBy",
+            MagicColumnKind::CreatedAt => "$createdAt",
+            MagicColumnKind::UpdatedBy => "$updatedBy",
+            MagicColumnKind::UpdatedAt => "$updatedAt",
         }
     }
 }
@@ -22,6 +30,10 @@ pub fn magic_column_kind(name: &str) -> Option<MagicColumnKind> {
         "$canRead" => Some(MagicColumnKind::CanRead),
         "$canEdit" => Some(MagicColumnKind::CanEdit),
         "$canDelete" => Some(MagicColumnKind::CanDelete),
+        "$createdBy" => Some(MagicColumnKind::CreatedBy),
+        "$createdAt" => Some(MagicColumnKind::CreatedAt),
+        "$updatedBy" => Some(MagicColumnKind::UpdatedBy),
+        "$updatedAt" => Some(MagicColumnKind::UpdatedAt),
         _ => None,
     }
 }

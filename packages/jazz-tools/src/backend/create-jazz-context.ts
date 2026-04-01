@@ -184,8 +184,8 @@ export class JazzContext {
     };
   }
 
-  private wrapDb(client: JazzClient, session?: Session): Db {
-    return createDbFromClient(this.buildDbConfig(), client, session);
+  private wrapDb(client: JazzClient, session?: Session, attribution?: string): Db {
+    return createDbFromClient(this.buildDbConfig(), client, session, attribution);
   }
 
   /**
@@ -209,7 +209,7 @@ export class JazzContext {
   }
 
   /**
-   * Get a high-level `Db` using the context's configured auth/runtime identity.
+   * Get the shared high-level `Db` for this context with no per-request session attached.
    */
   db(source?: BackendSchemaInput): Db {
     return this.wrapDb(this.getClient(source));
@@ -220,6 +220,16 @@ export class JazzContext {
    */
   asBackend(source?: BackendSchemaInput): Db {
     return this.wrapDb(this.getClient(source).asBackend());
+  }
+
+  /**
+   * Build a backend-scoped `Db` that stamps write provenance as `principalId`
+   * without evaluating permissions as that user.
+   */
+  withAttribution(principalId: string, source?: BackendSchemaInput): Db {
+    const client = this.getClient(source);
+    this.enableBackendSyncIfConfigured(client);
+    return this.wrapDb(client, undefined, principalId);
   }
 
   /**
@@ -246,6 +256,24 @@ export class JazzContext {
     const session = sessionFromRequest(request);
     this.enableBackendSyncIfConfigured(client);
     return this.wrapDb(client, session);
+  }
+
+  /**
+   * Build a backend-scoped `Db` that stamps write provenance using the
+   * principal in `session` without switching permission evaluation to it.
+   */
+  withAttributionForSession(session: Session, source?: BackendSchemaInput): Db {
+    const client = this.getClient(source);
+    this.enableBackendSyncIfConfigured(client);
+    return this.wrapDb(client, undefined, session.user_id);
+  }
+
+  /**
+   * Build a backend-scoped `Db` that stamps write provenance using the
+   * authenticated principal from `request` without switching permissions.
+   */
+  withAttributionForRequest(request: RequestLike, source?: BackendSchemaInput): Db {
+    return this.withAttributionForSession(sessionFromRequest(request), source);
   }
 
   /**

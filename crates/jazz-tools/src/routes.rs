@@ -1,5 +1,6 @@
 //! HTTP routes for the Jazz server.
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -31,6 +32,26 @@ use crate::query_manager::types::{
 use crate::schema_manager::{AppId, Lens, LensOp, LensTransform};
 use crate::server::{CatalogueAuthorityMode, ConnectionState, ServerState};
 use crate::sync_manager::ClientId;
+
+/// Runs an async closure when this guard is dropped.
+///
+/// Bridges sync `Drop` to async cleanup — useful when an `async_stream`
+/// generator is cancelled on client disconnect, making code after the
+/// yield loop unreachable.
+struct AsyncDropGuard {
+    _tx: tokio::sync::oneshot::Sender<()>,
+}
+
+impl AsyncDropGuard {
+    fn new(cleanup: impl Future<Output = ()> + Send + 'static) -> Self {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = rx.await;
+            cleanup.await;
+        });
+        Self { _tx: tx }
+    }
+}
 
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
@@ -302,11 +323,20 @@ async fn events_handler(
         .and_then(|v| v.to_str().ok());
     let has_session_header = headers.get("X-Jazz-Session").is_some();
 
-    if backend_secret.is_some() && !has_session_header {
+    // Resolve auth first (can fail with early return, no side effects yet).
+    // Then insert connection before creating ClientState — this closes the
+    // TOCTOU window where a sweep could see freshly created ClientState but
+    // no connection yet, and reap it.
+    enum ClientSetup {
+        Backend,
+        Session(crate::query_manager::session::Session),
+    }
+
+    let setup = if backend_secret.is_some() && !has_session_header {
         if let Err((status, msg)) = validate_backend_secret(backend_secret, &state.auth_config) {
             return Err((status, msg.to_string()));
         }
-        let _ = state.runtime.ensure_client_as_backend(client_id);
+        ClientSetup::Backend
     } else {
         // Extract session from headers (JWT, local auth, or backend impersonation)
         let session = {
@@ -343,29 +373,31 @@ async fn events_handler(
             }
         };
 
-        // Ensure client is registered with session (idempotent — won't overwrite
-        // existing role if client was already registered by a /sync request).
-        let _ = state.runtime.ensure_client_with_session(client_id, session);
-    }
+        ClientSetup::Session(session)
+    };
 
-    // Generate connection ID
+    // Connection is visible before ClientState is created — sweep will see
+    // the connection and skip reaping even if it runs during setup.
     let connection_id = state
         .next_connection_id
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    {
+        let mut connections = state.connections.write().await;
+        connections.insert(connection_id, ConnectionState { client_id });
+    }
+    state.on_client_connected(client_id).await;
+
+    match setup {
+        ClientSetup::Backend => {
+            let _ = state.runtime.ensure_client_as_backend(client_id);
+        }
+        ClientSetup::Session(session) => {
+            let _ = state.runtime.ensure_client_with_session(client_id, session);
+        }
+    }
 
     // Subscribe to broadcast channel for this client's events
     let mut sync_rx = state.sync_broadcast.subscribe();
-
-    // Store connection state
-    {
-        let mut connections = state.connections.write().await;
-        connections.insert(
-            connection_id,
-            ConnectionState {
-                _client_id: client_id,
-            },
-        );
-    }
 
     // Clone state for cleanup on drop
     let state_cleanup = state.clone();
@@ -375,8 +407,26 @@ async fn events_handler(
     let client_id_str = client_id.to_string();
     let catalogue_state_hash = state.runtime.catalogue_state_hash().ok();
 
+    let cleanup_guard = AsyncDropGuard::new(async move {
+        let closed_client_id = {
+            let mut connections = state_cleanup.connections.write().await;
+            let conn = connections.remove(&connection_id_cleanup);
+            conn.map(|c| c.client_id)
+        };
+        if let Some(closed_client_id) = closed_client_id {
+            state_cleanup.on_connection_closed(closed_client_id).await;
+            tracing::debug!(
+                connection_id = connection_id_cleanup,
+                %closed_client_id,
+                "SSE stream closed, client state retained pending TTL"
+            );
+        }
+    });
+
     // Create stream that emits length-prefixed binary frames
     let stream = async_stream::stream! {
+        let _cleanup_guard = cleanup_guard;
+
         // Send Connected frame
         let connected = ServerEvent::Connected {
             connection_id: ConnectionId(connection_id),
@@ -421,26 +471,19 @@ async fn events_handler(
                 }
             }
         }
-
-        // Cleanup on stream close
-        {
-            let mut connections = state_cleanup.connections.write().await;
-            connections.remove(&connection_id_cleanup);
-        }
-        // Keep logical client state across disconnects so reconnect with the same
-        // client_id can resume query forwarding state.
-        tracing::debug!(
-            "Stream connection {} closed (client state retained for resume)",
-            connection_id_cleanup
-        );
     };
 
-    Ok(axum::response::Response::builder()
+    axum::response::Response::builder()
         .header("Content-Type", "application/octet-stream")
         .header("Transfer-Encoding", "chunked")
         .header("Cache-Control", "no-cache")
         .body(axum::body::Body::from_stream(stream))
-        .unwrap())
+        .map_err(|e| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to build SSE response: {e}"),
+            )
+        })
 }
 
 /// Push an ordered batch of sync payloads to the server's inbox.

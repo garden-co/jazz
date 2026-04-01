@@ -96,115 +96,126 @@ export type TypedColumnBuilder<
   Sql extends SqlType = SqlType,
   Optional extends boolean = boolean,
   Ref extends string | undefined = string | undefined,
+  HasDefault extends boolean = boolean,
 > = Omit<ColumnBuilder, "optional" | "default"> & {
   readonly __jazzSqlType: Sql;
   readonly __jazzOptional: Optional;
   readonly __jazzReferences: Ref;
-  default(value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>): ColumnAlias<Sql, Optional, Ref>;
-  optional(): ColumnAlias<Sql, true, Ref>;
+  readonly __jazzHasDefault: HasDefault;
+  default(
+    value: MaybeOptional<TSTypeFromSqlType<Sql>, Optional>,
+  ): ColumnAlias<Sql, Optional, Ref, true>;
+  optional(): ColumnAlias<Sql, true, Ref, HasDefault>;
 };
 
-export type AnyTypedColumnBuilder = TypedColumnBuilder<SqlType, boolean, string | undefined>;
+export type AnyTypedColumnBuilder = TypedColumnBuilder<
+  SqlType,
+  boolean,
+  string | undefined,
+  boolean
+>;
 export type ColumnBuilderSqlType<TBuilder extends AnyTypedColumnBuilder> =
   TBuilder["__jazzSqlType"];
 export type ColumnBuilderOptional<TBuilder extends AnyTypedColumnBuilder> =
   TBuilder["__jazzOptional"];
 export type ColumnBuilderReferences<TBuilder extends AnyTypedColumnBuilder> =
   TBuilder["__jazzReferences"];
+export type ColumnBuilderHasDefault<TBuilder extends AnyTypedColumnBuilder> =
+  TBuilder["__jazzHasDefault"];
 
-export type StringColumn<Optional extends boolean = false> = TypedColumnBuilder<
-  "TEXT",
-  Optional,
-  undefined
->;
-export type BooleanColumn<Optional extends boolean = false> = TypedColumnBuilder<
-  "BOOLEAN",
-  Optional,
-  undefined
->;
-export type IntColumn<Optional extends boolean = false> = TypedColumnBuilder<
-  "INTEGER",
-  Optional,
-  undefined
->;
-export type TimestampColumn<Optional extends boolean = false> = TypedColumnBuilder<
-  "TIMESTAMP",
-  Optional,
-  undefined
->;
-export type FloatColumn<Optional extends boolean = false> = TypedColumnBuilder<
-  "REAL",
-  Optional,
-  undefined
->;
-export type BytesColumn<Optional extends boolean = false> = TypedColumnBuilder<
-  "BYTEA",
-  Optional,
-  undefined
->;
-export type JsonColumn<Output = JsonValue, Optional extends boolean = false> = TypedColumnBuilder<
-  JsonSqlType<Output>,
-  Optional,
-  undefined
->;
+export type StringColumn<
+  Optional extends boolean = false,
+  HasDefault extends boolean = false,
+> = TypedColumnBuilder<"TEXT", Optional, undefined, HasDefault>;
+export type BooleanColumn<
+  Optional extends boolean = false,
+  HasDefault extends boolean = false,
+> = TypedColumnBuilder<"BOOLEAN", Optional, undefined, HasDefault>;
+export type IntColumn<
+  Optional extends boolean = false,
+  HasDefault extends boolean = false,
+> = TypedColumnBuilder<"INTEGER", Optional, undefined, HasDefault>;
+export type TimestampColumn<
+  Optional extends boolean = false,
+  HasDefault extends boolean = false,
+> = TypedColumnBuilder<"TIMESTAMP", Optional, undefined, HasDefault>;
+export type FloatColumn<
+  Optional extends boolean = false,
+  HasDefault extends boolean = false,
+> = TypedColumnBuilder<"REAL", Optional, undefined, HasDefault>;
+export type BytesColumn<
+  Optional extends boolean = false,
+  HasDefault extends boolean = false,
+> = TypedColumnBuilder<"BYTEA", Optional, undefined, HasDefault>;
+export type JsonColumn<
+  Output = JsonValue,
+  Optional extends boolean = false,
+  HasDefault extends boolean = false,
+> = TypedColumnBuilder<JsonSqlType<Output>, Optional, undefined, HasDefault>;
 export type EnumColumn<
   Variants extends readonly string[] = readonly string[],
   Optional extends boolean = false,
+  HasDefault extends boolean = false,
 > = TypedColumnBuilder<
   {
     kind: "ENUM";
     variants: [...Variants];
   },
   Optional,
-  undefined
+  undefined,
+  HasDefault
 >;
 export type RefColumn<
   TargetTable extends string,
   Optional extends boolean = false,
-> = TypedColumnBuilder<"UUID", Optional, TargetTable>;
+  HasDefault extends boolean = false,
+> = TypedColumnBuilder<"UUID", Optional, TargetTable, HasDefault>;
 export type ArrayColumn<
   ElementSql extends SqlType = SqlType,
   Optional extends boolean = false,
   Ref extends string | undefined = undefined,
+  HasDefault extends boolean = false,
 > = TypedColumnBuilder<
   {
     kind: "ARRAY";
     element: ElementSql;
   },
   Optional,
-  Ref
+  Ref,
+  HasDefault
 >;
 export type ColumnAlias<
   Sql extends SqlType = SqlType,
   Optional extends boolean = boolean,
   Ref extends string | undefined = string | undefined,
-> = Ref extends string
-  ? RefColumn<Ref, Optional>
-  : Sql extends "TEXT"
-    ? StringColumn<Optional>
-    : Sql extends "BOOLEAN"
-      ? BooleanColumn<Optional>
-      : Sql extends "INTEGER"
-        ? IntColumn<Optional>
-        : Sql extends "TIMESTAMP"
-          ? TimestampColumn<Optional>
-          : Sql extends "REAL"
-            ? FloatColumn<Optional>
-            : Sql extends "BYTEA"
-              ? BytesColumn<Optional>
-              : Sql extends JsonSqlType<infer Output>
-                ? JsonColumn<Output, Optional>
-                : Sql extends {
-                      kind: "ENUM";
-                      variants: infer Variants extends readonly string[];
-                    }
-                  ? EnumColumn<Variants, Optional>
+  HasDefault extends boolean = boolean,
+> = Sql extends {
+  kind: "ARRAY";
+  element: infer ElementSql extends SqlType;
+}
+  ? ArrayColumn<ElementSql, Optional, Ref, HasDefault>
+  : Ref extends string
+    ? RefColumn<Ref, Optional, HasDefault>
+    : Sql extends "TEXT"
+      ? StringColumn<Optional, HasDefault>
+      : Sql extends "BOOLEAN"
+        ? BooleanColumn<Optional, HasDefault>
+        : Sql extends "INTEGER"
+          ? IntColumn<Optional, HasDefault>
+          : Sql extends "TIMESTAMP"
+            ? TimestampColumn<Optional, HasDefault>
+            : Sql extends "REAL"
+              ? FloatColumn<Optional, HasDefault>
+              : Sql extends "BYTEA"
+                ? BytesColumn<Optional, HasDefault>
+                : Sql extends JsonSqlType<infer Output>
+                  ? JsonColumn<Output, Optional, HasDefault>
                   : Sql extends {
-                        kind: "ARRAY";
-                        element: infer ElementSql extends SqlType;
+                        kind: "ENUM";
+                        variants: infer Variants extends readonly string[];
                       }
-                    ? ArrayColumn<ElementSql, Optional, Ref>
-                    : TypedColumnBuilder<Sql, Optional, Ref>;
+                    ? EnumColumn<Variants, Optional, HasDefault>
+                    : TypedColumnBuilder<Sql, Optional, Ref, HasDefault>;
 
 type RefColumnKey = `${string}Id` | `${string}_id`;
 type RefArrayColumnKey = `${string}Ids` | `${string}_ids`;

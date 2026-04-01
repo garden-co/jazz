@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::commit::CommitId;
-use crate::metadata::MetadataKey;
+use crate::metadata::{MetadataKey, RowProvenance};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::graph_nodes::policy_eval::PolicyContextEvaluator;
 use crate::schema_manager::LensTransformer;
@@ -48,6 +48,7 @@ pub(crate) struct AuthorizationPolicyRequest<'a> {
     pub(crate) table_name: TableName,
     pub(crate) policy: &'a PolicyExpr,
     pub(crate) content: &'a [u8],
+    pub(crate) provenance: &'a crate::metadata::RowProvenance,
     pub(crate) session: &'a Session,
     pub(crate) auth_schema: &'a Schema,
     pub(crate) auth_context: &'a crate::schema_manager::SchemaContext,
@@ -65,6 +66,36 @@ struct UpdatePermissionRequest<'a> {
 }
 
 impl QueryManager {
+    fn current_row_provenance(
+        &mut self,
+        storage: &dyn Storage,
+        object_id: ObjectId,
+        branch_name: BranchName,
+    ) -> Option<RowProvenance> {
+        let branches = vec![branch_name.as_str().to_string()];
+        let object = self
+            .sync_manager
+            .object_manager
+            .get_or_load(object_id, storage, &branches)?;
+        let branch = object.branches.get(&branch_name)?;
+        branch
+            .tips
+            .iter()
+            .filter_map(|tip_id| branch.commits.get(tip_id))
+            .max_by_key(|commit| commit.timestamp)
+            .and_then(|commit| commit.row_provenance())
+    }
+
+    fn payload_tip_provenance(payload: &SyncPayload) -> Option<RowProvenance> {
+        match payload {
+            SyncPayload::ObjectUpdated { commits, .. } => commits
+                .iter()
+                .max_by_key(|commit| commit.timestamp)
+                .and_then(|commit| commit.row_provenance()),
+            _ => None,
+        }
+    }
+
     pub(super) fn build_server_subscription_context(
         &self,
         query: &crate::query_manager::query::Query,
@@ -244,7 +275,7 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<LoadedRow> {
         let branches = vec![branch_name.as_str().to_string()];
-        let (table, tip_commit_id, tip_content) = {
+        let (table, tip_commit_id, tip_content, tip_provenance) = {
             let object = self
                 .sync_manager
                 .object_manager
@@ -259,7 +290,7 @@ impl QueryManager {
             if tip.1.content.is_empty() {
                 return None;
             }
-            Some((table, tip.0, tip.1.content.clone()))
+            Some((table, tip.0, tip.1.content.clone(), tip.1.row_provenance()?))
         }?;
 
         let transformed = self.transform_content_to_authorization_schema(
@@ -274,6 +305,7 @@ impl QueryManager {
         Some(LoadedRow::new(
             transformed,
             tip_commit_id,
+            tip_provenance,
             [(object_id, branch_name)].into_iter().collect(),
         ))
     }
@@ -289,6 +321,7 @@ impl QueryManager {
             table_name,
             policy,
             content,
+            provenance,
             session,
             auth_schema,
             auth_context,
@@ -310,7 +343,12 @@ impl QueryManager {
             return false;
         };
 
-        let row = Row::new(object_id, transformed, CommitId([0; 32]));
+        let row = Row::new(
+            object_id,
+            transformed,
+            CommitId([0; 32]),
+            provenance.clone(),
+        );
         let evaluator = PolicyContextEvaluator::new(auth_schema, session, branch_name.as_str());
         let mut visited = HashSet::new();
         let mut row_loader = |related_id: ObjectId| {
@@ -348,7 +386,7 @@ impl QueryManager {
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
     ) -> bool {
         let branches = vec![branch_name.as_str().to_string()];
-        let Some((table, tip_content)) = ({
+        let Some((table, tip_content, tip_provenance)) = ({
             let Some(object) = self
                 .sync_manager
                 .object_manager
@@ -373,7 +411,10 @@ impl QueryManager {
             if tip_commit.content.is_empty() {
                 return false;
             }
-            Some((table, tip_commit.content.clone()))
+            let Some(tip_provenance) = tip_commit.row_provenance() else {
+                return false;
+            };
+            Some((table, tip_commit.content.clone(), tip_provenance))
         }) else {
             return false;
         };
@@ -397,6 +438,7 @@ impl QueryManager {
                 table_name,
                 policy: select_policy,
                 content: &tip_content,
+                provenance: &tip_provenance,
                 session,
                 auth_schema,
                 auth_context,
@@ -827,9 +869,14 @@ impl QueryManager {
                     if resolved.is_soft_deleted && !include_deleted {
                         return None;
                     }
+                    let commit = obj
+                        .branches
+                        .get(&resolved.branch_name)
+                        .and_then(|branch| branch.commits.get(&resolved.commit_id))?;
                     Some(LoadedRow::new(
                         resolved.content,
                         resolved.commit_id,
+                        commit.row_provenance()?,
                         [(id, resolved.branch_name)].into_iter().collect(),
                     ))
                 };
@@ -994,9 +1041,14 @@ impl QueryManager {
                         if resolved.is_soft_deleted && !include_deleted {
                             return None;
                         }
+                        let commit = obj
+                            .branches
+                            .get(&resolved.branch_name)
+                            .and_then(|branch| branch.commits.get(&resolved.commit_id))?;
                         Some(LoadedRow::new(
                             resolved.content,
                             resolved.commit_id,
+                            commit.row_provenance()?,
                             [(id, resolved.branch_name)].into_iter().collect(),
                         ))
                     };
@@ -1336,6 +1388,19 @@ impl QueryManager {
                 return;
             }
         };
+        let provenance = match check.operation {
+            Operation::Insert => Self::payload_tip_provenance(&check.payload),
+            Operation::Delete => self.current_row_provenance(storage, object_id, branch_name),
+            Operation::Update | Operation::Select => None,
+        };
+        let Some(provenance) = provenance else {
+            let reason = format!(
+                "{:?} denied on table {} - missing row provenance",
+                check.operation, table_name.0
+            );
+            self.sync_manager.reject_permission_check(check, reason);
+            return;
+        };
         let source_branch_schema_map = self.branch_schema_map.clone();
 
         if !self.evaluate_authorization_policy(
@@ -1346,6 +1411,7 @@ impl QueryManager {
                 table_name,
                 policy,
                 content,
+                provenance: &provenance,
                 session: &check.session,
                 auth_schema: &auth_schema,
                 auth_context: &auth_context,
@@ -1408,6 +1474,8 @@ impl QueryManager {
         let using_policy = table_schema.policies.update.using.as_ref();
         let check_policy = table_schema.policies.update.with_check.as_ref();
         let source_branch_schema_map = self.branch_schema_map.clone();
+        let old_provenance = self.current_row_provenance(storage, object_id, branch_name);
+        let new_provenance = Self::payload_tip_provenance(&check.payload);
 
         if using_policy.is_none() && check_policy.is_none() {
             self.sync_manager.approve_permission_check(storage, check);
@@ -1426,6 +1494,14 @@ impl QueryManager {
                     return;
                 }
             };
+            let Some(old_provenance) = old_provenance.as_ref() else {
+                let reason = format!(
+                    "Update denied by USING policy on table {} - missing old provenance",
+                    table_name.0
+                );
+                self.sync_manager.reject_permission_check(check, reason);
+                return;
+            };
 
             if !self.evaluate_authorization_policy(
                 storage,
@@ -1435,6 +1511,7 @@ impl QueryManager {
                     table_name,
                     policy: using,
                     content: old_content,
+                    provenance: old_provenance,
                     session: &check.session,
                     auth_schema,
                     auth_context,
@@ -1459,6 +1536,14 @@ impl QueryManager {
                     return;
                 }
             };
+            let Some(new_provenance) = new_provenance.as_ref() else {
+                let reason = format!(
+                    "Update denied by WITH CHECK policy on table {} - missing new provenance",
+                    table_name.0
+                );
+                self.sync_manager.reject_permission_check(check, reason);
+                return;
+            };
 
             if !self.evaluate_authorization_policy(
                 storage,
@@ -1468,6 +1553,7 @@ impl QueryManager {
                     table_name,
                     policy: with_check,
                     content: new_content,
+                    provenance: new_provenance,
                     session: &check.session,
                     auth_schema,
                     auth_context,
@@ -1495,9 +1581,9 @@ impl QueryManager {
         descriptor: &RowDescriptor,
         _table: &TableName,
         session: &Session,
+        branch: &str,
     ) -> Vec<PolicyGraph> {
         let mut graphs = Vec::new();
-        let branch = self.current_branch();
 
         for clause in clauses {
             match clause {
@@ -1522,7 +1608,7 @@ impl QueryManager {
                     if super::encoding::column_is_null(descriptor, content, col_idx)
                         .unwrap_or(false)
                     {
-                        continue; // NULL FK passes INHERITS
+                        continue;
                     }
 
                     // Decode the FK value to get parent ObjectId
@@ -1558,7 +1644,7 @@ impl QueryManager {
                         parent_policy,
                         session,
                         &self.schema,
-                        &branch,
+                        branch,
                         1,
                     ) {
                         graphs.push(graph);
@@ -1571,13 +1657,13 @@ impl QueryManager {
                         condition,
                         session,
                         &self.schema,
-                        &branch,
+                        branch,
                     ) {
                         graphs.push(graph);
                     }
                 }
                 ComplexClause::ExistsRel { rel } => {
-                    if let Some(graph) = PolicyGraph::for_exists_rel(rel, &self.schema, &branch) {
+                    if let Some(graph) = PolicyGraph::for_exists_rel(rel, &self.schema, branch) {
                         graphs.push(graph);
                     }
                 }
@@ -1597,27 +1683,26 @@ impl QueryManager {
         let mut to_reject = Vec::new();
 
         // Create row loader for settling
-        let current_branch = self.current_branch();
-        let branches = vec![current_branch.clone()];
         let om = &mut self.sync_manager.object_manager;
         let storage_ref: &dyn Storage = storage;
 
         // Settle each active policy check
         for (pending_id, state) in &mut self.active_policy_checks {
+            let branch = state.branch;
+            let branches = vec![branch.as_str().to_string()];
             let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
                 let obj = om.get_or_load(id, storage_ref, &branches)?;
-                let branch = obj.branches.get(&BranchName::new(&current_branch))?;
-                let tip_id = branch.tips.iter().next()?;
-                let commit = branch.commits.get(tip_id)?;
+                let branch_state = obj.branches.get(&branch)?;
+                let tip_id = branch_state.tips.iter().next()?;
+                let commit = branch_state.commits.get(tip_id)?;
                 if commit.content.is_empty() {
                     return None;
                 }
                 Some(LoadedRow::new(
                     commit.content.clone(),
                     *tip_id,
-                    [(id, BranchName::new(&current_branch))]
-                        .into_iter()
-                        .collect(),
+                    commit.row_provenance()?,
+                    [(id, branch)].into_iter().collect(),
                 ))
             };
 
