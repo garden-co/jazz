@@ -231,18 +231,6 @@ impl Lens {
         }
     }
 
-    /// Translate a column name through the lens for a given table.
-    /// Returns the new column name, or None if the column doesn't exist in the output.
-    pub fn translate_column(
-        &self,
-        table: &str,
-        column: &str,
-        direction: Direction,
-    ) -> Option<String> {
-        self.translate_table_and_column(table, column, direction)
-            .map(|(_, translated_column)| translated_column)
-    }
-
     /// Translate a table name through the lens for a given direction.
     pub fn translate_table(&self, table: &str, direction: Direction) -> Option<String> {
         let transform = self.transform(direction);
@@ -277,16 +265,11 @@ impl Lens {
         direction: Direction,
     ) -> Option<(String, String)> {
         let transform = self.transform(direction);
-        let mut current_table = table.to_string();
+        let current_table = self.translate_table(table, direction)?;
         let mut current_column = column.to_string();
 
         for op in &transform.ops {
             match op {
-                LensOp::RenameTable { old_name, new_name } => {
-                    if current_table == *old_name {
-                        current_table = new_name.clone();
-                    }
-                }
                 LensOp::RenameColumn {
                     table: op_table,
                     old_name,
@@ -308,11 +291,9 @@ impl Lens {
                 LensOp::AddColumn { .. } => {
                     // New columns don't affect existing column references.
                 }
-                LensOp::AddTable { table, .. } | LensOp::RemoveTable { table, .. } => {
-                    if current_table == *table {
-                        return None;
-                    }
-                }
+                LensOp::RenameTable { .. }
+                | LensOp::AddTable { .. }
+                | LensOp::RemoveTable { .. } => {}
             }
         }
 
@@ -508,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn lens_translate_column_rename() {
+    fn lens_translate_table_and_column_rename() {
         let source = make_hash(1);
         let target = make_hash(2);
 
@@ -526,25 +507,25 @@ mod tests {
 
         // Forward: email -> email_address
         assert_eq!(
-            lens.translate_column("users", "email", Direction::Forward),
-            Some("email_address".to_string())
+            lens.translate_table_and_column("users", "email", Direction::Forward),
+            Some(("users".to_string(), "email_address".to_string()))
         );
 
         // Backward: email_address -> email
         assert_eq!(
-            lens.translate_column("users", "email_address", Direction::Backward),
-            Some("email".to_string())
+            lens.translate_table_and_column("users", "email_address", Direction::Backward),
+            Some(("users".to_string(), "email".to_string()))
         );
 
         // Unchanged column
         assert_eq!(
-            lens.translate_column("users", "name", Direction::Forward),
-            Some("name".to_string())
+            lens.translate_table_and_column("users", "name", Direction::Forward),
+            Some(("users".to_string(), "name".to_string()))
         );
     }
 
     #[test]
-    fn lens_translate_column_removed() {
+    fn lens_translate_table_and_column_removed() {
         let source = make_hash(1);
         let target = make_hash(2);
 
@@ -563,14 +544,14 @@ mod tests {
 
         // Forward: deprecated column doesn't exist in target
         assert_eq!(
-            lens.translate_column("users", "deprecated", Direction::Forward),
+            lens.translate_table_and_column("users", "deprecated", Direction::Forward),
             None
         );
 
         // Backward: column is added back
         assert_eq!(
-            lens.translate_column("users", "deprecated", Direction::Backward),
-            Some("deprecated".to_string())
+            lens.translate_table_and_column("users", "deprecated", Direction::Backward),
+            Some(("users".to_string(), "deprecated".to_string()))
         );
     }
 
