@@ -27,7 +27,7 @@ export default async function globalSetup() {
     serverUrl: serverHandle.url,
     appId: WALKTHROUGH_APP_ID,
     adminSecret: ADMIN_SECRET,
-    schemaDir: join(import.meta.dirname ?? __dirname, "../schema"),
+    schemaDir: join(import.meta.dirname ?? __dirname, ".."),
   });
 
   return async () => {
