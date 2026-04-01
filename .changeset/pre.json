@@ -26,7 +26,9 @@
     "auth-workos-chat": "0.1.0",
     "chat-react": "0.1.0",
     "stress-test-expo": "0.1.0",
-    "stress-test-todo-react": "0.1.0"
+    "stress-test-todo-react": "0.1.0",
+    "nextjs-csr-ssr": "0.1.0",
+    "world-tour": "0.0.0"
   },
   "changesets": [
     "authorship-edit-metadata-mvp",
@@ -39,6 +41,7 @@
     "codex-scoped-napi-loader",
     "cold-load-history",
     "deep-reactivity",
+    "dev-schema-autopush-help",
     "durability-tier-overhaul-summary",
     "eager-buttons-eat",
     "edge-server-settled-query",
@@ -84,10 +87,12 @@
     "pr-349-update-nullable-fields",
     "pr-351-vue-svelte-alignment",
     "pr-376-rn-error-reporting",
+    "pr-404-client-state-cleanup",
     "prefix-holes-preserve",
     "quick-coins-smoke",
     "quick-days-jam",
     "remove-nitro-modules",
+    "rocksdb-storage-backend",
     "rust-frozen-sql-quoting",
     "server-context-api",
     "silent-flowers-live",
@@ -102,6 +107,7 @@
     "tiny-files-sing",
     "vue-bindings-docs",
     "wet-rivers-send",
-    "wise-pans-dream"
+    "wise-pans-dream",
+    "world-tour-example"
   ]
 }
