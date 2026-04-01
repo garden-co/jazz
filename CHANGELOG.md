@@ -1,3 +1,7 @@
+Released Jazz 0.20.16:
+- Fixed `InvalidSignature` errors when loading from storage with a concurrent writer. The storage load path read session metadata and transaction rows in separate non-transactional queries, and a concurrent write between the two reads could cause the query to pick up an extra row not covered by the signature.
+- Added cursor-based time travel for CoValues. Introduces the ability to create cursors (frontier snapshots) on loaded CoValues and later reload them at that exact point in time, enabling read-only historical views. Adds `createCursor()`, `cursor` getter, and support for loading CoValues by cursor via `load()` and `ensureLoaded()`.
+
 Released Jazz 0.20.15:
 - Surface WASM panics as JavaScript errors and ship the generated inline snippet bundle.
 - Added an incoming queue metric that measures sync message processing time by `messageType`.
