@@ -169,6 +169,10 @@ export class SubscriptionsOrchestrator {
   async init(): Promise<void> {}
 
   setSession(session: Session | null): void {
+    if (sessionsEqual(this.session ?? null, session)) {
+      return;
+    }
+
     this.session = session;
 
     for (const entry of this.entries.values()) {
@@ -364,6 +368,14 @@ export class SubscriptionsOrchestrator {
 
     this.subscribeEntry(entry);
   }
+}
+
+function sessionsEqual(a: Session | null, b: Session | null): boolean {
+  if (a === b) {
+    return true;
+  }
+
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 function serializeQueryOptions(options?: QueryOptions): string {

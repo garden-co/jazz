@@ -366,9 +366,7 @@ async fn events_handler(
             {
                 Ok(s) => s,
                 Err(error) => {
-                    return Err(
-                        (StatusCode::UNAUTHORIZED, Json(error.into_response())).into_response()
-                    );
+                    return Err((StatusCode::UNAUTHORIZED, Json(error)).into_response());
                 }
             }
         };
@@ -584,9 +582,7 @@ async fn sync_handler(
                     )
                         .into_response();
                 }
-                Err(error) => {
-                    return (StatusCode::UNAUTHORIZED, Json(error.into_response())).into_response();
-                }
+                Err(error) => return (StatusCode::UNAUTHORIZED, Json(error)).into_response(),
             }
         };
 

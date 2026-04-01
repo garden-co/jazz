@@ -68,4 +68,27 @@ describe("Db auth state", () => {
       transport: "bearer",
     });
   });
+
+  it("ignores redundant auth updates when the token is unchanged", () => {
+    const jwt = makeJwt({ sub: "alice", claims: { role: "reader" } });
+    const { db, runtimeClient } = makeDbWithJwt(jwt);
+    const states: AuthState[] = [];
+
+    const stop = db.onAuthChanged((state) => {
+      states.push(state);
+    });
+
+    db.updateAuth(jwt);
+    stop();
+
+    expect(runtimeClient.updateAuth).not.toHaveBeenCalled();
+    expect(states).toHaveLength(1);
+    expect(states[0]).toMatchObject({
+      status: "authenticated",
+      transport: "bearer",
+      session: {
+        user_id: "alice",
+      },
+    });
+  });
 });

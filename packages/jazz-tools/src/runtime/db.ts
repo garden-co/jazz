@@ -405,6 +405,31 @@ export class Db {
     this.authStateStore.markUnauthenticated(reason);
   }
 
+  protected applyAuthUpdate(jwtToken?: string): boolean {
+    const previousToken = this.config.jwtToken;
+    const previousState = this.authStateStore.getState();
+    const nextState = this.authStateStore.applyJwtToken(jwtToken);
+    const tokenChanged = previousToken !== jwtToken;
+
+    if (!tokenChanged && nextState === previousState) {
+      return false;
+    }
+
+    this.config.jwtToken = jwtToken;
+
+    for (const client of this.clients.values()) {
+      client.updateAuth(jwtToken);
+    }
+
+    this.workerBridge?.updateAuth({
+      jwtToken,
+      localAuthMode: this.config.localAuthMode,
+      localAuthToken: this.config.localAuthToken,
+    });
+
+    return true;
+  }
+
   /**
    * Create a Db instance with pre-loaded WASM module.
    * @internal Use createDb() instead.
@@ -1003,18 +1028,7 @@ export class Db {
   }
 
   updateAuth(jwtToken?: string): void {
-    this.authStateStore.applyJwtToken(jwtToken);
-    this.config.jwtToken = jwtToken;
-
-    for (const client of this.clients.values()) {
-      client.updateAuth(jwtToken);
-    }
-
-    this.workerBridge?.updateAuth({
-      jwtToken,
-      localAuthMode: this.config.localAuthMode,
-      localAuthToken: this.config.localAuthToken,
-    });
+    this.applyAuthUpdate(jwtToken);
   }
 
   getAuthState(): AuthState {
@@ -1497,7 +1511,10 @@ class ClientBackedDb extends Db {
   }
 
   override updateAuth(jwtToken?: string): void {
-    super.updateAuth(jwtToken);
+    if (!this.applyAuthUpdate(jwtToken)) {
+      return;
+    }
+
     this.runtimeClient.updateAuth(jwtToken);
   }
 

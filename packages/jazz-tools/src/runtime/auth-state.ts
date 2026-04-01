@@ -103,24 +103,5 @@ export function createAuthStateStore(input: ClientSessionInput) {
       emit();
       return state;
     },
-
-    setAuthenticated(
-      transport: "bearer" | "local" | "backend",
-      session: Session | null,
-    ): AuthState {
-      const nextState: AuthState = {
-        status: "authenticated",
-        transport,
-        session,
-      };
-
-      if (authStateEquals(state, nextState)) {
-        return state;
-      }
-
-      state = nextState;
-      emit();
-      return state;
-    },
   };
 }

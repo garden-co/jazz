@@ -212,6 +212,43 @@ mod integration_tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
+    #[tokio::test]
+    async fn test_events_reject_invalid_client_id_with_structured_bad_request() {
+        let server = TestServer::start().await;
+
+        let resp = client()
+            .get(format!("{}/events?client_id=not-a-uuid", server.base_url()))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "Invalid client_id: not-a-uuid");
+        assert_eq!(body["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn test_events_require_session_with_structured_401() {
+        let server = TestServer::start().await;
+
+        let resp = client()
+            .get(format!(
+                "{}/events?client_id=01234567-89ab-cdef-0123-456789abcdef",
+                server.base_url()
+            ))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "unauthenticated");
+        assert_eq!(body["code"], "missing");
+    }
+
     /// Test backend impersonation with valid secret.
     #[tokio::test]
     async fn test_backend_impersonation_valid() {
@@ -341,6 +378,68 @@ mod integration_tests {
             .await
             .unwrap();
         assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_link_external_returns_expired_for_expired_jwt() {
+        let server = TestServer::start_with_jwks_responses(vec![test_server::hs256_jwks(
+            "test-jwks-kid",
+            "secret-expired-link",
+        )])
+        .await;
+        let expired = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 60;
+        let token = make_jwt_with_exp(
+            "external-user",
+            json!({"role": "user"}),
+            "secret-expired-link",
+            expired,
+            Some("https://issuer.example"),
+            None,
+        );
+
+        let response = client()
+            .post(format!("{}/auth/link-external", server.base_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("X-Jazz-Local-Mode", "anonymous")
+            .header("X-Jazz-Local-Token", "device-token-a")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["error"], "unauthenticated");
+        assert_eq!(body["code"], "expired");
+    }
+
+    #[tokio::test]
+    async fn test_link_external_returns_disabled_when_jwt_auth_is_not_configured() {
+        let server = TestServer::start_without_jwks().await;
+        let token = make_jwt_with_issuer(
+            "external-user",
+            json!({"role": "user"}),
+            JWT_SECRET,
+            "https://issuer.example",
+            None,
+        );
+
+        let response = client()
+            .post(format!("{}/auth/link-external", server.base_url()))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("X-Jazz-Local-Mode", "anonymous")
+            .header("X-Jazz-Local-Token", "device-token-a")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["error"], "unauthenticated");
+        assert_eq!(body["code"], "disabled");
     }
 
     /// Create a valid catalogue sync body for testing admin auth.

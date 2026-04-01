@@ -114,6 +114,7 @@ impl ServerEvent {
 
 /// Error codes for server errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     /// Invalid request format.
     BadRequest,

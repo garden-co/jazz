@@ -40,7 +40,7 @@ use tracing::warn;
 use crate::query_manager::session::Session;
 use crate::schema_manager::AppId;
 use crate::server::ServerState;
-use crate::transport_protocol::{UnauthenticatedCode, UnauthenticatedResponse};
+use crate::transport_protocol::UnauthenticatedResponse;
 
 const LOCAL_MODE_HEADER: &str = "X-Jazz-Local-Mode";
 const LOCAL_TOKEN_HEADER: &str = "X-Jazz-Local-Token";
@@ -155,51 +155,6 @@ impl std::fmt::Display for JwtError {
             JwtError::NoKeyConfigured => write!(f, "No JWT validation key configured"),
             JwtError::Expired => write!(f, "JWT has expired"),
             JwtError::Invalid(msg) => write!(f, "Invalid JWT: {}", msg),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthFailure {
-    pub code: UnauthenticatedCode,
-    pub message: String,
-}
-
-impl AuthFailure {
-    pub fn expired(message: impl Into<String>) -> Self {
-        Self {
-            code: UnauthenticatedCode::Expired,
-            message: message.into(),
-        }
-    }
-
-    pub fn missing(message: impl Into<String>) -> Self {
-        Self {
-            code: UnauthenticatedCode::Missing,
-            message: message.into(),
-        }
-    }
-
-    pub fn invalid(message: impl Into<String>) -> Self {
-        Self {
-            code: UnauthenticatedCode::Invalid,
-            message: message.into(),
-        }
-    }
-
-    pub fn disabled(message: impl Into<String>) -> Self {
-        Self {
-            code: UnauthenticatedCode::Disabled,
-            message: message.into(),
-        }
-    }
-
-    pub fn into_response(self) -> UnauthenticatedResponse {
-        match self.code {
-            UnauthenticatedCode::Expired => UnauthenticatedResponse::expired(self.message),
-            UnauthenticatedCode::Missing => UnauthenticatedResponse::missing(self.message),
-            UnauthenticatedCode::Invalid => UnauthenticatedResponse::invalid(self.message),
-            UnauthenticatedCode::Disabled => UnauthenticatedResponse::disabled(self.message),
         }
     }
 }
@@ -713,10 +668,10 @@ pub fn resolve_verified_jwt_session(
     app_id: AppId,
     verified: VerifiedJwt,
     external_identities: Option<&ExternalIdentityMap>,
-) -> Result<Session, AuthFailure> {
+) -> Result<Session, UnauthenticatedResponse> {
     let subject = verified.subject.trim();
     if subject.is_empty() {
-        return Err(AuthFailure::invalid("Invalid JWT subject"));
+        return Err(UnauthenticatedResponse::invalid("Invalid JWT subject"));
     }
 
     let issuer = verified
@@ -740,7 +695,9 @@ pub fn resolve_verified_jwt_session(
     if let (Some(claim), Some(mapped)) = (principal_claim, mapped_principal.as_deref())
         && claim != mapped
     {
-        return Err(AuthFailure::invalid("External identity mapping conflict"));
+        return Err(UnauthenticatedResponse::invalid(
+            "External identity mapping conflict",
+        ));
     }
 
     let principal_id = if let Some(claim) = principal_claim {
@@ -818,7 +775,7 @@ pub async fn extract_session(
     config: &AuthConfig,
     external_identities: Option<&ExternalIdentityMap>,
     jwks_cache: Option<&JwksCache>,
-) -> Result<Option<Session>, AuthFailure> {
+) -> Result<Option<Session>, UnauthenticatedResponse> {
     // Priority 1: Backend impersonation
     if let Some(session_b64) = headers.get("X-Jazz-Session").and_then(|v| v.to_str().ok()) {
         let backend_secret = headers
@@ -828,19 +785,21 @@ pub async fn extract_session(
         match (&config.backend_secret, backend_secret) {
             (Some(expected), Some(got)) if expected == got => {
                 let session = decode_session_header(session_b64)
-                    .ok_or_else(|| AuthFailure::invalid("Invalid session format"))?;
+                    .ok_or_else(|| UnauthenticatedResponse::invalid("Invalid session format"))?;
                 return Ok(Some(session));
             }
             (Some(_), Some(_)) => {
-                return Err(AuthFailure::invalid("Invalid backend secret"));
+                return Err(UnauthenticatedResponse::invalid("Invalid backend secret"));
             }
             (Some(_), None) => {
-                return Err(AuthFailure::invalid(
+                return Err(UnauthenticatedResponse::invalid(
                     "Backend secret required for session impersonation",
                 ));
             }
             (None, Some(_)) => {
-                return Err(AuthFailure::disabled("Backend auth not configured"));
+                return Err(UnauthenticatedResponse::disabled(
+                    "Backend auth not configured",
+                ));
             }
             (None, None) => {
                 // Session header without secret - ignore and fall through to JWT
@@ -851,12 +810,14 @@ pub async fn extract_session(
     // Priority 2: JWT auth
     if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
         let Some(token) = auth_value.strip_prefix("Bearer ") else {
-            return Err(AuthFailure::invalid("Invalid Authorization header format"));
+            return Err(UnauthenticatedResponse::invalid(
+                "Invalid Authorization header format",
+            ));
         };
 
         let token = token.trim();
         if token.is_empty() {
-            return Err(AuthFailure::invalid("Empty bearer token"));
+            return Err(UnauthenticatedResponse::invalid("Empty bearer token"));
         }
 
         let jwt_result = if let Some(cache) = jwks_cache {
@@ -871,27 +832,29 @@ pub async fn extract_session(
                 return Ok(Some(session));
             }
             Err(JwtError::NoKeyConfigured) => {
-                return Err(AuthFailure::disabled(
+                return Err(UnauthenticatedResponse::disabled(
                     "JWT auth is not enabled for this app",
                 ));
             }
             Err(JwtError::Expired) => {
-                return Err(AuthFailure::expired("JWT has expired"));
+                return Err(UnauthenticatedResponse::expired("JWT has expired"));
             }
             Err(JwtError::Invalid(message)) => {
-                return Err(AuthFailure::invalid(message));
+                return Err(UnauthenticatedResponse::invalid(message));
             }
         }
     }
 
     // Priority 3: Local anonymous/demo token auth
     if let Some((mode, token)) = parse_local_auth_headers(headers)
-        .map_err(|(_status, message)| AuthFailure::invalid(message))?
+        .map_err(|(_status, message)| UnauthenticatedResponse::invalid(message))?
     {
         if !config.is_local_mode_enabled(mode) {
             return Err(match mode {
-                LocalAuthMode::Anonymous => AuthFailure::disabled("Anonymous auth disabled"),
-                LocalAuthMode::Demo => AuthFailure::disabled("Demo auth disabled"),
+                LocalAuthMode::Anonymous => {
+                    UnauthenticatedResponse::disabled("Anonymous auth disabled")
+                }
+                LocalAuthMode::Demo => UnauthenticatedResponse::disabled("Demo auth disabled"),
             });
         }
 

@@ -547,4 +547,28 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       await harness.manager.shutdown();
     }
   });
+
+  it("SO-U22 setSession skips resubscribe work when the session is unchanged", async () => {
+    const session: Session = {
+      user_id: "alice",
+      claims: { role: "reader" },
+    };
+    const harness = createUnitHarness("orchestrator-unit-same-session", session);
+
+    try {
+      harness.makeEntry();
+
+      expect(harness.calls).toHaveLength(1);
+
+      harness.manager.setSession({
+        user_id: "alice",
+        claims: { role: "reader" },
+      });
+
+      expect(harness.calls).toHaveLength(1);
+      expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
 });
