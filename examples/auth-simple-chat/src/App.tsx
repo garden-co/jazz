@@ -1,6 +1,6 @@
 import * as React from "react";
 import { type DbConfig } from "jazz-tools";
-import { JazzProvider, getActiveSyntheticAuth, useSession } from "jazz-tools/react";
+import { JazzProvider, getActiveSyntheticAuth, useDb, useSession } from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID, SYNC_SERVER_URL } from "../constants.js";
 import {
   clearStoredAuthSession,
@@ -15,32 +15,46 @@ type ChatShellProps = {
   onTokenChange(token: string | null): void;
 };
 
-function ChatShell({ onTokenChange }: ChatShellProps) {
-  const session = useSession();
+function ChatShell() {
+  const db = useDb();
+  const session = db.getAuthState().session;
+
+  console.log("session", session);
+
   const role = typeof session?.claims?.role === "string" ? session.claims.role : null;
 
   async function handleSignIn(email: string, password: string) {
     const session = await requestSignIn(email, password);
     writeStoredAuthSession(DEFAULT_APP_ID, session);
-    onTokenChange(session.token);
+
+    db.updateAuth(session.token);
   }
 
   async function handleSignUp(email: string, password: string) {
     const session = await requestSignUp(email, password);
     writeStoredAuthSession(DEFAULT_APP_ID, session);
-    onTokenChange(session.token);
+    db.updateAuth(session.token);
   }
 
   function handleSignOut() {
     clearStoredAuthSession(DEFAULT_APP_ID);
-    onTokenChange(null);
+    db.updateAuth(undefined);
   }
+
+  React.useEffect(() => {
+    return db.onAuthChanged((state) => {
+      if (state.status === "unauthenticated") {
+        clearStoredAuthSession(DEFAULT_APP_ID);
+        db.updateAuth(undefined);
+      }
+    });
+  }, [db]);
 
   return (
     <main className="app-shell">
       <section className="content-grid">
         <AuthCard
-          loggedIn={session?.claims.auth_mode !== "local"}
+          loggedIn={session !== null && session?.claims.auth_mode !== "local"}
           role={role}
           onSignIn={handleSignIn}
           onSignUp={handleSignUp}
@@ -68,21 +82,17 @@ function ChatShell({ onTokenChange }: ChatShellProps) {
 }
 
 export function App() {
-  const [token, setToken] = React.useState<string | null>(
-    () => readStoredAuthSession(DEFAULT_APP_ID)?.token ?? null,
-  );
-
   const config = React.useMemo((): DbConfig => {
-    if (token) {
-      return {
-        appId: DEFAULT_APP_ID,
-        env: "dev",
-        userBranch: "main",
-        serverUrl: SYNC_SERVER_URL,
-        jwtToken: token,
-        driver: { type: "memory" },
-      };
-    }
+    const token = readStoredAuthSession(DEFAULT_APP_ID)?.token;
+
+    return {
+      appId: DEFAULT_APP_ID,
+      env: "dev",
+      userBranch: "main",
+      serverUrl: SYNC_SERVER_URL,
+      jwtToken: token,
+      driver: { type: "memory" },
+    };
 
     const localAuth = getActiveSyntheticAuth(DEFAULT_APP_ID, { defaultMode: "anonymous" });
     return {
@@ -94,15 +104,11 @@ export function App() {
       localAuthToken: localAuth.localAuthToken,
       driver: { type: "memory" },
     };
-  }, [token]);
+  }, []);
 
   return (
-    <JazzProvider
-      key={token ? "jwt" : "local"}
-      config={config}
-      fallback={<p className="loading-state">Connecting to Jazz...</p>}
-    >
-      <ChatShell onTokenChange={setToken} />
+    <JazzProvider config={config} fallback={<p className="loading-state">Connecting to Jazz...</p>}>
+      <ChatShell />
     </JazzProvider>
   );
 }

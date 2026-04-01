@@ -89,10 +89,11 @@ export function createAuthStateStore(input: ClientSessionInput) {
       if (
         jwtToken &&
         state.session &&
+        state.session.claims?.local_mode !== "anonymous" &&
         nextState.session &&
         state.session.user_id !== nextState.session.user_id
       ) {
-        throw new Error("Changing principals on a live client is not supported. Recreate the Db.");
+        throw new Error("Changing user_id on a live client is not supported. Recreate the Db.");
       }
 
       if (authStateEquals(state, nextState)) {
