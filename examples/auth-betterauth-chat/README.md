@@ -9,7 +9,7 @@ What it demonstrates:
 - The `admin` plugin to assign roles (`admin` / `member`) to users
 - Fetching the JWT from the Better Auth session and passing it to `JazzProvider`
 - Falling back to anonymous `localAuth` when no session exists
-- Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./schema/permissions.ts).
+- Role-based UI gating (`admin` can post to Announcements; `member` can post to the general chat). Permissions are defined in [permissions.ts](./permissions.ts).
 
 One default account is seeded on startup: `admin@example.com / admin` with `role = "admin"`.
 New sign-ups receive `role = "member"` by default (configured via the `admin` plugin).

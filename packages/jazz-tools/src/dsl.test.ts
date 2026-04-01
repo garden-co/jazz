@@ -24,13 +24,13 @@ describe("enum DSL invariants", () => {
   });
 
   it("rejects duplicate variants in add enum migration", () => {
-    expect(() => col.add().enum("todo", "todo", { default: "todo" })).toThrow(
+    expect(() => col.add.enum("todo", "todo", { default: "todo" })).toThrow(
       "Enum variants must be unique.",
     );
   });
 
   it("rejects empty variants in drop enum migration", () => {
-    expect(() => col.drop().enum("todo", "", { backwardsDefault: "todo" })).toThrow(
+    expect(() => col.drop.enum("todo", "", { backwardsDefault: "todo" })).toThrow(
       "Enum variants cannot be empty strings.",
     );
   });
@@ -39,8 +39,8 @@ describe("enum DSL invariants", () => {
 describe("bytes DSL API", () => {
   it("supports bytes as the primary BYTEA builder name", () => {
     expect(col.bytes()._sqlType).toBe("BYTEA");
-    expect(col.add().bytes({ default: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
-    expect(col.drop().bytes({ backwardsDefault: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
+    expect(col.add.bytes({ default: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
+    expect(col.drop.bytes({ backwardsDefault: new Uint8Array([0]) }).sqlType).toBe("BYTEA");
   });
 });
 
@@ -149,7 +149,6 @@ describe("ref DSL", () => {
 
   it("rejects scalar reference columns not ending in Id or _id", () => {
     resetCollectedState();
-    // @ts-expect-error ref columns must end in Id or _id
     expect(() => table("todos", { image: col.ref("files") })).toThrow(
       "Invalid reference key 'image'. Rename it to 'image_id' or 'imageId'.",
     );
@@ -157,7 +156,6 @@ describe("ref DSL", () => {
 
   it("rejects array(ref(...)) columns not ending in Ids or _ids", () => {
     resetCollectedState();
-    // @ts-expect-error array(ref(...)) columns must end in Ids or _ids
     expect(() => table("todos", { images: col.array(col.ref("files")) })).toThrow(
       "Invalid array reference key 'images'. Rename it to 'images_ids' or 'imagesIds'.",
     );
@@ -178,7 +176,7 @@ describe("reserved magic-column namespace", () => {
     resetCollectedState();
     expect(() =>
       migrate("todos", {
-        $canRead: col.add().boolean({ default: false }),
+        $canRead: col.add.boolean({ default: false }),
       }),
     ).toThrow(/reserved for magic columns/i);
   });
@@ -187,7 +185,7 @@ describe("reserved magic-column namespace", () => {
     resetCollectedState();
     expect(() =>
       migrate("todos", {
-        $legacy: col.drop().boolean({ backwardsDefault: false }),
+        $legacy: col.drop.boolean({ backwardsDefault: false }),
       }),
     ).not.toThrow();
 

@@ -1,6 +1,6 @@
 import type { Db } from "jazz-tools";
-import { app } from "../schema/app.js";
-import type { Venue } from "../schema/app.js";
+import { app } from "../schema.js";
+import type { Venue } from "../schema.js";
 import { defaultBandName, venues as seedVenues, descriptions, privateNotes } from "./seed-data.js";
 
 function pickWeightedStatus(rand: number): "confirmed" | "tentative" | "cancelled" {

@@ -1005,7 +1005,7 @@ fn get_or_load_computes_correct_tips_for_multi_commit_branch() {
 }
 
 #[test]
-fn get_or_load_hydrates_missing_branches_into_cached_object() {
+fn get_or_load_hydrates_missing_requested_branches_for_cached_objects() {
     let mut io = MemoryStorage::new();
     let author = ObjectId::new();
 
@@ -1017,9 +1017,9 @@ fn get_or_load_hydrates_missing_branches_into_cached_object() {
         mgr.add_commit(
             &mut io,
             oid,
-            "dev-other-main",
+            "draft",
             vec![],
-            b"other".to_vec(),
+            b"draft".to_vec(),
             author,
             None,
         )
@@ -1027,30 +1027,23 @@ fn get_or_load_hydrates_missing_branches_into_cached_object() {
         oid
     };
 
-    let mut mgr2 = ObjectManager::new();
-    let loaded_main = mgr2
-        .get_or_load(object_id, &io, &["main".to_string()])
-        .expect("object should load on main branch");
-    assert!(loaded_main.branches.contains_key(&BranchName::new("main")));
+    let mut mgr = ObjectManager::new();
+    mgr.get_or_load(object_id, &io, &["main".to_string()]);
+
+    let object = mgr.get(object_id).expect("object should be cached");
+    assert!(object.branches.contains_key(&BranchName::new("main")));
     assert!(
-        !loaded_main
-            .branches
-            .contains_key(&BranchName::new("dev-other-main"))
+        !object.branches.contains_key(&BranchName::new("draft")),
+        "setup should start with only the first requested branch cached"
     );
 
-    let loaded_with_fallback = mgr2
-        .get_or_load(object_id, &io, &["dev-other-main".to_string()])
-        .expect("object should load on dev-other-main branch");
+    mgr.get_or_load(object_id, &io, &["draft".to_string()]);
+
+    let object = mgr.get(object_id).expect("object should stay cached");
+    assert!(object.branches.contains_key(&BranchName::new("main")));
     assert!(
-        loaded_with_fallback
-            .branches
-            .contains_key(&BranchName::new("dev-other-main"))
-    );
-    // Main branch was already cached, so it's also returned
-    assert!(
-        loaded_with_fallback
-            .branches
-            .contains_key(&BranchName::new("main"))
+        object.branches.contains_key(&BranchName::new("draft")),
+        "subsequent get_or_load calls should hydrate newly requested branches"
     );
 }
 
@@ -1223,7 +1216,7 @@ fn lww_selects_highest_timestamp_tip() {
         parents: smallvec![root],
         content: b"alice-edit".to_vec(),
         timestamp: 200,
-        author: alice,
+        author: alice.to_string(),
         metadata: None,
         stored_state: StoredState::default(),
         ack_state: CommitAckState::default(),
@@ -1232,7 +1225,7 @@ fn lww_selects_highest_timestamp_tip() {
         parents: smallvec![root],
         content: b"bob-edit".to_vec(),
         timestamp: 300,
-        author: bob,
+        author: bob.to_string(),
         metadata: None,
         stored_state: StoredState::default(),
         ack_state: CommitAckState::default(),
@@ -1293,7 +1286,7 @@ fn lww_deterministic_on_equal_timestamps() {
         parents: smallvec![root],
         content: b"edit-x".to_vec(),
         timestamp: 500,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: StoredState::default(),
         ack_state: CommitAckState::default(),
@@ -1302,7 +1295,7 @@ fn lww_deterministic_on_equal_timestamps() {
         parents: smallvec![root],
         content: b"edit-y".to_vec(),
         timestamp: 500,
-        author,
+        author: author.to_string(),
         metadata: None,
         stored_state: StoredState::default(),
         ack_state: CommitAckState::default(),
@@ -1362,7 +1355,7 @@ fn receive_commit_idempotent_during_conflict() {
         parents: smallvec![root],
         content: b"alice-edit".to_vec(),
         timestamp: 100,
-        author: alice,
+        author: alice.to_string(),
         metadata: None,
         stored_state: StoredState::default(),
         ack_state: CommitAckState::default(),
@@ -1371,7 +1364,7 @@ fn receive_commit_idempotent_during_conflict() {
         parents: smallvec![root],
         content: b"bob-edit".to_vec(),
         timestamp: 200,
-        author: bob,
+        author: bob.to_string(),
         metadata: None,
         stored_state: StoredState::default(),
         ack_state: CommitAckState::default(),
@@ -1439,7 +1432,7 @@ fn truncate_with_diverged_tips() {
         parents: smallvec![root],
         content: b"a1".to_vec(),
         timestamp: 100,
-        author: alice,
+        author: alice.to_string(),
         metadata: None,
         stored_state: StoredState::default(),
         ack_state: CommitAckState::default(),
@@ -1452,7 +1445,7 @@ fn truncate_with_diverged_tips() {
         parents: smallvec![a1],
         content: b"a2".to_vec(),
         timestamp: 200,
-        author: alice,
+        author: alice.to_string(),
         metadata: None,
         stored_state: StoredState::default(),
         ack_state: CommitAckState::default(),
@@ -1466,7 +1459,7 @@ fn truncate_with_diverged_tips() {
         parents: smallvec![root],
         content: b"b1".to_vec(),
         timestamp: 150,
-        author: bob,
+        author: bob.to_string(),
         metadata: None,
         stored_state: StoredState::default(),
         ack_state: CommitAckState::default(),
@@ -1479,7 +1472,7 @@ fn truncate_with_diverged_tips() {
         parents: smallvec![b1],
         content: b"b2".to_vec(),
         timestamp: 250,
-        author: bob,
+        author: bob.to_string(),
         metadata: None,
         stored_state: StoredState::default(),
         ack_state: CommitAckState::default(),
@@ -1562,7 +1555,7 @@ fn truncate_rejects_when_tip_not_descendant_of_tail() {
         parents: smallvec![root],
         content: b"alice-edit".to_vec(),
         timestamp: 100,
-        author: alice,
+        author: alice.to_string(),
         metadata: None,
         stored_state: StoredState::default(),
         ack_state: CommitAckState::default(),
@@ -1571,7 +1564,7 @@ fn truncate_rejects_when_tip_not_descendant_of_tail() {
         parents: smallvec![root],
         content: b"bob-edit".to_vec(),
         timestamp: 200,
-        author: bob,
+        author: bob.to_string(),
         metadata: None,
         stored_state: StoredState::default(),
         ack_state: CommitAckState::default(),
@@ -1644,7 +1637,7 @@ fn lww_offline_edit_wins_when_later() {
             parents: smallvec![parent],
             content: format!("alice-v{i}").into_bytes(),
             timestamp: ts,
-            author: alice,
+            author: alice.to_string(),
             metadata: None,
             stored_state: StoredState::default(),
             ack_state: CommitAckState::default(),
@@ -1663,7 +1656,7 @@ fn lww_offline_edit_wins_when_later() {
         parents: smallvec![a1],
         content: b"bob-offline-edit".to_vec(),
         timestamp: 700,
-        author: bob,
+        author: bob.to_string(),
         metadata: None,
         stored_state: StoredState::default(),
         ack_state: CommitAckState::default(),
@@ -1728,12 +1721,12 @@ fn lww_different_fields_same_object_whole_commit_wins() {
         parents: smallvec![root],
         content: b"title=alice-title,completed=false".to_vec(),
         timestamp: 200,
-        author: alice,
+        author: alice.to_string(),
         metadata: None,
         stored_state: StoredState::default(),
         ack_state: CommitAckState::default(),
     };
-    let alice_id = manager
+    let _alice_id = manager
         .receive_commit(&mut io, object_id, "main", alice_edit)
         .unwrap();
 
@@ -1742,7 +1735,7 @@ fn lww_different_fields_same_object_whole_commit_wins() {
         parents: smallvec![root],
         content: b"title=task,completed=true".to_vec(),
         timestamp: 300,
-        author: bob,
+        author: bob.to_string(),
         metadata: None,
         stored_state: StoredState::default(),
         ack_state: CommitAckState::default(),

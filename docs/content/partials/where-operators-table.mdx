@@ -1,0 +1,15 @@
+Operator support by column type (TypeScript):
+
+| Column kind                   | Operators / shape                     |
+| ----------------------------- | ------------------------------------- |
+| `id`                          | `eq`, `ne`, `in`                      |
+| `s.string()`                  | `eq`, `ne`, `contains`                |
+| `s.boolean()`                 | plain boolean equality (`done: true`) |
+| `s.int()` / `s.float()`       | `eq`, `ne`, `gt`, `gte`, `lt`, `lte`  |
+| `s.timestamp()`               | `eq`, `ne`, `gt`, `gte`, `lt`, `lte`  |
+| `s.bytes()`                   | `eq`, `ne`                            |
+| `s.ref("...")` (required)     | `eq`, `ne`                            |
+| `s.ref("...").optional()`     | `eq`, `ne`, `isNull`                  |
+| `s.enum(...)`                 | `eq`, `ne`, `in`                      |
+| `s.array(...)`                | `eq`, `contains`                      |
+| `s.json()` / `s.json(schema)` | `eq`, `ne`, `in`                      |

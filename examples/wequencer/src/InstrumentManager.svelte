@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { getDb, QuerySubscription } from 'jazz-tools/svelte';
-	import { app } from '../schema/app.js';
+	import { app } from '../schema.js';
 
 	const db = getDb();
 	const instruments = new QuerySubscription(app.instruments.orderBy('display_order'));
@@ -15,11 +15,11 @@
 		uploading = true;
 
 		try {
-			const buffer = await file.arrayBuffer();
+			const storedFile = await db.createFileFromBlob(app, file, { tier: 'edge' });
 			const maxOrder = Math.max(0, ...(instruments.current ?? []).map((i) => i.display_order));
 			db.insert(app.instruments, {
 				name: name.trim(),
-				sound: new Uint8Array(buffer),
+				soundFileId: storedFile.id,
 				display_order: maxOrder + 1,
 			});
 			name = '';
@@ -30,7 +30,19 @@
 		}
 	}
 
-	function removeInstrument(id: string) {
+	async function removeInstrument(id: string) {
+		const instrument = await db.one(app.instruments.where({ id }));
+		const fileId = instrument?.soundFileId;
+		if (fileId) {
+			const storedFile = await db.one(app.files.where({ id: fileId }));
+			if (storedFile) {
+				for (const partId of storedFile.partIds) {
+					db.delete(app.file_parts, partId);
+				}
+				db.delete(app.files, storedFile.id);
+			}
+		}
+
 		db.delete(app.instruments, id);
 	}
 </script>

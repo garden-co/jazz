@@ -68,11 +68,11 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { useDb, useSession } from "jazz-tools/vue";
-import { app } from "../../schema/app.js";
-import type { StopWithIncludes } from "../../schema/app.js";
+import { app } from "../../schema.js";
+import type { StopWithVenue } from "../../schema.js";
 
 const props = defineProps<{
-  stop: StopWithIncludes<{ venue: true }>;
+  stop: StopWithVenue;
 }>();
 
 const emit = defineEmits<{

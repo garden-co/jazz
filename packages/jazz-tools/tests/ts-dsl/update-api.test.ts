@@ -1,6 +1,6 @@
 import { createDb, type Db } from "../../src/runtime/db.js";
 import { afterEach, assert, beforeEach, describe, expect, it } from "vitest";
-import { app } from "./fixtures/basic/app";
+import { app } from "./fixtures/basic/schema";
 import { insertProject, insertTodo, insertUser } from "./factories";
 
 describe("TS Update API", () => {
@@ -64,7 +64,7 @@ describe("TS Update API", () => {
 
     const updatedTodo = await db.one(app.todos.where({ id: { eq: todo.id } }));
     assert(updatedTodo);
-    expect(updatedTodo.ownerId).toBeUndefined();
+    expect(updatedTodo.ownerId).toBeNull();
   });
 
   it("required fields cannot be unset", async () => {

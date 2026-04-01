@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools/react-native";
-import { app } from "../schema/app";
+import { app } from "../schema";
 
 const EXAMPLE_TODO_ID = "00000000-0000-0000-0000-000000000000";
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";
@@ -39,7 +39,7 @@ export async function includeExamples(db: Db) {
   // Load each todo's project and parent in one shot
   const todos = await db.all(app.todos.include({ project: true, parent: true }));
 
-  // Reverse relations: project FK on todos creates todosViaProject on projects
+  // Reverse relations: projectId FK on todos creates todosViaProject on projects
   const projects = await db.all(app.projects.include({ todosViaProject: true }));
 
   // Nested: load project, and for each project, load its todos

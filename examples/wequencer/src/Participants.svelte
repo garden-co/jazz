@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getDb, getSession, QuerySubscription } from "jazz-tools/svelte";
-  import { app } from "../schema/app.js";
+  import { app } from "../schema.js";
   import { getStableHue } from "./constants.js";
   import { getAudioContext } from "./audio-context.js";
 

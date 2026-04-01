@@ -1,5 +1,5 @@
 import { type Db } from "../../src/runtime/db.js";
-import { app, Project, Todo, User } from "./fixtures/basic/app";
+import { app, type Project, type Todo, type User } from "./fixtures/basic/schema";
 
 export function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -16,10 +16,10 @@ export function insertProject(db: Db, name = "Test Project"): Project {
 export function insertTodo(db: Db, data: Partial<Todo>): Todo {
   return db.insert(app.todos, {
     title: data.title ?? "Test Todo",
-    done: data.done,
-    tags: data.tags,
+    done: data.done ?? false,
+    tags: data.tags ?? [],
     projectId: data.projectId ?? insertProject(db).id,
     ownerId: data.ownerId,
-    assigneesIds: data.assigneesIds,
+    assigneesIds: data.assigneesIds ?? [],
   });
 }

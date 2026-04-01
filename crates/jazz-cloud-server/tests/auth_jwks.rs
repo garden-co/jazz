@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{Json, Router, extract::State, routing::get};
@@ -299,6 +299,13 @@ impl Drop for TestServer {
     }
 }
 
+fn auth_jwks_test_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock auth_jwks test guard")
+}
+
 async fn jwks_handler(State(state): State<JwksState>) -> Json<Value> {
     let idx = state.hits.fetch_add(1, Ordering::SeqCst);
     let responses = state.responses.read().await;
@@ -387,6 +394,7 @@ fn make_jwt_with_options(
 
 #[tokio::test]
 async fn valid_bearer_jwt_is_accepted_with_cached_jwks() {
+    let _guard = auth_jwks_test_guard();
     let jwks_server = JwksServer::start(vec![hs256_jwks("kid-valid", "secret-valid")]).await;
     let server = TestServer::start().await;
     let app = server.create_app(&jwks_server.endpoint()).await;
@@ -420,6 +428,7 @@ async fn valid_bearer_jwt_is_accepted_with_cached_jwks() {
 
 #[tokio::test]
 async fn unknown_kid_triggers_single_refresh_then_succeeds() {
+    let _guard = auth_jwks_test_guard();
     let jwks_server = JwksServer::start(vec![
         hs256_jwks("kid-old", "secret-old"),
         hs256_jwks("kid-new", "secret-new"),
@@ -445,6 +454,7 @@ async fn unknown_kid_triggers_single_refresh_then_succeeds() {
 
 #[tokio::test]
 async fn bad_signature_stays_unauthorized_after_refresh_retry() {
+    let _guard = auth_jwks_test_guard();
     let jwks_server = JwksServer::start(vec![
         hs256_jwks("kid-signature", "good-secret"),
         hs256_jwks("kid-signature", "good-secret"),
@@ -484,6 +494,7 @@ async fn bad_signature_stays_unauthorized_after_refresh_retry() {
 /// ```
 #[tokio::test]
 async fn rapid_unknown_kids_do_not_trigger_unbounded_refreshes() {
+    let _guard = auth_jwks_test_guard();
     let jwks_server = JwksServer::start(vec![hs256_jwks("kid-stable", "secret-stable")]).await;
     let server = TestServer::start().await;
     let app = server.create_app(&jwks_server.endpoint()).await;
@@ -514,6 +525,7 @@ async fn rapid_unknown_kids_do_not_trigger_unbounded_refreshes() {
 /// rather than failing with an auth error.
 #[tokio::test]
 async fn stale_jwks_served_when_endpoint_goes_down_after_ttl_expiry() {
+    let _guard = auth_jwks_test_guard();
     // Response 1: valid key. Response 2+: empty keys (fetch_jwks rejects these).
     let jwks_server = JwksServer::start(vec![
         hs256_jwks("kid-stale", "secret-stale"),
@@ -552,6 +564,7 @@ async fn stale_jwks_served_when_endpoint_goes_down_after_ttl_expiry() {
 /// than TTL + max_stale, the fallback is refused and the request fails.
 #[tokio::test]
 async fn stale_jwks_refused_after_max_stale_expires() {
+    let _guard = auth_jwks_test_guard();
     let jwks_server = JwksServer::start(vec![
         hs256_jwks("kid-expiry", "secret-expiry"),
         json!({ "keys": [] }),
@@ -592,6 +605,7 @@ async fn stale_jwks_refused_after_max_stale_expires() {
 
 #[tokio::test]
 async fn backend_session_auth_requires_secret_and_accepts_valid_secret() {
+    let _guard = auth_jwks_test_guard();
     let jwks_server = JwksServer::start(vec![hs256_jwks("kid-valid", "secret-valid")]).await;
     let server = TestServer::start().await;
     let app = server
@@ -615,6 +629,7 @@ async fn backend_session_auth_requires_secret_and_accepts_valid_secret() {
 
 #[tokio::test]
 async fn local_mode_flags_are_enforced_per_app() {
+    let _guard = auth_jwks_test_guard();
     let server = TestServer::start().await;
     let app = server
         .create_app_with_config(
@@ -642,6 +657,7 @@ async fn local_mode_flags_are_enforced_per_app() {
 
 #[tokio::test]
 async fn link_external_is_idempotent_and_conflicts_on_relink_to_other_principal() {
+    let _guard = auth_jwks_test_guard();
     let jwks_server = JwksServer::start(vec![hs256_jwks("kid-link", "secret-link")]).await;
     let server = TestServer::start().await;
     let app = server.create_app(&jwks_server.endpoint()).await;

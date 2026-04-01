@@ -38,12 +38,13 @@ describe("missingSeeds", () => {
 // ensureInstrumentsSeeded
 // ---------------------------------------------------------------------------
 
-const fakeBuffer = new ArrayBuffer(8);
+const fakeBlob = new Blob([new Uint8Array(8)]);
 
 function makeDb(instruments: { name: string }[] = []) {
   return {
     all: vi.fn().mockResolvedValue(instruments),
     insert: vi.fn(),
+    createFileFromBlob: vi.fn().mockResolvedValue({ id: "file-id" }),
   };
 }
 
@@ -51,7 +52,7 @@ function allSeedRows() {
   return SEED_INSTRUMENTS.map((s, i) => ({
     id: String(i),
     name: s.name,
-    sound: new Uint8Array(0),
+    soundFileId: `file-${i}`,
     display_order: s.display_order,
   }));
 }
@@ -59,10 +60,7 @@ function allSeedRows() {
 describe("ensureInstrumentsSeeded", () => {
   beforeEach(() => {
     localStorage.removeItem(SEEDED_STORAGE_KEY);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({ arrayBuffer: () => Promise.resolve(fakeBuffer) }),
-    );
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ blob: () => Promise.resolve(fakeBlob) }));
   });
 
   afterEach(() => {
@@ -130,8 +128,8 @@ describe("ensureInstrumentsSeeded", () => {
 
   test("inserts only the missing seeds when the db is partially populated", async () => {
     const partial = [
-      { id: "1", name: "Kick", sound: new Uint8Array(0), display_order: 0 },
-      { id: "2", name: "Snare", sound: new Uint8Array(0), display_order: 1 },
+      { id: "1", name: "Kick", soundFileId: "file-0", display_order: 0 },
+      { id: "2", name: "Snare", soundFileId: "file-1", display_order: 1 },
     ];
     const db = makeDb(partial);
     await ensureInstrumentsSeeded(db as any);
@@ -144,11 +142,12 @@ describe("ensureInstrumentsSeeded", () => {
   test("inserts with the correct shape", async () => {
     const db = makeDb([]);
     await ensureInstrumentsSeeded(db as any);
+    expect(db.createFileFromBlob).toHaveBeenCalledTimes(SEED_INSTRUMENTS.length);
     for (const call of db.insert.mock.calls as any[]) {
       const data = call[1];
       expect(data).toHaveProperty("name");
-      expect(data).toHaveProperty("sound");
-      expect(data.sound).toBeInstanceOf(Uint8Array);
+      expect(data).toHaveProperty("soundFileId");
+      expect(typeof data.soundFileId).toBe("string");
       expect(data).toHaveProperty("display_order");
       expect(typeof data.display_order).toBe("number");
     }

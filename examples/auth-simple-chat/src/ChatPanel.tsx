@@ -1,6 +1,6 @@
 import * as React from "react";
 import { useAll, useDb, useSession } from "jazz-tools/react";
-import { app } from "../schema/app";
+import { app } from "../schema";
 
 export type ChatPanelProps = {
   chatId: string;
@@ -11,7 +11,7 @@ export type ChatPanelProps = {
   readOnlyNotice?: string;
 };
 
-function formatTimestamp(date: Date): string {
+function formatTimestamp(date: Date | number): string {
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: "medium",
     timeStyle: "short",

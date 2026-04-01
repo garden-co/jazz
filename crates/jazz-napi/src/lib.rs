@@ -27,12 +27,12 @@ use jazz_tools::binding_support::{
     align_query_rows_to_declared_schema, align_row_values_to_declared_schema, current_timestamp_ms,
     generate_id as generate_binding_id, parse_durability_tier as parse_binding_tier,
     parse_query_input, parse_read_durability_options as parse_binding_read_durability_options,
-    parse_session_input, query_rows_can_be_schema_aligned, serialize_outbox_entry,
-    subscription_delta_to_json,
+    parse_session_input, parse_write_context_input, query_rows_can_be_schema_aligned,
+    serialize_outbox_entry, subscription_delta_to_json,
 };
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::Query;
-use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{Schema, SchemaHash, TableName, Value};
 use jazz_tools::runtime_core::{
     ReadDurabilityOptions, RuntimeCore, Scheduler, SubscriptionDelta, SubscriptionHandle,
@@ -119,6 +119,13 @@ fn parse_session_json(session_json: Option<String>) -> napi::Result<Option<Sessi
         .map_err(|err| napi::Error::from_reason(format!("Invalid session JSON: {}", err)))
 }
 
+fn parse_write_context_json(
+    write_context_json: Option<String>,
+) -> napi::Result<Option<WriteContext>> {
+    parse_write_context_input(write_context_json.as_deref())
+        .map_err(|err| napi::Error::from_reason(format!("Invalid write context JSON: {}", err)))
+}
+
 fn parse_subscription_inputs(
     query_json: &str,
     session_json: Option<String>,
@@ -180,17 +187,6 @@ struct TestingServerStartOptions {
     admin_secret: Option<String>,
     backend_secret: Option<String>,
     jwks_url: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PushSchemaCatalogueOptions {
-    server_url: String,
-    app_id: String,
-    admin_secret: String,
-    schema_dir: String,
-    env: Option<String>,
-    user_branch: Option<String>,
 }
 
 /// Scheduler that schedules `batched_tick()` on the Node.js event loop via a
@@ -475,18 +471,18 @@ impl NapiRuntime {
         &self,
         table: String,
         #[napi(ts_arg_type = "Record<string, unknown>")] values: serde_json::Value,
-        session_json: Option<String>,
+        write_context_json: Option<String>,
     ) -> napi::Result<serde_json::Value> {
         let js_values: HashMap<String, Value> = serde_json::from_value(values)
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
-        let session = parse_session_json(session_json)?;
+        let write_context = parse_write_context_json(write_context_json)?;
 
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
         let (object_id, row_values) = core
-            .insert(&table, js_values, session.as_ref())
+            .insert(&table, js_values, write_context.as_ref())
             .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
         let row_values = align_row_values_to_declared_schema(
             &self.declared_schema,
@@ -530,12 +526,12 @@ impl NapiRuntime {
         &self,
         object_id: String,
         #[napi(ts_arg_type = "any")] values: serde_json::Value,
-        session_json: Option<String>,
+        write_context_json: Option<String>,
     ) -> napi::Result<()> {
         let uuid = uuid::Uuid::parse_str(&object_id)
             .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
-        let session = parse_session_json(session_json)?;
+        let write_context = parse_write_context_json(write_context_json)?;
 
         let partial_values: HashMap<String, Value> = serde_json::from_value(values)
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
@@ -545,7 +541,7 @@ impl NapiRuntime {
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.update(oid, updates, session.as_ref())
+        core.update(oid, updates, write_context.as_ref())
             .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?;
 
         Ok(())
@@ -571,18 +567,18 @@ impl NapiRuntime {
     pub fn delete_with_session(
         &self,
         object_id: String,
-        session_json: Option<String>,
+        write_context_json: Option<String>,
     ) -> napi::Result<()> {
         let uuid = uuid::Uuid::parse_str(&object_id)
             .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
-        let session = parse_session_json(session_json)?;
+        let write_context = parse_write_context_json(write_context_json)?;
 
         let mut core = self
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.delete(oid, session.as_ref())
+        core.delete(oid, write_context.as_ref())
             .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?;
 
         Ok(())
@@ -810,13 +806,13 @@ impl NapiRuntime {
         &self,
         table: String,
         #[napi(ts_arg_type = "Record<string, unknown>")] values: serde_json::Value,
-        session_json: Option<String>,
+        write_context_json: Option<String>,
         tier: String,
     ) -> napi::Result<serde_json::Value> {
         let persistence_tier = parse_tier(&tier)?;
         let js_values: HashMap<String, Value> = serde_json::from_value(values)
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
-        let session = parse_session_json(session_json)?;
+        let write_context = parse_write_context_json(write_context_json)?;
 
         let ((object_id, row_values), receiver) = {
             let mut core = self
@@ -824,7 +820,7 @@ impl NapiRuntime {
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
             let ((object_id, row_values), receiver) = core
-                .insert_persisted(&table, js_values, session.as_ref(), persistence_tier)
+                .insert_persisted(&table, js_values, write_context.as_ref(), persistence_tier)
                 .map_err(|e| napi::Error::from_reason(format!("Insert failed: {:?}", e)))?;
             let row_values = align_row_values_to_declared_schema(
                 &self.declared_schema,
@@ -877,7 +873,7 @@ impl NapiRuntime {
         &self,
         object_id: String,
         #[napi(ts_arg_type = "any")] values: serde_json::Value,
-        session_json: Option<String>,
+        write_context_json: Option<String>,
         tier: String,
     ) -> napi::Result<()> {
         let persistence_tier = parse_tier(&tier)?;
@@ -885,7 +881,7 @@ impl NapiRuntime {
         let uuid = uuid::Uuid::parse_str(&object_id)
             .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
-        let session = parse_session_json(session_json)?;
+        let write_context = parse_write_context_json(write_context_json)?;
 
         let partial_values: HashMap<String, Value> = serde_json::from_value(values)
             .map_err(|e| napi::Error::from_reason(format!("Invalid values: {}", e)))?;
@@ -896,7 +892,7 @@ impl NapiRuntime {
                 .core
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.update_persisted(oid, updates, session.as_ref(), persistence_tier)
+            core.update_persisted(oid, updates, write_context.as_ref(), persistence_tier)
                 .map_err(|e| napi::Error::from_reason(format!("Update failed: {:?}", e)))?
         };
 
@@ -929,7 +925,7 @@ impl NapiRuntime {
     pub async fn delete_durable_with_session(
         &self,
         object_id: String,
-        session_json: Option<String>,
+        write_context_json: Option<String>,
         tier: String,
     ) -> napi::Result<()> {
         let persistence_tier = parse_tier(&tier)?;
@@ -937,14 +933,14 @@ impl NapiRuntime {
         let uuid = uuid::Uuid::parse_str(&object_id)
             .map_err(|e| napi::Error::from_reason(format!("Invalid ObjectId: {}", e)))?;
         let oid = ObjectId::from_uuid(uuid);
-        let session = parse_session_json(session_json)?;
+        let write_context = parse_write_context_json(write_context_json)?;
 
         let receiver = {
             let mut core = self
                 .core
                 .lock()
                 .map_err(|_| napi::Error::from_reason("lock"))?;
-            core.delete_persisted(oid, session.as_ref(), persistence_tier)
+            core.delete_persisted(oid, write_context.as_ref(), persistence_tier)
                 .map_err(|e| napi::Error::from_reason(format!("Delete failed: {:?}", e)))?
         };
 
@@ -1294,30 +1290,6 @@ impl TestingServer {
 // ============================================================================
 // Module-level utility functions
 // ============================================================================
-
-/// Push versioned schema and lens catalogue objects to a sync server.
-#[napi(js_name = "pushSchemaCatalogue", ts_return_type = "Promise<void>")]
-pub async fn push_schema_catalogue(
-    #[napi(
-        ts_arg_type = "{ serverUrl: string; appId: string; adminSecret: string; schemaDir: string; env?: string; userBranch?: string }"
-    )]
-    options: JsonValue,
-) -> napi::Result<()> {
-    let opts: PushSchemaCatalogueOptions = serde_json::from_value(options).map_err(|e| {
-        napi::Error::from_reason(format!("Invalid pushSchemaCatalogue options: {e}"))
-    })?;
-
-    jazz_tools::schema_catalogue::push(
-        &opts.server_url,
-        &opts.app_id,
-        opts.env.as_deref().unwrap_or("dev"),
-        opts.user_branch.as_deref().unwrap_or("main"),
-        &opts.admin_secret,
-        &opts.schema_dir,
-    )
-    .await
-    .map_err(|e| napi::Error::from_reason(format!("pushSchemaCatalogue failed: {e}")))
-}
 
 #[napi(js_name = "generateId")]
 pub fn generate_id() -> String {

@@ -122,6 +122,21 @@ describe("translateQuery", () => {
       expect(result.relation_ir).toEqual({ type: "TableScan", table: "todos" });
     });
 
+    it("pushes provenance magic select columns into the runtime query payload", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        select: ["title", "$createdBy", "$updatedAt"],
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+
+      expect(result.select_columns).toEqual(["title", "$createdBy", "$updatedAt"]);
+      expect(result.relation_ir).toEqual({ type: "TableScan", table: "todos" });
+    });
+
     it('treats select(["*"]) as selecting all columns', () => {
       const builderJson = JSON.stringify({
         table: "todos",
@@ -187,6 +202,23 @@ describe("translateQuery", () => {
         left: { scope: "todos", column: "title" },
         op: "Eq",
         right: { type: "Literal", value: { Text: "Buy milk" } },
+      });
+    });
+
+    it("translates eq condition with provenance magic text columns", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "$createdBy", op: "eq", value: "alice" }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "$createdBy" },
+        op: "Eq",
+        right: { type: "Literal", value: { Text: "alice" } },
       });
     });
 
@@ -511,6 +543,24 @@ describe("translateQuery", () => {
       });
     });
 
+    it("translates gte condition with provenance magic timestamp columns", () => {
+      const iso = "2026-03-31T00:00:00.000Z";
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "$updatedAt", op: "gte", value: iso }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "Cmp",
+        left: { scope: "todos", column: "$updatedAt" },
+        op: "Ge",
+        right: { type: "Literal", value: { Timestamp: Date.parse(iso) } },
+      });
+    });
+
     it("translates lt condition", () => {
       const builderJson = JSON.stringify({
         table: "todos",
@@ -619,7 +669,7 @@ describe("translateQuery", () => {
       });
     });
 
-    it("translates null value", () => {
+    it("translates eq null value to IsNull", () => {
       const builderJson = JSON.stringify({
         table: "todos",
         conditions: [{ column: "priority", op: "eq", value: null }],
@@ -629,10 +679,23 @@ describe("translateQuery", () => {
 
       const result = parseTranslatedQuery(builderJson, basicSchema);
       expect(expectFilterPredicate(result)).toEqual({
-        type: "Cmp",
-        left: { scope: "todos", column: "priority" },
-        op: "Eq",
-        right: { type: "Literal", value: { Null: null } },
+        type: "IsNull",
+        column: { scope: "todos", column: "priority" },
+      });
+    });
+
+    it("translates ne null value to IsNotNull", () => {
+      const builderJson = JSON.stringify({
+        table: "todos",
+        conditions: [{ column: "priority", op: "ne", value: null }],
+        includes: {},
+        orderBy: [],
+      });
+
+      const result = parseTranslatedQuery(builderJson, basicSchema);
+      expect(expectFilterPredicate(result)).toEqual({
+        type: "IsNotNull",
+        column: { scope: "todos", column: "priority" },
       });
     });
 

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useDb, useAll, useSession } from "jazz-tools/react";
-import { app } from "../schema/app.js";
+import { app } from "../schema.js";
 
 export function TodoList() {
   const [filterTitle, setFilterTitle] = useState("");

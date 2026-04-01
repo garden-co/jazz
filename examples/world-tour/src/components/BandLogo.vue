@@ -23,7 +23,7 @@
 <script setup lang="ts">
 import { ref, watch, onUnmounted } from "vue";
 import { useDb, useAll, useSession } from "jazz-tools/vue";
-import { app } from "../../schema/app.js";
+import { app } from "../../schema.js";
 
 const props = defineProps<{
   bandId: string;

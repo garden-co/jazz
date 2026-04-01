@@ -16,6 +16,7 @@ use crate::query_manager::types::Schema;
 use crate::schema_manager::AppId;
 
 use super::{ServerBuilder, ServerState};
+use crate::sync_manager::ClientId;
 
 const DEFAULT_APP_ID_STR: &str = "00000000-0000-0000-0000-000000000001";
 const JWT_KID: &str = "test-jwks-kid";
@@ -285,6 +286,21 @@ impl TestingServer {
 
     pub fn backend_secret(&self) -> &str {
         &self.backend_secret
+    }
+
+    /// Set the client state TTL. Disconnected clients are reaped after this duration.
+    pub async fn set_client_ttl(&self, ttl: Duration) {
+        self.state.set_client_ttl(ttl).await;
+    }
+
+    /// Run one sweep iteration to reap expired disconnect candidates.
+    pub async fn run_sweep_once(&self) -> Vec<ClientId> {
+        self.state.run_sweep_once().await
+    }
+
+    /// Number of clients currently in the disconnect candidates list.
+    pub async fn disconnect_candidate_count(&self) -> usize {
+        self.state.disconnect_candidates.read().await.len()
     }
 
     pub fn built_in_jwt_helpers_available(&self) -> bool {

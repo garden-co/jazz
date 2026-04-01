@@ -1,5 +1,5 @@
 import type { Db } from "jazz-tools";
-import { app } from "../schema/app.js";
+import { app } from "../schema.js";
 
 // #region oneshot-svelte
 export async function readTodosOneshot(db: Db) {

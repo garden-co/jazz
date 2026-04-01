@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
-import { TestingServer, pushSchemaCatalogue } from "jazz-tools/testing";
+import { TestingServer } from "jazz-tools/testing";
 
 const APP_ID = "00000000-0000-0000-0000-000000000099";
 const PORT = 4200;
@@ -16,15 +16,7 @@ async function main() {
     port: PORT,
   });
   console.log(`Jazz server ready at ${server.url}`);
-
-  console.log("Pushing schema catalogue...");
-  await pushSchemaCatalogue({
-    serverUrl: server.url,
-    appId: server.appId,
-    adminSecret: server.adminSecret,
-    schemaDir: join(ROOT, "schema"),
-  });
-  console.log("Schema pushed.");
+  console.log("Client will auto-publish the current schema on first connect.");
 
   vite = spawn("npx", ["vite", "--host"], {
     cwd: ROOT,

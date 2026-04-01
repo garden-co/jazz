@@ -104,7 +104,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed } from "vue";
 import { useDb, useAll } from "jazz-tools/vue";
-import { app } from "../../schema/app.js";
+import { app } from "../../schema.js";
 
 const props = defineProps<{
   lat: number;

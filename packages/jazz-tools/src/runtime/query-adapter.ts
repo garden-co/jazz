@@ -232,8 +232,14 @@ function conditionToArraySubqueryFilter(
 
   switch (cond.op) {
     case "eq":
+      if (cond.value === null) {
+        return { IsNull: { column } };
+      }
       return { Eq: { column, value: literalValue } };
     case "ne":
+      if (cond.value === null) {
+        return { IsNotNull: { column } };
+      }
       return { Ne: { column, value: literalValue } };
     case "gt":
       return { Gt: { column, value: literalValue } };
@@ -367,8 +373,14 @@ function conditionToRelPredicate(
   }
   switch (cond.op) {
     case "eq":
+      if (cond.value === null) {
+        return { IsNull: { column: columnRef } };
+      }
       return { Cmp: { left: columnRef, op: "Eq", right: rightLiteral } };
     case "ne":
+      if (cond.value === null) {
+        return { IsNotNull: { column: columnRef } };
+      }
       return {
         Cmp: {
           left: columnRef,
