@@ -9,6 +9,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
+import { TestingServer } from "jazz-tools/testing";
 import {
   createServer,
   startServer,
@@ -17,12 +18,33 @@ import {
   type Todo,
 } from "../src/main.ts";
 
+const originalEnv = {
+  appId: process.env.JAZZ_APP_ID,
+  serverUrl: process.env.JAZZ_SERVER_URL,
+  backendSecret: process.env.JAZZ_BACKEND_SECRET,
+  adminSecret: process.env.JAZZ_ADMIN_SECRET,
+};
+
+function restoreEnv(): void {
+  process.env.JAZZ_APP_ID = originalEnv.appId;
+  process.env.JAZZ_SERVER_URL = originalEnv.serverUrl;
+  process.env.JAZZ_BACKEND_SECRET = originalEnv.backendSecret;
+  process.env.JAZZ_ADMIN_SECRET = originalEnv.adminSecret;
+}
+
 describe("Todo Server Integration", () => {
   let server: RunningServer;
   let baseUrl: string;
+  let upstream: Awaited<ReturnType<typeof TestingServer.start>> | undefined;
 
   beforeAll(async () => {
-    // Create server with Fjall-backed storage (temp directory)
+    upstream = await TestingServer.start();
+    process.env.JAZZ_APP_ID = upstream.appId;
+    process.env.JAZZ_SERVER_URL = upstream.url;
+    process.env.JAZZ_BACKEND_SECRET = upstream.backendSecret;
+    process.env.JAZZ_ADMIN_SECRET = upstream.adminSecret;
+
+    // Create server with temp persistent storage plus an ephemeral upstream server.
     const todoServer = await createServer();
 
     // Start on random available port
@@ -34,6 +56,12 @@ describe("Todo Server Integration", () => {
     if (server) {
       await stopServer(server);
     }
+
+    if (upstream) {
+      await upstream.stop();
+    }
+
+    restoreEnv();
   });
 
   describe("Health Check", () => {
@@ -54,7 +82,6 @@ describe("Todo Server Integration", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: "Test Todo",
-          description: "A test todo item",
         }),
       });
 
@@ -62,7 +89,6 @@ describe("Todo Server Integration", () => {
       const todo: Todo = await res.json();
       expect(todo.title).toBe("Test Todo");
       expect(todo.done).toBe(false);
-      expect(todo.description).toBe("A test todo item");
       expect(todo.id).toBeDefined();
 
       createdTodoId = todo.id;
@@ -186,7 +212,7 @@ describe("Todo Server Integration", () => {
       const createRes1 = await fetch(`${server1.baseUrl}/todos`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: "Survive restart", description: "persistent" }),
+        body: JSON.stringify({ title: "Survive restart" }),
       });
       expect(createRes1.status).toBe(201);
       const todo1: Todo = await createRes1.json();
@@ -216,7 +242,6 @@ describe("Todo Server Integration", () => {
       const found1 = todos.find((t) => t.id === todo1.id);
       expect(found1).toBeDefined();
       expect(found1!.title).toBe("Survive restart");
-      expect(found1!.description).toBe("persistent");
       expect(found1!.done).toBe(false);
 
       const found2 = todos.find((t) => t.id === todo2.id);

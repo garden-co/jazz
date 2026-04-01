@@ -9,10 +9,14 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     close: vi.fn(),
     createSubscription: vi.fn(() => 9n),
     delete_: vi.fn(),
+    deleteWithSession: vi.fn(),
     executeSubscription: vi.fn(),
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
     insert: vi.fn((_table, _valuesJson) => JSON.stringify({ id: "row-1", values: [] })),
+    insertWithSession: vi.fn((_table, _valuesJson, _writeContextJson) =>
+      JSON.stringify({ id: "row-1", values: [] }),
+    ),
     onBatchedTickNeeded: vi.fn(),
     onSyncMessageReceived: vi.fn(),
     onSyncMessageReceivedFromClient: vi.fn(),
@@ -23,6 +27,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     subscribe: vi.fn(() => 7n),
     unsubscribe: vi.fn(),
     update: vi.fn(),
+    updateWithSession: vi.fn(),
     ...overrides,
   };
 }
@@ -63,6 +68,55 @@ describe("JazzRnRuntimeAdapter", () => {
     expect(binding.delete_).toHaveBeenCalledWith("row-1");
 
     await expect(adapter.query("{}", null, null)).resolves.toEqual([{ id: "row-1", values: [] }]);
+  });
+
+  it("serializes write context payloads for session-aware mutations", async () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+    const writeContextJson = JSON.stringify({
+      session: { user_id: "alice", claims: {} },
+      attribution: "alice",
+    });
+
+    const row = adapter.insertWithSession(
+      "todos",
+      { title: { type: "Text", value: "milk" } },
+      writeContextJson,
+    );
+    expect(row).toEqual({ id: "row-1", values: [] });
+    expect(binding.insertWithSession).toHaveBeenCalledWith(
+      "todos",
+      JSON.stringify({ title: { type: "Text", value: "milk" } }),
+      writeContextJson,
+    );
+
+    adapter.updateWithSession(
+      "row-1",
+      { done: { type: "Boolean", value: true } },
+      writeContextJson,
+    );
+    expect(binding.updateWithSession).toHaveBeenCalledWith(
+      "row-1",
+      JSON.stringify({ done: { type: "Boolean", value: true } }),
+      writeContextJson,
+    );
+
+    adapter.deleteWithSession("row-1", writeContextJson);
+    expect(binding.deleteWithSession).toHaveBeenCalledWith("row-1", writeContextJson);
+
+    await expect(
+      adapter.insertDurableWithSession("todos", {}, writeContextJson, "worker"),
+    ).resolves.toEqual({
+      id: "row-1",
+      values: [],
+    });
+    await expect(
+      adapter.updateDurableWithSession("row-1", {}, writeContextJson, "worker"),
+    ).resolves.toBeUndefined();
+    await expect(
+      adapter.deleteDurableWithSession("row-1", writeContextJson, "worker"),
+    ).resolves.toBeUndefined();
+    expect(binding.flush).toHaveBeenCalledTimes(3);
   });
 
   it("bridges sync and subscription callbacks with handle conversion", () => {

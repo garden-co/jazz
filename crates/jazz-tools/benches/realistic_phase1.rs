@@ -1,3 +1,6 @@
+#[path = "common/mod.rs"]
+mod permission_bench_common;
+
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -16,8 +19,8 @@ use jazz_tools::commit::{Commit, CommitId, StoredState};
 use jazz_tools::object::{BranchName, Object, ObjectId};
 use jazz_tools::object_manager::ObjectManager;
 use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr};
-use jazz_tools::query_manager::query::QueryBuilder;
-use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::query::{Query, QueryBuilder};
+use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{
     ColumnType, Schema, SchemaBuilder, TablePolicies, TableSchema, Value,
 };
@@ -36,6 +39,7 @@ use serde::Deserialize;
 use tempfile::TempDir;
 
 type BenchRuntime = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
+const OBSERVER_BENCH_USER_ID: &str = "benchmark_user";
 
 fn row<const N: usize>(pairs: [(&str, Value); N]) -> HashMap<String, Value> {
     pairs
@@ -133,6 +137,13 @@ struct R8ScenarioConfig {
     cache_size_bytes: usize,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct R9ScenarioConfig {
+    id: String,
+    scale: usize,
+    subscription_count: usize,
+}
+
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy)]
 enum CrudOperation {
@@ -226,6 +237,13 @@ struct R8Scenario {
     payload_bytes: usize,
     #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
     cache_size_bytes: usize,
+}
+
+#[derive(Debug, Clone)]
+struct R9Scenario {
+    id: String,
+    scale: usize,
+    subscription_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -1379,6 +1397,7 @@ impl PermissionR5State {
     fn update_allowed_doc(&mut self) {
         let doc_id = self.allowed_doc_ids[self.rng.next_usize(self.allowed_doc_ids.len())];
         let updated_at = self.next_timestamp();
+        let write_context = WriteContext::from_session(self.session_alice.clone());
         self.runtime
             .update(
                 doc_id,
@@ -1386,7 +1405,7 @@ impl PermissionR5State {
                     ("status".to_string(), Value::Text("in_review".to_string())),
                     ("updated_at".to_string(), Value::Timestamp(updated_at)),
                 ],
-                Some(&self.session_alice),
+                Some(&write_context),
             )
             .expect("allowed permission update");
     }
@@ -1394,13 +1413,14 @@ impl PermissionR5State {
     fn update_denied_doc(&mut self) {
         let doc_id = self.denied_doc_ids[self.rng.next_usize(self.denied_doc_ids.len())];
         let updated_at = self.next_timestamp();
+        let write_context = WriteContext::from_session(self.session_alice.clone());
         let result = self.runtime.update(
             doc_id,
             vec![
                 ("status".to_string(), Value::Text("archived".to_string())),
                 ("updated_at".to_string(), Value::Timestamp(updated_at)),
             ],
-            Some(&self.session_alice),
+            Some(&write_context),
         );
         assert!(result.is_err(), "expected denied permission update");
     }
@@ -1871,6 +1891,82 @@ fn realistic_r8_many_branches_cold_load_fjall(c: &mut Criterion) {
 #[cfg(not(all(feature = "fjall", not(target_arch = "wasm32"))))]
 fn realistic_r8_many_branches_cold_load_fjall(_c: &mut Criterion) {}
 
+fn realistic_r9_subscribed_write_path(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r9_scenario(select_ci_path(
+        "benchmarks/realistic/scenarios/r9_subscribed_write_path.json",
+        "benchmarks/realistic/ci/scenarios/r9_subscribed_write_path.json",
+    ));
+    let benchmark_name = format!(
+        "{}_{}_docs{}_subs{}",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase(),
+        scenario.scale,
+        scenario.subscription_count
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/subscribed_write_path");
+    configure_group(&mut group, 10, 10);
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let mut core = permission_bench_common::create_runtime();
+            let data = permission_bench_common::setup_data(
+                &mut core,
+                scenario.scale,
+                OBSERVER_BENCH_USER_ID,
+            );
+            let session = permission_bench_common::create_session(OBSERVER_BENCH_USER_ID);
+            let mut handles = Vec::with_capacity(scenario.subscription_count);
+
+            for _ in 0..scenario.subscription_count {
+                let handle = core
+                    .subscribe(Query::new("documents"), |_delta| {}, Some(session.clone()))
+                    .expect("subscribe observe_all");
+                handles.push(handle);
+            }
+            core.immediate_tick();
+            core.batched_tick();
+
+            let doc_ids = data.owned_documents;
+            let mut doc_idx = 0usize;
+            let mut update_counter = 0u64;
+            let write_context = WriteContext::from_session(session.clone());
+
+            b.iter(|| {
+                update_counter += 1;
+                let doc_id = doc_ids[doc_idx % doc_ids.len()];
+                doc_idx += 1;
+
+                core.update(
+                    doc_id,
+                    vec![
+                        (
+                            "content".to_string(),
+                            Value::Text(format!("Observed updated content {}", update_counter)),
+                        ),
+                        (
+                            "created_at".to_string(),
+                            Value::Timestamp(
+                                permission_bench_common::current_timestamp() + update_counter,
+                            ),
+                        ),
+                    ],
+                    Some(&write_context),
+                )
+                .expect("update with observer should succeed");
+            });
+
+            black_box(handles.len());
+        },
+    );
+
+    group.finish();
+}
+
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 struct ManyBranchesSeededDb {
     _tempdir: TempDir,
@@ -1928,7 +2024,7 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
 ) -> ManyBranchesDataset {
     let object_id = manager.create(storage, None);
     let prefix = format!("dev-r8{:08x}-main-", scenario.seed as u32);
-    let author = ObjectId::new();
+    let author = ObjectId::new().to_string();
     let mut branch_names = Vec::with_capacity(scenario.branch_count);
     let mut head_ids = Vec::with_capacity(scenario.branch_count);
     let mut used_as_parent = vec![false; scenario.branch_count];
@@ -1944,7 +2040,7 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
             parents: parent_ids.into(),
             content: many_branches_payload(scenario, branch_idx, 0),
             timestamp: root_timestamps,
-            author,
+            author: author.clone(),
             metadata: None,
             stored_state: StoredState::default(),
             ack_state: Default::default(),
@@ -1963,7 +2059,7 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
                     &branch_name,
                     vec![head_id],
                     many_branches_payload(scenario, branch_idx, commit_idx),
-                    author,
+                    author.clone(),
                     None,
                 )
                 .expect("append linear commit in many-branches benchmark");
@@ -2181,6 +2277,15 @@ fn load_r8_scenario(path: &str) -> R8Scenario {
         payload_bytes: raw.payload_bytes.max(32),
         #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
         cache_size_bytes: raw.cache_size_bytes.max(1),
+    }
+}
+
+fn load_r9_scenario(path: &str) -> R9Scenario {
+    let raw: R9ScenarioConfig = load_json(path);
+    R9Scenario {
+        id: raw.id,
+        scale: raw.scale.max(1),
+        subscription_count: raw.subscription_count.max(1),
     }
 }
 
@@ -2414,6 +2519,7 @@ criterion_group!(
     realistic_r8_many_branches_write,
     realistic_r8_many_branches_scan_heads,
     realistic_r8_many_branches_scan_leaf_heads,
-    realistic_r8_many_branches_cold_load_fjall
+    realistic_r8_many_branches_cold_load_fjall,
+    realistic_r9_subscribed_write_path
 );
 criterion_main!(benches);

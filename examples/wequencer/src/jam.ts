@@ -32,10 +32,11 @@ export async function ensureInstrumentsSeeded(db: Db): Promise<void> {
 
   for (const seed of missingSeeds(existingNames)) {
     const res = await fetch(seed.file);
-    const buffer = await res.arrayBuffer();
+    const blob = await res.blob();
+    const file = await db.createFileFromBlob(app, blob, { tier: "edge" });
     db.insert(app.instruments, {
       name: seed.name,
-      sound: new Uint8Array(buffer),
+      soundFileId: file.id,
       display_order: seed.display_order,
     });
   }

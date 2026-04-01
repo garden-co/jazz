@@ -33,6 +33,25 @@ const schema = {
 type AppSchema = s.Schema<typeof schema>;
 const app: s.App<AppSchema> = s.defineApp(schema);
 
+const defaultedSchema = {
+  users: s.table({
+    name: s.string(),
+  }),
+  projects: s.table({
+    name: s.string(),
+  }),
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean().default(false),
+    tags: s.array(s.string()).default([]),
+    projectId: s.ref("projects"),
+    ownerId: s.ref("users").optional().default(null),
+    assigneesIds: s.array(s.ref("users")).default([]),
+  }),
+};
+type DefaultedAppSchema = s.Schema<typeof defaultedSchema>;
+const defaultedApp: s.App<DefaultedAppSchema> = s.defineApp(defaultedSchema);
+
 describe("typed app prototype", () => {
   it("serializes select/include metadata without codegen", () => {
     expect(JSON.parse(app.todos.select("title").include({ project: true })._build())).toEqual({
@@ -66,6 +85,28 @@ describe("typed app prototype", () => {
     });
   });
 
+  it("serializes provenance magic columns and infers their projected types", () => {
+    const provenanceQuery = app.todos
+      .where({ $createdBy: "alice" })
+      .select("title", "$createdBy", "$updatedAt");
+
+    expect(JSON.parse(provenanceQuery._build())).toEqual({
+      table: "todos",
+      conditions: [{ column: "$createdBy", op: "eq", value: "alice" }],
+      includes: {},
+      select: ["title", "$createdBy", "$updatedAt"],
+      orderBy: [],
+      hops: [],
+    });
+
+    type ProvenanceRow = s.RowOf<typeof provenanceQuery>;
+    const row = {} as ProvenanceRow;
+
+    expectTypeOf(row.title).toEqualTypeOf<string>();
+    expectTypeOf(row.$createdBy).toEqualTypeOf<string>();
+    expectTypeOf(row.$updatedAt).toEqualTypeOf<Date>();
+  });
+
   it("infers rows, init payloads, where inputs, and include names from schema literals", () => {
     const todoWithProjectQuery = app.todos.include({ project: true });
     const projectWithTitlesQuery = app.projects.include({
@@ -87,26 +128,26 @@ describe("typed app prototype", () => {
     expectTypeOf(todoRow.done).toEqualTypeOf<boolean>();
     expectTypeOf(todoRow.tags).toEqualTypeOf<string[]>();
     expectTypeOf(todoRow.project).toEqualTypeOf<string>();
-    expectTypeOf(todoRow.owner).toEqualTypeOf<string | undefined>();
+    expectTypeOf(todoRow.owner).toEqualTypeOf<string | null>();
 
     expectTypeOf(todoInsert.title).toEqualTypeOf<string>();
     expectTypeOf(todoInsert.done).toEqualTypeOf<boolean>();
     expectTypeOf(todoInsert.tags).toEqualTypeOf<string[]>();
     expectTypeOf(todoInsert.project).toEqualTypeOf<string>();
-    expectTypeOf(todoInsert.owner).toEqualTypeOf<string | undefined>();
+    expectTypeOf(todoInsert.owner).toEqualTypeOf<string | null | undefined>();
 
-    expectTypeOf(undefined as TodoWhere["project"]).toEqualTypeOf<
+    expectTypeOf<TodoWhere["project"]>().toEqualTypeOf<
       string | { eq?: string; ne?: string } | undefined
     >();
-    expectTypeOf(undefined as TodoWhere["owner"]).toEqualTypeOf<
-      string | { eq?: string; ne?: string; isNull?: boolean } | undefined
+    expectTypeOf<TodoWhere["owner"]>().branded.toEqualTypeOf<
+      string | null | { eq?: string | null; ne?: string | null; isNull?: boolean } | undefined
     >();
-    expectTypeOf(undefined as TodoWhere["tags"]).toEqualTypeOf<
-      string[] | { eq?: string[]; contains?: string } | undefined
+    expectTypeOf<TodoWhere["tags"]>().branded.toEqualTypeOf<
+      string[] | { eq?: string[]; ne?: string[]; contains?: string } | undefined
     >();
 
-    const projectRecord: ProjectRecord | undefined = todoWithProject.project;
-    expectTypeOf(todoWithProject.owner).toEqualTypeOf<string | undefined>();
+    const projectRecord: ProjectRecord | null = todoWithProject.project;
+    expectTypeOf(todoWithProject.owner).toEqualTypeOf<string | null>();
     const todoTitleRecords: TodoTitleRecord[] = projectWithTitles.todosViaProject;
     const queryContract: QueryBuilder<TodoWithProject> = todoWithProjectQuery;
     const typedQueryContract: Query<"todos", { project: true }, any, AppSchema> =
@@ -160,6 +201,37 @@ describe("typed app prototype", () => {
 
       // @ts-expect-error invalid ref target table name inside array ref
       s.defineApp(invalidArrayRefSchema);
+    }
+  });
+
+  it("infers fields with defaults as optional for init payloads", () => {
+    type TodoInsert = s.InsertOf<typeof defaultedApp.todos>;
+    const minimalInsert: TodoInsert = {
+      title: "Ship defaults",
+      projectId: "00000000-0000-0000-0000-000000000001",
+    };
+    const explicitOptionalValues: TodoInsert = {
+      title: "Ship defaults",
+      projectId: "00000000-0000-0000-0000-000000000001",
+      ownerId: null,
+      assigneesIds: ["00000000-0000-0000-0000-000000000002"],
+    };
+
+    expectTypeOf(minimalInsert.title).toEqualTypeOf<string>();
+    expectTypeOf(minimalInsert.projectId).toEqualTypeOf<string>();
+    expectTypeOf(minimalInsert.done).toEqualTypeOf<boolean | undefined>();
+    expectTypeOf(minimalInsert.tags).toEqualTypeOf<string[] | undefined>();
+    expectTypeOf(explicitOptionalValues.ownerId).toEqualTypeOf<string | null | undefined>();
+    expectTypeOf(explicitOptionalValues.assigneesIds).toEqualTypeOf<string[] | undefined>();
+
+    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      const invalidDefaultedNull: TodoInsert = {
+        title: "Broken",
+        projectId: "00000000-0000-0000-0000-000000000001",
+        // @ts-expect-error non-nullable defaulted columns still reject null
+        done: null,
+      };
+      void invalidDefaultedNull;
     }
   });
 });

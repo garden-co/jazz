@@ -33,13 +33,15 @@ npm run build              # Validate schema.ts + production build
 
 **Drift correction** runs every 500ms during playback. If the measured beat position drifts more than 10ms from the expected position for two consecutive checks, BPM is nudged up or down by up to 2% to pull the clocks back into alignment.
 
-**Audio samples** are stored as `BYTEA` blobs in the instruments table. When an instrument is seeded or added, the MP3 is fetched and written to the database. All peers receive the binary data through Jazz sync and decode it locally — no separate asset server required.
+**Audio samples** use Jazz's conventional `files` / `file_parts` storage pattern. When an instrument is seeded or added, the MP3 is chunked into file rows, the instrument stores a `soundFileId` reference, and peers load the blob through `db.loadFileAsBlob(...)` before decoding it locally.
 
 ## Schema
 
 Defined in `schema.ts` using the Jazz typed schema DSL. Running `pnpm build` runs `jazz-tools validate` before the production build; the app imports the typed `app` export directly from that file.
 
-- **instruments** — name, sound (BYTEA), display_order
+- **file_parts** — raw binary chunks
+- **files** — file metadata plus chunk ids and sizes
+- **instruments** — name, soundFileId (ref), display_order
 - **jams** — created_at, transport_start (nullable), bpm, beat_count
 - **beats** — jam (ref), instrument (ref), beat_index, placed_by
 - **participants** — jam (ref), user_id, display_name

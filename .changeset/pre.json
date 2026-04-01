@@ -20,9 +20,16 @@
     "inspector": "0.0.0",
     "wequencer": "0.1.0",
     "todo-client-localfirst-vue-docs": "0.1.0",
-    "file-upload-react": "0.1.0"
+    "file-upload-react": "0.1.0",
+    "auth-betterauth-chat": "0.1.0",
+    "auth-simple-chat": "0.1.0",
+    "auth-workos-chat": "0.1.0",
+    "chat-react": "0.1.0",
+    "stress-test-expo": "0.1.0",
+    "stress-test-todo-react": "0.1.0"
   },
   "changesets": [
+    "authorship-edit-metadata-mvp",
     "backend-high-level-only",
     "blue-pets-reflect",
     "bright-oranges-march",
@@ -31,6 +38,7 @@
     "codex-quoted-identifiers",
     "codex-scoped-napi-loader",
     "cold-load-history",
+    "deep-reactivity",
     "durability-tier-overhaul-summary",
     "eager-buttons-eat",
     "edge-server-settled-query",
@@ -49,10 +57,12 @@
     "fix-server-insert-permissions-schema-resolution",
     "fix-subgraph-context",
     "fix-subscription-callback-race",
+    "fix-sync-soft-delete-permissions",
     "fix-timestamp-lens-default",
     "fjall-native-storage",
     "flat-spoons-film",
     "green-humans-divide",
+    "jwks-rotation-self-hosted",
     "khaki-wasps-win",
     "late-jobs-show",
     "mcp-docs-server",
@@ -69,9 +79,11 @@
     "pr-294-fk-write-validation",
     "pr-314-expo-rn-release",
     "pr-315-react-provider-dx",
+    "pr-316-schema-permissions-lifecycle",
     "pr-326-opfs-checksum",
     "pr-349-update-nullable-fields",
     "pr-351-vue-svelte-alignment",
+    "pr-376-rn-error-reporting",
     "prefix-holes-preserve",
     "quick-coins-smoke",
     "quick-days-jam",
@@ -81,6 +93,7 @@
     "silent-flowers-live",
     "stale-taxis-heal",
     "svelte-query-subscription-options",
+    "svelte-rune-test-infra",
     "svelte-support",
     "sync-insert-api",
     "sync-update-delete-api",
@@ -88,6 +101,7 @@
     "tidy-points-guess",
     "tiny-files-sing",
     "vue-bindings-docs",
-    "wet-rivers-send"
+    "wet-rivers-send",
+    "wise-pans-dream"
   ]
 }

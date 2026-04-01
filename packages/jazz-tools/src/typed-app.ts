@@ -1,5 +1,6 @@
 import type {
   AnyTypedColumnBuilder,
+  ColumnBuilderHasDefault,
   ColumnBuilderOptional,
   ColumnBuilderReferences,
   ColumnBuilderSqlType,
@@ -8,7 +9,9 @@ import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { WasmSchema } from "./drivers/types.js";
 import {
   PERMISSION_INTROSPECTION_COLUMNS,
+  PROVENANCE_MAGIC_COLUMNS,
   type PermissionIntrospectionColumn,
+  type ProvenanceMagicColumn,
   assertUserColumnNameAllowed,
 } from "./magic-columns.js";
 import type { QueryBuilder } from "./runtime/db.js";
@@ -151,6 +154,14 @@ type BuilderForColumn<
 type ColumnValue<TBuilder extends AnyTypedColumnBuilder> = TSTypeFromSqlType<
   ColumnBuilderSqlType<TBuilder>
 >;
+type ReturnedColumnValue<TBuilder extends AnyTypedColumnBuilder> =
+  ColumnBuilderOptional<TBuilder> extends true
+    ? ColumnValue<TBuilder> | null
+    : ColumnValue<TBuilder>;
+type InsertColumnValue<TBuilder extends AnyTypedColumnBuilder> =
+  ColumnBuilderOptional<TBuilder> extends true
+    ? ColumnValue<TBuilder> | null
+    : ColumnValue<TBuilder>;
 
 type OptionalColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
   [TColumn in ColumnName<TSchema, TTable>]-?: ColumnBuilderOptional<
@@ -164,6 +175,20 @@ type RequiredColumnName<TSchema extends SchemaLike, TTable extends TableName<TSc
   ColumnName<TSchema, TTable>,
   OptionalColumnName<TSchema, TTable>
 >;
+type DefaultedColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
+  [TColumn in ColumnName<TSchema, TTable>]-?: ColumnBuilderHasDefault<
+    BuilderForColumn<TSchema, TTable, TColumn>
+  > extends true
+    ? TColumn
+    : never;
+}[ColumnName<TSchema, TTable>];
+type OptionalInsertColumnName<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
+  | OptionalColumnName<TSchema, TTable>
+  | DefaultedColumnName<TSchema, TTable>;
+type RequiredInsertColumnName<
+  TSchema extends SchemaLike,
+  TTable extends TableName<TSchema>,
+> = Exclude<ColumnName<TSchema, TTable>, OptionalInsertColumnName<TSchema, TTable>>;
 
 export type TableRow<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Simplify<
   {
@@ -173,7 +198,7 @@ export type TableRow<TSchema extends SchemaLike, TTable extends TableName<TSchem
       BuilderForColumn<TSchema, TTable, TColumn>
     >;
   } & {
-    [TColumn in OptionalColumnName<TSchema, TTable>]?: ColumnValue<
+    [TColumn in OptionalColumnName<TSchema, TTable>]: ReturnedColumnValue<
       BuilderForColumn<TSchema, TTable, TColumn>
     >;
   }
@@ -181,70 +206,79 @@ export type TableRow<TSchema extends SchemaLike, TTable extends TableName<TSchem
 
 export type TableInit<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = Simplify<
   {
-    [TColumn in RequiredColumnName<TSchema, TTable>]: ColumnValue<
+    [TColumn in RequiredInsertColumnName<TSchema, TTable>]: InsertColumnValue<
       BuilderForColumn<TSchema, TTable, TColumn>
     >;
   } & {
-    [TColumn in OptionalColumnName<TSchema, TTable>]?: ColumnValue<
+    [TColumn in OptionalInsertColumnName<TSchema, TTable>]?: InsertColumnValue<
       BuilderForColumn<TSchema, TTable, TColumn>
     >;
   }
 >;
 
-type PrimitiveWhere<T> = T | { eq?: T; ne?: T };
-type NumberWhere<T extends number> = T | { eq?: T; ne?: T; gt?: T; gte?: T; lt?: T; lte?: T };
-type TimestampWhere =
-  | Date
-  | number
-  | {
-      eq?: Date | number;
-      gt?: Date | number;
-      gte?: Date | number;
-      lt?: Date | number;
-      lte?: Date | number;
-    };
+type MaybeNullableWhere<T, TOptional extends boolean> = TOptional extends true ? T | null : T;
+type WhereEqNe<T, TOptional extends boolean, TExtra extends object = {}> =
+  | MaybeNullableWhere<T, TOptional>
+  | ({
+      eq?: MaybeNullableWhere<T, TOptional>;
+      ne?: MaybeNullableWhere<T, TOptional>;
+    } & TExtra);
+type NumberWhere<T extends number, TOptional extends boolean> = WhereEqNe<
+  T,
+  TOptional,
+  { gt?: T; gte?: T; lt?: T; lte?: T }
+>;
+type TimestampWhere<TOptional extends boolean> = WhereEqNe<
+  Date | number,
+  TOptional,
+  {
+    gt?: Date | number;
+    gte?: Date | number;
+    lt?: Date | number;
+    lte?: Date | number;
+  }
+>;
 type UuidWhere<TOptional extends boolean, TRef extends string | undefined> = TRef extends string
-  ? TOptional extends true
-    ? string | { eq?: string; ne?: string; isNull?: boolean }
-    : string | { eq?: string; ne?: string }
-  : string | { eq?: string; ne?: string; in?: string[] };
+  ? WhereEqNe<string, TOptional, TOptional extends true ? { isNull?: boolean } : {}>
+  : WhereEqNe<
+      string,
+      TOptional,
+      TOptional extends true ? { in?: string[]; isNull?: boolean } : { in?: string[] }
+    >;
 
 type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderSqlType<TBuilder> extends "TEXT"
-    ? string | { eq?: string; ne?: string; contains?: string }
+    ? WhereEqNe<string, ColumnBuilderOptional<TBuilder>, { contains?: string }>
     : ColumnBuilderSqlType<TBuilder> extends "BOOLEAN"
       ? boolean
       : ColumnBuilderSqlType<TBuilder> extends "INTEGER" | "REAL"
-        ? NumberWhere<number>
+        ? NumberWhere<number, ColumnBuilderOptional<TBuilder>>
         : ColumnBuilderSqlType<TBuilder> extends "TIMESTAMP"
-          ? TimestampWhere
+          ? TimestampWhere<ColumnBuilderOptional<TBuilder>>
           : ColumnBuilderSqlType<TBuilder> extends "UUID"
             ? UuidWhere<ColumnBuilderOptional<TBuilder>, ColumnBuilderReferences<TBuilder>>
             : ColumnBuilderSqlType<TBuilder> extends "BYTEA"
-              ? PrimitiveWhere<Uint8Array>
+              ? WhereEqNe<Uint8Array, ColumnBuilderOptional<TBuilder>>
               : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
-                ?
-                    | ColumnValue<TBuilder>
-                    | {
-                        eq?: ColumnValue<TBuilder>;
-                        ne?: ColumnValue<TBuilder>;
-                        in?: ColumnValue<TBuilder>[];
-                      }
+                ? WhereEqNe<
+                    ColumnValue<TBuilder>,
+                    ColumnBuilderOptional<TBuilder>,
+                    { in?: ColumnValue<TBuilder>[] }
+                  >
                 : ColumnBuilderSqlType<TBuilder> extends {
                       kind: "ENUM";
                       variants: readonly (infer TVariant extends string)[];
                     }
-                  ? TVariant | { eq?: TVariant; ne?: TVariant; in?: TVariant[] }
+                  ? WhereEqNe<TVariant, ColumnBuilderOptional<TBuilder>, { in?: TVariant[] }>
                   : ColumnBuilderSqlType<TBuilder> extends {
                         kind: "ARRAY";
                         element: infer TElementSql extends SqlType;
                       }
-                    ?
-                        | ColumnValue<TBuilder>
-                        | {
-                            eq?: ColumnValue<TBuilder>;
-                            contains?: TSTypeFromSqlType<TElementSql>;
-                          }
+                    ? WhereEqNe<
+                        ColumnValue<TBuilder>,
+                        ColumnBuilderOptional<TBuilder>,
+                        { contains?: TSTypeFromSqlType<TElementSql> }
+                      >
                     : never;
 
 export type TableWhereInput<
@@ -259,6 +293,19 @@ export type TableWhereInput<
     >;
   } & {
     [TColumn in PermissionIntrospectionColumn]?: boolean;
+  } & {
+    [TColumn in ProvenanceMagicColumn]?:
+      | string
+      | Date
+      | number
+      | {
+          eq?: string | Date | number;
+          ne?: string | Date | number;
+          gt?: Date | number;
+          gte?: Date | number;
+          lt?: Date | number;
+          lte?: Date | number;
+        };
   }
 >;
 
@@ -397,14 +444,23 @@ type PermissionIntrospectionColumns = {
   $canDelete: boolean | null;
 };
 
+type ProvenanceMagicColumns = {
+  $createdBy: string;
+  $createdAt: Date;
+  $updatedBy: string;
+  $updatedAt: Date;
+};
+
 export type TableSelectableColumn<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
   | BaseColumnName<TSchema, TTable>
   | PermissionIntrospectionColumn
+  | ProvenanceMagicColumn
   | "*";
 
 export type TableOrderableColumn<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
   | BaseColumnName<TSchema, TTable>
-  | PermissionIntrospectionColumn;
+  | PermissionIntrospectionColumn
+  | ProvenanceMagicColumn;
 
 export type TableSelected<
   TSchema extends SchemaLike,
@@ -417,7 +473,8 @@ export type TableSelected<
         TableRow<TSchema, TTable>,
         Extract<TSelection | "id", keyof TableRow<TSchema, TTable>>
       >) &
-    Pick<PermissionIntrospectionColumns, Extract<TSelection, PermissionIntrospectionColumn>>
+    Pick<PermissionIntrospectionColumns, Extract<TSelection, PermissionIntrospectionColumn>> &
+    Pick<ProvenanceMagicColumns, Extract<TSelection, ProvenanceMagicColumn>>
 >;
 
 type ApplyRelationCardinality<
@@ -427,13 +484,13 @@ type ApplyRelationCardinality<
   TRequired extends boolean,
 > = TIsArray extends true
   ? TNullable extends true
-    ? TValue[] | undefined
+    ? TValue[] | null
     : TValue[]
-  : TNullable extends true
-    ? TValue | undefined
-    : TRequired extends true
-      ? TValue
-      : TValue | undefined;
+  : TRequired extends true
+    ? TNullable extends true
+      ? TValue | null
+      : TValue
+    : TValue | null;
 
 export type TableInclude<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
   [TRelation in RelationName<TSchema, TTable>]?:
@@ -525,11 +582,13 @@ export type TableRelationMap = Record<string, TableRelation>;
 export interface TableMeta<
   TName extends string = string,
   TRow extends { id: string } = { id: string },
+  TInit extends object = Record<string, never>,
   TWhere extends object = Record<string, never>,
   TRelations extends TableRelationMap = {},
 > {
   readonly name: TName;
   readonly row: TRow;
+  readonly init: TInit;
   readonly where: TWhere;
   readonly relations: TRelations;
 }
@@ -538,12 +597,13 @@ export type AnyTableMeta = TableMeta<
   string,
   { id: string },
   Record<string, unknown>,
+  Record<string, unknown>,
   TableRelationMap
 >;
 
 type TableNameFromMeta<TMeta extends AnyTableMeta> = TMeta["name"];
 type TableRowFromMeta<TMeta extends AnyTableMeta> = TMeta["row"];
-type TableInitFromMeta<TMeta extends AnyTableMeta> = Simplify<Omit<TableRowFromMeta<TMeta>, "id">>;
+type TableInitFromMeta<TMeta extends AnyTableMeta> = TMeta["init"];
 type TableWhereFromMeta<TMeta extends AnyTableMeta> = TMeta["where"];
 type TableRelationsFromMeta<TMeta extends AnyTableMeta> = TMeta["relations"];
 type RelationNameFromMeta<TMeta extends AnyTableMeta> = Extract<
@@ -573,10 +633,12 @@ type BaseColumnNameFromMeta<TMeta extends AnyTableMeta> = Extract<
 type TableSelectableFromMeta<TMeta extends AnyTableMeta> =
   | BaseColumnNameFromMeta<TMeta>
   | PermissionIntrospectionColumn
+  | ProvenanceMagicColumn
   | "*";
 type TableOrderableFromMeta<TMeta extends AnyTableMeta> =
   | BaseColumnNameFromMeta<TMeta>
-  | PermissionIntrospectionColumn;
+  | PermissionIntrospectionColumn
+  | ProvenanceMagicColumn;
 type DefaultTableSelection<TMeta extends AnyTableMeta> = BaseColumnNameFromMeta<TMeta>;
 
 export type SchemaRelations<TTable extends string, TSchema extends SchemaLike> =
@@ -595,6 +657,7 @@ export type SchemaTable<TTable extends string, TSchema extends SchemaLike> =
     ? TableMeta<
         TTable,
         TableRow<TSchema, TTable>,
+        TableInit<TSchema, TTable>,
         TableWhereInput<TSchema, TTable>,
         SchemaRelations<TTable, TSchema>
       >
@@ -621,7 +684,8 @@ type SelectedFromMeta<
   ("*" extends TSelection
     ? TableRowFromMeta<TMeta>
     : Pick<TableRowFromMeta<TMeta>, Extract<TSelection | "id", keyof TableRowFromMeta<TMeta>>>) &
-    Pick<PermissionIntrospectionColumns, Extract<TSelection, PermissionIntrospectionColumn>>
+    Pick<PermissionIntrospectionColumns, Extract<TSelection, PermissionIntrospectionColumn>> &
+    Pick<ProvenanceMagicColumns, Extract<TSelection, ProvenanceMagicColumn>>
 >;
 
 type IncludedRelationValueFromMeta<
@@ -1100,3 +1164,4 @@ export function defineApp(
 }
 
 export const permissionIntrospectionColumns = [...PERMISSION_INTROSPECTION_COLUMNS];
+export const provenanceMagicColumns = [...PROVENANCE_MAGIC_COLUMNS];

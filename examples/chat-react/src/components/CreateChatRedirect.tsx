@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { useDb, useSession } from "jazz-tools/react";
 import { useRouter } from "@/hooks/useRouter";
 import { useMyProfile } from "@/hooks/useMyProfile";
-import { app } from "../../schema/app.js";
+import { app } from "../../schema.js";
 
 export const CreateChatRedirect = () => {
   const db = useDb();

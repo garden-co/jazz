@@ -2,6 +2,10 @@ use super::*;
 use std::collections::HashSet;
 use uuid::Uuid;
 
+fn test_row_provenance() -> crate::metadata::RowProvenance {
+    crate::metadata::RowProvenance::for_insert("jazz:test", 1)
+}
+
 #[test]
 fn column_type_fixed_sizes() {
     assert_eq!(ColumnType::Integer.fixed_size(), Some(4));
@@ -177,6 +181,7 @@ fn tuple_element_row() {
         id,
         content: content.clone(),
         commit_id,
+        row_provenance: test_row_provenance(),
     };
 
     assert_eq!(elem.id(), id);
@@ -188,7 +193,7 @@ fn tuple_element_row() {
 #[test]
 fn tuple_element_from_row() {
     let id = crate::object::ObjectId::from_uuid(Uuid::from_u128(42));
-    let row = Row::new(id, vec![1, 2, 3], make_commit_id(1));
+    let row = Row::new(id, vec![1, 2, 3], make_commit_id(1), test_row_provenance());
     let elem = TupleElement::from_row(&row);
 
     assert_eq!(elem.id(), id);
@@ -209,7 +214,7 @@ fn tuple_from_id() {
 #[test]
 fn tuple_from_row() {
     let id = crate::object::ObjectId::from_uuid(Uuid::from_u128(42));
-    let row = Row::new(id, vec![1, 2, 3], make_commit_id(1));
+    let row = Row::new(id, vec![1, 2, 3], make_commit_id(1), test_row_provenance());
     let tuple = Tuple::from_row(&row);
 
     assert_eq!(tuple.len(), 1);
@@ -227,6 +232,7 @@ fn tuple_equality_based_on_ids() {
         id,
         content: vec![1, 2, 3],
         commit_id: make_commit_id(1),
+        row_provenance: test_row_provenance(),
     }]);
 
     assert_eq!(tuple1, tuple2);
@@ -244,6 +250,7 @@ fn tuple_hash_based_on_ids() {
         id,
         content: vec![1, 2, 3],
         commit_id: make_commit_id(1),
+        row_provenance: test_row_provenance(),
     }]);
 
     let mut hasher1 = DefaultHasher::new();
@@ -268,6 +275,7 @@ fn tuple_in_hashset() {
         id: id1,
         content: vec![1, 2, 3],
         commit_id: make_commit_id(1),
+        row_provenance: test_row_provenance(),
     }]);
     assert!(set.contains(&tuple_with_content));
 }
@@ -275,7 +283,7 @@ fn tuple_in_hashset() {
 #[test]
 fn tuple_delta_to_row_delta() {
     let id = crate::object::ObjectId::from_uuid(Uuid::from_u128(42));
-    let row = Row::new(id, vec![1, 2, 3], make_commit_id(1));
+    let row = Row::new(id, vec![1, 2, 3], make_commit_id(1), test_row_provenance());
     let tuple = Tuple::from_row(&row);
 
     let tuple_delta = TupleDelta {

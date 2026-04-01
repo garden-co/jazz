@@ -222,14 +222,6 @@ export interface TableProxy<T, Init> {
   readonly _initType: Init;
 }
 
-type UpdateValue<RowValue, InitValue> = undefined extends RowValue
-  ? InitValue | null
-  : InitValue | undefined;
-
-type UpdateData<T, Init> = {
-  [K in keyof Init]?: K extends keyof T ? UpdateValue<T[K], Init[K]> : Init[K] | undefined;
-};
-
 interface BroadcastChannelLike {
   postMessage(data: unknown): void;
   addEventListener(type: "message", listener: (event: MessageEvent) => void): void;
@@ -1029,7 +1021,7 @@ export class Db {
   /**
    * Update an existing row without waiting for durability.
    */
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: UpdateData<T, Init>): void {
+  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
     const client = this.getClient(table._schema);
     const updates = toUpdateRecord(data as Record<string, unknown>, table._schema, table._table);
     client.update(id, updates);
@@ -1041,7 +1033,7 @@ export class Db {
   async updateDurable<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
-    data: UpdateData<T, Init>,
+    data: Partial<Init>,
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
     const client = this.getClient(table._schema);
@@ -1425,6 +1417,7 @@ class ClientBackedDb extends Db {
     config: DbConfig,
     private readonly runtimeClient: JazzClient,
     private readonly session?: Session,
+    private readonly attribution?: string,
   ) {
     super(config, null);
   }
@@ -1433,7 +1426,12 @@ class ClientBackedDb extends Db {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const values = toInsertRecord(data as Record<string, unknown>, inputSchema, table._table);
-    const row = this.runtimeClient.createInternal(table._table, values, this.session);
+    const row = this.runtimeClient.createInternal(
+      table._table,
+      values,
+      this.session,
+      this.attribution,
+    );
     return transformRow(row, table._schema, table._table);
   }
 
@@ -1449,36 +1447,39 @@ class ClientBackedDb extends Db {
       table._table,
       values,
       this.session,
+      this.attribution,
       options,
     );
     return transformRow(row, table._schema, table._table);
   }
 
-  override update<T, Init>(
-    table: TableProxy<T, Init>,
-    id: string,
-    data: UpdateData<T, Init>,
-  ): void {
+  override update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    this.runtimeClient.updateInternal(id, updates, this.session);
+    this.runtimeClient.updateInternal(id, updates, this.session, this.attribution);
   }
 
   override async updateDurable<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
-    data: UpdateData<T, Init>,
+    data: Partial<Init>,
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
     const runtimeSchema = normalizeRuntimeSchema(this.runtimeClient.getSchema());
     const inputSchema = resolveSchemaWithTable(table._schema, runtimeSchema, table._table);
     const updates = toUpdateRecord(data as Record<string, unknown>, inputSchema, table._table);
-    await this.runtimeClient.updateDurableInternal(id, updates, this.session, options);
+    await this.runtimeClient.updateDurableInternal(
+      id,
+      updates,
+      this.session,
+      this.attribution,
+      options,
+    );
   }
 
   override delete<T, Init>(_table: TableProxy<T, Init>, id: string): void {
-    this.runtimeClient.deleteInternal(id, this.session);
+    this.runtimeClient.deleteInternal(id, this.session, this.attribution);
   }
 
   override async deleteDurable<T, Init>(
@@ -1486,7 +1487,7 @@ class ClientBackedDb extends Db {
     id: string,
     options?: { tier?: DurabilityTier },
   ): Promise<void> {
-    await this.runtimeClient.deleteDurableInternal(id, this.session, options);
+    await this.runtimeClient.deleteDurableInternal(id, this.session, this.attribution, options);
   }
 
   override async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
@@ -1598,6 +1599,11 @@ export async function createDb(config: DbConfig): Promise<Db> {
   return Db.create(resolvedConfig);
 }
 
-export function createDbFromClient(config: DbConfig, client: JazzClient, session?: Session): Db {
-  return new ClientBackedDb(resolveLocalAuthDefaults(config), client, session);
+export function createDbFromClient(
+  config: DbConfig,
+  client: JazzClient,
+  session?: Session,
+  attribution?: string,
+): Db {
+  return new ClientBackedDb(resolveLocalAuthDefaults(config), client, session, attribution);
 }
