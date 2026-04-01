@@ -372,7 +372,7 @@ describe("cli migrations", () => {
     );
   });
 
-  it("renders addedTables and removedTables when inferring table add/drop steps", async () => {
+  it("renders createTables and dropTables when inferring table add/drop steps", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
     const fromHash = "abababababababababababababababababababababababababababababababab";
@@ -431,9 +431,9 @@ describe("cli migrations", () => {
     const generated = await readFile(filePath, "utf8");
     expect(generated).toContain('"todos": {');
     expect(generated).toContain('"notes": s.add.string({ default: null }),');
-    expect(generated).toContain("addedTables: {");
+    expect(generated).toContain("createTables: {");
     expect(generated).toContain('"users": true,');
-    expect(generated).toContain("removedTables: {");
+    expect(generated).toContain("dropTables: {");
     expect(generated).toContain('"legacy_users": true,');
   });
 
@@ -647,7 +647,7 @@ export default s.defineMigration({
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("pushes explicit addedTables and removedTables via the admin migrations payload", async () => {
+  it("pushes explicit createTables and dropTables via the admin migrations payload", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
     await mkdir(migrationsDir, { recursive: true });
@@ -667,10 +667,10 @@ export default s.defineMigration({
 import { schema as s } from ${JSON.stringify(indexPath)};
 
 export default s.defineMigration({
-  addedTables: {
+  createTables: {
     profiles: true,
   },
-  removedTables: {
+  dropTables: {
     legacy_profiles: true,
   },
   fromHash: ${JSON.stringify(fromShortHash)},

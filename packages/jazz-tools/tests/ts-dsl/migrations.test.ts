@@ -76,7 +76,7 @@ describe("typed migration object syntax", () => {
     ]);
   });
 
-  it("serializes explicit table renames alongside target-table column operations", () => {
+  it("serializes table renames", () => {
     const migration = s.defineMigration({
       fromHash: "aaaaaaaaaaaa",
       toHash: "bbbbbbbbbbbb",
@@ -143,10 +143,10 @@ describe("typed migration object syntax", () => {
           bio: s.string().optional(),
         }),
       },
-      addedTables: {
+      createTables: {
         profiles: true,
       },
-      removedTables: {
+      dropTables: {
         legacyProfiles: true,
       },
     });
@@ -247,7 +247,7 @@ describe("typed migration object syntax", () => {
         migrate: {},
       });
 
-      // @ts-expect-error target-only tables must be declared in addedTables
+      // @ts-expect-error target-only tables must be declared in createTables
       s.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",
@@ -266,7 +266,7 @@ describe("typed migration object syntax", () => {
         },
       });
 
-      // @ts-expect-error source-only tables must be declared in removedTables
+      // @ts-expect-error source-only tables must be declared in dropTables
       s.defineMigration({
         fromHash: "aaaaaaaaaaaa",
         toHash: "bbbbbbbbbbbb",

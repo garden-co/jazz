@@ -1123,7 +1123,7 @@ async fn publish_migration_handler(
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(ErrorResponse::bad_request(format!(
-                            "addedTables references unknown target table {}",
+                            "createTables references unknown target table {}",
                             table_name
                         ))),
                     )
@@ -1146,7 +1146,7 @@ async fn publish_migration_handler(
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(ErrorResponse::bad_request(format!(
-                            "removedTables references unknown source table {}",
+                            "dropTables references unknown source table {}",
                             table_name
                         ))),
                     )
