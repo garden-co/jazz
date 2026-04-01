@@ -64,7 +64,9 @@ jobs:
           toolchain: 1.93.1
 
       - name: Install libclang (needed by rocksdb bindgen)
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "18"
 
       - uses: actions/setup-node@v6
         with:
@@ -212,6 +214,11 @@ jobs:
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
+
+      - name: Install libclang (needed by rocksdb bindgen)
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "18"
 
       - uses: actions/setup-node@v6
         with:
