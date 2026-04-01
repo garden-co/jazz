@@ -281,10 +281,10 @@ type TableRenameSuggestion = {
   newTableName: string;
 };
 
-function detectPossibleTableRename(
+function detectPossibleTableRenames(
   fromSchema: WasmSchema,
   toSchema: WasmSchema,
-): TableRenameSuggestion | undefined {
+): TableRenameSuggestion[] {
   const removedTables = Object.keys(fromSchema)
     .filter((tableName) => !toSchema[tableName])
     .sort();
@@ -292,18 +292,39 @@ function detectPossibleTableRename(
     .filter((tableName) => !fromSchema[tableName])
     .sort();
 
-  if (removedTables.length !== 1 || addedTables.length !== 1) {
-    return undefined;
-  }
+  const removedCandidates = removedTables.map((oldTableName) =>
+    addedTables
+      .map((newTableName, addedIndex) =>
+        tableSchemasEqual(fromSchema[oldTableName], toSchema[newTableName]) ? addedIndex : -1,
+      )
+      .filter((addedIndex) => addedIndex >= 0),
+  );
+  const addedCandidates = addedTables.map((newTableName) =>
+    removedTables
+      .map((oldTableName, removedIndex) =>
+        tableSchemasEqual(fromSchema[oldTableName], toSchema[newTableName]) ? removedIndex : -1,
+      )
+      .filter((removedIndex) => removedIndex >= 0),
+  );
 
-  const oldTableName = removedTables[0]!;
-  const newTableName = addedTables[0]!;
+  return removedCandidates.flatMap((candidateAddedTables, removedIndex) => {
+    if (candidateAddedTables.length !== 1) {
+      return [];
+    }
 
-  if (!tableSchemasEqual(fromSchema[oldTableName], toSchema[newTableName])) {
-    return undefined;
-  }
+    const addedIndex = candidateAddedTables[0]!;
+    const candidateRemovedTables = addedCandidates[addedIndex]!;
+    if (candidateRemovedTables.length !== 1 || candidateRemovedTables[0] !== removedIndex) {
+      return [];
+    }
 
-  return { oldTableName, newTableName };
+    return [
+      {
+        oldTableName: removedTables[removedIndex]!,
+        newTableName: addedTables[addedIndex]!,
+      },
+    ];
+  });
 }
 
 function ensurePermissionsProject(compiled: LoadedSchemaProject): LoadedSchemaProject & {
@@ -636,26 +657,26 @@ function renderMigrationBody(
   witnessFrom: WasmSchema;
   witnessTo: WasmSchema;
 } {
-  const renameSuggestion = detectPossibleTableRename(fromSchema, toSchema);
+  const renameSuggestions = detectPossibleTableRenames(fromSchema, toSchema);
+  const renamedOldTables = new Set(renameSuggestions.map((suggestion) => suggestion.oldTableName));
+  const renamedNewTables = new Set(renameSuggestions.map((suggestion) => suggestion.newTableName));
   const addedTables = Object.keys(toSchema)
     .filter((tableName) => !fromSchema[tableName])
     .sort();
   const removedTables = Object.keys(fromSchema)
     .filter((tableName) => !toSchema[tableName])
     .sort();
-  const explicitAddedTables = renameSuggestion
-    ? addedTables.filter((tableName) => tableName !== renameSuggestion.newTableName)
-    : addedTables;
-  const explicitRemovedTables = renameSuggestion
-    ? removedTables.filter((tableName) => tableName !== renameSuggestion.oldTableName)
-    : removedTables;
+  const explicitAddedTables = addedTables.filter((tableName) => !renamedNewTables.has(tableName));
+  const explicitRemovedTables = removedTables.filter(
+    (tableName) => !renamedOldTables.has(tableName),
+  );
   const changedTables = changedTableNames(fromSchema, toSchema);
   const migratableTables = changedTables.filter(
     (tableName) => fromSchema[tableName] !== undefined && toSchema[tableName] !== undefined,
   );
   const witnessFromTables = [...migratableTables, ...explicitRemovedTables];
   const witnessToTables = [...migratableTables, ...explicitAddedTables];
-  if (renameSuggestion) {
+  for (const renameSuggestion of renameSuggestions) {
     witnessFromTables.push(renameSuggestion.oldTableName);
     witnessToTables.push(renameSuggestion.newTableName);
   }
@@ -684,7 +705,7 @@ function renderMigrationBody(
 
   if (lines.length === 0) {
     if (
-      !renameSuggestion &&
+      renameSuggestions.length === 0 &&
       explicitAddedTables.length === 0 &&
       explicitRemovedTables.length === 0
     ) {
@@ -706,9 +727,15 @@ function renderMigrationBody(
       explicitRemovedTables.length > 0
         ? explicitRemovedTables.map((tableName) => `${JSON.stringify(tableName)}: true,`).join("\n")
         : undefined,
-    renameTablesBody: renameSuggestion
-      ? `${renameSuggestion.newTableName}: s.renameTableFrom(${JSON.stringify(renameSuggestion.oldTableName)}),`
-      : undefined,
+    renameTablesBody:
+      renameSuggestions.length > 0
+        ? renameSuggestions
+            .map(
+              (renameSuggestion) =>
+                `${renameSuggestion.newTableName}: s.renameTableFrom(${JSON.stringify(renameSuggestion.oldTableName)}),`,
+            )
+            .join("\n")
+        : undefined,
     witnessFrom,
     witnessTo,
   };

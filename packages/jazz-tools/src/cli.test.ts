@@ -494,6 +494,72 @@ describe("cli migrations", () => {
     expect(generated).not.toContain("migrate: {");
   });
 
+  it("suggests renameTables for multiple exact unambiguous table renames", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "3434343434343434343434343434343434343434343434343434343434343434";
+    const toHash = "5656565656565656565656565656565656565656565656565656565656565656";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${fromHash}`)) {
+        return new Response(
+          JSON.stringify({
+            users: {
+              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+            },
+            orgs: {
+              columns: [{ name: "slug", column_type: { type: "Text" }, nullable: false }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      if (input.endsWith(`/schema/${toHash}`)) {
+        return new Response(
+          JSON.stringify({
+            companies: {
+              columns: [{ name: "slug", column_type: { type: "Text" }, nullable: false }],
+            },
+            people: {
+              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const filePath = await createMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    const generated = await readFile(filePath, "utf8");
+    expect(generated).toContain("renameTables: {");
+    expect(generated).toContain('companies: s.renameTableFrom("orgs"),');
+    expect(generated).toContain('people: s.renameTableFrom("users"),');
+    expect(generated).not.toContain("createTables: {");
+    expect(generated).not.toContain("dropTables: {");
+    expect(generated).toContain('"orgs": s.table({');
+    expect(generated).toContain('"users": s.table({');
+    expect(generated).toContain('"companies": s.table({');
+    expect(generated).toContain('"people": s.table({');
+    expect(generated).not.toContain("migrate: {");
+  });
+
   it("pushes a reviewed migration via the admin migrations endpoint", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
