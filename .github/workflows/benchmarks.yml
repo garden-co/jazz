@@ -67,8 +67,11 @@ jobs:
         uses: KyleMayes/install-llvm-action@v2
         with:
           version: "18"
-      - name: Set LIBCLANG_PATH
-        run: echo "LIBCLANG_PATH=${LLVM_PATH}/lib" >> "$GITHUB_ENV"
+      - name: Configure LLVM env for bindgen only
+        run: |
+          echo "LIBCLANG_PATH=${LLVM_PATH}/lib" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v6
         with:
@@ -221,8 +224,11 @@ jobs:
         uses: KyleMayes/install-llvm-action@v2
         with:
           version: "18"
-      - name: Set LIBCLANG_PATH
-        run: echo "LIBCLANG_PATH=${LLVM_PATH}/lib" >> "$GITHUB_ENV"
+      - name: Configure LLVM env for bindgen only
+        run: |
+          echo "LIBCLANG_PATH=${LLVM_PATH}/lib" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v6
         with:
