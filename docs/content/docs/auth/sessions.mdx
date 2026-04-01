@@ -1,7 +1,7 @@
 ---
 title: Sessions
 description: Reading the current session and scoping queries and inserts to the logged-in user.
-reviewedAt: "14cd73f0"
+reviewedAt: "4059cdef"
 ---
 
 After [setting up authentication](/docs/auth/authentication), you can read the current session to scope queries and inserts to the logged-in user.
@@ -126,10 +126,24 @@ On clients, writes are automatically attributed to the current session user. On 
 `context.forRequest(...)` and `context.forSession(...)` both run as that user for permissions and
 also stamp authorship as that user.
 
-If backend code should keep backend permissions but still record a user's identity in authorship
-metadata,
-use `withAttribution(...)`, `withAttributionForSession(...)`, or `withAttributionForRequest(...)`
-from [Server Setup](/docs/reference/server-setup).
+### Attribution without impersonation
+
+Sometimes backend code should keep backend-level permissions but still record a user's identity in
+edit metadata. Use the attribution helpers for this:
+
+- `context.withAttribution(userId)`&hairsp;—&hairsp;stamps writes as the given user ID
+- `context.withAttributionForSession(session)`&hairsp;—&hairsp;derives authorship from a resolved session
+- `context.withAttributionForRequest(req)`&hairsp;—&hairsp;derives authorship from an authenticated request
+
+<include cwd lang="ts">
+  ../examples/docs/todo-server-ts/src/request-context.ts#backend-attribution-ts
+</include>
+
+These differ from `forRequest` / `forSession` in one key way:
+
+- `forRequest` / `forSession` change both permission evaluation **and** authorship
+- `withAttribution*` only changes authorship&hairsp;—&hairsp;permissions stay at the backend level
+- `asBackend()` and unscoped `db()` writes default to `jazz:system`
 
 <Callout type="info">
   Client-side filters are useful for UX, but they don't enforce access control on their own. Use
