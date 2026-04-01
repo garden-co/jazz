@@ -673,6 +673,71 @@ function buildRemovedTableSet(
   return set;
 }
 
+function columnShapeSignature(builder: AnyTypedColumnBuilder): string {
+  const column = builder._build("__migration_shape__");
+  return JSON.stringify({
+    sqlType: column.sqlType,
+    nullable: column.nullable,
+    references: column.references ?? null,
+  });
+}
+
+function tableMatchesAfterApplyingColumnOperations(
+  sourceTable: Record<string, AnyTypedColumnBuilder>,
+  targetTable: Record<string, AnyTypedColumnBuilder>,
+  tableOps: Record<string, AddOp | DropOp | RenameOp>,
+): boolean {
+  const transformed = new Map<string, AnyTypedColumnBuilder>(Object.entries(sourceTable));
+
+  for (const [columnName, operation] of Object.entries(tableOps)) {
+    switch (operation._type) {
+      case "rename": {
+        const builder = transformed.get(operation.oldName);
+        if (!builder) {
+          return false;
+        }
+        if (columnName !== operation.oldName && transformed.has(columnName)) {
+          return false;
+        }
+        transformed.delete(operation.oldName);
+        transformed.set(columnName, builder);
+        break;
+      }
+      case "add": {
+        const builder = targetTable[columnName];
+        if (!builder || transformed.has(columnName)) {
+          return false;
+        }
+        transformed.set(columnName, builder);
+        break;
+      }
+      case "drop": {
+        if (!transformed.delete(columnName)) {
+          return false;
+        }
+        break;
+      }
+    }
+  }
+
+  const targetEntries = Object.entries(targetTable);
+  if (transformed.size !== targetEntries.length) {
+    return false;
+  }
+
+  for (const [columnName, targetBuilder] of targetEntries) {
+    const sourceBuilder = transformed.get(columnName);
+    if (!sourceBuilder) {
+      return false;
+    }
+    if (columnShapeSignature(sourceBuilder) !== columnShapeSignature(targetBuilder)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function buildForwardLenses<
   TFrom extends SchemaLike,
   TTo extends SchemaLike,
@@ -718,10 +783,10 @@ function buildForwardLenses<
   const forward: Lens[] = [];
   const orderedTableNames = [
     ...new Set([
-      ...Object.keys((createTables ?? {}) as Record<string, unknown>),
-      ...Object.keys((dropTables ?? {}) as Record<string, unknown>),
-      ...Object.keys((renameTables ?? {}) as Record<string, unknown>),
-      ...Object.keys((migrate ?? {}) as Record<string, unknown>),
+      ...Object.keys(createTables ?? {}),
+      ...Object.keys(dropTables ?? {}),
+      ...Object.keys(renameTables ?? {}),
+      ...Object.keys(migrate ?? {}),
     ]),
   ];
   const sourceTables = fromDefinition as Record<string, Record<string, AnyTypedColumnBuilder>>;
@@ -816,6 +881,23 @@ function buildForwardLenses<
           });
           break;
         }
+      }
+    }
+
+    if (renamedFrom) {
+      const sourceTable = sourceTables[sourceTableName];
+      const targetTable = targetTables[tableName];
+
+      if (!sourceTable || !targetTable) {
+        throw new Error(
+          `Table rename ${sourceTableName} -> ${tableName} references a missing source or target table.`,
+        );
+      }
+
+      if (!tableMatchesAfterApplyingColumnOperations(sourceTable, targetTable, tableOps)) {
+        throw new Error(
+          `Table rename ${sourceTableName} -> ${tableName} does not match the target table after applying its column migrations.`,
+        );
       }
     }
 
