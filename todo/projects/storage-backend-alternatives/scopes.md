@@ -21,4 +21,5 @@ See `sqlite-mobile-backend-design.md` for implementation details.
 
 - [ ] Review feature flags so targets that don't need RocksDB (WASM, docs, inspector) never pull it in
 - [ ] Ensure Vercel, CI, and local dev builds only install libclang when actually needed
-- [ ] Consider making `cli` and `client` features work without a concrete storage backend, letting consumers opt in to `rocksdb` or `fjall` explicitly
+- [ ] Consider making `cli` and `client` features work without a concrete storage backend, letting consumers opt in to `rocksdb` explicitly
+- [ ] Remove Fjall from the codebase (feature flag, storage implementation, dependencies)
