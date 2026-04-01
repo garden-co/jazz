@@ -28,7 +28,10 @@ async function selectBackend(
 ): Promise<DocsBackend> {
   try {
     // Step 1: confirm node:sqlite is importable
-    const { DatabaseSync } = await import("node:sqlite");
+    // Use a variable so esbuild cannot statically analyse and strip the "node:" prefix.
+    // eslint-disable-next-line @typescript-eslint/no-implied-eval
+    const sqliteMod = "node:sqlite";
+    const { DatabaseSync } = await import(sqliteMod);
 
     // Step 2: FTS5 probe on an in-memory DB
     const probe = new DatabaseSync(":memory:");
