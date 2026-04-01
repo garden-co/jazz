@@ -38,6 +38,7 @@ jobs:
     needs: build-rn
     timeout-minutes: 60
     env:
+      CARGO_ZIGBUILD_CACHE_DIR: /tmp/cargo-zigbuild-cache
       JAZZ_E2E_APP_ID: 6316f08d-d5d1-41df-82b8-8c16aa26db84
       JAZZ_E2E_ADMIN_SECRET: d0a2f110-36a8-45b9-8632-ecbc09128e2a
       JAZZ_E2E_SERVER_PORT: "1625"
@@ -63,12 +64,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
-          targets: wasm32-unknown-unknown, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
+          targets: wasm32-unknown-unknown, x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
           components: clippy, rustfmt
 
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack
+
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
 
       - name: Install libclang (needed by rocksdb bindgen)
         run: sudo apt-get update && sudo apt-get install -y libclang-dev
@@ -108,12 +117,12 @@ jobs:
 
           ARCH="$(sandbox exec "${COMMON[@]}" "$SANDBOX_ID" uname -m | tr -d '\r' | tail -n1)"
           case "$ARCH" in
-            x86_64|amd64)  TARGET=x86_64-unknown-linux-gnu ;;
-            aarch64|arm64) TARGET=aarch64-unknown-linux-gnu ;;
+            x86_64|amd64)  TARGET=x86_64-unknown-linux-musl ;;
+            aarch64|arm64) TARGET=aarch64-unknown-linux-musl ;;
             *) echo "::error::Unsupported sandbox arch: $ARCH"; exit 1 ;;
           esac
 
-          cargo build --release -p jazz-tools --bin jazz-tools --features cli --target "$TARGET"
+          cargo zigbuild --release -p jazz-tools --bin jazz-tools --features cli --target "$TARGET"
           sandbox copy "${COMMON[@]}" "target/$TARGET/release/jazz-tools" "$SANDBOX_ID:/tmp/jazz-tools"
 
           sandbox exec "${COMMON[@]}" "$SANDBOX_ID" chmod +x /tmp/jazz-tools
@@ -128,7 +137,9 @@ jobs:
       - name: Verify Server URL
         run: |
           echo "Verifying server URL: ${SERVER_PUBLIC_URL}"
-          curl --fail --retry 20 --retry-delay 1 "${SERVER_PUBLIC_URL}/health"
+          HEALTH_BODY="$(curl --silent --show-error --fail --retry 20 --retry-delay 1 "${SERVER_PUBLIC_URL}/health")"
+          echo "$HEALTH_BODY"
+          echo "$HEALTH_BODY" | grep -F '"status":"healthy"'
 
       - name: Build release APK
         working-directory: examples/todo-client-localfirst-expo/android
