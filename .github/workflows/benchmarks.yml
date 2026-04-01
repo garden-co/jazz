@@ -64,10 +64,12 @@ jobs:
           toolchain: 1.93.1
 
       - name: Install libclang (needed by rocksdb bindgen)
+        id: llvm
         uses: KyleMayes/install-llvm-action@v2
         with:
           version: "18"
-          env: true
+      - name: Set LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=${{ steps.llvm.outputs.LLVM_PATH }}/lib" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v6
         with:
@@ -217,10 +219,12 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Install libclang (needed by rocksdb bindgen)
+        id: llvm
         uses: KyleMayes/install-llvm-action@v2
         with:
           version: "18"
-          env: true
+      - name: Set LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=${{ steps.llvm.outputs.LLVM_PATH }}/lib" >> "$GITHUB_ENV"
 
       - uses: actions/setup-node@v6
         with:
