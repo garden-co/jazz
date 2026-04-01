@@ -70,6 +70,9 @@ jobs:
         with:
           tool: wasm-pack
 
+      - name: Install libclang (needed by rocksdb bindgen)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
       - name: pnpm build
         run: pnpm build
 

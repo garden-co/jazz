@@ -24,6 +24,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install libclang (needed by rocksdb bindgen)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
@@ -43,6 +46,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          prefix-key: rocksdb-v1
 
       - uses: taiki-e/install-action@v2
         with:
@@ -56,6 +60,7 @@ jobs:
 
       - run: pnpm format:check
       - run: pnpm lint
+      - run: cargo clippy --workspace -- -D warnings
 
   test-rust:
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -68,6 +73,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install libclang (needed by rocksdb bindgen)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -88,6 +96,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          prefix-key: rocksdb-v1
 
       - uses: taiki-e/install-action@v2
         with:
@@ -114,6 +123,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install libclang (needed by rocksdb bindgen)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
@@ -133,6 +145,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          prefix-key: rocksdb-v1
 
       - uses: taiki-e/install-action@v2
         with:

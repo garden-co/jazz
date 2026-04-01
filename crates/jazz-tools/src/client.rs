@@ -13,7 +13,11 @@ use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
 use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_manifest};
-use crate::storage::{FjallStorage, MemoryStorage, Storage, StorageError};
+#[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+use crate::storage::FjallStorage;
+#[cfg(feature = "rocksdb")]
+use crate::storage::RocksDBStorage;
+use crate::storage::{MemoryStorage, Storage, StorageError};
 use crate::sync_manager::{
     ClientId, Destination, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
@@ -124,7 +128,7 @@ impl JazzClient {
         let declared_schema = context.schema.clone();
         let default_session = default_session_from_context(&context);
         let client_id = match context.storage {
-            ClientStorage::Fjall => load_or_create_persistent_client_id(&context)?,
+            ClientStorage::Persistent => load_or_create_persistent_client_id(&context)?,
             ClientStorage::Memory => context.client_id.unwrap_or_default(),
         };
 
@@ -143,7 +147,7 @@ impl JazzClient {
         };
 
         let storage: DynStorage = match context.storage {
-            ClientStorage::Fjall => Box::new(open_fjall_storage(&context.data_dir).await?),
+            ClientStorage::Persistent => open_persistent_storage(&context.data_dir).await?,
             ClientStorage::Memory => Box::new(MemoryStorage::new()),
         };
 
@@ -671,7 +675,11 @@ mod tests {
     use crate::query_manager::types::{SchemaHash, TablePolicies};
     use crate::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
     use crate::schema_manager::AppId;
-    use crate::storage::{CatalogueManifestOp, FjallStorage};
+    use crate::storage::CatalogueManifestOp;
+    #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+    use crate::storage::FjallStorage;
+    #[cfg(feature = "rocksdb")]
+    use crate::storage::RocksDBStorage;
     use crate::{ColumnType, ObjectId, SchemaBuilder, TableSchema};
     use serde_json::json;
     use tempfile::TempDir;
@@ -744,9 +752,17 @@ mod tests {
         publish_permissions: bool,
     ) -> (SchemaHash, SchemaHash) {
         std::fs::create_dir_all(data_dir).expect("create seeded client data dir");
-        let db_path = data_dir.join("jazz.fjall");
-        let storage =
-            FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage");
+
+        #[cfg(feature = "rocksdb")]
+        let storage = {
+            let db_path = data_dir.join("jazz.rocksdb");
+            RocksDBStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
+        };
+        #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+        let storage = {
+            let db_path = data_dir.join("jazz.fjall");
+            FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
+        };
 
         let bundled_schema = declared_todo_schema();
         let learned_schema = learned_runtime_todo_schema();
@@ -812,9 +828,16 @@ mod tests {
     }
 
     fn expected_client_catalogue_hash(context: &AppContext) -> String {
-        let db_path = context.data_dir.join("jazz.fjall");
-        let storage =
-            FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage");
+        #[cfg(feature = "rocksdb")]
+        let storage = {
+            let db_path = context.data_dir.join("jazz.rocksdb");
+            RocksDBStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
+        };
+        #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+        let storage = {
+            let db_path = context.data_dir.join("jazz.fjall");
+            FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
+        };
         let schema_manager = build_client_schema_manager(&storage, context)
             .expect("rehydrate client schema manager");
         let catalogue_hash = schema_manager.catalogue_state_hash();
@@ -979,6 +1002,54 @@ mod tests {
 
         client.shutdown().await.expect("shutdown client");
     }
+
+    #[cfg(feature = "rocksdb")]
+    #[tokio::test]
+    async fn open_persistent_storage_retries_on_lock_contention() {
+        let data_dir = TempDir::new().expect("temp dir");
+        std::fs::create_dir_all(data_dir.path()).unwrap();
+
+        let db_path = data_dir.path().join("jazz.rocksdb");
+        // Hold the DB open so the next open hits a lock error.
+        let _holder =
+            RocksDBStorage::open(&db_path, 64 * 1024 * 1024).expect("first open should succeed");
+
+        // Spawn a task that drops the holder after a short delay, unblocking the retry.
+        let holder_handle = tokio::task::spawn_blocking({
+            let holder = _holder;
+            move || {
+                std::thread::sleep(Duration::from_millis(150));
+                drop(holder);
+            }
+        });
+
+        // open_persistent_storage retries up to 100 times at 25ms intervals.
+        // The holder is released after ~150ms, so this should succeed within a few retries.
+        let storage = open_persistent_storage(data_dir.path()).await;
+        assert!(
+            storage.is_ok(),
+            "should succeed after lock is released: {:?}",
+            storage.err()
+        );
+
+        holder_handle.await.expect("holder task should complete");
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[tokio::test]
+    async fn open_persistent_storage_fails_on_non_lock_error() {
+        // Point at a file (not a directory) so RocksDB gets a non-lock IO error.
+        let data_dir = TempDir::new().expect("temp dir");
+        let db_path = data_dir.path().join("jazz.rocksdb");
+        // Create a regular file where rocksdb expects a directory.
+        std::fs::write(&db_path, b"not a database").unwrap();
+
+        let result = open_persistent_storage(data_dir.path()).await;
+        assert!(
+            result.is_err(),
+            "non-lock errors should not be retried and should fail immediately"
+        );
+    }
 }
 
 fn parse_delay_ms(raw: &str) -> Option<Duration> {
@@ -1118,6 +1189,64 @@ fn load_or_create_persistent_client_id(context: &AppContext) -> Result<ClientId>
     Ok(client_id)
 }
 
+async fn open_persistent_storage(data_dir: &std::path::Path) -> Result<DynStorage> {
+    #[cfg(feature = "rocksdb")]
+    {
+        Ok(Box::new(open_rocksdb_storage(data_dir).await?))
+    }
+    #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+    {
+        Ok(Box::new(open_fjall_storage(data_dir).await?))
+    }
+    #[cfg(not(any(feature = "rocksdb", feature = "fjall")))]
+    {
+        tracing::warn!("no persistent storage backend enabled, falling back to MemoryStorage");
+        Ok(Box::new(MemoryStorage::new()))
+    }
+}
+
+#[cfg(feature = "rocksdb")]
+async fn open_rocksdb_storage(data_dir: &std::path::Path) -> Result<RocksDBStorage> {
+    const MAX_ATTEMPTS: usize = 100;
+    const RETRY_DELAY_MS: u64 = 25;
+
+    std::fs::create_dir_all(data_dir)?;
+
+    let db_path = data_dir.join("jazz.rocksdb");
+    let mut opened = None;
+    let mut last_err = None;
+
+    for attempt in 0..MAX_ATTEMPTS {
+        match RocksDBStorage::open(&db_path, 64 * 1024 * 1024) {
+            Ok(storage) => {
+                opened = Some(storage);
+                break;
+            }
+            Err(err) => {
+                let is_lock_error = matches!(
+                    &err,
+                    StorageError::IoError(msg)
+                        if msg.contains("lock") || msg.contains("Lock") || msg.contains("busy")
+                );
+                if !is_lock_error || attempt + 1 == MAX_ATTEMPTS {
+                    last_err = Some(err);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+            }
+        }
+    }
+
+    opened.ok_or_else(|| {
+        JazzError::Connection(format!(
+            "failed to open rocksdb storage '{}': {:?}",
+            db_path.display(),
+            last_err
+        ))
+    })
+}
+
+#[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
 async fn open_fjall_storage(data_dir: &std::path::Path) -> Result<FjallStorage> {
     const MAX_ATTEMPTS: usize = 100;
     const RETRY_DELAY_MS: u64 = 25;

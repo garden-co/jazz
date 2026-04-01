@@ -4,13 +4,19 @@ mod permission_bench_common;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[cfg(any(
+    all(feature = "fjall", not(target_arch = "wasm32")),
+    all(feature = "rocksdb", not(target_arch = "wasm32"))
+))]
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[cfg(any(
+    all(feature = "fjall", not(target_arch = "wasm32")),
+    all(feature = "rocksdb", not(target_arch = "wasm32"))
+))]
 use std::time::Instant;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -29,13 +35,17 @@ use jazz_tools::schema_manager::{AppId, SchemaManager};
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 use jazz_tools::storage::FjallStorage;
 use jazz_tools::storage::MemoryStorage;
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+use jazz_tools::storage::RocksDBStorage;
 use jazz_tools::storage::Storage;
 use jazz_tools::sync_manager::{
     ClientId, ClientRole, Destination, InboxEntry, ServerId, Source, SyncManager,
 };
 use serde::Deserialize;
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[cfg(any(
+    all(feature = "fjall", not(target_arch = "wasm32")),
+    all(feature = "rocksdb", not(target_arch = "wasm32"))
+))]
 use tempfile::TempDir;
 
 type BenchRuntime = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
@@ -86,7 +96,10 @@ struct R2ScenarioConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[cfg(any(
+    all(feature = "fjall", not(target_arch = "wasm32")),
+    all(feature = "rocksdb", not(target_arch = "wasm32"))
+))]
 struct R3ScenarioConfig {
     id: String,
     seed: u64,
@@ -132,7 +145,10 @@ struct R8ScenarioConfig {
     commits_per_branch: usize,
     merge_fanin: usize,
     payload_bytes: usize,
-    #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        all(feature = "fjall", not(target_arch = "wasm32")),
+        all(feature = "rocksdb", not(target_arch = "wasm32"))
+    ))]
     #[serde(default = "default_many_branches_cache_size_bytes")]
     cache_size_bytes: usize,
 }
@@ -181,7 +197,10 @@ struct R2Scenario {
 }
 
 #[derive(Debug, Clone)]
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[cfg(any(
+    all(feature = "fjall", not(target_arch = "wasm32")),
+    all(feature = "rocksdb", not(target_arch = "wasm32"))
+))]
 struct R3Scenario {
     id: String,
     seed: u64,
@@ -235,7 +254,10 @@ struct R8Scenario {
     commits_per_branch: usize,
     merge_fanin: usize,
     payload_bytes: usize,
-    #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+    #[cfg(any(
+        all(feature = "fjall", not(target_arch = "wasm32")),
+        all(feature = "rocksdb", not(target_arch = "wasm32"))
+    ))]
     cache_size_bytes: usize,
 }
 
@@ -262,7 +284,10 @@ struct BranchHeadScan {
     checksum: u64,
 }
 
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[cfg(any(
+    all(feature = "fjall", not(target_arch = "wasm32")),
+    all(feature = "rocksdb", not(target_arch = "wasm32"))
+))]
 fn default_many_branches_cache_size_bytes() -> usize {
     32 * 1024 * 1024
 }
@@ -314,8 +339,8 @@ impl Lcg {
     }
 }
 
-struct R1State {
-    runtime: BenchRuntime,
+struct R1State<S: Storage = MemoryStorage> {
+    runtime: RuntimeCore<S, NoopScheduler, VecSyncSender>,
     rng: Lcg,
     users: Vec<ObjectId>,
     organizations: Vec<ObjectId>,
@@ -369,13 +394,19 @@ struct PermissionR5State {
     timestamp: u64,
 }
 
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[cfg(any(
+    all(feature = "fjall", not(target_arch = "wasm32")),
+    all(feature = "rocksdb", not(target_arch = "wasm32"))
+))]
 struct SeededProjectBoard {
     projects: Vec<ObjectId>,
     active_tasks: Vec<ObjectId>,
 }
 
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[cfg(any(
+    all(feature = "fjall", not(target_arch = "wasm32")),
+    all(feature = "rocksdb", not(target_arch = "wasm32"))
+))]
 struct ColdLoadSeededDb {
     _tempdir: TempDir,
     db_path: PathBuf,
@@ -383,7 +414,7 @@ struct ColdLoadSeededDb {
     cache_size_bytes: usize,
 }
 
-impl R1State {
+impl R1State<MemoryStorage> {
     fn new(profile: &ProfileConfig, scenario: &R1Scenario) -> Self {
         Self::seeded(profile, profile.seed ^ scenario.seed)
     }
@@ -391,8 +422,14 @@ impl R1State {
     fn seeded(profile: &ProfileConfig, seed: u64) -> Self {
         Self::with_runtime(create_runtime(project_board_schema()), profile, seed)
     }
+}
 
-    fn with_runtime(runtime: BenchRuntime, profile: &ProfileConfig, seed: u64) -> Self {
+impl<S: Storage> R1State<S> {
+    fn with_runtime(
+        runtime: RuntimeCore<S, NoopScheduler, VecSyncSender>,
+        profile: &ProfileConfig,
+        seed: u64,
+    ) -> Self {
         let mut state = Self {
             runtime,
             rng: Lcg::new(seed),
@@ -773,7 +810,10 @@ impl R1State {
     }
 }
 
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[cfg(any(
+    all(feature = "fjall", not(target_arch = "wasm32")),
+    all(feature = "rocksdb", not(target_arch = "wasm32"))
+))]
 fn seed_project_board_dataset<S: Storage>(
     runtime: &mut RuntimeCore<S, NoopScheduler, VecSyncSender>,
     profile: &ProfileConfig,
@@ -949,7 +989,7 @@ fn seed_project_board_dataset<S: Storage>(
 
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 impl ColdLoadSeededDb {
-    fn new(profile: &ProfileConfig, scenario: &R3Scenario) -> Self {
+    fn new_fjall(profile: &ProfileConfig, scenario: &R3Scenario) -> Self {
         let tempdir = TempDir::new().expect("create tempdir for cold-load benchmark");
         let db_path = tempdir.path().join("r3_cold_load.fjall");
 
@@ -960,6 +1000,37 @@ impl ColdLoadSeededDb {
                 seed_project_board_dataset(&mut runtime, profile, profile.seed ^ scenario.seed);
             runtime.flush_storage();
             runtime.storage().close().expect("close seeded fjall");
+            seeded
+        };
+
+        assert!(
+            !seeded.active_tasks.is_empty(),
+            "cold-load dataset must contain tasks"
+        );
+        let target_project_id =
+            seeded.projects[scenario.target_project_index % seeded.projects.len()];
+        Self {
+            _tempdir: tempdir,
+            db_path,
+            target_project_id,
+            cache_size_bytes: scenario.cache_size_bytes,
+        }
+    }
+}
+
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+impl ColdLoadSeededDb {
+    fn new_rocksdb(profile: &ProfileConfig, scenario: &R3Scenario) -> Self {
+        let tempdir = TempDir::new().expect("create tempdir for cold-load benchmark");
+        let db_path = tempdir.path().join("r3_cold_load.rocksdb");
+
+        let seeded = {
+            let mut runtime =
+                create_rocksdb_runtime(project_board_schema(), &db_path, scenario.cache_size_bytes);
+            let seeded =
+                seed_project_board_dataset(&mut runtime, profile, profile.seed ^ scenario.seed);
+            runtime.flush_storage();
+            runtime.storage().close().expect("close seeded rocksdb");
             seeded
         };
 
@@ -1576,10 +1647,164 @@ fn realistic_r2_reads_with_write_churn(c: &mut Criterion) {
 }
 
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+fn realistic_r1_crud_fjall(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let benchmark_name = format!(
+        "{}_{}_fjall",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/crud_sustained_fjall");
+    configure_group(&mut group, 20, 10);
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    let tempdir = TempDir::new().expect("create tempdir for fjall crud benchmark");
+    let db_path = tempdir.path().join("r1_crud.fjall");
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let runtime = create_fjall_runtime(project_board_schema(), &db_path, 32 * 1024 * 1024);
+            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
+            b.iter(|| {
+                let executed = state.run_crud_batch(scenario);
+                black_box(executed);
+            });
+            state.runtime.flush_storage();
+            state.runtime.storage().close().expect("close fjall");
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "fjall", not(target_arch = "wasm32"))))]
+fn realistic_r1_crud_fjall(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+fn realistic_r1_crud_rocksdb(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r1_scenario("benchmarks/realistic/scenarios/r1_crud_sustained.json");
+    let benchmark_name = format!(
+        "{}_{}_rocksdb",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/crud_sustained_rocksdb");
+    configure_group(&mut group, 20, 10);
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    let tempdir = TempDir::new().expect("create tempdir for rocksdb crud benchmark");
+    let db_path = tempdir.path().join("r1_crud.rocksdb");
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let runtime =
+                create_rocksdb_runtime(project_board_schema(), &db_path, 32 * 1024 * 1024);
+            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
+            b.iter(|| {
+                let executed = state.run_crud_batch(scenario);
+                black_box(executed);
+            });
+            state.runtime.flush_storage();
+            state.runtime.storage().close().expect("close rocksdb");
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
+fn realistic_r1_crud_rocksdb(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+fn realistic_r2_reads_fjall(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_sustained.json");
+    let benchmark_name = format!(
+        "{}_{}_fjall",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_fjall");
+    configure_group(&mut group, 20, 10);
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    let tempdir = TempDir::new().expect("create tempdir for fjall reads benchmark");
+    let db_path = tempdir.path().join("r2_reads.fjall");
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let runtime = create_fjall_runtime(project_board_schema(), &db_path, 32 * 1024 * 1024);
+            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
+            b.iter(|| {
+                let total_rows = state.run_read_batch(scenario);
+                black_box(total_rows);
+            });
+            state.runtime.flush_storage();
+            state.runtime.storage().close().expect("close fjall");
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "fjall", not(target_arch = "wasm32"))))]
+fn realistic_r2_reads_fjall(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+fn realistic_r2_reads_rocksdb(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_sustained.json");
+    let benchmark_name = format!(
+        "{}_{}_rocksdb",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_rocksdb");
+    configure_group(&mut group, 20, 10);
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    let tempdir = TempDir::new().expect("create tempdir for rocksdb reads benchmark");
+    let db_path = tempdir.path().join("r2_reads.rocksdb");
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let runtime =
+                create_rocksdb_runtime(project_board_schema(), &db_path, 32 * 1024 * 1024);
+            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
+            b.iter(|| {
+                let total_rows = state.run_read_batch(scenario);
+                black_box(total_rows);
+            });
+            state.runtime.flush_storage();
+            state.runtime.storage().close().expect("close rocksdb");
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
+fn realistic_r2_reads_rocksdb(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 fn realistic_r3_cold_load_fjall(c: &mut Criterion) {
     let scenario = load_r3_scenario("benchmarks/realistic/scenarios/r3_cold_load_fjall.json");
     let profile: ProfileConfig = load_json(&scenario.profile_path);
-    let seeded = ColdLoadSeededDb::new(&profile, &scenario);
+    let seeded = ColdLoadSeededDb::new_fjall(&profile, &scenario);
     let benchmark_name = format!(
         "{}_{}_fjall",
         scenario.id.to_lowercase(),
@@ -1629,6 +1854,61 @@ fn realistic_r3_cold_load_fjall(c: &mut Criterion) {
 
 #[cfg(not(all(feature = "fjall", not(target_arch = "wasm32"))))]
 fn realistic_r3_cold_load_fjall(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+fn realistic_r3_cold_load_rocksdb(c: &mut Criterion) {
+    let scenario = load_r3_scenario("benchmarks/realistic/scenarios/r3_cold_load_fjall.json");
+    let profile: ProfileConfig = load_json(&scenario.profile_path);
+    let seeded = ColdLoadSeededDb::new_rocksdb(&profile, &scenario);
+    let benchmark_name = format!(
+        "{}_{}_rocksdb",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/cold_load_rocksdb");
+    configure_group(&mut group, 10, 10);
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, _scenario| {
+            b.iter(|| {
+                let open_start = Instant::now();
+                let mut runtime = create_rocksdb_runtime(
+                    project_board_schema(),
+                    &seeded.db_path,
+                    seeded.cache_size_bytes,
+                );
+                let open_elapsed = open_start.elapsed();
+
+                let query = QueryBuilder::new("tasks")
+                    .filter_eq("project_id", Value::Uuid(seeded.target_project_id))
+                    .filter_ne("status", Value::Text("done".to_string()))
+                    .order_by_desc("updated_at")
+                    .limit(200)
+                    .build();
+
+                let query_start = Instant::now();
+                let rows = block_on(runtime.query(query, None)).expect("cold-load query");
+                let query_elapsed = query_start.elapsed();
+
+                runtime.flush_storage();
+                runtime.storage().close().expect("close cold-load rocksdb");
+
+                black_box(open_elapsed);
+                black_box(query_elapsed);
+                black_box(rows.len());
+            });
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
+fn realistic_r3_cold_load_rocksdb(_c: &mut Criterion) {}
 
 fn realistic_r4_fanout_updates(c: &mut Criterion) {
     let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
@@ -1860,7 +2140,7 @@ fn realistic_r8_many_branches_cold_load_fjall(c: &mut Criterion) {
         "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
     ));
     let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "fjall_cold_load");
-    let seeded = ManyBranchesSeededDb::new(&scenario);
+    let seeded = ManyBranchesSeededDb::new_fjall(&scenario);
 
     let mut group = c.benchmark_group("realistic_phase1/many_branches_cold_load_fjall");
     configure_group(&mut group, 10, 5);
@@ -1890,6 +2170,47 @@ fn realistic_r8_many_branches_cold_load_fjall(c: &mut Criterion) {
 
 #[cfg(not(all(feature = "fjall", not(target_arch = "wasm32"))))]
 fn realistic_r8_many_branches_cold_load_fjall(_c: &mut Criterion) {}
+
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+fn realistic_r8_many_branches_cold_load_rocksdb(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r8_scenario(select_ci_path(
+        "benchmarks/realistic/scenarios/r8_many_branches.json",
+        "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
+    ));
+    let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "rocksdb_cold_load");
+    let seeded = ManyBranchesSeededDb::new_rocksdb(&scenario);
+
+    let mut group = c.benchmark_group("realistic_phase1/many_branches_cold_load_rocksdb");
+    configure_group(&mut group, 10, 5);
+    group.throughput(Throughput::Elements(scenario.branch_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &seeded,
+        |b, seeded| {
+            b.iter(|| {
+                let storage = RocksDBStorage::open(&seeded.db_path, seeded.cache_size_bytes)
+                    .expect("open rocksdb for many-branches cold-load benchmark");
+                let mut manager = ObjectManager::new();
+                let object = manager
+                    .get_or_load(seeded.object_id, &storage, &seeded.branch_names)
+                    .expect("cold-load many-branches object");
+                let scan = scan_branch_heads(object, &seeded.prefix);
+                storage.flush();
+                storage
+                    .close()
+                    .expect("close many-branches rocksdb storage");
+                black_box(scan);
+            });
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
+fn realistic_r8_many_branches_cold_load_rocksdb(_c: &mut Criterion) {}
 
 fn realistic_r9_subscribed_write_path(c: &mut Criterion) {
     let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
@@ -1967,7 +2288,10 @@ fn realistic_r9_subscribed_write_path(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[cfg(any(
+    all(feature = "fjall", not(target_arch = "wasm32")),
+    all(feature = "rocksdb", not(target_arch = "wasm32"))
+))]
 struct ManyBranchesSeededDb {
     _tempdir: TempDir,
     db_path: PathBuf,
@@ -1979,7 +2303,7 @@ struct ManyBranchesSeededDb {
 
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 impl ManyBranchesSeededDb {
-    fn new(scenario: &R8Scenario) -> Self {
+    fn new_fjall(scenario: &R8Scenario) -> Self {
         let tempdir = TempDir::new().expect("create tempdir for many-branches cold-load");
         let db_path = tempdir.path().join("many_branches_fjall");
         let mut storage = FjallStorage::open(&db_path, scenario.cache_size_bytes)
@@ -1990,6 +2314,30 @@ impl ManyBranchesSeededDb {
         storage
             .close()
             .expect("close seeded many-branches fjall storage");
+        Self {
+            _tempdir: tempdir,
+            db_path,
+            object_id: dataset.object_id,
+            branch_names: dataset.branch_names,
+            prefix: dataset.prefix,
+            cache_size_bytes: scenario.cache_size_bytes,
+        }
+    }
+}
+
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+impl ManyBranchesSeededDb {
+    fn new_rocksdb(scenario: &R8Scenario) -> Self {
+        let tempdir = TempDir::new().expect("create tempdir for many-branches cold-load");
+        let db_path = tempdir.path().join("many_branches_rocksdb");
+        let mut storage = RocksDBStorage::open(&db_path, scenario.cache_size_bytes)
+            .expect("open rocksdb for many-branches seed");
+        let mut manager = ObjectManager::new();
+        let dataset = build_many_branches_dataset(&mut manager, &mut storage, scenario);
+        storage.flush();
+        storage
+            .close()
+            .expect("close seeded many-branches rocksdb storage");
         Self {
             _tempdir: tempdir,
             db_path,
@@ -2205,7 +2553,10 @@ fn load_r2_scenario(path: &str) -> R2Scenario {
     }
 }
 
-#[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+#[cfg(any(
+    all(feature = "fjall", not(target_arch = "wasm32")),
+    all(feature = "rocksdb", not(target_arch = "wasm32"))
+))]
 fn load_r3_scenario(path: &str) -> R3Scenario {
     let raw: R3ScenarioConfig = load_json(path);
     R3Scenario {
@@ -2275,7 +2626,10 @@ fn load_r8_scenario(path: &str) -> R8Scenario {
         commits_per_branch: raw.commits_per_branch.max(1),
         merge_fanin: raw.merge_fanin,
         payload_bytes: raw.payload_bytes.max(32),
-        #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
+        #[cfg(any(
+            all(feature = "fjall", not(target_arch = "wasm32")),
+            all(feature = "rocksdb", not(target_arch = "wasm32"))
+        ))]
         cache_size_bytes: raw.cache_size_bytes.max(1),
     }
 }
@@ -2397,6 +2751,30 @@ fn create_fjall_runtime(
     )
 }
 
+#[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
+fn create_rocksdb_runtime(
+    schema: Schema,
+    db_path: &Path,
+    cache_size_bytes: usize,
+) -> RuntimeCore<RocksDBStorage, NoopScheduler, VecSyncSender> {
+    let sync_manager = SyncManager::new();
+    let schema_manager = SchemaManager::new(
+        sync_manager,
+        schema,
+        AppId::from_name("realistic-phase1-bench"),
+        "dev",
+        "main",
+    )
+    .expect("create schema manager");
+
+    RuntimeCore::new(
+        schema_manager,
+        RocksDBStorage::open(db_path, cache_size_bytes).expect("open rocksdb for benchmark"),
+        NoopScheduler,
+        VecSyncSender::new(),
+    )
+}
+
 fn permission_recursive_schema(recursive_depth: usize) -> Schema {
     let folder_select = PolicyExpr::or(vec![
         PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
@@ -2507,11 +2885,16 @@ fn project_board_schema() -> Schema {
 criterion_group!(
     benches,
     realistic_r1_crud,
+    realistic_r1_crud_fjall,
+    realistic_r1_crud_rocksdb,
     realistic_r1_crud_single_hop,
     realistic_r2_reads,
+    realistic_r2_reads_fjall,
+    realistic_r2_reads_rocksdb,
     realistic_r2_reads_single_hop,
     realistic_r2_reads_with_write_churn,
     realistic_r3_cold_load_fjall,
+    realistic_r3_cold_load_rocksdb,
     realistic_r4_fanout_updates,
     realistic_r5_permission_recursive,
     realistic_r6_permission_write_heavy,
@@ -2520,6 +2903,7 @@ criterion_group!(
     realistic_r8_many_branches_scan_heads,
     realistic_r8_many_branches_scan_leaf_heads,
     realistic_r8_many_branches_cold_load_fjall,
+    realistic_r8_many_branches_cold_load_rocksdb,
     realistic_r9_subscribed_write_path
 );
 criterion_main!(benches);
