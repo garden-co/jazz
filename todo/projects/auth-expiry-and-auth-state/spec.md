@@ -84,7 +84,7 @@ Jazz resumes with the new credential
 The app should have one obvious place to listen and one obvious place to recover.
 
 ```ts
-const stop = db.subscribeAuth((state) => {
+const stop = db.onAuthChanged((state) => {
   if (state.status === "unauthenticated") {
     authUi.promptSignIn({ reason: state.reason });
   }
@@ -179,17 +179,16 @@ Core surface:
 ```ts
 interface DbConfig {
   jwtToken?: string;
-  onAuthStateChange?(state: AuthState): void;
 }
 
 interface Db {
   updateAuth(jwtToken?: string): void;
   getAuthState(): AuthState;
-  subscribeAuth(listener: (state: AuthState) => void): () => void;
+  onAuthChanged(listener: (state: AuthState) => void): () => void;
 }
 ```
 
-`useAuthState()` in framework adapters can be a thin wrapper around `subscribeAuth(...)`. `useSession()` should expose the current derived session and preserve the last known value while auth is unauthenticated.
+`useAuthState()` in framework adapters can be a thin wrapper around `onAuthChanged(...)`. `useSession()` should expose the current derived session and preserve the last known value while auth is unauthenticated.
 
 #### Session derivation rules
 
