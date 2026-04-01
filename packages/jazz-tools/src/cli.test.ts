@@ -1,5 +1,6 @@
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { access, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, chmod, copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +18,9 @@ const dslPath = fileURLToPath(new URL("./dsl.ts", import.meta.url));
 const indexPath = fileURLToPath(new URL("./index.ts", import.meta.url));
 const distIndexPath = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 const binPath = fileURLToPath(new URL("../bin/jazz-tools.js", import.meta.url));
+const bootstrapVerifierPath = fileURLToPath(
+  new URL("../scripts/verify-packed-runtime-bootstrap.mjs", import.meta.url),
+);
 
 const tempRoots: string[] = [];
 
@@ -705,6 +709,21 @@ function runBin(args: string[]): SpawnSyncReturns<string> {
   });
 }
 
+function hostNativeBinaryName(): string | null {
+  switch (`${process.platform}-${process.arch}`) {
+    case "darwin-arm64":
+      return "jazz-tools-darwin-arm64";
+    case "darwin-x64":
+      return "jazz-tools-darwin-x64";
+    case "linux-arm64":
+      return "jazz-tools-linux-arm64";
+    case "linux-x64":
+      return "jazz-tools-linux-x64";
+    default:
+      return null;
+  }
+}
+
 describe("bin integration", () => {
   it("routes validate through the TypeScript CLI for a root schema.ts project", async () => {
     const { root } = await createWorkspace();
@@ -765,6 +784,41 @@ describe("bin integration", () => {
     expect(
       exported.todos.columns.some((column: { name: string }) => column.name === "ownerId"),
     ).toBe(true);
+  });
+
+  it("verifies packed runtime bootstrap with a native-only help probe", async () => {
+    const hostBinaryName = hostNativeBinaryName();
+
+    if (!hostBinaryName) {
+      return;
+    }
+
+    const { root } = await createWorkspace();
+    const packageRoot = join(root, "package");
+    const nativeDir = join(packageRoot, "bin", "native");
+    const argsPath = join(root, "captured-args.txt");
+    const binaryPath = join(nativeDir, hostBinaryName);
+
+    await mkdir(nativeDir, { recursive: true });
+    await copyFile(binPath, join(packageRoot, "bin", "jazz-tools.js"));
+    await writeFile(
+      binaryPath,
+      `#!/bin/sh
+printf '%s\n' "$@" > ${JSON.stringify(argsPath)}
+exit 0
+`,
+      "utf8",
+    );
+    await chmod(binaryPath, 0o644);
+
+    const result = spawnSync(process.execPath, [bootstrapVerifierPath, packageRoot], {
+      encoding: "utf8",
+      env: process.env,
+    });
+
+    expect(result.status).toBe(0);
+    expect(await readFile(argsPath, "utf8")).toBe("create\n--help\n");
+    await expect(access(binaryPath, constants.X_OK)).resolves.toBeUndefined();
   });
 
   it("shows the wrapper command surface in --help output", () => {
