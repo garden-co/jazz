@@ -1,7 +1,7 @@
 ---
 title: Queries
 description: One-shot queries, subscriptions, framework hooks, Suspense integration, and read durability options.
-reviewedAt: "14cd73f0"
+reviewedAt: "4059cdef"
 ---
 
 ## One-shot queries
@@ -79,7 +79,7 @@ You can select and filter on Jazz's magic columns just like other columns. They 
 These are useful for showing authorship, when a row last changed, or building "my created items"
 views without storing duplicate ownership fields.
 
-<include cwd lang="ts" meta='title="app.ts"'>
+<include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-edit-metadata-magic-columns-ts
 </include>
 
@@ -93,7 +93,7 @@ Each framework has a reactive binding that re-renders when query results change.
 | Framework  | API                            | Notes                       |
 | ---------- | ------------------------------ | --------------------------- |
 | React/Expo | `useAll(query)`                | Returns `T[] \| undefined`  |
-| Vue        | `useAll(query)`                | Returns a `ShallowRef`      |
+| Vue        | `useAll(query)`                | Returns a `Ref`             |
 | Svelte     | `new QuerySubscription(query)` | Exposes reactive `.current` |
 
 ### The `undefined` loading state
