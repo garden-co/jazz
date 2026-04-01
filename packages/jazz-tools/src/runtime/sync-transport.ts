@@ -536,11 +536,35 @@ async function postSyncBatch(
   }
 }
 
+function catalogueObjectTypeFromPayloadJson(payloadJson: string): string | null {
+  try {
+    const parsed = JSON.parse(payloadJson) as {
+      ObjectUpdated?: {
+        metadata?: {
+          metadata?: {
+            type?: unknown;
+          };
+        };
+      };
+    };
+    const kind = parsed.ObjectUpdated?.metadata?.metadata?.type;
+    return typeof kind === "string" ? kind : null;
+  } catch {
+    return null;
+  }
+}
+
+function isStructuralSchemaCataloguePayload(payloadJson: string): boolean {
+  return catalogueObjectTypeFromPayloadJson(payloadJson) === "catalogue_schema";
+}
+
 /**
  * POST a sync payload to the server.
  *
  * User auth headers are always applied first (JWT or local auth).
- * Catalogue payloads additionally include the admin-secret header when available.
+ * Structural schema catalogue payloads can also flow with ordinary user auth so
+ * development servers can learn schemas without exposing an admin secret to the client.
+ * Other catalogue payloads still require the admin secret.
  */
 export async function sendSyncPayload(
   serverUrl: string,
@@ -549,12 +573,14 @@ export async function sendSyncPayload(
   auth: SyncAuth,
   logPrefix = "",
 ): Promise<void> {
-  if (isCatalogue && !auth.adminSecret) {
+  const isSchemaCatalogue = isCatalogue && isStructuralSchemaCataloguePayload(payloadJson);
+
+  if (isCatalogue && !auth.adminSecret && !isSchemaCatalogue) {
     return;
   }
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (isCatalogue) {
+  if (isCatalogue && auth.adminSecret) {
     headers["X-Jazz-Admin-Secret"] = auth.adminSecret!;
   } else {
     applySyncAuthHeaders(headers, auth);
