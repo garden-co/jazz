@@ -142,6 +142,7 @@ describe("ensureInstrumentsSeeded", () => {
   test("inserts with the correct shape", async () => {
     const db = makeDb([]);
     await ensureInstrumentsSeeded(db as any);
+    expect(db.createFileFromBlob).toHaveBeenCalledTimes(SEED_INSTRUMENTS.length);
     for (const call of db.insert.mock.calls as any[]) {
       const data = call[1];
       expect(data).toHaveProperty("name");
