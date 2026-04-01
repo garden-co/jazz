@@ -476,7 +476,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build CLI binary
-        run: cargo build -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
+        run: scripts/with-macos-libclang-env.sh cargo build -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
 
       - name: Stage artifact
         run: |
@@ -660,9 +660,9 @@ jobs:
           SCCACHE_CACHE_SIZE: 8G
         run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
 
-      - name: Build jazz-napi binding (macOS/Windows)
-        if: ${{ !matrix.use_sccache }}
-        run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
+      - name: Build jazz-napi binding (macOS)
+        if: runner.os == 'macOS'
+        run: scripts/with-macos-libclang-env.sh pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
 
       - uses: actions/upload-artifact@v4
         with:
