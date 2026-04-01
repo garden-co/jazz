@@ -18,7 +18,7 @@ function readEnvAppId(): string | undefined {
 
 // #region context-setup-react
 function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
-  const appId = overrides.appId ?? readEnvAppId() ?? "6316f08d-d5d1-41df-82b8-8c16aa26db84";
+  const appId = overrides.appId ?? readEnvAppId() ?? "019d4349-23f3-7227-818f-51eb1d178b6b";
   const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
   return {

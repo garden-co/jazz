@@ -12,7 +12,7 @@ import { InviteHandler } from "@/components/InviteHandler";
 import { NavBar } from "@/components/navbar/NavBar";
 import Router from "@/components/Router";
 
-const APP_ID = import.meta.env.VITE_JAZZ_APP_ID || "chat-react-example";
+const APP_ID = import.meta.env.VITE_JAZZ_APP_ID || "019d4349-2486-7021-a33e-566b0820c5af";
 const SERVER_URL = import.meta.env.VITE_JAZZ_SERVER_URL || undefined;
 const ADMIN_SECRET = import.meta.env.VITE_JAZZ_ADMIN_SECRET || undefined;
 

@@ -14,7 +14,7 @@
 
   // #region auth-session-svelte-query
   const ownedTodos = new QuerySubscription(
-    app.todos.where({ ownerId: sessionUserId ?? '__no-session__' }),
+    sessionUserId ? app.todos.where({ ownerId: sessionUserId }) : undefined,
   );
   // #endregion auth-session-svelte-query
 

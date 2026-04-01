@@ -10,7 +10,7 @@ export function AddTodo() {
   const handleAdd = () => {
     const trimmed = title.trim();
     if (!trimmed) return;
-    db.insert(app.todos, { title: trimmed, done: false, ownerId: "" });
+    db.insert(app.todos, { title: trimmed, done: false });
     setTitle("");
   };
 

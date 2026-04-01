@@ -25,7 +25,7 @@ const defaultServerUrl = Platform.select({
   default: "http://127.0.0.1:1625",
 });
 
-const defaultAppId = "00000000-0000-0000-0000-000000000002";
+const defaultAppId = "019d4349-2434-7753-b91a-21642b0896c7";
 type ExpoPublicEnvKey =
   | "EXPO_PUBLIC_JAZZ_APP_ID"
   | "EXPO_PUBLIC_JAZZ_SERVER_URL"

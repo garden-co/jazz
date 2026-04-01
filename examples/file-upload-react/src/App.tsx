@@ -47,7 +47,7 @@ function readEnvAppId(): string | undefined {
 }
 
 function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
-  const appId = overrides.appId ?? readEnvAppId() ?? "14fef0b4-4f6f-41f9-8884-8e6a8e52bb49";
+  const appId = overrides.appId ?? readEnvAppId() ?? "019d4349-2473-7006-857e-dd676070304b";
   const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
   return {
