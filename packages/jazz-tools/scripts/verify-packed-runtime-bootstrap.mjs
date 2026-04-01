@@ -26,7 +26,9 @@ const wrapperPath = join(packageDir, "bin", "jazz-tools.js");
 const binaryName = BINARIES[`${process.platform}-${process.arch}`];
 
 if (!binaryName) {
-  fail(`Unsupported host platform for packed runtime bootstrap verification: ${process.platform}/${process.arch}`);
+  fail(
+    `Unsupported host platform for packed runtime bootstrap verification: ${process.platform}/${process.arch}`,
+  );
 }
 
 const binaryPath = join(packageDir, "bin", "native", binaryName);
