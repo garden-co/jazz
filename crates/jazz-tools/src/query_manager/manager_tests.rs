@@ -9975,6 +9975,7 @@ fn remove_client_cleans_active_policy_checks() {
         PolicyCheckState {
             graphs: vec![],
             table: "users".into(),
+            branch: crate::object::BranchName::new("main"),
             pending_check: make_check(1, alice),
         },
     );
@@ -9983,6 +9984,7 @@ fn remove_client_cleans_active_policy_checks() {
         PolicyCheckState {
             graphs: vec![],
             table: "users".into(),
+            branch: crate::object::BranchName::new("main"),
             pending_check: make_check(2, bob),
         },
     );
