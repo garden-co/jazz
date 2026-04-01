@@ -471,10 +471,12 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     }
 
     /// Remove a client connection.
-    pub fn remove_client(&self, client_id: ClientId) -> Result<(), RuntimeError> {
+    ///
+    /// Returns `Ok(true)` if removed, `Ok(false)` if skipped due to
+    /// unprocessed inbox entries (caller should retry later).
+    pub fn remove_client(&self, client_id: ClientId) -> Result<bool, RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
-        core.remove_client(client_id);
-        Ok(())
+        Ok(core.remove_client(client_id))
     }
 
     /// Promote a client to Admin role (full access, no ReBAC).
@@ -544,6 +546,16 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
     pub fn with_storage<R>(&self, f: impl FnOnce(&S) -> R) -> Result<R, RuntimeError> {
         let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
         Ok(f(core.storage()))
+    }
+
+    /// Run a closure with read access to the SyncManager (for testing/inspection).
+    #[cfg(test)]
+    pub(crate) fn with_sync_manager<R>(
+        &self,
+        f: impl FnOnce(&crate::sync_manager::SyncManager) -> R,
+    ) -> Result<R, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(f(core.schema_manager().query_manager().sync_manager()))
     }
 
     /// Access the underlying schema manager while holding the core lock.

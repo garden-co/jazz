@@ -212,8 +212,25 @@ impl SyncManager {
         self.queue_catalogue_sync_to_client(client_id);
     }
 
-    /// Remove a client connection.
-    pub fn remove_client(&mut self, client_id: ClientId) {
+    /// Remove a client connection and all associated state.
+    ///
+    /// Returns `false` if the client has unprocessed inbox entries — the
+    /// caller should retry later to avoid dropping data that hasn't been
+    /// persisted to storage yet.
+    pub fn remove_client(&mut self, client_id: ClientId) -> bool {
+        let has_inbox = self
+            .inbox
+            .iter()
+            .any(|e| e.source == Source::Client(client_id));
+
+        if has_inbox {
+            tracing::warn!(
+                %client_id,
+                "skipping reap: client has unprocessed inbox entries"
+            );
+            return false;
+        }
+
         self.clients.remove(&client_id);
         // Clean up interest map
         self.commit_interest.retain(|_, clients| {
@@ -225,6 +242,17 @@ impl SyncManager {
             clients.remove(&client_id);
             !clients.is_empty()
         });
+        // Clean up pending queues
+        self.pending_permission_checks
+            .retain(|c| c.client_id != client_id);
+        self.pending_query_subscriptions
+            .retain(|s| s.client_id != client_id);
+        self.pending_query_unsubscriptions
+            .retain(|u| u.client_id != client_id);
+        // Drop queued outbox messages for this client
+        self.outbox
+            .retain(|e| e.destination != Destination::Client(client_id));
+        true
     }
 
     /// Get server state.
