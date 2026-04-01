@@ -7,6 +7,7 @@
     "ensure:rust-toolchain": "bash scripts/install-jazz-rn-deps.sh",
     "build:vercel-docs": "export PATH=\"${CARGO_HOME:-$HOME/.cargo}/bin:$PATH\" && JAZZ_SKIP_RN_DEPS=1 pnpm run ensure:rust-toolchain && turbo run --env-mode=loose build:crates --filter=@jazz/rust && turbo run --env-mode=loose build --filter=docs --only",
     "build": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=!jazz-rn --filter=!jazz-wasm --only",
+    "build:ci": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=jazz-napi --filter=jazz-tools --only",
     "build:all": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build:rn --filter=jazz-rn && turbo run build --filter=!jazz-rn --filter=!jazz-wasm --only",
     "release:version": "changeset version",
     "release:version:alpha": "changeset version --snapshot alpha",
