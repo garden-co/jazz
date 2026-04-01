@@ -33,4 +33,6 @@
 
 ## Projects
 
+- [**client-state-lifecycle**](todo/projects/client-state-lifecycle/)
+- [**auth-expiry-and-auth-state**](todo/projects/auth-expiry-and-auth-state/)
 - [**ordered-index-topk-query-path**](todo/projects/ordered-index-topk-query-path/)
