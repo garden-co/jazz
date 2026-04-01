@@ -1,0 +1,31 @@
+{
+  "name": "nextjs-csr-ssr",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "node ../../packages/jazz-tools/dist/cli.js validate && next build",
+    "start": "next start",
+    "sync-server": "tsx --env-file=.env scripts/sync-server.ts",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "jazz-napi": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "next": "16.2.1",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "dotenv": "^17.3.1",
+    "tailwindcss": "^4",
+    "tsx": "^4.21.0",
+    "typescript": "catalog:default"
+  }
+}
