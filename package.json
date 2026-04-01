@@ -6,6 +6,7 @@
     "lint": "oxlint . --ignore-path .oxlintignore && cargo clippy --workspace -- -D warnings",
     "ensure:rust-toolchain": "bash scripts/install-jazz-rn-deps.sh",
     "build:vercel-docs": "export PATH=\"${CARGO_HOME:-$HOME/.cargo}/bin:$PATH\" && JAZZ_SKIP_RN_DEPS=1 pnpm run ensure:rust-toolchain && turbo run --env-mode=loose build:crates --filter=@jazz/rust && turbo run --env-mode=loose build --filter=docs --only",
+    "build:vercel-inspector": "export PATH=\"${CARGO_HOME:-$HOME/.cargo}/bin:$PATH\" && JAZZ_SKIP_RN_DEPS=1 pnpm run ensure:rust-toolchain && pnpm --filter jazz-wasm build && pnpm --filter jazz-tools build && pnpm --filter inspector build",
     "build": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=!jazz-rn --filter=!jazz-wasm --only",
     "build:ci": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build --filter=jazz-napi --filter=jazz-tools --only",
     "build:all": "turbo run build:crates --filter=@jazz/rust && turbo run build --filter=jazz-wasm && turbo run build:rn --filter=jazz-rn && turbo run build --filter=!jazz-rn --filter=!jazz-wasm --only",
