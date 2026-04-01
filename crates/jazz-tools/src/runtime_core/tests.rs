@@ -2523,3 +2523,133 @@ fn rc_partial_update_changing_fk_to_missing_target_succeeds() {
     )
     .expect("changing FK to non-existent target must succeed without local FK checks");
 }
+
+// =========================================================================
+// Disconnect cleanup: parked message guard
+// =========================================================================
+
+#[test]
+fn remove_client_blocked_by_parked_sync_messages() {
+    //
+    // alice ──/sync──▶ server (message parked in RuntimeCore, not yet in SyncManager inbox)
+    //
+    // Sweep tries to reap alice → remove_client returns false because
+    // parked_sync_messages contains an entry from alice.
+    //
+    use crate::object::BranchName;
+
+    let mut core = create_test_runtime();
+    let alice = ClientId::new();
+    core.add_client(alice, None);
+
+    // Park a message from alice (simulates push_sync_inbox before batched_tick)
+    core.park_sync_message(InboxEntry {
+        source: Source::Client(alice),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: ObjectId::new(),
+            metadata: None,
+            branch_name: BranchName::new("main"),
+            commits: vec![],
+        },
+    });
+
+    let removed = core.remove_client(alice);
+    assert!(!removed, "should refuse to reap with parked messages");
+
+    // Client state must be preserved
+    assert!(
+        core.schema_manager()
+            .query_manager()
+            .sync_manager()
+            .get_client(alice)
+            .is_some(),
+        "alice's ClientState should be preserved"
+    );
+}
+
+#[test]
+fn remove_client_succeeds_after_parked_messages_drained() {
+    //
+    // alice ──/sync──▶ server (message parked) ──batched_tick──▶ inbox drained
+    //
+    // After batched_tick processes the parked message, remove_client succeeds.
+    //
+    use crate::object::BranchName;
+
+    let mut core = create_test_runtime();
+    let alice = ClientId::new();
+    core.add_client(alice, None);
+
+    core.park_sync_message(InboxEntry {
+        source: Source::Client(alice),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: ObjectId::new(),
+            metadata: None,
+            branch_name: BranchName::new("main"),
+            commits: vec![],
+        },
+    });
+
+    // Drain parked messages via batched_tick
+    core.batched_tick();
+
+    let removed = core.remove_client(alice);
+    assert!(removed, "should succeed after parked messages are drained");
+
+    assert!(
+        core.schema_manager()
+            .query_manager()
+            .sync_manager()
+            .get_client(alice)
+            .is_none(),
+        "alice should be removed"
+    );
+}
+
+#[test]
+fn remove_client_ignores_parked_messages_from_other_clients() {
+    //
+    // bob ──/sync──▶ server (message parked)
+    //
+    // alice disconnects → remove_client(alice) succeeds because
+    // the parked message is from bob, not alice.
+    //
+    use crate::object::BranchName;
+
+    let mut core = create_test_runtime();
+    let alice = ClientId::new();
+    let bob = ClientId::new();
+    core.add_client(alice, None);
+    core.add_client(bob, None);
+
+    // Park a message from bob
+    core.park_sync_message(InboxEntry {
+        source: Source::Client(bob),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: ObjectId::new(),
+            metadata: None,
+            branch_name: BranchName::new("main"),
+            commits: vec![],
+        },
+    });
+
+    let removed = core.remove_client(alice);
+    assert!(removed, "alice has no parked messages — should succeed");
+
+    assert!(
+        core.schema_manager()
+            .query_manager()
+            .sync_manager()
+            .get_client(alice)
+            .is_none(),
+        "alice should be removed"
+    );
+    assert!(
+        core.schema_manager()
+            .query_manager()
+            .sync_manager()
+            .get_client(bob)
+            .is_some(),
+        "bob should be preserved"
+    );
+}

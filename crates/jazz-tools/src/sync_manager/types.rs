@@ -110,7 +110,8 @@ pub(super) type BranchSyncData = (
 /// Role-based access control for client connections.
 ///
 /// Determines how incoming writes from a client are routed:
-/// - `User`: Requires session, ReBAC for rows, rejected for catalogue
+/// - `User`: Requires session, ReBAC for rows, rejected for catalogue unless
+///   development-only schema auto-push is enabled
 /// - `Backend`: Trusted backend data access (rows only, no catalogue writes)
 /// - `Admin`: Full access (catalogue + data, no ReBAC)
 /// - `Peer`: Trusted relay (server-to-server), bypasses all auth
@@ -340,6 +341,20 @@ mod query_subscription_session_serde {
 }
 
 impl SyncPayload {
+    fn catalogue_object_type(&self) -> Option<&str> {
+        let metadata = match self {
+            SyncPayload::ObjectUpdated {
+                metadata: Some(m), ..
+            } => &m.metadata,
+            SyncPayload::ObjectTruncated { .. } => return None,
+            _ => return None,
+        };
+
+        metadata
+            .get(crate::metadata::MetadataKey::Type.as_str())
+            .map(String::as_str)
+    }
+
     /// Encode this payload using postcard.
     pub fn to_bytes(&self) -> Result<Vec<u8>, postcard::Error> {
         postcard::to_allocvec(self)
@@ -360,22 +375,17 @@ impl SyncPayload {
 
     /// Check if this payload carries a catalogue object (schema or lens).
     pub fn is_catalogue(&self) -> bool {
-        let metadata = match self {
-            SyncPayload::ObjectUpdated {
-                metadata: Some(m), ..
-            } => &m.metadata,
-            SyncPayload::ObjectTruncated { .. } => {
-                // Truncation could be catalogue, but we check conservatively.
-                // The object_id might not have metadata attached to the truncation payload,
-                // so we can't determine type from the payload alone.
-                // Catalogue truncation is rare; treat as non-catalogue for routing.
-                return false;
-            }
-            _ => return false,
-        };
         matches!(
-            metadata.get(crate::metadata::MetadataKey::Type.as_str()).map(|s| s.as_str()),
+            self.catalogue_object_type(),
             Some(t) if crate::metadata::ObjectType::is_catalogue_type_str(t)
+        )
+    }
+
+    /// Check if this payload carries a structural schema catalogue object.
+    pub fn is_structural_schema_catalogue(&self) -> bool {
+        matches!(
+            self.catalogue_object_type(),
+            Some(t) if t == crate::metadata::ObjectType::CatalogueSchema.as_str()
         )
     }
 

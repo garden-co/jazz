@@ -330,7 +330,12 @@ npx jazz-tools@alpha create app
 # outputs a UUID like: 019d0ba1-519a-7e01-b0eb-0059ee898e4d
 ```
 
-Start the server with that ID and an admin secret (required for clients to push schemas). The default port is 1625, but you can use `--port` to change it:
+Start the server with that ID. In development-like mode (`NODE_ENV` unset or anything except
+`production`), clients auto-publish the current structural schema from `schema.ts` when they
+connect, so you do not need to expose an admin secret to the browser just to get the latest schema
+onto a fresh dev server. Keep an admin secret around for explicit admin commands like
+`permissions push` and `migrations push`. The default port is 1625, but you can use `--port` to
+change it:
 
 ```bash title="Terminal"
 npx jazz-tools@alpha server <your-app-id> --admin-secret secret
@@ -352,6 +357,14 @@ export default s.definePermissions(app, ({ policy }) => {
 });
 ```
 
+Then publish the permissions bundle:
+
+```bash title="Terminal"
+npx jazz-tools@alpha permissions push \
+  --server-url http://127.0.0.1:1625 \
+  --admin-secret secret
+```
+
 ### Connect the client
 
 Update your client config to use the same app ID, and add `serverUrl`:
@@ -364,11 +377,12 @@ Update your client config to use the same app ID, and add `serverUrl`:
 }
 ```
 
-Clients learn the structural schema when they connect. If you later change `permissions.ts`,
-publish the new permissions bundle explicitly with `npx jazz-tools@alpha permissions push`.
-If you change `schema.ts` structurally after data already exists, create and push a
-[reviewed migration edge](/docs/schemas/migrations) before old and new clients mix on the same
-shared server.
+On development-like servers, clients learn and auto-publish the current structural schema when
+they connect. If you later change `permissions.ts`, publish the new permissions bundle explicitly
+with `npx jazz-tools@alpha permissions push`. If you change `schema.ts` structurally after data
+already exists, create and push a [reviewed migration edge](/docs/schemas/migrations) before old
+and new clients mix on the same shared server. Auto-pushing the latest schema does not replace
+reviewed migration edges for existing data.
 
 For production deployment and hosting options, see [Server Setup](/docs/reference/server-setup).
 

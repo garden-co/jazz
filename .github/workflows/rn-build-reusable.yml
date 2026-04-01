@@ -1,8 +1,6 @@
 name: Build jazz-rn (React Native)
 
 "on":
-  pull_request:
-    types: [opened, synchronize, reopened]
   workflow_call:
     inputs:
       concurrency:
