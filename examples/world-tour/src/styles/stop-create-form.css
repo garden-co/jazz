@@ -1,0 +1,61 @@
+.stop-create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.form-title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 22px;
+  color: var(--text-primary);
+}
+
+.fieldset {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.legend {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--accent-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0 6px;
+}
+
+.toggle-row {
+  display: flex;
+  gap: 6px;
+}
+
+.toggle-btn {
+  flex: 1;
+  padding: 6px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-body);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all var(--duration-fast);
+}
+
+.toggle-btn.active {
+  background: var(--accent-primary-muted);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.btn {
+  flex: 1;
+}
