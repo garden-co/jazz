@@ -3894,11 +3894,6 @@ async fn events_handler(
             active.add(-1, &self.attrs);
         }
     }
-    #[cfg(feature = "otel")]
-    let _conn_guard = ConnectionMetricsGuard {
-        attrs: connect_attrs.clone(),
-    };
-
     let mut sync_rx = app.sync_broadcast.subscribe();
     let mut shutdown_rx = state.shutdown_tx.subscribe();
     let app_cleanup = app.clone();
@@ -3910,6 +3905,13 @@ async fn events_handler(
     let otel_app_id = app_id.to_string();
 
     let stream = async_stream::stream! {
+        // Guard lives inside the stream — dropped when the stream is dropped
+        // (client disconnect), ensuring the active counter always decrements.
+        #[cfg(feature = "otel")]
+        let _conn_guard = ConnectionMetricsGuard {
+            attrs: connect_attrs.clone(),
+        };
+
         let connected = ServerEvent::Connected {
             connection_id: ConnectionId(connection_id),
             client_id: client_id_str,
