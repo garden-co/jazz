@@ -19,6 +19,17 @@ impl SchemaHash {
         Self(bytes)
     }
 
+    /// Create a SchemaHash from a hex string.
+    pub fn from_hex(hex_str: &str) -> Option<Self> {
+        let bytes = hex::decode(hex_str).ok()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(Self(arr))
+    }
+
     /// Get the raw bytes.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0

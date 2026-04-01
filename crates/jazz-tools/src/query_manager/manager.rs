@@ -9,7 +9,8 @@ use crate::metadata::{MetadataKey, ObjectType, RowProvenance};
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::AllObjectUpdate;
 use crate::schema_manager::{
-    LensTransformer, SchemaContext, resolve_current_table_name, translate_table_name_to_schema,
+    LensTransformer, SchemaContext, origin_schema_hash_from_metadata, resolve_current_table_name,
+    translate_table_name_to_schema,
 };
 use crate::storage::{CatalogueManifestOp, Storage};
 use crate::sync_manager::{
@@ -974,9 +975,14 @@ impl QueryManager {
 
                     let (_, commit_id, content, source_branch, is_soft_deleted, row_provenance) =
                         best.filter(|(_, _, content, _, _, _)| !content.is_empty())?;
-                    let obj_table_name: &str = obj.table_name();
-                    let current_table = resolve_current_table_name(&schema_context, obj_table_name)
-                        .unwrap_or(obj_table_name.to_string());
+                    let obj_table_name: &str = obj.original_table_name();
+                    let origin_schema_hash = origin_schema_hash_from_metadata(&obj.metadata);
+                    let current_table = resolve_current_table_name(
+                        &schema_context,
+                        obj_table_name,
+                        origin_schema_hash.as_ref(),
+                    )
+                    .unwrap_or(obj_table_name.to_string());
 
                     if let Some(&source_hash) = branch_schema_map.get(&source_branch)
                         && source_hash != schema_context.current_hash
@@ -1241,16 +1247,6 @@ impl QueryManager {
             .map(|(content, _)| content)
     }
 
-    fn parse_schema_hash_hex(hex_str: &str) -> Option<SchemaHash> {
-        let bytes = hex::decode(hex_str).ok()?;
-        if bytes.len() != 32 {
-            return None;
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        Some(SchemaHash::from_bytes(arr))
-    }
-
     fn catalogue_manifest_append(
         metadata: &HashMap<String, String>,
         object_id: ObjectId,
@@ -1263,7 +1259,7 @@ impl QueryManager {
         let op = match type_str.as_str() {
             t if t == ObjectType::CatalogueSchema.as_str() => {
                 let schema_hash_hex = metadata.get(MetadataKey::SchemaHash.as_str())?;
-                let schema_hash = Self::parse_schema_hash_hex(schema_hash_hex)?;
+                let schema_hash = SchemaHash::from_hex(schema_hash_hex)?;
                 CatalogueManifestOp::SchemaSeen {
                     object_id,
                     schema_hash,
@@ -1271,7 +1267,7 @@ impl QueryManager {
             }
             t if t == ObjectType::CataloguePermissions.as_str() => {
                 let schema_hash_hex = metadata.get(MetadataKey::SchemaHash.as_str())?;
-                let schema_hash = Self::parse_schema_hash_hex(schema_hash_hex)?;
+                let schema_hash = SchemaHash::from_hex(schema_hash_hex)?;
                 CatalogueManifestOp::PermissionsSeen {
                     object_id,
                     schema_hash,
@@ -1280,8 +1276,8 @@ impl QueryManager {
             t if t == ObjectType::CatalogueLens.as_str() => {
                 let source_hex = metadata.get(MetadataKey::SourceHash.as_str())?;
                 let target_hex = metadata.get(MetadataKey::TargetHash.as_str())?;
-                let source_hash = Self::parse_schema_hash_hex(source_hex)?;
-                let target_hash = Self::parse_schema_hash_hex(target_hex)?;
+                let source_hash = SchemaHash::from_hex(source_hex)?;
+                let target_hash = SchemaHash::from_hex(target_hex)?;
                 CatalogueManifestOp::LensSeen {
                     object_id,
                     source_hash,
@@ -1329,10 +1325,11 @@ impl QueryManager {
         }
 
         // Check if this is a row object
-        let table_hint = match update.metadata.get(MetadataKey::Table.as_str()) {
+        let original_table_name = match update.metadata.get(MetadataKey::Table.as_str()) {
             Some(t) => t.clone(),
             None => return,
         };
+        let origin_schema_hash = origin_schema_hash_from_metadata(&update.metadata);
         let branch = update.branch_name.as_str();
 
         // Look up the correct schema for this branch
@@ -1372,13 +1369,17 @@ impl QueryManager {
             }
         };
 
-        let current_table = resolve_current_table_name(&self.schema_context, &table_hint)
-            .unwrap_or_else(|| table_hint.clone());
+        let current_table = resolve_current_table_name(
+            &self.schema_context,
+            &original_table_name,
+            origin_schema_hash.as_ref(),
+        )
+        .unwrap_or_else(|| original_table_name.clone());
         let branch_table = if schema_hash == self.schema_context.current_hash {
             current_table.clone()
         } else {
             translate_table_name_to_schema(&self.schema_context, &current_table, &schema_hash)
-                .unwrap_or_else(|| table_hint.clone())
+                .unwrap_or_else(|| original_table_name.clone())
         };
         let table_name = TableName::new(&branch_table);
 

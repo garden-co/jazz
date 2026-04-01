@@ -7265,6 +7265,10 @@ fn server_subscription_uses_current_permissions_after_table_rename_lens_transfor
 
     let mut metadata = HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "documents".to_string());
+    metadata.insert(
+        MetadataKey::OriginSchemaHash.to_string(),
+        legacy_hash.to_string(),
+    );
     let document_id = server_qm
         .sync_manager_mut()
         .object_manager

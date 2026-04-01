@@ -3,7 +3,10 @@
 //! This module provides utilities for transforming rows from old schema versions
 //! to the current schema using lenses.
 
+use std::collections::HashMap;
+
 use crate::commit::CommitId;
+use crate::metadata::MetadataKey;
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::types::{SchemaHash, TableName};
 
@@ -245,38 +248,31 @@ pub fn translate_table_name_from_schema(
     Some(current_table)
 }
 
-/// Resolve the logical current-schema table name from an object-level table hint.
-///
-/// This treats metadata as provenance, not authority. If the hinted table no longer exists
-/// in the current schema, we walk live schema versions and translate the old name forward.
-pub fn resolve_current_table_name(context: &SchemaContext, hinted_table: &str) -> Option<String> {
-    let hinted = TableName::new(hinted_table);
-    if context.current_schema.contains_key(&hinted) {
-        return Some(hinted_table.to_string());
-    }
+pub fn origin_schema_hash_from_metadata(metadata: &HashMap<String, String>) -> Option<SchemaHash> {
+    let raw_hash = metadata.get(MetadataKey::OriginSchemaHash.as_str())?;
+    SchemaHash::from_hex(raw_hash)
+}
 
-    let mut candidate: Option<String> = None;
-    for (hash, schema) in &context.live_schemas {
-        if !schema.contains_key(&hinted) {
-            continue;
-        }
-
-        let translated = translate_table_name_from_schema(context, hinted_table, hash)?;
-        if !context
+pub fn resolve_current_table_name(
+    context: &SchemaContext,
+    original_table: &str,
+    origin_schema_hash: Option<&SchemaHash>,
+) -> Option<String> {
+    if let Some(origin_schema_hash) = origin_schema_hash {
+        let translated =
+            translate_table_name_from_schema(context, original_table, origin_schema_hash)?;
+        if context
             .current_schema
             .contains_key(&TableName::new(&translated))
         {
-            continue;
+            return Some(translated);
         }
-
-        match &candidate {
-            Some(existing) if existing != &translated => return None,
-            Some(_) => {}
-            None => candidate = Some(translated),
-        }
+        None
+    } else {
+        // Fallback for legacy objects that don't have an origin schema hash.
+        // Assumes the object's original table name is still the current table name.
+        Some(original_table.to_string())
     }
-
-    candidate
 }
 
 /// Translate a table/column pair through the lens chain for a target schema.

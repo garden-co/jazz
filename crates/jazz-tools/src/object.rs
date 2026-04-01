@@ -161,7 +161,7 @@ impl Object {
         }
     }
 
-    pub fn table_name(&self) -> &str {
+    pub fn original_table_name(&self) -> &str {
         self.metadata
             .get(MetadataKey::Table.as_str())
             .expect("unexpected object with no table name")
