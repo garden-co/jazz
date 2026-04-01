@@ -252,6 +252,60 @@ impl<'a> TestingClient<'a> {
     }
 }
 
+#[allow(dead_code)]
+pub async fn connect_ready_client(
+    server: &TestingServer,
+    schema: &Schema,
+    user_id: &str,
+    ready_table: &str,
+    ready_timeout: Duration,
+) -> JazzClient {
+    TestingClient::builder()
+        .with_server(server)
+        .with_schema(schema.clone())
+        .with_user_id(user_id)
+        .ready_on(ready_table, ready_timeout)
+        .connect()
+        .await
+}
+
+#[allow(dead_code)]
+pub async fn connect_ready_user(
+    server: &TestingServer,
+    schema: &Schema,
+    user_id: &str,
+    ready_table: &str,
+    ready_timeout: Duration,
+) -> JazzClient {
+    TestingClient::builder()
+        .with_server(server)
+        .with_schema(schema.clone())
+        .with_user_id(user_id)
+        .as_user()
+        .ready_on(ready_table, ready_timeout)
+        .connect()
+        .await
+}
+
+#[allow(dead_code)]
+pub async fn connect_ready_claims(
+    server: &TestingServer,
+    schema: &Schema,
+    user_id: &str,
+    claims: JsonValue,
+    ready_table: &str,
+    ready_timeout: Duration,
+) -> JazzClient {
+    TestingClient::builder()
+        .with_server(server)
+        .with_schema(schema.clone())
+        .with_user_id(user_id)
+        .with_claims(claims)
+        .ready_on(ready_table, ready_timeout)
+        .connect()
+        .await
+}
+
 fn make_jwt(sub: &str, claims: JsonValue) -> String {
     let jwt_claims = JwtClaims {
         sub: sub.to_string(),
@@ -541,6 +595,33 @@ where
 }
 
 #[allow(dead_code)]
+pub async fn wait_for_visible_row(
+    client: &JazzClient,
+    query: Query,
+    description: impl Into<String>,
+    row_id: ObjectId,
+    expected: Vec<Value>,
+) -> QueryRows {
+    wait_for_rows(client, query, description, |rows| {
+        has_row(&rows, row_id, &expected).then_some(rows)
+    })
+    .await
+}
+
+#[allow(dead_code)]
+pub async fn wait_for_hidden_row(
+    client: &JazzClient,
+    query: Query,
+    description: impl Into<String>,
+    row_id: ObjectId,
+) -> QueryRows {
+    wait_for_rows(client, query, description, |rows| {
+        lacks_row(&rows, row_id).then_some(rows)
+    })
+    .await
+}
+
+#[allow(dead_code)]
 /// Reads subscription deltas until the accumulated log satisfies the provided
 /// predicate or the timeout expires.
 ///
@@ -632,4 +713,15 @@ pub fn has_updated(log: &[OrderedRowDelta], id: ObjectId) -> bool {
 /// update, or removal.
 pub fn has_any_change(log: &[OrderedRowDelta], id: ObjectId) -> bool {
     has_added(log, id) || has_updated(log, id) || has_removed(log, id)
+}
+
+#[allow(dead_code)]
+pub fn has_row(rows: &QueryRows, row_id: ObjectId, expected: &[Value]) -> bool {
+    rows.iter()
+        .any(|(id, values)| *id == row_id && values.as_slice() == expected)
+}
+
+#[allow(dead_code)]
+pub fn lacks_row(rows: &QueryRows, row_id: ObjectId) -> bool {
+    rows.iter().all(|(id, _)| *id != row_id)
 }
