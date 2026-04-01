@@ -74,11 +74,28 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     }
 
     /// Remove a client connection.
-    pub fn remove_client(&mut self, client_id: ClientId) {
+    ///
+    /// Returns `false` if the client has unprocessed messages — either
+    /// parked in RuntimeCore (pre-inbox, from `push_sync_inbox`) or
+    /// already in SyncManager's inbox. The caller should retry later.
+    pub fn remove_client(&mut self, client_id: ClientId) -> bool {
+        use crate::sync_manager::Source;
+
+        let has_parked = self
+            .parked_sync_messages
+            .iter()
+            .any(|e| e.source == Source::Client(client_id));
+        if has_parked {
+            tracing::warn!(
+                %client_id,
+                "skipping reap: client has parked sync messages"
+            );
+            return false;
+        }
+
         self.schema_manager
             .query_manager_mut()
-            .sync_manager_mut()
-            .remove_client(client_id);
+            .remove_client(client_id)
     }
 
     /// Promote a client to Admin role (full access, no ReBAC).

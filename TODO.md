@@ -20,8 +20,8 @@
 
 ### Mvp
 
-- [**client-state-cleanup**](todo/ideas/1_mvp/client-state-cleanup.md) — Garbage collection of server-side state (sync cursors, query subscriptions, session records) for permanently disconnected clients.
 - [**complex-merge-strategies**](todo/ideas/1_mvp/complex-merge-strategies.md) — Per-column/per-table merge strategies beyond LWW (counters, sets, rich text, custom logic).
+- [**configurable-client-ttl**](todo/ideas/1_mvp/configurable-client-ttl.md) — Expose the client state TTL (how long a disconnected client's server-side state survives before reaping) as a configurable option per app. Currently hardcoded to 5 minutes in `ServerBuilder` with a `set_client_ttl` runtime setter that nothing calls outside of tests.
 - [**count-aggregation**](todo/ideas/1_mvp/count-aggregation.md) — Add terminal `.count()` queries for filtered relations, with the MVP limited to reactive `COUNT(*)` returning `{ count: number }`.
 - [**explicit-indices**](todo/ideas/1_mvp/explicit-indices.md) — Developer-declared indices in the schema language, replacing auto-index-all-columns.
 - [**lens-hardening**](todo/ideas/1_mvp/lens-hardening.md) — Harden Jazz lens semantics and tooling so schema evolution stays deterministic, reviewable, and safe under mixed-version traffic.
@@ -31,5 +31,6 @@
 
 ## Projects
 
+- [**client-state-lifecycle**](todo/projects/client-state-lifecycle/)
 - [**ordered-index-topk-query-path**](todo/projects/ordered-index-topk-query-path/)
 - [**storage-backend-alternatives**](todo/projects/storage-backend-alternatives/)

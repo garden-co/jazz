@@ -119,7 +119,28 @@ impl ServerBuilder {
             http_client,
             external_identity_store,
             external_identities: RwLock::new(external_identities),
+            disconnect_candidates: RwLock::new(HashMap::new()),
+            client_ttl: RwLock::new(Duration::from_secs(300)),
         });
+
+        // Spawn periodic client state sweep (uses Weak so the task exits
+        // when all strong refs to ServerState are dropped, e.g. in tests).
+        {
+            let weak_state = Arc::downgrade(&state);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    let Some(state) = weak_state.upgrade() else {
+                        break;
+                    };
+                    let reaped = state.run_sweep_once().await;
+                    if !reaped.is_empty() {
+                        tracing::info!(count = reaped.len(), "reaped stale disconnected clients");
+                    }
+                }
+            });
+        }
 
         let app = routes::create_router(state.clone());
         Ok(BuiltServer { state, app })
