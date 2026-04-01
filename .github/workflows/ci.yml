@@ -60,6 +60,7 @@ jobs:
 
       - run: pnpm format:check
       - run: pnpm lint
+      - run: cargo clippy --workspace -- -D warnings
 
   test-rust:
     runs-on: blacksmith-4vcpu-ubuntu-2404
