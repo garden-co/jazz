@@ -1,0 +1,4 @@
+
+
+ALTER TABLE instruments DROP COLUMN sound;
+ALTER TABLE instruments ADD COLUMN soundFileId TEXT DEFAULT NULL;
