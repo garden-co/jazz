@@ -1,7 +1,7 @@
 ---
-"jazz-tools": major
-"jazz-napi": major
-"jazz-cloud-server": major
+"jazz-tools": patch
+"jazz-napi": patch
+"jazz-cloud-server": patch
 ---
 
 Replace Fjall with RocksDB as the default persistent storage engine for server, Node.js client, and CLI.
