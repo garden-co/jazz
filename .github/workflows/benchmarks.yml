@@ -67,6 +67,7 @@ jobs:
         uses: KyleMayes/install-llvm-action@v2
         with:
           version: "18"
+          env: true
 
       - uses: actions/setup-node@v6
         with:
@@ -219,6 +220,7 @@ jobs:
         uses: KyleMayes/install-llvm-action@v2
         with:
           version: "18"
+          env: true
 
       - uses: actions/setup-node@v6
         with:
