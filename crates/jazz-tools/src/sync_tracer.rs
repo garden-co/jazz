@@ -354,6 +354,39 @@ impl SyncTracer {
         self.inner.lock().unwrap().messages.len()
     }
 
+    /// Wait until the tally output stops changing (no new messages for
+    /// `stable_for` consecutive polls at 50ms intervals).
+    ///
+    /// Panics with the current tally if `timeout` expires before stabilising.
+    #[cfg(feature = "test")]
+    pub async fn wait_until_settled(&self, timeout: std::time::Duration) {
+        let stable_for_target = 3; // require 3 consecutive identical polls (~150ms quiet)
+        let mut stable_count = 0u32;
+        let mut last_tally = String::new();
+        let start = Instant::now();
+
+        loop {
+            let current = self.tally();
+            if current == last_tally && !current.is_empty() {
+                stable_count += 1;
+                if stable_count >= stable_for_target {
+                    return;
+                }
+            } else {
+                stable_count = 0;
+                last_tally = current;
+            }
+            if start.elapsed() >= timeout {
+                panic!(
+                    "SyncTracer: timed out waiting for tally to settle\n\
+                     Current tally:\n{}",
+                    self.tally()
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     /// Clear all recorded messages and reset sequence counter.
     pub fn clear(&self) {
         let mut inner = self.inner.lock().unwrap();
