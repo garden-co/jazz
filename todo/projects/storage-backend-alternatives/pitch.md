@@ -34,14 +34,7 @@ _heed (LMDB)_ — Rejected due to fundamental iOS incompatibility. LMDB memory-m
 
 _redb_ — Rejected despite strong raw performance (4-7x faster reads, 7.7x faster individual durable writes vs SQLite in redb's own benchmarks). The advantages don't outweigh the practical costs for mobile: 3x larger file sizes (copy-on-write amplification), slow startup on large databases (known issue — checksum verification + allocator reconstruction), no mobile platform integration (must be bundled), and no production track record on iOS/Android. SQLite is already on the device, already tuned by the OS vendor, and already handles flash storage quirks. redb's write performance edge matters less on mobile where sync is intermittent and battery life trumps throughput.
 
-Implementation approach:
-
-- New `SqliteStorage` struct implementing the `Storage` trait
-- Same `storage_core.rs` reuse pattern
-- Map composite key scheme to a single `kv(key TEXT PRIMARY KEY, value BLOB)` table with prefix range queries via `WHERE key >= ? AND key < ?`
-- WAL mode + `PRAGMA synchronous = NORMAL` for mobile-appropriate durability/performance balance
-- Validate the build toolchain for iOS (xcframework) and Android (JNI/NDK)
-- This replaces the planned Fjall-on-RN investigation (`specs/todo/b_launch/react_native_storage_investigation.md`)
+See `sqlite-mobile-backend-design.md` for implementation details.
 
 **Browser: unchanged.** OpfsBTreeStorage stays — it's purpose-built for the OPFS/SyncAccessHandle constraint and has no Fjall dependency.
 
@@ -67,9 +60,8 @@ After:
 
 ## Rabbit Holes
 
-- **RocksDB build complexity.** RocksDB has a heavy C++ build chain — linking it into the existing Cargo workspace, cross-compiling for CI targets (linux-musl, macOS arm64), and keeping build times tolerable are all non-trivial. Need to evaluate `rust-rocksdb` crate maturity and whether we need to pin a specific RocksDB version.
-- **SQLite KV performance.** SQLite is not designed as a KV store. Prefix range scans via `WHERE key >= ? AND key < ?` should be efficient on an indexed primary key, but need to verify this holds under Jazz's access patterns (frequent small writes, prefix iteration). WAL mode is important for concurrent read/write performance.
-- **Key encoding compatibility.** The current key scheme uses string-encoded composite keys. RocksDB's byte-ordered comparator matches this naturally. SQLite's `TEXT` collation uses lexicographic ordering which should match, but needs verification for index range scans with encoded values.
+- **RocksDB build complexity (materialized).** RocksDB's C++ build chain requires `libclang` at build time via `bindgen`. This broke Vercel deployments and required `yum install -y clang-devel` in Vercel build scripts, `apt-get install -y libclang-dev` in CI workflows, and developer-local setup on macOS (Homebrew LLVM). A dedicated "Build Infra" scope tracks reducing this impact.
+- **SQLite KV performance.** See `sqlite-mobile-backend-design.md` for details on approach and tradeoffs.
 - **Conformance gaps.** The Storage trait has subtle contracts (flush semantics, close/reopen, index ordering) that may not surface until the conformance suite runs. Budget time for debugging edge cases.
 
 ## No-gos
