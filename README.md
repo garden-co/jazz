@@ -25,6 +25,8 @@ For docs-only builds (for example on Vercel), set `JAZZ_SKIP_RN_DEPS=1` to skip 
 JAZZ_SKIP_RN_DEPS=1 pnpm run ensure:rust-toolchain
 ```
 
+Vercel builds can use `scripts/install-vercel-deps.sh`, which installs `libclang` for the host distro and then runs the same Rust bootstrap in docs-only mode.
+
 ## Package versioning
 
 `jazz-tools`, `jazz-wasm`, `jazz-napi`, and `jazz-rn` are configured as a Changesets fixed group for lock-stepped releases. Keep workspace links in source (`workspace:*`) and let pack/publish resolve concrete versions.
