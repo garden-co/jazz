@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::support::{connect_ready_user, wait_for_rows};
+use super::support::{connect_ready_client, connect_ready_user, wait_for_rows};
 use jazz_tools::query_manager::policy::PolicyExpr;
 use jazz_tools::query_manager::session::Session;
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
@@ -36,6 +36,14 @@ async fn create_note_as(client: &JazzClient, user_id: &str, title: &str) -> Obje
         .create("notes", note_input(title))
         .await
         .expect("create note with session-authored provenance")
+        .0
+}
+
+async fn create_note_without_session(client: &JazzClient, title: &str) -> ObjectId {
+    client
+        .create("notes", note_input(title))
+        .await
+        .expect("create note without attribution")
         .0
 }
 
@@ -159,6 +167,173 @@ async fn created_by_policies_scope_crud_to_creators() {
     .await;
     assert_eq!(bob_rows.len(), 1);
 
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Verifies that backend/server writes with no attribution stamp
+/// `jazz:system`, so `$createdBy` policies fail closed for ordinary users.
+///
+/// Actors: a backend client writes one derived row without a session, then
+/// `alice` writes her own note through a normal user session.
+///
+/// ```text
+/// backend client ─create(no session)──► server ──$createdBy = jazz:system
+/// alice client ──create(as alice)─────► server ──$createdBy = alice
+/// alice query ────────────────────────► sees only alice row
+/// bob query ──────────────────────────► sees nothing
+/// ```
+#[tokio::test]
+async fn created_by_policies_hide_server_generated_rows_without_attribution() {
+    let created_by_policy = PolicyExpr::eq_session("$createdBy", vec!["user_id".into()]);
+    let schema = SchemaBuilder::new()
+        .table(make_notes_schema(
+            "notes",
+            TablePolicies::new()
+                .with_select(created_by_policy.clone())
+                .with_insert(PolicyExpr::True)
+                .with_update(Some(created_by_policy.clone()), created_by_policy.clone())
+                .with_delete(created_by_policy),
+        ))
+        .build();
+    let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
+    let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
+
+    let system_note = create_note_without_session(&backend, "server-generated").await;
+    let alice_note = create_note_as(&alice, "alice", "alice note").await;
+    let query = QueryBuilder::new("notes")
+        .select(&["title", "$createdBy"])
+        .order_by("title")
+        .build();
+
+    let alice_rows = wait_for_rows(
+        &alice,
+        query.clone(),
+        "alice sees only explicitly attributed user-owned rows",
+        |rows| (rows.len() == 1 && rows[0].0 == alice_note).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        alice_rows[0].1,
+        vec![
+            Value::Text("alice note".into()),
+            Value::Text("alice".into())
+        ]
+    );
+    assert!(
+        alice_rows.iter().all(|(id, _)| *id != system_note),
+        "server-generated row should stay hidden from alice under $createdBy policy"
+    );
+
+    let bob_rows = wait_for_rows(
+        &bob,
+        query,
+        "bob does not see the server-generated system row by default",
+        |rows| rows.is_empty().then_some(rows),
+    )
+    .await;
+    assert!(bob_rows.is_empty());
+
+    assert_ne!(system_note, alice_note);
+
+    backend.shutdown().await.expect("shutdown backend");
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Verifies that `$createdBy = "jazz:system"` can be used as an explicit
+/// allowlist branch when ordinary users should read server-generated rows.
+///
+/// Actors: a backend client writes one system-authored row without a session,
+/// and `alice` writes one user-authored row through her session.
+///
+/// ```text
+/// backend client ─create(no session)──► server ──$createdBy = jazz:system
+/// alice client ──create(as alice)─────► server ──$createdBy = alice
+/// alice query ────────────────────────► sees system row + alice row
+/// bob query ──────────────────────────► sees only system row
+/// ```
+#[tokio::test]
+async fn created_by_policies_can_allow_reads_from_system_author() {
+    let created_by_policy = PolicyExpr::eq_session("$createdBy", vec!["user_id".into()]);
+    let system_author_policy =
+        PolicyExpr::eq_literal("$createdBy", Value::Text("jazz:system".into()));
+    let schema = SchemaBuilder::new()
+        .table(make_notes_schema(
+            "notes",
+            TablePolicies::new()
+                .with_select(PolicyExpr::or(vec![
+                    created_by_policy.clone(),
+                    system_author_policy,
+                ]))
+                .with_insert(PolicyExpr::True)
+                .with_update(Some(created_by_policy.clone()), created_by_policy.clone())
+                .with_delete(created_by_policy),
+        ))
+        .build();
+    let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
+    let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
+
+    let system_note = create_note_without_session(&backend, "server-generated").await;
+    let alice_note = create_note_as(&alice, "alice", "alice note").await;
+    let query = QueryBuilder::new("notes")
+        .select(&["title", "$createdBy"])
+        .order_by("title")
+        .build();
+
+    let alice_rows = wait_for_rows(
+        &alice,
+        query.clone(),
+        "alice sees both her own row and the allowed system-authored row",
+        |rows| {
+            (rows.len() == 2
+                && rows.iter().any(|(id, _)| *id == alice_note)
+                && rows.iter().any(|(id, _)| *id == system_note))
+            .then_some(rows)
+        },
+    )
+    .await;
+    let alice_owned = alice_rows
+        .iter()
+        .find(|(id, _)| *id == alice_note)
+        .expect("alice-owned row should be visible");
+    assert_eq!(
+        alice_owned.1,
+        vec![
+            Value::Text("alice note".into()),
+            Value::Text("alice".into())
+        ]
+    );
+    let system_owned = alice_rows
+        .iter()
+        .find(|(id, _)| *id == system_note)
+        .expect("system-authored row should be visible");
+    assert_eq!(
+        system_owned.1,
+        vec![
+            Value::Text("server-generated".into()),
+            Value::Text("jazz:system".into())
+        ]
+    );
+
+    let bob_rows = wait_for_rows(
+        &bob,
+        query,
+        "bob sees only the allowed system-authored row",
+        |rows| (rows.len() == 1 && rows[0].0 == system_note).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        bob_rows[0].1,
+        vec![
+            Value::Text("server-generated".into()),
+            Value::Text("jazz:system".into())
+        ]
+    );
+
+    backend.shutdown().await.expect("shutdown backend");
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
