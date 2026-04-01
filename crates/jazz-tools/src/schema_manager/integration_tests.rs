@@ -8,7 +8,7 @@ mod tests {
     use crate::metadata::{MetadataKey, RowProvenance, row_provenance_metadata};
     use crate::object::ObjectId;
     use crate::query_manager::encoding::{decode_row, encode_row};
-    use crate::query_manager::manager::LocalUpdates;
+    use crate::query_manager::manager::{LocalUpdates, QueryError};
     use crate::query_manager::types::{
         ColumnDescriptor, ColumnType, RowDescriptor, Schema, SchemaBuilder, SchemaHash, TableName,
         TableSchema, Value,
@@ -361,6 +361,7 @@ mod tests {
         qm: &mut QueryManager,
         storage: &mut MemoryStorage,
         table: &str,
+        schema_hash: SchemaHash,
         object_id: ObjectId,
         branch: &str,
         content: Vec<u8>,
@@ -368,6 +369,10 @@ mod tests {
     ) {
         let mut metadata = HashMap::new();
         metadata.insert(MetadataKey::Table.to_string(), table.to_string());
+        metadata.insert(
+            MetadataKey::OriginSchemaHash.to_string(),
+            schema_hash.to_string(),
+        );
         qm.sync_manager_mut()
             .object_manager
             .receive_object(storage, object_id, metadata);
@@ -577,6 +582,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             old_row_id,
             &v1_branch,
             old_row_data,
@@ -724,6 +730,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             row1_id,
             &v1_branch,
             row1_data,
@@ -743,6 +750,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v2_hash,
             row2_id,
             &v2_branch,
             row2_data,
@@ -899,6 +907,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             alice_id,
             &v1_branch,
             alice_data,
@@ -1023,6 +1032,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             row_id,
             &v1_branch,
             row_data,
@@ -1109,6 +1119,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             row_id,
             &v1_branch,
             row_data,
@@ -1196,6 +1207,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             row_id,
             &v1_branch,
             row_data,
@@ -1284,6 +1296,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             row_id,
             &v1_branch,
             row_data,
@@ -1356,6 +1369,7 @@ mod tests {
             manager.query_manager_mut(),
             &mut storage,
             "users",
+            v1_hash,
             row_id,
             &v1_branch,
             row_data,
@@ -1506,6 +1520,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             author_id,
             &v1_branch,
             user_data,
@@ -1527,6 +1542,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "posts",
+            v1_hash,
             post_id,
             &v1_branch,
             post_data,
@@ -1622,6 +1638,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             author_id,
             &v1_branch,
             user_data,
@@ -1643,6 +1660,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "posts",
+            v1_hash,
             post_id,
             &v1_branch,
             post_data,
@@ -1772,6 +1790,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "users",
+            v1_hash,
             alice_id,
             &v1_branch,
             alice_data,
@@ -1792,6 +1811,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "people",
+            v2_hash,
             bob_id,
             &v2_branch,
             bob_data,
@@ -1812,6 +1832,7 @@ mod tests {
             &mut qm,
             &mut storage,
             "members",
+            v3_hash,
             carol_id,
             &v3_branch,
             carol_data,
@@ -3658,6 +3679,7 @@ mod tests {
             client.query_manager_mut(),
             &mut storage,
             "users",
+            v2_hash,
             row_id,
             &v2_branch,
             row_data,

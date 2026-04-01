@@ -7,7 +7,8 @@ use crate::metadata::{MetadataKey, RowProvenance};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::graph_nodes::policy_eval::PolicyContextEvaluator;
 use crate::schema_manager::{
-    LensTransformer, resolve_current_table_name, translate_table_name_to_schema,
+    LensTransformer, origin_schema_hash_from_metadata, resolve_current_table_name,
+    translate_table_name_to_schema,
 };
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, ClientRole, PendingPermissionCheck, QueryId, SyncPayload};
@@ -38,11 +39,12 @@ const SCHEMA_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn resolve_current_table_for_context(
     schema_context: &crate::schema_manager::SchemaContext,
-    table_hint: &str,
+    original_table_name: &str,
+    origin_schema_hash: Option<&SchemaHash>,
 ) -> TableName {
-    resolve_current_table_name(schema_context, table_hint)
+    resolve_current_table_name(schema_context, original_table_name, origin_schema_hash)
         .map(|name| TableName::new(&name))
-        .unwrap_or_else(|| TableName::new(table_hint))
+        .unwrap_or_else(|| TableName::new(original_table_name))
 }
 
 fn translate_current_table_for_hash(
@@ -299,12 +301,13 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<LoadedRow> {
         let branches = vec![branch_name.as_str().to_string()];
-        let (table_hint, tip_commit_id, tip_content, tip_provenance) = {
+        let (table_hint, origin_schema_hash, tip_commit_id, tip_content, tip_provenance) = {
             let object = self
                 .sync_manager
                 .object_manager
                 .get_or_load(object_id, storage, &branches)?;
-            let table = object.table_name();
+            let table = object.original_table_name();
+            let origin_schema_hash = origin_schema_hash_from_metadata(&object.metadata);
             let branch = object.branches.get(&branch_name)?;
             let tip = branch
                 .tips
@@ -314,10 +317,20 @@ impl QueryManager {
             if tip.1.content.is_empty() {
                 return None;
             }
-            Some((table, tip.0, tip.1.content.clone(), tip.1.row_provenance()?))
+            Some((
+                table,
+                origin_schema_hash,
+                tip.0,
+                tip.1.content.clone(),
+                tip.1.row_provenance()?,
+            ))
         }?;
 
-        let current_table = resolve_current_table_for_context(auth_context, table_hint);
+        let current_table = resolve_current_table_for_context(
+            auth_context,
+            table_hint,
+            origin_schema_hash.as_ref(),
+        );
         let transformed = self.transform_content_to_authorization_schema(
             current_table.as_str(),
             &tip_content,
@@ -411,7 +424,7 @@ impl QueryManager {
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
     ) -> bool {
         let branches = vec![branch_name.as_str().to_string()];
-        let Some((table_hint, tip_content, tip_provenance)) = ({
+        let Some((table_hint, origin_schema_hash, tip_content, tip_provenance)) = ({
             let Some(object) = self
                 .sync_manager
                 .object_manager
@@ -419,7 +432,8 @@ impl QueryManager {
             else {
                 return false;
             };
-            let table = object.table_name();
+            let table = object.original_table_name();
+            let origin_schema_hash = origin_schema_hash_from_metadata(&object.metadata);
             let Some(branch) = object.branches.get(&branch_name) else {
                 return false;
             };
@@ -437,12 +451,21 @@ impl QueryManager {
             let Some(tip_provenance) = tip_commit.row_provenance() else {
                 return false;
             };
-            Some((table, tip_commit.content.clone(), tip_provenance))
+            Some((
+                table,
+                origin_schema_hash,
+                tip_commit.content.clone(),
+                tip_provenance,
+            ))
         }) else {
             return false;
         };
 
-        let table_name = resolve_current_table_for_context(auth_context, table_hint);
+        let table_name = resolve_current_table_for_context(
+            auth_context,
+            table_hint,
+            origin_schema_hash.as_ref(),
+        );
         let Some(select_policy) = auth_schema
             .get(&table_name)
             .and_then(|table_schema| table_schema.policies.select.using.as_ref())
@@ -663,8 +686,12 @@ impl QueryManager {
         if content.is_empty() {
             return None;
         }
-        let current_table =
-            resolve_current_table_for_context(context.schema_context, obj.table_name());
+        let origin_schema_hash = origin_schema_hash_from_metadata(&obj.metadata);
+        let current_table = resolve_current_table_for_context(
+            context.schema_context,
+            obj.original_table_name(),
+            origin_schema_hash.as_ref(),
+        );
         Self::transform_row_with_schema(
             id,
             current_table.as_str(),
@@ -774,8 +801,13 @@ impl QueryManager {
 
         let branch_names: Vec<BranchName> = branches.iter().map(BranchName::new).collect();
         for (object_id, object) in &object_manager.objects {
-            let table_hint = object.table_name();
-            let current_table = resolve_current_table_for_context(schema_context, table_hint);
+            let table_hint = object.original_table_name();
+            let origin_schema_hash = origin_schema_hash_from_metadata(&object.metadata);
+            let current_table = resolve_current_table_for_context(
+                schema_context,
+                table_hint,
+                origin_schema_hash.as_ref(),
+            );
             if !policy_tables.iter().any(|table| *table == current_table) {
                 continue;
             }
@@ -1246,6 +1278,7 @@ impl QueryManager {
                 return;
             }
         };
+        let origin_schema_hash = origin_schema_hash_from_metadata(&check.metadata);
 
         let branch_name = match &check.payload {
             SyncPayload::ObjectUpdated { branch_name, .. } => *branch_name,
@@ -1261,11 +1294,21 @@ impl QueryManager {
         let authorization_parts = self.authorization_schema_for_branch(&branch_name);
         let table_name = authorization_parts
             .as_ref()
-            .map(|(_, auth_context)| resolve_current_table_for_context(auth_context, &table_hint))
+            .map(|(_, auth_context)| {
+                resolve_current_table_for_context(
+                    auth_context,
+                    &table_hint,
+                    origin_schema_hash.as_ref(),
+                )
+            })
             .or_else(|| {
-                self.schema_context
-                    .is_initialized()
-                    .then(|| resolve_current_table_for_context(&self.schema_context, &table_hint))
+                self.schema_context.is_initialized().then(|| {
+                    resolve_current_table_for_context(
+                        &self.schema_context,
+                        &table_hint,
+                        origin_schema_hash.as_ref(),
+                    )
+                })
             })
             .unwrap_or_else(|| TableName::new(&table_hint));
         let write_schema_context = authorization_parts
