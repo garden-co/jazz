@@ -99,6 +99,24 @@ export function isExpectedFetchAbortError(error: unknown, signal?: AbortSignal):
   return false;
 }
 
+function logSchemaWarningPayload(payload: any, logPrefix = ""): void {
+  const warning = payload?.SchemaWarning;
+  if (!warning) return;
+
+  const rowCount = warning.rowCount ?? warning.row_count ?? 0;
+  const tableName = warning.tableName ?? warning.table_name ?? "unknown";
+  const fromHash = warning.fromHash ?? warning.from_hash ?? "unknown";
+  const toHash = warning.toHash ?? warning.to_hash ?? "unknown";
+  const shortHash = (hash: string) =>
+    typeof hash === "string" && /^[0-9a-f]{12,}$/i.test(hash) ? hash.slice(0, 12) : hash;
+
+  console.warn(
+    `${logPrefix}Detected ${rowCount} rows of ${tableName} with differing schema versions. ` +
+      `To ensure data visibility and forward/backward compatibility please create a new migration with ` +
+      `\`npx jazz-tools migrations create ${shortHash(fromHash)} ${shortHash(toHash)}\``,
+  );
+}
+
 /**
  * Shared binary-stream lifecycle (connect/reconnect/auth-refresh/teardown).
  *
@@ -518,11 +536,35 @@ async function postSyncBatch(
   }
 }
 
+function catalogueObjectTypeFromPayloadJson(payloadJson: string): string | null {
+  try {
+    const parsed = JSON.parse(payloadJson) as {
+      ObjectUpdated?: {
+        metadata?: {
+          metadata?: {
+            type?: unknown;
+          };
+        };
+      };
+    };
+    const kind = parsed.ObjectUpdated?.metadata?.metadata?.type;
+    return typeof kind === "string" ? kind : null;
+  } catch {
+    return null;
+  }
+}
+
+function isStructuralSchemaCataloguePayload(payloadJson: string): boolean {
+  return catalogueObjectTypeFromPayloadJson(payloadJson) === "catalogue_schema";
+}
+
 /**
  * POST a sync payload to the server.
  *
  * User auth headers are always applied first (JWT or local auth).
- * Catalogue payloads additionally include the admin-secret header when available.
+ * Structural schema catalogue payloads can also flow with ordinary user auth so
+ * development servers can learn schemas without exposing an admin secret to the client.
+ * Other catalogue payloads still require the admin secret.
  */
 export async function sendSyncPayload(
   serverUrl: string,
@@ -531,12 +573,14 @@ export async function sendSyncPayload(
   auth: SyncAuth,
   logPrefix = "",
 ): Promise<void> {
-  if (isCatalogue && !auth.adminSecret) {
+  const isSchemaCatalogue = isCatalogue && isStructuralSchemaCataloguePayload(payloadJson);
+
+  if (isCatalogue && !auth.adminSecret && !isSchemaCatalogue) {
     return;
   }
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (isCatalogue) {
+  if (isCatalogue && auth.adminSecret) {
     headers["X-Jazz-Admin-Secret"] = auth.adminSecret!;
   } else {
     applySyncAuthHeaders(headers, auth);
@@ -678,6 +722,7 @@ export async function readBinaryFrames(
         if (event.type === "Connected" && event.client_id) {
           callbacks.onConnected?.(event.client_id, event.catalogue_state_hash ?? null);
         } else if (event.type === "SyncUpdate") {
+          logSchemaWarningPayload(event.payload, logPrefix);
           callbacks.onSyncMessage(JSON.stringify(event.payload));
         }
       } catch (error) {

@@ -1,6 +1,6 @@
 import type { Request } from "express";
 import { type JazzContext, type Session } from "jazz-tools/backend";
-import { app as schemaApp } from "../schema/app.js";
+import { app as schemaApp } from "../schema.js";
 
 type RequesterIdentity = {
   userId: string;
@@ -40,5 +40,5 @@ export async function listTodosWithInheritedPolicy(
   folderId: string,
 ) {
   const userDb = context.forSession(sessionFromRequest(req), schemaApp);
-  return userDb.all(schemaApp.todos.where({ project: folderId }));
+  return userDb.all(schemaApp.todos.where({ projectId: folderId }));
 }

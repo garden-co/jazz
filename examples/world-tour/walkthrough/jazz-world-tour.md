@@ -47,33 +47,37 @@ Jazz is a **local-first** sync framework. Every client runs a full database in a
 
 ## The schema
 
-The schema is written in TypeScript. Running `pnpm build` reads it and generates typed interfaces and query builders in `schema/app.ts`.
+The schema is written directly in `schema.ts`. Running `pnpm build` runs `jazz-tools validate` before the production build, and the app imports the typed `app` export from that file directly.
 
-**[`schema/current.ts`](../schema/current.ts)**
+**[`schema.ts`](../schema.ts)**
 
 ```typescript
-import { table, col } from "jazz-tools";
+import { schema as s } from "jazz-tools";
 
-table("venues", {
-  name: col.string(),
-  city: col.string(),
-  country: col.string(),
-  lat: col.float(),
-  lng: col.float(),
-  capacity: col.int().optional(),
-});
+const schema = {
+  venues: s.table({
+    name: s.string(),
+    city: s.string(),
+    country: s.string(),
+    lat: s.float(),
+    lng: s.float(),
+    capacity: s.int().optional(),
+  }),
+  stops: s.table({
+    bandId: s.ref("bands"),
+    venueId: s.ref("venues"),
+    date: s.timestamp(),
+    status: s.enum("confirmed", "tentative", "cancelled"),
+    publicDescription: s.string(),
+    privateNotes: s.string().optional(),
+  }),
+};
 
-table("stops", {
-  bandId: col.ref("bands"), // foreign key
-  venueId: col.ref("venues"), // foreign key
-  date: col.timestamp(),
-  status: col.enum("confirmed", "tentative", "cancelled"),
-  publicDescription: col.string(),
-  privateNotes: col.string().optional(),
-});
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
 ```
 
-`col.ref()` declares foreign keys. `col.enum()` maps to a union type. `.optional()` makes a field nullable.
+`s.ref()` declares foreign keys. `s.enum()` maps to a union type. `.optional()` makes a field nullable.
 
 ---
 
@@ -183,13 +187,13 @@ One composable, two audiences. The server-side row-level policies (shown later) 
 
 Permissions are defined in a TypeScript DSL alongside the schema. They compile to row-level security policies enforced by the Jazz runtime, not the UI.
 
-**[`schema/permissions.ts`](../schema/permissions.ts)**
+**[`permissions.ts`](../permissions.ts)**
 
 ```typescript
-import { definePermissions } from "jazz-tools/permissions";
-import { app } from "./app.js";
+import { schema as s } from "jazz-tools";
+import { app } from "./schema.js";
 
-export default definePermissions(app, ({ policy, session, anyOf }) => {
+export default s.definePermissions(app, ({ policy, session, anyOf }) => {
   const isBandMember = policy.members.exists.where({
     userId: session.user_id,
   });
@@ -219,7 +223,7 @@ Each component owns the Jazz calls it needs. No prop drilling for data, no event
 ```html
 <script setup lang="ts">
   import { useDb, useSession } from "jazz-tools/vue";
-  import { app } from "../../schema/app.js";
+  import { app } from "../../schema.js";
 
   const db = useDb();
   const session = useSession();
@@ -250,7 +254,7 @@ Each component owns the Jazz calls it needs. No prop drilling for data, no event
 ```html
 <script setup lang="ts">
   import { useDb, useAll } from "jazz-tools/vue";
-  import { app } from "../../schema/app.js";
+  import { app } from "../../schema.js";
 
   const db = useDb();
   const venues = useAll(app.venues); // live venue list, no props needed

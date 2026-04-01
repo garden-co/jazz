@@ -121,8 +121,8 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, computed, watch, nextTick } from "vue";
 import { useAll, useDb, useSession, SyntheticUserSwitcher } from "jazz-tools/vue";
-import { app } from "../schema/app.js";
-import type { StopWithIncludes } from "../schema/app.js";
+import { app } from "../schema.js";
+import type { StopWithVenue } from "../schema.js";
 import { MapController, type StopMapData } from "./lib/map-controller";
 import { findNearestStop } from "./lib/nearest-stop";
 import type { StopWithLocation } from "./lib/nearest-stop";
@@ -154,7 +154,6 @@ ensureData(db, session?.user_id, canEdit).catch((err) =>
   console.error("Failed to ensure data:", err),
 );
 
-type StopWithVenue = StopWithIncludes<{ venue: true }>;
 const selectedStop = ref<StopWithVenue | null>(null);
 const posterStop = ref<StopWithVenue | null>(null);
 const showLandingPoster = ref(!canEdit);

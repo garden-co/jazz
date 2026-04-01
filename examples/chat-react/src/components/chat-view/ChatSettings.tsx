@@ -26,7 +26,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { navigate } from "@/hooks/useRouter";
-import { app } from "../../../schema/app.js";
+import { app } from "../../../schema.js";
 
 interface ChatSettingsProps {
   chatId: string;

@@ -9,8 +9,6 @@ pub mod query_manager;
 #[cfg(feature = "cli")]
 pub mod routes;
 pub mod runtime_core;
-#[cfg(feature = "cli")]
-pub mod schema_catalogue;
 pub mod schema_manager;
 #[cfg(feature = "cli")]
 pub mod server;

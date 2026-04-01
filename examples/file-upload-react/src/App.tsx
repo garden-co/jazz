@@ -9,7 +9,7 @@ import {
   useSession,
 } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
-import { app, UploadWithIncludes, type File as JazzFile } from "../schema/app.js";
+import { app, type UploadWithIncludes, type File as JazzFile } from "../schema.js";
 import { Logo } from "./Logo.js";
 
 function formatBytes(bytes: number): string {
@@ -172,7 +172,7 @@ function FileUploadScreen() {
     }
   }
 
-  function deleteUpload(upload: UploadWithIncludes<{ file: { parts: true } }>) {
+  function deleteUpload(upload: UploadWithIncludes) {
     const fileRecord = upload.file;
     db.delete(app.uploads, upload.id);
     if (fileRecord?.parts) {

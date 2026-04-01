@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::commit::CommitId;
+use crate::metadata::SYSTEM_PRINCIPAL_ID;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::ObjectManager;
 use crate::query_manager::query::Query;
@@ -33,6 +34,7 @@ pub use types::*;
 pub struct SyncManager {
     pub object_manager: ObjectManager,
     pub(super) catalogue_objects: HashSet<ObjectId>,
+    pub(super) allow_unprivileged_schema_catalogue_writes: bool,
 
     pub(super) servers: HashMap<ServerId, ServerState>,
     pub(super) clients: HashMap<ClientId, ClientState>,
@@ -67,6 +69,10 @@ impl std::fmt::Debug for SyncManager {
         f.debug_struct("SyncManager")
             .field("object_manager", &self.object_manager)
             .field("catalogue_objects", &self.catalogue_objects)
+            .field(
+                "allow_unprivileged_schema_catalogue_writes",
+                &self.allow_unprivileged_schema_catalogue_writes,
+            )
             .field("servers", &self.servers)
             .field("clients", &self.clients)
             .field("inbox", &self.inbox)
@@ -114,6 +120,7 @@ impl SyncManager {
         Self {
             object_manager,
             catalogue_objects,
+            allow_unprivileged_schema_catalogue_writes: false,
             servers: HashMap::new(),
             clients: HashMap::new(),
             inbox: Vec::new(),
@@ -133,6 +140,13 @@ impl SyncManager {
     /// Add a durability identity for this node (enables durability notifications).
     pub fn with_durability_tier(mut self, tier: DurabilityTier) -> Self {
         self.my_tiers.insert(tier);
+        self
+    }
+
+    /// Allow authenticated user clients to publish structural schema catalogue
+    /// objects directly. Intended for development servers only.
+    pub fn with_unprivileged_schema_catalogue_writes(mut self) -> Self {
+        self.allow_unprivileged_schema_catalogue_writes = true;
         self
     }
 
@@ -198,8 +212,25 @@ impl SyncManager {
         self.queue_catalogue_sync_to_client(client_id);
     }
 
-    /// Remove a client connection.
-    pub fn remove_client(&mut self, client_id: ClientId) {
+    /// Remove a client connection and all associated state.
+    ///
+    /// Returns `false` if the client has unprocessed inbox entries — the
+    /// caller should retry later to avoid dropping data that hasn't been
+    /// persisted to storage yet.
+    pub fn remove_client(&mut self, client_id: ClientId) -> bool {
+        let has_inbox = self
+            .inbox
+            .iter()
+            .any(|e| e.source == Source::Client(client_id));
+
+        if has_inbox {
+            tracing::warn!(
+                %client_id,
+                "skipping reap: client has unprocessed inbox entries"
+            );
+            return false;
+        }
+
         self.clients.remove(&client_id);
         // Clean up interest map
         self.commit_interest.retain(|_, clients| {
@@ -211,6 +242,17 @@ impl SyncManager {
             clients.remove(&client_id);
             !clients.is_empty()
         });
+        // Clean up pending queues
+        self.pending_permission_checks
+            .retain(|c| c.client_id != client_id);
+        self.pending_query_subscriptions
+            .retain(|s| s.client_id != client_id);
+        self.pending_query_unsubscriptions
+            .retain(|u| u.client_id != client_id);
+        // Drop queued outbox messages for this client
+        self.outbox
+            .retain(|e| e.destination != Destination::Client(client_id));
+        true
     }
 
     /// Get server state.
@@ -296,7 +338,7 @@ impl SyncManager {
             "main",
             Vec::new(), // No parents - root commit
             content,
-            ObjectId::from_uuid(uuid::Uuid::nil()), // System author
+            SYSTEM_PRINCIPAL_ID.to_string(),
             None,
         );
     }
@@ -476,6 +518,14 @@ impl SyncManager {
                 },
             });
         }
+    }
+
+    /// Emit a schema warning to a client.
+    pub fn emit_schema_warning(&mut self, client_id: ClientId, warning: SchemaWarning) {
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(client_id),
+            payload: SyncPayload::SchemaWarning(warning),
+        });
     }
 
     /// Emit a query subscription rejection error to a client.

@@ -210,6 +210,7 @@ mod tests {
             id,
             content: content.to_vec(),
             commit_id: CommitId([commit_byte; 32]),
+            row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
     }
 

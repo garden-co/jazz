@@ -72,6 +72,12 @@ interface NativeModuleInterface {
     objectId: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_deletewithsession(
+    ptr: bigint,
+    objectId: Uint8Array,
+    writeContextJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_execute_subscription(
     ptr: bigint,
     handle: bigint,
@@ -90,6 +96,13 @@ interface NativeModuleInterface {
     ptr: bigint,
     table: Uint8Array,
     valuesJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): Uint8Array;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_insert_with_session(
+    ptr: bigint,
+    table: Uint8Array,
+    valuesJson: Uint8Array,
+    writeContextJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): Uint8Array;
   ubrn_uniffi_jazz_rn_fn_method_rnruntime_on_batched_tick_needed(
@@ -147,6 +160,13 @@ interface NativeModuleInterface {
     ptr: bigint,
     objectId: Uint8Array,
     valuesJson: Uint8Array,
+    uniffi_out_err: UniffiRustCallStatus
+  ): void;
+  ubrn_uniffi_jazz_rn_fn_method_rnruntime_update_with_session(
+    ptr: bigint,
+    objectId: Uint8Array,
+    valuesJson: Uint8Array,
+    writeContextJson: Uint8Array,
     uniffi_out_err: UniffiRustCallStatus
   ): void;
   ubrn_uniffi_jazz_rn_fn_init_callback_vtable_batchedtickcallback(

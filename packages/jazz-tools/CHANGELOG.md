@@ -1,5 +1,36 @@
 # jazz-tools
 
+## 2.0.0-alpha.22
+
+### Patch Changes
+
+- dedab8f: Add authorship-based edit metadata for row writes across the runtime and bindings.
+
+  Rows now expose `$createdBy`, `$createdAt`, `$updatedBy`, and `$updatedAt` magic columns in queries and permissions, and backend contexts can override stamped authorship with `withAttribution(...)`, `withAttributionForSession(...)`, and `withAttributionForRequest(...)`.
+
+- 568aa27: Add reconcileArray for granular Svelte and Vue reactivity in onDelta callbacks
+- 6aca383: Fix a sync-server permission bypass where replicated soft deletes could skip `DELETE` policy evaluation.
+
+  User writes received as `ObjectUpdated` payloads now inspect delete metadata before the sync permission check is queued. Soft-delete commits are classified as `DELETE` operations instead of `UPDATE`, so replicated row deletions correctly use delete policies and are rejected when the client lacks delete access.
+
+- 4d53497: Self-hosted server now supports JWKS key rotation without a restart. Keys are cached with a configurable TTL (5 minutes by default, override with `JAZZ_JWKS_CACHE_TTL_SECS`) and automatically refetched when a JWT arrives with an unknown key ID or a signature mismatch. A 10-second cooldown prevents forced refreshes from being abused as a DoS vector. If the JWKS endpoint goes down, the server continues validating against the stale cached keyset.
+- fd7ecd0: Schema authoring no longer has a build/codegen step. Apps now define their schema directly in TypeScript with the namespaced API (`import { schema as s } from "jazz-tools"`), and `jazz-tools validate` is just an optional local preflight check.
+
+  Current `permissions.ts` is now separate from the structural schema and migration lifecycle, instead of being versioned as part of schema identity.
+
+  Runtime permission enforcement now follows the latest published permissions head independently of client schema hashes, with learned schemas, migration lenses, and permissions rehydrated from the local catalogue on restart.
+
+- 3bd07c5: Improve React Native runtime error reporting by normalizing UniFFI bridge failures into standard `Error` objects with stable `name`, `message`, `cause`, and `tag` metadata.
+
+  Thanks [Schniz](https://github.com/Schniz)!
+
+- 195db76: Add rune-based Svelte test infrastructure with real $state/$effect verification
+- 113a73d: `jazz-tools server` now logs a ready-to-open inspector URL on startup using `https://jazz2-inspector.vercel.app/` with `url`, `appId`, and `adminSecret` encoded in the hash fragment.
+- Updated dependencies [dedab8f]
+- Updated dependencies [fd7ecd0]
+  - jazz-wasm@2.0.0-alpha.22
+  - jazz-rn@2.0.0-alpha.22
+
 ## 2.0.0-alpha.21
 
 ### Patch Changes

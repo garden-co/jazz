@@ -10,6 +10,6 @@
     "outDir": "dist",
     "declaration": true
   },
-  "include": ["src/**/*", "schema/**/*"],
+  "include": ["src/**/*", "schema.ts", "permissions.ts"],
   "exclude": ["node_modules", "dist"]
 }

@@ -69,57 +69,52 @@ Jazz is a **local-first** sync framework. Every client runs a full database in a
 
 ## 1. The schema
 
-The schema is written in a **TypeScript DSL** (`schema/current.ts`). Running `jazz codegen` reads it and generates two things: a SQL migration and the typed `schema/app.ts` interfaces used throughout the app.
+The schema is written directly in **TypeScript** (`schema.ts`). Jazz validates that file and the app imports the typed `app` export from it directly.
 
-**[`schema/current.ts`](../schema/current.ts)** — source of truth
+**[`schema.ts`](../schema.ts)** — source of truth
 
 ```typescript
-import { table, col } from "jazz-tools";
+import { schema as s } from "jazz-tools";
 
-table("instruments", {
-  name: col.string(),
-  sound: col.bytes(), // binary blobs are first-class
-  display_order: col.int(),
-});
+const schema = {
+  file_parts: s.table({
+    data: s.bytes(),
+  }),
+  files: s.table({
+    name: s.string().optional(),
+    mimeType: s.string(),
+    partIds: s.array(s.ref("file_parts")),
+    partSizes: s.array(s.int()),
+  }),
+  instruments: s.table({
+    name: s.string(),
+    soundFileId: s.ref("files"),
+    display_order: s.int(),
+  }),
+  beats: s.table({
+    jamId: s.ref("jams"),
+    instrumentId: s.ref("instruments"),
+    beat_index: s.int(), // 0–15
+    placed_by: s.string(), // session user_id
+  }),
+};
 
-table("beats", {
-  jam: col.ref("jams"),
-  instrument: col.ref("instruments"),
-  beat_index: col.int(), // 0–15
-  placed_by: col.string(), // session user_id
-});
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
 ```
 
-`col.ref()` declares foreign keys. `col.bytes()` maps to `Uint8Array` in TypeScript. The generated `schema/app.ts` provides typed interfaces and query builders — shown on the next slide.
+`s.ref()` declares foreign keys. For uploaded audio, Wequencer uses the conventional `files` / `file_parts` tables and stores a `soundFileId` reference on each instrument. The same file gives us the typed `app` entry point — shown on the next slide.
 
 ---
 
-## 2. Generated types
+## 2. Typed app export
 
-Codegen produces typed interfaces for every table, plus a typed entry point for all queries:
+Jazz infers the typed query surface directly from `schema.ts`:
 
 ```typescript
-// schema/app.ts — AUTO-GENERATED, do not edit
-export interface Beat {
-  id: string;
-  jam: string;
-  instrument: string;
-  beat_index: number;
-  placed_by: string; // who placed this beat
-}
+import { app, type Beat, type Instrument } from "../schema.js";
 
-export interface Instrument {
-  id: string;
-  name: string;
-  sound: Uint8Array; // binary blobs are first-class
-  display_order: number;
-}
-
-export const app = {
-  instruments: new InstrumentQueryBuilder(),
-  beats: new BeatQueryBuilder(),
-  participants: new ParticipantQueryBuilder(),
-};
+const beatQuery = app.beats.include({ jam: true, instrument: true }).orderBy("beat_index", "asc");
 ```
 
 ---
@@ -263,16 +258,17 @@ export async function ensureInstrumentsSeeded(db: Db): Promise<void> {
   if (localStorage.getItem(SEEDED_STORAGE_KEY)) return;
 
   // First visit on this device: wait for edge confirmation.
-  // Jazz has no custom-ID insert or upsert, so settledTier: 'edge' is the
+  // Jazz has no custom-ID insert or upsert, so tier: 'edge' is the
   // only way to prevent two fresh clients seeding concurrently.
-  const existing = await db.all(app.instruments, { settledTier: "edge" });
+  const existing = await db.all(app.instruments, { tier: "edge" });
   const existingNames = new Set(existing.map((i) => i.name));
 
   for (const seed of missingSeeds(existingNames)) {
-    const buf = await (await fetch(seed.file)).arrayBuffer();
+    const blob = await (await fetch(seed.file)).blob();
+    const file = await db.createFileFromBlob(app, blob, { tier: "edge" });
     db.insert(app.instruments, {
       name: seed.name,
-      sound: new Uint8Array(buf),
+      soundFileId: file.id,
       display_order: seed.display_order,
     });
   }
@@ -281,7 +277,7 @@ export async function ensureInstrumentsSeeded(db: Db): Promise<void> {
 ```
 
 - **Return visits** skip the network entirely — the app opens instantly and works offline.
-- **First visit** on a new device still uses `settledTier: 'edge'` to guard against duplicate seeding from concurrent fresh clients.
+- **First visit** on a new device still uses `tier: 'edge'` to guard against duplicate seeding from concurrent fresh clients.
 - If the edge is unreachable on a first visit, the promise waits until connectivity returns. Subsequent visits are unaffected.
 
 ---
@@ -308,12 +304,14 @@ Identity flows through `session.user_id` — the same ID that colours your beats
 
 ![bg right:45% 85%](screenshots/06-instrument-add-form.png)
 
-Instruments can be added at runtime. Upload any audio file — it is stored as a `BYTEA` blob in the database and synced to all clients as binary data.
+Instruments can be added at runtime. Upload any audio file — Jazz stores it in the conventional `files` / `file_parts` tables, and the instrument row keeps a `soundFileId` reference.
 
 ```typescript
+const storedFile = await db.createFileFromBlob(app, file, { tier: "edge" });
+
 db.insert(app.instruments, {
   name: newInstrumentName,
-  sound: new Uint8Array(audioBuffer),
+  soundFileId: storedFile.id,
   display_order: nextOrder,
 });
 ```
@@ -326,12 +324,13 @@ Because `QuerySubscription` watches `app.instruments`, every client's grid grows
 
 ## Jazz API surface — used in Wequencer
 
-| API                                      | Notes                                                                 |
-| ---------------------------------------- | --------------------------------------------------------------------- |
-| `createJazzClient`                       | Initialises WASM worker + OPFS database, begins syncing               |
-| `JazzSvelteProvider`                     | Provides `db` to every component — no prop drilling                   |
-| `getDb()`                                | Db singleton — callable from any component in the tree                |
-| `getSession()`                           | Current user identity (`user_id`)                                     |
-| `new QuerySubscription(query)`           | **Svelte-specific** — reactive live query, re-renders on every change |
-| `db.insert` / `db.update` / `db.delete`  | Synchronous local writes — sync to edge happens in the background     |
-| `db.all(query, { settledTier: 'edge' })` | Async read that waits for edge server confirmation before resolving   |
+| API                                        | Notes                                                                 |
+| ------------------------------------------ | --------------------------------------------------------------------- |
+| `createJazzClient`                         | Initialises WASM worker + OPFS database, begins syncing               |
+| `JazzSvelteProvider`                       | Provides `db` to every component — no prop drilling                   |
+| `getDb()`                                  | Db singleton — callable from any component in the tree                |
+| `getSession()`                             | Current user identity (`user_id`)                                     |
+| `new QuerySubscription(query)`             | **Svelte-specific** — reactive live query, re-renders on every change |
+| `db.insert` / `db.update` / `db.delete`    | Synchronous local writes — sync to edge happens in the background     |
+| `db.createFileFromBlob` / `loadFileAsBlob` | Store and load instrument audio through Jazz file storage             |
+| `db.all(query, { tier: 'edge' })`          | Async read that waits for edge server confirmation before resolving   |

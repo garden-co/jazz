@@ -60,11 +60,11 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
-import type { StopWithIncludes } from "../../schema/app.js";
+import type { StopWithVenue } from "../../schema.js";
 import { generateTriangles, seedFromString, pickPalette } from "../lib/poster-triangles.js";
 
 const props = defineProps<{
-  stop: StopWithIncludes<{ venue: true }>;
+  stop: StopWithVenue;
   bandName: string;
 }>();
 

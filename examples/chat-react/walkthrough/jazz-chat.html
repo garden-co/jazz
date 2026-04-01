@@ -1698,10 +1698,10 @@
             <h2 id="the-schema">The schema</h2>
             <p>
               <strong
-                ><a href="../schema/current.ts"><code>schema/current.ts</code></a></strong
+                ><a href="../schema.ts"><code>schema.ts</code></a></strong
               >
-              defines the tables. <code>jazz-tools build</code> generates SQL and typed TypeScript
-              helpers.
+              defines the tables. You can optionally run <code>jazz-tools validate</code> as a local
+              check against that file.
             </p>
             <div
               style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; margin-top: 0.4rem"
@@ -2104,7 +2104,7 @@
             <p>
               Policies live in
               <strong
-                ><a href="../schema/permissions.ts"><code>schema/permissions.ts</code></a></strong
+                ><a href="../permissions.ts"><code>permissions.ts</code></a></strong
               >, written in a typed DSL. They're compiled into the schema and enforced on the server
               on every sync.
             </p>

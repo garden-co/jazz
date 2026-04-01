@@ -43,7 +43,7 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
 import { useDb, useSession } from "jazz-tools/vue";
-import { app } from "../../schema/app.js";
+import { app } from "../../schema.js";
 import { buildMonthGrid, mapStopsToGrid } from "../lib/calendar-grid.js";
 
 interface StopProp {

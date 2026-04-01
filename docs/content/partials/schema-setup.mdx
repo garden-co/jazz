@@ -1,0 +1,24 @@
+import { Callout } from "fumadocs-ui/components/callout";
+
+Run an optional schema sanity check from your app root:
+
+`npx jazz-tools@alpha validate`
+
+This validates `schema.ts` and the optional `permissions.ts`, then compiles them into Jazz's
+internal schema representation.
+
+On development-like servers (`NODE_ENV` unset or anything except `production`), clients
+auto-publish the latest structural schema from `schema.ts` when they connect. That does not
+publish permissions, and it does not replace reviewed migration edges for existing data.
+
+When Jazz later reports an old and new schema hash pair, create and review a migration edge as
+described in [Migrations](/docs/schemas/migrations):
+
+```bash
+npx jazz-tools@alpha migrations create <fromHash> <toHash>
+npx jazz-tools@alpha migrations push <fromHash> <toHash>
+```
+
+<Callout title="Source of truth">
+  `schema.ts` is the source of truth. Jazz no longer generates `schema/app.ts` or `current.sql`.
+</Callout>
