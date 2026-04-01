@@ -493,6 +493,7 @@ async fn events_handler(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 format!("failed to build SSE response: {e}"),
             )
+                .into_response()
         })
 }
 

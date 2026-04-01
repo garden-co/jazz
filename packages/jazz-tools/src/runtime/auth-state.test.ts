@@ -63,7 +63,7 @@ describe("auth-state", () => {
     });
 
     expect(() => store.applyJwtToken(makeJwt({ sub: "bob" }))).toThrow(
-      "Changing principals on a live client is not supported",
+      "Changing user_id on a live client is not supported. Recreate the Db.",
     );
   });
 

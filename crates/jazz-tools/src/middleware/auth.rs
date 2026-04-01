@@ -933,6 +933,7 @@ pub fn validate_admin_secret(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport_protocol::UnauthenticatedCode;
     use jsonwebtoken::{EncodingKey, Header, encode};
 
     const TEST_JWKS_KID: &str = "test-kid";
