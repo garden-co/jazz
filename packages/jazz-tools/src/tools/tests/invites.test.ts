@@ -38,6 +38,19 @@ describe("Invite Links", () => {
     );
   });
 
+  test("createInviteLink accepts options object", () => {
+    const inviteLink = createInviteLink(group, "writer", {
+      baseURL,
+      valueHint: "myGroup",
+    });
+
+    expect(inviteLink).toMatch(
+      new RegExp(
+        `^${baseURL}#/invite/myGroup/${group.$jazz.id}/[A-Za-z0-9_-]+$`,
+      ),
+    );
+  });
+
   test("parseInviteLink correctly parses valid link", () => {
     const inviteLink = createInviteLink(group, "writer", baseURL, "myGroup");
     const result = parseInviteLink(inviteLink);

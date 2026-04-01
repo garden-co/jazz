@@ -27,7 +27,7 @@ export function createInviteLink<C extends CoValue>(
     valueHint,
   }: { baseURL?: string; valueHint?: string } = {},
 ): string {
-  return baseCreateInviteLink(value, role, baseURL, valueHint);
+  return baseCreateInviteLink(value, role, { baseURL, valueHint });
 }
 
 /** @category Invite Links */

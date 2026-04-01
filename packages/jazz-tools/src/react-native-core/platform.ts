@@ -240,7 +240,10 @@ export function createInviteLink<C extends CoValue>(
   role: "reader" | "writer" | "admin",
   { baseURL, valueHint }: { baseURL?: string; valueHint?: string } = {},
 ): string {
-  return baseCreateInviteLink(value, role, baseURL ?? "", valueHint);
+  return baseCreateInviteLink(value, role, {
+    baseURL: baseURL ?? "",
+    valueHint,
+  });
 }
 
 export function setupKvStore(
