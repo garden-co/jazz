@@ -10,9 +10,34 @@ The `rocksdb` feature uses `bindgen` to generate FFI bindings at build time, whi
 
 ```sh
 brew install llvm
-# Add to your shell profile (~/.zshrc or ~/.bashrc):
-export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
 ```
+
+Cargo does not support making repo-local `.cargo/config.toml` `[env]` entries
+conditional on macOS, so keep this setup user-local. First, get the Homebrew
+LLVM lib directory:
+
+```sh
+brew --prefix llvm
+```
+
+Then use that path in either your shell profile or your personal
+`~/.cargo/config.toml`:
+
+```sh
+# ~/.zshrc or ~/.bashrc
+export LIBCLANG_PATH="/opt/homebrew/opt/llvm/lib"
+export DYLD_LIBRARY_PATH="/opt/homebrew/opt/llvm/lib"
+```
+
+```toml
+# ~/.cargo/config.toml
+[env]
+LIBCLANG_PATH = { value = "/opt/homebrew/opt/llvm/lib", force = false }
+DYLD_LIBRARY_PATH = { value = "/opt/homebrew/opt/llvm/lib", force = false }
+```
+
+Replace `/opt/homebrew/opt/llvm/lib` with the path from `brew --prefix llvm` if
+your Homebrew install lives elsewhere.
 
 **Linux (Debian/Ubuntu):**
 
