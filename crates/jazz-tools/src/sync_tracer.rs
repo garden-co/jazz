@@ -1032,7 +1032,7 @@ mod tests {
             parents: smallvec![],
             content: vec![byte],
             timestamp: 1000,
-            author: ObjectId::new(),
+            author: ObjectId::new().to_string(),
             metadata: None,
             stored_state: Default::default(),
             ack_state: Default::default(),

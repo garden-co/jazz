@@ -176,13 +176,16 @@ async fn bob_updates_alice_todo() {
     )
     .await;
 
-    insta::assert_snapshot!(tracer.tally(), @"
+    insta::assert_snapshot!(tracer.tally_for("alice"), @"
     alice    -> server  : QuerySubscription (1)
     alice    => server  : QuerySubscription (1), QueryUnsubscription (1)
-    bob      -> server  : ObjectUpdated (1), QueryUnsubscription (1)
-    bob      => server  : ObjectUpdated (1)
     server   -> alice   : ObjectUpdated (2), QuerySettled (2)
     server   => alice   : ObjectUpdated (2), QuerySettled (2)
+    ");
+
+    insta::assert_snapshot!(tracer.tally_for("bob"), @"
+    bob      -> server  : ObjectUpdated (1), QueryUnsubscription (1)
+    bob      => server  : ObjectUpdated (1)
     server   => bob     : PersistenceAck (2)
     ");
 
