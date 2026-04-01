@@ -1,16 +1,17 @@
 import { useState } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
-import { useDb } from "jazz-tools/react-native";
+import { useDb, useSession } from "jazz-tools/react-native";
 import { app } from "../schema";
 
 export function AddTodo() {
   const db = useDb();
+  const session = useSession();
   const [title, setTitle] = useState("");
 
   const handleAdd = () => {
     const trimmed = title.trim();
-    if (!trimmed) return;
-    db.insert(app.todos, { title: trimmed, done: false });
+    if (!trimmed || !session?.user_id) return;
+    db.insert(app.todos, { title: trimmed, done: false, ownerId: session.user_id });
     setTitle("");
   };
 

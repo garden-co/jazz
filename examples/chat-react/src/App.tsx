@@ -14,8 +14,6 @@ import Router from "@/components/Router";
 
 const APP_ID = import.meta.env.VITE_JAZZ_APP_ID || "019d4349-2486-7021-a33e-566b0820c5af";
 const SERVER_URL = import.meta.env.VITE_JAZZ_SERVER_URL || undefined;
-const ADMIN_SECRET = import.meta.env.VITE_JAZZ_ADMIN_SECRET || undefined;
-
 function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
   const appId = overrides.appId ?? APP_ID;
   const active = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
@@ -27,7 +25,6 @@ function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
     localAuthMode: active.localAuthMode,
     localAuthToken: active.localAuthToken,
     ...(SERVER_URL ? { serverUrl: SERVER_URL } : {}),
-    ...(ADMIN_SECRET ? { adminSecret: ADMIN_SECRET } : {}),
     ...overrides,
   };
 }
