@@ -502,6 +502,10 @@ jobs:
           toolchain: 1.93.1
           targets: x86_64-pc-windows-msvc
 
+      - name: Set LIBCLANG_PATH (needed by rocksdb bindgen)
+        shell: pwsh
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\lib" >> $env:GITHUB_ENV
+
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -597,11 +601,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
             platform: linux-x64-gnu
             use_sccache: true
-          # Windows disabled until libclang/bindgen setup is added for rocksdb
-          # - os: windows-latest
-          #   target: x86_64-pc-windows-msvc
-          #   platform: win32-x64-msvc
-          #   use_sccache: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: win32-x64-msvc
+            use_sccache: false
           - os: macos-14
             target: x86_64-apple-darwin
             platform: darwin-x64
@@ -636,6 +639,11 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libclang-dev
 
+      - name: Set LIBCLANG_PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\lib" >> $env:GITHUB_ENV
+
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -663,6 +671,10 @@ jobs:
       - name: Build jazz-napi binding (macOS)
         if: runner.os == 'macOS'
         run: scripts/with-macos-libclang-env.sh pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
+
+      - name: Build jazz-napi binding (Windows)
+        if: runner.os == 'Windows'
+        run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
 
       - uses: actions/upload-artifact@v4
         with:
