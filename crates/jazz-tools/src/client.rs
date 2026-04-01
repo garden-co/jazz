@@ -842,7 +842,7 @@ mod tests {
         let app_id = AppId::from_name("client-jwt-session");
         let mut context = make_offline_context(
             app_id,
-            TempDir::new().expect("tempdir").into_path(),
+            TempDir::new().expect("tempdir").keep(),
             declared_todo_schema(),
         );
         context.jwt_token = Some(make_test_jwt("alice", json!({ "join_code": "secret-123" })));
@@ -857,7 +857,7 @@ mod tests {
         let app_id = AppId::from_name("client-backend-session");
         let mut context = make_offline_context(
             app_id,
-            TempDir::new().expect("tempdir").into_path(),
+            TempDir::new().expect("tempdir").keep(),
             declared_todo_schema(),
         );
         context.jwt_token = Some(make_test_jwt("alice", json!({ "role": "user" })));

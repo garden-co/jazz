@@ -10236,9 +10236,7 @@ fn remove_client_cleans_active_policy_checks() {
     // alice disconnects → only bob's policy check remains.
     //
     use crate::query_manager::policy::Operation;
-    use crate::sync_manager::{
-        ClientId, Destination, PendingPermissionCheck, PendingUpdateId, SyncPayload,
-    };
+    use crate::sync_manager::{ClientId, PendingPermissionCheck, PendingUpdateId, SyncPayload};
     use uuid::Uuid;
 
     let sync_manager = SyncManager::new();
@@ -10251,13 +10249,14 @@ fn remove_client_cleans_active_policy_checks() {
     server_qm.sync_manager_mut().add_client(bob);
 
     let obj_id = crate::object::ObjectId::new();
+    let branch_name = crate::object::BranchName::new("main");
     let make_check = |id: u64, client_id: ClientId| PendingPermissionCheck {
         id: PendingUpdateId(id),
         client_id,
         payload: SyncPayload::ObjectUpdated {
             object_id: obj_id,
             metadata: None,
-            branch_name: crate::object::BranchName::new("main"),
+            branch_name,
             commits: vec![],
         },
         session: crate::query_manager::session::Session {
@@ -10278,6 +10277,7 @@ fn remove_client_cleans_active_policy_checks() {
         PolicyCheckState {
             graphs: vec![],
             table: "users".into(),
+            branch: branch_name,
             pending_check: make_check(1, alice),
         },
     );
@@ -10286,6 +10286,7 @@ fn remove_client_cleans_active_policy_checks() {
         PolicyCheckState {
             graphs: vec![],
             table: "users".into(),
+            branch: branch_name,
             pending_check: make_check(2, bob),
         },
     );
