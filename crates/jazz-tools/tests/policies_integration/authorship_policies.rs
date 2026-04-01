@@ -2,10 +2,15 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::support::{connect_ready_client, connect_ready_user, wait_for_rows};
+use jazz_tools::jazz_transport::{SyncBatchRequest, SyncBatchResponse};
 use jazz_tools::query_manager::policy::PolicyExpr;
-use jazz_tools::query_manager::session::Session;
+use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
+use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
+use jazz_tools::schema_manager::SchemaManager;
 use jazz_tools::server::TestingServer;
+use jazz_tools::storage::MemoryStorage;
+use jazz_tools::sync_manager::{ClientId, Destination, ServerId, SyncManager};
 use jazz_tools::{
     ColumnType, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
 };
@@ -45,6 +50,77 @@ async fn create_note_without_session(client: &JazzClient, title: &str) -> Object
         .await
         .expect("create note without attribution")
         .0
+}
+
+async fn create_note_with_backend_attribution(
+    server: &TestingServer,
+    schema: &Schema,
+    attributed_user_id: &str,
+    title: &str,
+) -> ObjectId {
+    let schema_manager = SchemaManager::new(
+        SyncManager::new(),
+        schema.clone(),
+        server.app_id(),
+        "client",
+        "main",
+    )
+    .expect("build backend attributed schema manager");
+    let mut runtime = RuntimeCore::new(
+        schema_manager,
+        MemoryStorage::new(),
+        NoopScheduler,
+        VecSyncSender::new(),
+    );
+    let client_id = ClientId::new();
+    runtime.add_server(ServerId::default());
+
+    let write_context = WriteContext {
+        session: None,
+        attribution: Some(attributed_user_id.to_string()),
+    };
+    let note_id = runtime
+        .insert("notes", note_input(title), Some(&write_context))
+        .expect("create note with backend attribution")
+        .0;
+    runtime.batched_tick();
+
+    let payloads = runtime
+        .sync_sender()
+        .take()
+        .into_iter()
+        .filter_map(|entry| match entry.destination {
+            Destination::Server(_) => Some(entry.payload),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !payloads.is_empty(),
+        "backend attributed insert should enqueue sync payloads"
+    );
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/sync", server.base_url()))
+        .header("X-Jazz-Backend-Secret", server.backend_secret())
+        .json(&SyncBatchRequest {
+            payloads,
+            client_id,
+        })
+        .send()
+        .await
+        .expect("push backend attributed sync batch")
+        .error_for_status()
+        .expect("backend attributed sync batch should succeed")
+        .json::<SyncBatchResponse>()
+        .await
+        .expect("decode backend attributed sync response");
+    assert!(
+        response.results.iter().all(|result| result.ok),
+        "backend attributed sync payloads should all apply: {:?}",
+        response.results
+    );
+
+    note_id
 }
 
 async fn start_alice_and_bob_server(schema: Schema) -> (TestingServer, JazzClient, JazzClient) {
@@ -334,6 +410,64 @@ async fn created_by_policies_can_allow_reads_from_system_author() {
     );
 
     backend.shutdown().await.expect("shutdown backend");
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// Verifies that backend writes can keep backend permissions while stamping
+/// row authorship as `alice`, so `$createdBy` policies treat the row as hers.
+///
+/// Actors: a backend runtime creates one row with `alice` attribution and both
+/// users query under a creator-only policy.
+///
+/// ```text
+/// backend runtime ─create(attribution=alice)──► server ──$createdBy = alice
+/// alice query ────────────────────────────────► sees attributed row
+/// bob query ──────────────────────────────────► sees nothing
+/// ```
+#[tokio::test]
+async fn created_by_policies_allow_backend_attribution_to_specific_user() {
+    let created_by_policy = PolicyExpr::eq_session("$createdBy", vec!["user_id".into()]);
+    let schema = SchemaBuilder::new()
+        .table(make_notes_schema(
+            "notes",
+            TablePolicies::new()
+                .with_select(created_by_policy.clone())
+                .with_insert(PolicyExpr::False)
+                .with_update(Some(created_by_policy.clone()), created_by_policy.clone())
+                .with_delete(created_by_policy),
+        ))
+        .build();
+    let (server, alice, bob) = start_alice_and_bob_server(schema.clone()).await;
+
+    let attributed_note =
+        create_note_with_backend_attribution(&server, &schema, "alice", "backend for alice").await;
+    let query = QueryBuilder::new("notes")
+        .select(&["title", "$createdBy", "$updatedBy"])
+        .build();
+
+    let alice_rows = wait_for_rows(
+        &alice,
+        query.clone(),
+        "alice sees the backend-attributed row as her own",
+        |rows| (rows.len() == 1 && rows[0].0 == attributed_note).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        alice_rows[0].1,
+        provenance_values("backend for alice", "alice", "alice")
+    );
+
+    let bob_rows = wait_for_rows(
+        &bob,
+        query,
+        "bob cannot see alice-attributed backend row",
+        |rows| rows.is_empty().then_some(rows),
+    )
+    .await;
+    assert!(bob_rows.is_empty());
+
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
     server.shutdown().await;
