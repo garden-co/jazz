@@ -225,6 +225,13 @@ export class SyncStreamController {
     }
   }
 
+  notifyAuthFailure(reason: AuthFailureReason): void {
+    this.pausedForAuthFailure = true;
+    this.abortStream();
+    this.detachServer();
+    this.options.onAuthFailure?.(reason);
+  }
+
   notifyTransportFailure(): void {
     this.abortStream();
     this.detachServer();
@@ -314,9 +321,7 @@ export class SyncStreamController {
       if (!response.ok) {
         const authError = await readSyncAuthError(response);
         if (authError) {
-          this.pausedForAuthFailure = true;
-          this.detachServer();
-          this.options.onAuthFailure?.(authError.reason);
+          this.notifyAuthFailure(authError.reason);
           return;
         }
         console.error(`${this.logPrefix}Stream connect failed: ${response.status}`);

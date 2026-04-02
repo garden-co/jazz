@@ -1513,7 +1513,7 @@ export class JazzClient {
           this.sendSyncMessage(payload as string, isCatalogue),
         onServerPayloadError: (error) => {
           if (error instanceof SyncAuthError) {
-            this.onAuthFailure?.(error.reason);
+            this.streamController.notifyAuthFailure(error.reason);
             return;
           }
 

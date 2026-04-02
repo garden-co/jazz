@@ -24,9 +24,11 @@ function makeSchema(tableName: string): WasmSchema {
 
 function makeClientStub() {
   const shutdown = vi.fn(async () => undefined);
+  const updateAuth = vi.fn();
   return {
-    client: { shutdown } as unknown as JazzClient,
+    client: { shutdown, updateAuth } as unknown as JazzClient,
     shutdown,
+    updateAuth,
   };
 }
 
@@ -180,5 +182,27 @@ describe("react-native Db", () => {
     });
 
     expect(() => db.exposeGetClient(schema)).toThrow(clientError);
+  });
+
+  it("RNDB-U05 forwards updateAuth to cached native clients", () => {
+    const connectWithRuntimeSpy = vi.spyOn(JazzClient, "connectWithRuntime");
+    const schemaA = makeSchema("todos");
+    const schemaB = makeSchema("projects");
+    const clientA = makeClientStub();
+    const clientB = makeClientStub();
+
+    createJazzRnRuntimeMock
+      .mockReturnValueOnce({ id: "runtime-a" } as never)
+      .mockReturnValueOnce({ id: "runtime-b" } as never);
+    connectWithRuntimeSpy.mockReturnValueOnce(clientA.client).mockReturnValueOnce(clientB.client);
+
+    const db = new TestDb({ appId: "rn-app", jwtToken: "stale-jwt" });
+    db.exposeGetClient(schemaA);
+    db.exposeGetClient(schemaB);
+
+    db.updateAuth("fresh-jwt");
+
+    expect(clientA.updateAuth).toHaveBeenCalledWith("fresh-jwt");
+    expect(clientB.updateAuth).toHaveBeenCalledWith("fresh-jwt");
   });
 });

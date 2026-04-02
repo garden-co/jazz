@@ -59,6 +59,16 @@ export class Db extends RuntimeDb {
     return this.nativeClients.get(key)!;
   }
 
+  override updateAuth(jwtToken?: string): void {
+    if (!this.applyAuthUpdate(jwtToken)) {
+      return;
+    }
+
+    for (const client of this.nativeClients.values()) {
+      client.updateAuth(jwtToken);
+    }
+  }
+
   override async shutdown(): Promise<void> {
     for (const client of this.nativeClients.values()) {
       await client.shutdown();
