@@ -6,7 +6,8 @@ use std::env;
 use std::fs;
 #[cfg(any(
     all(feature = "fjall", not(target_arch = "wasm32")),
-    all(feature = "rocksdb", not(target_arch = "wasm32"))
+    all(feature = "rocksdb", not(target_arch = "wasm32")),
+    all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
 use std::path::Path;
 use std::path::PathBuf;
@@ -15,7 +16,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 #[cfg(any(
     all(feature = "fjall", not(target_arch = "wasm32")),
-    all(feature = "rocksdb", not(target_arch = "wasm32"))
+    all(feature = "rocksdb", not(target_arch = "wasm32")),
+    all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
 use std::time::Instant;
 
@@ -37,6 +39,8 @@ use jazz_tools::storage::FjallStorage;
 use jazz_tools::storage::MemoryStorage;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 use jazz_tools::storage::RocksDBStorage;
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+use jazz_tools::storage::SqliteStorage;
 use jazz_tools::storage::Storage;
 use jazz_tools::sync_manager::{
     ClientId, ClientRole, Destination, InboxEntry, ServerId, Source, SyncManager,
@@ -44,7 +48,8 @@ use jazz_tools::sync_manager::{
 use serde::Deserialize;
 #[cfg(any(
     all(feature = "fjall", not(target_arch = "wasm32")),
-    all(feature = "rocksdb", not(target_arch = "wasm32"))
+    all(feature = "rocksdb", not(target_arch = "wasm32")),
+    all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
 use tempfile::TempDir;
 
@@ -98,7 +103,8 @@ struct R2ScenarioConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[cfg(any(
     all(feature = "fjall", not(target_arch = "wasm32")),
-    all(feature = "rocksdb", not(target_arch = "wasm32"))
+    all(feature = "rocksdb", not(target_arch = "wasm32")),
+    all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
 struct R3ScenarioConfig {
     id: String,
@@ -199,7 +205,8 @@ struct R2Scenario {
 #[derive(Debug, Clone)]
 #[cfg(any(
     all(feature = "fjall", not(target_arch = "wasm32")),
-    all(feature = "rocksdb", not(target_arch = "wasm32"))
+    all(feature = "rocksdb", not(target_arch = "wasm32")),
+    all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
 struct R3Scenario {
     id: String,
@@ -405,7 +412,8 @@ struct SeededProjectBoard {
 
 #[cfg(any(
     all(feature = "fjall", not(target_arch = "wasm32")),
-    all(feature = "rocksdb", not(target_arch = "wasm32"))
+    all(feature = "rocksdb", not(target_arch = "wasm32")),
+    all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
 struct ColdLoadSeededDb {
     _tempdir: TempDir,
@@ -2290,7 +2298,8 @@ fn realistic_r9_subscribed_write_path(c: &mut Criterion) {
 
 #[cfg(any(
     all(feature = "fjall", not(target_arch = "wasm32")),
-    all(feature = "rocksdb", not(target_arch = "wasm32"))
+    all(feature = "rocksdb", not(target_arch = "wasm32")),
+    all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
 struct ManyBranchesSeededDb {
     _tempdir: TempDir,
@@ -2555,7 +2564,8 @@ fn load_r2_scenario(path: &str) -> R2Scenario {
 
 #[cfg(any(
     all(feature = "fjall", not(target_arch = "wasm32")),
-    all(feature = "rocksdb", not(target_arch = "wasm32"))
+    all(feature = "rocksdb", not(target_arch = "wasm32")),
+    all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
 fn load_r3_scenario(path: &str) -> R3Scenario {
     let raw: R3ScenarioConfig = load_json(path);
