@@ -7,13 +7,13 @@
  * without losing or reordering any intermediate states.
  */
 export class ServerPayloadBatcher {
-  private pending: string[] = [];
+  private pending: Uint8Array[] = [];
   private flushQueued = false;
 
-  constructor(private readonly sendBatch: (payloads: string[]) => Promise<void>) {}
+  constructor(private readonly sendBatch: (payloads: Uint8Array[]) => Promise<void>) {}
 
-  enqueue(payloadJson: string): void {
-    this.pending.push(payloadJson);
+  enqueue(payload: Uint8Array): void {
+    this.pending.push(payload);
     if (this.flushQueued) return;
 
     this.flushQueued = true;

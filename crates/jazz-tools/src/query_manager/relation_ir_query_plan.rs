@@ -6,7 +6,7 @@ use super::relation_ir::{
     ColumnRef, JoinKind, OrderDirection, PredicateCmpOp, PredicateExpr, ProjectColumn, ProjectExpr,
     RelExpr, RowIdRef, ValueRef,
 };
-use super::types::TableName;
+use super::types::{QueryBranchRef, TableName, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct QueryEnvelope<'a> {
@@ -40,7 +40,8 @@ struct RuntimeCorePlan {
 pub(crate) struct ExecutionQueryPlan {
     pub table: TableName,
     pub base_scope: String,
-    pub branches: Vec<String>,
+    pub branches: Vec<QueryBranchRef>,
+    pub branches_are_explicit: bool,
     pub disjuncts: Vec<Conjunction>,
     pub joins: Vec<JoinSpec>,
     pub recursive: Option<RecursiveSpec>,
@@ -127,7 +128,14 @@ fn predicate_term_to_condition(predicate: &PredicateExpr) -> Option<Condition> {
             op,
             right: ValueRef::Literal(value),
         } => {
-            let column = to_scoped_runtime_column(left);
+            let column = if left.column == "id" && !matches!(value, Value::Uuid(_)) {
+                match left.scope.as_deref() {
+                    Some(scope) => format!("{scope}.id"),
+                    None => "id".to_string(),
+                }
+            } else {
+                to_scoped_runtime_column(left)
+            };
             Some(match op {
                 PredicateCmpOp::Eq => Condition::Eq {
                     column,
@@ -755,9 +763,43 @@ fn unwrap_query_envelope(expr: &RelExpr) -> QueryEnvelope<'_> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn lower_relation_to_execution_plan(
     relation: &RelExpr,
     branches: &[String],
+    include_deleted: bool,
+    array_subqueries: Vec<ArraySubquerySpec>,
+    select_columns: Option<Vec<String>>,
+) -> Option<ExecutionQueryPlan> {
+    let schema_context = crate::schema_manager::SchemaContext::new_with_batch_id(
+        crate::query_manager::types::Schema::new(),
+        "dev",
+        "main",
+        crate::query_manager::types::BatchId::nil(),
+    );
+    let branch_refs: Vec<QueryBranchRef> = branches
+        .iter()
+        .map(|branch| {
+            crate::query_manager::manager::QueryManager::resolve_query_branch_ref_for_context(
+                &schema_context,
+                branch,
+            )
+        })
+        .collect();
+    lower_relation_to_execution_plan_with_branch_refs(
+        relation,
+        &branch_refs,
+        !branches.is_empty(),
+        include_deleted,
+        array_subqueries,
+        select_columns,
+    )
+}
+
+pub(crate) fn lower_relation_to_execution_plan_with_branch_refs(
+    relation: &RelExpr,
+    branches: &[QueryBranchRef],
+    branches_are_explicit: bool,
     include_deleted: bool,
     array_subqueries: Vec<ArraySubquerySpec>,
     select_columns: Option<Vec<String>>,
@@ -776,6 +818,7 @@ pub(crate) fn lower_relation_to_execution_plan(
         table: core_plan.table,
         base_scope: core_plan.base_scope,
         branches: branches.to_vec(),
+        branches_are_explicit,
         disjuncts: core_plan.disjuncts,
         joins: core_plan.joins,
         recursive: core_plan.recursive,

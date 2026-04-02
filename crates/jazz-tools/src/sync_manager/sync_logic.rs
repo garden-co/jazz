@@ -1,6 +1,7 @@
 use super::*;
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
+use crate::query_manager::types::BatchBranchKey;
 use std::collections::{HashMap, HashSet};
 
 impl SyncManager {
@@ -48,10 +49,10 @@ impl SyncManager {
             };
 
             sent_metadata.insert(object_id);
-            for (branch_name, branch) in &object.branches {
+            for (branch_name, branch) in object.branches.iter() {
                 sent_tips.push((
                     object_id,
-                    *branch_name,
+                    branch_name,
                     branch.tips.iter().copied().collect::<HashSet<_>>(),
                 ));
             }
@@ -62,7 +63,10 @@ impl SyncManager {
         };
         server.sent_metadata.extend(sent_metadata);
         for (object_id, branch_name, tips) in sent_tips {
-            server.sent_tips.insert((object_id, branch_name), tips);
+            server.sent_tips.insert(
+                (object_id, BatchBranchKey::from_branch_name(branch_name)),
+                tips,
+            );
         }
     }
 
@@ -73,11 +77,11 @@ impl SyncManager {
         let mut to_sync: Vec<BranchSyncData> = Vec::new();
 
         for (object_id, object) in &self.object_manager.objects {
-            for (branch_name, branch) in &object.branches {
+            for (branch_name, branch) in object.branches.iter() {
                 to_sync.push((
                     *object_id,
                     object.metadata.clone(),
-                    *branch_name,
+                    branch_name,
                     branch.tips.iter().copied().collect(),
                 ));
             }
@@ -97,11 +101,11 @@ impl SyncManager {
             let Some(object) = self.object_manager.objects.get(&object_id) else {
                 continue;
             };
-            for (branch_name, branch) in &object.branches {
+            for (branch_name, branch) in object.branches.iter() {
                 to_sync.push((
                     object_id,
                     object.metadata.clone(),
-                    *branch_name,
+                    branch_name,
                     branch.tips.iter().copied().collect(),
                 ));
             }
@@ -121,6 +125,9 @@ impl SyncManager {
         branch_name: BranchName,
         tips: HashSet<CommitId>,
     ) {
+        let Some(branch_name) = Self::normalize_branch_name(branch_name) else {
+            return;
+        };
         let _span = tracing::debug_span!("queue_tips_to_server", %server_id, %object_id, %branch_name, tips = tips.len()).entered();
         // Skip objects marked as nosync (local-only, e.g., index nodes)
         if metadata
@@ -137,9 +144,10 @@ impl SyncManager {
                 return;
             };
             let include_metadata = !server.sent_metadata.contains(&object_id);
+            let branch_key = BatchBranchKey::from_branch_name(branch_name);
             let already_sent = server
                 .sent_tips
-                .get(&(object_id, branch_name))
+                .get(&(object_id, branch_key))
                 .cloned()
                 .unwrap_or_default();
             (include_metadata, already_sent)
@@ -157,8 +165,10 @@ impl SyncManager {
         if include_metadata {
             server.sent_metadata.insert(object_id);
         }
-        server.sent_tips.insert((object_id, branch_name), tips);
-
+        server.sent_tips.insert(
+            (object_id, BatchBranchKey::from_branch_name(branch_name)),
+            tips,
+        );
         self.outbox.push(OutboxEntry {
             destination: Destination::Server(server_id),
             payload: SyncPayload::ObjectUpdated {
@@ -184,6 +194,9 @@ impl SyncManager {
         object_id: ObjectId,
         branch_name: BranchName,
     ) {
+        let Some(branch_name) = Self::normalize_branch_name(branch_name) else {
+            return;
+        };
         // Get current tips from object manager
         let Some(object) = self.object_manager.get(object_id) else {
             return;
@@ -209,7 +222,7 @@ impl SyncManager {
         self.queue_tips_to_client_inner(client_id, object_id, metadata, branch_name, tips, true);
     }
 
-    pub(super) fn queue_tips_to_client_unscoped(
+    pub(crate) fn queue_tips_to_client_unscoped(
         &mut self,
         client_id: ClientId,
         object_id: ObjectId,
@@ -229,6 +242,9 @@ impl SyncManager {
         tips: HashSet<CommitId>,
         require_scope: bool,
     ) {
+        let Some(branch_name) = Self::normalize_branch_name(branch_name) else {
+            return;
+        };
         // Skip objects marked as nosync (local-only, e.g., index nodes)
         if metadata
             .get(crate::metadata::MetadataKey::NoSync.as_str())
@@ -248,10 +264,11 @@ impl SyncManager {
             let in_scope = !require_scope || client.is_in_scope(object_id, &branch_name);
 
             let include_metadata = !client.sent_metadata.contains(&object_id);
+            let branch_key = BatchBranchKey::from_branch_name(branch_name);
 
             let already_sent = client
                 .sent_tips
-                .get(&(object_id, branch_name))
+                .get(&(object_id, branch_key))
                 .cloned()
                 .unwrap_or_default();
 
@@ -274,8 +291,10 @@ impl SyncManager {
         if include_metadata {
             client.sent_metadata.insert(object_id);
         }
-        client.sent_tips.insert((object_id, branch_name), tips);
-
+        client.sent_tips.insert(
+            (object_id, BatchBranchKey::from_branch_name(branch_name)),
+            tips,
+        );
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
             payload: SyncPayload::ObjectUpdated {
@@ -303,10 +322,13 @@ impl SyncManager {
         already_sent: &HashSet<CommitId>,
         new_tips: &HashSet<CommitId>,
     ) -> Vec<Commit> {
+        let Some(branch_name) = Self::normalize_branch_name(*branch_name) else {
+            return Vec::new();
+        };
         let Some(object) = self.object_manager.get(object_id) else {
             return Vec::new();
         };
-        let Some(branch) = object.branches.get(branch_name) else {
+        let Some(branch) = object.branches.get(&branch_name) else {
             return Vec::new();
         };
 
@@ -328,14 +350,18 @@ impl SyncManager {
                 continue;
             }
 
+            let Some(commit) = branch.commits.get(&commit_id) else {
+                // Merge roots may reference parents that live on sibling batches.
+                // Branch-scoped sync payloads only ship commits stored on this branch.
+                continue;
+            };
+
             to_send.insert(commit_id);
 
             // Visit parents
-            if let Some(commit) = branch.commits.get(&commit_id) {
-                for parent in &commit.parents {
-                    if !visited.contains(parent) {
-                        to_visit.push(*parent);
-                    }
+            for parent in &commit.parents {
+                if !visited.contains(parent) {
+                    to_visit.push(*parent);
                 }
             }
         }

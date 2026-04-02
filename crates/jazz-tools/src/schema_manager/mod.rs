@@ -67,3 +67,11 @@ pub use transformer::{
     LensTransformer, TransformError, TransformResult, translate_column_for_index,
 };
 pub use types::AppId;
+
+pub(crate) fn catalogue_branch_name() -> crate::object::BranchName {
+    use crate::query_manager::types::{BatchId, BranchPrefixName, SchemaHash};
+
+    BranchPrefixName::new("catalogue", SchemaHash::from_bytes([0; 32]), "main")
+        .with_batch_id(BatchId::nil())
+        .to_branch_name()
+}

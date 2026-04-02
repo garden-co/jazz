@@ -217,7 +217,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
       msg.userBranch,
       msg.dbName,
       "worker",
-      false,
+      true,
     );
 
     // Store auth
@@ -269,7 +269,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
           // Server-bound → HTTP POST to upstream
           if (activeServerUrl) {
             if (isCatalogue) {
-              sendToServer(activeServerUrl, payload as string, isCatalogue).catch((error) => {
+              sendToServer(activeServerUrl, payload, isCatalogue).catch((error) => {
                 if (!isExpectedFetchAbortError(error)) {
                   console.error("[worker] Sync POST error:", error);
                 }
@@ -277,7 +277,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
                 scheduleReconnect();
               });
             } else {
-              serverPayloadBatcher.enqueue(payload as string);
+              serverPayloadBatcher.enqueue(payload as Uint8Array);
             }
           }
         }
@@ -334,12 +334,12 @@ async function handleInit(msg: InitMessage): Promise<void> {
 /** POST a sync payload to the upstream server. */
 async function sendToServer(
   serverUrl: string,
-  payloadJson: string,
+  payload: Uint8Array | string,
   isCatalogue: boolean,
 ): Promise<void> {
   await sendSyncPayload(
     serverUrl,
-    payloadJson,
+    payload,
     isCatalogue,
     {
       jwtToken,
@@ -608,7 +608,11 @@ self.onmessage = async (event: MessageEvent<MainToWorkerMessage>) => {
       }
       if (runtime) {
         detachServer();
-        runtime.flush();
+        if (typeof runtime.close === "function") {
+          runtime.close();
+        } else {
+          runtime.flush();
+        }
         runtime.free(); // Triggers Rust Drop → closes OPFS exclusive handles
         runtime = null;
       }

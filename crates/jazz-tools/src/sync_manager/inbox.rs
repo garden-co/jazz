@@ -27,6 +27,19 @@ fn log_schema_warning(origin: &str, warning: &SchemaWarning) {
 }
 
 impl SyncManager {
+    fn resolve_existing_row_content_for_branch<H: Storage>(
+        &mut self,
+        storage: &H,
+        object_id: ObjectId,
+        branch_name: BranchName,
+    ) -> Option<Vec<u8>> {
+        self.object_manager
+            .resolve_latest_visible_tip(object_id, branch_name, storage)
+            .ok()
+            .flatten()
+            .map(|(_, _, commit)| commit.content)
+    }
+
     /// Process a single inbox entry.
     pub(super) fn process_inbox_entry<H: Storage>(&mut self, storage: &mut H, entry: InboxEntry) {
         tracing::trace!(source = ?entry.source, payload = entry.payload.variant_name(), "processing inbox entry");
@@ -187,7 +200,9 @@ impl SyncManager {
             tracing::warn!(%client_id, "message from unknown client, ignoring");
             return;
         };
-        tracing::trace!(%client_id, role = ?client.role, payload = payload.variant_name(), "client→payload");
+        let client_role = client.role;
+        let client_session = client.session.clone();
+        tracing::trace!(%client_id, role = ?client_role, payload = payload.variant_name(), "client→payload");
 
         match &payload {
             SyncPayload::ObjectUpdated {
@@ -199,7 +214,7 @@ impl SyncManager {
             } => {
                 let object_id = *object_id;
                 let branch_name = *branch_name;
-                match client.role {
+                match client_role {
                     ClientRole::Peer | ClientRole::Admin => {
                         // Trusted — apply directly
                         self.apply_payload_from_client(storage, client_id, payload, false);
@@ -219,7 +234,7 @@ impl SyncManager {
                     }
                     ClientRole::User => {
                         // User requires session
-                        let Some(session) = &client.session else {
+                        let Some(session) = client_session.as_ref() else {
                             self.outbox.push(OutboxEntry {
                                 destination: Destination::Client(client_id),
                                 payload: SyncPayload::Error(SyncError::SessionRequired {
@@ -252,24 +267,16 @@ impl SyncManager {
                             .as_ref()
                             .map(|meta| meta.metadata.clone())
                             .unwrap_or_default();
-                        let (stored_metadata, old_content) = self
+                        let stored_metadata = self
                             .object_manager
                             .get(object_id)
-                            .map(|obj| {
-                                let old = obj
-                                    .branches
-                                    .get(&branch_name)
-                                    .and_then(|branch| {
-                                        branch
-                                            .tips
-                                            .iter()
-                                            .next()
-                                            .and_then(|tip_id| branch.commits.get(tip_id))
-                                    })
-                                    .map(|commit| commit.content.clone());
-                                (obj.metadata.clone(), old)
-                            })
+                            .map(|obj| obj.metadata.clone())
                             .unwrap_or_default();
+                        let old_content = self.resolve_existing_row_content_for_branch(
+                            storage,
+                            object_id,
+                            branch_name,
+                        );
                         // For brand-new rows, metadata may only be present in the inbound payload
                         // because the object has not been applied to ObjectManager yet.
                         let metadata = if old_content.is_none() && stored_metadata.is_empty() {
@@ -309,7 +316,7 @@ impl SyncManager {
             } => {
                 let object_id = *object_id;
                 let branch_name = *branch_name;
-                match client.role {
+                match client_role {
                     ClientRole::Peer | ClientRole::Admin => {
                         self.apply_payload_from_client(storage, client_id, payload, false);
                     }
@@ -327,7 +334,7 @@ impl SyncManager {
                         self.apply_payload_from_client(storage, client_id, payload, false);
                     }
                     ClientRole::User => {
-                        let Some(session) = &client.session else {
+                        let Some(session) = client_session.as_ref() else {
                             self.outbox.push(OutboxEntry {
                                 destination: Destination::Client(client_id),
                                 payload: SyncPayload::Error(SyncError::SessionRequired {
@@ -337,24 +344,16 @@ impl SyncManager {
                             });
                             return;
                         };
-                        let (metadata, old_content) = self
+                        let metadata = self
                             .object_manager
                             .get(object_id)
-                            .map(|obj| {
-                                let old = obj
-                                    .branches
-                                    .get(&branch_name)
-                                    .and_then(|branch| {
-                                        branch
-                                            .tips
-                                            .iter()
-                                            .next()
-                                            .and_then(|tip_id| branch.commits.get(tip_id))
-                                    })
-                                    .map(|commit| commit.content.clone());
-                                (obj.metadata.clone(), old)
-                            })
+                            .map(|obj| obj.metadata.clone())
                             .unwrap_or_default();
+                        let old_content = self.resolve_existing_row_content_for_branch(
+                            storage,
+                            object_id,
+                            branch_name,
+                        );
                         self.queue_for_permission_check(
                             client_id,
                             payload,
@@ -372,6 +371,7 @@ impl SyncManager {
             SyncPayload::QuerySubscription {
                 query_id,
                 query,
+                schema_context,
                 session,
                 propagation,
             } => {
@@ -424,6 +424,7 @@ impl SyncManager {
                         client_id,
                         query_id: *query_id,
                         query: query.as_ref().clone(),
+                        schema_context: schema_context.clone(),
                         session: effective_session,
                         propagation: *propagation,
                     });
@@ -589,6 +590,9 @@ impl SyncManager {
         branch_name: BranchName,
         commits: Vec<Commit>,
     ) -> HashSet<CommitId> {
+        let Some(normalized_branch_name) = Self::normalize_branch_name(branch_name) else {
+            return HashSet::new();
+        };
         if let Some(meta) = metadata.as_ref() {
             self.track_catalogue_object(object_id, &meta.metadata);
         }
@@ -610,12 +614,12 @@ impl SyncManager {
             let already_exists = self
                 .object_manager
                 .get(object_id)
-                .and_then(|obj| obj.branches.get(&branch_name))
+                .and_then(|obj| obj.branches.get(&normalized_branch_name))
                 .is_some_and(|branch| branch.commits.contains_key(&commit_id));
 
             if self
                 .object_manager
-                .receive_commit(storage, object_id, branch_name, commit)
+                .receive_commit(storage, object_id, normalized_branch_name, commit)
                 .is_ok()
                 && !already_exists
             {

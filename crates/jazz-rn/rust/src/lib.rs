@@ -852,6 +852,15 @@ impl RnRuntime {
         })
     }
 
+    pub fn get_batch_id(&self) -> Result<String, JazzRnError> {
+        with_panic_boundary("get_batch_id", || {
+            let core = self.core.lock().map_err(|_| JazzRnError::Internal {
+                message: "lock poisoned".into(),
+            })?;
+            Ok(core.schema_manager().batch_id().to_string())
+        })
+    }
+
     pub fn flush(&self) -> Result<(), JazzRnError> {
         with_panic_boundary("flush", || {
             let core = self.core.lock().map_err(|_| JazzRnError::Internal {

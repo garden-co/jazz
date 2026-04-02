@@ -76,8 +76,8 @@ use jazz_tools::storage::OpfsBTreeStorage;
 use jazz_tools::storage::{MemoryStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
-    ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager,
-    SyncPayload,
+    ClientId, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
+    SyncConnectionCodec, SyncManager, SyncPayload,
 };
 
 use crate::query::parse_query;
@@ -368,6 +368,8 @@ impl Scheduler for WasmScheduler {
 pub struct JsSyncSender {
     callback: RefCell<Option<Function>>,
     use_binary_encoding: bool,
+    server_codec: RefCell<SyncConnectionCodec>,
+    client_codecs: RefCell<HashMap<ClientId, SyncConnectionCodec>>,
 }
 
 impl JsSyncSender {
@@ -375,11 +377,38 @@ impl JsSyncSender {
         Self {
             callback: RefCell::new(None),
             use_binary_encoding,
+            server_codec: RefCell::new(SyncConnectionCodec::default()),
+            client_codecs: RefCell::new(HashMap::new()),
         }
     }
 
     fn set_callback(&self, callback: Function) {
         *self.callback.borrow_mut() = Some(callback);
+    }
+
+    fn reset_server_codec(&self) {
+        self.server_codec.borrow_mut().reset();
+    }
+
+    fn encode_binary_payload(
+        &self,
+        destination: Destination,
+        payload: SyncPayload,
+    ) -> Result<Vec<u8>, String> {
+        match destination {
+            Destination::Server(_) => self
+                .server_codec
+                .borrow_mut()
+                .encode_payload(payload)
+                .map_err(|error| error.to_string()),
+            Destination::Client(client_id) => self
+                .client_codecs
+                .borrow_mut()
+                .entry(client_id)
+                .or_default()
+                .encode_payload(payload)
+                .map_err(|error| error.to_string()),
+        }
     }
 }
 
@@ -387,12 +416,14 @@ impl SyncSender for JsSyncSender {
     fn send_sync_message(&self, message: OutboxEntry) {
         if let Some(ref callback) = *self.callback.borrow() {
             let is_catalogue = message.payload.is_catalogue();
-            let (destination_kind, destination_id) = match message.destination {
+            let destination = message.destination;
+            let (destination_kind, destination_id) = match destination {
                 Destination::Server(server_id) => ("server", server_id.0.to_string()),
                 Destination::Client(client_id) => ("client", client_id.0.to_string()),
             };
             if self.use_binary_encoding || destination_kind == "client" {
-                if let Ok(payload_bytes) = message.payload.to_bytes() {
+                if let Ok(payload_bytes) = self.encode_binary_payload(destination, message.payload)
+                {
                     let payload_js = Uint8Array::from(payload_bytes.as_slice());
                     let _ = callback.call4(
                         &JsValue::NULL,
@@ -429,6 +460,8 @@ impl SyncSender for JsSyncSender {
 pub struct WasmRuntime {
     core: Rc<RefCell<WasmCoreType>>,
     upstream_server_id: RefCell<Option<ServerId>>,
+    inbound_server_codec: RefCell<SyncConnectionCodec>,
+    inbound_client_codecs: RefCell<HashMap<ClientId, SyncConnectionCodec>>,
     /// Label for tracing (e.g. "worker", "edge", or "client").
     tier_label: &'static str,
 }
@@ -518,6 +551,8 @@ impl WasmRuntime {
         Ok(WasmRuntime {
             core: core_rc,
             upstream_server_id: RefCell::new(None),
+            inbound_server_codec: RefCell::new(SyncConnectionCodec::default()),
+            inbound_client_codecs: RefCell::new(HashMap::new()),
             tier_label,
         })
     }
@@ -530,7 +565,7 @@ impl WasmRuntime {
     #[wasm_bindgen(js_name = onSyncMessageReceived)]
     pub fn on_sync_message_received(&self, payload: JsValue) -> Result<(), JsError> {
         let _span = debug_span!("wasm::onSyncMessageReceived", tier = self.tier_label).entered();
-        let payload = self.parse_sync_payload(payload)?;
+        let payload = self.parse_server_sync_payload(payload)?;
 
         let entry = InboxEntry {
             source: Source::Server(ServerId::new()),
@@ -562,7 +597,7 @@ impl WasmRuntime {
             .map_err(|e| JsError::new(&format!("Invalid client ID: {}", e)))?;
         let cid = ClientId(uuid);
 
-        let payload = self.parse_sync_payload(payload)?;
+        let payload = self.parse_client_sync_payload(cid, payload)?;
 
         let entry = InboxEntry {
             source: Source::Client(cid),
@@ -573,14 +608,39 @@ impl WasmRuntime {
         Ok(())
     }
 
-    fn parse_sync_payload(&self, payload: JsValue) -> Result<SyncPayload, JsError> {
+    fn parse_server_sync_payload(&self, payload: JsValue) -> Result<SyncPayload, JsError> {
         if let Some(json) = payload.as_string() {
             SyncPayload::from_json(&json)
                 .map_err(|e| JsError::new(&format!("Invalid sync payload JSON: {e}")))
         } else if payload.is_instance_of::<Uint8Array>() {
             let bytes = Uint8Array::new(&payload).to_vec();
-            SyncPayload::from_bytes(&bytes)
-                .map_err(|e| JsError::new(&format!("Invalid sync payload postcard: {e}")))
+            self.inbound_server_codec
+                .borrow_mut()
+                .decode_payload(&bytes)
+                .map_err(|e| JsError::new(&format!("Invalid sync payload binary: {e}")))
+        } else {
+            Err(JsError::new(
+                "Invalid sync payload type: expected Uint8Array or JSON string",
+            ))
+        }
+    }
+
+    fn parse_client_sync_payload(
+        &self,
+        client_id: ClientId,
+        payload: JsValue,
+    ) -> Result<SyncPayload, JsError> {
+        if let Some(json) = payload.as_string() {
+            SyncPayload::from_json(&json)
+                .map_err(|e| JsError::new(&format!("Invalid sync payload JSON: {e}")))
+        } else if payload.is_instance_of::<Uint8Array>() {
+            let bytes = Uint8Array::new(&payload).to_vec();
+            self.inbound_client_codecs
+                .borrow_mut()
+                .entry(client_id)
+                .or_default()
+                .decode_payload(&bytes)
+                .map_err(|e| JsError::new(&format!("Invalid sync payload binary: {e}")))
         } else {
             Err(JsError::new(
                 "Invalid sync payload type: expected Uint8Array or JSON string",
@@ -611,6 +671,7 @@ impl WasmRuntime {
         let (object_id, row_values) = core
             .insert(table, named_values, None)
             .map_err(|e| JsError::new(&format!("Insert failed: {e}")))?;
+        core.batched_tick();
 
         let row = SubscriptionRow {
             id: object_id.uuid().to_string(),
@@ -638,6 +699,7 @@ impl WasmRuntime {
         let (object_id, row_values) = core
             .insert(table, named_values, write_context.as_ref())
             .map_err(|e| JsError::new(&format!("Insert failed: {:?}", e)))?;
+        core.batched_tick();
 
         let row = SubscriptionRow {
             id: object_id.uuid().to_string(),
@@ -710,6 +772,7 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.update(oid, updates, None)
             .map_err(|e| JsError::new(&format!("Update failed: {e}")))?;
+        core.batched_tick();
 
         tracing::debug!(object_id, "updated");
         Ok(())
@@ -741,6 +804,7 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.update(oid, updates, write_context.as_ref())
             .map_err(|e| JsError::new(&format!("Update failed: {e}")))?;
+        core.batched_tick();
 
         tracing::debug!(object_id, "updated_with_session");
         Ok(())
@@ -757,6 +821,7 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.delete(oid, None)
             .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?;
+        core.batched_tick();
 
         tracing::debug!(object_id, "deleted");
         Ok(())
@@ -779,6 +844,7 @@ impl WasmRuntime {
         let mut core = self.core.borrow_mut();
         core.delete(oid, write_context.as_ref())
             .map_err(|e| JsError::new(&format!("Delete failed: {:?}", e)))?;
+        core.batched_tick();
 
         tracing::debug!(object_id, "deleted_with_session");
         Ok(())
@@ -1008,9 +1074,8 @@ impl WasmRuntime {
             parse_subscription_inputs(query_json, session_json, settled_tier, options_json)?;
         let callback = make_subscription_callback(on_update);
 
-        let handle = self
-            .core
-            .borrow_mut()
+        let mut core = self.core.borrow_mut();
+        let handle = core
             .subscribe_with_durability_and_propagation(
                 query,
                 callback,
@@ -1019,6 +1084,7 @@ impl WasmRuntime {
                 propagation,
             )
             .map_err(|e| JsError::new(&format!("Subscribe failed: {:?}", e)))?;
+        core.batched_tick();
 
         let subscription_id = handle.0;
         tracing::debug!(subscription_id, "subscribed");
@@ -1031,9 +1097,9 @@ impl WasmRuntime {
     pub fn unsubscribe(&self, handle: f64) {
         let sub_id = handle as u64;
         let _span = tracing::debug_span!("wasm::unsubscribe", sub_id).entered();
-        self.core
-            .borrow_mut()
-            .unsubscribe(SubscriptionHandle(sub_id));
+        let mut core = self.core.borrow_mut();
+        core.unsubscribe(SubscriptionHandle(sub_id));
+        core.batched_tick();
     }
 
     /// Phase 1 of 2-phase subscribe: allocate a handle and store query params.
@@ -1076,10 +1142,10 @@ impl WasmRuntime {
         .entered();
         let callback = make_subscription_callback(on_update);
 
-        self.core
-            .borrow_mut()
-            .execute_subscription(sub_handle, callback)
+        let mut core = self.core.borrow_mut();
+        core.execute_subscription(sub_handle, callback)
             .map_err(|e| JsError::new(&format!("Execute subscription failed: {:?}", e)))?;
+        core.batched_tick();
 
         Ok(())
     }
@@ -1096,6 +1162,7 @@ impl WasmRuntime {
     #[wasm_bindgen(js_name = addServer)]
     pub fn add_server(&self, server_catalogue_state_hash: Option<String>) {
         let _span = info_span!("wasm::addServer", tier = self.tier_label).entered();
+        self.inbound_server_codec.borrow_mut().reset();
         let server_id = {
             let mut slot = self.upstream_server_id.borrow_mut();
             if let Some(server_id) = *slot {
@@ -1107,6 +1174,7 @@ impl WasmRuntime {
             }
         };
         let mut core = self.core.borrow_mut();
+        core.sync_sender().reset_server_codec();
         // Re-attach semantics: remove existing upstream edge then add again so
         // replay/full-sync runs on every successful reconnect.
         core.remove_server(server_id);
@@ -1121,6 +1189,8 @@ impl WasmRuntime {
     #[wasm_bindgen(js_name = removeServer)]
     pub fn remove_server(&self) {
         let mut core = self.core.borrow_mut();
+        self.inbound_server_codec.borrow_mut().reset();
+        core.sync_sender().reset_server_codec();
         if let Some(server_id) = *self.upstream_server_id.borrow() {
             core.remove_server(server_id);
         }
@@ -1132,6 +1202,9 @@ impl WasmRuntime {
         let _span = info_span!("wasm::addClient", tier = self.tier_label).entered();
         let client_id = ClientId::new();
         info!(%client_id, "generated client id");
+        self.inbound_client_codecs
+            .borrow_mut()
+            .insert(client_id, SyncConnectionCodec::default());
         let mut core = self.core.borrow_mut();
         core.add_client(client_id, None);
         client_id.0.to_string()
@@ -1187,6 +1260,13 @@ impl WasmRuntime {
         let core = self.core.borrow();
         let schema = core.current_schema();
         SchemaHash::compute(schema).to_string()
+    }
+
+    /// Get the active batch identifier for the current runtime context.
+    #[wasm_bindgen(js_name = getBatchId)]
+    pub fn get_batch_id(&self) -> String {
+        let core = self.core.borrow();
+        core.schema_manager().batch_id().to_string()
     }
 
     /// Debug helper: expose schema/lens state currently loaded in SchemaManager.
@@ -1269,6 +1349,15 @@ impl WasmRuntime {
     pub fn flush(&self) {
         let _span = debug_span!("wasm::flush", tier = self.tier_label).entered();
         self.core.borrow().flush_storage();
+    }
+
+    /// Flush pending sync/storage work before dropping the runtime.
+    #[wasm_bindgen]
+    pub fn close(&self) {
+        let _span = debug_span!("wasm::close", tier = self.tier_label).entered();
+        let mut core = self.core.borrow_mut();
+        core.batched_tick();
+        core.flush_storage();
     }
 
     /// Flush only the WAL buffer to OPFS (not the snapshot).
@@ -1370,6 +1459,8 @@ impl WasmRuntime {
         Ok(WasmRuntime {
             core: core_rc,
             upstream_server_id: RefCell::new(None),
+            inbound_server_codec: RefCell::new(SyncConnectionCodec::default()),
+            inbound_client_codecs: RefCell::new(HashMap::new()),
             tier_label,
         })
     }

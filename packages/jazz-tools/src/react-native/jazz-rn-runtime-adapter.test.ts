@@ -13,6 +13,7 @@ function createBinding(overrides: Partial<JazzRnRuntimeBinding> = {}): JazzRnRun
     executeSubscription: vi.fn(),
     flush: vi.fn(),
     getSchemaHash: vi.fn(() => "schema-hash"),
+    getBatchId: vi.fn(() => "b00000000000000000000000000000000"),
     insert: vi.fn((_table, _valuesJson) => JSON.stringify({ id: "row-1", values: [] })),
     insertWithSession: vi.fn((_table, _valuesJson, _writeContextJson) =>
       JSON.stringify({ id: "row-1", values: [] }),

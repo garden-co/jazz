@@ -3,7 +3,7 @@
 //! Creates minimal query graphs to evaluate policy conditions like USING and INHERITS.
 //! These graphs are throwaway - created, settled until complete, then discarded.
 
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 
 use crate::storage::Storage;
 
@@ -19,7 +19,9 @@ use super::index::ScanCondition;
 use super::policy::PolicyExpr;
 use super::session::Session;
 use super::types::ColumnName;
-use super::types::{LoadedRow, Schema, TableName, TupleDescriptor, Value};
+use super::types::{
+    LoadedRow, QueryBranchRef, Schema, TableName, TupleDescriptor, TupleProvenance, Value,
+};
 
 /// A one-shot graph for evaluating a policy condition.
 ///
@@ -69,10 +71,11 @@ impl PolicyGraph {
 
         // IndexScan node: scan _id index for exact match
         let id_column = ColumnName::new("_id");
+        let branch_ref = QueryBranchRef::from_branch_name(branch.to_string());
         let scan_node = IndexScanNode::new_with_branch(
             *table,
             id_column,
-            branch,
+            branch_ref,
             ScanCondition::Eq(Value::Uuid(object_id)),
             descriptor.clone(),
         );
@@ -149,6 +152,7 @@ impl PolicyGraph {
         session: &Session,
         schema: &Schema,
         branch: &str,
+        io: &dyn Storage,
     ) -> Option<Self> {
         let table_schema = schema.get(table)?;
         let descriptor = table_schema.columns.clone();
@@ -157,10 +161,12 @@ impl PolicyGraph {
 
         // IndexScan node: full table scan (check all rows)
         let id_column = ColumnName::new("_id");
-        let scan_node = IndexScanNode::new_with_branch(
+        let seed_branches = vec![QueryBranchRef::from_branch_name(branch.to_string())];
+        let branches = QueryGraph::resolve_active_branches_for_table(io, *table, &seed_branches)?;
+        let scan_node = IndexScanNode::new_with_branches(
             *table,
             id_column,
-            branch,
+            branches,
             ScanCondition::All,
             descriptor.clone(),
         );
@@ -207,16 +213,29 @@ impl PolicyGraph {
         rel: &crate::query_manager::relation_ir::RelExpr,
         schema: &Schema,
         branch: &str,
+        io: &dyn Storage,
     ) -> Option<Self> {
-        let branches = vec![branch.to_string()];
-        let schema_context = SchemaContext::with_defaults(schema.clone(), "main");
-        let mut graph = QueryGraph::compile_relation_ir_with_schema_context(
-            rel,
-            schema,
-            &branches,
-            None,
-            &schema_context,
-        )?;
+        let branches = vec![QueryBranchRef::from_branch_name(branch.to_string())];
+        let schema_context = match crate::query_manager::types::ComposedBranchName::parse(
+            &BranchName::new(branch.to_string()),
+        ) {
+            Some(composed) => SchemaContext::new_with_batch_id(
+                schema.clone(),
+                &composed.env,
+                &composed.user_branch,
+                composed.batch_id,
+            ),
+            None => SchemaContext::with_defaults(schema.clone(), "main"),
+        };
+        let mut graph =
+            QueryGraph::compile_relation_ir_with_branch_refs_and_schema_context_using_storage(
+                rel,
+                schema,
+                &branches,
+                None,
+                &schema_context,
+                Some(io),
+            )?;
         let output_descriptor = match graph
             .nodes
             .get(graph.output_node.0 as usize)
@@ -246,7 +265,7 @@ impl PolicyGraph {
     pub fn settle(
         &mut self,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<&TupleProvenance>) -> Option<LoadedRow>,
     ) -> bool {
         let _delta = self.graph.settle(io, row_loader);
         true
@@ -294,7 +313,8 @@ mod tests {
         ProjectExpr, RelExpr, RowIdRef, ValueRef,
     };
     use crate::query_manager::types::{
-        ColumnDescriptor, ColumnType, RowDescriptor, TablePolicies, TableSchema,
+        BatchId, ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, SchemaHash,
+        TablePolicies, TableSchema,
     };
 
     fn test_schema() -> Schema {
@@ -318,6 +338,18 @@ mod tests {
         schema
     }
 
+    fn test_branch() -> String {
+        ComposedBranchName::new(
+            "dev",
+            SchemaHash::from_bytes([7; 32]),
+            "main",
+            BatchId::from_uuid(uuid::Uuid::from_u128(1)),
+        )
+        .to_branch_name()
+        .as_str()
+        .to_string()
+    }
+
     #[test]
     fn test_for_using_check_creates_graph() {
         let schema = test_schema();
@@ -327,8 +359,15 @@ mod tests {
 
         let policy = PolicyExpr::eq_session("owner_id", vec!["user_id".into()]);
 
-        let policy_graph =
-            PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema, "main");
+        let branch = test_branch();
+        let policy_graph = PolicyGraph::for_using_check(
+            &table,
+            object_id,
+            &policy,
+            &session,
+            &schema,
+            branch.as_str(),
+        );
 
         assert!(policy_graph.is_some());
 
@@ -346,8 +385,15 @@ mod tests {
 
         let policy = PolicyExpr::True;
 
-        let policy_graph =
-            PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema, "main");
+        let branch = test_branch();
+        let policy_graph = PolicyGraph::for_using_check(
+            &table,
+            object_id,
+            &policy,
+            &session,
+            &schema,
+            branch.as_str(),
+        );
 
         assert!(policy_graph.is_none());
     }
@@ -361,9 +407,16 @@ mod tests {
 
         let policy = PolicyExpr::True;
 
-        let pg =
-            PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema, "main")
-                .unwrap();
+        let branch = test_branch();
+        let pg = PolicyGraph::for_using_check(
+            &table,
+            object_id,
+            &policy,
+            &session,
+            &schema,
+            branch.as_str(),
+        )
+        .unwrap();
 
         // Before settling, result should be false (no rows yet)
         // But it might be pending since we haven't settled
@@ -380,15 +433,23 @@ mod tests {
         // PolicyExpr::True should always pass
         let policy = PolicyExpr::True;
 
-        let mut pg =
-            PolicyGraph::for_using_check(&table, object_id, &policy, &session, &schema, "main")
-                .unwrap();
+        let branch = test_branch();
+        let mut pg = PolicyGraph::for_using_check(
+            &table,
+            object_id,
+            &policy,
+            &session,
+            &schema,
+            branch.as_str(),
+        )
+        .unwrap();
 
         // With no actual data in storage, the scan will return no rows
         let storage = crate::storage::MemoryStorage::new();
 
         // Row loader returns None for all IDs (no data)
-        let mut row_loader = |_id: ObjectId| -> Option<LoadedRow> { None };
+        let mut row_loader =
+            |_id: ObjectId, _provenance: Option<&TupleProvenance>| -> Option<LoadedRow> { None };
 
         // Settle the graph
         pg.settle(&storage, &mut row_loader);
@@ -411,7 +472,9 @@ mod tests {
             },
         };
 
-        let graph = PolicyGraph::for_exists_rel(&rel, &schema, "main");
+        let storage = crate::storage::MemoryStorage::new();
+        let branch = test_branch();
+        let graph = PolicyGraph::for_exists_rel(&rel, &schema, branch.as_str(), &storage);
         assert!(graph.is_some(), "exists-rel graph should compile");
 
         let graph = graph.expect("graph");
@@ -522,7 +585,9 @@ mod tests {
             }],
         };
 
-        let graph = PolicyGraph::for_exists_rel(&rel, &schema, "main");
+        let storage = crate::storage::MemoryStorage::new();
+        let branch = test_branch();
+        let graph = PolicyGraph::for_exists_rel(&rel, &schema, branch.as_str(), &storage);
         assert!(
             graph.is_some(),
             "gather + post-join exists-rel should compile"

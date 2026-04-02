@@ -355,6 +355,62 @@ mod tests {
         results
     }
 
+    #[test]
+    fn update_after_default_query_uses_visible_batch_branches() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("name", ColumnType::Text)
+                    .column("score", ColumnType::Integer),
+            )
+            .build();
+        let mut storage = MemoryStorage::new();
+
+        let mut alice = SchemaManager::new(
+            SyncManager::new(),
+            schema.clone(),
+            test_app_id(),
+            "dev",
+            "main",
+        )
+        .unwrap();
+        let inserted = alice
+            .insert(
+                &mut storage,
+                "users",
+                HashMap::from([
+                    ("name".to_string(), Value::Text("Alice".into())),
+                    ("score".to_string(), Value::Integer(100)),
+                ]),
+            )
+            .expect("alice insert");
+
+        let mut bob =
+            SchemaManager::new(SyncManager::new(), schema, test_app_id(), "dev", "main").unwrap();
+        let rows = execute_query(&mut bob, &mut storage, QueryBuilder::new("users").build());
+        assert_eq!(rows.len(), 1, "default query should see alice's row");
+        assert_eq!(rows[0].0, inserted.row_id);
+
+        bob.update_with_session(
+            &mut storage,
+            inserted.row_id,
+            &[
+                ("name".to_string(), Value::Text("Alicia".into())),
+                ("score".to_string(), Value::Integer(101)),
+            ],
+            None,
+        )
+        .expect("bob should update the visible row onto a fresh batch branch");
+
+        let updated_rows =
+            execute_query(&mut bob, &mut storage, QueryBuilder::new("users").build());
+        assert_eq!(updated_rows.len(), 1);
+        assert_eq!(
+            updated_rows[0].1,
+            vec![Value::Text("Alicia".into()), Value::Integer(101)]
+        );
+    }
+
     /// Ingest a remote row commit on a specific branch through ObjectManager's sync path.
     /// QueryManager picks this up during `process()` via global object updates.
     fn ingest_remote_row(
@@ -379,7 +435,7 @@ mod tests {
             .unwrap();
     }
 
-    /// Ingest a remote catalogue object on the `main` branch through sync path.
+    /// Ingest a remote catalogue object on the deterministic catalogue batch branch.
     fn ingest_remote_catalogue_object(
         qm: &mut QueryManager,
         storage: &mut MemoryStorage,
@@ -395,7 +451,12 @@ mod tests {
         let commit = stored_row_commit(content, timestamp, object_id.to_string());
         qm.sync_manager_mut()
             .object_manager
-            .receive_commit(storage, object_id, "main", commit)
+            .receive_commit(
+                storage,
+                object_id,
+                crate::schema_manager::catalogue_branch_name(),
+                commit,
+            )
             .unwrap();
     }
 
@@ -438,8 +499,14 @@ mod tests {
         assert_eq!(branches.len(), 2);
 
         // Both schema branches should be included
-        let v1_branch = format!("dev-{}-main", v1_hash.short());
-        let v2_branch = format!("dev-{}-main", v2_hash.short());
+        let v1_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v1_hash)
+            .to_string();
+        let v2_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v2_hash)
+            .to_string();
         assert!(branches.contains(&v1_branch));
         assert!(branches.contains(&v2_branch));
     }
@@ -565,8 +632,14 @@ mod tests {
         let mut storage = MemoryStorage::new();
 
         // Get branch names
-        let v1_branch = format!("dev-{}-main", v1_hash.short());
-        let v2_branch = format!("dev-{}-main", v2_hash.short());
+        let v1_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v1_hash)
+            .to_string();
+        let v2_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v2_hash)
+            .to_string();
 
         // --- Ingest a synced row on the OLD schema branch (v1 format: id, name only) ---
         let v1_table = v1.get(&TableName::new("users")).unwrap();
@@ -710,9 +783,18 @@ mod tests {
         qm.register_lens(lens_v1_v2);
 
         // Get branch names
-        let v1_branch = format!("dev-{}-main", v1_hash.short());
-        let v2_branch = format!("dev-{}-main", v2_hash.short());
-        let v3_branch = format!("dev-{}-main", v3_hash.short());
+        let v1_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v1_hash)
+            .to_string();
+        let v2_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v2_hash)
+            .to_string();
+        let v3_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v3_hash)
+            .to_string();
         let mut storage = MemoryStorage::new();
 
         // --- Ingest row on v1 branch (oldest schema) ---
@@ -896,7 +978,10 @@ mod tests {
         qm.add_live_schema(v1.clone());
         qm.register_lens(lens_v1_v2);
 
-        let v1_branch = format!("dev-{}-main", v1_hash.short());
+        let v1_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v1_hash)
+            .to_string();
 
         // Insert row on v1 branch with old column name
         let v1_table = v1.get(&TableName::new("users")).unwrap();
@@ -982,8 +1067,14 @@ mod tests {
         let mut storage = MemoryStorage::new();
 
         // Get branch names
-        let v1_branch = format!("dev-{}-main", v1_hash.short());
-        let v2_branch = format!("dev-{}-main", v2_hash.short());
+        let v1_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v1_hash)
+            .to_string();
+        let v2_branch = qm
+            .schema_context()
+            .branch_name_for_hash(v2_hash)
+            .to_string();
 
         // --- Insert row on v1 branch with old column name ---
         let v1_table = v1.get(&TableName::new("users")).unwrap();
@@ -1900,12 +1991,8 @@ mod tests {
             });
         client_b.process(&mut io_b);
 
-        // Query across both branches; row should be visible transformed into current (v1) shape.
-        let v1_branch = client_b.branch_name().to_string();
-        let v2_branch = format!("dev-{}-main", v2_hash.short());
-        let query = QueryBuilder::new("users")
-            .branches(&[&v1_branch, &v2_branch])
-            .build();
+        // Query using default fanout across active batches for both live schema prefixes.
+        let query = QueryBuilder::new("users").build();
         let results = execute_query(&mut client_b, &mut io_b, query);
         assert_eq!(results.len(), 1, "Client B should observe the synced row");
 
@@ -2806,8 +2893,16 @@ mod tests {
         let mut storage = MemoryStorage::new();
 
         // Get branch names
-        let v1_branch = format!("dev-{}-main", v1_hash.short());
-        let v2_branch = format!("dev-{}-main", v2_hash.short());
+        let v1_branch = client
+            .query_manager()
+            .schema_context()
+            .branch_name_for_hash(v1_hash)
+            .to_string();
+        let v2_branch = client
+            .query_manager()
+            .schema_context()
+            .branch_name_for_hash(v2_hash)
+            .to_string();
 
         // Create a row on the v2 branch (simulate receiving via sync)
         // IMPORTANT: When schema goes through encode/decode, columns are sorted alphabetically.

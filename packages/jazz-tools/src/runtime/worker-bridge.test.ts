@@ -86,6 +86,7 @@ function createRuntimeMock(): {
     addClient: () => "client-id",
     getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
+    getBatchId: () => "b00000000000000000000000000000000",
   };
 
   return {

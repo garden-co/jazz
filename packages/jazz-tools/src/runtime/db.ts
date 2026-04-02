@@ -506,7 +506,7 @@ export class Db {
         {
           // Worker-bridged runtimes exchange postcard payloads with peers;
           // direct browser/server routing keeps JSON payloads.
-          useBinaryEncoding: this.worker !== null,
+          useBinaryEncoding: this.worker !== null || Boolean(this.config.serverUrl),
         },
       );
 
@@ -538,13 +538,17 @@ export class Db {
     }
 
     const bridge = new WorkerBridge(this.worker, client.getRuntime());
+    const readyPromise = bridge
+      .init(this.buildWorkerBridgeOptions(schemaJson))
+      .then(() => undefined);
+    client.setWorkerReadyPromise(readyPromise);
     this.leaderPeerIds.clear();
     bridge.onPeerSync((batch) => {
       this.handleWorkerPeerSync(batch);
     });
     this.applyBridgeRoutingForCurrentLeader(bridge, false);
     this.workerBridge = bridge;
-    this.bridgeReady = bridge.init(this.buildWorkerBridgeOptions(schemaJson)).then(() => undefined);
+    this.bridgeReady = readyPromise;
   }
 
   private buildWorkerBridgeOptions(schemaJson: string): WorkerBridgeOptions {
@@ -844,6 +848,9 @@ export class Db {
         // Best effort
       }
       this.workerBridge = null;
+      for (const client of this.clients.values()) {
+        client.setWorkerReadyPromise(null);
+      }
     }
     this.bridgeReady = null;
 
@@ -880,6 +887,9 @@ export class Db {
       }
     }
     this.workerBridge = null;
+    for (const client of this.clients.values()) {
+      client.setWorkerReadyPromise(null);
+    }
     this.bridgeReady = null;
 
     for (const client of this.clients.values()) {
@@ -1317,6 +1327,9 @@ export class Db {
     if (this.workerBridge && this.worker) {
       await this.workerBridge.shutdown(this.worker);
       this.workerBridge = null;
+      for (const client of this.clients.values()) {
+        client.setWorkerReadyPromise(null);
+      }
     }
 
     for (const client of this.clients.values()) {

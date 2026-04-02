@@ -42,6 +42,26 @@ pub struct OutputNode {
 }
 
 impl OutputNode {
+    fn normalize_ordered_tuples(ordered_tuples: &[Tuple]) -> Vec<Tuple> {
+        let mut normalized: Vec<Tuple> = Vec::new();
+        let mut positions_by_ids: std::collections::HashMap<Vec<crate::object::ObjectId>, usize> =
+            std::collections::HashMap::new();
+
+        for tuple in ordered_tuples.iter().cloned() {
+            let ids = tuple.ids();
+            if let Some(position) = positions_by_ids.get(&ids).copied() {
+                let mut merged = tuple;
+                merged.merge_provenance(normalized[position].provenance());
+                normalized[position] = merged;
+            } else {
+                positions_by_ids.insert(ids, normalized.len());
+                normalized.push(tuple);
+            }
+        }
+
+        normalized
+    }
+
     /// Create an OutputNode with TupleDescriptor.
     /// The output descriptor is always fully materialized.
     pub fn with_tuple_descriptor(tuple_descriptor: TupleDescriptor, mode: OutputMode) -> Self {
@@ -100,9 +120,10 @@ impl OutputNode {
 
     /// Rebuild ordered output from a full ordered upstream input.
     pub fn process_with_ordered_input(&mut self, ordered_tuples: &[Tuple]) -> TupleDelta {
-        let delta = compute_tuple_delta(&self.ordered_tuples, ordered_tuples);
+        let normalized = Self::normalize_ordered_tuples(ordered_tuples);
+        let delta = compute_tuple_delta(&self.ordered_tuples, &normalized);
 
-        self.ordered_tuples = ordered_tuples.to_vec();
+        self.ordered_tuples = normalized;
         self.current_tuples = self.ordered_tuples.iter().cloned().collect();
         self.dirty = false;
         self.subscriber_initialized = true;
@@ -187,6 +208,9 @@ impl RowNode for OutputNode {
                 self.ordered_tuples[pos] = new_tuple.clone();
             }
         }
+
+        self.ordered_tuples = Self::normalize_ordered_tuples(&self.ordered_tuples);
+        self.current_tuples = self.ordered_tuples.iter().cloned().collect();
 
         self.dirty = false;
 
@@ -456,5 +480,53 @@ mod tests {
         assert!(delta.removed.is_empty());
         assert_eq!(delta.moved.len(), 1);
         assert_eq!(delta.moved[0].first_id(), tuples[0].first_id());
+    }
+
+    #[test]
+    fn ordered_input_dedupes_duplicate_ids_and_keeps_latest_row() {
+        let mut node = make_output_node(OutputMode::Delta);
+        let id = ObjectId::new();
+        let old_tuple = make_tuple(id, 1, "Old");
+        let new_tuple = make_tuple(id, 2, "New");
+
+        let delta = node.process_with_ordered_input(&[old_tuple, new_tuple]);
+
+        assert_eq!(delta.added.len(), 1);
+        assert!(delta.removed.is_empty());
+        assert!(delta.moved.is_empty());
+        assert!(delta.updated.is_empty());
+
+        let decoded = node.decode_current();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0][0], Value::Integer(2));
+        assert_eq!(decoded[0][1], Value::Text("New".into()));
+    }
+
+    #[test]
+    fn incremental_process_dedupes_duplicate_added_ids() {
+        let mut node = make_output_node(OutputMode::Delta);
+        let id = ObjectId::new();
+        let original = make_tuple(id, 1, "Old");
+        let replacement = make_tuple(id, 2, "New");
+
+        node.process(TupleDelta {
+            added: vec![original],
+            removed: vec![],
+            moved: vec![],
+            updated: vec![],
+        });
+
+        node.process(TupleDelta {
+            added: vec![replacement],
+            removed: vec![],
+            moved: vec![],
+            updated: vec![],
+        });
+
+        let decoded = node.decode_current();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0][0], Value::Integer(2));
+        assert_eq!(decoded[0][1], Value::Text("New".into()));
+        assert_eq!(node.ordered_tuples().len(), 1);
     }
 }

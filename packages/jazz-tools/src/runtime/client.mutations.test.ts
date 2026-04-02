@@ -87,6 +87,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     addClient: () => "00000000-0000-0000-0000-000000000001",
     getSchema: () => ({}),
     getSchemaHash: () => "schema-hash",
+    getBatchId: () => "b00000000000000000000000000000000",
   };
   const runtime: Runtime = { ...runtimeBase, ...runtimeOverrides };
 

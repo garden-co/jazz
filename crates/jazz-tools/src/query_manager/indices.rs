@@ -1,11 +1,25 @@
-use crate::object::ObjectId;
+use std::collections::HashMap;
+
+use crate::commit::{Commit, CommitId};
+use crate::object::{BranchName, ObjectId};
 use crate::storage::{Storage, StorageError, validate_index_value_size};
 
 use super::encoding::decode_column;
 use super::manager::{QueryError, QueryManager};
-use super::types::{ColumnDescriptor, ColumnType, RowDescriptor, TableName, Value};
+use super::types::{ColumnDescriptor, ColumnType, QueryBranchRef, RowDescriptor, TableName, Value};
+
+#[derive(Debug, Clone)]
+struct IndexSourceState {
+    branch: BranchName,
+    data: Vec<u8>,
+    is_deleted: bool,
+}
 
 impl QueryManager {
+    fn branch_ref(branch: &BranchName) -> QueryBranchRef {
+        QueryBranchRef::from_branch_name(*branch)
+    }
+
     fn map_index_storage_error(error: StorageError) -> QueryError {
         match error {
             StorageError::IndexKeyTooLarge {
@@ -47,11 +61,12 @@ impl QueryManager {
     fn validate_column_index_values(
         table: &str,
         column: &ColumnDescriptor,
-        branch: &str,
+        branch: &BranchName,
         value: &Value,
     ) -> Result<(), QueryError> {
+        let branch_ref = Self::branch_ref(branch);
         for index_value in Self::expand_index_values(column, value) {
-            validate_index_value_size(table, column.name.as_str(), branch, &index_value)
+            validate_index_value_size(table, column.name.as_str(), &branch_ref, &index_value)
                 .map_err(Self::map_index_storage_error)?;
         }
         Ok(())
@@ -59,7 +74,7 @@ impl QueryManager {
 
     pub(super) fn validate_write_index_values_on_branch(
         table: &str,
-        branch: &str,
+        branch: &BranchName,
         values: &[Value],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
@@ -75,13 +90,20 @@ impl QueryManager {
         storage: &mut dyn Storage,
         table: &str,
         column: &ColumnDescriptor,
-        branch: &str,
+        branch: &BranchName,
         value: &Value,
         object_id: ObjectId,
     ) -> Result<(), QueryError> {
+        let branch_ref = Self::branch_ref(branch);
         for index_value in Self::expand_index_values(column, value) {
             storage
-                .index_insert(table, column.name.as_str(), branch, &index_value, object_id)
+                .index_insert(
+                    table,
+                    column.name.as_str(),
+                    &branch_ref,
+                    &index_value,
+                    object_id,
+                )
                 .map_err(Self::map_index_storage_error)?;
         }
         Ok(())
@@ -91,33 +113,44 @@ impl QueryManager {
         storage: &mut dyn Storage,
         table: &str,
         column: &ColumnDescriptor,
-        branch: &str,
+        branch: &BranchName,
         value: &Value,
         object_id: ObjectId,
     ) -> Result<(), QueryError> {
+        let branch_ref = Self::branch_ref(branch);
         for index_value in Self::expand_index_values(column, value) {
             storage
-                .index_remove(table, column.name.as_str(), branch, &index_value, object_id)
+                .index_remove(
+                    table,
+                    column.name.as_str(),
+                    &branch_ref,
+                    &index_value,
+                    object_id,
+                )
                 .map_err(Self::map_index_storage_error)?;
         }
         Ok(())
     }
 
-    /// Update indices when a row is inserted on a specific branch.
-    pub(super) fn update_indices_for_insert_on_branch(
+    fn insert_live_row_indices_on_branch(
         storage: &mut dyn Storage,
         table: &str,
-        branch: &str,
+        branch: &BranchName,
         object_id: ObjectId,
         data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        // Update "_id" index
+        let branch_ref = Self::branch_ref(branch);
         storage
-            .index_insert(table, "_id", branch, &Value::Uuid(object_id), object_id)
+            .index_insert(
+                table,
+                "_id",
+                &branch_ref,
+                &Value::Uuid(object_id),
+                object_id,
+            )
             .map_err(Self::map_index_storage_error)?;
 
-        // Update column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
             if let Ok(value) = decode_column(descriptor, data, col_idx)
                 && value != Value::Null
@@ -129,250 +162,265 @@ impl QueryManager {
         Ok(())
     }
 
-    /// Update indices when a row is inserted (on the default branch).
-    pub(super) fn update_indices_for_insert(
-        &self,
+    fn remove_live_row_indices_on_branch(
         storage: &mut dyn Storage,
         table: &str,
+        branch: &BranchName,
         object_id: ObjectId,
         data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        Self::update_indices_for_insert_on_branch(
-            storage,
-            table,
-            &self.current_branch(),
-            object_id,
-            data,
-            descriptor,
-        )
-    }
-
-    /// Update indices when a row is updated on a specific branch.
-    pub(super) fn update_indices_for_update_on_branch(
-        storage: &mut dyn Storage,
-        table: &str,
-        branch: &str,
-        object_id: ObjectId,
-        old_data: &[u8],
-        new_data: &[u8],
-        descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
-        // "_id" index doesn't change on update
-
-        // Update column indices (remove old value, add new value)
-        for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            // Remove old value
-            if let Ok(old_value) = decode_column(descriptor, old_data, col_idx)
-                && old_value != Value::Null
-            {
-                Self::remove_column_index_values(
-                    storage, table, col, branch, &old_value, object_id,
-                )?;
-            }
-            // Add new value
-            if let Ok(new_value) = decode_column(descriptor, new_data, col_idx)
-                && new_value != Value::Null
-            {
-                Self::insert_column_index_values(
-                    storage, table, col, branch, &new_value, object_id,
-                )?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Update indices when a row is updated (on the default branch).
-    pub(super) fn update_indices_for_update(
-        &self,
-        storage: &mut dyn Storage,
-        table: &str,
-        object_id: ObjectId,
-        old_data: &[u8],
-        new_data: &[u8],
-        descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
-        Self::update_indices_for_update_on_branch(
-            storage,
-            table,
-            &self.current_branch(),
-            object_id,
-            old_data,
-            new_data,
-            descriptor,
-        )
-    }
-
-    /// Update indices for soft delete on a specific branch.
-    pub(super) fn update_indices_for_soft_delete_on_branch(
-        storage: &mut dyn Storage,
-        table: &str,
-        branch: &str,
-        object_id: ObjectId,
-        old_data: &[u8],
-        descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
-        // Remove from "_id" index
+        let branch_ref = Self::branch_ref(branch);
         storage
-            .index_remove(table, "_id", branch, &Value::Uuid(object_id), object_id)
+            .index_remove(
+                table,
+                "_id",
+                &branch_ref,
+                &Value::Uuid(object_id),
+                object_id,
+            )
             .map_err(Self::map_index_storage_error)?;
 
-        // Remove from all column indices
         for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            if let Ok(value) = decode_column(descriptor, old_data, col_idx)
+            if let Ok(value) = decode_column(descriptor, data, col_idx)
                 && value != Value::Null
             {
                 Self::remove_column_index_values(storage, table, col, branch, &value, object_id)?;
             }
         }
 
-        // Add to "_id_deleted" index
+        Ok(())
+    }
+
+    fn insert_deleted_row_index_on_branch(
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &BranchName,
+        object_id: ObjectId,
+    ) -> Result<(), QueryError> {
+        let branch_ref = Self::branch_ref(branch);
         storage
             .index_insert(
                 table,
                 "_id_deleted",
-                branch,
+                &branch_ref,
                 &Value::Uuid(object_id),
                 object_id,
             )
-            .map_err(Self::map_index_storage_error)?;
-
-        Ok(())
+            .map_err(Self::map_index_storage_error)
     }
 
-    /// Update indices for soft delete (on the default branch).
-    pub(super) fn update_indices_for_soft_delete(
-        &self,
+    fn remove_deleted_row_index_on_branch(
         storage: &mut dyn Storage,
         table: &str,
+        branch: &BranchName,
         object_id: ObjectId,
-        old_data: &[u8],
-        descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        Self::update_indices_for_soft_delete_on_branch(
-            storage,
-            table,
-            &self.current_branch(),
-            object_id,
-            old_data,
-            descriptor,
-        )
-    }
-
-    /// Update indices for hard delete on a specific branch.
-    pub(super) fn update_indices_for_hard_delete_on_branch(
-        storage: &mut dyn Storage,
-        table: &str,
-        branch: &str,
-        object_id: ObjectId,
-        old_data: Option<&[u8]>,
-        descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
-        // Remove from "_id" index (may not be present if already soft-deleted)
-        storage
-            .index_remove(table, "_id", branch, &Value::Uuid(object_id), object_id)
-            .map_err(Self::map_index_storage_error)?;
-
-        // Remove from all column indices (if we have old data)
-        if let Some(data) = old_data {
-            for (col_idx, col) in descriptor.columns.iter().enumerate() {
-                if let Ok(value) = decode_column(descriptor, data, col_idx)
-                    && value != Value::Null
-                {
-                    Self::remove_column_index_values(
-                        storage, table, col, branch, &value, object_id,
-                    )?;
-                }
-            }
-        }
-
-        // Remove from "_id_deleted" index (handles soft→hard upgrade)
+        let branch_ref = Self::branch_ref(branch);
         storage
             .index_remove(
                 table,
                 "_id_deleted",
-                branch,
+                &branch_ref,
                 &Value::Uuid(object_id),
                 object_id,
             )
-            .map_err(Self::map_index_storage_error)?;
-
-        Ok(())
+            .map_err(Self::map_index_storage_error)
     }
 
-    /// Update indices for hard delete (on the default branch).
-    pub(super) fn update_indices_for_hard_delete(
-        &self,
+    fn retire_source_indices(
         storage: &mut dyn Storage,
         table: &str,
         object_id: ObjectId,
-        old_data: Option<&[u8]>,
         descriptor: &RowDescriptor,
+        source_state: &IndexSourceState,
     ) -> Result<(), QueryError> {
-        Self::update_indices_for_hard_delete_on_branch(
-            storage,
-            table,
-            &self.current_branch(),
-            object_id,
-            old_data,
-            descriptor,
-        )
-    }
-
-    /// Update indices for undelete on a specific branch.
-    pub(super) fn update_indices_for_undelete_on_branch(
-        storage: &mut dyn Storage,
-        table: &str,
-        branch: &str,
-        object_id: ObjectId,
-        new_data: &[u8],
-        descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
-        // Remove from "_id_deleted" index
-        storage
-            .index_remove(
+        if source_state.is_deleted {
+            Self::remove_deleted_row_index_on_branch(
+                storage,
                 table,
-                "_id_deleted",
-                branch,
-                &Value::Uuid(object_id),
+                &source_state.branch,
                 object_id,
             )
-            .map_err(Self::map_index_storage_error)?;
+        } else {
+            Self::remove_live_row_indices_on_branch(
+                storage,
+                table,
+                &source_state.branch,
+                object_id,
+                &source_state.data,
+                descriptor,
+            )
+        }
+    }
 
-        // Add to "_id" index
-        storage
-            .index_insert(table, "_id", branch, &Value::Uuid(object_id), object_id)
-            .map_err(Self::map_index_storage_error)?;
+    pub(super) fn tip_commit_on_branch(
+        &self,
+        object_id: ObjectId,
+        branch: &BranchName,
+    ) -> Option<(CommitId, Commit)> {
+        let object = self.sync_manager.object_manager.get(object_id)?;
+        let branch = object.branches.get(branch)?;
+        let mut tips: Vec<_> = branch.tips.iter().copied().collect();
+        tips.sort_by_key(|id| {
+            (
+                branch
+                    .commits
+                    .get(id)
+                    .map(|commit| commit.timestamp)
+                    .unwrap_or(0),
+                *id,
+            )
+        });
+        let tip_id = *tips.last()?;
+        let commit = branch.commits.get(&tip_id)?.clone();
+        Some((tip_id, commit))
+    }
 
-        // Add to all column indices
-        for (col_idx, col) in descriptor.columns.iter().enumerate() {
-            if let Ok(value) = decode_column(descriptor, new_data, col_idx)
-                && value != Value::Null
-            {
-                Self::insert_column_index_values(storage, table, col, branch, &value, object_id)?;
+    fn commit_branch_for_object<H: Storage + ?Sized>(
+        &self,
+        storage: &H,
+        object_id: ObjectId,
+        commit_id: CommitId,
+    ) -> Option<BranchName> {
+        self.sync_manager
+            .object_manager
+            .get(object_id)
+            .and_then(|object| {
+                object
+                    .commit_branches
+                    .get(&commit_id)
+                    .copied()
+                    .map(|branch| branch.branch_name())
+            })
+            .or_else(|| {
+                storage
+                    .load_commit_branch(object_id, commit_id)
+                    .ok()
+                    .flatten()
+                    .map(|branch| branch.branch_name())
+            })
+    }
+
+    fn source_states_for_head_commit(
+        &mut self,
+        storage: &dyn Storage,
+        object_id: ObjectId,
+        branch: &BranchName,
+        head_commit_id: CommitId,
+    ) -> Result<Vec<IndexSourceState>, QueryError> {
+        let requested_branches = [branch.as_str().to_string()];
+        self.sync_manager
+            .object_manager
+            .get_or_load(object_id, storage, &requested_branches)
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
+
+        let head_commit = self
+            .sync_manager
+            .object_manager
+            .get(object_id)
+            .and_then(|object| object.branches.get(branch))
+            .and_then(|object_branch| object_branch.commits.get(&head_commit_id))
+            .cloned()
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
+
+        let mut states_by_branch = HashMap::new();
+        for parent_id in &head_commit.parents {
+            let Some(parent_branch) = self.commit_branch_for_object(storage, object_id, *parent_id)
+            else {
+                continue;
+            };
+
+            let parent_branch_request = [parent_branch.as_str().to_string()];
+            let _ = self.sync_manager.object_manager.get_or_load_tips(
+                object_id,
+                storage,
+                &parent_branch_request,
+            );
+
+            let Some(parent_commit) = self
+                .sync_manager
+                .object_manager
+                .get(object_id)
+                .and_then(|object| object.branches.get(&parent_branch))
+                .and_then(|object_branch| object_branch.commits.get(parent_id))
+                .cloned()
+            else {
+                continue;
+            };
+
+            if parent_commit.content.is_empty() && parent_commit.is_hard_deleted() {
+                continue;
             }
+
+            states_by_branch
+                .entry(parent_branch)
+                .or_insert_with(|| IndexSourceState {
+                    branch: parent_branch,
+                    is_deleted: parent_commit.is_soft_deleted(),
+                    data: parent_commit.content,
+                });
         }
 
-        Ok(())
+        Ok(states_by_branch.into_values().collect())
     }
 
-    /// Update indices for undelete (on the default branch).
-    pub(super) fn update_indices_for_undelete(
-        &self,
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn reconcile_indices_after_live_commit(
+        &mut self,
         storage: &mut dyn Storage,
         table: &str,
+        branch: &BranchName,
         object_id: ObjectId,
+        head_commit_id: CommitId,
         new_data: &[u8],
         descriptor: &RowDescriptor,
     ) -> Result<(), QueryError> {
-        Self::update_indices_for_undelete_on_branch(
-            storage,
-            table,
-            &self.current_branch(),
-            object_id,
-            new_data,
-            descriptor,
+        for source_state in
+            self.source_states_for_head_commit(storage, object_id, branch, head_commit_id)?
+        {
+            Self::retire_source_indices(storage, table, object_id, descriptor, &source_state)?;
+        }
+
+        Self::insert_live_row_indices_on_branch(
+            storage, table, branch, object_id, new_data, descriptor,
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn reconcile_indices_after_soft_delete_commit(
+        &mut self,
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &BranchName,
+        object_id: ObjectId,
+        head_commit_id: CommitId,
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        for source_state in
+            self.source_states_for_head_commit(storage, object_id, branch, head_commit_id)?
+        {
+            Self::retire_source_indices(storage, table, object_id, descriptor, &source_state)?;
+        }
+
+        Self::insert_deleted_row_index_on_branch(storage, table, branch, object_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn reconcile_indices_after_hard_delete_commit(
+        &mut self,
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &BranchName,
+        object_id: ObjectId,
+        head_commit_id: CommitId,
+        descriptor: &RowDescriptor,
+    ) -> Result<(), QueryError> {
+        for source_state in
+            self.source_states_for_head_commit(storage, object_id, branch, head_commit_id)?
+        {
+            Self::retire_source_indices(storage, table, object_id, descriptor, &source_state)?;
+        }
+        Ok(())
     }
 }

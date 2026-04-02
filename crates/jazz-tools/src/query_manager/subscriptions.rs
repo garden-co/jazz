@@ -19,7 +19,7 @@ use super::query::{Query, QueryBuilder};
 use super::session::Session;
 #[cfg(test)]
 use super::types::Value;
-use super::types::{ComposedBranchName, Schema, SchemaHash};
+use super::types::{Schema, SchemaHash};
 #[cfg(test)]
 use crate::object::ObjectId;
 
@@ -91,25 +91,32 @@ impl QueryManager {
         let _span =
             tracing::debug_span!("QM::subscribe", table = %query.table, ?durability_tier).entered();
         // Determine branches
-        let branches: Vec<String> = if !query.branches.is_empty() {
-            query.branches.clone()
-        } else if self.schema_context.is_initialized() {
-            self.schema_context
-                .all_branch_names()
-                .into_iter()
-                .map(|b| b.as_str().to_string())
-                .collect()
-        } else {
-            return Err(QueryError::QueryCompilationError(
-                "schema context not initialized - call set_current_schema() first".into(),
-            ));
-        };
+        let branches: Vec<crate::query_manager::types::QueryBranchRef> =
+            if !query.branches.is_empty() {
+                query
+                    .branches
+                    .iter()
+                    .map(|branch| self.resolve_query_branch_ref(branch))
+                    .collect()
+            } else if self.schema_context.is_initialized() {
+                self.schema_context
+                    .all_branch_names()
+                    .into_iter()
+                    .map(crate::query_manager::types::QueryBranchRef::from_branch_name)
+                    .collect()
+            } else {
+                return Err(QueryError::QueryCompilationError(
+                    "schema context not initialized - call set_current_schema() first".into(),
+                ));
+            };
 
         let uses_explicit_authorization_filtering =
             self.local_subscription_uses_explicit_authorization(session.as_ref());
         let compile_schema = self.local_subscription_compile_schema(session.as_ref());
         let graph = Self::compile_graph(
+            None,
             &query,
+            &branches,
             &compile_schema,
             session.clone(),
             &self.schema_context,
@@ -179,19 +186,33 @@ impl QueryManager {
             .collect();
 
         // Determine branches from query or context
-        let branches: Vec<String> = if !query.branches.is_empty() {
-            query.branches.clone()
+        let branches: Vec<crate::query_manager::types::QueryBranchRef> = if !query
+            .branches
+            .is_empty()
+        {
+            query
+                .branches
+                .iter()
+                .map(|branch| Self::resolve_query_branch_ref_for_context(schema_context, branch))
+                .collect()
         } else {
             schema_context
                 .all_branch_names()
                 .into_iter()
-                .map(|b| b.as_str().to_string())
+                .map(crate::query_manager::types::QueryBranchRef::from_branch_name)
                 .collect()
         };
 
         // Compile query graph with explicit schema context
-        let graph = Self::compile_graph(&query, &compile_schema, session.clone(), schema_context)
-            .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
+        let graph = Self::compile_graph(
+            None,
+            &query,
+            &branches,
+            &compile_schema,
+            session.clone(),
+            schema_context,
+        )
+        .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -305,6 +326,7 @@ impl QueryManager {
             self.sync_manager.send_query_subscription_to_servers(
                 query_id,
                 sync_query,
+                self.schema_context.query_context(),
                 session,
                 propagation,
             );
@@ -368,32 +390,46 @@ impl QueryManager {
     /// Replay all currently active local and downstream query subscriptions
     /// to a newly added upstream server.
     fn replay_active_query_subscriptions_to_server(&mut self, server_id: ServerId) {
-        let local_subs: Vec<(QueryId, Query, Option<Session>, QueryPropagation)> = self
+        let local_subs: Vec<(
+            QueryId,
+            Query,
+            crate::schema_manager::QuerySchemaContext,
+            Option<Session>,
+            QueryPropagation,
+        )> = self
             .subscriptions
             .iter()
             .map(|(sub_id, sub)| {
                 (
                     QueryId(sub_id.0),
                     self.sync_query_payload_for_upstream(&sub.query),
+                    self.schema_context.query_context(),
                     sub.session.clone(),
                     sub.propagation,
                 )
             })
             .collect();
 
-        for (query_id, query, session, propagation) in local_subs {
+        for (query_id, query, schema_context, session, propagation) in local_subs {
             if self.should_send_local_subscription_upstream(propagation) {
                 self.sync_manager.send_query_subscription_to_server(
                     server_id,
                     query_id,
                     query,
+                    schema_context,
                     session,
                     propagation,
                 );
             }
         }
 
-        let downstream_subs: Vec<(QueryId, Query, Option<Session>, QueryPropagation)> = self
+        let downstream_subs: Vec<(
+            QueryId,
+            Query,
+            crate::schema_manager::QuerySchemaContext,
+            Option<Session>,
+            QueryPropagation,
+        )> = self
             .server_subscriptions
             .iter()
             .filter(|(_, sub)| sub.propagation == QueryPropagation::Full)
@@ -401,17 +437,19 @@ impl QueryManager {
                 (
                     *query_id,
                     sub.query.clone(),
+                    sub.schema_context.query_context(),
                     sub.session.clone(),
                     sub.propagation,
                 )
             })
             .collect();
 
-        for (query_id, query, session, propagation) in downstream_subs {
+        for (query_id, query, schema_context, session, propagation) in downstream_subs {
             self.sync_manager.send_query_subscription_to_server(
                 server_id,
                 query_id,
                 query,
+                schema_context,
                 session,
                 propagation,
             );
@@ -464,58 +502,6 @@ impl QueryManager {
     /// This enables lazy branch activation when rows arrive with unknown branches.
     pub fn set_known_schemas(&mut self, schemas: Arc<HashMap<SchemaHash, Schema>>) {
         self.known_schemas = schemas;
-    }
-
-    /// Add a branch → schema hash mapping (for server-mode schema activation).
-    ///
-    /// Used when a subscription arrives with explicit schema context.
-    pub fn add_schema_branch(&mut self, branch: &str, schema_hash: SchemaHash) {
-        self.branch_schema_map
-            .insert(branch.to_string(), schema_hash);
-    }
-
-    /// Find a schema in known_schemas by its short hash prefix.
-    ///
-    /// Returns the full SchemaHash if found. The partial hash has the first 4 bytes
-    /// filled with the short hash, and the rest zeroed (as produced by ComposedBranchName::parse).
-    pub(super) fn find_schema_by_short_hash(&self, partial: &SchemaHash) -> Option<SchemaHash> {
-        let target_short = &partial.0[..4];
-
-        // Search known_schemas for matching short hash
-        for full_hash in self.known_schemas.keys() {
-            if &full_hash.0[..4] == target_short {
-                return Some(*full_hash);
-            }
-        }
-        None
-    }
-
-    /// Update the branch_schema_map from the current schema context.
-    ///
-    /// Called internally after schema changes to ensure the map
-    /// includes all live schemas.
-    pub fn update_branch_schema_map(&mut self) {
-        if !self.schema_context.is_initialized() {
-            return;
-        }
-
-        // Current schema branch
-        self.branch_schema_map.insert(
-            self.schema_context.branch_name().as_str().to_string(),
-            self.schema_context.current_hash,
-        );
-
-        // Live schema branches
-        for &live_hash in self.schema_context.live_schemas.keys() {
-            let live_branch = ComposedBranchName::new(
-                &self.schema_context.env,
-                live_hash,
-                &self.schema_context.user_branch,
-            )
-            .to_branch_name();
-            self.branch_schema_map
-                .insert(live_branch.as_str().to_string(), live_hash);
-        }
     }
 
     /// Get subscription results as decoded rows with ObjectIds (for testing).

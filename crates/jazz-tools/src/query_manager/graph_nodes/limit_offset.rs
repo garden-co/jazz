@@ -1,3 +1,5 @@
+use std::cell::OnceCell;
+
 use ahash::AHashSet;
 
 use crate::query_manager::{
@@ -20,7 +22,7 @@ pub struct LimitOffsetNode {
     /// Current tuples after limit/offset.
     windowed_tuples: Vec<Tuple>,
     /// HashSet view for trait requirement.
-    current_tuples: AHashSet<Tuple>,
+    current_tuples: OnceCell<AHashSet<Tuple>>,
     dirty: bool,
 }
 
@@ -39,7 +41,7 @@ impl LimitOffsetNode {
             offset,
             all_tuples: Vec::new(),
             windowed_tuples: Vec::new(),
-            current_tuples: AHashSet::new(),
+            current_tuples: OnceCell::new(),
             dirty: true,
         }
     }
@@ -56,28 +58,33 @@ impl LimitOffsetNode {
             Some(limit) => (start + limit).min(self.all_tuples.len()),
             None => self.all_tuples.len(),
         };
-        let sync_scope = self.sync_scope_provenance();
         self.windowed_tuples.clear();
+        self.windowed_tuples.reserve(end.saturating_sub(start));
         self.windowed_tuples
-            .extend(
-                self.all_tuples[start..end]
-                    .iter()
-                    .cloned()
-                    .map(|mut tuple| {
-                        tuple.merge_provenance(&sync_scope);
-                        tuple
-                    }),
-            );
-        self.current_tuples = self.windowed_tuples.iter().cloned().collect();
+            .extend(self.all_tuples[start..end].iter().cloned());
+        self.current_tuples.take();
     }
 
     /// Rebuild state from a full ordered input (e.g. upstream SortNode output).
     pub fn process_with_ordered_input(&mut self, ordered_tuples: &[Tuple]) -> TupleDelta {
         let old_tuples = std::mem::take(&mut self.windowed_tuples);
         self.all_tuples.clear();
+        self.all_tuples.reserve(ordered_tuples.len());
         self.all_tuples.extend_from_slice(ordered_tuples);
         self.recompute_tuple_window();
         self.dirty = false;
+        if old_tuples.is_empty() {
+            return TupleDelta {
+                added: self.windowed_tuples.clone(),
+                ..TupleDelta::new()
+            };
+        }
+        if self.windowed_tuples.is_empty() {
+            return TupleDelta {
+                removed: old_tuples,
+                ..TupleDelta::new()
+            };
+        }
         compute_tuple_delta(&old_tuples, &self.windowed_tuples)
     }
 
@@ -97,13 +104,6 @@ impl LimitOffsetNode {
             None => self.all_tuples.len(),
         };
         &self.all_tuples[..end]
-    }
-
-    fn sync_scope_provenance(&self) -> crate::query_manager::types::TupleProvenance {
-        self.sync_input_tuples()
-            .iter()
-            .flat_map(|tuple| tuple.provenance().iter().copied())
-            .collect()
     }
 }
 
@@ -149,7 +149,8 @@ impl RowNode for LimitOffsetNode {
     }
 
     fn current_tuples(&self) -> &AHashSet<Tuple> {
-        &self.current_tuples
+        self.current_tuples
+            .get_or_init(|| self.windowed_tuples.iter().cloned().collect())
     }
 
     fn mark_dirty(&mut self) {
@@ -167,7 +168,10 @@ mod tests {
     use crate::commit::CommitId;
     use crate::object::ObjectId;
     use crate::query_manager::encoding::encode_row;
-    use crate::query_manager::types::{ColumnDescriptor, ColumnType, TupleElement, Value};
+    use crate::query_manager::types::{
+        BatchBranchKey, BatchId, BranchPrefixName, ColumnDescriptor, ColumnType, SchemaHash,
+        TupleElement, Value,
+    };
 
     fn test_descriptor() -> RowDescriptor {
         RowDescriptor::new(vec![
@@ -185,6 +189,14 @@ mod tests {
             commit_id: CommitId([0; 32]),
             row_provenance: crate::metadata::RowProvenance::for_insert("jazz:test", 0),
         }])
+    }
+
+    fn make_tuple_with_branch(id: ObjectId, n: i32, name: &str, batch_byte: u8) -> Tuple {
+        let branch_key = BatchBranchKey::from_prefix_and_batch(
+            &BranchPrefixName::new("dev", SchemaHash([batch_byte; 32]), "main"),
+            BatchId([batch_byte; 16]),
+        );
+        make_tuple(id, n, name).with_provenance([(id, branch_key)].into_iter().collect())
     }
 
     fn contains_id(tuples: &[Tuple], id: ObjectId) -> bool {
@@ -443,5 +455,31 @@ mod tests {
         assert!(delta.removed.is_empty());
         assert_eq!(delta.moved.len(), 1);
         assert_eq!(delta.moved[0].first_id(), tuples[0].first_id());
+    }
+
+    #[test]
+    fn ordered_input_keeps_visible_tuple_provenance_local() {
+        let mut node = make_limit_offset_node(Some(1), 1);
+        let tuples = vec![
+            make_tuple_with_branch(ObjectId::new(), 1, "A", 1),
+            make_tuple_with_branch(ObjectId::new(), 2, "B", 2),
+        ];
+
+        node.process_with_ordered_input(&tuples);
+
+        assert_eq!(
+            node.sync_input_tuples()
+                .iter()
+                .flat_map(|tuple| tuple.provenance().iter().copied())
+                .collect::<AHashSet<_>>()
+                .len(),
+            2,
+            "pagination sync scope should still cover the full ordered prefix"
+        );
+        assert_eq!(
+            node.windowed_tuples()[0].provenance().len(),
+            1,
+            "visible tuples should keep only their own row provenance"
+        );
     }
 }

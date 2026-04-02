@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::{ComposedBranchName, Schema, SchemaHash};
+use crate::query_manager::types::{BatchId, ComposedBranchName, Schema, SchemaHash};
 
 use super::lens::Lens;
 
@@ -28,6 +28,8 @@ pub struct QuerySchemaContext {
     pub schema_hash: SchemaHash,
     /// User-facing branch name (e.g., "main", "feature-x").
     pub user_branch: String,
+    /// Active batch identifier for reads and writes.
+    pub batch_id: BatchId,
 }
 
 impl QuerySchemaContext {
@@ -36,17 +38,24 @@ impl QuerySchemaContext {
         env: impl Into<String>,
         schema_hash: SchemaHash,
         user_branch: impl Into<String>,
+        batch_id: BatchId,
     ) -> Self {
         Self {
             env: env.into(),
             schema_hash,
             user_branch: user_branch.into(),
+            batch_id,
         }
     }
 
     /// Get the composed branch name for this context.
     pub fn branch_name(&self) -> ComposedBranchName {
-        ComposedBranchName::new(&self.env, self.schema_hash, &self.user_branch)
+        ComposedBranchName::new(
+            &self.env,
+            self.schema_hash,
+            &self.user_branch,
+            self.batch_id,
+        )
     }
 }
 
@@ -131,6 +140,8 @@ pub struct SchemaContext {
     pub env: String,
     /// User-facing branch name (e.g., "main", "feature-x").
     pub user_branch: String,
+    /// Active batch identifier for reads and writes.
+    pub batch_id: BatchId,
 
     /// Other live schemas reachable via lenses (hash -> schema).
     pub live_schemas: HashMap<SchemaHash, Schema>,
@@ -155,6 +166,7 @@ impl SchemaContext {
             current_hash: SchemaHash::from_bytes([0; 32]), // Sentinel value
             env: String::new(),
             user_branch: String::new(),
+            batch_id: BatchId::nil(),
             live_schemas: HashMap::new(),
             lenses: HashMap::new(),
             pending_schemas: HashMap::new(),
@@ -164,12 +176,22 @@ impl SchemaContext {
 
     /// Create a new context with only the current schema (no live schemas).
     pub fn new(schema: Schema, env: &str, user_branch: &str) -> Self {
+        Self::new_with_batch_id(schema, env, user_branch, BatchId::new())
+    }
+
+    pub fn new_with_batch_id(
+        schema: Schema,
+        env: &str,
+        user_branch: &str,
+        batch_id: BatchId,
+    ) -> Self {
         let hash = SchemaHash::compute(&schema);
         Self {
             current_schema: schema,
             current_hash: hash,
             env: env.to_string(),
             user_branch: user_branch.to_string(),
+            batch_id,
             live_schemas: HashMap::new(),
             lenses: HashMap::new(),
             pending_schemas: HashMap::new(),
@@ -187,6 +209,16 @@ impl SchemaContext {
     /// # Panics
     /// Panics if called more than once.
     pub fn set_current(&mut self, schema: Schema, env: &str, user_branch: &str) {
+        self.set_current_with_batch(schema, env, user_branch, BatchId::new());
+    }
+
+    pub fn set_current_with_batch(
+        &mut self,
+        schema: Schema,
+        env: &str,
+        user_branch: &str,
+        batch_id: BatchId,
+    ) {
         assert!(
             !self.is_initialized,
             "set_current() called on already-initialized SchemaContext"
@@ -195,6 +227,7 @@ impl SchemaContext {
         self.current_hash = SchemaHash::compute(&self.current_schema);
         self.env = env.to_string();
         self.user_branch = user_branch.to_string();
+        self.batch_id = batch_id;
         self.is_initialized = true;
     }
 
@@ -205,16 +238,44 @@ impl SchemaContext {
 
     /// Get the composed branch name for the current schema.
     pub fn branch_name(&self) -> BranchName {
-        ComposedBranchName::new(&self.env, self.current_hash, &self.user_branch).to_branch_name()
+        self.branch_name_for_hash(self.current_hash)
+    }
+
+    /// Build the query-time schema context needed on the wire.
+    pub fn query_context(&self) -> QuerySchemaContext {
+        QuerySchemaContext::new(
+            self.env.clone(),
+            self.current_hash,
+            self.user_branch.clone(),
+            self.batch_id,
+        )
+    }
+
+    pub fn branch_name_for_hash(&self, schema_hash: SchemaHash) -> BranchName {
+        ComposedBranchName::new(&self.env, schema_hash, &self.user_branch, self.batch_id)
+            .to_branch_name()
+    }
+
+    /// Resolve a user-facing query branch into the composed storage branch name.
+    ///
+    /// Queries may still refer to branches like `main` or `draft`; internally we
+    /// always execute against a composed branch keyed by the current schema hash
+    /// and batch id for this schema context.
+    pub fn resolve_query_branch_name(&self, branch: &str) -> BranchName {
+        let branch_name = BranchName::new(branch);
+        if ComposedBranchName::parse(&branch_name).is_some() {
+            branch_name
+        } else {
+            ComposedBranchName::new(&self.env, self.current_hash, branch, self.batch_id)
+                .to_branch_name()
+        }
     }
 
     /// Get branch names for all live schemas (current + live).
     pub fn all_branch_names(&self) -> Vec<BranchName> {
         let mut names = vec![self.branch_name()];
         for hash in self.live_schemas.keys() {
-            names.push(
-                ComposedBranchName::new(&self.env, *hash, &self.user_branch).to_branch_name(),
-            );
+            names.push(self.branch_name_for_hash(*hash));
         }
         names
     }
@@ -448,7 +509,7 @@ mod tests {
         let s = branch.as_str();
 
         assert!(s.starts_with("dev-"));
-        assert!(s.ends_with("-main"));
+        assert!(s.contains("-main-"));
     }
 
     #[test]

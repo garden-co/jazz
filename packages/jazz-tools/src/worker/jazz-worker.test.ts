@@ -12,10 +12,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { ServerPayloadBatcher } from "./server-payload-batcher.js";
 
+const textEncoder = new TextEncoder();
+
 const playerPayload = (seq: number) =>
-  JSON.stringify({
-    ObjectUpdated: { object_id: `player-obj`, branch_name: "main", seq },
-  });
+  textEncoder.encode(
+    JSON.stringify({
+      ObjectUpdated: { object_id: `player-obj`, branch_name: "main", seq },
+    }),
+  );
 
 describe("ServerPayloadBatcher", () => {
   it("batches 60 synchronous enqueues into a single sendBatch call after a microtask", async () => {
@@ -48,7 +52,7 @@ describe("ServerPayloadBatcher", () => {
     //  enqueue(false) → enqueue(true) → enqueue(false)
     //  flush → sendBatch([false, true, false])  ← order preserved
 
-    const received: string[][] = [];
+    const received: Uint8Array[][] = [];
     const batcher = new ServerPayloadBatcher(async (payloads) => {
       received.push([...payloads]);
     });

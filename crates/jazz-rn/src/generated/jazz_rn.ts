@@ -699,6 +699,7 @@ export interface RnRuntimeInterface {
     callback: SubscriptionCallback
   ) /*throws*/ : void;
   flush() /*throws*/ : void;
+  getBatchId() /*throws*/ : string;
   getSchemaHash() /*throws*/ : string;
   insert(table: string, valuesJson: string) /*throws*/ : string;
   insertWithSession(
@@ -953,6 +954,23 @@ export class RnRuntime
         );
       },
       /*liftString:*/ FfiConverterString.lift
+    );
+  }
+
+  getBatchId(): string /*throws*/ {
+    return FfiConverterString.lift(
+      uniffiCaller.rustCallWithError(
+        /*liftError:*/ FfiConverterTypeJazzRnError.lift.bind(
+          FfiConverterTypeJazzRnError
+        ),
+        /*caller:*/ (callStatus) => {
+          return nativeModule().ubrn_uniffi_jazz_rn_fn_method_rnruntime_get_batch_id(
+            uniffiTypeRnRuntimeObjectFactory.clonePointer(this),
+            callStatus
+          );
+        },
+        /*liftString:*/ FfiConverterString.lift
+      )
     );
   }
 

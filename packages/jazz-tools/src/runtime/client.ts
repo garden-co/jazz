@@ -99,6 +99,7 @@ export interface Runtime {
   addClient(): string;
   getSchema(): any;
   getSchemaHash(): string;
+  getBatchId(): string;
   close?(): void | Promise<void>;
   setClientRole?(client_id: string, role: string): void;
   onSyncMessageReceivedFromClient?(client_id: string, payload: Uint8Array | string): void;
@@ -603,6 +604,7 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
   private useBackendSyncAuth = false;
+  private workerReadyPromise: Promise<void> | null = null;
 
   private constructor(
     runtime: Runtime,
@@ -1129,6 +1131,9 @@ export class JazzClient {
     const sessionJson = session ? JSON.stringify(session) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const runtimeSchema = this.getSchema();
+    if (normalizedOptions.tier === "worker" && this.workerReadyPromise) {
+      await this.workerReadyPromise;
+    }
     const results = await this.runtime.query(
       queryJson,
       sessionJson,
@@ -1136,6 +1141,10 @@ export class JazzClient {
       optionsJson,
     );
     return this.alignQueryRowsToDeclaredSchema(queryJson, results as Row[], runtimeSchema);
+  }
+
+  setWorkerReadyPromise(promise: Promise<void> | null): void {
+    this.workerReadyPromise = promise;
   }
 
   /**
@@ -1302,15 +1311,27 @@ export class JazzClient {
     );
 
     this.scheduler(() => {
-      this.runtime.executeSubscription(handle, (...args: unknown[]) => {
-        const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
-        if (deltaJsonOrObject === undefined) {
-          return;
+      const execute = async () => {
+        if (normalizedOptions.tier === "worker" && this.workerReadyPromise) {
+          await this.workerReadyPromise;
         }
 
-        const delta: RowDelta =
-          typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
-        callback(this.alignSubscriptionDeltaToDeclaredSchema(queryJson, delta, runtimeSchema));
+        this.runtime.executeSubscription(handle, (...args: unknown[]) => {
+          const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
+          if (deltaJsonOrObject === undefined) {
+            return;
+          }
+
+          const delta: RowDelta =
+            typeof deltaJsonOrObject === "string"
+              ? JSON.parse(deltaJsonOrObject)
+              : deltaJsonOrObject;
+          callback(this.alignSubscriptionDeltaToDeclaredSchema(queryJson, delta, runtimeSchema));
+        });
+      };
+
+      void execute().catch((error) => {
+        console.error("[client] Subscription execute failed:", error);
       });
     });
 
@@ -1368,11 +1389,13 @@ export class JazzClient {
     env: string;
     schema_hash: string;
     user_branch: string;
+    batch_id: string;
   } {
     return {
       env: this.context.env ?? "dev",
       schema_hash: this.runtime.getSchemaHash(),
       user_branch: this.context.userBranch ?? "main",
+      batch_id: this.runtime.getBatchId(),
     };
   }
 

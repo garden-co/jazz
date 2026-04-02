@@ -571,14 +571,15 @@ impl RecursiveRelationNode {
         io: &dyn Storage,
         row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
     ) -> Vec<(crate::query_manager::types::Row, TupleProvenance)> {
-        let mut instance = match self
-            .step_template
-            .instantiate(correlation_value.clone(), &self.schema)
-        {
-            Some(instance) => instance,
-            None => return Vec::new(),
-        };
-        let _delta = instance.graph.settle(io, row_loader);
+        let mut instance =
+            match self
+                .step_template
+                .instantiate(correlation_value.clone(), &self.schema, Some(io))
+            {
+                Some(instance) => instance,
+                None => return Vec::new(),
+            };
+        let _delta = instance.graph.settle(io, |id, _provenance| row_loader(id));
         instance.graph.current_output_rows_with_provenance()
     }
 

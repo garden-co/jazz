@@ -81,8 +81,79 @@ describe("sync-transport", () => {
     return all;
   }
 
-  function streamResponse(events: unknown[]): Response {
-    const bytes = encodeFrames(events);
+  function encodeBinaryConnectedFrame(clientId: string, catalogueStateHash?: string): Uint8Array {
+    const clientIdBytes = textEncoder.encode(clientId);
+    const hashBytes = catalogueStateHash ? textEncoder.encode(catalogueStateHash) : undefined;
+    const payloadLength =
+      1 + 8 + 4 + clientIdBytes.length + 1 + 1 + (hashBytes ? 4 + hashBytes.length : 0);
+    const frame = new Uint8Array(4 + payloadLength);
+    const view = new DataView(frame.buffer);
+    let offset = 0;
+    view.setUint32(offset, payloadLength, false);
+    offset += 4;
+    frame[offset] = 1;
+    offset += 1;
+    view.setBigUint64(offset, 0n, false);
+    offset += 8;
+    view.setUint32(offset, clientIdBytes.length, false);
+    offset += 4;
+    frame.set(clientIdBytes, offset);
+    offset += clientIdBytes.length;
+    frame[offset] = 0;
+    offset += 1;
+    frame[offset] = hashBytes ? 1 : 0;
+    offset += 1;
+    if (hashBytes) {
+      view.setUint32(offset, hashBytes.length, false);
+      offset += 4;
+      frame.set(hashBytes, offset);
+    }
+    return frame;
+  }
+
+  function encodeBinarySyncUpdateFrame(payloadJson: string): Uint8Array {
+    const payload = textEncoder.encode(payloadJson);
+    const payloadLength = 1 + 1 + 4 + payload.length;
+    const frame = new Uint8Array(4 + payloadLength);
+    const view = new DataView(frame.buffer);
+    let offset = 0;
+    view.setUint32(offset, payloadLength, false);
+    offset += 4;
+    frame[offset] = 3;
+    offset += 1;
+    frame[offset] = 0;
+    offset += 1;
+    view.setUint32(offset, payload.length, false);
+    offset += 4;
+    frame.set(payload, offset);
+    return frame;
+  }
+
+  function decodeBinarySyncBatchRequest(bytes: Uint8Array): {
+    clientId: string;
+    payloads: Uint8Array[];
+  } {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let offset = 0;
+    const clientIdBytes = new Uint8Array(bytes.buffer, bytes.byteOffset + offset, 16);
+    offset += 16;
+    const clientId = [...clientIdBytes]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("")
+      .replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, "$1-$2-$3-$4-$5");
+    const payloadCount = view.getUint32(offset, false);
+    offset += 4;
+    const payloads: Uint8Array[] = [];
+    for (let i = 0; i < payloadCount; i += 1) {
+      const length = view.getUint32(offset, false);
+      offset += 4;
+      payloads.push(bytes.slice(offset, offset + length));
+      offset += length;
+    }
+    return { clientId, payloads };
+  }
+
+  function streamResponseBytes(bytes: Uint8Array): Response {
     const body = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(bytes);
@@ -95,6 +166,10 @@ describe("sync-transport", () => {
       statusText: "OK",
       body,
     } as Response;
+  }
+
+  function streamResponse(events: unknown[]): Response {
+    return streamResponseBytes(encodeFrames(events));
   }
 
   afterEach(() => {
@@ -542,6 +617,31 @@ describe("sync-transport", () => {
     );
   });
 
+  it("reads binary Connected and SyncUpdate frames", async () => {
+    const bytes = new Uint8Array(
+      encodeBinaryConnectedFrame("server-client-7", "catalogue-7").length +
+        encodeBinarySyncUpdateFrame(JSON.stringify({ Ping: {} })).length,
+    );
+    const connected = encodeBinaryConnectedFrame("server-client-7", "catalogue-7");
+    bytes.set(connected, 0);
+    bytes.set(encodeBinarySyncUpdateFrame(JSON.stringify({ Ping: {} })), connected.length);
+    const reader = streamResponseBytes(bytes).body!.getReader();
+    const onConnected = vi.fn();
+    const onSyncMessage = vi.fn();
+
+    await readBinaryFrames(
+      reader,
+      {
+        onConnected,
+        onSyncMessage,
+      },
+      "[client] ",
+    );
+
+    expect(onConnected).toHaveBeenCalledWith("server-client-7", "catalogue-7");
+    expect(onSyncMessage).toHaveBeenCalledWith(textEncoder.encode(JSON.stringify({ Ping: {} })));
+  });
+
   it("runtime-bound stream controller maps stream events to runtime hooks", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       streamResponse([
@@ -756,6 +856,44 @@ describe("sync-transport", () => {
       await expect(
         sendSyncPayloadBatch("http://localhost:3000", [playerPayload("id-1")], {}),
       ).rejects.toThrow("503");
+    });
+
+    it("sends binary payload batches as a single octet-stream request", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({ ok: true, statusText: "OK" });
+      (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+      const payloads = [
+        textEncoder.encode(playerPayload("id-1")),
+        textEncoder.encode(playerPayload("id-2")),
+      ];
+
+      await sendSyncPayloadBatch("http://localhost:3000", payloads, {
+        clientId: "11111111-2222-4333-8444-555555555555",
+        jwtToken: "alice-token",
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]![1].headers).toMatchObject({
+        "Content-Type": "application/octet-stream",
+      });
+
+      const body = new Uint8Array(await (fetchMock.mock.calls[0]![1].body as Blob).arrayBuffer());
+      const request = decodeBinarySyncBatchRequest(body);
+      expect(request.clientId).toBe("11111111-2222-4333-8444-555555555555");
+      expect(request.payloads.map((payload) => new TextDecoder().decode(payload))).toEqual([
+        playerPayload("id-1"),
+        playerPayload("id-2"),
+      ]);
+    });
+
+    it("rejects mixed binary and json payload batches", async () => {
+      await expect(
+        sendSyncPayloadBatch(
+          "http://localhost:3000",
+          [textEncoder.encode(playerPayload("id-1")), playerPayload("id-2")],
+          { jwtToken: "alice-token" },
+        ),
+      ).rejects.toThrow("Mixed sync payload encodings are not supported in a single batch");
     });
   });
 });

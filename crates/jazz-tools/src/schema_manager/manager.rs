@@ -11,13 +11,14 @@ use std::{collections::HashMap, sync::Arc};
 
 use blake3::Hasher;
 
+use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
 use crate::query_manager::query::{Query, QueryBuilder};
 use crate::query_manager::session::{Session, WriteContext};
 use crate::query_manager::types::{
-    ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, Value,
+    BatchId, ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName, TablePolicies, Value,
 };
 use crate::query_manager::writes::{RowBranchDelete, RowBranchWrite};
 use crate::storage::Storage;
@@ -117,6 +118,26 @@ pub struct SchemaManager {
 }
 
 impl SchemaManager {
+    fn visible_branches_for_row<H: Storage>(
+        &self,
+        storage: &H,
+        object_id: ObjectId,
+    ) -> Result<(String, Vec<String>), QueryError> {
+        let table = storage
+            .load_object_metadata(object_id)
+            .ok()
+            .flatten()
+            .and_then(|metadata| metadata.get(MetadataKey::Table.as_str()).cloned())
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
+
+        let branches = self
+            .query_manager
+            .visible_branch_names_for_table(storage, &table)
+            .map_err(|err| QueryError::IndexError(err.to_string()))?;
+
+        Ok((table, branches))
+    }
+
     /// Create a new SchemaManager with integrated QueryManager.
     ///
     /// # Arguments
@@ -136,12 +157,13 @@ impl SchemaManager {
         let schema = normalize_schema(schema);
         let structural_schema = strip_schema_policies(&schema);
 
-        let context = SchemaContext::new(schema.clone(), env, user_branch);
+        let batch_id = BatchId::new();
+        let context = SchemaContext::new_with_batch_id(schema.clone(), env, user_branch, batch_id);
         let current_hash = SchemaHash::compute(&schema);
 
         // Create QueryManager with empty context, then set current schema
         let mut query_manager = QueryManager::new(sync_manager);
-        query_manager.set_current_schema(schema.clone(), env, user_branch);
+        query_manager.set_current_schema_with_batch(schema.clone(), env, user_branch, batch_id);
 
         // Initialize known_schemas with current schema
         let mut known_schemas = HashMap::new();
@@ -253,6 +275,10 @@ impl SchemaManager {
     /// Get the composed branch name for the current schema.
     pub fn branch_name(&self) -> BranchName {
         self.context.branch_name()
+    }
+
+    pub fn batch_id(&self) -> BatchId {
+        self.context.batch_id
     }
 
     /// Get branch names for all live schemas (current + live).
@@ -549,27 +575,6 @@ impl SchemaManager {
             .into_iter()
             .map(|b| b.as_str().to_string())
             .collect()
-    }
-
-    /// Build a mapping from branch name to schema hash.
-    pub fn branch_schema_map(&self) -> std::collections::HashMap<String, SchemaHash> {
-        let mut map = std::collections::HashMap::new();
-
-        // Current schema branch
-        map.insert(
-            self.context.branch_name().as_str().to_string(),
-            self.context.current_hash,
-        );
-
-        // Live schema branches
-        for hash in self.context.live_schemas.keys() {
-            let branch =
-                ComposedBranchName::new(&self.context.env, *hash, &self.context.user_branch)
-                    .to_branch_name();
-            map.insert(branch.as_str().to_string(), *hash);
-        }
-
-        map
     }
 
     /// Create a LensTransformer for a specific table.
@@ -1246,8 +1251,12 @@ impl SchemaManager {
             .clone();
 
         // Build a SchemaContext with target as current
-        let mut temp_context =
-            SchemaContext::new(target_schema.clone(), &ctx.env, &ctx.user_branch);
+        let mut temp_context = SchemaContext::new_with_batch_id(
+            target_schema.clone(),
+            &ctx.env,
+            &ctx.user_branch,
+            ctx.batch_id,
+        );
 
         // Copy lenses from our main context for multi-schema queries
         for ((_source, _target), lens) in &self.context.lenses {
@@ -1264,12 +1273,6 @@ impl SchemaManager {
 
         // Try to activate any pending schemas that now have lens paths
         temp_context.try_activate_pending();
-
-        // Ensure the client's branch is registered for indexing (server-mode)
-        let client_branch =
-            ComposedBranchName::new(&ctx.env, ctx.schema_hash, &ctx.user_branch).to_branch_name();
-        self.query_manager
-            .add_schema_branch(client_branch.as_str(), ctx.schema_hash);
 
         // Ensure indices exist for all branches in the temp context
         for branch_name in temp_context.all_branch_names() {
@@ -1350,7 +1353,7 @@ impl SchemaManager {
         write_context: Option<&WriteContext>,
     ) -> Result<crate::commit::CommitId, QueryError> {
         let current_branch = self.context.branch_name().as_str().to_string();
-        let branches = self.all_branch_strings();
+        let (_table_name, branches) = self.visible_branches_for_row(storage, object_id)?;
         let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
             self.query_manager
                 .load_row_for_schema_update(storage, object_id, &branches)
@@ -1423,7 +1426,7 @@ impl SchemaManager {
         write_context: Option<&WriteContext>,
     ) -> Result<DeleteHandle, QueryError> {
         let current_branch = self.context.branch_name().as_str().to_string();
-        let branches = self.all_branch_strings();
+        let (_table_name, branches) = self.visible_branches_for_row(storage, object_id)?;
         let (table, source_branch, old_current_data, _source_commit_id, old_current_provenance) =
             self.query_manager
                 .load_row_for_schema_update(storage, object_id, &branches)
@@ -1702,7 +1705,7 @@ mod tests {
         let s = branch.as_str();
 
         assert!(s.starts_with("prod-"));
-        assert!(s.ends_with("-feature"));
+        assert!(s.contains("-feature-"));
     }
 
     #[test]
@@ -1810,26 +1813,6 @@ mod tests {
     }
 
     #[test]
-    fn schema_manager_branch_schema_map() {
-        let v1 = make_schema_v1();
-        let v2 = make_schema_v2();
-        let v1_hash = SchemaHash::compute(&v1);
-        let v2_hash = SchemaHash::compute(&v2);
-
-        let mut manager =
-            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
-        manager.add_live_schema(v1).unwrap();
-
-        let map = manager.branch_schema_map();
-        assert_eq!(map.len(), 2);
-
-        // Should contain both schema hashes
-        let hashes: std::collections::HashSet<_> = map.values().collect();
-        assert!(hashes.contains(&v1_hash));
-        assert!(hashes.contains(&v2_hash));
-    }
-
-    #[test]
     fn schema_manager_all_branch_strings() {
         let v1 = make_schema_v1();
         let v2 = make_schema_v2();
@@ -1844,7 +1827,7 @@ mod tests {
         // All should have correct format
         for branch in &branches {
             assert!(branch.starts_with("dev-"));
-            assert!(branch.ends_with("-main"));
+            assert!(branch.contains("-main-"));
         }
     }
 

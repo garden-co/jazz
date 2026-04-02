@@ -16,7 +16,7 @@ use crate::query_manager::policy::{
 };
 use crate::query_manager::session::Session;
 use crate::query_manager::types::{
-    LoadedRow, Row, RowDescriptor, Schema, Tuple, TupleDelta, TupleElement,
+    LoadedRow, Row, RowDescriptor, Schema, Tuple, TupleDelta, TupleElement, TupleProvenance,
 };
 
 use crate::storage::Storage;
@@ -124,15 +124,12 @@ impl PolicyFilterNode {
 
     /// Process with context for INHERITS evaluation.
     /// Similar to ArraySubqueryNode::process_with_context().
-    pub fn process_with_context<F>(
+    pub fn process_with_context(
         &mut self,
         input: TupleDelta,
         io: &dyn Storage,
-        mut row_loader: F,
-    ) -> TupleDelta
-    where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
-    {
+        mut row_loader: &mut dyn FnMut(ObjectId, Option<&TupleProvenance>) -> Option<LoadedRow>,
+    ) -> TupleDelta {
         let mut result = TupleDelta::default();
 
         // If dependency tables changed, re-check current visible tuples.
@@ -209,10 +206,11 @@ impl PolicyFilterNode {
     }
 
     /// Re-evaluate all current tuples when INHERITS-referenced tables change.
-    fn reevaluate_all_with_context<F>(&mut self, io: &dyn Storage, row_loader: &mut F) -> TupleDelta
-    where
-        F: FnMut(ObjectId) -> Option<LoadedRow>,
-    {
+    fn reevaluate_all_with_context(
+        &mut self,
+        io: &dyn Storage,
+        row_loader: &mut dyn FnMut(ObjectId, Option<&TupleProvenance>) -> Option<LoadedRow>,
+    ) -> TupleDelta {
         let mut result = TupleDelta::default();
         let all_tuples: Vec<_> = self.input_tuples.iter().cloned().collect();
 
@@ -244,7 +242,7 @@ impl PolicyFilterNode {
         &self,
         row: &Row,
         io: &dyn Storage,
-        row_loader: &mut dyn FnMut(ObjectId) -> Option<LoadedRow>,
+        row_loader: &mut dyn FnMut(ObjectId, Option<&TupleProvenance>) -> Option<LoadedRow>,
     ) -> bool {
         let evaluator = PolicyContextEvaluator::new(&self.schema, &self.session, &self.branch);
         let mut visited_referencing = HashSet::new();

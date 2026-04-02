@@ -1,8 +1,10 @@
 use std::ops::Bound;
 
 use crate::commit::CommitId;
-use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::Value;
+#[cfg(test)]
+use crate::object::BranchName;
+use crate::object::ObjectId;
+use crate::query_manager::types::{QueryBranchRef, Value};
 
 use super::{StorageError, encode_value};
 
@@ -17,7 +19,7 @@ const OVERFLOW_INDEX_VALUE_TRAILER_BYTES: usize =
 fn index_entry_key_bytes(
     table: &str,
     column: &str,
-    branch: &str,
+    branch_key: &str,
     value_segment_len: usize,
 ) -> usize {
     "idx:".len()
@@ -25,7 +27,7 @@ fn index_entry_key_bytes(
         + 1
         + column.len()
         + 1
-        + branch.len()
+        + branch_key.len()
         + 1
         + value_segment_len
         + 1
@@ -35,29 +37,46 @@ fn index_entry_key_bytes(
 fn index_value_prefix_bytes(
     table: &str,
     column: &str,
-    branch: &str,
+    branch_key: &str,
     value_segment_len: usize,
 ) -> usize {
-    "idx:".len() + table.len() + 1 + column.len() + 1 + branch.len() + 1 + value_segment_len + 1
+    "idx:".len() + table.len() + 1 + column.len() + 1 + branch_key.len() + 1 + value_segment_len + 1
 }
 
 fn index_key_too_large_error(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     key_bytes: usize,
 ) -> StorageError {
     StorageError::IndexKeyTooLarge {
         table: table.to_string(),
         column: column.to_string(),
-        branch: branch.to_string(),
+        branch: branch.as_str().to_string(),
         key_bytes,
         max_key_bytes: INDEX_KEY_MAX_BYTES,
     }
 }
 
-fn max_index_value_segment_len(table: &str, column: &str, branch: &str) -> Option<usize> {
-    INDEX_KEY_MAX_BYTES.checked_sub(index_entry_key_bytes(table, column, branch, 0))
+pub(super) fn encode_index_branch_key(branch: &QueryBranchRef) -> String {
+    let prefix_id = branch.batch_branch_key().prefix_id();
+    format!(
+        "c{}:{}",
+        hex::encode(prefix_id.as_bytes()),
+        branch.batch_id().branch_segment()
+    )
+}
+
+pub(super) fn encode_object_branch_key(branch: &QueryBranchRef) -> String {
+    format!(
+        "c{}:{}",
+        hex::encode(branch.batch_branch_key().prefix_id().as_bytes()),
+        branch.batch_id().branch_segment()
+    )
+}
+
+fn max_index_value_segment_len(table: &str, column: &str, branch_key: &str) -> Option<usize> {
+    INDEX_KEY_MAX_BYTES.checked_sub(index_entry_key_bytes(table, column, branch_key, 0))
 }
 
 fn overflow_index_value_segment(
@@ -79,17 +98,18 @@ fn overflow_index_value_segment(
 fn encode_index_value_segment(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     value: &Value,
 ) -> Result<String, StorageError> {
     let encoded_value = encode_value(value);
     let encoded_hex = hex::encode(&encoded_value);
-    let Some(max_segment_len) = max_index_value_segment_len(table, column, branch) else {
+    let branch_key = encode_index_branch_key(branch);
+    let Some(max_segment_len) = max_index_value_segment_len(table, column, &branch_key) else {
         return Err(index_key_too_large_error(
             table,
             column,
             branch,
-            index_entry_key_bytes(table, column, branch, 0),
+            index_entry_key_bytes(table, column, &branch_key, 0),
         ));
     };
 
@@ -103,7 +123,12 @@ fn encode_index_value_segment(
             table,
             column,
             branch,
-            index_entry_key_bytes(table, column, branch, OVERFLOW_INDEX_VALUE_TRAILER_BYTES),
+            index_entry_key_bytes(
+                table,
+                column,
+                &branch_key,
+                OVERFLOW_INDEX_VALUE_TRAILER_BYTES,
+            ),
         ));
     };
 
@@ -117,7 +142,7 @@ fn encode_index_value_segment(
 pub(super) fn validate_index_entry_size(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     value: &Value,
 ) -> Result<(), StorageError> {
     encode_index_value_segment(table, column, branch, value).map(|_| ())
@@ -132,21 +157,40 @@ pub(super) fn obj_meta_key(id: ObjectId) -> String {
     format!("obj:{}:meta", format_uuid(id))
 }
 
-pub(super) fn branch_tips_key(object_id: ObjectId, branch: &BranchName) -> String {
-    format!("obj:{}:br:{}:tips", format_uuid(object_id), branch)
+pub(super) fn branch_manifest_key(object_id: ObjectId, branch: &QueryBranchRef) -> String {
+    format!(
+        "obj:{}:br:{}:manifest",
+        format_uuid(object_id),
+        encode_object_branch_key(branch)
+    )
 }
 
-pub(super) fn commit_key(object_id: ObjectId, branch: &BranchName, commit_id: CommitId) -> String {
+pub(super) fn branch_segment_key(
+    object_id: ObjectId,
+    branch: &QueryBranchRef,
+    segment_id: u32,
+) -> String {
     format!(
-        "obj:{}:br:{}:c:{}",
+        "obj:{}:br:{}:seg:{segment_id:08x}",
         format_uuid(object_id),
-        branch,
+        encode_object_branch_key(branch)
+    )
+}
+
+pub(super) fn commit_branch_key(object_id: ObjectId, commit_id: CommitId) -> String {
+    format!(
+        "obj:{}:commit-branch:{}",
+        format_uuid(object_id),
         hex::encode(commit_id.0)
     )
 }
 
-pub(super) fn commit_prefix(object_id: ObjectId, branch: &BranchName) -> String {
-    format!("obj:{}:br:{}:c:", format_uuid(object_id), branch)
+pub(super) fn prefix_batch_catalog_key(object_id: ObjectId, prefix: &str) -> String {
+    format!("obj:{}:prefix:{}:catalog", format_uuid(object_id), prefix)
+}
+
+pub(super) fn table_prefix_batches_key(table: &str, prefix: &str) -> String {
+    format!("tblpfx:{}:{}:batches", table, prefix)
 }
 
 pub(super) fn ack_key(commit_id: CommitId) -> String {
@@ -168,15 +212,16 @@ pub(super) fn catalogue_manifest_op_prefix(app_id: ObjectId) -> String {
 pub(super) fn index_entry_key(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     value: &Value,
     row_id: ObjectId,
 ) -> Result<String, StorageError> {
+    let branch_key = encode_index_branch_key(branch);
     Ok(format!(
         "idx:{}:{}:{}:{}:{}",
         table,
         column,
-        branch,
+        branch_key,
         encode_index_value_segment(table, column, branch, value)?,
         format_uuid(row_id)
     ))
@@ -185,29 +230,35 @@ pub(super) fn index_entry_key(
 pub(super) fn index_value_prefix(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     value: &Value,
 ) -> Result<String, StorageError> {
     let value_segment = encode_index_value_segment(table, column, branch, value)?;
-    let key_bytes = index_value_prefix_bytes(table, column, branch, value_segment.len());
+    let branch_key = encode_index_branch_key(branch);
+    let key_bytes = index_value_prefix_bytes(table, column, &branch_key, value_segment.len());
     if key_bytes > INDEX_KEY_MAX_BYTES {
         return Err(index_key_too_large_error(table, column, branch, key_bytes));
     }
     Ok(format!(
         "idx:{}:{}:{}:{}:",
-        table, column, branch, value_segment
+        table, column, branch_key, value_segment
     ))
 }
 
-pub(super) fn index_prefix(table: &str, column: &str, branch: &str) -> String {
-    format!("idx:{}:{}:{}:", table, column, branch)
+pub(super) fn index_prefix(table: &str, column: &str, branch: &QueryBranchRef) -> String {
+    format!(
+        "idx:{}:{}:{}:",
+        table,
+        column,
+        encode_index_branch_key(branch)
+    )
 }
 
 /// Compute lexicographic scan bounds for index range queries.
 pub(super) fn index_range_scan_bounds(
     table: &str,
     column: &str,
-    branch: &str,
+    branch: &QueryBranchRef,
     start: Bound<&Value>,
     end: Bound<&Value>,
 ) -> Option<(String, String)> {
@@ -272,7 +323,7 @@ pub(super) fn index_range_scan_bounds(
 }
 
 /// Parse a UUID from the last segment of an index key.
-/// Key format: `idx:{table}:{col}:{branch}:{value_segment}:{uuid_hex}`
+/// Key format: `idx:{table}:{col}:{branch_key}:{value_segment}:{uuid_hex}`
 pub(super) fn parse_uuid_from_index_key(key: &str) -> Option<ObjectId> {
     let uuid_hex = key.rsplit(':').next()?;
     let bytes = hex::decode(uuid_hex).ok()?;
@@ -305,11 +356,21 @@ pub(super) fn increment_string(s: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::query_manager::types::{QueryBranchRef, SchemaHash};
+
+    fn batch_branch_name(ord: u128) -> String {
+        format!("dev-{}-main-b{ord:032x}", SchemaHash::from_bytes([7; 32]))
+    }
+
+    fn branch_ref(ord: u128) -> QueryBranchRef {
+        QueryBranchRef::from_branch_name(BranchName::new(batch_branch_name(ord)))
+    }
 
     #[test]
     fn short_text_index_segments_stay_inline() {
+        let branch = branch_ref(1);
         let segment =
-            encode_index_value_segment("todos", "title", "main", &Value::Text("hello".into()))
+            encode_index_value_segment("todos", "title", &branch, &Value::Text("hello".into()))
                 .expect("short text should fit inline");
         assert_eq!(
             segment,
@@ -322,7 +383,8 @@ mod tests {
     fn oversized_text_index_segments_preserve_real_prefix() {
         let value = Value::Text("x".repeat(40_000));
         let encoded_hex = hex::encode(encode_value(&value));
-        let segment = encode_index_value_segment("todos", "title", "main", &value)
+        let branch = branch_ref(1);
+        let segment = encode_index_value_segment("todos", "title", &branch, &value)
             .expect("oversized text should use overflow segment");
         let (prefix, suffix) = segment
             .split_once(OVERFLOW_INDEX_VALUE_MARKER)
@@ -340,11 +402,12 @@ mod tests {
 
     #[test]
     fn oversized_text_segments_sort_by_prefix() {
+        let branch = branch_ref(1);
         let a =
-            encode_index_value_segment("todos", "title", "main", &Value::Text("a".repeat(40_000)))
+            encode_index_value_segment("todos", "title", &branch, &Value::Text("a".repeat(40_000)))
                 .expect("a segment");
         let b =
-            encode_index_value_segment("todos", "title", "main", &Value::Text("b".repeat(40_000)))
+            encode_index_value_segment("todos", "title", &branch, &Value::Text("b".repeat(40_000)))
                 .expect("b segment");
         assert!(a < b, "overflow segments should preserve prefix ordering");
     }
@@ -353,10 +416,11 @@ mod tests {
     fn range_bounds_support_oversized_text_values() {
         let min = Value::Text("a".repeat(40_000));
         let max = Value::Text("b".repeat(40_000));
+        let branch = branch_ref(1);
         let bounds = index_range_scan_bounds(
             "todos",
             "title",
-            "main",
+            &branch,
             Bound::Included(&min),
             Bound::Included(&max),
         );
@@ -364,5 +428,34 @@ mod tests {
             bounds.is_some(),
             "overflow text values should still produce range bounds"
         );
+    }
+
+    #[test]
+    fn composed_branch_index_keys_store_prefix_id_and_batch_only() {
+        let branch = BranchName::new(batch_branch_name(1));
+        let branch_ref = QueryBranchRef::from_branch_name(branch);
+        let key = index_entry_key(
+            "users",
+            "name",
+            &branch_ref,
+            &Value::Text("Alice".into()),
+            ObjectId::from_uuid(uuid::Uuid::nil()),
+        )
+        .expect("key should encode");
+
+        assert!(key.contains(":c"));
+        assert!(key.contains(":b00000000000000000000000000000001:"));
+        assert!(!key.contains(branch.as_str()));
+    }
+
+    #[test]
+    fn composed_object_branch_keys_store_prefix_id_and_batch_only() {
+        let branch = BranchName::new(batch_branch_name(1));
+        let branch_ref = QueryBranchRef::from_branch_name(branch);
+        let key = branch_manifest_key(ObjectId::from_uuid(uuid::Uuid::nil()), &branch_ref);
+
+        assert!(key.contains(":br:c"));
+        assert!(key.contains(":b00000000000000000000000000000001:manifest"));
+        assert!(!key.contains(branch.as_str()));
     }
 }

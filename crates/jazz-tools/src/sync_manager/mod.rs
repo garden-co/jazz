@@ -6,6 +6,7 @@ use crate::object::{BranchName, ObjectId};
 use crate::object_manager::ObjectManager;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
+use crate::query_manager::types::ComposedBranchName;
 use crate::storage::Storage;
 
 // Module declarations
@@ -103,6 +104,10 @@ impl Default for SyncManager {
 }
 
 impl SyncManager {
+    fn normalize_branch_name(branch_name: BranchName) -> Option<BranchName> {
+        ComposedBranchName::parse(&branch_name).map(|_| branch_name)
+    }
+
     pub fn new() -> Self {
         Self::with_object_manager(ObjectManager::new())
     }
@@ -313,7 +318,7 @@ impl SyncManager {
     /// Create an object with initial content for catalogue storage.
     ///
     /// Creates an object with the specified ID, metadata, and content.
-    /// The content is stored as a commit on the "main" branch.
+    /// The content is stored on the deterministic catalogue batch branch.
     ///
     /// Used for storing schemas and lenses in the catalogue.
     pub fn create_object_with_content<H: Storage>(
@@ -331,11 +336,21 @@ impl SyncManager {
                 .create_with_id(storage, object_id, Some(metadata));
         }
 
-        // Add content as a commit on the "main" branch
+        let branch_name = crate::schema_manager::catalogue_branch_name();
+        let requested_branches = [branch_name.as_str().to_string()];
+        if self
+            .object_manager
+            .get_or_load_tips(object_id, storage, &requested_branches)
+            .and_then(|object| object.branches.get(&branch_name))
+            .is_some_and(|branch| !branch.commits.is_empty())
+        {
+            return;
+        }
+
         let _ = self.object_manager.add_commit(
             storage,
             object_id,
-            "main",
+            branch_name,
             Vec::new(), // No parents - root commit
             content,
             SYSTEM_PRINCIPAL_ID.to_string(),
@@ -379,12 +394,33 @@ impl SyncManager {
         scope: HashSet<(ObjectId, BranchName)>,
         session: Option<Session>,
     ) {
+        let scope = scope
+            .into_iter()
+            .filter_map(|(object_id, branch_name)| {
+                Self::normalize_branch_name(branch_name).map(|normalized| {
+                    (
+                        object_id,
+                        crate::query_manager::types::BatchBranchKey::from_branch_name(normalized),
+                    )
+                })
+            })
+            .collect();
+        self.set_client_query_scope_keys(client_id, query_id, scope, session);
+    }
+
+    pub(super) fn set_client_query_scope_keys(
+        &mut self,
+        client_id: ClientId,
+        query_id: QueryId,
+        scope: HashSet<ScopedBranchKey>,
+        session: Option<Session>,
+    ) {
         let Some(client) = self.clients.get_mut(&client_id) else {
             return;
         };
 
         // Collect all objects currently in any query scope
-        let old_scope: HashSet<(ObjectId, BranchName)> = client
+        let old_scope: HashSet<ScopedBranchKey> = client
             .queries
             .values()
             .flat_map(|q| q.scope.iter().cloned())
@@ -400,19 +436,19 @@ impl SyncManager {
         );
 
         // Collect all objects now in any query scope
-        let new_scope: HashSet<(ObjectId, BranchName)> = client
+        let new_scope: HashSet<ScopedBranchKey> = client
             .queries
             .values()
             .flat_map(|q| q.scope.iter().cloned())
             .collect();
 
         // Find newly visible (object, branch) pairs
-        let newly_visible: Vec<(ObjectId, BranchName)> =
+        let newly_visible: Vec<ScopedBranchKey> =
             new_scope.difference(&old_scope).cloned().collect();
 
         // Queue initial syncs for newly visible objects
-        for (object_id, branch_name) in newly_visible {
-            self.queue_initial_sync_to_client(client_id, object_id, branch_name);
+        for (object_id, branch_key) in newly_visible {
+            self.queue_initial_sync_to_client(client_id, object_id, branch_key.branch_name());
         }
     }
 
@@ -440,6 +476,7 @@ impl SyncManager {
         &mut self,
         query_id: QueryId,
         query: Query,
+        schema_context: crate::schema_manager::QuerySchemaContext,
         session: Option<Session>,
         propagation: QueryPropagation,
     ) {
@@ -449,6 +486,7 @@ impl SyncManager {
                 server_id,
                 query_id,
                 query.clone(),
+                schema_context.clone(),
                 session.clone(),
                 propagation,
             );
@@ -463,6 +501,7 @@ impl SyncManager {
         server_id: ServerId,
         query_id: QueryId,
         query: Query,
+        schema_context: crate::schema_manager::QuerySchemaContext,
         session: Option<Session>,
         propagation: QueryPropagation,
     ) {
@@ -475,6 +514,7 @@ impl SyncManager {
             payload: SyncPayload::QuerySubscription {
                 query_id,
                 query: Box::new(query),
+                schema_context,
                 session,
                 propagation,
             },

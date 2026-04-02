@@ -24,6 +24,7 @@ export interface JazzRnRuntimeBinding {
   deleteWithSession?(objectId: string, writeContextJson: string | undefined): void;
   flush(): void;
   getSchemaHash(): string;
+  getBatchId(): string;
   insert(table: string, valuesJson: string): string;
   insertWithSession?(
     table: string,
@@ -464,6 +465,10 @@ export class JazzRnRuntimeAdapter implements Runtime {
 
   getSchemaHash(): string {
     return this.binding.getSchemaHash();
+  }
+
+  getBatchId(): string {
+    return this.binding.getBatchId();
   }
 
   setClientRole(client_id: string, role: string): void {

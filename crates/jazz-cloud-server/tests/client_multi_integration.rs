@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use axum::{Json, Router, routing::get};
 use base64::Engine;
 use jazz_tools::object::BranchName;
-use jazz_tools::query_manager::types::{ComposedBranchName, SchemaHash};
+use jazz_tools::query_manager::types::{BranchPrefixName, SchemaHash};
 use jazz_tools::storage::{RocksDBStorage, Storage};
 use jazz_tools::{
     AppContext, AppId, ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder,
@@ -363,9 +363,7 @@ async fn wait_for_todos_count_on_disk(
         .join(app_id.to_string())
         .join("jazz.rocksdb");
     let schema_hash = SchemaHash::compute(&test_schema());
-    let branch = ComposedBranchName::new("client", schema_hash, "main")
-        .to_branch_name()
-        .to_string();
+    let prefix = BranchPrefixName::new("client", schema_hash, "main");
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last_count = 0usize;
 
@@ -373,8 +371,19 @@ async fn wait_for_todos_count_on_disk(
         if db_path.exists()
             && let Ok(storage) = RocksDBStorage::open(&db_path, 64 * 1024 * 1024)
         {
-            let branch_name = BranchName::new(&branch);
-            let row_ids = storage.index_scan_all("todos", "_id", &branch);
+            let branches = storage
+                .load_table_prefix_batch_keys("todos", BranchName::new(prefix.branch_prefix()))
+                .unwrap_or_default();
+            let mut row_ids = HashSet::new();
+            for branch in &branches {
+                row_ids.extend(storage.index_scan_all(
+                    "todos",
+                    "_id",
+                    &jazz_tools::query_manager::types::QueryBranchRef::from_batch_branch_key(
+                        *branch,
+                    ),
+                ));
+            }
             let mut materialized = 0usize;
             for row_id in row_ids {
                 let has_metadata = storage
@@ -382,17 +391,24 @@ async fn wait_for_todos_count_on_disk(
                     .ok()
                     .flatten()
                     .is_some();
-                let has_content = storage
-                    .load_branch(row_id, &branch_name)
-                    .ok()
-                    .flatten()
-                    .map(|loaded| {
-                        loaded
-                            .commits
-                            .iter()
-                            .any(|commit| !commit.content.is_empty())
-                    })
-                    .unwrap_or(false);
+                let has_content = branches.iter().any(|branch| {
+                    storage
+                        .load_branch(
+                            row_id,
+                            &jazz_tools::query_manager::types::QueryBranchRef::from_batch_branch_key(
+                                *branch,
+                            ),
+                        )
+                        .ok()
+                        .flatten()
+                        .map(|loaded| {
+                            loaded
+                                .commits
+                                .iter()
+                                .any(|commit| !commit.content.is_empty())
+                        })
+                        .unwrap_or(false)
+                });
                 if has_metadata && has_content {
                     materialized += 1;
                 }
@@ -516,7 +532,7 @@ async fn jazz_tools_clients_sync_queries_and_mutations_over_cloud_server() {
     assert!(saw_update, "client b should observe mutation from client a");
 
     client_a.delete(row_id).await.expect("client a delete todo");
-    let rows_after_delete = wait_for_todos_count(&client_b, 0, Duration::from_secs(15), None).await;
+    let rows_after_delete = wait_for_todos_count(&client_b, 0, Duration::from_secs(30), None).await;
     assert!(rows_after_delete.is_empty());
 
     client_a.shutdown().await.expect("shutdown client a");

@@ -16,17 +16,21 @@ use rocksdb::{
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::Value;
+use crate::query_manager::types::{BatchBranchKey, QueryBranchRef, Value};
+#[cfg(test)]
+use crate::query_manager::types::{BatchId, BranchPrefixName, ComposedBranchName, SchemaHash};
 use crate::sync_manager::DurabilityTier;
 
 use super::{
-    CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
+    CatalogueManifest, CatalogueManifestOp, LoadedBranch, LoadedBranchTips, PrefixBatchCatalog,
+    PrefixBatchUpdate, Storage, StorageError,
     storage_core::{
-        append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
-        create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
-        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
-        store_ack_tier_core,
+        adjust_table_prefix_batch_refcount_core, append_catalogue_manifest_op_core,
+        append_catalogue_manifest_ops_core, append_commit_core, create_object_core,
+        index_insert_core, index_lookup_core, index_range_core, index_remove_core,
+        index_scan_all_core, load_branch_core, load_branch_tips_core, load_catalogue_manifest_core,
+        load_commit_branch_core, load_object_metadata_core, load_prefix_batch_catalog_core,
+        load_table_prefix_batch_keys_core, replace_branch_core, store_ack_tier_core,
     },
 };
 
@@ -216,6 +220,102 @@ impl RocksDBStorage {
         txn.commit()
             .map_err(|e| StorageError::IoError(format!("rocksdb txn commit: {e}")))
     }
+
+    #[cfg(test)]
+    #[allow(clippy::needless_pass_by_value)]
+    fn branch_ref(branch: impl Into<String>) -> QueryBranchRef {
+        let branch = branch.into();
+        let branch_name = BranchName::new(branch.clone());
+        if ComposedBranchName::parse(&branch_name).is_some() {
+            return QueryBranchRef::from_branch_name(branch_name);
+        }
+
+        let prefix = BranchPrefixName::new("dev", SchemaHash::from_bytes([7; 32]), &branch);
+        let batch_id = BatchId::from_uuid(uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            branch.as_bytes(),
+        ));
+        QueryBranchRef::from_prefix_and_batch(&prefix, batch_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_table_prefix_batches(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<HashSet<BatchId>, StorageError> {
+        Ok(self
+            .load_table_prefix_batch_keys(table, BranchName::new(prefix))?
+            .into_iter()
+            .map(|branch_key| branch_key.batch_id())
+            .collect())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index_insert(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        <Self as Storage>::index_insert(
+            self,
+            table,
+            column,
+            &Self::branch_ref(branch),
+            value,
+            row_id,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index_remove(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        <Self as Storage>::index_remove(
+            self,
+            table,
+            column,
+            &Self::branch_ref(branch),
+            value,
+            row_id,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+    ) -> Vec<ObjectId> {
+        <Self as Storage>::index_lookup(self, table, column, &Self::branch_ref(branch), value)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index_range(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: Bound<&Value>,
+        end: Bound<&Value>,
+    ) -> Vec<ObjectId> {
+        <Self as Storage>::index_range(self, table, column, &Self::branch_ref(branch), start, end)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+        <Self as Storage>::index_scan_all(self, table, column, &Self::branch_ref(branch))
+    }
 }
 
 impl Storage for RocksDBStorage {
@@ -245,23 +345,65 @@ impl Storage for RocksDBStorage {
     fn load_branch(
         &self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
     ) -> Result<Option<LoadedBranch>, StorageError> {
         self.with_inner(|inner| {
-            load_branch_core(
-                object_id,
-                branch,
-                |key| Self::get_from_db(&inner.db, key),
-                |prefix| Self::scan_prefix_from_db(&inner.db, prefix),
-            )
+            load_branch_core(object_id, branch, |key| Self::get_from_db(&inner.db, key))
+        })
+    }
+
+    fn load_branch_tips(
+        &self,
+        object_id: ObjectId,
+        branch: &QueryBranchRef,
+    ) -> Result<Option<LoadedBranchTips>, StorageError> {
+        self.with_inner(|inner| {
+            load_branch_tips_core(object_id, branch, |key| Self::get_from_db(&inner.db, key))
+        })
+    }
+
+    fn load_commit_branch(
+        &self,
+        object_id: ObjectId,
+        commit_id: CommitId,
+    ) -> Result<Option<QueryBranchRef>, StorageError> {
+        self.with_inner(|inner| {
+            load_commit_branch_core(object_id, commit_id, |key| {
+                Self::get_from_db(&inner.db, key)
+            })
+        })
+    }
+
+    fn load_prefix_batch_catalog(
+        &self,
+        object_id: ObjectId,
+        prefix: &str,
+    ) -> Result<Option<PrefixBatchCatalog>, StorageError> {
+        self.with_inner(|inner| {
+            load_prefix_batch_catalog_core(object_id, prefix, |key| {
+                Self::get_from_db(&inner.db, key)
+            })
+        })
+    }
+
+    fn load_table_prefix_batch_keys(
+        &self,
+        table: &str,
+        prefix: BranchName,
+    ) -> Result<Vec<BatchBranchKey>, StorageError> {
+        self.with_inner(|inner| {
+            load_table_prefix_batch_keys_core(table, prefix, |key| {
+                Self::get_from_db(&inner.db, key)
+            })
         })
     }
 
     fn append_commit(
         &mut self,
         object_id: ObjectId,
-        branch: &BranchName,
+        branch: &QueryBranchRef,
         commit: Commit,
+        prefix_batch_update: Option<PrefixBatchUpdate>,
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let txn = RefCell::new(inner.db.transaction());
@@ -269,6 +411,7 @@ impl Storage for RocksDBStorage {
                 object_id,
                 branch,
                 commit,
+                prefix_batch_update,
                 |key| Self::get_from_txn_cell(&txn, key),
                 |key, value| Self::put_on_txn_cell(&txn, key, value),
             )?;
@@ -276,38 +419,21 @@ impl Storage for RocksDBStorage {
         })
     }
 
-    fn delete_commit(
+    fn replace_branch(
         &mut self,
         object_id: ObjectId,
-        branch: &BranchName,
-        commit_id: CommitId,
+        branch: &QueryBranchRef,
+        commits: Vec<Commit>,
+        tails: HashSet<CommitId>,
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let txn = RefCell::new(inner.db.transaction());
-            delete_commit_core(
+            replace_branch_core(
                 object_id,
                 branch,
-                commit_id,
-                |key| Self::get_from_txn_cell(&txn, key),
-                |key, value| Self::put_on_txn_cell(&txn, key, value),
-                |key| Self::delete_on_txn_cell(&txn, key),
-            )?;
-            Self::commit_txn(txn.into_inner())
-        })
-    }
-
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = RefCell::new(inner.db.transaction());
-            set_branch_tails_core(
-                object_id,
-                branch,
+                commits,
                 tails,
+                |key| Self::get_from_txn_cell(&txn, key),
                 |key, value| Self::put_on_txn_cell(&txn, key, value),
                 |key| Self::delete_on_txn_cell(&txn, key),
             )?;
@@ -381,16 +507,32 @@ impl Storage for RocksDBStorage {
         &mut self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
-            let txn = inner.db.transaction();
-            index_insert_core(table, column, branch, value, row_id, |key, bytes| {
-                Self::put_on_txn(&txn, key, bytes)
-            })?;
-            Self::commit_txn(txn)
+            let txn = RefCell::new(inner.db.transaction());
+            let inserted = index_insert_core(
+                table,
+                column,
+                branch,
+                value,
+                row_id,
+                |key| Self::get_from_txn_cell(&txn, key),
+                |key, bytes| Self::put_on_txn_cell(&txn, key, bytes),
+            )?;
+            if inserted && matches!(column, "_id" | "_id_deleted") {
+                adjust_table_prefix_batch_refcount_core(
+                    table,
+                    branch,
+                    1,
+                    |key| Self::get_from_txn_cell(&txn, key),
+                    |key, bytes| Self::put_on_txn_cell(&txn, key, bytes),
+                    |key| Self::delete_on_txn_cell(&txn, key),
+                )?;
+            }
+            Self::commit_txn(txn.into_inner())
         })
     }
 
@@ -398,16 +540,32 @@ impl Storage for RocksDBStorage {
         &mut self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
-            let txn = inner.db.transaction();
-            index_remove_core(table, column, branch, value, row_id, |key| {
-                Self::delete_on_txn(&txn, key)
-            })?;
-            Self::commit_txn(txn)
+            let txn = RefCell::new(inner.db.transaction());
+            let removed = index_remove_core(
+                table,
+                column,
+                branch,
+                value,
+                row_id,
+                |key| Self::get_from_txn_cell(&txn, key),
+                |key| Self::delete_on_txn_cell(&txn, key),
+            )?;
+            if removed && matches!(column, "_id" | "_id_deleted") {
+                adjust_table_prefix_batch_refcount_core(
+                    table,
+                    branch,
+                    -1,
+                    |key| Self::get_from_txn_cell(&txn, key),
+                    |key, bytes| Self::put_on_txn_cell(&txn, key, bytes),
+                    |key| Self::delete_on_txn_cell(&txn, key),
+                )?;
+            }
+            Self::commit_txn(txn.into_inner())
         })
     }
 
@@ -415,7 +573,7 @@ impl Storage for RocksDBStorage {
         &self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         value: &Value,
     ) -> Vec<ObjectId> {
         self.with_inner(|inner| {
@@ -430,7 +588,7 @@ impl Storage for RocksDBStorage {
         &self,
         table: &str,
         column: &str,
-        branch: &str,
+        branch: &QueryBranchRef,
         start: Bound<&Value>,
         end: Bound<&Value>,
     ) -> Vec<ObjectId> {
@@ -447,7 +605,7 @@ impl Storage for RocksDBStorage {
         .unwrap_or_default()
     }
 
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+    fn index_scan_all(&self, table: &str, column: &str, branch: &QueryBranchRef) -> Vec<ObjectId> {
         self.with_inner(|inner| {
             Ok(index_scan_all_core(table, column, branch, |prefix| {
                 Self::scan_prefix_keys_from_db(&inner.db, prefix)

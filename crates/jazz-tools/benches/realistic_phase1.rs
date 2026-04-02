@@ -22,13 +22,14 @@ use std::time::Instant;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use futures::executor::block_on;
 use jazz_tools::commit::{Commit, CommitId, StoredState};
-use jazz_tools::object::{BranchName, Object, ObjectId};
+use jazz_tools::object::ObjectId;
 use jazz_tools::object_manager::ObjectManager;
 use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr};
 use jazz_tools::query_manager::query::{Query, QueryBuilder};
 use jazz_tools::query_manager::session::{Session, WriteContext};
 use jazz_tools::query_manager::types::{
-    ColumnType, Schema, SchemaBuilder, TablePolicies, TableSchema, Value,
+    BatchId, BranchPrefixName, ColumnType, Schema, SchemaBuilder, SchemaHash, TablePolicies,
+    TableSchema, Value,
 };
 use jazz_tools::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
 use jazz_tools::schema_manager::{AppId, SchemaManager};
@@ -271,9 +272,8 @@ struct R9Scenario {
 #[derive(Debug, Clone)]
 struct ManyBranchesDataset {
     object_id: ObjectId,
-    prefix: String,
+    prefix_name: BranchPrefixName,
     branch_names: Vec<String>,
-    leaf_branch_names: HashSet<String>,
     total_commits: usize,
 }
 
@@ -2053,7 +2053,6 @@ fn realistic_r8_many_branches_write(c: &mut Criterion) {
                 let dataset = build_many_branches_dataset(&mut manager, &mut storage, scenario);
                 black_box(dataset.object_id);
                 black_box(dataset.branch_names.len());
-                black_box(dataset.leaf_branch_names.len());
                 black_box(dataset.total_commits);
             });
         },
@@ -2082,11 +2081,13 @@ fn realistic_r8_many_branches_scan_heads(c: &mut Criterion) {
         BenchmarkId::from_parameter(benchmark_name),
         &dataset,
         |b, dataset| {
-            let object = manager
-                .get(dataset.object_id)
-                .expect("many-branches object should be loaded");
             b.iter(|| {
-                let scan = scan_branch_heads(object, &dataset.prefix);
+                let scan = scan_prefix_heads(
+                    &mut manager,
+                    &storage,
+                    dataset.object_id,
+                    &dataset.prefix_name,
+                );
                 black_box(scan);
             });
         },
@@ -2115,14 +2116,12 @@ fn realistic_r8_many_branches_scan_leaf_heads(c: &mut Criterion) {
         BenchmarkId::from_parameter(benchmark_name),
         &dataset,
         |b, dataset| {
-            let object = manager
-                .get(dataset.object_id)
-                .expect("many-branches object should be loaded");
             b.iter(|| {
-                let scan = scan_leaf_like_branch_heads(
-                    object,
-                    &dataset.prefix,
-                    &dataset.leaf_branch_names,
+                let scan = scan_prefix_leaf_heads(
+                    &mut manager,
+                    &storage,
+                    dataset.object_id,
+                    &dataset.prefix_name,
                 );
                 black_box(scan);
             });
@@ -2154,10 +2153,12 @@ fn realistic_r8_many_branches_cold_load_fjall(c: &mut Criterion) {
                 let storage = FjallStorage::open(&seeded.db_path, seeded.cache_size_bytes)
                     .expect("open fjall for many-branches cold-load benchmark");
                 let mut manager = ObjectManager::new();
-                let object = manager
-                    .get_or_load(seeded.object_id, &storage, &seeded.branch_names)
-                    .expect("cold-load many-branches object");
-                let scan = scan_branch_heads(object, &seeded.prefix);
+                let scan = scan_prefix_heads(
+                    &mut manager,
+                    &storage,
+                    seeded.object_id,
+                    &seeded.prefix_name,
+                );
                 storage.flush();
                 storage.close().expect("close many-branches fjall storage");
                 black_box(scan);
@@ -2296,8 +2297,7 @@ struct ManyBranchesSeededDb {
     _tempdir: TempDir,
     db_path: PathBuf,
     object_id: ObjectId,
-    branch_names: Vec<String>,
-    prefix: String,
+    prefix_name: BranchPrefixName,
     cache_size_bytes: usize,
 }
 
@@ -2318,8 +2318,7 @@ impl ManyBranchesSeededDb {
             _tempdir: tempdir,
             db_path,
             object_id: dataset.object_id,
-            branch_names: dataset.branch_names,
-            prefix: dataset.prefix,
+            prefix_name: dataset.prefix_name,
             cache_size_bytes: scenario.cache_size_bytes,
         }
     }
@@ -2371,18 +2370,27 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
     scenario: &R8Scenario,
 ) -> ManyBranchesDataset {
     let object_id = manager.create(storage, None);
-    let prefix = format!("dev-r8{:08x}-main-", scenario.seed as u32);
+    let mut schema_hash_bytes = [0u8; 32];
+    for chunk in schema_hash_bytes.chunks_exact_mut(8) {
+        chunk.copy_from_slice(&scenario.seed.to_le_bytes());
+    }
+    let prefix_name =
+        BranchPrefixName::new("dev", SchemaHash::from_bytes(schema_hash_bytes), "main");
     let author = ObjectId::new().to_string();
     let mut branch_names = Vec::with_capacity(scenario.branch_count);
     let mut head_ids = Vec::with_capacity(scenario.branch_count);
-    let mut used_as_parent = vec![false; scenario.branch_count];
     let mut root_timestamps = 1_770_000_000_000_000u64 + (scenario.seed & 0xffff);
 
     for branch_idx in 0..scenario.branch_count {
-        let branch_name = format!("{prefix}b{branch_idx:08}");
+        let branch_name = prefix_name
+            .with_batch_id(BatchId::from_uuid(uuid::Uuid::from_u128(
+                branch_idx as u128 + 1,
+            )))
+            .to_branch_name()
+            .as_str()
+            .to_string();
         let parent_start = branch_idx.saturating_sub(scenario.merge_fanin);
         let parent_ids: Vec<CommitId> = head_ids[parent_start..branch_idx].to_vec();
-        used_as_parent[parent_start..branch_idx].fill(true);
 
         let root_commit = Commit {
             parents: parent_ids.into(),
@@ -2417,18 +2425,10 @@ fn build_many_branches_dataset<H: jazz_tools::storage::Storage>(
         head_ids.push(head_id);
     }
 
-    let leaf_branch_names = branch_names
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| !used_as_parent[*idx])
-        .map(|(_, branch_name)| branch_name.clone())
-        .collect();
-
     ManyBranchesDataset {
         object_id,
-        prefix,
+        prefix_name,
         branch_names,
-        leaf_branch_names,
         total_commits: scenario.total_commits(),
     }
 }
@@ -2448,31 +2448,11 @@ fn many_branches_payload(scenario: &R8Scenario, branch_idx: usize, commit_idx: u
     payload
 }
 
-fn scan_branch_heads(object: &Object, prefix: &str) -> BranchHeadScan {
-    let mut scan = BranchHeadScan {
-        branches_scanned: 0,
-        heads_found: 0,
-        checksum: 0,
-    };
-
-    for (branch_name, branch) in &object.branches {
-        if !branch_name.as_str().starts_with(prefix) {
-            continue;
-        }
-        scan.branches_scanned += 1;
-        for head_id in &branch.tips {
-            scan.heads_found += 1;
-            scan.checksum ^= branch_head_checksum(branch_name, *head_id);
-        }
-    }
-
-    scan
-}
-
-fn scan_leaf_like_branch_heads(
-    object: &Object,
-    prefix: &str,
-    leaf_branch_names: &HashSet<String>,
+fn scan_prefix_heads<H: jazz_tools::storage::Storage>(
+    manager: &mut ObjectManager,
+    storage: &H,
+    object_id: ObjectId,
+    prefix: &BranchPrefixName,
 ) -> BranchHeadScan {
     let mut scan = BranchHeadScan {
         branches_scanned: 0,
@@ -2480,27 +2460,67 @@ fn scan_leaf_like_branch_heads(
         checksum: 0,
     };
 
-    for (branch_name, branch) in &object.branches {
-        if !branch_name.as_str().starts_with(prefix) {
-            continue;
-        }
+    manager
+        .ensure_prefix_batch_catalog_loaded(object_id, prefix, storage)
+        .expect("load prefix heads");
+    let object = manager
+        .get(object_id)
+        .expect("many-branches object should be loaded");
+    let catalog = object
+        .prefix_batches
+        .get(&prefix.branch_prefix())
+        .expect("prefix catalog should be cached");
+
+    for batch_meta in catalog.batch_metas() {
         scan.branches_scanned += 1;
-        if !leaf_branch_names.contains(branch_name.as_str()) {
-            continue;
-        }
-        for head_id in &branch.tips {
-            scan.heads_found += 1;
-            scan.checksum ^= branch_head_checksum(branch_name, *head_id);
-        }
+        scan.heads_found += 1;
+        scan.checksum ^= batch_head_checksum(batch_meta.batch_id, batch_meta.head_commit_id);
     }
 
     scan
 }
 
-fn branch_head_checksum(branch_name: &BranchName, head_id: CommitId) -> u64 {
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&head_id.0[..8]);
-    u64::from_le_bytes(bytes) ^ (branch_name.as_str().len() as u64)
+fn scan_prefix_leaf_heads<H: jazz_tools::storage::Storage>(
+    manager: &mut ObjectManager,
+    storage: &H,
+    object_id: ObjectId,
+    prefix: &BranchPrefixName,
+) -> BranchHeadScan {
+    let mut scan = BranchHeadScan {
+        branches_scanned: 0,
+        heads_found: 0,
+        checksum: 0,
+    };
+
+    manager
+        .ensure_prefix_batch_catalog_loaded(object_id, prefix, storage)
+        .expect("load prefix leaf heads");
+    let object = manager
+        .get(object_id)
+        .expect("many-branches object should be loaded");
+    let catalog = object
+        .prefix_batches
+        .get(&prefix.branch_prefix())
+        .expect("prefix catalog should be cached");
+
+    for batch_ord in catalog.leaf_batch_ords() {
+        let batch_meta = catalog
+            .batch_meta_by_ord(batch_ord)
+            .expect("leaf batch ord should resolve");
+        scan.branches_scanned += 1;
+        scan.heads_found += 1;
+        scan.checksum ^= batch_head_checksum(batch_meta.batch_id, batch_meta.head_commit_id);
+    }
+
+    scan
+}
+
+fn batch_head_checksum(batch_id: BatchId, head_id: CommitId) -> u64 {
+    let mut commit_bytes = [0u8; 8];
+    commit_bytes.copy_from_slice(&head_id.0[..8]);
+    let mut batch_bytes = [0u8; 8];
+    batch_bytes.copy_from_slice(&batch_id.as_bytes()[..8]);
+    u64::from_le_bytes(commit_bytes) ^ u64::from_le_bytes(batch_bytes)
 }
 
 fn load_r1_scenario(path: &str) -> R1Scenario {

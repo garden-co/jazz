@@ -4,20 +4,28 @@
 
 use serde_json::json;
 use smallvec::smallvec;
+use uuid::Uuid;
 
 use crate::metadata::{MetadataKey, RowProvenance, row_provenance_metadata};
+use crate::object::{BranchName, ObjectId};
 use crate::query_manager::encoding::{decode_row, encode_row};
 use crate::query_manager::manager::{QueryError, QueryManager};
 use crate::query_manager::query::QueryBuilder;
+use crate::query_manager::relation_ir::{
+    ColumnRef, PredicateCmpOp, PredicateExpr, RelExpr, RowIdRef, ValueRef,
+};
 use crate::query_manager::session::Session as PolicySession;
 use crate::query_manager::types::{
-    ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, TableName, TablePolicies,
-    TableSchema, Value,
+    BatchId, ColumnDescriptor, ColumnType, ComposedBranchName, PolicyExpr, RowDescriptor, Schema,
+    TableName, TablePolicies, TableSchema, Value,
 };
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 use crate::storage::FjallStorage;
 use crate::storage::{MemoryStorage, Storage};
-use crate::sync_manager::SyncManager;
+use crate::sync_manager::{
+    ClientId, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation, SyncManager,
+    SyncPayload,
+};
 
 fn test_schema() -> Schema {
     let mut schema = Schema::new();
@@ -66,14 +74,105 @@ fn recursive_hop_team_schema() -> Schema {
     schema
 }
 
+fn private_chat_policy_schema() -> Schema {
+    let mut schema = Schema::new();
+
+    let membership_read_rel_for_column = |chat_id_column: &str| PolicyExpr::ExistsRel {
+        rel: RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("chat_members"),
+            }),
+            predicate: PredicateExpr::And(vec![
+                PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("chat_id"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::OuterColumn(ColumnRef::unscoped(chat_id_column)),
+                },
+                PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("user_id"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::SessionRef(vec!["user_id".into()]),
+                },
+            ]),
+        },
+    };
+    let membership_read_rel_for_row_id = PolicyExpr::ExistsRel {
+        rel: RelExpr::Filter {
+            input: Box::new(RelExpr::TableScan {
+                table: TableName::new("chat_members"),
+            }),
+            predicate: PredicateExpr::And(vec![
+                PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("chat_id"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::RowId(RowIdRef::Outer),
+                },
+                PredicateExpr::Cmp {
+                    left: ColumnRef::unscoped("user_id"),
+                    op: PredicateCmpOp::Eq,
+                    right: ValueRef::SessionRef(vec!["user_id".into()]),
+                },
+            ]),
+        },
+    };
+
+    schema.insert(
+        TableName::new("chats"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("is_public", ColumnType::Boolean),
+                ColumnDescriptor::new("created_by", ColumnType::Text),
+            ]),
+            TablePolicies::new().with_select(membership_read_rel_for_row_id),
+        ),
+    );
+
+    schema.insert(
+        TableName::new("chat_members"),
+        RowDescriptor::new(vec![
+            ColumnDescriptor::new("chat_id", ColumnType::Uuid).references("chats"),
+            ColumnDescriptor::new("user_id", ColumnType::Text),
+        ])
+        .into(),
+    );
+
+    schema.insert(
+        TableName::new("messages"),
+        TableSchema::with_policies(
+            RowDescriptor::new(vec![
+                ColumnDescriptor::new("chat_id", ColumnType::Uuid).references("chats"),
+                ColumnDescriptor::new("text", ColumnType::Text),
+            ]),
+            TablePolicies::new().with_select(membership_read_rel_for_column("chat_id")),
+        ),
+    );
+
+    schema
+}
+
 /// Helper to create QueryManager with schema on default branch.
 fn create_query_manager(
     sync_manager: SyncManager,
     schema: Schema,
 ) -> (QueryManager, MemoryStorage) {
     let mut qm = QueryManager::new(sync_manager);
-    qm.set_current_schema(schema, "dev", "main");
+    qm.set_current_schema_with_batch(schema, "dev", "main", BatchId::nil());
     (qm, MemoryStorage::new())
+}
+
+fn create_query_manager_with_batch(
+    sync_manager: SyncManager,
+    schema: Schema,
+    batch: u128,
+) -> QueryManager {
+    let mut qm = QueryManager::new(sync_manager);
+    qm.set_current_schema_with_batch(
+        schema,
+        "dev",
+        "main",
+        BatchId::from_uuid(Uuid::from_u128(batch)),
+    );
+    qm
 }
 
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
@@ -82,7 +181,7 @@ fn create_query_manager_with_fjall(
     schema: Schema,
 ) -> (QueryManager, tempfile::TempDir, FjallStorage) {
     let mut qm = QueryManager::new(sync_manager);
-    qm.set_current_schema(schema, "dev", "main");
+    qm.set_current_schema_with_batch(schema, "dev", "main", BatchId::nil());
 
     let temp_dir = tempfile::TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.fjall");
@@ -146,7 +245,6 @@ fn add_row_commit(
         .unwrap()
 }
 
-use crate::object::ObjectId;
 use crate::query_manager::query::Query;
 
 fn json_documents_schema(schema: Option<serde_json::Value>) -> Schema {
@@ -304,6 +402,87 @@ fn insert_rejects_json_schema_violation() {
 }
 
 #[test]
+fn exists_rel_policy_reads_membership_across_active_batches() {
+    // alice batch ──create private chat + seed message──► batch A
+    // bob batch   ──insert membership───────────────────► batch B
+    // bob query   ──should still see the seed message across A+B
+    let schema = private_chat_policy_schema();
+    let mut storage = MemoryStorage::new();
+
+    let mut alice = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 11);
+    let chat_id = alice
+        .insert(
+            &mut storage,
+            "chats",
+            &[Value::Boolean(false), Value::Text("alice".into())],
+        )
+        .expect("alice creates chat")
+        .row_id;
+    alice
+        .insert(
+            &mut storage,
+            "messages",
+            &[
+                Value::Uuid(chat_id),
+                Value::Text("This is a private chat.".into()),
+            ],
+        )
+        .expect("alice inserts seed message");
+    alice.process(&mut storage);
+
+    let mut bob = create_query_manager_with_batch(SyncManager::new(), schema, 12);
+    bob.insert_with_session(
+        &mut storage,
+        "chat_members",
+        &[Value::Uuid(chat_id), Value::Text("bob".into())],
+        Some(&PolicySession::new("bob")),
+    )
+    .expect("bob joins private chat");
+    bob.process(&mut storage);
+
+    let chat_sub = bob
+        .subscribe_with_session(
+            bob.query("chats")
+                .filter_eq("id", Value::Uuid(chat_id))
+                .build(),
+            Some(PolicySession::new("bob")),
+            None,
+        )
+        .expect("bob subscribes to chat");
+    let message_sub = bob
+        .subscribe_with_session(
+            bob.query("messages")
+                .filter_eq("chat_id", Value::Uuid(chat_id))
+                .build(),
+            Some(PolicySession::new("bob")),
+            None,
+        )
+        .expect("bob subscribes to messages");
+
+    for _ in 0..10 {
+        bob.process(&mut storage);
+    }
+
+    let chat_rows = bob.get_subscription_results(chat_sub);
+    assert_eq!(
+        chat_rows.len(),
+        1,
+        "bob should see the private chat after joining"
+    );
+
+    let message_rows = bob.get_subscription_results(message_sub);
+    assert_eq!(
+        message_rows.len(),
+        1,
+        "bob should see the seed message even though membership is on a newer batch"
+    );
+    assert_eq!(
+        message_rows[0].1[1],
+        Value::Text("This is a private chat.".into())
+    );
+}
+
+#[test]
 fn update_rejects_json_schema_violation() {
     let sync_manager = SyncManager::new();
     let schema = json_documents_schema(Some(json!({
@@ -365,6 +544,322 @@ fn insert_and_get() {
     assert_eq!(results[0].0, handle.row_id);
     assert_eq!(results[0].1[0], Value::Text("Alice".into()));
     assert_eq!(results[0].1[1], Value::Integer(100));
+}
+
+#[test]
+fn update_on_fresh_batch_branch_merges_from_prefix_leaf_head() {
+    let schema = test_schema();
+    let mut storage = MemoryStorage::new();
+
+    let mut qm1 = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 1);
+    let handle = qm1
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let branch1 = BranchName::new(get_branch(&qm1));
+    let parent_tip = *qm1
+        .sync_manager
+        .object_manager
+        .get(handle.row_id)
+        .unwrap()
+        .branches
+        .get(&branch1)
+        .unwrap()
+        .tips
+        .iter()
+        .next()
+        .unwrap();
+
+    let mut qm2 = create_query_manager_with_batch(SyncManager::new(), schema, 2);
+    qm2.update(
+        &mut storage,
+        handle.row_id,
+        &[Value::Text("Alicia".into()), Value::Integer(101)],
+    )
+    .unwrap();
+
+    let branch2 = BranchName::new(get_branch(&qm2));
+    let obj = qm2.sync_manager.object_manager.get(handle.row_id).unwrap();
+    let current_branch = obj.branches.get(&branch2).unwrap();
+    assert_eq!(current_branch.tips.len(), 1);
+
+    let current_tip = *current_branch.tips.iter().next().unwrap();
+    let current_commit = current_branch.commits.get(&current_tip).unwrap();
+    assert_eq!(current_commit.parents.as_slice(), &[parent_tip]);
+
+    let prefix = ComposedBranchName::parse(&branch1).unwrap().prefix();
+    let leaf_heads = qm2
+        .sync_manager
+        .object_manager
+        .get_leaf_head_ids_for_prefix(handle.row_id, &prefix, &storage)
+        .unwrap();
+    assert_eq!(leaf_heads.len(), 1);
+    assert_eq!(leaf_heads.get(&branch2), Some(&current_tip));
+
+    let row = qm2.get_row(handle.row_id).unwrap();
+    assert_eq!(row.1[0], Value::Text("Alicia".into()));
+    assert_eq!(row.1[1], Value::Integer(101));
+}
+
+#[test]
+fn delete_on_fresh_batch_branch_merges_from_prefix_leaf_head() {
+    let schema = test_schema();
+    let mut storage = MemoryStorage::new();
+
+    let mut qm1 = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 11);
+    let handle = qm1
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let branch1 = BranchName::new(get_branch(&qm1));
+    let parent_tip = *qm1
+        .sync_manager
+        .object_manager
+        .get(handle.row_id)
+        .unwrap()
+        .branches
+        .get(&branch1)
+        .unwrap()
+        .tips
+        .iter()
+        .next()
+        .unwrap();
+
+    let mut qm2 = create_query_manager_with_batch(SyncManager::new(), schema, 12);
+    qm2.delete(&mut storage, handle.row_id).unwrap();
+
+    let branch2 = BranchName::new(get_branch(&qm2));
+    let obj = qm2.sync_manager.object_manager.get(handle.row_id).unwrap();
+    let current_branch = obj.branches.get(&branch2).unwrap();
+    let current_tip = *current_branch.tips.iter().next().unwrap();
+    let current_commit = current_branch.commits.get(&current_tip).unwrap();
+    assert_eq!(current_commit.parents.as_slice(), &[parent_tip]);
+    assert!(current_commit.is_soft_deleted());
+
+    let prefix = ComposedBranchName::parse(&branch1).unwrap().prefix();
+    let leaf_heads = qm2
+        .sync_manager
+        .object_manager
+        .get_leaf_head_ids_for_prefix(handle.row_id, &prefix, &storage)
+        .unwrap();
+    assert_eq!(leaf_heads.len(), 1);
+    assert_eq!(leaf_heads.get(&branch2), Some(&current_tip));
+
+    assert!(qm2.row_is_deleted(&storage, "users", handle.row_id));
+}
+
+#[test]
+fn hard_delete_on_fresh_batch_branch_merges_from_prefix_leaf_head() {
+    let schema = test_schema();
+    let mut storage = MemoryStorage::new();
+
+    let mut qm1 = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 21);
+    let handle = qm1
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let branch1 = BranchName::new(get_branch(&qm1));
+    let parent_tip = *qm1
+        .sync_manager
+        .object_manager
+        .get(handle.row_id)
+        .unwrap()
+        .branches
+        .get(&branch1)
+        .unwrap()
+        .tips
+        .iter()
+        .next()
+        .unwrap();
+
+    let mut qm2 = create_query_manager_with_batch(SyncManager::new(), schema, 22);
+    qm2.hard_delete(&mut storage, handle.row_id).unwrap();
+
+    let branch2 = BranchName::new(get_branch(&qm2));
+    let obj = qm2.sync_manager.object_manager.get(handle.row_id).unwrap();
+    let current_branch = obj.branches.get(&branch2).unwrap();
+    let current_tip = *current_branch.tips.iter().next().unwrap();
+    let current_commit = current_branch.commits.get(&current_tip).unwrap();
+    assert_eq!(current_commit.parents.as_slice(), &[parent_tip]);
+    assert!(current_commit.is_hard_deleted());
+    assert!(current_commit.content.is_empty());
+
+    let prefix = ComposedBranchName::parse(&branch1).unwrap().prefix();
+    let leaf_heads = qm2
+        .sync_manager
+        .object_manager
+        .get_leaf_head_ids_for_prefix(handle.row_id, &prefix, &storage)
+        .unwrap();
+    assert_eq!(leaf_heads.len(), 1);
+    assert_eq!(leaf_heads.get(&branch2), Some(&current_tip));
+}
+
+#[test]
+fn default_query_on_fresh_batch_branch_reads_registered_prefix_branches() {
+    let schema = test_schema();
+    let mut storage = MemoryStorage::new();
+
+    let mut qm1 = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 31);
+    qm1.insert(
+        &mut storage,
+        "users",
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+
+    let mut qm2 = create_query_manager_with_batch(SyncManager::new(), schema, 32);
+    let current_branch = get_branch(&qm2);
+    let explicit_query = qm2.query("users").branch(&current_branch).build();
+    let default_query = qm2.query("users").build();
+
+    let explicit_results = execute_query(&mut qm2, &mut storage, explicit_query).unwrap();
+    assert!(explicit_results.is_empty());
+
+    let default_results = execute_query(&mut qm2, &mut storage, default_query)
+        .expect("default query should fan out to registered batch branches");
+    assert_eq!(default_results.len(), 1);
+    assert_eq!(
+        default_results[0].1,
+        vec![Value::Text("Alice".into()), Value::Integer(100)]
+    );
+}
+
+#[test]
+fn update_after_tips_only_read_on_fresh_batch_branch_merges_from_prefix_leaf_head() {
+    let schema = test_schema();
+    let mut storage = MemoryStorage::new();
+
+    let mut qm1 = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 41);
+    let handle = qm1
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let branch1 = BranchName::new(get_branch(&qm1));
+    let parent_tip = *qm1
+        .sync_manager
+        .object_manager
+        .get(handle.row_id)
+        .unwrap()
+        .branches
+        .get(&branch1)
+        .unwrap()
+        .tips
+        .iter()
+        .next()
+        .unwrap();
+
+    let mut qm2 = create_query_manager_with_batch(SyncManager::new(), schema, 42);
+
+    let query = qm2.query("users").build();
+    let query_results = execute_query(&mut qm2, &mut storage, query).unwrap();
+    assert_eq!(
+        query_results.len(),
+        1,
+        "tips-only query should see remote row"
+    );
+    assert_eq!(query_results[0].0, handle.row_id);
+
+    qm2.update(
+        &mut storage,
+        handle.row_id,
+        &[Value::Text("Alicia".into()), Value::Integer(101)],
+    )
+    .expect("fresh batch update should succeed after tips-only read");
+
+    let branch2 = BranchName::new(get_branch(&qm2));
+    let obj = qm2.sync_manager.object_manager.get(handle.row_id).unwrap();
+    let current_branch = obj.branches.get(&branch2).unwrap();
+    let current_tip = *current_branch.tips.iter().next().unwrap();
+    let current_commit = current_branch.commits.get(&current_tip).unwrap();
+    assert_eq!(current_commit.parents.as_slice(), &[parent_tip]);
+    assert!(!current_commit.content.is_empty());
+}
+
+#[test]
+fn subscription_recompiles_when_external_batch_arrives_for_same_prefix() {
+    use crate::commit::{Commit, StoredState};
+    use crate::query_manager::encoding::encode_row;
+    use std::collections::HashMap;
+
+    let schema = test_schema();
+    let schema_hash = crate::query_manager::types::SchemaHash::compute(&schema);
+    let mut storage = MemoryStorage::new();
+    let mut qm = create_query_manager_with_batch(SyncManager::new(), schema, 32);
+    qm.set_known_schemas(std::sync::Arc::new(std::collections::HashMap::from([(
+        schema_hash,
+        test_schema(),
+    )])));
+
+    let sub_id = qm.subscribe(qm.query("users").build()).unwrap();
+    let _ = qm.take_updates();
+
+    let remote_branch = ComposedBranchName::new(
+        "dev",
+        schema_hash,
+        "main",
+        BatchId::from_uuid(Uuid::from_u128(31)),
+    )
+    .to_branch_name();
+
+    let row_id = ObjectId::new();
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_object(&mut storage, row_id, metadata);
+
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let row_data = encode_row(
+        &descriptor,
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    let commit = Commit {
+        parents: smallvec![],
+        content: row_data,
+        timestamp: 1_000,
+        author: row_id.to_string(),
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut storage, row_id, remote_branch, commit)
+        .unwrap();
+
+    qm.process(&mut storage);
+
+    let query = qm.query("users").build();
+    let results = execute_query(&mut qm, &mut storage, query)
+        .expect("default query should fan out to the new external batch");
+    assert_eq!(results.len(), 1);
+
+    let updates = qm.take_updates();
+    let update = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("subscription should recompile onto the new batch and emit the row");
+    assert_eq!(update.delta.added.len(), 1);
 }
 
 #[test]
@@ -634,6 +1129,48 @@ fn recursive_hop_query_subscriptions_receive_expansion_updates() {
     assert!(
         added_names.contains(&"team-3".to_string()),
         "team-3 should be added when edge team-2 -> team-3 is inserted"
+    );
+}
+
+#[test]
+fn process_ignores_non_write_pending_permission_checks_without_schema_context() {
+    let mut qm = QueryManager::new(SyncManager::new());
+    let mut storage = MemoryStorage::new();
+
+    qm.sync_manager_mut()
+        .requeue_pending_permission_checks(vec![PendingPermissionCheck {
+            id: PendingUpdateId(1),
+            client_id: ClientId::new(),
+            payload: SyncPayload::QuerySubscription {
+                query_id: QueryId(1),
+                query: Box::new(QueryBuilder::new("users").build()),
+                schema_context: crate::schema_manager::QuerySchemaContext::new(
+                    "dev",
+                    crate::query_manager::types::SchemaHash::from_bytes([1; 32]),
+                    "main",
+                    BatchId::nil(),
+                ),
+                session: None,
+                propagation: QueryPropagation::Full,
+            },
+            session: PolicySession::new("alice"),
+            schema_wait_started_at: None,
+            metadata: std::collections::HashMap::from([(
+                MetadataKey::Table.as_str().to_string(),
+                "users".to_string(),
+            )]),
+            old_content: None,
+            new_content: None,
+            operation: crate::query_manager::policy::Operation::Insert,
+        }]);
+
+    qm.process(&mut storage);
+
+    assert!(
+        qm.sync_manager_mut()
+            .take_pending_permission_checks()
+            .is_empty(),
+        "unexpected payload should be dropped instead of retrying or panicking"
     );
 }
 
@@ -1522,42 +2059,114 @@ fn synced_update_updates_column_indices() {
 }
 
 #[test]
-#[should_panic(expected = "missing old_content for historical sync update")]
-fn synced_update_missing_old_content_panics_fail_fast() {
+fn synced_update_missing_old_content_reconciles_from_current_head() {
+    use crate::commit::{Commit, StoredState};
     use crate::object::BranchName;
     use crate::object_manager::AllObjectUpdate;
+    use crate::query_manager::encoding::encode_row;
+    use std::collections::HashMap;
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
     let branch = get_branch(&qm);
 
-    let handle = qm
-        .insert(
-            &mut storage,
-            "users",
-            &[Value::Text("Alice".into()), Value::Integer(100)],
-        )
+    let row_id = crate::object::ObjectId::new();
+    let author = row_id;
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_object(&mut storage, row_id, metadata.clone());
+    qm.sync_manager_mut().object_manager.subscribe_all();
+
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let initial_data = encode_row(
+        &descriptor,
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    let commit1 = Commit {
+        parents: smallvec![],
+        content: initial_data,
+        timestamp: 1000,
+        author: author.to_string(),
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+    let commit1_id = qm
+        .sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut storage, row_id, &branch, commit1)
         .unwrap();
     qm.process(&mut storage);
 
-    let mut metadata = std::collections::HashMap::new();
-    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    let updated_data = encode_row(
+        &descriptor,
+        &[Value::Text("Bob".into()), Value::Integer(200)],
+    )
+    .unwrap();
+    let commit2 = Commit {
+        parents: smallvec![commit1_id],
+        content: updated_data,
+        timestamp: 2000,
+        author: author.to_string(),
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+    let commit2_id = qm
+        .sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut storage, row_id, &branch, commit2)
+        .unwrap();
 
     // Simulate a historical sync update where ObjectManager couldn't provide
-    // old_content. We should fail-fast rather than accept index staleness.
+    // old_content. QueryManager should reconcile indices from the current head.
     qm.handle_object_update(
         &mut storage,
         AllObjectUpdate {
-            object_id: handle.row_id,
+            object_id: row_id,
             metadata,
             branch_name: BranchName::new(&branch),
-            commit_ids: vec![],
+            commit_ids: vec![commit2_id],
             is_new_object: false,
-            previous_commit_ids: vec![handle.row_commit_id],
+            previous_commit_ids: vec![commit1_id],
             old_content: None,
         },
     );
+
+    let query = qm
+        .query("users")
+        .filter_eq("name", Value::Text("Alice".into()))
+        .build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(results.len(), 0);
+
+    let query = qm
+        .query("users")
+        .filter_eq("name", Value::Text("Bob".into()))
+        .build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(results.len(), 1);
+
+    let query = qm
+        .query("users")
+        .filter_eq("score", Value::Integer(100))
+        .build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(results.len(), 0);
+
+    let query = qm
+        .query("users")
+        .filter_eq("score", Value::Integer(200))
+        .build();
+    let results = execute_query(&mut qm, &mut storage, query).unwrap();
+    assert_eq!(results.len(), 1);
 }
 
 #[test]
@@ -2561,6 +3170,180 @@ fn sync_inbox_update_flows_to_subscription_delta() {
     let values = decode_row(&descriptor, &new_row.data).unwrap();
     assert_eq!(values[0], Value::Text("Alice Updated".into()));
     assert_eq!(values[1], Value::Integer(999));
+}
+
+#[test]
+fn sync_inbox_update_on_external_batch_becomes_query_visible() {
+    use crate::commit::{Commit, StoredState};
+    use crate::query_manager::encoding::{decode_row, encode_row};
+    use crate::query_manager::types::{BatchId, ComposedBranchName, SchemaHash};
+    use crate::sync_manager::{InboxEntry, ServerId, Source, SyncPayload};
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    let schema = test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let mut qm = create_query_manager_with_batch(SyncManager::new(), schema, 32);
+    let mut storage = MemoryStorage::new();
+    qm.set_known_schemas(Arc::new(std::collections::HashMap::from([(
+        schema_hash,
+        test_schema(),
+    )])));
+
+    let server_id = ServerId::new();
+    qm.sync_manager_mut().add_server(server_id);
+    qm.sync_manager_mut().object_manager.subscribe_all();
+
+    let query = qm.query("users").build();
+    let sub_id = qm.subscribe(query.clone()).unwrap();
+    qm.process(&mut storage);
+    let _ = qm.take_updates();
+
+    let row_id = crate::object::ObjectId::new();
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let row_data = encode_row(
+        &descriptor,
+        &[Value::Text("SyncedUser".into()), Value::Integer(42)],
+    )
+    .unwrap();
+
+    let remote_branch = ComposedBranchName::new(
+        "dev",
+        schema_hash,
+        "main",
+        BatchId::from_uuid(Uuid::from_u128(31)),
+    )
+    .to_branch_name();
+
+    let mut obj_metadata = std::collections::HashMap::new();
+    obj_metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+
+    let commit = Commit {
+        parents: smallvec![],
+        content: row_data,
+        timestamp: 1000,
+        author: row_id.to_string(),
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Server(server_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: row_id,
+            metadata: Some(crate::sync_manager::ObjectMetadata {
+                id: row_id,
+                metadata: obj_metadata,
+            }),
+            branch_name: remote_branch,
+            commits: vec![commit],
+        },
+    });
+
+    qm.sync_manager_mut().process_inbox(&mut storage);
+    qm.process(&mut storage);
+
+    let results = execute_query(&mut qm, &mut storage, query)
+        .expect("default query should include synced rows from external batches");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1[0], Value::Text("SyncedUser".into()));
+    assert_eq!(results[0].1[1], Value::Integer(42));
+
+    let updates = qm.take_updates();
+    let update = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("subscription should emit the synced row from the external batch");
+    assert_eq!(update.delta.added.len(), 1);
+    let values = decode_row(&descriptor, &update.delta.added[0].data).unwrap();
+    assert_eq!(values[0], Value::Text("SyncedUser".into()));
+    assert_eq!(values[1], Value::Integer(42));
+}
+
+#[test]
+fn peer_client_update_on_external_batch_becomes_query_visible() {
+    use crate::commit::{Commit, StoredState};
+    use crate::query_manager::encoding::encode_row;
+    use crate::query_manager::types::{BatchId, ComposedBranchName, SchemaHash};
+    use crate::sync_manager::{ClientRole, InboxEntry, Source, SyncPayload};
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    let schema = test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let mut qm = create_query_manager_with_batch(SyncManager::new(), schema, 32);
+    let mut storage = MemoryStorage::new();
+    qm.set_known_schemas(Arc::new(std::collections::HashMap::from([(
+        schema_hash,
+        test_schema(),
+    )])));
+
+    let client_id = ClientId::new();
+    qm.sync_manager_mut().add_client(client_id);
+    qm.sync_manager_mut()
+        .set_client_role(client_id, ClientRole::Peer);
+
+    let query = qm.query("users").build();
+    let _ = qm.subscribe(query.clone()).unwrap();
+    qm.process(&mut storage);
+    let _ = qm.take_updates();
+
+    let row_id = crate::object::ObjectId::new();
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let row_data = encode_row(
+        &descriptor,
+        &[Value::Text("PeerUser".into()), Value::Integer(42)],
+    )
+    .unwrap();
+
+    let remote_branch = ComposedBranchName::new(
+        "dev",
+        schema_hash,
+        "main",
+        BatchId::from_uuid(Uuid::from_u128(41)),
+    )
+    .to_branch_name();
+
+    let mut obj_metadata = std::collections::HashMap::new();
+    obj_metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+
+    let commit = Commit {
+        parents: smallvec![],
+        content: row_data,
+        timestamp: 1000,
+        author: row_id.to_string(),
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: row_id,
+            metadata: Some(crate::sync_manager::ObjectMetadata {
+                id: row_id,
+                metadata: obj_metadata,
+            }),
+            branch_name: remote_branch,
+            commits: vec![commit],
+        },
+    });
+
+    qm.process(&mut storage);
+
+    let results = execute_query(&mut qm, &mut storage, query)
+        .expect("default query should include peer-originated rows from external batches");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].1[0], Value::Text("PeerUser".into()));
+    assert_eq!(results[0].1[1], Value::Integer(42));
 }
 
 #[test]
@@ -4195,6 +4978,83 @@ fn join_subscription_can_execute_precise_relation_ir_projection() {
 }
 
 #[test]
+fn default_join_query_reads_related_rows_across_active_batches() {
+    use crate::query_manager::relation_ir::{
+        ColumnRef, JoinCondition, JoinKind, ProjectColumn, ProjectExpr, RelExpr,
+    };
+
+    // user-writer(batch 61)  -> users: Alice(id=1)
+    // post-writer(batch 62)  -> posts: Hello(author_id=1)
+    // reader(batch 63)       -> default join query should see both
+    let schema = join_schema();
+    let mut storage = MemoryStorage::new();
+
+    let mut user_writer = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 61);
+    user_writer
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Integer(1), Value::Text("Alice".into())],
+        )
+        .unwrap();
+
+    let mut post_writer = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 62);
+    post_writer
+        .insert(
+            &mut storage,
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Hello".into()),
+                Value::Integer(1),
+            ],
+        )
+        .unwrap();
+
+    let mut reader = create_query_manager_with_batch(SyncManager::new(), schema, 63);
+    let mut query = reader
+        .query("posts")
+        .join("users")
+        .on("posts.author_id", "users.id")
+        .build();
+    query.relation_ir = RelExpr::Project {
+        input: Box::new(RelExpr::Join {
+            left: Box::new(RelExpr::TableScan {
+                table: TableName::new("posts"),
+            }),
+            right: Box::new(RelExpr::TableScan {
+                table: TableName::new("users"),
+            }),
+            on: vec![JoinCondition {
+                left: ColumnRef::scoped("posts", "author_id"),
+                right: ColumnRef::scoped("users", "id"),
+            }],
+            join_kind: JoinKind::Inner,
+        }),
+        columns: vec![
+            ProjectColumn {
+                alias: "post_title".into(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("posts", "title")),
+            },
+            ProjectColumn {
+                alias: "author_name".into(),
+                expr: ProjectExpr::Column(ColumnRef::scoped("users", "name")),
+            },
+        ],
+    };
+    query.select_columns = None;
+
+    let results = execute_query(&mut reader, &mut storage, query)
+        .expect("default join query should fan out per table across active batches");
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].1,
+        vec![Value::Text("Hello".into()), Value::Text("Alice".into())]
+    );
+}
+
+#[test]
 fn join_subscription_precise_relation_ir_full_joined_element_preserves_implicit_id_row_shape() {
     use crate::query_manager::relation_ir::{
         ColumnRef, JoinCondition, JoinKind, ProjectColumn, ProjectExpr, RelExpr,
@@ -4615,6 +5475,57 @@ fn uuid_array_fk_forward_materialization_preserves_order_and_duplicates() {
 }
 
 #[test]
+fn uuid_array_fk_forward_materialization_reads_related_rows_across_active_batches() {
+    // part_writer(batch 81) -> file_parts: A
+    // file_writer(batch 82) -> files.parts: [A]
+    // reader(batch 83)      -> files.with_array(part_rows) should still see A
+    let schema = file_storage_schema();
+    let mut part_writer = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 81);
+    let mut file_writer = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 82);
+    let mut reader = create_query_manager_with_batch(SyncManager::new(), schema, 83);
+    let mut storage = MemoryStorage::new();
+
+    let part_a = part_writer
+        .insert(&mut storage, "file_parts", &[Value::Text("A".into())])
+        .expect("part insert");
+
+    file_writer
+        .insert(
+            &mut storage,
+            "files",
+            &[Value::Array(vec![Value::Uuid(part_a.row_id)])],
+        )
+        .expect("file insert");
+
+    let query = reader
+        .query("files")
+        .with_array("part_rows", |sub| {
+            sub.from("file_parts").correlate("id", "files.parts")
+        })
+        .build();
+    let sub_id = reader.subscribe(query).expect("subscribe file include");
+    reader.process(&mut storage);
+
+    let update = reader
+        .take_updates()
+        .into_iter()
+        .find(|u| u.subscription_id == sub_id)
+        .expect("files subscription should produce one update");
+    let row_values =
+        decode_row(&files_with_parts_descriptor(), &update.delta.added[0].data).unwrap();
+    let part_rows = row_values[1]
+        .as_array()
+        .expect("part_rows should be an array");
+    assert_eq!(part_rows.len(), 1, "expected one related file part");
+    let first_row = part_rows[0].as_row().expect("part row");
+    assert!(
+        part_rows[0].row_id().is_some(),
+        "part row should keep row id"
+    );
+    assert_eq!(first_row[0], Value::Text("A".into()));
+}
+
+#[test]
 fn uuid_array_fk_reverse_membership_and_index_updates_on_edit() {
     let sync_manager = SyncManager::new();
     let schema = file_storage_schema();
@@ -4988,6 +5899,86 @@ fn array_subquery_user_with_no_posts() {
     // Posts array should be empty
     let posts = values[2].as_array().expect("Should have posts array");
     assert_eq!(posts.len(), 0, "User with no posts should have empty array");
+}
+
+#[test]
+fn array_subquery_reads_related_rows_across_active_batches() {
+    // user_writer(batch 71) -> users: Alice
+    // post_writer(batch 72) -> posts: Hello by Alice
+    // reader(batch 73)      -> posts.with_array(authors) should see Alice
+    let schema = users_posts_schema();
+    let mut user_writer = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 71);
+    let mut post_writer = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 72);
+    let mut reader = create_query_manager_with_batch(SyncManager::new(), schema, 73);
+    let mut storage = MemoryStorage::new();
+
+    user_writer
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Integer(1), Value::Text("Alice".into())],
+        )
+        .expect("user insert");
+
+    post_writer
+        .insert(
+            &mut storage,
+            "posts",
+            &[
+                Value::Integer(100),
+                Value::Text("Hello".into()),
+                Value::Integer(1),
+            ],
+        )
+        .expect("post insert");
+
+    let query = reader
+        .query("posts")
+        .with_array("authors", |sub| {
+            sub.from("users")
+                .correlate("id", "posts.author_id")
+                .limit(1)
+        })
+        .build();
+
+    let sub_id = reader.subscribe(query).expect("subscribe array query");
+    reader.process(&mut storage);
+
+    let updates = reader.take_updates();
+    let delta = updates
+        .iter()
+        .find(|u| u.subscription_id == sub_id)
+        .map(|u| &u.delta)
+        .expect("array subquery should emit an initial row");
+
+    assert_eq!(delta.added.len(), 1, "expected one post row");
+
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("id", ColumnType::Integer),
+        ColumnDescriptor::new("title", ColumnType::Text),
+        ColumnDescriptor::new("author_id", ColumnType::Integer),
+        ColumnDescriptor::new(
+            "authors",
+            ColumnType::Array {
+                element: Box::new(ColumnType::Row {
+                    columns: Box::new(RowDescriptor::new(vec![
+                        ColumnDescriptor::new("id", ColumnType::Integer),
+                        ColumnDescriptor::new("name", ColumnType::Text),
+                    ])),
+                }),
+            },
+        ),
+    ]);
+
+    let values = decode_row(&descriptor, &delta.added[0].data)
+        .expect("decode array-subquery row across active batches");
+    let authors = values[3]
+        .as_array()
+        .expect("authors include should be array");
+    assert_eq!(authors.len(), 1, "expected the related author row");
+    let author = authors[0].as_row().expect("author should decode as row");
+    assert_eq!(author[0], Value::Integer(1));
+    assert_eq!(author[1], Value::Text("Alice".into()));
 }
 
 #[test]
@@ -6615,6 +7606,60 @@ fn policy_filters_select_results() {
 }
 
 #[test]
+fn paginated_policy_query_drops_page_when_hidden_prefix_is_required() {
+    // Ordered rows:
+    //   1. "A-hidden"  (not visible to alice)
+    //   2. "B-visible" (visible to alice)
+    //
+    // Query:
+    //   ORDER BY title ASC OFFSET 1 LIMIT 1
+    //
+    // Alice cannot reproduce that page locally without the hidden prefix row,
+    // so the paginated result should be withheld entirely.
+    let sync_manager = SyncManager::new();
+    let schema = policy_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    qm.insert(
+        &mut storage,
+        "documents",
+        &[
+            Value::Text("bob".into()),
+            Value::Text("sales".into()),
+            Value::Text("A-hidden".into()),
+        ],
+    )
+    .unwrap();
+    qm.insert(
+        &mut storage,
+        "documents",
+        &[
+            Value::Text("alice".into()),
+            Value::Text("eng".into()),
+            Value::Text("B-visible".into()),
+        ],
+    )
+    .unwrap();
+
+    let query = qm
+        .query("documents")
+        .order_by("title")
+        .offset(1)
+        .limit(1)
+        .build();
+    let sub_id = qm
+        .subscribe_with_session(query, Some(PolicySession::new("alice")), None)
+        .unwrap();
+
+    qm.process(&mut storage);
+
+    assert!(
+        qm.get_subscription_results(sub_id).is_empty(),
+        "paginated query should not reveal rows when an invisible ordered prefix row is required"
+    );
+}
+
+#[test]
 fn no_session_returns_all_rows() {
     let sync_manager = SyncManager::new();
     let schema = policy_schema();
@@ -6934,7 +7979,8 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use crate::query_manager::types::{ComposedBranchName, SchemaHash};
+    use crate::query_manager::types::{BatchId, ComposedBranchName, SchemaHash};
+    use crate::schema_manager::QuerySchemaContext;
     use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
 
     let authorization_schema = join_policy_schema();
@@ -6947,7 +7993,8 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
         })
         .collect();
     let schema_hash = SchemaHash::compute(&structural_schema);
-    let branch = ComposedBranchName::new("dev", schema_hash, "main")
+    let batch_id = BatchId::new();
+    let branch = ComposedBranchName::new("dev", schema_hash, "main", batch_id)
         .to_branch_name()
         .as_str()
         .to_string();
@@ -7028,6 +8075,7 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(1),
             query: Box::new(query),
+            schema_context: QuerySchemaContext::new("dev", schema_hash, "main", batch_id),
             session: Some(session),
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -7220,12 +8268,14 @@ fn join_query_with_multiple_branches_reads_all_branches() {
 #[test]
 fn handle_object_update_respects_branch() {
     use crate::query_manager::encoding::encode_row;
+    use crate::query_manager::types::{BatchId, ComposedBranchName, SchemaHash};
     use std::collections::HashMap;
 
     // Verify that handle_object_update updates the correct branch's indices.
     // Rows on a non-schema branch should NOT appear in queries on the schema branch.
     let sync_manager = SyncManager::new();
     let schema = test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
 
     // Get the actual schema branch
@@ -7253,11 +8303,14 @@ fn handle_object_update_respects_branch() {
     )
     .unwrap();
 
+    let other_branch = ComposedBranchName::new("dev", schema_hash, "other-branch", BatchId::nil())
+        .to_branch_name();
+
     // Receive commit on "other-branch" (not the schema's branch)
     let commit = stored_row_commit(smallvec![], row_data.clone(), 1000, author.to_string());
     qm.sync_manager_mut()
         .object_manager
-        .receive_commit(&mut storage, row_id, "other-branch", commit)
+        .receive_commit(&mut storage, row_id, other_branch, commit)
         .unwrap();
 
     qm.process(&mut storage);
@@ -7294,6 +8347,75 @@ fn handle_object_update_respects_branch() {
         results.len(),
         1,
         "Row on schema branch should appear in default query"
+    );
+}
+
+#[test]
+fn handle_object_update_in_server_mode_checks_hard_delete_on_update_branch() {
+    use crate::commit::{Commit, StoredState};
+    use crate::object_manager::AllObjectUpdate;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let mut qm = QueryManager::new(SyncManager::new());
+    let mut storage = MemoryStorage::new();
+    let schema = test_schema();
+    let schema_hash = crate::query_manager::types::SchemaHash::compute(&schema);
+    let branch =
+        ComposedBranchName::new("dev", schema_hash, "main", BatchId::nil()).to_branch_name();
+
+    qm.known_schemas = Arc::new(HashMap::from([(schema_hash, schema)]));
+
+    let row_id = ObjectId::new();
+    let author = row_id;
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_object(&mut storage, row_id, metadata.clone());
+
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let row_data = encode_row(
+        &descriptor,
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+
+    let commit = Commit {
+        parents: smallvec![],
+        content: row_data,
+        timestamp: 1_000,
+        author: author.to_string(),
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+    let commit_id = qm
+        .sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut storage, row_id, branch, commit)
+        .unwrap();
+
+    qm.handle_object_update(
+        &mut storage,
+        AllObjectUpdate {
+            object_id: row_id,
+            metadata,
+            branch_name: branch,
+            commit_ids: vec![commit_id],
+            is_new_object: false,
+            previous_commit_ids: vec![],
+            old_content: None,
+        },
+    );
+
+    assert!(
+        qm.pending_row_updates.is_empty(),
+        "server-mode composed branch updates should not hit current_branch()"
     );
 }
 
@@ -7724,11 +8846,13 @@ fn server_builds_query_graph_on_subscription() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
+    let schema_context = server_qm.schema_context().query_context();
     server_qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(1),
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -7766,6 +8890,99 @@ fn server_builds_query_graph_on_subscription() {
 
     assert!(sent_ids.contains(&handle1.row_id), "Alice should be sent");
     assert!(sent_ids.contains(&handle3.row_id), "Charlie should be sent");
+}
+
+#[test]
+fn restarted_server_query_subscription_replays_persisted_rows_into_scope() {
+    use crate::sync_manager::{
+        ClientId, Destination, DurabilityTier, InboxEntry, QueryId, Source, SyncPayload,
+    };
+    use uuid::Uuid;
+
+    let schema = test_schema();
+    let mut storage = MemoryStorage::new();
+
+    let mut writer_qm = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 1);
+    let alice = writer_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap()
+        .row_id;
+    writer_qm.process(&mut storage);
+
+    let mut restarted_server = create_query_manager_with_batch(
+        SyncManager::new().with_durability_tier(DurabilityTier::Worker),
+        schema.clone(),
+        2,
+    );
+    let restarted_rows = execute_query(
+        &mut restarted_server,
+        &mut storage,
+        QueryBuilder::new("users").build(),
+    )
+    .expect("restarted server should read persisted rows locally");
+    assert_eq!(restarted_rows.len(), 1);
+    assert_eq!(restarted_rows[0].0, alice);
+
+    let client_qm = create_query_manager_with_batch(SyncManager::new(), schema, 3);
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    restarted_server.sync_manager_mut().add_client(client_id);
+
+    restarted_server.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(
+                QueryBuilder::new("users")
+                    .branch(client_qm.schema_context().branch_name().as_str())
+                    .build(),
+            ),
+            schema_context: client_qm.schema_context().query_context(),
+            session: None,
+            propagation: QueryPropagation::Full,
+        },
+    });
+
+    restarted_server.process(&mut storage);
+
+    let subscription = restarted_server
+        .server_subscriptions
+        .get(&(client_id, QueryId(1)))
+        .expect("server subscription should exist after processing");
+    assert!(
+        subscription
+            .branches
+            .iter()
+            .any(|branch| branch.batch_id() != client_qm.schema_context().batch_id),
+        "restarted server should resolve downstream query to its own active batch branches, not keep only the client's current batch"
+    );
+    assert_eq!(
+        subscription.graph.current_result().len(),
+        1,
+        "restarted server subscription should still settle the persisted row"
+    );
+    assert_eq!(
+        subscription.graph.sync_scope_object_keys().len(),
+        1,
+        "restarted server subscription should keep that row in downstream sync scope"
+    );
+    assert_eq!(
+        subscription.last_scope.len(),
+        1,
+        "restarted server should remember a non-empty downstream scope"
+    );
+
+    let outbox = restarted_server.sync_manager_mut().take_outbox();
+    assert!(
+        outbox.iter().any(|entry| {
+            entry.destination == Destination::Client(client_id)
+                && matches!(entry.payload, SyncPayload::ObjectUpdated { object_id, .. } if object_id == alice)
+        }),
+        "restarted server should emit ObjectUpdated for the persisted row"
+    );
 }
 
 #[test]
@@ -7824,11 +9041,13 @@ fn server_sends_error_for_uncompilable_query_subscription() {
 
     // Query references a table that does not exist in schema.
     let invalid_query = QueryBuilder::new("no_such_table").build();
+    let schema_context = server_qm.schema_context().query_context();
     server_qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(42),
             query: Box::new(invalid_query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -7877,11 +9096,13 @@ fn server_stale_recompile_failure_drops_subscription_and_notifies_client() {
     server_qm.sync_manager_mut().add_client(client_id);
 
     let valid_query = server_qm.query("users").build();
+    let schema_context = server_qm.schema_context().query_context();
     server_qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(7),
             query: Box::new(valid_query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -7976,11 +9197,13 @@ fn server_pushes_new_matches() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
+    let schema_context = server_qm.schema_context().query_context();
     server_qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(1),
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -8072,11 +9295,13 @@ fn server_subscription_telemetry_tracks_grouping_and_unsubscribe_lifecycle() {
             QueryPropagation::Full,
         ),
     ] {
+        let schema_context = server_qm.schema_context().query_context();
         server_qm.sync_manager_mut().push_inbox(InboxEntry {
             source: Source::Client(client_id),
             payload: SyncPayload::QuerySubscription {
                 query_id,
                 query: Box::new(query),
+                schema_context,
                 session: None,
                 propagation,
             },
@@ -8135,11 +9360,13 @@ fn server_does_not_push_non_matching() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
+    let schema_context = server_qm.schema_context().query_context();
     server_qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(1),
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -8450,11 +9677,13 @@ fn mid_tier_forwards_query_subscription_upstream() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
+    let schema_context = mid_tier.schema_context().query_context();
     mid_tier.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: crate::sync_manager::QueryId(42),
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -8500,11 +9729,13 @@ fn mid_tier_does_not_forward_local_only_query_subscription_upstream() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
+    let schema_context = mid_tier.schema_context().query_context();
     mid_tier.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: crate::sync_manager::QueryId(42),
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::LocalOnly,
         },
@@ -8542,11 +9773,13 @@ fn add_server_does_not_replay_downstream_local_only_query_subscription() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
+    let schema_context = mid_tier.schema_context().query_context();
     mid_tier.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(downstream_client),
         payload: SyncPayload::QuerySubscription {
             query_id: crate::sync_manager::QueryId(77),
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::LocalOnly,
         },
@@ -8596,11 +9829,13 @@ fn mid_tier_forwards_query_unsubscription_upstream() {
 
     let query_id = crate::sync_manager::QueryId(42);
 
+    let schema_context = mid_tier.schema_context().query_context();
     mid_tier.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id,
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -8673,11 +9908,13 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
         .filter_gt("score", Value::Integer(50))
         .build();
 
+    let schema_context = mid_tier.schema_context().query_context();
     mid_tier.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: crate::sync_manager::QueryId(42),
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -8962,6 +10199,304 @@ fn e2e_client_receives_server_data_via_subscription() {
     assert!(names.contains(&"Alice"), "Should contain Alice");
     assert!(names.contains(&"Charlie"), "Should contain Charlie");
     assert!(!names.contains(&"Bob"), "Should NOT contain Bob");
+}
+
+#[test]
+fn e2e_client_subscription_replays_remote_fresh_batch_update() {
+    use crate::commit::{Commit, StoredState};
+    use crate::query_manager::encoding::encode_row;
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, ServerId, Source};
+    use uuid::Uuid;
+
+    // alice client subscribes on batch A.
+    // server later receives an update for the same row on fresh batch B.
+    //
+    // alice client ──subscribe──► server
+    //                              │
+    //                              ├── initial row on batch A
+    //                              └── remote update on batch B
+    //                                        │
+    //                                        └──► alice should see updated row
+    let schema = test_schema();
+
+    let mut server = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 100);
+    let mut server_io = MemoryStorage::new();
+
+    let handle = server
+        .insert(
+            &mut server_io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(75)],
+        )
+        .unwrap();
+    server.process(&mut server_io);
+
+    let initial_branch = BranchName::new(get_branch(&server));
+    let initial_tip = server
+        .sync_manager_mut()
+        .object_manager
+        .get(handle.row_id)
+        .and_then(|object| object.branches.get(&initial_branch))
+        .and_then(|branch| branch.tips.iter().next().copied())
+        .expect("server row tip should exist");
+
+    let mut client = create_query_manager_with_batch(SyncManager::new(), schema, 1);
+    let mut client_io = MemoryStorage::new();
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client.sync_manager_mut().add_server(server_id);
+    server.sync_manager_mut().add_client(client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let sub_id = client
+        .subscribe_with_sync(client.query("users").build(), None, None)
+        .unwrap();
+
+    let client_outbox = client.sync_manager_mut().take_outbox();
+    let query_subscription = client_outbox
+        .into_iter()
+        .find(|entry| matches!(entry.destination, Destination::Server(id) if id == server_id))
+        .expect("client should send query subscription upstream");
+    server.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: query_subscription.payload,
+    });
+    server.process(&mut server_io);
+
+    let server_outbox = server.sync_manager_mut().take_outbox();
+    assert!(
+        server_outbox.iter().any(|entry| {
+            matches!(
+                &entry.payload,
+                SyncPayload::ObjectUpdated { object_id, .. } if *object_id == handle.row_id
+            )
+        }),
+        "server should sync the initial visible row to the downstream client"
+    );
+    for entry in server_outbox {
+        if matches!(entry.destination, Destination::Client(id) if id == client_id) {
+            client.sync_manager_mut().push_inbox(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+    client.process(&mut client_io);
+
+    let initial_results = client.get_subscription_results(sub_id);
+    assert_eq!(
+        initial_results.len(),
+        1,
+        "client should receive the initial row"
+    );
+    assert_eq!(initial_results[0].1[1], Value::Integer(75));
+
+    let remote_branch = ComposedBranchName::new(
+        "dev",
+        ComposedBranchName::parse(&initial_branch)
+            .expect("server branch should be composed")
+            .schema_hash,
+        "main",
+        BatchId::from_uuid(Uuid::from_u128(200)),
+    )
+    .to_branch_name();
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let remote_commit = Commit {
+        parents: smallvec![initial_tip],
+        content: encode_row(
+            &descriptor,
+            &[Value::Text("Alice".into()), Value::Integer(125)],
+        )
+        .unwrap(),
+        timestamp: 2_000,
+        author: handle.row_id.to_string(),
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+    server
+        .sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut server_io, handle.row_id, remote_branch, remote_commit)
+        .unwrap();
+    server.process(&mut server_io);
+
+    let server_outbox = server.sync_manager_mut().take_outbox();
+    assert!(
+        server_outbox.iter().any(|entry| {
+            matches!(
+                &entry.payload,
+                SyncPayload::ObjectUpdated { object_id, .. } if *object_id == handle.row_id
+            )
+        }),
+        "server should sync the fresh-batch update to the downstream client"
+    );
+    for entry in server_outbox {
+        if matches!(entry.destination, Destination::Client(id) if id == client_id) {
+            client.sync_manager_mut().push_inbox(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+    client.process(&mut client_io);
+
+    let updated_results = client.get_subscription_results(sub_id);
+    assert_eq!(updated_results.len(), 1, "client should still see one row");
+    assert_eq!(
+        updated_results[0].1[1],
+        Value::Integer(125),
+        "client should observe the fresh-batch update"
+    );
+}
+
+#[test]
+fn e2e_client_subscription_removes_row_after_remote_fresh_batch_update_leaves_filter() {
+    use crate::commit::{Commit, StoredState};
+    use crate::query_manager::encoding::encode_row;
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, ServerId, Source};
+    use uuid::Uuid;
+
+    let schema = test_schema();
+
+    let mut server = create_query_manager_with_batch(SyncManager::new(), schema.clone(), 300);
+    let mut server_io = MemoryStorage::new();
+    let handle = server
+        .insert(
+            &mut server_io,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(75)],
+        )
+        .unwrap();
+    server.process(&mut server_io);
+
+    let initial_branch = BranchName::new(get_branch(&server));
+    let initial_tip = server
+        .sync_manager_mut()
+        .object_manager
+        .get(handle.row_id)
+        .and_then(|object| object.branches.get(&initial_branch))
+        .and_then(|branch| branch.tips.iter().next().copied())
+        .expect("server row tip should exist");
+
+    let mut client = create_query_manager_with_batch(SyncManager::new(), schema, 301);
+    let mut client_io = MemoryStorage::new();
+
+    let server_id = ServerId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+
+    client.sync_manager_mut().add_server(server_id);
+    server.sync_manager_mut().add_client(client_id);
+    let _ = client.sync_manager_mut().take_outbox();
+
+    let sub_id = client
+        .subscribe_with_sync(
+            client
+                .query("users")
+                .filter_gt("score", Value::Integer(50))
+                .build(),
+            None,
+            None,
+        )
+        .unwrap();
+
+    let client_outbox = client.sync_manager_mut().take_outbox();
+    let query_subscription = client_outbox
+        .into_iter()
+        .find(|entry| matches!(entry.destination, Destination::Server(id) if id == server_id))
+        .expect("client should send query subscription upstream");
+    server.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: query_subscription.payload,
+    });
+    server.process(&mut server_io);
+
+    for entry in server.sync_manager_mut().take_outbox() {
+        if matches!(entry.destination, Destination::Client(id) if id == client_id) {
+            client.sync_manager_mut().push_inbox(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+    client.process(&mut client_io);
+    let _ = client.take_updates();
+
+    let remote_branch = ComposedBranchName::new(
+        "dev",
+        ComposedBranchName::parse(&initial_branch)
+            .expect("server branch should be composed")
+            .schema_hash,
+        "main",
+        BatchId::from_uuid(Uuid::from_u128(400)),
+    )
+    .to_branch_name();
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let remote_commit = Commit {
+        parents: smallvec![initial_tip],
+        content: encode_row(
+            &descriptor,
+            &[Value::Text("Alice".into()), Value::Integer(10)],
+        )
+        .unwrap(),
+        timestamp: 2_000,
+        author: handle.row_id.to_string(),
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+    server
+        .sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut server_io, handle.row_id, remote_branch, remote_commit)
+        .unwrap();
+    server.process(&mut server_io);
+
+    let server_outbox = server.sync_manager_mut().take_outbox();
+    assert!(
+        server_outbox.iter().any(|entry| {
+            matches!(
+                &entry.payload,
+                SyncPayload::ObjectUpdated { object_id, .. } if *object_id == handle.row_id
+            )
+        }),
+        "server should sync the fresh-batch update to the downstream client"
+    );
+    for entry in server_outbox {
+        if matches!(entry.destination, Destination::Client(id) if id == client_id) {
+            client.sync_manager_mut().push_inbox(InboxEntry {
+                source: Source::Server(server_id),
+                payload: entry.payload,
+            });
+        }
+    }
+    client.process(&mut client_io);
+
+    let updates = client.take_updates();
+    let update = updates
+        .iter()
+        .find(|update| update.subscription_id == sub_id)
+        .expect("filtered subscription should emit a delta");
+    assert!(
+        update
+            .delta
+            .removed
+            .iter()
+            .any(|row| row.id == handle.row_id),
+        "filtered subscription should remove the row after the remote update leaves the filter"
+    );
+    assert!(
+        client.get_subscription_results(sub_id).is_empty(),
+        "row should no longer match the filter"
+    );
 }
 
 /// E2E: Client can cold-load a paginated remote query with a non-zero offset.
@@ -9823,11 +11358,13 @@ fn push_query_subscription(
     query: crate::query_manager::query::Query,
 ) {
     use crate::sync_manager::{InboxEntry, QueryId, Source, SyncPayload};
+    let schema_context = qm.schema_context().query_context();
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(query_id),
             query: Box::new(query),
+            schema_context,
             session: None,
             propagation: crate::sync_manager::QueryPropagation::Full,
         },
@@ -9933,9 +11470,7 @@ fn remove_client_cleans_active_policy_checks() {
     // alice disconnects → only bob's policy check remains.
     //
     use crate::query_manager::policy::Operation;
-    use crate::sync_manager::{
-        ClientId, Destination, PendingPermissionCheck, PendingUpdateId, SyncPayload,
-    };
+    use crate::sync_manager::{ClientId, PendingPermissionCheck, PendingUpdateId, SyncPayload};
     use uuid::Uuid;
 
     let sync_manager = SyncManager::new();

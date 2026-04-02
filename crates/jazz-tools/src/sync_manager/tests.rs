@@ -1,8 +1,36 @@
 use super::*;
 use crate::commit::{Commit, StoredState};
 use crate::query_manager::policy::Operation;
+use crate::query_manager::types::{BatchBranchKey, BatchId, BranchPrefixName, SchemaHash};
 use crate::storage::MemoryStorage;
 use smallvec::smallvec;
+use uuid::Uuid;
+
+fn catalogue_branch() -> BranchName {
+    crate::schema_manager::catalogue_branch_name()
+}
+
+fn test_branch(user_branch: &str) -> BranchName {
+    BranchPrefixName::new("dev", SchemaHash::from_bytes([7; 32]), user_branch)
+        .with_batch_id(BatchId::from_uuid(Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            user_branch.as_bytes(),
+        )))
+        .to_branch_name()
+}
+
+fn main_branch() -> BranchName {
+    test_branch("main")
+}
+
+fn main_branch_batch(label: &str) -> BranchName {
+    BranchPrefixName::new("dev", SchemaHash::from_bytes([7; 32]), "main")
+        .with_batch_id(BatchId::from_uuid(Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            label.as_bytes(),
+        )))
+        .to_branch_name()
+}
 
 // ========================================================================
 // Phase 1: Foundation Tests
@@ -30,7 +58,7 @@ fn add_server_receives_existing_objects() {
     let _ = sm.object_manager.add_commit(
         &mut io,
         obj_id,
-        "main",
+        main_branch(),
         vec![],
         b"content".to_vec(),
         author,
@@ -66,7 +94,7 @@ fn add_server_receives_existing_objects() {
                 metadata.metadata.is_empty(),
                 "Object created without metadata should sync an empty metadata map"
             );
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name.as_str(), main_branch().as_str());
             assert_eq!(commits.len(), 1);
         }
         _ => panic!("Expected ObjectUpdated to the newly added server"),
@@ -91,7 +119,7 @@ fn local_commit_syncs_to_server() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"content".to_vec(),
             author,
@@ -100,7 +128,7 @@ fn local_commit_syncs_to_server() {
         .unwrap();
 
     // Manually trigger sync (in real usage, this would be called after local changes)
-    sm.forward_update_to_servers(obj_id, "main".into());
+    sm.forward_update_to_servers(obj_id, main_branch());
 
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
@@ -118,7 +146,7 @@ fn local_commit_syncs_to_server() {
         } => {
             assert_eq!(*id, server_id);
             assert_eq!(*object_id, obj_id);
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name.as_str(), main_branch().as_str());
             assert_eq!(commits.len(), 1);
             assert_eq!(commits[0].id(), commit_id);
         }
@@ -186,14 +214,14 @@ fn remove_server_stops_sync() {
     let _ = sm.object_manager.add_commit(
         &mut io,
         obj_id,
-        "main",
+        main_branch(),
         vec![],
         b"content".to_vec(),
         author,
         None,
     );
 
-    sm.forward_update_to_servers(obj_id, "main".into());
+    sm.forward_update_to_servers(obj_id, main_branch());
 
     let outbox = sm.take_outbox();
     assert!(outbox.is_empty()); // No server to send to
@@ -212,7 +240,7 @@ fn commits_sent_in_causal_order() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"c1".to_vec(),
             author,
@@ -224,7 +252,7 @@ fn commits_sent_in_causal_order() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![c1],
             b"c2".to_vec(),
             author,
@@ -236,7 +264,7 @@ fn commits_sent_in_causal_order() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![c2],
             b"c3".to_vec(),
             author,
@@ -264,7 +292,7 @@ fn commits_sent_in_causal_order() {
         } => {
             assert_eq!(*id, server_id);
             assert_eq!(*object_id, obj_id);
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name.as_str(), main_branch().as_str());
             assert_eq!(commits.len(), 3);
             // Parents should come before children
             assert_eq!(commits[0].id(), c1);
@@ -290,7 +318,7 @@ fn client_with_query_receives_matching_objects() {
     let _ = sm.object_manager.add_commit(
         &mut io,
         obj_id,
-        "main",
+        main_branch(),
         vec![],
         b"content".to_vec(),
         author,
@@ -302,7 +330,7 @@ fn client_with_query_receives_matching_objects() {
     sm.add_client(client_id);
 
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, main_branch()));
     sm.set_client_query_scope(client_id, QueryId(1), scope, None);
 
     let outbox = sm.take_outbox();
@@ -321,7 +349,7 @@ fn client_with_query_receives_matching_objects() {
         } => {
             assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name.as_str(), main_branch().as_str());
             assert_eq!(commits.len(), 1);
         }
         _ => panic!("Expected ObjectUpdated to client"),
@@ -339,7 +367,7 @@ fn client_without_query_receives_nothing() {
     let _ = sm.object_manager.add_commit(
         &mut io,
         obj_id,
-        "main",
+        main_branch(),
         vec![],
         b"content".to_vec(),
         author,
@@ -387,7 +415,7 @@ fn client_receives_existing_catalogue_on_connect() {
         } => {
             assert_eq!(*id, client_id);
             assert_eq!(*synced_object_id, object_id);
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name, &catalogue_branch());
             assert_eq!(commits.len(), 1);
             assert!(
                 metadata.is_some(),
@@ -417,7 +445,7 @@ fn live_catalogue_updates_broadcast_without_query_scope() {
     );
     sm.create_object_with_content(&mut io, object_id, metadata, b"lens".to_vec());
 
-    sm.forward_update_to_clients(object_id, "main".into());
+    sm.forward_update_to_clients(object_id, catalogue_branch());
 
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 2);
@@ -450,7 +478,7 @@ fn remotely_received_catalogue_replays_to_later_clients() {
                 id: object_id,
                 metadata,
             }),
-            branch_name: "main".into(),
+            branch_name: catalogue_branch(),
             commits: vec![Commit {
                 parents: smallvec![],
                 content: b"schema".to_vec(),
@@ -497,7 +525,7 @@ fn local_commit_in_scope_syncs_to_client() {
     let author = ObjectId::new();
 
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, main_branch()));
     sm.set_client_query_scope(client_id, QueryId(1), scope, None);
     sm.take_outbox(); // Clear initial sync
 
@@ -507,7 +535,7 @@ fn local_commit_in_scope_syncs_to_client() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"content".to_vec(),
             author,
@@ -515,7 +543,7 @@ fn local_commit_in_scope_syncs_to_client() {
         )
         .unwrap();
 
-    sm.forward_update_to_clients(obj_id, "main".into());
+    sm.forward_update_to_clients(obj_id, main_branch());
 
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
@@ -533,7 +561,7 @@ fn local_commit_in_scope_syncs_to_client() {
         } => {
             assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name.as_str(), main_branch().as_str());
             assert!(commits.iter().any(|c| c.id() == commit_id));
         }
         _ => panic!("Expected ObjectUpdated to matching client scope"),
@@ -551,7 +579,7 @@ fn local_commit_out_of_scope_not_sent_to_client() {
     // Client has query for obj1/main
     let obj1 = sm.object_manager.create(&mut io, None);
     let mut scope = HashSet::new();
-    scope.insert((obj1, "main".into()));
+    scope.insert((obj1, main_branch()));
     sm.set_client_query_scope(client_id, QueryId(1), scope, None);
     sm.take_outbox();
 
@@ -561,14 +589,14 @@ fn local_commit_out_of_scope_not_sent_to_client() {
     let _ = sm.object_manager.add_commit(
         &mut io,
         obj2,
-        "main",
+        main_branch(),
         vec![],
         b"content".to_vec(),
         author,
         None,
     );
 
-    sm.forward_update_to_clients(obj2, "main".into());
+    sm.forward_update_to_clients(obj2, main_branch());
 
     let outbox = sm.take_outbox();
     assert!(outbox.is_empty()); // obj2 not in client's scope
@@ -583,26 +611,38 @@ fn query_update_adds_scope_triggers_initial_sync() {
     let obj1 = sm.object_manager.create(&mut io, None);
     let obj2 = sm.object_manager.create(&mut io, None);
     let author = ObjectId::new();
-    let _ =
-        sm.object_manager
-            .add_commit(&mut io, obj1, "main", vec![], b"c1".to_vec(), author, None);
-    let _ =
-        sm.object_manager
-            .add_commit(&mut io, obj2, "main", vec![], b"c2".to_vec(), author, None);
+    let _ = sm.object_manager.add_commit(
+        &mut io,
+        obj1,
+        main_branch(),
+        vec![],
+        b"c1".to_vec(),
+        author,
+        None,
+    );
+    let _ = sm.object_manager.add_commit(
+        &mut io,
+        obj2,
+        main_branch(),
+        vec![],
+        b"c2".to_vec(),
+        author,
+        None,
+    );
 
     // Client initially only has obj1
     let client_id = ClientId::new();
     sm.add_client(client_id);
 
     let mut scope = HashSet::new();
-    scope.insert((obj1, "main".into()));
+    scope.insert((obj1, main_branch()));
     sm.set_client_query_scope(client_id, QueryId(1), scope, None);
     sm.take_outbox(); // Clear obj1 sync
 
     // Update query to also include obj2
     let mut new_scope = HashSet::new();
-    new_scope.insert((obj1, "main".into()));
-    new_scope.insert((obj2, "main".into()));
+    new_scope.insert((obj1, main_branch()));
+    new_scope.insert((obj2, main_branch()));
     sm.set_client_query_scope(client_id, QueryId(1), new_scope, None);
 
     let outbox = sm.take_outbox();
@@ -621,7 +661,7 @@ fn query_update_adds_scope_triggers_initial_sync() {
         } => {
             assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj2);
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name.as_str(), main_branch().as_str());
             assert_eq!(commits.len(), 1);
         }
         _ => panic!("Expected ObjectUpdated for newly visible object"),
@@ -640,7 +680,7 @@ fn query_removal_stops_future_updates() {
     sm.add_client(client_id);
 
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, main_branch()));
     sm.set_client_query_scope(client_id, QueryId(1), scope, None);
     sm.take_outbox();
 
@@ -655,14 +695,14 @@ fn query_removal_stops_future_updates() {
     let _ = sm.object_manager.add_commit(
         &mut io,
         obj_id,
-        "main",
+        main_branch(),
         vec![],
         b"content".to_vec(),
         author,
         None,
     );
 
-    sm.forward_update_to_clients(obj_id, "main".into());
+    sm.forward_update_to_clients(obj_id, main_branch());
 
     let outbox = sm.take_outbox();
     assert!(outbox.is_empty()); // Client no longer in scope
@@ -685,7 +725,7 @@ fn peer_writes_applied_directly() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"original".to_vec(),
             author,
@@ -715,7 +755,7 @@ fn peer_writes_applied_directly() {
         payload: SyncPayload::ObjectUpdated {
             object_id: obj_id,
             metadata: None,
-            branch_name: "main".into(),
+            branch_name: main_branch(),
             commits: vec![commit.clone()],
         },
     });
@@ -727,7 +767,10 @@ fn peer_writes_applied_directly() {
     assert_eq!(pending.len(), 0);
 
     // Verify commit was applied
-    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    let tips = sm
+        .object_manager
+        .get_tip_ids(obj_id, main_branch())
+        .unwrap();
     assert!(tips.contains(&commit.id()));
 }
 
@@ -767,7 +810,7 @@ fn admin_writes_catalogue_directly() {
                 id: obj_id,
                 metadata: cat_metadata,
             }),
-            branch_name: "main".into(),
+            branch_name: catalogue_branch(),
             commits: vec![commit.clone()],
         },
     });
@@ -779,7 +822,10 @@ fn admin_writes_catalogue_directly() {
     assert_eq!(pending.len(), 0);
 
     // Commit should be applied directly
-    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    let tips = sm
+        .object_manager
+        .get_tip_ids(obj_id, catalogue_branch())
+        .unwrap();
     assert!(tips.contains(&commit.id()));
 }
 
@@ -796,7 +842,7 @@ fn admin_writes_row_directly() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"original".to_vec(),
             author,
@@ -824,7 +870,7 @@ fn admin_writes_row_directly() {
         payload: SyncPayload::ObjectUpdated {
             object_id: obj_id,
             metadata: None,
-            branch_name: "main".into(),
+            branch_name: main_branch(),
             commits: vec![commit.clone()],
         },
     });
@@ -834,7 +880,10 @@ fn admin_writes_row_directly() {
     let pending = sm.take_pending_permission_checks();
     assert_eq!(pending.len(), 0);
 
-    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    let tips = sm
+        .object_manager
+        .get_tip_ids(obj_id, main_branch())
+        .unwrap();
     assert!(tips.contains(&commit.id()));
 }
 
@@ -851,7 +900,7 @@ fn backend_writes_row_directly() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"original".to_vec(),
             author,
@@ -879,7 +928,7 @@ fn backend_writes_row_directly() {
         payload: SyncPayload::ObjectUpdated {
             object_id: obj_id,
             metadata: None,
-            branch_name: "main".into(),
+            branch_name: main_branch(),
             commits: vec![commit.clone()],
         },
     });
@@ -889,7 +938,10 @@ fn backend_writes_row_directly() {
     let pending = sm.take_pending_permission_checks();
     assert_eq!(pending.len(), 0);
 
-    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    let tips = sm
+        .object_manager
+        .get_tip_ids(obj_id, main_branch())
+        .unwrap();
     assert!(tips.contains(&commit.id()));
 }
 
@@ -929,7 +981,7 @@ fn backend_catalogue_writes_are_denied() {
                 id: obj_id,
                 metadata: cat_metadata,
             }),
-            branch_name: "main".into(),
+            branch_name: catalogue_branch(),
             commits: vec![commit],
         },
     });
@@ -962,7 +1014,7 @@ fn user_with_session_goes_to_permission_check() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"original".to_vec(),
             author,
@@ -990,7 +1042,7 @@ fn user_with_session_goes_to_permission_check() {
         payload: SyncPayload::ObjectUpdated {
             object_id: obj_id,
             metadata: None,
-            branch_name: "main".into(),
+            branch_name: main_branch(),
             commits: vec![commit.clone()],
         },
     });
@@ -1004,7 +1056,10 @@ fn user_with_session_goes_to_permission_check() {
     assert_eq!(pending[0].session.user_id, "alice");
 
     // Should NOT be applied yet
-    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    let tips = sm
+        .object_manager
+        .get_tip_ids(obj_id, main_branch())
+        .unwrap();
     assert!(!tips.contains(&commit.id()));
 }
 
@@ -1035,7 +1090,7 @@ fn user_without_session_rejected() {
         payload: SyncPayload::ObjectUpdated {
             object_id: obj_id,
             metadata: None,
-            branch_name: "main".into(),
+            branch_name: main_branch(),
             commits: vec![commit],
         },
     });
@@ -1056,7 +1111,7 @@ fn user_without_session_rejected() {
         } => {
             assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name.as_str(), main_branch().as_str());
         }
         other => panic!(
             "Expected SessionRequired error to source client, got {:?}",
@@ -1104,7 +1159,7 @@ fn user_catalogue_write_rejected() {
                 id: obj_id,
                 metadata: cat_metadata,
             }),
-            branch_name: "main".into(),
+            branch_name: catalogue_branch(),
             commits: vec![commit],
         },
     });
@@ -1125,7 +1180,7 @@ fn user_catalogue_write_rejected() {
         } => {
             assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name, &catalogue_branch());
         }
         other => panic!(
             "Expected CatalogueWriteDenied error to source client, got {:?}",
@@ -1283,7 +1338,7 @@ fn write_with_session_goes_to_pending_permission_checks() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"original".to_vec(),
             author,
@@ -1300,7 +1355,7 @@ fn write_with_session_goes_to_pending_permission_checks() {
     }
 
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, main_branch()));
     sm.set_client_query_scope(client_id, QueryId(1), scope, None);
     sm.take_outbox();
 
@@ -1320,7 +1375,7 @@ fn write_with_session_goes_to_pending_permission_checks() {
         payload: SyncPayload::ObjectUpdated {
             object_id: obj_id,
             metadata: None,
-            branch_name: "main".into(),
+            branch_name: main_branch(),
             commits: vec![commit.clone()],
         },
     });
@@ -1336,7 +1391,10 @@ fn write_with_session_goes_to_pending_permission_checks() {
     assert_eq!(pending[0].new_content, Some(b"new_content".to_vec()));
 
     // Commit should NOT be applied yet
-    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    let tips = sm
+        .object_manager
+        .get_tip_ids(obj_id, main_branch())
+        .unwrap();
     assert!(!tips.contains(&commit.id()));
 }
 
@@ -1352,7 +1410,7 @@ fn soft_delete_object_updated_is_queued_as_delete_permission_check() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"original".to_vec(),
             author,
@@ -1380,7 +1438,7 @@ fn soft_delete_object_updated_is_queued_as_delete_permission_check() {
         payload: SyncPayload::ObjectUpdated {
             object_id: obj_id,
             metadata: None,
-            branch_name: "main".into(),
+            branch_name: main_branch(),
             commits: vec![delete_commit.clone()],
         },
     });
@@ -1393,8 +1451,125 @@ fn soft_delete_object_updated_is_queued_as_delete_permission_check() {
     assert_eq!(pending[0].old_content, Some(b"original".to_vec()));
     assert_eq!(pending[0].new_content, None);
 
-    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    let tips = sm
+        .object_manager
+        .get_tip_ids(obj_id, main_branch())
+        .unwrap();
     assert!(!tips.contains(&delete_commit.id()));
+}
+
+#[test]
+fn fresh_batch_update_uses_prefix_head_for_permission_check() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let alice_branch = main_branch_batch("alice-batch");
+    let bob_branch = main_branch_batch("bob-batch");
+
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let alice_commit = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            alice_branch,
+            vec![],
+            b"original".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("bob"));
+    sm.take_outbox();
+
+    let bob_update = Commit {
+        parents: smallvec![alice_commit],
+        content: b"hacked".to_vec(),
+        timestamp: 2000,
+        author: author.to_string(),
+        metadata: None,
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: bob_branch,
+            commits: vec![bob_update],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].operation, Operation::Update);
+    assert_eq!(pending[0].old_content, Some(b"original".to_vec()));
+    assert_eq!(pending[0].new_content, Some(b"hacked".to_vec()));
+}
+
+#[test]
+fn fresh_batch_delete_uses_prefix_head_for_permission_check() {
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+
+    let alice_branch = main_branch_batch("alice-delete-batch");
+    let bob_branch = main_branch_batch("bob-delete-batch");
+
+    let obj_id = sm.object_manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let alice_commit = sm
+        .object_manager
+        .add_commit(
+            &mut io,
+            obj_id,
+            alice_branch,
+            vec![],
+            b"original".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let client_id = ClientId::new();
+    sm.add_client(client_id);
+    sm.set_client_session(client_id, Session::new("bob"));
+    sm.take_outbox();
+
+    let bob_delete = Commit {
+        parents: smallvec![alice_commit],
+        content: b"original".to_vec(),
+        timestamp: 2000,
+        author: author.to_string(),
+        metadata: Some(crate::metadata::soft_delete_metadata()),
+        stored_state: StoredState::Stored,
+        ack_state: Default::default(),
+    };
+
+    sm.push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::ObjectUpdated {
+            object_id: obj_id,
+            metadata: None,
+            branch_name: bob_branch,
+            commits: vec![bob_delete],
+        },
+    });
+
+    sm.process_inbox(&mut io);
+
+    let pending = sm.take_pending_permission_checks();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].operation, Operation::Delete);
+    assert_eq!(pending[0].old_content, Some(b"original".to_vec()));
+    assert_eq!(pending[0].new_content, None);
 }
 
 #[test]
@@ -1409,7 +1584,7 @@ fn approve_permission_check_applies_write() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"original".to_vec(),
             author,
@@ -1426,7 +1601,7 @@ fn approve_permission_check_applies_write() {
     }
 
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, main_branch()));
     sm.set_client_query_scope(client_id, QueryId(1), scope, None);
     sm.take_outbox();
 
@@ -1446,7 +1621,7 @@ fn approve_permission_check_applies_write() {
         payload: SyncPayload::ObjectUpdated {
             object_id: obj_id,
             metadata: None,
-            branch_name: "main".into(),
+            branch_name: main_branch(),
             commits: vec![commit.clone()],
         },
     });
@@ -1461,7 +1636,10 @@ fn approve_permission_check_applies_write() {
     sm.approve_permission_check(&mut io, check);
 
     // Commit should now be applied
-    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    let tips = sm
+        .object_manager
+        .get_tip_ids(obj_id, main_branch())
+        .unwrap();
     assert!(tips.contains(&commit.id()));
 }
 
@@ -1477,7 +1655,7 @@ fn reject_permission_check_sends_error() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"original".to_vec(),
             author,
@@ -1494,7 +1672,7 @@ fn reject_permission_check_sends_error() {
     }
 
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, main_branch()));
     sm.set_client_query_scope(client_id, QueryId(1), scope, None);
     sm.take_outbox();
 
@@ -1514,7 +1692,7 @@ fn reject_permission_check_sends_error() {
         payload: SyncPayload::ObjectUpdated {
             object_id: obj_id,
             metadata: None,
-            branch_name: "main".into(),
+            branch_name: main_branch(),
             commits: vec![commit.clone()],
         },
     });
@@ -1544,14 +1722,17 @@ fn reject_permission_check_sends_error() {
         } => {
             assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name.as_str(), main_branch().as_str());
             assert_eq!(reason, "access denied by policy");
         }
         _ => panic!("Expected PermissionDenied error for source client"),
     }
 
     // Commit should NOT be applied
-    let tips = sm.object_manager.get_tip_ids(obj_id, "main").unwrap();
+    let tips = sm
+        .object_manager
+        .get_tip_ids(obj_id, main_branch())
+        .unwrap();
     assert!(!tips.contains(&commit.id()));
 }
 
@@ -1571,7 +1752,7 @@ fn server_update_forwarded_to_matching_clients() {
 
     let obj_id = ObjectId::new();
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, main_branch()));
     sm.set_client_query_scope(client_id, QueryId(1), scope, None);
     sm.take_outbox();
 
@@ -1596,7 +1777,7 @@ fn server_update_forwarded_to_matching_clients() {
                 id: obj_id,
                 metadata: HashMap::new(),
             }),
-            branch_name: "main".into(),
+            branch_name: main_branch(),
             commits: vec![commit.clone()],
         },
     });
@@ -1620,7 +1801,7 @@ fn server_update_forwarded_to_matching_clients() {
         } => {
             assert_eq!(*id, client_id);
             assert_eq!(*object_id, obj_id);
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name.as_str(), main_branch().as_str());
             assert_eq!(commits.len(), 1);
             assert_eq!(commits[0].id(), commit_id);
         }
@@ -1649,7 +1830,7 @@ fn client_update_forwarded_to_server_and_other_clients() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"initial".to_vec(),
             author,
@@ -1667,7 +1848,7 @@ fn client_update_forwarded_to_server_and_other_clients() {
     sm.add_client(client2);
 
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, main_branch()));
     sm.set_client_query_scope(client1, QueryId(1), scope.clone(), None);
     sm.set_client_query_scope(client2, QueryId(1), scope, None);
     sm.take_outbox();
@@ -1689,7 +1870,7 @@ fn client_update_forwarded_to_server_and_other_clients() {
         payload: SyncPayload::ObjectUpdated {
             object_id: obj_id,
             metadata: None,
-            branch_name: "main".into(),
+            branch_name: main_branch(),
             commits: vec![commit],
         },
     });
@@ -1718,7 +1899,7 @@ fn client_update_forwarded_to_server_and_other_clients() {
             ..
         } => {
             assert_eq!(*object_id, obj_id);
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name.as_str(), main_branch().as_str());
             assert!(
                 commits.iter().any(|c| c.id() == commit_id),
                 "server payload must include the client's new commit"
@@ -1747,7 +1928,7 @@ fn client_update_forwarded_to_server_and_other_clients() {
             ..
         } => {
             assert_eq!(*object_id, obj_id);
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name.as_str(), main_branch().as_str());
             assert!(
                 commits.iter().any(|c| c.id() == commit_id),
                 "client payload must include the forwarded commit"
@@ -1777,7 +1958,7 @@ fn metadata_sent_only_once_per_destination() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"c1".to_vec(),
             author,
@@ -1806,7 +1987,7 @@ fn metadata_sent_only_once_per_destination() {
         } => {
             assert_eq!(*id, server_id);
             assert_eq!(*object_id, obj_id);
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name.as_str(), main_branch().as_str());
             assert_eq!(commits.len(), 1);
             assert_eq!(commits[0].id(), c1);
             let metadata = metadata
@@ -1826,14 +2007,14 @@ fn metadata_sent_only_once_per_destination() {
     let _ = sm.object_manager.add_commit(
         &mut io,
         obj_id,
-        "main",
+        main_branch(),
         vec![c1],
         b"c2".to_vec(),
         author,
         None,
     );
 
-    sm.forward_update_to_servers(obj_id, "main".into());
+    sm.forward_update_to_servers(obj_id, main_branch());
 
     let outbox = sm.take_outbox();
 
@@ -1852,7 +2033,7 @@ fn metadata_sent_only_once_per_destination() {
         } => {
             assert_eq!(*id, server_id);
             assert_eq!(*object_id, obj_id);
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name.as_str(), main_branch().as_str());
             assert_eq!(commits.len(), 1);
             assert!(metadata.is_none());
         }
@@ -1886,7 +2067,7 @@ fn nosync_object_not_synced_to_server() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"c1".to_vec(),
             author,
@@ -1927,7 +2108,7 @@ fn nosync_object_not_synced_to_client() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"c1".to_vec(),
             author,
@@ -1939,7 +2120,7 @@ fn nosync_object_not_synced_to_client() {
     let client_id = ClientId::new();
     sm.add_client(client_id);
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, main_branch()));
     sm.set_client_query_scope(client_id, QueryId(1), scope, None);
 
     let outbox = sm.take_outbox();
@@ -1972,7 +2153,7 @@ fn nosync_object_update_not_forwarded_to_server() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"c1".to_vec(),
             author,
@@ -1990,7 +2171,7 @@ fn nosync_object_update_not_forwarded_to_server() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![c1],
             b"c2".to_vec(),
             author,
@@ -1999,7 +2180,7 @@ fn nosync_object_update_not_forwarded_to_server() {
         .unwrap();
 
     // Forward update to servers
-    sm.forward_update_to_servers(obj_id, "main".into());
+    sm.forward_update_to_servers(obj_id, main_branch());
 
     let outbox = sm.take_outbox();
     assert!(
@@ -2031,7 +2212,7 @@ fn nosync_object_truncation_not_forwarded_to_server() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"c1".to_vec(),
             author,
@@ -2043,7 +2224,7 @@ fn nosync_object_truncation_not_forwarded_to_server() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![c1],
             b"c2".to_vec(),
             author,
@@ -2058,7 +2239,7 @@ fn nosync_object_truncation_not_forwarded_to_server() {
 
     // Forward truncation to servers (simulating what would happen after truncation)
     // The nosync check should prevent any message from being sent
-    sm.forward_truncation_to_servers(obj_id, "main".into(), [c2].into_iter().collect());
+    sm.forward_truncation_to_servers(obj_id, main_branch(), [c2].into_iter().collect());
 
     let outbox = sm.take_outbox();
     assert!(
@@ -2090,7 +2271,7 @@ fn nosync_object_truncation_not_forwarded_to_client() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"c1".to_vec(),
             author,
@@ -2102,7 +2283,7 @@ fn nosync_object_truncation_not_forwarded_to_client() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![c1],
             b"c2".to_vec(),
             author,
@@ -2114,13 +2295,13 @@ fn nosync_object_truncation_not_forwarded_to_client() {
     let client_id = ClientId::new();
     sm.add_client(client_id);
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, main_branch()));
     sm.set_client_query_scope(client_id, QueryId(1), scope, None);
     sm.take_outbox(); // Clear any initial sync messages
 
     // Forward truncation to clients (simulating what would happen after truncation)
     // The nosync check should prevent any message from being sent
-    sm.forward_truncation_to_clients(obj_id, "main".into(), [c2].into_iter().collect());
+    sm.forward_truncation_to_clients(obj_id, main_branch(), [c2].into_iter().collect());
 
     let outbox = sm.take_outbox();
     assert!(
@@ -2150,7 +2331,7 @@ fn regular_object_still_syncs_to_server() {
         .add_commit(
             &mut io,
             obj_id,
-            "main",
+            main_branch(),
             vec![],
             b"c1".to_vec(),
             author,
@@ -2183,7 +2364,7 @@ fn regular_object_still_syncs_to_server() {
                 *object_id, obj_id,
                 "synced object id should match created object"
             );
-            assert_eq!(branch_name.as_str(), "main");
+            assert_eq!(branch_name.as_str(), main_branch().as_str());
             assert_eq!(commits.len(), 1);
             assert_eq!(commits[0].id(), commit_id);
 
@@ -2216,14 +2397,15 @@ fn set_query_scope_stores_session() {
 
     let obj_id = ObjectId::new();
     let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
+    scope.insert((obj_id, main_branch()));
 
     let session = Session::new("alice");
     sm.set_client_query_scope(client_id, QueryId(1), scope.clone(), Some(session));
 
     let client = sm.get_client(client_id).expect("client should exist");
     let query = client.queries.get(&QueryId(1)).expect("query should exist");
-    assert_eq!(query.scope, scope);
+    let expected_scope = HashSet::from([(obj_id, BatchBranchKey::from_branch_name(main_branch()))]);
+    assert_eq!(query.scope, expected_scope);
     let session = query
         .session
         .as_ref()
@@ -2248,6 +2430,7 @@ fn send_query_subscription_includes_session() {
     sm.send_query_subscription_to_servers(
         QueryId(1),
         query.clone(),
+        test_query_schema_context(),
         Some(session.clone()),
         QueryPropagation::Full,
     );
@@ -2264,6 +2447,7 @@ fn send_query_subscription_includes_session() {
                     query: sent_query,
                     session: sent_session,
                     propagation,
+                    ..
                 },
         } => {
             assert_eq!(*id, server_id);
@@ -2427,9 +2611,9 @@ fn persistence_ack_direct() {
     let commit_id = commit.id();
     let _ =
         s.a.object_manager
-            .receive_commit(&mut s.a_io, obj_id, "main", commit);
+            .receive_commit(&mut s.a_io, obj_id, main_branch(), commit);
     s.a.add_server(s.b_server_for_a);
-    s.a.forward_update_to_servers(obj_id, "main".into());
+    s.a.forward_update_to_servers(obj_id, main_branch());
 
     pump_messages_3tier(
         &mut s.a,
@@ -2451,7 +2635,7 @@ fn persistence_ack_direct() {
     // Since A processes PersistenceAck from server, it stores it in io and updates in-memory.
     let a_commit =
         s.a.object_manager
-            .get_commit_mut(obj_id, &"main".into(), commit_id);
+            .get_commit_mut(obj_id, &main_branch(), commit_id);
     let a_commit = a_commit.expect("Commit should exist on A");
     assert!(
         a_commit
@@ -2472,9 +2656,9 @@ fn persistence_ack_relay() {
     let commit_id = commit.id();
     let _ =
         s.a.object_manager
-            .receive_commit(&mut s.a_io, obj_id, "main", commit);
+            .receive_commit(&mut s.a_io, obj_id, main_branch(), commit);
     s.a.add_server(s.b_server_for_a);
-    s.a.forward_update_to_servers(obj_id, "main".into());
+    s.a.forward_update_to_servers(obj_id, main_branch());
 
     pump_messages_3tier(
         &mut s.a,
@@ -2492,7 +2676,7 @@ fn persistence_ack_relay() {
     // A should have received EdgeServer ack (relayed through B from C)
     let a_commit =
         s.a.object_manager
-            .get_commit_mut(obj_id, &"main".into(), commit_id)
+            .get_commit_mut(obj_id, &main_branch(), commit_id)
             .expect("Commit should exist on A");
     assert!(
         a_commit
@@ -2512,9 +2696,9 @@ fn persistence_ack_both_tiers() {
     let commit_id = commit.id();
     let _ =
         s.a.object_manager
-            .receive_commit(&mut s.a_io, obj_id, "main", commit);
+            .receive_commit(&mut s.a_io, obj_id, main_branch(), commit);
     s.a.add_server(s.b_server_for_a);
-    s.a.forward_update_to_servers(obj_id, "main".into());
+    s.a.forward_update_to_servers(obj_id, main_branch());
 
     pump_messages_3tier(
         &mut s.a,
@@ -2531,7 +2715,7 @@ fn persistence_ack_both_tiers() {
 
     let a_commit =
         s.a.object_manager
-            .get_commit_mut(obj_id, &"main".into(), commit_id)
+            .get_commit_mut(obj_id, &main_branch(), commit_id)
             .expect("Commit should exist on A");
     assert!(
         a_commit
@@ -2558,9 +2742,9 @@ fn persistence_ack_idempotent() {
     let commit_id = commit.id();
     let _ =
         s.a.object_manager
-            .receive_commit(&mut s.a_io, obj_id, "main", commit.clone());
+            .receive_commit(&mut s.a_io, obj_id, main_branch(), commit.clone());
     s.a.add_server(s.b_server_for_a);
-    s.a.forward_update_to_servers(obj_id, "main".into());
+    s.a.forward_update_to_servers(obj_id, main_branch());
 
     // Pump once
     pump_messages_3tier(
@@ -2577,7 +2761,7 @@ fn persistence_ack_idempotent() {
     );
 
     // Send the same commit again — should not panic
-    s.a.forward_update_to_servers(obj_id, "main".into());
+    s.a.forward_update_to_servers(obj_id, main_branch());
 
     pump_messages_3tier(
         &mut s.a,
@@ -2595,7 +2779,7 @@ fn persistence_ack_idempotent() {
     // Still has acks
     let a_commit =
         s.a.object_manager
-            .get_commit_mut(obj_id, &"main".into(), commit_id)
+            .get_commit_mut(obj_id, &main_branch(), commit_id)
             .expect("Commit should exist on A");
     assert!(
         a_commit
@@ -2614,9 +2798,9 @@ fn persistence_ack_cleanup_on_disconnect() {
     let commit = make_test_commit(b"disconnect-test", vec![]);
     let _ =
         s.a.object_manager
-            .receive_commit(&mut s.a_io, obj_id, "main", commit);
+            .receive_commit(&mut s.a_io, obj_id, main_branch(), commit);
     s.a.add_server(s.b_server_for_a);
-    s.a.forward_update_to_servers(obj_id, "main".into());
+    s.a.forward_update_to_servers(obj_id, main_branch());
 
     // Pump A→B only (one round)
     for entry in s.a.take_outbox() {
@@ -2681,7 +2865,13 @@ fn persistence_ack_survives_reload() {
 
     let commit = make_test_commit(b"persist-test", vec![]);
     let commit_id = commit.id();
-    io.append_commit(obj_id, &"main".into(), commit).unwrap();
+    io.append_commit(
+        obj_id,
+        &crate::query_manager::types::QueryBranchRef::from_branch_name(main_branch()),
+        commit,
+        None,
+    )
+    .unwrap();
 
     // Store ack tier
     io.store_ack_tier(commit_id, DurabilityTier::EdgeServer)
@@ -2689,7 +2879,10 @@ fn persistence_ack_survives_reload() {
 
     // Load branch and verify ack_state is populated
     let loaded = io
-        .load_branch(obj_id, &"main".into())
+        .load_branch(
+            obj_id,
+            &crate::query_manager::types::QueryBranchRef::from_branch_name(main_branch()),
+        )
         .unwrap()
         .expect("Branch should exist");
 
@@ -2723,6 +2916,15 @@ fn ack_state_does_not_affect_commit_id_sync() {
 // QuerySubscription session fallback (inbox.rs fix)
 // ========================================================================
 
+fn test_query_schema_context() -> crate::schema_manager::QuerySchemaContext {
+    crate::schema_manager::QuerySchemaContext::new(
+        "dev",
+        crate::query_manager::types::SchemaHash::from_bytes([7; 32]),
+        "main",
+        crate::query_manager::types::BatchId::nil(),
+    )
+}
+
 /// Helper: push a QuerySubscription from a client and drain pending subs.
 fn push_query_subscription(
     sm: &mut SyncManager,
@@ -2736,6 +2938,7 @@ fn push_query_subscription(
         payload: SyncPayload::QuerySubscription {
             query_id: QueryId(1),
             query: Box::new(query),
+            schema_context: test_query_schema_context(),
             session: payload_session,
             propagation: QueryPropagation::Full,
         },
@@ -2909,6 +3112,12 @@ fn remove_client_cleans_pending_query_subscriptions() {
             client_id: alice,
             query_id: QueryId(1),
             query: query.clone(),
+            schema_context: crate::schema_manager::QuerySchemaContext::new(
+                "dev",
+                SchemaHash::from_bytes([1; 32]),
+                "main",
+                BatchId([2; 16]),
+            ),
             session: None,
             propagation: QueryPropagation::Full,
         });
@@ -2917,6 +3126,12 @@ fn remove_client_cleans_pending_query_subscriptions() {
             client_id: bob,
             query_id: QueryId(1),
             query,
+            schema_context: crate::schema_manager::QuerySchemaContext::new(
+                "dev",
+                SchemaHash::from_bytes([1; 32]),
+                "main",
+                BatchId([3; 16]),
+            ),
             session: None,
             propagation: QueryPropagation::Full,
         });

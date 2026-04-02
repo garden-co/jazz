@@ -5,7 +5,9 @@ use std::time::Duration;
 use base64::Engine;
 use jazz_tools::metadata::{MetadataKey, ObjectType};
 use jazz_tools::query_manager::session::Session;
-use jazz_tools::query_manager::types::{ColumnType, SchemaBuilder, SchemaHash, TableSchema};
+use jazz_tools::query_manager::types::{
+    BatchId, BranchPrefixName, ColumnType, SchemaBuilder, SchemaHash, TableSchema,
+};
 use jazz_tools::schema_manager::encode_schema;
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
@@ -270,13 +272,18 @@ fn basic_auth_header(username: &str, password: &str) -> String {
 }
 
 fn sync_body() -> Value {
+    let branch_name = BranchPrefixName::new("dev", SchemaHash::from_bytes([0; 32]), "main")
+        .with_batch_id(BatchId::nil())
+        .to_branch_name()
+        .as_str()
+        .to_string();
     json!({
         "client_id": "01234567-89ab-cdef-0123-456789abcdef",
         "payloads": [{
             "ObjectUpdated": {
                 "object_id": "01234567-89ab-cdef-0123-456789abcdef",
                 "metadata": null,
-                "branch_name": "main",
+                "branch_name": branch_name,
                 "commits": []
             }
         }]
@@ -766,7 +773,14 @@ async fn schema_catalogue_sync_and_retrieval_round_trip() {
                     "id": object_id,
                     "metadata": metadata
                 },
-                "branch_name": "main",
+                "branch_name": BranchPrefixName::new(
+                    "catalogue",
+                    SchemaHash::from_bytes([0; 32]),
+                    "main",
+                )
+                .with_batch_id(BatchId::nil())
+                .to_branch_name()
+                .as_str(),
                 "commits": [
                     {
                         "parents": [],

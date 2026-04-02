@@ -1,5 +1,6 @@
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+
+use ahash::AHashMap;
 
 use crate::query_manager::types::{Tuple, TupleDelta, TupleElement};
 
@@ -40,19 +41,42 @@ impl Hash for HashedTupleRef<'_> {
 }
 
 pub(crate) fn compute_tuple_delta(old_tuples: &[Tuple], new_tuples: &[Tuple]) -> TupleDelta {
+    if old_tuples.is_empty() {
+        return TupleDelta {
+            added: new_tuples.to_vec(),
+            removed: Vec::new(),
+            moved: Vec::new(),
+            updated: Vec::new(),
+        };
+    }
+    if new_tuples.is_empty() {
+        return TupleDelta {
+            added: Vec::new(),
+            removed: old_tuples.to_vec(),
+            moved: Vec::new(),
+            updated: Vec::new(),
+        };
+    }
+    if old_tuples.len() == new_tuples.len()
+        && old_tuples
+            .iter()
+            .zip(new_tuples.iter())
+            .all(|(old, new)| old == new && !has_tuple_content_changed(old, new))
+    {
+        return TupleDelta::new();
+    }
+
     let mut delta = TupleDelta::new();
     let old_hashed: Vec<_> = old_tuples.iter().map(HashedTupleRef::new).collect();
     let new_hashed: Vec<_> = new_tuples.iter().map(HashedTupleRef::new).collect();
-    let old_pos_by_ids: HashMap<&HashedTupleRef<'_>, usize> = old_hashed
-        .iter()
-        .enumerate()
-        .map(|(idx, h)| (h, idx))
-        .collect();
-    let new_pos_by_ids: HashMap<&HashedTupleRef<'_>, usize> = new_hashed
-        .iter()
-        .enumerate()
-        .map(|(idx, h)| (h, idx))
-        .collect();
+    let mut old_pos_by_ids = AHashMap::with_capacity(old_hashed.len());
+    for (idx, hashed) in old_hashed.iter().enumerate() {
+        old_pos_by_ids.insert(hashed, idx);
+    }
+    let mut new_pos_by_ids = AHashMap::with_capacity(new_hashed.len());
+    for (idx, hashed) in new_hashed.iter().enumerate() {
+        new_pos_by_ids.insert(hashed, idx);
+    }
 
     for (old, h) in old_tuples.iter().zip(old_hashed.iter()) {
         if !new_pos_by_ids.contains_key(h) {
@@ -199,7 +223,8 @@ fn has_tuple_content_changed(old: &Tuple, new: &Tuple) -> bool {
 mod tests {
     use super::*;
     use crate::commit::CommitId;
-    use crate::object::{BranchName, ObjectId};
+    use crate::object::ObjectId;
+    use crate::query_manager::types::{BatchBranchKey, BatchId, BranchPrefixName, SchemaHash};
 
     fn id_tuple(ids: &[ObjectId]) -> Tuple {
         Tuple::new(ids.iter().copied().map(TupleElement::Id).collect())
@@ -257,11 +282,43 @@ mod tests {
     }
 
     #[test]
+    fn compute_tuple_delta_fast_path_with_empty_old() {
+        let a = ObjectId::new();
+        let b = ObjectId::new();
+        let new = vec![id_tuple(&[a]), id_tuple(&[b])];
+
+        let delta = compute_tuple_delta(&[], &new);
+
+        assert_eq!(delta.added, new);
+        assert!(delta.removed.is_empty());
+        assert!(delta.moved.is_empty());
+        assert!(delta.updated.is_empty());
+    }
+
+    #[test]
+    fn compute_tuple_delta_fast_path_with_identical_inputs() {
+        let a = ObjectId::new();
+        let tuples = vec![id_tuple(&[a])];
+
+        let delta = compute_tuple_delta(&tuples, &tuples);
+
+        assert!(delta.is_empty());
+    }
+
+    #[test]
     fn compute_tuple_delta_reports_provenance_only_updates() {
         let id = ObjectId::new();
-        let branch = BranchName::new("main");
+        let branch = BranchPrefixName::new("dev", SchemaHash::from_bytes([7; 32]), "main")
+            .with_batch_id(BatchId::nil())
+            .to_branch_name();
         let old = vec![id_tuple(&[id])];
-        let new = vec![id_tuple(&[id]).with_provenance([(id, branch)].into_iter().collect())];
+        let new = vec![
+            id_tuple(&[id]).with_provenance(
+                [(id, BatchBranchKey::from_branch_name(branch))]
+                    .into_iter()
+                    .collect(),
+            ),
+        ];
 
         let delta = compute_tuple_delta(&old, &new);
 
