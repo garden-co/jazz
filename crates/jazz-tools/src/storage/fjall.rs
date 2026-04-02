@@ -451,12 +451,19 @@ impl Storage for FjallStorage {
 
             #[cfg(feature = "otel")]
             {
-                let meter = opentelemetry::global::meter("jazz-storage");
-                let flush_counter = meter.u64_counter("jazz.storage.flush.total").build();
+                use opentelemetry::metrics::{Counter, Histogram};
+                static INSTRUMENTS: std::sync::OnceLock<(Counter<u64>, Histogram<f64>)> =
+                    std::sync::OnceLock::new();
+                let (flush_counter, flush_duration) = INSTRUMENTS.get_or_init(|| {
+                    let meter = opentelemetry::global::meter("jazz-storage");
+                    (
+                        meter.u64_counter("jazz.storage.flush.total").build(),
+                        meter
+                            .f64_histogram("jazz.storage.flush.duration_ms")
+                            .build(),
+                    )
+                });
                 flush_counter.add(1, &[]);
-                let flush_duration = meter
-                    .f64_histogram("jazz.storage.flush.duration_ms")
-                    .build();
                 flush_duration.record(start.elapsed().as_secs_f64() * 1000.0, &[]);
             }
         }
