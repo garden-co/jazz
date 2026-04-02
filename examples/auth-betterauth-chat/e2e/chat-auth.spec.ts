@@ -2,12 +2,17 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 
 test.describe("auth-betterauth-chat", () => {
   test("enforces announcement and generic chat access by role", async ({ page }) => {
+    const pageErrors: string[] = [];
     const announcements = chat(page, "Announcements");
     const genericChat = chat(page, "chat-01");
     const runId = Date.now();
     const adminAnnouncement = `Admin announcement ${runId}`;
     const adminGenericMessage = `Admin generic chat ${runId}`;
     const memberGenericMessage = `Member generic chat ${runId}`;
+
+    page.on("pageerror", (error) => {
+      pageErrors.push(error.message);
+    });
 
     await page.goto("/");
 
@@ -67,6 +72,17 @@ test.describe("auth-betterauth-chat", () => {
     await expect(messageItem(genericChat.list, memberGenericMessage)).toBeVisible({
       timeout: 20_000,
     });
+
+    await page.reload();
+    await expect(page.getByTestId("auth-status")).toContainText("member", { timeout: 20_000 });
+
+    await page.getByTestId("logout-button").click();
+    await expect(page.getByTestId("auth-status")).toContainText("Anonymous", { timeout: 20_000 });
+    await expect(messageItem(genericChat.list, memberGenericMessage)).toHaveCount(0, {
+      timeout: 20_000,
+    });
+    await expect(genericChat.readOnlyNotice).toBeVisible();
+    expect(pageErrors).toEqual([]);
   });
 });
 

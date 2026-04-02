@@ -80,6 +80,12 @@ describe("Db auth refresh browser integration", () => {
       }),
     );
 
+    const marker = `queued-after-auth-loss-${Date.now()}`;
+    writer.insert(todos, {
+      title: marker,
+      done: false,
+    });
+
     await waitForCondition(
       async () => {
         const authState = writer.getAuthState();
@@ -95,12 +101,6 @@ describe("Db auth refresh browser integration", () => {
       session: {
         user_id: "alice",
       },
-    });
-
-    const marker = `queued-after-auth-loss-${Date.now()}`;
-    writer.insert(todos, {
-      title: marker,
-      done: false,
     });
 
     writer.updateAuth(validJwt);

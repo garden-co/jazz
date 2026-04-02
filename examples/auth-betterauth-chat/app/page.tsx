@@ -8,13 +8,30 @@ import { ChatPanel } from "../../auth-simple-chat/src/ChatPanel";
 import { AuthCard } from "../../auth-simple-chat/src/AuthCard";
 import { authClient } from "../src/lib/auth-client";
 
+async function getJazzJwtFromBetterAuth(): Promise<string | null> {
+  try {
+    const token = await authClient.token();
+    if (token.error) {
+      console.error("Error getting JWT token:", token.error.message);
+      return null;
+    }
+
+    return token.data.token;
+  } catch (error) {
+    console.error("Error getting JWT token:", error);
+    return null;
+  }
+}
+
 function ChatShell() {
-  const session = useSession();
+  const db = useDb();
+  const authState = db.getAuthState();
+  const session = authState.session;
   const role = typeof session?.claims?.role === "string" ? session.claims.role : null;
 
   async function handleSignIn(email: string, password: string) {
     const res = await authClient.signIn.email({
-      email: email,
+      email,
       password,
     });
 
@@ -25,7 +42,7 @@ function ChatShell() {
 
   async function handleSignUp(email: string, password: string) {
     const res = await authClient.signUp.email({
-      email: email,
+      email,
       name: email,
       password,
     });
@@ -43,7 +60,7 @@ function ChatShell() {
     <main className="app-shell">
       <section className="content-grid">
         <AuthCard
-          loggedIn={session?.claims.auth_mode !== "local"}
+          loggedIn={authState.status === "authenticated" && session?.claims.auth_mode !== "local"}
           role={role}
           onSignIn={handleSignIn}
           onSignUp={handleSignUp}
@@ -80,44 +97,48 @@ function BetterAuthJazzSync({ children }: React.PropsWithChildren<{}>) {
       return;
     }
 
-    if (!authSession?.session) {
-      db.updateAuth(null);
-      setTokenPending(false);
-      return;
-    }
-
     const ac = new AbortController();
-    setTokenPending(true);
-    authClient.token().then((token) => {
-      if (ac.signal.aborted) return;
+    async function syncJazzAuth() {
+      setTokenPending(true);
 
-      if (token.error) {
-        throw new Error(token.error.message ?? "Unable to get JWT token.");
+      if (!authSession?.session) {
+        if (!ac.signal.aborted) {
+          db.updateAuth(null);
+          setTokenPending(false);
+        }
+        return;
       }
 
-      db.updateAuth(token.data.token);
+      const jwtToken = await getJazzJwtFromBetterAuth();
+      if (ac.signal.aborted) {
+        return;
+      }
 
+      db.updateAuth(jwtToken);
       setTokenPending(false);
-    });
+    }
+
+    void syncJazzAuth();
 
     return () => ac.abort();
-  }, [authPending, authSession?.session?.id]);
+  }, [authPending, authSession?.session?.id, db]);
 
   React.useEffect(() => {
     return db.onAuthChanged((state) => {
       // if the sync server throws a 401
       // we need to try issuing a new token
       if (state.status === "unauthenticated") {
-        authClient.token().then((token) => {
-          if (token.error) {
-            throw new Error(token.error.message ?? "Unable to get JWT token.");
-          }
+        if (!authSession?.session) {
+          db.updateAuth(null);
+          return;
+        }
 
-          db.updateAuth(token.data.token);
+        void getJazzJwtFromBetterAuth().then((jwtToken) => {
+          db.updateAuth(jwtToken);
         });
       }
     });
-  }, [db]);
+  }, [authSession?.session?.id, db]);
 
   if (authPending || tokenPending) {
     return <p className="loading-state">Connecting to BetterAuth...</p>;

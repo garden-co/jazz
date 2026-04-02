@@ -249,6 +249,65 @@ mod integration_tests {
         assert_eq!(body["code"], "missing");
     }
 
+    #[tokio::test]
+    async fn test_events_return_expired_for_expired_jwt() {
+        let server = TestServer::start_with_jwks_responses(vec![test_server::hs256_jwks(
+            "kid-events-expired",
+            "secret-events-expired",
+        )])
+        .await;
+
+        let expired = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 60;
+        let token = make_jwt_with_kid_and_exp(
+            "user-events-expired",
+            "kid-events-expired",
+            "secret-events-expired",
+            expired,
+        );
+
+        let resp = client()
+            .get(format!(
+                "{}/events?client_id=01234567-89ab-cdef-0123-456789abcdef",
+                server.base_url()
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "unauthenticated");
+        assert_eq!(body["code"], "expired");
+    }
+
+    #[tokio::test]
+    async fn test_events_return_disabled_when_jwt_auth_is_not_configured() {
+        let server = TestServer::start_without_jwks().await;
+        let token = make_jwt("events-user", json!({"role": "member"}), JWT_SECRET);
+
+        let resp = client()
+            .get(format!(
+                "{}/events?client_id=01234567-89ab-cdef-0123-456789abcdef",
+                server.base_url()
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["error"], "unauthenticated");
+        assert_eq!(body["code"], "disabled");
+    }
+
     /// Test backend impersonation with valid secret.
     #[tokio::test]
     async fn test_backend_impersonation_valid() {

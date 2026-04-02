@@ -1,6 +1,6 @@
 import * as React from "react";
 import { type DbConfig } from "jazz-tools";
-import { JazzProvider, getActiveSyntheticAuth, useDb, useSession } from "jazz-tools/react";
+import { JazzProvider, getActiveSyntheticAuth, useDb } from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID, SYNC_SERVER_URL } from "../constants.js";
 import {
   clearStoredAuthSession,
@@ -13,7 +13,8 @@ import { requestSignIn, requestSignUp } from "./api.js";
 
 function ChatShell() {
   const db = useDb();
-  const session = db.getAuthState().session;
+  const authState = db.getAuthState();
+  const session = authState.session;
 
   const role = typeof session?.claims?.role === "string" ? session.claims.role : null;
 
@@ -48,7 +49,7 @@ function ChatShell() {
     <main className="app-shell">
       <section className="content-grid">
         <AuthCard
-          loggedIn={session !== null && session?.claims.auth_mode !== "local"}
+          loggedIn={authState.status === "authenticated" && session?.claims.auth_mode !== "local"}
           role={role}
           onSignIn={handleSignIn}
           onSignUp={handleSignUp}
@@ -78,6 +79,7 @@ function ChatShell() {
 export function App() {
   const config = React.useMemo((): DbConfig => {
     const token = readStoredAuthSession(DEFAULT_APP_ID)?.token;
+    const localAuth = getActiveSyntheticAuth(DEFAULT_APP_ID, { defaultMode: "anonymous" });
 
     return {
       appId: DEFAULT_APP_ID,
@@ -85,6 +87,8 @@ export function App() {
       userBranch: "main",
       serverUrl: SYNC_SERVER_URL,
       jwtToken: token,
+      localAuthMode: localAuth.localAuthMode,
+      localAuthToken: localAuth.localAuthToken,
       driver: { type: "memory" },
     };
   }, []);

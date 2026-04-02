@@ -19,7 +19,10 @@ await pushSchemaCatalogue({
 console.log(`Schema catalogue pushed to ${server.url} for app ${DEFAULT_APP_ID}`);
 console.log("Sync server is running. Press Ctrl-C to stop.");
 
+const i = setInterval(() => {}, 10_000_000);
+
 const stopServer = async (signal: NodeJS.Signals) => {
+  clearInterval(i);
   try {
     console.log(`\nReceived ${signal}, stopping sync server...`);
     await server.stop();
