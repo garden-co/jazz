@@ -5,13 +5,18 @@ import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID, SYNC_SERVER_URL } from 
 import {
   clearStoredAuthSession,
   readStoredAuthSession,
+  type StoredAuthSession,
   writeStoredAuthSession,
 } from "./auth-storage.js";
 import { ChatPanel } from "./ChatPanel.js";
 import { AuthCard } from "./AuthCard.js";
 import { requestSignIn, requestSignUp } from "./api.js";
 
-function ChatShell() {
+type ChatShellProps = {
+  onStoredAuthSessionChange(session: StoredAuthSession | null): void;
+};
+
+function ChatShell({ onStoredAuthSessionChange }: ChatShellProps) {
   const db = useDb();
   const authState = db.getAuthState();
   const session = authState.session;
@@ -21,29 +26,29 @@ function ChatShell() {
   async function handleSignIn(email: string, password: string) {
     const session = await requestSignIn(email, password);
     writeStoredAuthSession(DEFAULT_APP_ID, session);
-
-    db.updateAuth(session.token);
+    onStoredAuthSessionChange(session);
   }
 
   async function handleSignUp(email: string, password: string) {
     const session = await requestSignUp(email, password);
     writeStoredAuthSession(DEFAULT_APP_ID, session);
-    db.updateAuth(session.token);
+    onStoredAuthSessionChange(session);
   }
 
   function handleSignOut() {
     clearStoredAuthSession(DEFAULT_APP_ID);
-    db.updateAuth(null);
+    onStoredAuthSessionChange(null);
   }
 
   React.useEffect(() => {
     return db.onAuthChanged((state) => {
+      // React to sync-server 401s
       if (state.status === "unauthenticated") {
         clearStoredAuthSession(DEFAULT_APP_ID);
-        db.updateAuth(null);
+        onStoredAuthSessionChange(null);
       }
     });
-  }, [db]);
+  }, [db, onStoredAuthSessionChange]);
 
   return (
     <main className="app-shell">
@@ -77,25 +82,40 @@ function ChatShell() {
 }
 
 export function App() {
+  const [storedAuthSession, setStoredAuthSession] = React.useState<StoredAuthSession | null>(() =>
+    readStoredAuthSession(DEFAULT_APP_ID),
+  );
+  const localAuth = React.useMemo(
+    () => getActiveSyntheticAuth(DEFAULT_APP_ID, { defaultMode: "anonymous" }),
+    [],
+  );
+
   const config = React.useMemo((): DbConfig => {
-    const token = readStoredAuthSession(DEFAULT_APP_ID)?.token;
-    const localAuth = getActiveSyntheticAuth(DEFAULT_APP_ID, { defaultMode: "anonymous" });
+    const sharedConfig = {
+      appId: DEFAULT_APP_ID,
+      env: "dev" as const,
+      userBranch: "main" as const,
+      serverUrl: SYNC_SERVER_URL,
+      driver: { type: "memory" as const },
+    };
+
+    if (storedAuthSession) {
+      return {
+        ...sharedConfig,
+        jwtToken: storedAuthSession.token,
+      };
+    }
 
     return {
-      appId: DEFAULT_APP_ID,
-      env: "dev",
-      userBranch: "main",
-      serverUrl: SYNC_SERVER_URL,
-      jwtToken: token,
+      ...sharedConfig,
       localAuthMode: localAuth.localAuthMode,
       localAuthToken: localAuth.localAuthToken,
-      driver: { type: "memory" },
     };
-  }, []);
+  }, [localAuth.localAuthMode, localAuth.localAuthToken, storedAuthSession]);
 
   return (
     <JazzProvider config={config} fallback={<p className="loading-state">Connecting to Jazz...</p>}>
-      <ChatShell />
+      <ChatShell onStoredAuthSessionChange={setStoredAuthSession} />
     </JazzProvider>
   );
 }

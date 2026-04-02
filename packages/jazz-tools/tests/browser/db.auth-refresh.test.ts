@@ -52,7 +52,7 @@ describe("Db auth refresh browser integration", () => {
     await ctx.cleanup();
   });
 
-  it("recovers from auth loss after updateAuth and flushes queued local writes", async () => {
+  it("recovers from auth loss after updateAuthToken and flushes queued local writes", async () => {
     const { appId, serverUrl } = await getTestingServerInfo();
     const dbNameA = uniqueDbName("auth-refresh-a");
     const dbNameB = uniqueDbName("auth-refresh-b");
@@ -103,12 +103,12 @@ describe("Db auth refresh browser integration", () => {
       },
     });
 
-    writer.updateAuth(validJwt);
+    writer.updateAuthToken(validJwt);
 
     await waitForCondition(
       async () => writer.getAuthState().status === "authenticated",
       20_000,
-      "writer should return to authenticated after updateAuth",
+      "writer should return to authenticated after updateAuthToken",
     );
 
     await waitForQuery(

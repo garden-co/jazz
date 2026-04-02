@@ -419,7 +419,7 @@ export class Db {
     this.config.jwtToken = jwtToken;
 
     for (const client of this.clients.values()) {
-      client.updateAuth(jwtToken);
+      client.updateAuthToken(jwtToken);
     }
 
     this.workerBridge?.updateAuth({
@@ -1028,7 +1028,7 @@ export class Db {
     return worker;
   }
 
-  updateAuth(jwtToken: string | null): void {
+  updateAuthToken(jwtToken: string | null): void {
     this.applyAuthUpdate(jwtToken);
   }
 
@@ -1511,12 +1511,12 @@ class ClientBackedDb extends Db {
     super(config, null);
   }
 
-  override updateAuth(jwtToken: string | null): void {
+  override updateAuthToken(jwtToken: string | null): void {
     if (!this.applyAuthUpdate(jwtToken)) {
       return;
     }
 
-    this.runtimeClient.updateAuth(jwtToken ?? undefined);
+    this.runtimeClient.updateAuthToken(jwtToken ?? undefined);
   }
 
   override insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {

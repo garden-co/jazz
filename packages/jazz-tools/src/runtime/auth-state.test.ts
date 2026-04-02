@@ -63,7 +63,32 @@ describe("auth-state", () => {
     });
 
     expect(() => store.applyJwtToken(makeJwt({ sub: "bob" }))).toThrow(
-      "Changing user_id on a live client is not supported. Recreate the Db.",
+      "Changing auth principal on a live client is not supported. Recreate the Db.",
+    );
+  });
+
+  it("rejects anonymous-to-jwt swap on a live client", () => {
+    const store = createAuthStateStore({
+      appId: "test-app",
+      localAuthMode: "anonymous",
+      localAuthToken: "device-token",
+    });
+
+    expect(() => store.applyJwtToken(makeJwt({ sub: "alice" }))).toThrow(
+      "Changing auth principal on a live client is not supported. Recreate the Db.",
+    );
+  });
+
+  it("rejects logout principal change on a live client", () => {
+    const store = createAuthStateStore({
+      appId: "test-app",
+      jwtToken: makeJwt({ sub: "alice" }),
+      localAuthMode: "anonymous",
+      localAuthToken: "device-token",
+    });
+
+    expect(() => store.applyJwtToken(undefined)).toThrow(
+      "Changing auth principal on a live client is not supported. Recreate the Db.",
     );
   });
 

@@ -817,7 +817,7 @@ export class JazzClient {
     return this;
   }
 
-  updateAuth(jwtToken?: string): void {
+  updateAuthToken(jwtToken?: string): void {
     this.context.jwtToken = jwtToken;
     this.resolvedSession = resolveClientSessionStateSync({
       appId: this.context.appId,

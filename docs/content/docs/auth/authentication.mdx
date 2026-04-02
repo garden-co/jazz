@@ -1,7 +1,7 @@
 ---
 title: Authentication
 description: "How and when to use Jazz's three auth modes, and how to manage JWT auth over the lifetime of a live client."
-reviewedAt: "6b7e363f"
+reviewedAt: "f52c2c62"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -160,41 +160,45 @@ For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web
 </Tabs>
 
 <Callout type="warn">
-  Use `jwtToken` in `JazzProvider` or `createDb(...)` for initial setup only. After the client is
-  created, update auth on the existing `Db` with `db.updateAuth(...)` instead of changing provider
-  config or remounting the provider.
+  Use `jwtToken` in `JazzProvider` or `createDb(...)` for initial setup and whenever the signed-in
+  user changes. Recreate the client for sign-in, sign-out, or principal switches. Reserve
+  `db.updateAuthToken(...)` for refreshing a JWT for the same user on an already-authenticated
+  client.
 </Callout>
 
 ### Managing JWT changes on a live client
 
-For sign-in, sign-out, token refresh, and token rotation, keep the same Jazz client alive and call
-`db.updateAuth(...)`:
+For sign-in and sign-out, recreate `JazzProvider` or `Db` with a new auth config:
 
-```ts
-const db = await createDb({
-  appId: "my-app",
-  serverUrl: "https://sync.example.com",
-  jwtToken: initialJwtToken,
-});
+```tsx
+const localAuth = getActiveSyntheticAuth("my-app", { defaultMode: "anonymous" });
+const [jwtToken, setJwtToken] = useState<string | null>(readStoredJwt());
 
-function syncJazzAuth(jwtToken: string | null) {
-  db.updateAuth(jwtToken ?? null);
-}
+const config = jwtToken
+  ? {
+      appId: "my-app",
+      serverUrl: "https://sync.example.com",
+      jwtToken,
+    }
+  : {
+      appId: "my-app",
+      serverUrl: "https://sync.example.com",
+      ...localAuth,
+    };
 
-// Call syncJazzAuth(...) whenever your auth layer signs in, signs out,
-// refreshes, or rotates its JWT.
+<JazzProvider key={jwtToken ? "external" : "local"} config={config} />;
 ```
 
-`updateAuth()` accepts only the JWT. Jazz re-derives the session from that token internally.
+On a live client, `db.updateAuthToken(jwt)` is only for replacing the bearer token with a new JWT for
+the same principal:
 
-- `db.updateAuth(jwt)` refreshes bearer auth for the same principal on the live client.
-- `db.updateAuth(null)` clears bearer auth and falls back to local auth if the client was
-  configured with it.
+- `db.updateAuthToken(jwt)` refreshes bearer auth for the same principal on the live client.
+- Do not use `db.updateAuthToken(null)` for logout or anonymous fallback on a live client.
 - Switching from one principal to another, like `alice -> bob`, is not supported on a live `Db`.
   Recreate `Db` or `JazzProvider` when the authenticated user changes.
 
-If you change the `config` passed to `JazzProvider`, Jazz recreates the client. That is useful for a
-full reset, but it is not the recommended path for normal auth refresh and logout flows.
+If you change the `config` passed to `JazzProvider`, Jazz recreates the client. That is the
+recommended path for login, logout, and any principal change.
 
 ### Reacting to expiry and unauthenticated responses
 
@@ -207,8 +211,14 @@ const stop = db.onAuthChanged(async (state) => {
   console.log(state.reason);
   // "expired" | "missing" | "invalid" | "disabled"
 
-  const freshJwt = await getFreshJwtFromYourAuthLayer().catch(() => null);
-  db.updateAuth(freshJwt);
+  const freshJwt = await getFreshJwtForCurrentUser().catch(() => null);
+  if (freshJwt) {
+    db.updateAuthToken(freshJwt);
+    return;
+  }
+
+  // Sign-out or principal change: recreate Jazz without bearer auth.
+  setJwtToken(null);
 });
 ```
 
@@ -218,7 +228,8 @@ When Jazz receives a structured unauthenticated response from the sync server, i
 
 - transitions the client to `status: "unauthenticated"`
 - preserves the last known `session`
-- pauses authenticated sync and reconnects until the app calls `db.updateAuth(...)`
+- pauses authenticated sync and reconnects until the app either refreshes the same user's JWT with
+  `db.updateAuthToken(...)` or recreates the client with a new auth config
 
 This means app code should treat `authState.status` as the source of truth for whether Jazz is
 currently authenticated.

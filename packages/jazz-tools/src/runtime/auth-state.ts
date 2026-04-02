@@ -39,6 +39,10 @@ function deriveAuthenticatedState(input: ClientSessionInput): AuthState {
   };
 }
 
+function authUserId(state: AuthState): string | null {
+  return state.session?.user_id ?? null;
+}
+
 export function createAuthStateStore(input: ClientSessionInput) {
   let state = deriveAuthenticatedState(input);
   const listeners = new Set<AuthStateListener>();
@@ -86,14 +90,13 @@ export function createAuthStateStore(input: ClientSessionInput) {
         localAuthToken: input.localAuthToken,
       });
 
-      if (
-        jwtToken &&
-        state.session &&
-        state.session.claims?.local_mode !== "anonymous" &&
-        nextState.session &&
-        state.session.user_id !== nextState.session.user_id
-      ) {
-        throw new Error("Changing user_id on a live client is not supported. Recreate the Db.");
+      const currentUserId = authUserId(state);
+      const nextUserId = authUserId(nextState);
+
+      if (currentUserId !== nextUserId) {
+        throw new Error(
+          "Changing auth principal on a live client is not supported. Recreate the Db.",
+        );
       }
 
       if (authStateEquals(state, nextState)) {

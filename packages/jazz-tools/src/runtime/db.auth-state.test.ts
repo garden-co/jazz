@@ -14,7 +14,7 @@ function makeJwt(payload: Record<string, unknown>): string {
 
 function makeDbWithJwt(jwtToken: string) {
   const runtimeClient = {
-    updateAuth: vi.fn(),
+    updateAuthToken: vi.fn(),
   };
 
   const db = createDbFromClient(
@@ -51,10 +51,10 @@ describe("Db auth state", () => {
       states.push(state);
     });
 
-    db.updateAuth(refreshed);
+    db.updateAuthToken(refreshed);
     stop();
 
-    expect(runtimeClient.updateAuth).toHaveBeenCalledWith(refreshed);
+    expect(runtimeClient.updateAuthToken).toHaveBeenCalledWith(refreshed);
     expect(db.getAuthState()).toMatchObject({
       status: "authenticated",
       transport: "bearer",
@@ -78,12 +78,28 @@ describe("Db auth state", () => {
       states.push(state);
     });
 
-    db.updateAuth(jwt);
+    db.updateAuthToken(jwt);
     stop();
 
-    expect(runtimeClient.updateAuth).not.toHaveBeenCalled();
+    expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
     expect(states).toHaveLength(1);
     expect(states[0]).toMatchObject({
+      status: "authenticated",
+      transport: "bearer",
+      session: {
+        user_id: "alice",
+      },
+    });
+  });
+
+  it("rejects logout principal changes on a live db", () => {
+    const { db, runtimeClient } = makeDbWithJwt(makeJwt({ sub: "alice" }));
+
+    expect(() => db.updateAuthToken(null)).toThrow(
+      "Changing auth principal on a live client is not supported. Recreate the Db.",
+    );
+    expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
+    expect(db.getAuthState()).toMatchObject({
       status: "authenticated",
       transport: "bearer",
       session: {

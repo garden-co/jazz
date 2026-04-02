@@ -1,7 +1,7 @@
 import * as React from "react";
 import { type User, AuthKitProvider, useAuth } from "@workos-inc/authkit-react";
 import { type DbConfig } from "jazz-tools";
-import { JazzProvider, getActiveSyntheticAuth, useSession } from "jazz-tools/react";
+import { JazzProvider, getActiveSyntheticAuth, useDb } from "jazz-tools/react";
 import {
   ANNOUNCEMENTS_CHAT_ID,
   CHAT_ID,
@@ -19,10 +19,19 @@ type ChatShellProps = {
 };
 
 function ChatShell({ user, onSignIn, onSignOut }: ChatShellProps) {
-  const session = useSession();
+  const db = useDb();
+  const authState = db.getAuthState();
+  const session = authState.session;
   const role = typeof session?.claims?.role === "string" ? session.claims.role : null;
+  const jazzAuthenticated =
+    authState.status === "authenticated" && session?.claims.auth_mode !== "local";
+  const canPostAnnouncements = authState.status === "authenticated" && role === "admin";
+  const canPostGeneric =
+    authState.status === "authenticated" && (role === "admin" || role === "member");
   const displayName = user ? `${user.firstName} ${user.lastName}`.trim() : "Anonymous";
-  const statusDetail = role ? "Signed in with WorkOS" : "Sign in with WorkOS to unlock chat-01";
+  const statusDetail = jazzAuthenticated
+    ? "Signed in with WorkOS"
+    : "Sign in with WorkOS to unlock chat-01";
 
   return (
     <main className="app-shell">
@@ -38,7 +47,7 @@ function ChatShell({ user, onSignIn, onSignOut }: ChatShellProps) {
         <ChatPanel
           chatId={ANNOUNCEMENTS_CHAT_ID}
           title="Announcements"
-          canSend={role === "admin"}
+          canSend={canPostAnnouncements}
           authorName={displayName}
           readOnlyNotice="Only admins can post announcements."
         />
@@ -46,7 +55,7 @@ function ChatShell({ user, onSignIn, onSignOut }: ChatShellProps) {
         <ChatPanel
           chatId={CHAT_ID}
           title={CHAT_ID}
-          canSend={role === "admin" || role === "member"}
+          canSend={canPostGeneric}
           authorName={displayName}
           readOnlyNotice="Sign in as admin or member to participate."
         />
@@ -55,95 +64,133 @@ function ChatShell({ user, onSignIn, onSignOut }: ChatShellProps) {
   );
 }
 
-type JazzAppProps = {
-  token: string | null;
-  onTokenChange: React.Dispatch<React.SetStateAction<string | null>>;
-};
+type WorkOsJazzSyncProps = React.PropsWithChildren<{
+  canRefreshJwt: boolean;
+  getAccessToken: () => Promise<string | null | undefined>;
+}>;
 
-function JazzApp({ token, onTokenChange }: JazzAppProps) {
-  const { isLoading, user, getAccessToken, signIn, signOut } = useAuth();
+function WorkOsJazzSync({ canRefreshJwt, children, getAccessToken }: WorkOsJazzSyncProps) {
+  const db = useDb();
 
   React.useEffect(() => {
-    let isCancelled = false;
+    if (!canRefreshJwt) {
+      return;
+    }
 
-    async function syncToken() {
-      if (!user) {
-        onTokenChange(null);
+    return db.onAuthChanged((state) => {
+      if (state.status !== "unauthenticated") {
         return;
       }
 
-      const accessToken = await getAccessToken();
-      if (!isCancelled) {
-        onTokenChange(accessToken ?? null);
-      }
+      void getAccessToken().then((accessToken) => {
+        if (accessToken) {
+          db.updateAuthToken(accessToken);
+        }
+      });
+    });
+  }, [canRefreshJwt, db, getAccessToken]);
+
+  return children;
+}
+
+function JazzApp() {
+  const { isLoading, user, getAccessToken, signIn, signOut } = useAuth();
+  const [initialJwtToken, setInitialJwtToken] = React.useState<string | null>(null);
+  const [tokenPending, setTokenPending] = React.useState(false);
+  const localAuth = React.useMemo(
+    () => getActiveSyntheticAuth(DEFAULT_APP_ID, { defaultMode: "anonymous" }),
+    [],
+  );
+
+  React.useEffect(() => {
+    let cancelled = false;
+
+    if (isLoading) {
+      return;
     }
 
-    void syncToken();
+    if (!user) {
+      setInitialJwtToken(null);
+      setTokenPending(false);
+      return;
+    }
+
+    setTokenPending(true);
+
+    void getAccessToken().then((accessToken) => {
+      if (cancelled) {
+        return;
+      }
+
+      setInitialJwtToken(accessToken ?? null);
+      setTokenPending(false);
+    });
 
     return () => {
-      isCancelled = true;
+      cancelled = true;
     };
-  }, [getAccessToken, onTokenChange, user]);
+  }, [getAccessToken, isLoading, user]);
 
   const config = React.useMemo((): DbConfig => {
-    if (token) {
+    const sharedConfig = {
+      appId: DEFAULT_APP_ID,
+      env: "dev" as const,
+      userBranch: "main" as const,
+      serverUrl: SYNC_SERVER_URL,
+      driver: { type: "memory" as const },
+    };
+
+    if (initialJwtToken) {
       return {
-        appId: DEFAULT_APP_ID,
-        env: "dev",
-        userBranch: "main",
-        serverUrl: SYNC_SERVER_URL,
-        jwtToken: token,
-        driver: { type: "memory" },
+        ...sharedConfig,
+        jwtToken: initialJwtToken,
       };
     }
 
-    const localAuth = getActiveSyntheticAuth(DEFAULT_APP_ID, { defaultMode: "anonymous" });
     return {
-      appId: DEFAULT_APP_ID,
-      env: "dev",
-      userBranch: "main",
-      serverUrl: SYNC_SERVER_URL,
+      ...sharedConfig,
       localAuthMode: localAuth.localAuthMode,
       localAuthToken: localAuth.localAuthToken,
-      driver: { type: "memory" },
     };
-  }, [token]);
+  }, [initialJwtToken, localAuth.localAuthMode, localAuth.localAuthToken]);
 
-  if (isLoading) {
+  const providerKey = initialJwtToken
+    ? "external"
+    : `local:${localAuth.localAuthMode}:${localAuth.localAuthToken}`;
+
+  if (isLoading || tokenPending) {
     return <p className="loading-state">Connecting to WorkOS...</p>;
+  }
+
+  if (user && !initialJwtToken) {
+    return <p className="loading-state">Fetching WorkOS token...</p>;
   }
 
   return (
     <JazzProvider
-      key={token ? "jwt" : "local"}
+      key={providerKey}
       config={config}
       fallback={<p className="loading-state">Connecting to Jazz...</p>}
     >
-      <ChatShell
-        user={user}
-        onSignIn={signIn}
-        onSignOut={() => {
-          void signOut({
-            returnTo: window.location.href,
-          });
-        }}
-      />
+      <WorkOsJazzSync canRefreshJwt={Boolean(user)} getAccessToken={getAccessToken}>
+        <ChatShell
+          user={user}
+          onSignIn={signIn}
+          onSignOut={() => {
+            void signOut({
+              returnTo: window.location.href,
+            });
+          }}
+        />
+      </WorkOsJazzSync>
     </JazzProvider>
   );
 }
 
 export function App() {
-  const [token, setToken] = React.useState<string | null>(null);
-
   return (
-    <AuthKitProvider
-      clientId={WORKOS_CLIENT_ID}
-      devMode={true}
-      onRefresh={({ accessToken }) => {
-        setToken(accessToken);
-      }}
-    >
-      <JazzApp token={token} onTokenChange={setToken} />
+    <AuthKitProvider clientId={WORKOS_CLIENT_ID} devMode={true}>
+      <JazzApp />
     </AuthKitProvider>
   );
 }

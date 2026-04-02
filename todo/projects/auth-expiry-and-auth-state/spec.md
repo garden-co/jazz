@@ -27,7 +27,7 @@ On any `401` from `/sync` or `/events`, Jazz should stop treating the failure as
 3. stop authenticated reconnect loops
 4. preserve local state and pending outbox entries
 5. notify the app through a typed auth-state surface
-6. wait for the app to call `updateAuth(...)`
+6. wait for the app to call `updateAuthToken(...)`
 
 Jazz does **not** refresh tokens itself in this spec. Renewal stays app-owned.
 
@@ -50,7 +50,7 @@ JWT expires
 app sees unauthenticated state
   -> app runs its own refresh/login flow
   -> app gets fresh JWT
-  -> app calls db.updateAuth(jwtToken)
+  -> app calls db.updateAuthToken(jwtToken)
 
 Jazz resumes
   -> recomputes session from the new JWT
@@ -74,7 +74,7 @@ JWT expires or becomes invalid server-side
 app sees unauthenticated state
   -> app redirects to sign-in or silently renews with its own auth SDK
   -> app gets a fresh JWT
-  -> app calls db.updateAuth(jwtToken)
+  -> app calls db.updateAuthToken(jwtToken)
 
 Jazz resumes with the new credential
 ```
@@ -92,7 +92,7 @@ const stop = db.onAuthChanged((state) => {
 
 const next = await authSdk.refreshOrSignIn();
 
-db.updateAuth(next.jwtToken);
+db.updateAuthToken(next.jwtToken);
 ```
 
 ### Fat Marker Sketch
@@ -182,7 +182,7 @@ interface DbConfig {
 }
 
 interface Db {
-  updateAuth(jwtToken?: string): void;
+  updateAuthToken(jwtToken?: string): void;
   getAuthState(): AuthState;
   onAuthChanged(listener: (state: AuthState) => void): () => void;
 }
@@ -209,7 +209,7 @@ When `/sync` or `/events` gets a structured `401`:
 1. mark auth state as `unauthenticated`
 2. abort the active stream
 3. detach the server from the runtime
-4. stop scheduling reconnect attempts until `updateAuth(...)`
+4. stop scheduling reconnect attempts until `updateAuthToken(...)`
 5. preserve the current derived session for local reads/writes
 6. keep local storage, local subscriptions, and pending sync payloads intact
 
@@ -217,7 +217,7 @@ Repeated `401`s while already unauthenticated should be deduplicated so the app 
 
 #### Resuming after renewal
 
-`updateAuth(...)` should:
+`updateAuthToken(...)` should:
 
 1. update the main-thread JWT
 2. propagate the new auth to the worker via `update-auth`
@@ -226,7 +226,7 @@ Repeated `401`s while already unauthenticated should be deduplicated so the app 
 5. reconnect `/events`
 6. flush queued sync work
 
-`updateAuth(...)` supports:
+`updateAuthToken(...)` supports:
 
 - `undefined -> principal` initial sign-in
 - `principal -> same principal` token renewal
@@ -238,7 +238,7 @@ This allows the common renewal path to keep local authorship stable while the ap
 
 #### Provider behavior
 
-`JazzProvider` should stop treating auth refresh as a full client recreation event. For a stable app/schema/server tuple, changes limited to `jwtToken` should call `updateAuth(...)` on the existing client rather than tearing down the DB and worker.
+`JazzProvider` should stop treating auth refresh as a full client recreation event. For a stable app/schema/server tuple, changes limited to `jwtToken` should call `updateAuthToken(...)` on the existing client rather than tearing down the DB and worker.
 
 ### Rabbit Holes
 
@@ -267,11 +267,11 @@ Prefer integration-first coverage using the existing server/runtime/browser stac
   - malformed or rejected bearer returns `401` with `code: "invalid"`
 - Browser worker integration:
   - alice starts authenticated, token expires, `/events` returns `401`, and the worker stops reconnecting until auth is updated
-  - alice makes local writes while unauthenticated; they remain queued and flush after `updateAuth(...)`
+  - alice makes local writes while unauthenticated; they remain queued and flush after `updateAuthToken(...)`
 - Framework adapter integration:
   - `useSession()` remains on alice's last derived session during auth loss and changes when a new JWT is applied or auth is cleared
   - `useAuthState()` or equivalent listener surfaces one `unauthenticated` transition per auth-loss episode
   - updating auth in `JazzProvider` does not recreate the underlying DB client for same-principal renewal
 - Guardrail tests:
-  - `updateAuth(...)` rejects `alice -> bob` principal changes on a live client
+  - `updateAuthToken(...)` rejects `alice -> bob` principal changes on a live client
   - local anonymous/demo auth behavior remains unchanged when cookie auth is not configured

@@ -2,32 +2,20 @@
 
 import * as React from "react";
 import { type DbConfig } from "jazz-tools";
-import { JazzProvider, useDb, useSession } from "jazz-tools/react";
+import { JazzProvider, getActiveSyntheticAuth, useDb } from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID, SYNC_SERVER_URL } from "../constants";
 import { ChatPanel } from "../../auth-simple-chat/src/ChatPanel";
 import { AuthCard } from "../../auth-simple-chat/src/AuthCard";
-import { authClient } from "../src/lib/auth-client";
+import { authClient, getJwtFromBetterAuth } from "../src/lib/auth-client";
 
-async function getJazzJwtFromBetterAuth(): Promise<string | null> {
-  try {
-    const token = await authClient.token();
-    if (token.error) {
-      console.error("Error getting JWT token:", token.error.message);
-      return null;
-    }
-
-    return token.data.token;
-  } catch (error) {
-    console.error("Error getting JWT token:", error);
-    return null;
-  }
-}
-
-function ChatShell() {
+function ChatShell(): React.JSX.Element {
   const db = useDb();
   const authState = db.getAuthState();
   const session = authState.session;
   const role = typeof session?.claims?.role === "string" ? session.claims.role : null;
+  const canPostAnnouncements = authState.status === "authenticated" && role === "admin";
+  const canPostGeneric =
+    authState.status === "authenticated" && (role === "admin" || role === "member");
 
   async function handleSignIn(email: string, password: string) {
     const res = await authClient.signIn.email({
@@ -70,7 +58,7 @@ function ChatShell() {
         <ChatPanel
           chatId={ANNOUNCEMENTS_CHAT_ID}
           title="Announcements"
-          canSend={role === "admin"}
+          canSend={canPostAnnouncements}
           authorName={session?.user_id ?? null}
           readOnlyNotice="Only admins can post announcements."
         />
@@ -78,7 +66,7 @@ function ChatShell() {
         <ChatPanel
           chatId={CHAT_ID}
           title={CHAT_ID}
-          canSend={role === "admin" || role === "member"}
+          canSend={canPostGeneric}
           authorName={session?.user_id ?? null}
           readOnlyNotice="Sign in as admin or member to participate."
         />
@@ -89,8 +77,35 @@ function ChatShell() {
 
 function BetterAuthJazzSync({ children }: React.PropsWithChildren<{}>) {
   const db = useDb();
+
+  React.useEffect(() => {
+    async function refreshJazzAuthToken(): Promise<void> {
+      const jwtToken = await getJwtFromBetterAuth();
+      if (jwtToken) {
+        db.updateAuthToken(jwtToken);
+      }
+    }
+
+    return db.onAuthChanged((state) => {
+      if (state.status !== "unauthenticated") {
+        return;
+      }
+
+      void refreshJazzAuthToken();
+    });
+  }, [db]);
+
+  return children;
+}
+
+export default function Page(): React.JSX.Element {
   const { data: authSession, isPending: authPending } = authClient.useSession();
+  const [initialJwtToken, setInitialJwtToken] = React.useState<string | null>(null);
   const [tokenPending, setTokenPending] = React.useState(true);
+  const localAuth = React.useMemo(
+    () => getActiveSyntheticAuth(DEFAULT_APP_ID, { defaultMode: "anonymous" }),
+    [],
+  );
 
   React.useEffect(() => {
     if (authPending) {
@@ -103,60 +118,55 @@ function BetterAuthJazzSync({ children }: React.PropsWithChildren<{}>) {
 
       if (!authSession?.session) {
         if (!ac.signal.aborted) {
-          db.updateAuth(null);
           setTokenPending(false);
         }
         return;
       }
 
-      const jwtToken = await getJazzJwtFromBetterAuth();
+      const jwtToken = await getJwtFromBetterAuth();
       if (ac.signal.aborted) {
         return;
       }
 
-      db.updateAuth(jwtToken);
+      setInitialJwtToken(jwtToken);
       setTokenPending(false);
     }
 
     void syncJazzAuth();
 
     return () => ac.abort();
-  }, [authPending, authSession?.session?.id, db]);
+  }, [authPending]);
 
-  React.useEffect(() => {
-    return db.onAuthChanged((state) => {
-      // if the sync server throws a 401
-      // we need to try issuing a new token
-      if (state.status === "unauthenticated") {
-        if (!authSession?.session) {
-          db.updateAuth(null);
-          return;
-        }
+  const config = React.useMemo((): DbConfig => {
+    const sharedConfig = {
+      appId: DEFAULT_APP_ID,
+      env: "dev" as const,
+      userBranch: "main" as const,
+      serverUrl: SYNC_SERVER_URL,
+      driver: { type: "memory" as const },
+    };
 
-        void getJazzJwtFromBetterAuth().then((jwtToken) => {
-          db.updateAuth(jwtToken);
-        });
-      }
-    });
-  }, [authSession?.session?.id, db]);
+    if (initialJwtToken) {
+      return {
+        ...sharedConfig,
+        jwtToken: initialJwtToken,
+      };
+    }
+
+    return {
+      ...sharedConfig,
+      localAuthMode: localAuth.localAuthMode,
+      localAuthToken: localAuth.localAuthToken,
+    };
+  }, [initialJwtToken, localAuth.localAuthMode, localAuth.localAuthToken]);
 
   if (authPending || tokenPending) {
     return <p className="loading-state">Connecting to BetterAuth...</p>;
   }
 
-  return children;
-}
-
-export default function Page() {
-  const config = React.useMemo((): DbConfig => {
-    return {
-      appId: DEFAULT_APP_ID,
-      env: "dev",
-      userBranch: "main",
-      serverUrl: SYNC_SERVER_URL,
-      driver: { type: "memory" },
-    };
-  }, []);
+  if (authPending && !initialJwtToken) {
+    return <p className="loading-state">Fetching BetterAuth token...</p>;
+  }
 
   return (
     <JazzProvider config={config} fallback={<p className="loading-state">Connecting to Jazz...</p>}>
