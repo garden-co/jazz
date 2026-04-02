@@ -153,7 +153,8 @@ struct R8ScenarioConfig {
     payload_bytes: usize,
     #[cfg(any(
         all(feature = "fjall", not(target_arch = "wasm32")),
-        all(feature = "rocksdb", not(target_arch = "wasm32"))
+        all(feature = "rocksdb", not(target_arch = "wasm32")),
+        all(feature = "sqlite", not(target_arch = "wasm32"))
     ))]
     #[serde(default = "default_many_branches_cache_size_bytes")]
     cache_size_bytes: usize,
@@ -263,7 +264,8 @@ struct R8Scenario {
     payload_bytes: usize,
     #[cfg(any(
         all(feature = "fjall", not(target_arch = "wasm32")),
-        all(feature = "rocksdb", not(target_arch = "wasm32"))
+        all(feature = "rocksdb", not(target_arch = "wasm32")),
+        all(feature = "sqlite", not(target_arch = "wasm32"))
     ))]
     cache_size_bytes: usize,
 }
@@ -293,7 +295,8 @@ struct BranchHeadScan {
 
 #[cfg(any(
     all(feature = "fjall", not(target_arch = "wasm32")),
-    all(feature = "rocksdb", not(target_arch = "wasm32"))
+    all(feature = "rocksdb", not(target_arch = "wasm32")),
+    all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
 fn default_many_branches_cache_size_bytes() -> usize {
     32 * 1024 * 1024
@@ -2860,7 +2863,8 @@ fn load_r8_scenario(path: &str) -> R8Scenario {
         payload_bytes: raw.payload_bytes.max(32),
         #[cfg(any(
             all(feature = "fjall", not(target_arch = "wasm32")),
-            all(feature = "rocksdb", not(target_arch = "wasm32"))
+            all(feature = "rocksdb", not(target_arch = "wasm32")),
+            all(feature = "sqlite", not(target_arch = "wasm32"))
         ))]
         cache_size_bytes: raw.cache_size_bytes.max(1),
     }
