@@ -45,9 +45,6 @@ jobs:
           - aarch64-unknown-linux-musl
     env:
       CARGO_ZIGBUILD_CACHE_DIR: /tmp/cargo-zigbuild-cache
-      RUSTC_WRAPPER: sccache
-      SCCACHE_DIR: /home/runner/.cache/sccache
-      SCCACHE_CACHE_SIZE: 8G
     steps:
       - uses: actions/checkout@v6
 
@@ -67,16 +64,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: sccache
-
-      - name: Mount sccache sticky disk
-        uses: useblacksmith/stickydisk@v1
-        with:
-          key: sccache-jazz-tools-sandbox-${{ github.repository_id }}-${{ runner.os }}-${{ matrix.target }}-v1
-          path: /home/runner/.cache/sccache
 
       - name: Install libclang (needed by rocksdb bindgen)
         run: sudo apt-get update && sudo apt-get install -y libclang-dev
