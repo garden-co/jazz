@@ -1,5 +1,5 @@
 import { describe, expectTypeOf, it } from "vitest";
-import { definePermissions } from "./index.js";
+import { schema as s } from "../index.js";
 
 interface Todo {
   id: string;
@@ -171,7 +171,7 @@ const app = {
 
 describe("permissions type inference", () => {
   it("infers row callback and where key types", () => {
-    definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
+    s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) => {
       expectTypeOf(session.user_id.path).toEqualTypeOf<string[]>();
       expectTypeOf(session.userId.path).toEqualTypeOf<string[]>();
       expectTypeOf(session["claims.role"]!.path).toEqualTypeOf<string[]>();
@@ -211,7 +211,7 @@ describe("permissions type inference", () => {
   });
 
   it("exposes never() on read/insert/update/delete builders", () => {
-    definePermissions(app, ({ policy }) => [
+    s.definePermissions(app, ({ policy }) => [
       policy.todos.allowRead.never(),
       policy.todos.allowInsert.never(),
       policy.todos.allowUpdate.never(),
@@ -220,7 +220,7 @@ describe("permissions type inference", () => {
   });
 
   it("exposes always() on read/insert/update/delete builders", () => {
-    definePermissions(app, ({ policy }) => [
+    s.definePermissions(app, ({ policy }) => [
       policy.todos.allowRead.always(),
       policy.todos.allowInsert.always(),
       policy.todos.allowUpdate.always(),
@@ -229,12 +229,12 @@ describe("permissions type inference", () => {
   });
 
   it("rejects invalid table/column usage at compile time where possible", () => {
-    definePermissions(app, ({ policy, allowedTo }) => [
+    s.definePermissions(app, ({ policy, allowedTo }) => [
       policy.todos.allowRead.where({ done: true }),
       policy.todos.allowRead.where(allowedTo.read("projectId")),
     ]);
 
-    definePermissions(app, ({ policy }) => {
+    s.definePermissions(app, ({ policy }) => {
       // Type-level negative checks only: keep unreachable in normal runs.
       if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
         // @ts-expect-error unknown table key

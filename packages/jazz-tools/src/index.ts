@@ -1,13 +1,6 @@
 // Public exports
 
-import {
-  col,
-  getCollectedMigration,
-  getCollectedSchema,
-  migrate,
-  resetCollectedState,
-  table,
-} from "./dsl.js";
+import { col, migrate } from "./dsl.js";
 import { defineMigration } from "./migrations.js";
 import { definePermissions } from "./permissions/index.js";
 import {
@@ -29,15 +22,6 @@ import type {
   WhereOf as TypedWhereOf,
 } from "./typed-app.js";
 
-// DSL for schema definitions
-export {
-  table,
-  col,
-  migrate,
-  getCollectedSchema,
-  getCollectedMigration,
-  resetCollectedState,
-} from "./dsl.js";
 export type {
   Schema as SchemaAst,
   Table as SchemaAstTable,
@@ -100,21 +84,11 @@ export type {
 
 // Typed schema app
 export { schemaToWasm } from "./codegen/schema-reader.js";
-export {
-  defineSchema,
-  defineApp,
-  TypedTableQueryBuilder,
-  permissionIntrospectionColumns,
-} from "./typed-app.js";
-export { defineMigration } from "./migrations.js";
+export { TypedTableQueryBuilder, permissionIntrospectionColumns } from "./typed-app.js";
 export type {
-  Schema,
-  TableDefinition,
-  SchemaDefinition,
   Simplify,
   CompactSchema,
   DefinedSchema,
-  TableIndex,
   DefinedTable,
   TableRow,
   TableInit,
@@ -134,17 +108,13 @@ export type {
   Query,
   TableHandle,
   QueryHandle,
-  App,
   TypedApp,
-  RowOf,
-  InsertOf,
-  TableMetaOf,
-  WhereOf,
 } from "./typed-app.js";
 export type { DefinedMigration, MigrationShape, MigrationTableShape } from "./migrations.js";
 
 type RuntimeSchemaNamespace = typeof col & {
   table: typeof defineTable;
+  migrate: typeof migrate;
   defineSchema: typeof defineSchema;
   defineApp: typeof defineApp;
   defineMigration: typeof defineMigration;
@@ -154,6 +124,7 @@ type RuntimeSchemaNamespace = typeof col & {
 
 export const schema: RuntimeSchemaNamespace = Object.assign({}, col, {
   table: defineTable,
+  migrate,
   defineSchema,
   defineApp,
   defineMigration,
@@ -182,7 +153,15 @@ export * from "./drivers/index.js";
 export * from "./runtime/index.js";
 
 // Permissions DSL
-export * from "./permissions/index.js";
+export type {
+  PermissionRelation,
+  WhereInputOrCallback,
+  SessionContext,
+  AllowedToContext,
+  PolicyContext,
+  CompiledPermissions,
+} from "./permissions/index.js";
+export { relationToIr, relationExistsToPolicy, anyOf, allOf } from "./permissions/index.js";
 export * from "./dev-tools/index.js";
 
 // Local synthetic users and vanilla switcher UI

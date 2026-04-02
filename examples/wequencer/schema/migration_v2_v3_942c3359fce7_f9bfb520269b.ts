@@ -1,14 +1,14 @@
-import { migrate, col } from "jazz-tools";
+import { schema as s } from "jazz-tools";
 
-migrate("file_parts", {
+s.migrate("file_parts", {
   // TODO: Table-level operation not yet supported in TypeScript DSL
 });
 
-migrate("files", {
+s.migrate("files", {
   // TODO: Table-level operation not yet supported in TypeScript DSL
 });
 
-migrate("instruments", {
-  sound: col.drop().bytes({ backwardsDefault: new Uint8Array([]) }),
-  soundFileId: col.add().optional().string({ default: null }),
+s.migrate("instruments", {
+  sound: s.drop.bytes({ backwardsDefault: new Uint8Array([]) }),
+  soundFileId: s.add.string({ default: null }),
 });
