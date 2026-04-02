@@ -1,12 +1,33 @@
 ---
 title: Overview
 description: The database that syncs.
-reviewedAt: "4059cdef"
+reviewedAt: "f6535a533"
 ---
 
-Jazz is a local-first relational database: your app reads from and writes to a local replica, then syncs with a server.
+Jazz is a local-first relational database with row-level permissions, real-time sync, and offline support&hairsp;—&hairsp;no separate API layer needed. Your app reads from and writes to a local replica, and Jazz syncs it with a server in the background.
 
-You can use Jazz from React, Vue, Expo/React Native, and Svelte clients, plus backend/server contexts in TypeScript and Rust.
+```ts
+import { schema as s } from "jazz-tools";
+
+// Define your schema
+const schema = {
+  todos: s.table({
+    title: s.string(),
+    done: s.boolean(),
+  }),
+};
+const app = s.defineApp(schema);
+
+// Write — instant, works offline
+db.insert(app.todos, { title: "Ship it", done: false });
+
+// Read — reactive, stays up to date across devices
+db.subscribeAll(app.todos.where({ done: false }), ({ all }) => {
+  console.log(all);
+});
+```
+
+Jazz works with React, Vue, Expo/React Native, Svelte, plain TypeScript, and Rust.
 
 ## Quickstarts
 
