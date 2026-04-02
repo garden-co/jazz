@@ -9,7 +9,7 @@ edition = "2021"
 uniffi = "0.30.0"
 thiserror = "1.0.64"
 jazz_tools = { package = "jazz-tools", path = "../../jazz-tools", version = "2.0.0-alpha.0", features = [
-  "fjall",
+  "sqlite",
 ] }
 futures = "0.3"
 uuid = { version = "1", features = ["v7"] }

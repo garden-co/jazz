@@ -110,11 +110,12 @@ impl SqliteStorage {
     }
 
     fn get(conn: &rusqlite::Connection, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
-        match conn.query_row(
-            "SELECT value FROM kv WHERE key = ?1",
-            rusqlite::params![key.as_bytes()],
-            |row| row.get::<_, Vec<u8>>(0),
-        ) {
+        let mut stmt = conn
+            .prepare_cached("SELECT value FROM kv WHERE key = ?1")
+            .map_err(|e| StorageError::IoError(format!("sqlite prepare get: {e}")))?;
+        match stmt.query_row(rusqlite::params![key.as_bytes()], |row| {
+            row.get::<_, Vec<u8>>(0)
+        }) {
             Ok(v) => Ok(Some(v)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(StorageError::IoError(format!("sqlite get: {e}"))),
@@ -129,7 +130,7 @@ impl SqliteStorage {
         let upper = Self::prefix_upper_bound(prefix_bytes)
             .ok_or_else(|| StorageError::IoError("prefix upper bound overflow".to_string()))?;
         let mut stmt = conn
-            .prepare("SELECT key, value FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key")
+            .prepare_cached("SELECT key, value FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key")
             .map_err(|e| StorageError::IoError(format!("sqlite prepare scan_prefix: {e}")))?;
         let rows = stmt
             .query_map(rusqlite::params![prefix_bytes, upper.as_slice()], |row| {
@@ -155,7 +156,7 @@ impl SqliteStorage {
         let upper = Self::prefix_upper_bound(prefix_bytes)
             .ok_or_else(|| StorageError::IoError("prefix upper bound overflow".to_string()))?;
         let mut stmt = conn
-            .prepare("SELECT key FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key")
+            .prepare_cached("SELECT key FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key")
             .map_err(|e| StorageError::IoError(format!("sqlite prepare scan_prefix_keys: {e}")))?;
         let rows = stmt
             .query_map(rusqlite::params![prefix_bytes, upper.as_slice()], |row| {
@@ -179,7 +180,7 @@ impl SqliteStorage {
         end: &str,
     ) -> Result<Vec<String>, StorageError> {
         let mut stmt = conn
-            .prepare("SELECT key FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key")
+            .prepare_cached("SELECT key FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key")
             .map_err(|e| StorageError::IoError(format!("sqlite prepare scan_key_range: {e}")))?;
         let rows = stmt
             .query_map(rusqlite::params![start.as_bytes(), end.as_bytes()], |row| {
@@ -198,21 +199,19 @@ impl SqliteStorage {
     }
 
     fn set(conn: &rusqlite::Connection, key: &str, value: &[u8]) -> Result<(), StorageError> {
-        conn.execute(
-            "INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)",
-            rusqlite::params![key.as_bytes(), value],
-        )
-        .map(|_| ())
-        .map_err(|e| StorageError::IoError(format!("sqlite set: {e}")))
+        conn.prepare_cached("INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)")
+            .map_err(|e| StorageError::IoError(format!("sqlite prepare set: {e}")))?
+            .execute(rusqlite::params![key.as_bytes(), value])
+            .map(|_| ())
+            .map_err(|e| StorageError::IoError(format!("sqlite set: {e}")))
     }
 
     fn delete(conn: &rusqlite::Connection, key: &str) -> Result<(), StorageError> {
-        conn.execute(
-            "DELETE FROM kv WHERE key = ?1",
-            rusqlite::params![key.as_bytes()],
-        )
-        .map(|_| ())
-        .map_err(|e| StorageError::IoError(format!("sqlite delete: {e}")))
+        conn.prepare_cached("DELETE FROM kv WHERE key = ?1")
+            .map_err(|e| StorageError::IoError(format!("sqlite prepare delete: {e}")))?
+            .execute(rusqlite::params![key.as_bytes()])
+            .map(|_| ())
+            .map_err(|e| StorageError::IoError(format!("sqlite delete: {e}")))
     }
 }
 
