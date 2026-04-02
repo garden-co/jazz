@@ -1878,6 +1878,44 @@ fn realistic_r2_reads_rocksdb(c: &mut Criterion) {
 #[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
 fn realistic_r2_reads_rocksdb(_c: &mut Criterion) {}
 
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+fn realistic_r2_reads_sqlite(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r2_scenario("benchmarks/realistic/scenarios/r2_reads_sustained.json");
+    let benchmark_name = format!(
+        "{}_{}_sqlite",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/reads_sustained_sqlite");
+    configure_group(&mut group, 20, 10);
+    group.throughput(Throughput::Elements(scenario.operation_count as u64));
+
+    let tempdir = TempDir::new().expect("create tempdir for sqlite reads benchmark");
+    let db_path = tempdir.path().join("r2_reads.sqlite");
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, scenario| {
+            let runtime = create_sqlite_runtime(project_board_schema(), &db_path);
+            let mut state = R1State::with_runtime(runtime, &profile, profile.seed ^ scenario.seed);
+            b.iter(|| {
+                let total_rows = state.run_read_batch(scenario);
+                black_box(total_rows);
+            });
+            state.runtime.flush_storage();
+            state.runtime.storage().close().expect("close sqlite");
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
+fn realistic_r2_reads_sqlite(_c: &mut Criterion) {}
+
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 fn realistic_r3_cold_load_fjall(c: &mut Criterion) {
     let scenario = load_r3_scenario("benchmarks/realistic/scenarios/r3_cold_load_fjall.json");
