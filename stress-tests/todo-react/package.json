@@ -4,12 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --port 5477",
+    "dev": "npx tsx scripts/dev.ts",
+    "dev:vite": "vite --port 5477",
     "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
     "jazz-tools": "workspace:*",
+    "jose": "^6.2.1",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },
@@ -19,6 +21,7 @@
     "@vitejs/plugin-react": "catalog:default",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
+    "tsx": "^4.0.0",
     "typescript": "catalog:default",
     "vite": "catalog:default",
     "vite-plugin-top-level-await": "catalog:default",
