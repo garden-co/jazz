@@ -161,7 +161,7 @@ function FileUploadScreen() {
         size: file.size,
         lastModified: new Date(file.lastModified),
         fileId: insertedFile.id,
-        ownerId: session.user_id,
+        owner_id: session.user_id,
       });
 
       if (fileInputRef.current) {

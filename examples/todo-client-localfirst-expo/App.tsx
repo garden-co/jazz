@@ -29,7 +29,6 @@ const defaultAppId = "019d4349-2434-7753-b91a-21642b0896c7";
 type ExpoPublicEnvKey =
   | "EXPO_PUBLIC_JAZZ_APP_ID"
   | "EXPO_PUBLIC_JAZZ_SERVER_URL"
-  | "EXPO_PUBLIC_JAZZ_ADMIN_SECRET"
   | "EXPO_PUBLIC_JAZZ_LOCAL_MODE"
   | "EXPO_PUBLIC_JAZZ_LOCAL_TOKEN";
 
@@ -47,24 +46,19 @@ function readExpoPublicEnv(key: ExpoPublicEnvKey): string | undefined {
         ? typeof process !== "undefined"
           ? process.env.EXPO_PUBLIC_JAZZ_SERVER_URL
           : undefined
-        : key === "EXPO_PUBLIC_JAZZ_ADMIN_SECRET"
+        : key === "EXPO_PUBLIC_JAZZ_LOCAL_MODE"
           ? typeof process !== "undefined"
-            ? process.env.EXPO_PUBLIC_JAZZ_ADMIN_SECRET
+            ? process.env.EXPO_PUBLIC_JAZZ_LOCAL_MODE
             : undefined
-          : key === "EXPO_PUBLIC_JAZZ_LOCAL_MODE"
-            ? typeof process !== "undefined"
-              ? process.env.EXPO_PUBLIC_JAZZ_LOCAL_MODE
-              : undefined
-            : typeof process !== "undefined"
-              ? process.env.EXPO_PUBLIC_JAZZ_LOCAL_TOKEN
-              : undefined;
+          : typeof process !== "undefined"
+            ? process.env.EXPO_PUBLIC_JAZZ_LOCAL_TOKEN
+            : undefined;
 
   return bundledValue ?? runtimeEnv?.[key];
 }
 
 const envAppId = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_APP_ID");
 const envServerUrl = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_SERVER_URL");
-const envAdminSecret = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_ADMIN_SECRET");
 const envLocalMode = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_LOCAL_MODE");
 const envLocalToken = readExpoPublicEnv("EXPO_PUBLIC_JAZZ_LOCAL_TOKEN");
 
@@ -95,7 +89,6 @@ function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
     serverUrl: overrides.serverUrl ?? envServerUrl ?? defaultServerUrl,
     localAuthMode: overrides.localAuthMode ?? envMode ?? syntheticAuth.localAuthMode,
     localAuthToken: overrides.localAuthToken ?? envLocalToken ?? syntheticAuth.localAuthToken,
-    adminSecret: overrides.adminSecret ?? envAdminSecret,
     ...overrides,
   };
 }

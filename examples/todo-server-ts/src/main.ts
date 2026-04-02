@@ -124,7 +124,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         title: body.title,
         done: false,
         description: body.description?.trim(),
-        ownerId: body.owner_id ?? "anonymous",
+        owner_id: body.owner_id ?? "anonymous",
       });
 
       res.status(201).json(todo);

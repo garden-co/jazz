@@ -153,7 +153,7 @@ export async function startApp(
     db.insert(app.todos, {
       title: input.value,
       done: false,
-      ownerId: sessionUserId,
+      owner_id: sessionUserId,
       ...(selectedParentId ? { parentId: selectedParentId } : {}),
     });
     input.value = "";

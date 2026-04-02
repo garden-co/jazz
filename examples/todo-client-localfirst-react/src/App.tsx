@@ -25,7 +25,6 @@ function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
     appId,
     env: "dev",
     userBranch: "main",
-    devMode: true,
     localAuthMode: active.localAuthMode,
     localAuthToken: active.localAuthToken,
     ...overrides,
