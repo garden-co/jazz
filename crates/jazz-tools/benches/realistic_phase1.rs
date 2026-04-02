@@ -403,7 +403,8 @@ struct PermissionR5State {
 
 #[cfg(any(
     all(feature = "fjall", not(target_arch = "wasm32")),
-    all(feature = "rocksdb", not(target_arch = "wasm32"))
+    all(feature = "rocksdb", not(target_arch = "wasm32")),
+    all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
 struct SeededProjectBoard {
     projects: Vec<ObjectId>,
@@ -820,7 +821,8 @@ impl<S: Storage> R1State<S> {
 
 #[cfg(any(
     all(feature = "fjall", not(target_arch = "wasm32")),
-    all(feature = "rocksdb", not(target_arch = "wasm32"))
+    all(feature = "rocksdb", not(target_arch = "wasm32")),
+    all(feature = "sqlite", not(target_arch = "wasm32"))
 ))]
 fn seed_project_board_dataset<S: Storage>(
     runtime: &mut RuntimeCore<S, NoopScheduler, VecSyncSender>,
@@ -1053,6 +1055,36 @@ impl ColdLoadSeededDb {
             db_path,
             target_project_id,
             cache_size_bytes: scenario.cache_size_bytes,
+        }
+    }
+}
+
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+impl ColdLoadSeededDb {
+    fn new_sqlite(profile: &ProfileConfig, scenario: &R3Scenario) -> Self {
+        let tempdir = TempDir::new().expect("create tempdir for cold-load benchmark");
+        let db_path = tempdir.path().join("r3_cold_load.sqlite");
+
+        let seeded = {
+            let mut runtime = create_sqlite_runtime(project_board_schema(), &db_path);
+            let seeded =
+                seed_project_board_dataset(&mut runtime, profile, profile.seed ^ scenario.seed);
+            runtime.flush_storage();
+            runtime.storage().close().expect("close seeded sqlite");
+            seeded
+        };
+
+        assert!(
+            !seeded.active_tasks.is_empty(),
+            "cold-load dataset must contain tasks"
+        );
+        let target_project_id =
+            seeded.projects[scenario.target_project_index % seeded.projects.len()];
+        Self {
+            _tempdir: tempdir,
+            db_path,
+            target_project_id,
+            cache_size_bytes: 0,
         }
     }
 }
