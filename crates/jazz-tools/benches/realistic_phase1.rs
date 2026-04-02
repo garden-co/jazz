@@ -2785,6 +2785,29 @@ fn create_rocksdb_runtime(
     )
 }
 
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+fn create_sqlite_runtime(
+    schema: Schema,
+    db_path: &Path,
+) -> RuntimeCore<SqliteStorage, NoopScheduler, VecSyncSender> {
+    let sync_manager = SyncManager::new();
+    let schema_manager = SchemaManager::new(
+        sync_manager,
+        schema,
+        AppId::from_name("realistic-phase1-bench"),
+        "dev",
+        "main",
+    )
+    .expect("create schema manager");
+
+    RuntimeCore::new(
+        schema_manager,
+        SqliteStorage::open(db_path).expect("open sqlite for benchmark"),
+        NoopScheduler,
+        VecSyncSender::new(),
+    )
+}
+
 fn permission_recursive_schema(recursive_depth: usize) -> Schema {
     let folder_select = PolicyExpr::or(vec![
         PolicyExpr::eq_session("owner_id", vec!["user_id".into()]),
