@@ -58,4 +58,5 @@ If `propagation: "full"` is set, Edge-1 delivers Bob's write locally, then may r
 - How does this interact with the `allow_local_while_waiting` exception — should we offer an `allow_edge_while_waiting`? I propose no, because the purpose of `allow_local_while_waiting` is primarily to enable optimistic UI updates, not to bypass the durability guarantee requested as part of the subscription set-up.
 
 > Related: [Sync Manager — QuerySettled](../../status-quo/sync_manager.md#querysettled-read-durability-signal)
+> Related: [Confirmed Tier Reconciliation and Replayable Query Settlement](./confirmed_tier_reconciliation.md)
 > Related: [Globally Consistent Transactions](../b_launch/globally_consistent_transactions.md)
