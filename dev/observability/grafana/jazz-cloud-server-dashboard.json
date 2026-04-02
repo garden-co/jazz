@@ -121,11 +121,11 @@
       "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
       "id": 5,
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
-      "title": "Active Subscriptions",
+      "title": "Subscriptions /s",
       "type": "stat",
       "targets": [
         {
-          "expr": "sum(jazz_sync_subscriptions_active{app_id=~\"$app_id\", env=~\"$env\"})",
+          "expr": "sum(rate(jazz_sync_subscriptions_total{app_id=~\"$app_id\", env=~\"$env\"}[$__rate_interval]))",
           "legendFormat": ""
         }
       ]
@@ -404,11 +404,11 @@
       "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 20 } } },
       "gridPos": { "h": 8, "w": 8, "x": 0, "y": 58 },
       "id": 50,
-      "title": "Active Subscriptions",
+      "title": "Subscription Rate",
       "type": "timeseries",
       "targets": [
         {
-          "expr": "jazz_sync_subscriptions_active{app_id=~\"$app_id\", env=~\"$env\"}",
+          "expr": "rate(jazz_sync_subscriptions_total{app_id=~\"$app_id\", env=~\"$env\"}[$__rate_interval])",
           "legendFormat": "{{app_id}}"
         }
       ]

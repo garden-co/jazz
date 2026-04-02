@@ -1,3 +1,4 @@
+mod metrics;
 mod server;
 
 use clap::Parser;

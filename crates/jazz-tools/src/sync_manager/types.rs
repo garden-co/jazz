@@ -29,6 +29,16 @@ pub enum DurabilityTier {
     GlobalServer,
 }
 
+impl DurabilityTier {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Worker => "Worker",
+            Self::EdgeServer => "EdgeServer",
+            Self::GlobalServer => "GlobalServer",
+        }
+    }
+}
+
 /// Unique identifier for a server connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServerId(pub Uuid);
