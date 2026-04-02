@@ -2026,6 +2026,57 @@ fn realistic_r3_cold_load_rocksdb(c: &mut Criterion) {
 #[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
 fn realistic_r3_cold_load_rocksdb(_c: &mut Criterion) {}
 
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+fn realistic_r3_cold_load_sqlite(c: &mut Criterion) {
+    let scenario = load_r3_scenario("benchmarks/realistic/scenarios/r3_cold_load_fjall.json");
+    let profile: ProfileConfig = load_json(&scenario.profile_path);
+    let seeded = ColdLoadSeededDb::new_sqlite(&profile, &scenario);
+    let benchmark_name = format!(
+        "{}_{}_sqlite",
+        scenario.id.to_lowercase(),
+        profile.id.to_lowercase()
+    );
+
+    let mut group = c.benchmark_group("realistic_phase1/cold_load_sqlite");
+    configure_group(&mut group, 10, 10);
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &scenario,
+        |b, _scenario| {
+            b.iter(|| {
+                let open_start = Instant::now();
+                let mut runtime = create_sqlite_runtime(project_board_schema(), &seeded.db_path);
+                let open_elapsed = open_start.elapsed();
+
+                let query = QueryBuilder::new("tasks")
+                    .filter_eq("project_id", Value::Uuid(seeded.target_project_id))
+                    .filter_ne("status", Value::Text("done".to_string()))
+                    .order_by_desc("updated_at")
+                    .limit(200)
+                    .build();
+
+                let query_start = Instant::now();
+                let rows = block_on(runtime.query(query, None)).expect("cold-load query");
+                let query_elapsed = query_start.elapsed();
+
+                runtime.flush_storage();
+                runtime.storage().close().expect("close cold-load sqlite");
+
+                black_box(open_elapsed);
+                black_box(query_elapsed);
+                black_box(rows.len());
+            });
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
+fn realistic_r3_cold_load_sqlite(_c: &mut Criterion) {}
+
 fn realistic_r4_fanout_updates(c: &mut Criterion) {
     let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
     let scenario = load_r4_scenario(select_ci_path(
