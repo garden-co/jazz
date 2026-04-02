@@ -149,7 +149,11 @@ impl SyncMessage {
             SyncPayload::ObjectUpdated { commits, .. } => commits.iter().map(|c| c.id()).collect(),
             SyncPayload::PersistenceAck {
                 confirmed_commits, ..
-            } => confirmed_commits.iter().copied().collect(),
+            } => {
+                let mut ids: Vec<_> = confirmed_commits.iter().copied().collect();
+                ids.sort();
+                ids
+            }
             _ => vec![],
         }
     }
@@ -367,7 +371,7 @@ impl SyncTracer {
 
         loop {
             let current = self.tally();
-            if current == last_tally && !current.is_empty() {
+            if current == last_tally {
                 stable_count += 1;
                 if stable_count >= stable_for_target {
                     return;
@@ -870,7 +874,9 @@ impl<'a> Normalizer<'a> {
                 branch_name,
                 tails,
             } => {
-                let tail_ids: Vec<String> = tails.iter().map(|id| self.commit(id)).collect();
+                let mut sorted_tails: Vec<_> = tails.iter().collect();
+                sorted_tails.sort();
+                let tail_ids: Vec<String> = sorted_tails.iter().map(|id| self.commit(id)).collect();
                 format!(
                     "obj:{} branch:{} tails:[{}]",
                     self.object(object_id),
@@ -884,8 +890,10 @@ impl<'a> Normalizer<'a> {
                 confirmed_commits,
                 tier,
             } => {
+                let mut sorted_commits: Vec<_> = confirmed_commits.iter().collect();
+                sorted_commits.sort();
                 let commit_ids: Vec<String> =
-                    confirmed_commits.iter().map(|id| self.commit(id)).collect();
+                    sorted_commits.iter().map(|id| self.commit(id)).collect();
                 format!(
                     "obj:{} branch:{} confirmed:[{}] tier:{:?}",
                     self.object(object_id),
@@ -980,7 +988,8 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
             branch_name,
             tails,
         } => {
-            let tail_ids: Vec<String> = tails.iter().map(|id| names.commit(id)).collect();
+            let mut tail_ids: Vec<String> = tails.iter().map(|id| names.commit(id)).collect();
+            tail_ids.sort();
             format!(
                 "obj:{} branch:{} tails:[{}]",
                 names.object(object_id),
@@ -994,10 +1003,11 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
             confirmed_commits,
             tier,
         } => {
-            let commit_ids: Vec<String> = confirmed_commits
+            let mut commit_ids: Vec<String> = confirmed_commits
                 .iter()
                 .map(|id| names.commit(id))
                 .collect();
+            commit_ids.sort();
             format!(
                 "obj:{} branch:{} confirmed:[{}] tier:{:?}",
                 names.object(object_id),
