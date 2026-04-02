@@ -138,3 +138,60 @@ mod noop {
 #[cfg(not(feature = "otel"))]
 #[allow(unused_imports)]
 pub use noop::*;
+
+#[cfg(all(test, feature = "otel"))]
+mod tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn admin_takes_precedence() {
+        let headers = HeaderMap::new();
+        assert_eq!(resolve_auth_type(&headers, true, true, true), "admin");
+    }
+
+    #[test]
+    fn backend_without_session() {
+        let headers = HeaderMap::new();
+        assert_eq!(resolve_auth_type(&headers, false, true, false), "backend");
+    }
+
+    #[test]
+    fn backend_with_session_is_impersonation() {
+        let headers = HeaderMap::new();
+        assert_eq!(
+            resolve_auth_type(&headers, false, true, true),
+            "backend_impersonation"
+        );
+    }
+
+    #[test]
+    fn bearer_token_is_jwt() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Authorization", "Bearer eyJ...".parse().unwrap());
+        assert_eq!(resolve_auth_type(&headers, false, false, false), "jwt");
+    }
+
+    #[test]
+    fn anonymous_local_mode() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Jazz-Local-Mode", "anonymous".parse().unwrap());
+        assert_eq!(
+            resolve_auth_type(&headers, false, false, false),
+            "anonymous"
+        );
+    }
+
+    #[test]
+    fn demo_local_mode() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Jazz-Local-Mode", "demo".parse().unwrap());
+        assert_eq!(resolve_auth_type(&headers, false, false, false), "demo");
+    }
+
+    #[test]
+    fn no_auth_is_unknown() {
+        let headers = HeaderMap::new();
+        assert_eq!(resolve_auth_type(&headers, false, false, false), "unknown");
+    }
+}
