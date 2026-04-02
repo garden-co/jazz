@@ -1688,10 +1688,14 @@ async fn delete_policies_block_unauthorized_server_mutations() {
 
 /// Verifies that a single client's operations reach the server in causal order.
 ///
+/// This test lives in the policy suite but the failure mode is caused by the
+/// sync layer: the transport may deliver two writes from the same client out of
+/// order, making an otherwise-correct policy decision look wrong.
+///
 /// Alice locks herself out by transferring ownership to bob, then immediately
 /// fires a title update. The two writes race to the server via the same
-/// transport — if the server reorders them, the title update lands while
-/// alice still owns the row and is incorrectly accepted.
+/// transport — if the transport delivers them out of order, the title update
+/// lands while alice still owns the row and is incorrectly accepted.
 ///
 /// The observer's EdgeServer query is used as a causal barrier: once the
 /// marker document (sent last by alice) is visible, all prior writes have
@@ -1709,7 +1713,7 @@ async fn delete_policies_block_unauthorized_server_mutations() {
 ///   broken:   owner="bob", title="nope"      (out-of-order: title accepted before lockout)
 /// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore]
+#[ignore = "TODO: sync transport does not guarantee delivery order - writes from the same client can arrive at the server out of sequence"]
 async fn single_client_operations_reach_server_in_causal_order() {
     let schema = write_policy_schema();
     let server = TestingServer::builder()
@@ -1805,6 +1809,10 @@ async fn single_client_operations_reach_server_in_causal_order() {
 
 /// Verifies that a rejected mutation is rolled back to the originating client.
 ///
+/// This test lives in the policy suite but the failure mode is triggered by the
+/// sync layer: the server rejects a mutation but never sends a correction back,
+/// so the originating client's local state diverges from the server's truth.
+///
 /// This is a companion to `single_client_operations_reach_server_in_causal_order`.
 /// That test confirms the *server* correctly rejects alice's title update. This
 /// test asks whether *alice herself* ever learns about the rejection.
@@ -1828,7 +1836,7 @@ async fn single_client_operations_reach_server_in_causal_order() {
 ///
 /// STATUS: FAILS — server does not notify the originating client of rejections.
 #[tokio::test]
-#[ignore]
+#[ignore = "TODO: server does not notify the originating client of rejections."]
 async fn originating_client_receives_rollback_for_rejected_mutation() {
     let schema = write_policy_schema();
     let server = TestingServer::builder()
