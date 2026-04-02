@@ -995,6 +995,13 @@ describe("Worker Bridge with OPFS", () => {
       "Post-reconnect control insert(worker) did not resolve",
     );
 
+    await waitForTodos(
+      dbA,
+      (rows) => rows.some((row) => row.title === postReconnectTitle),
+      "A sees control row locally after reconnect",
+      10000,
+      "worker",
+    );
     await waitForRemoteTodoTitle(
       remoteDbId,
       postReconnectTitle,
