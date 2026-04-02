@@ -349,13 +349,11 @@ jobs:
                     "jazz-tools-darwin-x64",
                     "jazz-tools-linux-arm64",
                     "jazz-tools-linux-x64",
-                    "jazz-tools-windows-x64",
                     "jazz-wasm-pkg",
                     "jazz-napi-loader",
                     "jazz-napi-binding-darwin-arm64",
                     "jazz-napi-binding-darwin-x64",
                     "jazz-napi-binding-linux-x64-gnu",
-                    "jazz-napi-binding-win32-x64-msvc",
                     "jazz-rn-ios-payload",
                     "jazz-rn-android-payload-arm64-v8a",
                     "jazz-rn-android-payload-armeabi-v7a",
@@ -395,7 +393,7 @@ jobs:
 
   build-linux:
     name: Build CLI Linux (${{ matrix.arch }})
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [release-push-gate, resolve-preview-artifacts]
     if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     env:
@@ -476,7 +474,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build CLI binary
-        run: cargo build -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
+        run: scripts/with-macos-libclang-env.sh cargo build -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
 
       - name: Stage artifact
         run: |
@@ -487,38 +485,6 @@ jobs:
         with:
           name: ${{ matrix.output }}
           path: dist/${{ matrix.output }}
-
-  build-windows:
-    name: Build CLI Windows (x64)
-    runs-on: windows-latest
-    needs: [release-push-gate, resolve-preview-artifacts]
-    if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.93.1
-          targets: x86_64-pc-windows-msvc
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-
-      - name: Build CLI binary
-        run: cargo build -p jazz-tools --bin jazz-tools --features cli --release --target x86_64-pc-windows-msvc
-
-      - name: Stage artifact
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item target/x86_64-pc-windows-msvc/release/jazz-tools.exe dist/jazz-tools-windows-x64.exe
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: jazz-tools-windows-x64
-          path: dist/jazz-tools-windows-x64.exe
 
   build-wasm:
     name: Build jazz-wasm
@@ -597,11 +563,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
             platform: linux-x64-gnu
             use_sccache: true
-          # Windows disabled until libclang/bindgen setup is added for rocksdb
-          # - os: windows-latest
-          #   target: x86_64-pc-windows-msvc
-          #   platform: win32-x64-msvc
-          #   use_sccache: false
           - os: macos-14
             target: x86_64-apple-darwin
             platform: darwin-x64
@@ -660,9 +621,9 @@ jobs:
           SCCACHE_CACHE_SIZE: 8G
         run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
 
-      - name: Build jazz-napi binding (macOS/Windows)
-        if: ${{ !matrix.use_sccache }}
-        run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
+      - name: Build jazz-napi binding (macOS)
+        if: runner.os == 'macOS'
+        run: scripts/with-macos-libclang-env.sh pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -739,7 +700,7 @@ jobs:
 
   build-rn-android:
     name: Build jazz-rn Android payload (${{ matrix.abi }})
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [release-push-gate, resolve-preview-artifacts]
     if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     strategy:
@@ -814,7 +775,6 @@ jobs:
       - resolve-preview-artifacts
       - build-linux
       - build-macos
-      - build-windows
       - build-wasm
       - build-napi
       - build-rn-ios
@@ -827,7 +787,6 @@ jobs:
         (
           needs.build-linux.result == 'success' &&
           needs.build-macos.result == 'success' &&
-          needs.build-windows.result == 'success' &&
           needs.build-wasm.result == 'success' &&
           needs.build-napi.result == 'success' &&
           needs.build-rn-ios.result == 'success' &&
@@ -997,13 +956,14 @@ jobs:
           cd crates/jazz-napi
           pnpm exec napi create-npm-dirs
           pnpm exec napi artifacts -d artifacts --npm-dir npm
+          rm -rf npm/win32-*
 
       - name: Verify staged jazz-napi platform artifacts
         run: |
           test -f crates/jazz-napi/npm/linux-x64-gnu/jazz-napi.linux-x64-gnu.node
-          test -f crates/jazz-napi/npm/win32-x64-msvc/jazz-napi.win32-x64-msvc.node
           test -f crates/jazz-napi/npm/darwin-x64/jazz-napi.darwin-x64.node
           test -f crates/jazz-napi/npm/darwin-arm64/jazz-napi.darwin-arm64.node
+          test ! -d crates/jazz-napi/npm/win32-x64-msvc
 
       - name: Build jazz-tools TypeScript package
         run: pnpm --filter jazz-tools build
@@ -1019,15 +979,14 @@ jobs:
       - name: Stage binaries into npm package
         run: |
           mkdir -p packages/jazz-tools/bin/native
-          cp dist/jazz-tools-* packages/jazz-tools/bin/native/
           for bin in \
             jazz-tools-darwin-arm64 \
             jazz-tools-darwin-x64 \
             jazz-tools-linux-arm64 \
-            jazz-tools-linux-x64 \
-            jazz-tools-windows-x64.exe; do
-            FILE="packages/jazz-tools/bin/native/${bin}"
-            test -f "${FILE}" || { echo "Missing staged native binary ${bin}"; exit 1; }
+            jazz-tools-linux-x64; do
+            SOURCE="dist/${bin}"
+            test -f "${SOURCE}" || { echo "Missing release native binary ${bin}"; exit 1; }
+            cp "${SOURCE}" packages/jazz-tools/bin/native/
           done
           chmod 755 \
             packages/jazz-tools/bin/native/jazz-tools-darwin-arm64 \
@@ -1097,7 +1056,7 @@ jobs:
           TARBALL=$(ls "${TMP_DIR}"/jazz-napi-*.tgz | head -n 1)
           tar -tf "${TARBALL}" | grep -q "package/index.js"
           tar -tf "${TARBALL}" | grep -q "package/index.d.ts"
-          tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);const optional=p.optionalDependencies||{};for(const [name,version] of Object.entries(optional)){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`optionalDependencies.${name} uses workspace protocol (${version}) in packed manifest`);}}for(const name of ["@garden-co/jazz-napi-linux-x64-gnu","@garden-co/jazz-napi-win32-x64-msvc","@garden-co/jazz-napi-darwin-x64","@garden-co/jazz-napi-darwin-arm64"]){if(!optional[name]){throw new Error(`missing optional dependency ${name} in packed manifest`);}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
+          tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);const optional=p.optionalDependencies||{};for(const [name,version] of Object.entries(optional)){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`optionalDependencies.${name} uses workspace protocol (${version}) in packed manifest`);}}for(const name of ["@garden-co/jazz-napi-linux-x64-gnu","@garden-co/jazz-napi-darwin-x64","@garden-co/jazz-napi-darwin-arm64"]){if(!optional[name]){throw new Error(`missing optional dependency ${name} in packed manifest`);}}if(optional["@garden-co/jazz-napi-win32-x64-msvc"]){throw new Error("packed manifest still includes Windows native package");}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
           tar -xOf "${TARBALL}" package/index.js | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const unscoped=[...s.matchAll(/require\((["\x27])((?!\.\/)jazz-napi-[^"\x27)]+)\1\)/g)].map((m)=>m[2]);if(unscoped.length){throw new Error(`packed index.js still references unscoped native packages: ${[...new Set(unscoped)].join(", ")}`);}if(!s.includes("@garden-co")){throw new Error("packed index.js is missing the @garden-co package scope");}console.log("Packed loader uses scoped native package names");});'
 
       - name: Verify packed jazz-tools manifest

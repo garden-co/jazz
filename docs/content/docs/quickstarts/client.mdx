@@ -1,7 +1,7 @@
 ---
 title: Client
 description: Build a local-first to-do app with Jazz, step by step.
-reviewedAt: "14cd73f0"
+reviewedAt: "4059cdef"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
@@ -34,7 +34,7 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
     pnpm install
     ```
 
-    <Callout>
+    <Callout type="info">
       This quickstart uses Svelte 5 features (`$state`, `$props`, `$derived`, snippets). Make sure you're on Svelte 5 or later.
     </Callout>
 
@@ -55,8 +55,6 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
 </Tabs>
 
 ## Install
-
-Install Jazz in your project.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Expo", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
@@ -151,9 +149,7 @@ Create `schema.ts` at the root of your project. This is the source of truth for 
 
 ## Set up your app
 
-Create the basic structure for your app, and add Jazz.
-
-We're also adding a to-do list which we'll build out later.
+Create the basic structure for your app with Jazz and a to-do list.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Expo", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
@@ -310,12 +306,12 @@ Subscribe to a query to get real-time updates as data changes, regardless of whe
       ../examples/docs/todo-client-localfirst-ts/src/quickstart.ts#list-ts
     </include>
 
-    `subscribeAll` receives an object with `all`, `added`, `updated`, and `removed` arrays.
+    The callback receives a `{ all, delta }` object&hairsp;—&hairsp;`all` is the current full result set, and `delta` is an array of row-level changes (each with a `kind`: added, removed, or updated).
 
   </Tab>
 </Tabs>
 
-Queries return `undefined` while loading, then an array of matching rows. For filtering, sorting, and pagination, see [Queries](/docs/reading/queries).
+Framework hooks return `undefined` while loading, then an array of matching rows. For filtering, sorting, and pagination, see [Queries](/docs/reading/queries).
 
 ## Enable sync
 
@@ -330,12 +326,7 @@ npx jazz-tools@alpha create app
 # outputs a UUID like: 019d0ba1-519a-7e01-b0eb-0059ee898e4d
 ```
 
-Start the server with that ID. In development-like mode (`NODE_ENV` unset or anything except
-`production`), clients auto-publish the current structural schema from `schema.ts` when they
-connect, so you do not need to expose an admin secret to the browser just to get the latest schema
-onto a fresh dev server. Keep an admin secret around for explicit admin commands like
-`permissions push` and `migrations push`. The default port is 1625, but you can use `--port` to
-change it:
+Start the server with that ID. In development mode, clients auto-publish the schema when they connect, so you don't need an admin secret just to sync schema changes. The default port is 1625.
 
 ```bash title="Terminal"
 npx jazz-tools@alpha server <your-app-id> --admin-secret secret
@@ -345,17 +336,9 @@ npx jazz-tools@alpha server <your-app-id> --admin-secret secret
 
 The server rejects all reads and writes unless you define [permissions](/docs/auth/permissions). For this quickstart, allow everything:
 
-```ts title="permissions.ts"
-import { schema as s } from "jazz-tools";
-import { app } from "./schema.js";
-
-export default s.definePermissions(app, ({ policy }) => {
-  policy.todos.allowRead.always();
-  policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.always();
-  policy.todos.allowDelete.always();
-});
-```
+<include cwd lang="ts" meta='title="permissions.ts"'>
+  ../examples/docs/todo-client-localfirst-ts/permissions.ts#quickstart-permissions-ts
+</include>
 
 Then publish the permissions bundle:
 
@@ -369,7 +352,7 @@ npx jazz-tools@alpha permissions push \
 
 Update your client config to use the same app ID, and add `serverUrl`:
 
-```ts
+```ts title="Client config"
 {
   appId: "<your-app-id>",
   // Use your machine's LAN IP for mobile devices.
@@ -377,12 +360,9 @@ Update your client config to use the same app ID, and add `serverUrl`:
 }
 ```
 
-On development-like servers, clients learn and auto-publish the current structural schema when
-they connect. If you later change `permissions.ts`, publish the new permissions bundle explicitly
-with `npx jazz-tools@alpha permissions push`. If you change `schema.ts` structurally after data
-already exists, create and push a [reviewed migration edge](/docs/schemas/migrations) before old
-and new clients mix on the same shared server. Auto-pushing the latest schema does not replace
-reviewed migration edges for existing data.
+Clients pick up the schema from the server when they connect. If you update `schema.ts` you need to [create and push a migration to the new schema](/docs/schemas/migrations) so that clients can understand existing data with the new schema.
+
+Permissions can be updated without adding a new schema by using `npx jazz-tools@alpha permissions push`.
 
 For production deployment and hosting options, see [Server Setup](/docs/reference/server-setup).
 
