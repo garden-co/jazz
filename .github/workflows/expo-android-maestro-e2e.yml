@@ -112,8 +112,22 @@ jobs:
           path: .artifacts/jazz-tools
           merge-multiple: true
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
       - name: Build Expo E2E JS dependencies
         run: |
+          pnpm --filter jazz-wasm run build
           pnpm --filter jazz-tools run build:runtime
 
       - name: Validate Expo app schema and types
