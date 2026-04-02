@@ -395,7 +395,7 @@ jobs:
 
   build-linux:
     name: Build CLI Linux (${{ matrix.arch }})
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [release-push-gate, resolve-preview-artifacts]
     if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     env:
@@ -476,7 +476,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build CLI binary
-        run: cargo build -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
+        run: scripts/with-macos-libclang-env.sh cargo build -p jazz-tools --bin jazz-tools --features cli --release --target ${{ matrix.target }}
 
       - name: Stage artifact
         run: |
@@ -490,7 +490,7 @@ jobs:
 
   build-windows:
     name: Build CLI Windows (x64)
-    runs-on: windows-latest
+    runs-on: blacksmith-4vcpu-windows-2022
     needs: [release-push-gate, resolve-preview-artifacts]
     if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
 
@@ -597,11 +597,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
             platform: linux-x64-gnu
             use_sccache: true
-          # Windows disabled until libclang/bindgen setup is added for rocksdb
-          # - os: windows-latest
-          #   target: x86_64-pc-windows-msvc
-          #   platform: win32-x64-msvc
-          #   use_sccache: false
+          - os: blacksmith-4vcpu-windows-2022
+            target: x86_64-pc-windows-msvc
+            platform: win32-x64-msvc
+            use_sccache: false
           - os: macos-14
             target: x86_64-apple-darwin
             platform: darwin-x64
@@ -660,8 +659,12 @@ jobs:
           SCCACHE_CACHE_SIZE: 8G
         run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
 
-      - name: Build jazz-napi binding (macOS/Windows)
-        if: ${{ !matrix.use_sccache }}
+      - name: Build jazz-napi binding (macOS)
+        if: runner.os == 'macOS'
+        run: scripts/with-macos-libclang-env.sh pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
+
+      - name: Build jazz-napi binding (Windows)
+        if: runner.os == 'Windows'
         run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
 
       - uses: actions/upload-artifact@v4
@@ -739,7 +742,7 @@ jobs:
 
   build-rn-android:
     name: Build jazz-rn Android payload (${{ matrix.abi }})
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [release-push-gate, resolve-preview-artifacts]
     if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     strategy:
@@ -1118,7 +1121,8 @@ jobs:
             jazz-tools-darwin-arm64 \
             jazz-tools-darwin-x64 \
             jazz-tools-linux-arm64 \
-            jazz-tools-linux-x64; do
+            jazz-tools-linux-x64 \
+            jazz-tools-windows-x64.exe; do
             FILE="${EXTRACT_DIR}/package/bin/native/${bin}"
             test -f "${FILE}" || { echo "Missing packed native binary ${bin}"; exit 1; }
           done

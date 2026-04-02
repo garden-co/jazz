@@ -33,7 +33,9 @@ const schema = {
   // #endregion schema-files-and-blobs-ts
 };
 
+// #region schema-define-app-ts
 type AppSchema = s.Schema<typeof schema>;
 export const app: s.App<AppSchema> = s.defineApp(schema);
 
 export type Todo = s.RowOf<typeof app.todos>;
+// #endregion schema-define-app-ts

@@ -1,19 +1,15 @@
 ---
 title: Files & Blobs
 description: Chunked browser Blob and stream storage using conventional files and file_parts tables.
-reviewedAt: "14cd73f0"
+reviewedAt: "4059cdef"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
 
-This page explains how to store images and other binary blobs in Jazz using browser `Blob`,
-`File`, and `ReadableStream` values. These files benefit from the same sync, local-first storage,
-and permission model as the rest of your structured data.
+Use plain `s.bytes()` when the binary value is small and should always load with its row.
+For larger files, use the chunked storage described below.
 
-Use plain `s.bytes()` when the binary value is small, naturally belongs on the row itself, and
-should always load together with the rest of that row.
-
-## Add the Conventional Tables
+## Add the conventional tables
 
 `db.createFileFromBlob`, `db.createFileFromStream`, `db.loadFileAsBlob`, and
 `db.loadFileAsStream` currently expect these exact table and column names on `app`:
@@ -28,7 +24,7 @@ should always load together with the rest of that row.
 In the example above, `uploads.file` is your app-owned reference to a stored file. `files.name`
 is optional metadata; `createFileFromBlob(...)` fills it from `File.name` when available.
 
-## Add Permissions
+## Add permissions
 
 <include cwd lang="ts" meta='title="files-and-blobs-permissions.ts"'>
   ../examples/docs/todo-client-localfirst-ts/files-and-blobs-permissions.ts#files-permissions-ts
@@ -47,7 +43,7 @@ is optional metadata; `createFileFromBlob(...)` fills it from `File.name` when a
 Files are currently write-once, so `files` and `file_parts` normally do not need update
 policies.
 
-## Create from a Blob
+## Create from a blob
 
 <include cwd lang="ts" meta='title="src/files-and-blobs-snippets.ts"'>
   ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-create-from-blob-ts
@@ -55,19 +51,19 @@ policies.
 
 Returns the file row; store its id on your own table.
 
-## Create from a ReadableStream
+## Create from a stream
 
 <include cwd lang="ts" meta='title="src/files-and-blobs-snippets.ts"'>
   ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-create-from-stream-ts
 </include>
 
-## Load as a Blob
+## Load as a blob
 
 <include cwd lang="ts" meta='title="src/files-and-blobs-snippets.ts"'>
   ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-load-blob-ts
 </include>
 
-## Load as a ReadableStream
+## Load as a stream
 
 <include cwd lang="ts" meta='title="src/files-and-blobs-snippets.ts"'>
   ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-load-stream-ts
@@ -75,7 +71,7 @@ Returns the file row; store its id on your own table.
 
 `loadFileAsBlob(...)` and `loadFileAsStream(...)` fetch each chunk sequentially rather than eager-loading every part in one query.
 
-## Durability and Incomplete Local Data
+## Durability and incomplete local data
 
 The file helpers forward normal Jazz durability options:
 
@@ -86,7 +82,7 @@ If the requested tier does not have the full file yet, `loadFileAsBlob(...)` fai
 read and `loadFileAsStream(...)` errors when it reaches the missing part. Use `edge` or `global`
 when you need the read to wait for a more complete remote snapshot than local OPFS currently has.
 
-## No Automatic Cascade Yet
+## No automatic cascade yet
 
 Until file cascade delete lands, delete the chunk rows and the `files` row before deleting your
 parent app row so the [inherited delete policies](/docs/auth/permissions#inherited-access-allowedto) still match:
@@ -95,6 +91,6 @@ parent app row so the [inherited delete policies](/docs/auth/permissions#inherit
   ../examples/docs/todo-client-localfirst-ts/src/files-and-blobs-snippets.ts#files-delete-ts
 </include>
 
-## Example
+## Example app
 
-See the [file upload example](https://github.com/garden-co/jazz2/tree/main/docs/examples/file-upload-react) for a complete React app with image upload, rendering, and deletion.
+See the [file upload example](https://github.com/garden-co/jazz2/tree/main/examples/file-upload-react) for a complete React app with image upload, rendering, and deletion.

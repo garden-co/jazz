@@ -54,7 +54,7 @@ esac
 
 apt-get update
 apt-get install -y \
-  build-essential curl git jq unzip ca-certificates pkg-config libssl-dev \
+  build-essential curl git jq unzip ca-certificates pkg-config libssl-dev libclang-dev \
   xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libgbm1 \
   libasound2t64 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
   libxrandr2 libgtk-3-0 libpango-1.0-0 libcairo2 libatspi2.0-0 \
