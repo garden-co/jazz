@@ -3,7 +3,17 @@ import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
 import { resolve } from "node:path";
 import { playwright } from "@vitest/browser-playwright";
-import { testingServerInfo, testingServerJwtForUser } from "./tests/browser/testing-server-node.js";
+import {
+  blockTestingServerNetwork,
+  testingServerInfo,
+  testingServerJwtForUser,
+  unblockTestingServerNetwork,
+} from "./tests/browser/testing-server-node.js";
+import {
+  closeRemoteBrowserDb,
+  createRemoteBrowserDb,
+  waitForRemoteBrowserDbTitle,
+} from "./tests/browser/remote-browser-db-node.js";
 
 const realisticBrowserScenarios = process.env.JAZZ_REALISTIC_BROWSER_SCENARIOS ?? "";
 const realisticBrowserRunId = process.env.JAZZ_REALISTIC_BROWSER_RUN_ID ?? "";
@@ -43,6 +53,15 @@ export default defineConfig({
       instances: [{ browser: "chromium", headless: true }],
       commands: {
         testingServerInfo: async () => testingServerInfo(),
+        testingServerBlockNetwork: async ({ context }, serverUrl) =>
+          blockTestingServerNetwork(context, serverUrl),
+        testingServerUnblockNetwork: async ({ context }, serverUrl) =>
+          unblockTestingServerNetwork(context, serverUrl),
+        createRemoteBrowserDb: async ({ context, page }, input) =>
+          createRemoteBrowserDb(context, page, input),
+        waitForRemoteBrowserDbTitle: async (_commandContext, input) =>
+          waitForRemoteBrowserDbTitle(input),
+        closeRemoteBrowserDb: async (_commandContext, id) => closeRemoteBrowserDb(id),
         testingServerJwtForUser: async (_context, userId, claims) =>
           testingServerJwtForUser(userId, claims),
       },
