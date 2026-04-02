@@ -44,12 +44,12 @@ pub struct RowBranchDelete<'a> {
 
 fn resolve_table_name_for_context(
     schema_context: &crate::schema_manager::SchemaContext,
-    table_hint: &str,
+    original_table: &str,
     origin_schema_hash: Option<&crate::query_manager::types::SchemaHash>,
 ) -> TableName {
-    resolve_current_table_name(schema_context, table_hint, origin_schema_hash)
+    resolve_current_table_name(schema_context, original_table, origin_schema_hash)
         .map(|name| TableName::new(&name))
-        .unwrap_or_else(|| TableName::new(table_hint))
+        .unwrap_or_else(|| TableName::new(original_table))
 }
 
 impl QueryManager {
@@ -371,12 +371,15 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get_or_load(id, storage, branches)?;
-        let table_hint = obj.original_table_name();
+        let original_table = obj.original_table_name();
         let origin_schema_hash = origin_schema_hash_from_metadata(&obj.metadata);
-        let current_table =
-            resolve_table_name_for_context(schema_context, table_hint, origin_schema_hash.as_ref())
-                .as_str()
-                .to_string();
+        let current_table = resolve_table_name_for_context(
+            schema_context,
+            original_table,
+            origin_schema_hash.as_ref(),
+        )
+        .as_str()
+        .to_string();
         let mut schema_warnings = SchemaWarningAccumulator::default();
         let mut transform_context = RowTransformContext {
             branch_schema_map: &branch_schema_map,

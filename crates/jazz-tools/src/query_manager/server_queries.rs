@@ -47,18 +47,22 @@ fn resolve_current_table_for_context(
         .unwrap_or_else(|| TableName::new(original_table_name))
 }
 
-fn translate_current_table_for_hash(
+fn translate_current_table_for_schema(
     schema_context: &crate::schema_manager::SchemaContext,
     current_table: TableName,
-    target_hash: SchemaHash,
+    original_schema_hash: SchemaHash,
 ) -> TableName {
-    if target_hash == schema_context.current_hash {
+    if original_schema_hash == schema_context.current_hash {
         return current_table;
     }
 
-    translate_table_name_to_schema(schema_context, current_table.as_str(), &target_hash)
-        .map(|name| TableName::new(&name))
-        .unwrap_or(current_table)
+    translate_table_name_to_schema(
+        schema_context,
+        current_table.as_str(),
+        &original_schema_hash,
+    )
+    .map(|name| TableName::new(&name))
+    .unwrap_or(current_table)
 }
 
 pub(super) struct RowTransformContext<'a> {
@@ -301,7 +305,7 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<LoadedRow> {
         let branches = vec![branch_name.as_str().to_string()];
-        let (table_hint, origin_schema_hash, tip_commit_id, tip_content, tip_provenance) = {
+        let (original_table, origin_schema_hash, tip_commit_id, tip_content, tip_provenance) = {
             let object = self
                 .sync_manager
                 .object_manager
@@ -328,7 +332,7 @@ impl QueryManager {
 
         let current_table = resolve_current_table_for_context(
             auth_context,
-            table_hint,
+            original_table,
             origin_schema_hash.as_ref(),
         );
         let transformed = self.transform_content_to_authorization_schema(
@@ -424,7 +428,7 @@ impl QueryManager {
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
     ) -> bool {
         let branches = vec![branch_name.as_str().to_string()];
-        let Some((table_hint, origin_schema_hash, tip_content, tip_provenance)) = ({
+        let Some((original_table, origin_schema_hash, tip_content, tip_provenance)) = ({
             let Some(object) = self
                 .sync_manager
                 .object_manager
@@ -463,7 +467,7 @@ impl QueryManager {
 
         let table_name = resolve_current_table_for_context(
             auth_context,
-            table_hint,
+            original_table,
             origin_schema_hash.as_ref(),
         );
         let Some(select_policy) = auth_schema
@@ -801,11 +805,11 @@ impl QueryManager {
 
         let branch_names: Vec<BranchName> = branches.iter().map(BranchName::new).collect();
         for (object_id, object) in &object_manager.objects {
-            let table_hint = object.original_table_name();
+            let original_table = object.original_table_name();
             let origin_schema_hash = origin_schema_hash_from_metadata(&object.metadata);
             let current_table = resolve_current_table_for_context(
                 schema_context,
-                table_hint,
+                original_table,
                 origin_schema_hash.as_ref(),
             );
             if !policy_tables.iter().any(|table| *table == current_table) {
@@ -1218,7 +1222,7 @@ impl QueryManager {
             };
 
             let branch_table_name =
-                translate_current_table_for_hash(schema_context, current_table_name, schema_hash);
+                translate_current_table_for_schema(schema_context, current_table_name, schema_hash);
 
             return schema
                 .get(&branch_table_name)
@@ -1266,7 +1270,7 @@ impl QueryManager {
         storage: &mut H,
         mut check: PendingPermissionCheck,
     ) {
-        let table_hint = match check.metadata.get(MetadataKey::Table.as_str()) {
+        let original_table = match check.metadata.get(MetadataKey::Table.as_str()) {
             Some(t) => t.clone(),
             None => {
                 tracing::trace!(
@@ -1297,7 +1301,7 @@ impl QueryManager {
             .map(|(_, auth_context)| {
                 resolve_current_table_for_context(
                     auth_context,
-                    &table_hint,
+                    &original_table,
                     origin_schema_hash.as_ref(),
                 )
             })
@@ -1305,12 +1309,12 @@ impl QueryManager {
                 self.schema_context.is_initialized().then(|| {
                     resolve_current_table_for_context(
                         &self.schema_context,
-                        &table_hint,
+                        &original_table,
                         origin_schema_hash.as_ref(),
                     )
                 })
             })
-            .unwrap_or_else(|| TableName::new(&table_hint));
+            .unwrap_or_else(|| TableName::new(&original_table));
         let write_schema_context = authorization_parts
             .as_ref()
             .map(|(_, auth_context)| auth_context.clone())
