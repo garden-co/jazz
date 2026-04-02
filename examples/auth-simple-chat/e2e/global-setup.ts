@@ -21,7 +21,7 @@ async function globalSetup(_config: FullConfig): Promise<() => Promise<void>> {
     serverUrl: jazzServer.url,
     appId: DEFAULT_APP_ID,
     adminSecret: DEFAULT_ADMIN_SECRET,
-    schemaDir: join(import.meta.dirname ?? __dirname, "../schema"),
+    schemaDir: join(import.meta.dirname ?? __dirname, ".."),
   });
 
   return async () => {
