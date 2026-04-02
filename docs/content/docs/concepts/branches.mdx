@@ -1,7 +1,7 @@
 ---
 title: Branches
 description: How Jazz uses branches to isolate data across environments, schema versions, and user-defined contexts.
-reviewedAt: "14cd73f0"
+reviewedAt: "4059cdef"
 ---
 
 Every commit in Jazz is written to a **branch**&hairsp;—&hairsp;a named, independent line of history, like a Git branch for your data. Some branches are merged automatically at query time (schema versions), while others are fully isolated (environments and user branches). This makes it easy to keep development data separate from production, or to create parallel lines of history like drafts or staging.
@@ -63,7 +63,7 @@ All [reads](/docs/reading/queries) and [writes](/docs/writing/writing-data) thro
 
 When your schema changes, Jazz creates a new branch with a different schema hash (e.g. `prod-a1b2c3d4-main` for v1 and `prod-e5f6g7h8-main` for v2). At the storage level, data from different schema versions is kept separate.
 
-At query time, Jazz automatically fetches data from all known schema versions within your current environment and user branch. It applies [migration lenses](/docs/schemas/migrations) to adapt older data to your current schema automatically.
+At query time, Jazz automatically fetches data from all known schema versions within your current environment and user branch. It applies [migrations](/docs/schemas/migrations) to adapt older data to your current schema automatically.
 
 ## Environments and user branches are fully isolated
 

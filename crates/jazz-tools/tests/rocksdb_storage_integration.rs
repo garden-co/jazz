@@ -101,10 +101,10 @@ async fn make_client_external_jwks(
     client
 }
 
-/// Single entry point — all subtests run sequentially so only one fjall
+/// Single entry point — all subtests run sequentially so only one RocksDB
 /// server instance exists at a time (avoids file-descriptor exhaustion).
 #[tokio::test]
-async fn fjall_server_storage() {
+async fn rocksdb_server_storage() {
     // --- shared-server subtests ---
     let server = TestingServer::builder()
         .with_persistent_storage()

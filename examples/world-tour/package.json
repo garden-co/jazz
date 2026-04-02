@@ -1,0 +1,28 @@
+{
+  "name": "world-tour",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx tsx scripts/dev-server.ts & vite",
+    "dev:server": "npx tsx scripts/dev-server.ts",
+    "dev:client": "vite",
+    "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "walkthrough": "npx @marp-team/marp-cli --html --theme walkthrough/theme-jazz.css walkthrough/jazz-world-tour.md --preview",
+    "walkthrough:shots": "NODE_OPTIONS='--import ./walkthrough/patch-expect.mjs' playwright test --config playwright.screenshots.config.ts"
+  },
+  "dependencies": {
+    "jazz-tools": "workspace:*",
+    "maplibre-gl": "^5.4.0",
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@vitejs/plugin-vue": "catalog:default",
+    "typescript": "catalog:default",
+    "vite": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}

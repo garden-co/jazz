@@ -1,6 +1,6 @@
 import { existsSync } from "fs";
 import { access } from "fs/promises";
-import { basename, dirname, join, resolve } from "path";
+import { basename, join, resolve } from "path";
 import { pathToFileURL } from "url";
 import { register as registerCjs } from "tsx/cjs/api";
 import { register as registerEsm } from "tsx/esm/api";
@@ -208,29 +208,38 @@ function findInlinePolicyTables(schema: Schema): string[] {
   return schema.tables.filter((table) => table.policies).map((table) => table.name);
 }
 
-function resolveRootSchemaFiles(schemaDir: string): { rootDir: string; schemaFile: string } | null {
-  const directRootSchemaFile = join(schemaDir, "schema.ts");
-  if (existsSync(directRootSchemaFile)) {
-    return {
-      rootDir: schemaDir,
-      schemaFile: directRootSchemaFile,
-    };
-  }
+interface SchemaRootCandidate {
+  rootDir: string;
+  schemaFile: string;
+}
 
-  if (basename(schemaDir) !== "schema") {
-    return null;
-  }
-
-  const appRoot = dirname(schemaDir);
-  const parentRootSchemaFile = join(appRoot, "schema.ts");
-  if (existsSync(parentRootSchemaFile)) {
-    return {
+function schemaRootCandidates(appRoot: string): SchemaRootCandidate[] {
+  return [
+    {
       rootDir: appRoot,
-      schemaFile: parentRootSchemaFile,
-    };
-  }
+      schemaFile: join(appRoot, "schema.ts"),
+    },
+    {
+      rootDir: join(appRoot, "src"),
+      schemaFile: join(appRoot, "src", "schema.ts"),
+    },
+  ];
+}
 
-  return null;
+function resolveSchemaRootCandidate(appRoot: string): SchemaRootCandidate | null {
+  return (
+    schemaRootCandidates(appRoot).find((candidate) => existsSync(candidate.schemaFile)) ?? null
+  );
+}
+
+function describeExpectedSchemaFiles(schemaDir: string): string {
+  return schemaRootCandidates(schemaDir)
+    .map((candidate) => candidate.schemaFile)
+    .join(" or ");
+}
+
+function resolveRootSchemaFiles(schemaDir: string): SchemaRootCandidate | null {
+  return resolveSchemaRootCandidate(schemaDir);
 }
 
 export async function hasRootSchema(schemaDir: string): Promise<boolean> {
@@ -240,7 +249,7 @@ export async function hasRootSchema(schemaDir: string): Promise<boolean> {
 export async function loadCompiledSchema(schemaDir: string): Promise<LoadedSchemaProject> {
   const resolved = resolveRootSchemaFiles(schemaDir);
   if (!resolved) {
-    throw new Error(`Schema file not found. Expected ${join(schemaDir, "schema.ts")}.`);
+    throw new Error(`Schema file not found. Expected ${describeExpectedSchemaFiles(schemaDir)}.`);
   }
 
   let schema = await loadSchemaAst(resolved.schemaFile);

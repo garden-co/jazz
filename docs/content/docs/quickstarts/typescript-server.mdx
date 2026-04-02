@@ -1,7 +1,7 @@
 ---
 title: TypeScript Server
 description: Build a server-side to-do API with Jazz and Hono, step by step.
-reviewedAt: "14cd73f0"
+reviewedAt: "4059cdef"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
@@ -76,10 +76,10 @@ Create `src/index.ts`. This quickstart puts everything in one file; a real app w
 </include>
 
 - `appId` identifies the app namespace for storage and sync.
-- `app` is your typed schema export (`app.wasmSchema` is loaded for runtime setup).
-- `permissions` is the server-side policy bundle evaluated for request-scoped reads and writes.
-- `serverUrl` + `backendSecret` let request-scoped handles sync through a Jazz server and enable explicit backend mode via `context.asBackend()`.
-- Runtime storage path controls where local server state persists.
+- `app` is your typed schema export.
+- `permissions` is the server-side policy bundle.
+- `serverUrl` + `backendSecret` let request-scoped handles sync through a Jazz server.
+- `dataPath` controls where local server state persists.
 
 Each route handler calls `context.forRequest(c.req)` to get a database handle with [permissions](/docs/auth/permissions) scoped to the request.
 For server-owned work, use `context.asBackend()`. For embedded or local-only setups without a
