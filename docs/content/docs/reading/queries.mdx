@@ -1,7 +1,7 @@
 ---
 title: Queries
 description: One-shot queries, subscriptions, framework hooks, Suspense integration, and read durability options.
-reviewedAt: "4059cdef"
+reviewedAt: "f6535a533"
 ---
 
 ## One-shot queries
@@ -145,6 +145,32 @@ Pass `undefined` instead of a query to skip evaluation. This is useful when buil
     </include>
   </Tab>
 </Tabs>
+
+### Read durability
+
+By default, queries deliver results from local storage immediately. Pass a `tier` option to wait for
+a specific durability level before the first result arrives.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-durability-tier-ts
+    </include>
+  </Tab>
+  <Tab value="Rust">
+    <include cwd lang="rs">
+      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-durability-tier-rust
+    </include>
+  </Tab>
+</Tabs>
+
+<Callout type="info" title="Subscriptions and durability">
+  For subscriptions, the durability tier applies only to the first result. After that, updates
+  stream in as they become available and are not guaranteed to have reached any particular tier.
+</Callout>
+
+See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including
+`localUpdates`, `propagation`, and how tiers interact with subscriptions.
 
 ### React Suspense and Transitions
 

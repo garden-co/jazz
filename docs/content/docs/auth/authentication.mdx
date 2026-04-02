@@ -1,7 +1,7 @@
 ---
 title: Authentication
 description: "How and when to use Jazz's three different auth modes: anonymous, demo, and external JWTs."
-reviewedAt: "4059cdef"
+reviewedAt: "f6535a533"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -161,18 +161,7 @@ For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web
 
 ### Server configuration
 
-| Flag                | Purpose                                                                                   | Development | Production                                                          |
-| ------------------- | ----------------------------------------------------------------------------------------- | ----------- | ------------------------------------------------------------------- |
-| `--port`            | Port to listen on (defaults to 1625)                                                      | Optional    | Optional                                                            |
-| `--data-dir`        | Directory for persistent storage (defaults to `./data`)                                   | Optional    | Optional                                                            |
-| `--in-memory`       | Use in-memory storage instead of Fjall-backed files. Data is lost when the process exits. | Optional    | Optional                                                            |
-| `--jwks-url <url>`  | JWKS endpoint for JWT signature verification                                              | Optional    | Optional, but required if using JWT auth to validate JWT signatures |
-| `--backend-secret`  | Secret for backend session impersonation                                                  | Optional    | Optional                                                            |
-| `--admin-secret`    | Secret for admin operations (schema/policy sync)                                          | Optional    | Optional                                                            |
-| `--allow-anonymous` | Allow anonymous auth                                                                      | Enabled     | Disabled                                                            |
-| `--allow-demo`      | Allow demo auth                                                                           | Enabled     | Disabled                                                            |
-
-Production mode activates when `NODE_ENV=production`.
+See [Server Setup](/docs/reference/server-setup) for the full list of server flags and storage options. In production (`NODE_ENV=production`), anonymous and demo auth are disabled unless explicitly enabled with `--allow-anonymous` / `--allow-demo`.
 
 <include cwd lang="bash" meta='title="Terminal"'>
   ../examples/docs/todo-server-ts/docs/auth-server-cli.sh#auth-server-cli
@@ -182,10 +171,10 @@ Production mode activates when `NODE_ENV=production`.
 
 When the server receives a request, it tries each auth method in priority order and uses the first match:
 
-1. **Backend impersonation** &hairsp;—&hairsp; the request includes `X-Jazz-Backend-Secret` and `X-Jazz-Session` headers. A trusted backend service (e.g. a cron job or webhook handler) can act as any user by providing the shared secret and a base64-encoded session identifying the user to impersonate.
-2. **External JWT** &hairsp;—&hairsp; the request includes an `Authorization: Bearer <jwt>` header. The token is validated against the JWKS endpoint configured with `--jwks-url`.
-3. **Local auth** &hairsp;—&hairsp; the request includes `X-Jazz-Local-Mode` and `X-Jazz-Local-Token` headers. Used by anonymous and demo auth in development.
-4. **No session** &hairsp;—&hairsp; none of the above matched.
+1. **Backend impersonation**&hairsp;—&hairsp;the request includes `X-Jazz-Backend-Secret` and `X-Jazz-Session` headers. A trusted backend service (e.g. a cron job or webhook handler) can act as any user by providing the shared secret and the session as a base64-encoded JSON string in `X-Jazz-Session`.
+2. **External JWT**&hairsp;—&hairsp;the request includes an `Authorization: Bearer <jwt>` header. The token is validated against the JWKS endpoint configured with `--jwks-url`.
+3. **Local auth**&hairsp;—&hairsp;the request includes `X-Jazz-Local-Mode` and `X-Jazz-Local-Token` headers. Used by anonymous and demo auth in development.
+4. **No session**&hairsp;—&hairsp;none of the above matched.
 
 Backend impersonation always takes precedence, so a backend service can reliably impersonate users even if the request also carries a JWT.
 
