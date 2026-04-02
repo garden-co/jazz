@@ -2390,6 +2390,30 @@ impl ManyBranchesSeededDb {
     }
 }
 
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+impl ManyBranchesSeededDb {
+    fn new_sqlite(scenario: &R8Scenario) -> Self {
+        let tempdir = TempDir::new().expect("create tempdir for many-branches cold-load");
+        let db_path = tempdir.path().join("many_branches_sqlite");
+        let mut storage =
+            SqliteStorage::open(&db_path).expect("open sqlite for many-branches seed");
+        let mut manager = ObjectManager::new();
+        let dataset = build_many_branches_dataset(&mut manager, &mut storage, scenario);
+        storage.flush();
+        storage
+            .close()
+            .expect("close seeded many-branches sqlite storage");
+        Self {
+            _tempdir: tempdir,
+            db_path,
+            object_id: dataset.object_id,
+            branch_names: dataset.branch_names,
+            prefix: dataset.prefix,
+            cache_size_bytes: 0,
+        }
+    }
+}
+
 fn many_branches_benchmark_name(
     scenario: &R8Scenario,
     profile: &ProfileConfig,
