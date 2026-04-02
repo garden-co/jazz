@@ -35,3 +35,17 @@ import type { SchemaDefinition } from "jazz-tools";
 import type { TableIndex } from "jazz-tools";
 // @ts-expect-error use `s.TableMetaOf`
 import type { TableMetaOf } from "jazz-tools";
+
+void [col, table, migrate, defineSchema, defineApp, defineMigration, definePermissions];
+
+export type SchemaNamespaceOnlyTypeGuards = [
+  Schema,
+  App,
+  RowOf<never>,
+  InsertOf<never>,
+  WhereOf<never>,
+  TableDefinition,
+  SchemaDefinition,
+  TableIndex,
+  TableMetaOf<never>,
+];
