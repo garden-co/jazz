@@ -43,7 +43,8 @@ use jazz_tools::server::TestingServer as JazzTestingServer;
 use jazz_tools::storage::{MemoryStorage, RocksDBStorage, Storage};
 use jazz_tools::sync_manager::QueryPropagation;
 use jazz_tools::sync_manager::{
-    ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncManager, SyncPayload,
+    ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source, SyncConnectionCodec,
+    SyncManager, SyncPayload,
 };
 
 fn convert_updates(values: HashMap<String, Value>) -> Vec<(String, Value)> {
@@ -370,6 +371,8 @@ fn build_napi_runtime(
     Ok(NapiRuntime {
         core: core_arc,
         upstream_server_id: Mutex::new(None),
+        inbound_server_codec: Mutex::new(SyncConnectionCodec::default()),
+        inbound_client_codecs: Mutex::new(HashMap::new()),
         declared_schema,
         subscription_queries: Mutex::new(HashMap::new()),
     })
@@ -383,8 +386,51 @@ fn build_napi_runtime(
 pub struct NapiRuntime {
     core: Arc<Mutex<NapiCoreType>>,
     upstream_server_id: Mutex<Option<ServerId>>,
+    inbound_server_codec: Mutex<SyncConnectionCodec>,
+    inbound_client_codecs: Mutex<HashMap<ClientId, SyncConnectionCodec>>,
     declared_schema: Schema,
     subscription_queries: Mutex<HashMap<u64, Query>>,
+}
+
+impl NapiRuntime {
+    fn parse_server_sync_payload(
+        &self,
+        payload: Either<String, Uint8Array>,
+    ) -> napi::Result<SyncPayload> {
+        match payload {
+            Either::A(message_json) => serde_json::from_str(&message_json)
+                .map_err(|e| napi::Error::from_reason(format!("Invalid sync message: {}", e))),
+            Either::B(payload_bytes) => self
+                .inbound_server_codec
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?
+                .decode_payload(payload_bytes.as_ref())
+                .map_err(|e| {
+                    napi::Error::from_reason(format!("Invalid sync payload binary: {}", e))
+                }),
+        }
+    }
+
+    fn parse_client_sync_payload(
+        &self,
+        client_id: ClientId,
+        payload: Either<String, Uint8Array>,
+    ) -> napi::Result<SyncPayload> {
+        match payload {
+            Either::A(message_json) => serde_json::from_str(&message_json)
+                .map_err(|e| napi::Error::from_reason(format!("Invalid sync message: {}", e))),
+            Either::B(payload_bytes) => self
+                .inbound_client_codecs
+                .lock()
+                .map_err(|_| napi::Error::from_reason("lock"))?
+                .entry(client_id)
+                .or_default()
+                .decode_payload(payload_bytes.as_ref())
+                .map_err(|e| {
+                    napi::Error::from_reason(format!("Invalid sync payload binary: {}", e))
+                }),
+        }
+    }
 }
 
 #[napi]
@@ -956,9 +1002,11 @@ impl NapiRuntime {
     // =========================================================================
 
     #[napi(js_name = "onSyncMessageReceived")]
-    pub fn on_sync_message_received(&self, message_json: String) -> napi::Result<()> {
-        let payload: SyncPayload = serde_json::from_str(&message_json)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid sync message: {}", e)))?;
+    pub fn on_sync_message_received(
+        &self,
+        #[napi(ts_arg_type = "string | Uint8Array")] payload: Either<String, Uint8Array>,
+    ) -> napi::Result<()> {
+        let payload = self.parse_server_sync_payload(payload)?;
 
         let entry = InboxEntry {
             source: Source::Server(ServerId::new()),
@@ -978,14 +1026,13 @@ impl NapiRuntime {
     pub fn on_sync_message_received_from_client(
         &self,
         client_id: String,
-        message_json: String,
+        #[napi(ts_arg_type = "string | Uint8Array")] payload: Either<String, Uint8Array>,
     ) -> napi::Result<()> {
         let uuid = uuid::Uuid::parse_str(&client_id)
             .map_err(|e| napi::Error::from_reason(format!("Invalid client ID: {}", e)))?;
         let cid = ClientId(uuid);
 
-        let payload: SyncPayload = serde_json::from_str(&message_json)
-            .map_err(|e| napi::Error::from_reason(format!("Invalid sync message: {}", e)))?;
+        let payload = self.parse_client_sync_payload(cid, payload)?;
 
         let entry = InboxEntry {
             source: Source::Client(cid),

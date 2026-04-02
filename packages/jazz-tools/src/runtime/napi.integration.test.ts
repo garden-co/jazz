@@ -700,6 +700,24 @@ describe("NAPI integration", () => {
     expect(insertedRow.id).toEqual(expect.any(String));
   }, 20_000);
 
+  it("accepts Uint8Array sync payload inputs on the compiled addon boundary", async () => {
+    const runtime = await createNapiRuntime(TEST_SCHEMA, {
+      appId: `napi-binary-inbound-${randomUUID()}`,
+      tier: "edge",
+    });
+
+    expect(() => runtime.onSyncMessageReceived(new Uint8Array([1, 2, 3]))).toThrow(
+      /Invalid sync payload binary:/,
+    );
+
+    const clientId = runtime.addClient();
+    runtime.setClientRole?.(clientId, "peer");
+
+    expect(() =>
+      runtime.onSyncMessageReceivedFromClient?.(clientId, new Uint8Array([1, 2, 3])),
+    ).toThrow(/Invalid sync payload binary:/);
+  }, 20_000);
+
   it("posts backend query subscriptions upstream via createJazzContext(...).asBackend()", async () => {
     const captureServer = await startSyncCaptureServer();
     let context: {

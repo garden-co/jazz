@@ -74,12 +74,14 @@ impl ServerConnection {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
-        // Priority 1: Backend impersonation
-        if let (Some(session), Some(secret)) = (session, &self.auth.backend_secret) {
+        // Priority 1: Backend auth (optionally with impersonated session)
+        if let Some(secret) = &self.auth.backend_secret {
             if let Ok(secret_value) = HeaderValue::from_str(secret) {
                 headers.insert("X-Jazz-Backend-Secret", secret_value);
             }
-            if let Ok(session_json) = serde_json::to_string(session) {
+            if let Some(session) = session
+                && let Ok(session_json) = serde_json::to_string(session)
+            {
                 let session_b64 =
                     base64::engine::general_purpose::STANDARD.encode(session_json.as_bytes());
                 if let Ok(session_value) = HeaderValue::from_str(&session_b64) {
@@ -204,5 +206,55 @@ fn is_catalogue_payload(payload: &SyncPayload) -> bool {
             false
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connection_with_auth(auth: AuthConfig) -> ServerConnection {
+        ServerConnection {
+            client: Client::new(),
+            base_url: "http://127.0.0.1:8787".to_string(),
+            route_prefix: String::new(),
+            auth,
+        }
+    }
+
+    #[test]
+    fn build_stream_headers_include_backend_secret_without_session() {
+        let connection = connection_with_auth(AuthConfig {
+            backend_secret: Some("backend-secret".to_string()),
+            ..AuthConfig::default()
+        });
+
+        let headers = connection.build_stream_headers();
+
+        assert_eq!(
+            headers
+                .get("X-Jazz-Backend-Secret")
+                .and_then(|value| value.to_str().ok()),
+            Some("backend-secret")
+        );
+        assert!(headers.get(CONTENT_TYPE).is_none());
+    }
+
+    #[test]
+    fn build_headers_include_backend_secret_even_without_impersonated_session() {
+        let connection = connection_with_auth(AuthConfig {
+            backend_secret: Some("backend-secret".to_string()),
+            ..AuthConfig::default()
+        });
+
+        let headers = connection.build_headers(None);
+
+        assert_eq!(
+            headers
+                .get("X-Jazz-Backend-Secret")
+                .and_then(|value| value.to_str().ok()),
+            Some("backend-secret")
+        );
+        assert!(headers.get("X-Jazz-Session").is_none());
     }
 }

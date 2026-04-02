@@ -532,7 +532,9 @@ async function postSyncBatch(
 
   if (!response.ok) {
     const statusText = response.statusText ? ` ${response.statusText}` : "";
-    throw new Error(`${logPrefix}Sync POST failed: ${response.status}${statusText}`);
+    const body = await response.text().catch(() => "");
+    const bodySuffix = body ? `: ${body}` : "";
+    throw new Error(`${logPrefix}Sync POST failed: ${response.status}${statusText}${bodySuffix}`);
   }
 }
 

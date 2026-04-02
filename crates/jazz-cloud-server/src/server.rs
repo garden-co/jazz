@@ -11,7 +11,7 @@ use axum::{
     extract::{Path as AxumPath, Query, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+        header::{AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE},
     },
     response::{Html, IntoResponse, Json},
     routing::{get, patch, post},
@@ -20,8 +20,8 @@ use base64::Engine;
 use bytes::Bytes;
 use hmac::{Hmac, Mac};
 use jazz_tools::jazz_transport::{
-    ConnectionId, ErrorResponse, ServerEvent, SyncBatchRequest, SyncBatchResponse,
-    SyncPayloadResult,
+    BinarySyncBatchRequest, ConnectionId, ErrorResponse, ServerEvent, SyncBatchRequest,
+    SyncBatchResponse, SyncPayloadResult, encode_binary_server_event_frame,
 };
 use jazz_tools::object::ObjectId;
 use jazz_tools::query_manager::query::QueryBuilder;
@@ -36,7 +36,8 @@ use jazz_tools::schema_manager::manager::PermissionsHeadSummary;
 use jazz_tools::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
 use jazz_tools::storage::RocksDBStorage;
 use jazz_tools::sync_manager::{
-    ClientId, Destination, DurabilityTier, InboxEntry, Source, SyncManager, SyncPayload,
+    ClientId, Destination, DurabilityTier, InboxEntry, Source, SyncConnectionCodec, SyncManager,
+    SyncPayload,
 };
 use jsonwebtoken::jwk::{Jwk, JwkSet, KeyAlgorithm};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
@@ -1898,6 +1899,7 @@ struct AppEntry {
     meta_object_id: ObjectId,
     config: tokio::sync::RwLock<AppConfig>,
     connections: tokio::sync::RwLock<HashMap<u64, ConnectionState>>,
+    sync_request_codecs: tokio::sync::RwLock<HashMap<ClientId, SyncConnectionCodec>>,
     next_connection_id: AtomicU64,
     sync_broadcast: tokio::sync::broadcast::Sender<ClientSyncUpdate>,
     send_seq_by_client: ClientSendSeqMap,
@@ -1916,6 +1918,7 @@ impl AppEntry {
             meta_object_id,
             config: tokio::sync::RwLock::new(config),
             connections: tokio::sync::RwLock::new(HashMap::new()),
+            sync_request_codecs: tokio::sync::RwLock::new(HashMap::new()),
             next_connection_id: AtomicU64::new(1),
             sync_broadcast,
             send_seq_by_client,
@@ -2640,13 +2643,8 @@ fn parse_schema_hash(value: &str) -> Result<SchemaHash, (StatusCode, String)> {
     Ok(SchemaHash::from_bytes(hash_bytes))
 }
 
-fn encode_frame(event: &ServerEvent) -> Bytes {
-    let json = serde_json::to_vec(event).unwrap_or_default();
-    let len = (json.len() as u32).to_be_bytes();
-    let mut buf = Vec::with_capacity(4 + json.len());
-    buf.extend_from_slice(&len);
-    buf.extend_from_slice(&json);
-    Bytes::from(buf)
+fn encode_frame(event: &ServerEvent, payload_bytes: Option<&[u8]>) -> Bytes {
+    Bytes::from(encode_binary_server_event_frame(event, payload_bytes))
 }
 
 fn decode_session_header(b64: &str) -> Option<Session> {
@@ -3641,6 +3639,10 @@ async fn events_handler(
             },
         );
     }
+    app.sync_request_codecs
+        .write()
+        .await
+        .insert(client_id, SyncConnectionCodec::default());
 
     // New stream connection defines a fresh sequencing epoch for this client.
     {
@@ -3666,13 +3668,14 @@ async fn events_handler(
     let next_sync_seq = 1u64;
 
     let stream = async_stream::stream! {
+        let mut sync_codec = SyncConnectionCodec::default();
         let connected = ServerEvent::Connected {
             connection_id: ConnectionId(connection_id),
             client_id: client_id_str,
             next_sync_seq: Some(next_sync_seq),
             catalogue_state_hash: catalogue_state_hash.clone(),
         };
-        yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected));
+        yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected, None));
 
         let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
 
@@ -3682,11 +3685,14 @@ async fn events_handler(
                     match result {
                         Ok((target_client_id, seq, payload)) => {
                             if target_client_id == client_id {
+                                let payload_bytes = sync_codec
+                                    .encode_payload(payload.clone())
+                                    .expect("stream sync payload encoding must succeed");
                                 let event = ServerEvent::SyncUpdate {
                                     seq: Some(seq),
                                     payload: Box::new(payload),
                                 };
-                                yield Ok(encode_frame(&event));
+                                yield Ok(encode_frame(&event, Some(&payload_bytes)));
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -3698,7 +3704,7 @@ async fn events_handler(
                     }
                 }
                 _ = heartbeat_interval.tick() => {
-                    yield Ok(encode_frame(&ServerEvent::Heartbeat));
+                    yield Ok(encode_frame(&ServerEvent::Heartbeat, None));
                 }
                 changed = shutdown_rx.changed() => {
                     if changed.is_ok() && *shutdown_rx.borrow() {
@@ -3724,7 +3730,7 @@ async fn sync_handler(
     State(state): State<Arc<ServerState>>,
     AxumPath(path): AxumPath<AppPath>,
     headers: HeaderMap,
-    Json(request): Json<SyncBatchRequest>,
+    body: Bytes,
 ) -> impl IntoResponse {
     let app_id = match parse_app_id(&path.app_id) {
         Ok(id) => id,
@@ -3745,6 +3751,61 @@ async fn sync_handler(
             )
                 .into_response();
         }
+    };
+
+    let is_binary = headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/octet-stream"));
+
+    let (request_client_id, payloads) = if is_binary {
+        let request = match BinarySyncBatchRequest::decode(&body) {
+            Ok(request) => request,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::bad_request(format!(
+                        "invalid binary sync batch: {error}"
+                    ))),
+                )
+                    .into_response();
+            }
+        };
+        let decoded_payloads = {
+            let mut codecs = app.sync_request_codecs.write().await;
+            let codec = codecs.entry(request.client_id).or_default();
+            let mut decoded = Vec::with_capacity(request.payloads.len());
+            for payload_bytes in request.payloads {
+                match codec.decode_payload(&payload_bytes) {
+                    Ok(payload) => decoded.push(payload),
+                    Err(error) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse::bad_request(format!(
+                                "invalid binary sync payload: {error}"
+                            ))),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+            decoded
+        };
+        (request.client_id, decoded_payloads)
+    } else {
+        let request: SyncBatchRequest = match serde_json::from_slice(&body) {
+            Ok(request) => request,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse::bad_request(format!(
+                        "invalid sync batch json: {error}"
+                    ))),
+                )
+                    .into_response();
+            }
+        };
+        (request.client_id, request.payloads)
     };
 
     let cfg = app.config.read().await.clone();
@@ -3792,24 +3853,24 @@ async fn sync_handler(
     };
 
     // Apply each payload in order, collecting per-payload results.
-    let mut results = Vec::with_capacity(request.payloads.len());
-    for payload in request.payloads {
+    let mut results = Vec::with_capacity(payloads.len());
+    for payload in payloads {
         let dispatch_result = if is_admin {
             state
                 .workers
-                .sync_as_admin(app_id, request.client_id, payload)
+                .sync_as_admin(app_id, request_client_id, payload)
                 .await
         } else if is_backend && !has_session_header {
             state
                 .workers
-                .sync_as_backend(app_id, request.client_id, payload)
+                .sync_as_backend(app_id, request_client_id, payload)
                 .await
         } else {
             state
                 .workers
                 .sync_as_session(
                     app_id,
-                    request.client_id,
+                    request_client_id,
                     session.clone().expect("session resolved above"),
                     payload,
                 )
