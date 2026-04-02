@@ -217,6 +217,7 @@ pub struct ColumnDescriptor {
     pub column_type: ColumnType,
     pub nullable: bool,
     /// Optional foreign key reference to another table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub references: Option<TableName>,
     /// Optional schema-level default used for omitted values on insert.
     #[serde(default, skip_serializing_if = "Option::is_none")]

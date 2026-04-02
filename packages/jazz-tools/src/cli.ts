@@ -250,7 +250,10 @@ function tableSchemasEqual(
     return false;
   }
 
-  return left.columns.every((column, index) => columnsEqual(column, right.columns[index]!));
+  const leftColumns = [...left.columns].sort((a, b) => a.name.localeCompare(b.name));
+  const rightColumns = [...right.columns].sort((a, b) => a.name.localeCompare(b.name));
+
+  return leftColumns.every((column, index) => columnsEqual(column, rightColumns[index]!));
 }
 
 function wasmSchemasEqual(left: WasmSchema, right: WasmSchema): boolean {
