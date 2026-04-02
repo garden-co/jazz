@@ -7,6 +7,22 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
+    resolve: {
+      alias: [
+        {
+          find: "jazz-tools/react",
+          replacement: resolve(__dirname, "../jazz-tools/src/react/index.ts"),
+        },
+        {
+          find: "jazz-tools/testing",
+          replacement: resolve(__dirname, "../jazz-tools/src/testing/index.ts"),
+        },
+        {
+          find: "jazz-tools",
+          replacement: resolve(__dirname, "../jazz-tools/src/index.ts"),
+        },
+      ],
+    },
     base: isExtensionBuild ? "./" : "/",
     publicDir: isExtensionBuild ? "chrome-extension" : "public",
     worker: {

@@ -1,4 +1,4 @@
-import type { ColumnType, Value as WasmValue, WasmSchema } from "../drivers/types.js";
+import type { ColumnType, TableSchema, Value as WasmValue, WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
 import { normalizePermissionsForWasm } from "../schema-permissions.js";
 import { buildEndpointUrl } from "./sync-transport.js";
@@ -62,6 +62,75 @@ export async function fetchSchemaHashes(
 
   const schemaHashesResponse = (await response.json()) as { hashes?: string[] };
   return { hashes: schemaHashesResponse.hashes ?? [] };
+}
+
+export interface StoredMigrationEdge {
+  fromHash: string;
+  toHash: string;
+  forward: StoredTableLens[];
+}
+
+export type StoredMigrationOp =
+  | {
+      type: "introduce";
+      column: string;
+      columnType: ColumnType;
+      value: PublishedMigrationValue;
+    }
+  | {
+      type: "drop";
+      column: string;
+      columnType: ColumnType;
+      value: PublishedMigrationValue;
+    }
+  | {
+      type: "rename";
+      column: string;
+      value: string;
+    }
+  | {
+      type: "addTable";
+      schema: TableSchema;
+    }
+  | {
+      type: "removeTable";
+      schema: TableSchema;
+    };
+
+export interface StoredTableLens {
+  table: string;
+  operations: StoredMigrationOp[];
+}
+
+export interface FetchStoredMigrationsOptions {
+  adminSecret: string;
+  pathPrefix?: string;
+}
+
+export async function fetchStoredMigrations(
+  serverUrl: string,
+  options: FetchStoredMigrationsOptions,
+): Promise<{ migrations: StoredMigrationEdge[] }> {
+  const response = await fetch(
+    buildEndpointUrl(serverUrl, "/admin/migrations", options.pathPrefix),
+    {
+      method: "GET",
+      headers: {
+        "X-Jazz-Admin-Secret": options.adminSecret,
+      },
+    },
+  );
+
+  if (!response.ok) {
+    const bodyText = await response.text().catch(() => "");
+    const detail = bodyText ? ` - ${bodyText}` : "";
+    throw new Error(
+      `Migration edges fetch failed: ${response.status} ${response.statusText}${detail}`,
+    );
+  }
+
+  const body = (await response.json()) as { migrations?: StoredMigrationEdge[] };
+  return { migrations: body.migrations ?? [] };
 }
 
 export interface PublishStoredSchemaOptions {

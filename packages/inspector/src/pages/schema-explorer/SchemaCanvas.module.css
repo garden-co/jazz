@@ -1,0 +1,200 @@
+.canvas {
+  min-height: 620px;
+  border: 1px solid #273344;
+  border-radius: 12px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at top left, rgb(54 91 138 / 0.18), transparent 34%),
+    linear-gradient(180deg, #111823, #0e141c 62%);
+}
+
+.emptyState {
+  min-height: 220px;
+  border: 1px dashed #304052;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  color: #8f9db0;
+  background: #121923;
+  padding: 20px;
+  text-align: center;
+}
+
+.tableNode {
+  position: relative;
+  width: 340px;
+  border-radius: 16px;
+  border: 1px solid #304052;
+  background: linear-gradient(180deg, #172130, #111924);
+  box-shadow: 0 14px 28px rgb(0 0 0 / 0.24);
+  overflow: hidden;
+}
+
+.tableNodeAdded {
+  border-color: #357657;
+}
+
+.tableNodeRemoved {
+  border-color: #8f4c4c;
+}
+
+.tableNodeChanged {
+  border-color: #9b7b2e;
+}
+
+.tableHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px 14px;
+  border-bottom: 1px solid #243243;
+  background: linear-gradient(180deg, rgb(79 117 161 / 0.18), transparent);
+}
+
+.tableName {
+  font-size: 16px;
+  font-weight: 700;
+  color: #eef5ff;
+}
+
+.tableSubtitle {
+  margin-top: 4px;
+  color: #8ea1b8;
+  font-size: 12px;
+}
+
+.tableCount {
+  color: #8ea1b8;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.columnList {
+  padding: 8px 10px 10px;
+}
+
+.columnRow {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 10px;
+  margin-bottom: 8px;
+  background: rgb(20 29 41 / 0.9);
+  border: 1px solid #233244;
+}
+
+.columnName {
+  min-width: 0;
+  color: #e8eef7;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.columnMeta {
+  display: inline-flex;
+  gap: 8px;
+  color: #8ea0b6;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.columnReference {
+  grid-column: 1 / -1;
+  color: #7bc3ff;
+  font-size: 11px;
+}
+
+.columnAdded {
+  border-color: #34734f;
+  background: rgb(24 51 35 / 0.9);
+}
+
+.columnRemoved {
+  border-color: #874848;
+  background: rgb(55 27 29 / 0.9);
+}
+
+.columnChanged {
+  border-color: #9b7b2e;
+  background: rgb(56 46 19 / 0.92);
+}
+
+.columnUnknown {
+  border-color: #547091;
+  background: rgb(25 41 60 / 0.92);
+}
+
+.unknownMappings {
+  border-top: 1px solid #243243;
+  padding: 12px 16px 14px;
+  background: rgb(11 18 27 / 0.78);
+}
+
+.unknownMappingRow {
+  color: #b6c4d8;
+  font-size: 12px;
+}
+
+.columnSourceHandle,
+.tableTargetHandle {
+  width: 10px;
+  height: 10px;
+  border: 1px solid #d8edf9;
+  background: #5ec5ff;
+}
+
+.tableTargetHandle {
+  left: -6px;
+  top: 26px;
+}
+
+.hashNode {
+  width: 220px;
+  border-radius: 16px;
+  border: 1px solid #314257;
+  background: linear-gradient(180deg, #172130, #101720);
+  padding: 16px;
+  box-shadow: 0 14px 28px rgb(0 0 0 / 0.24);
+}
+
+.hashNodeSelected {
+  border-color: #7acfff;
+  box-shadow:
+    0 0 0 1px rgb(122 207 255 / 0.32),
+    0 14px 28px rgb(0 0 0 / 0.24);
+}
+
+.hashValue {
+  color: #eef5ff;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.hashMeta {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #8ea1b8;
+  font-size: 12px;
+}
+
+.hashBadge {
+  margin-top: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  background: rgb(58 105 149 / 0.36);
+  color: #9fe0ff;
+  padding: 5px 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}

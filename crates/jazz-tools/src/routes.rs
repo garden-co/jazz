@@ -62,7 +62,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route("/admin/schemas", post(publish_schema_handler))
         .route("/admin/permissions/head", get(permissions_head_handler))
         .route("/admin/permissions", post(publish_permissions_handler))
-        .route("/admin/migrations", post(publish_migration_handler))
+        .route(
+            "/admin/migrations",
+            get(migration_edges_handler).post(publish_migration_handler),
+        )
         .route(
             "/admin/introspection/subscriptions",
             get(admin_subscription_introspection_handler),
@@ -90,6 +93,51 @@ struct EventsParams {
 #[derive(Debug, Serialize)]
 struct SchemaHashesResponse {
     hashes: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MigrationEdgesResponse {
+    migrations: Vec<StoredMigrationResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredMigrationResponse {
+    from_hash: String,
+    to_hash: String,
+    forward: Vec<StoredTableLens>,
+}
+
+#[derive(Debug, Serialize)]
+struct StoredTableLens {
+    table: String,
+    operations: Vec<StoredLensOp>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+enum StoredLensOp {
+    Introduce {
+        column: String,
+        column_type: ColumnType,
+        value: Value,
+    },
+    Drop {
+        column: String,
+        column_type: ColumnType,
+        value: Value,
+    },
+    Rename {
+        column: String,
+        value: String,
+    },
+    AddTable {
+        schema: TableSchema,
+    },
+    RemoveTable {
+        schema: TableSchema,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -733,6 +781,56 @@ async fn schema_hashes_handler(
     }
 }
 
+/// Return all registered migration edges from catalogue state.
+///
+/// Requires a valid admin secret.
+async fn migration_edges_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let admin_secret = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+
+    match validate_admin_secret(admin_secret, &state.auth_config) {
+        Ok(()) => {}
+        Err((status, msg)) => {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+        }
+    }
+
+    if matches!(
+        &state.catalogue_authority,
+        CatalogueAuthorityMode::Forward { .. }
+    ) {
+        return match forward_catalogue_request(
+            &state,
+            reqwest::Method::GET,
+            "/admin/migrations",
+            None,
+        )
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => error.into_response(),
+        };
+    }
+
+    match state.runtime.known_lenses() {
+        Ok(lenses) => {
+            let migrations = lenses.iter().map(stored_migration_response).collect();
+            Json(MigrationEdgesResponse { migrations }).into_response()
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(format!(
+                "failed to read migration edges: {err}"
+            ))),
+        )
+            .into_response(),
+    }
+}
+
 /// Publish a schema object into the catalogue.
 ///
 /// Requires a valid admin secret.
@@ -1189,6 +1287,71 @@ async fn publish_migration_handler(
         .into_response()
 }
 
+fn stored_migration_response(lens: &Lens) -> StoredMigrationResponse {
+    StoredMigrationResponse {
+        from_hash: lens.source_hash.to_string(),
+        to_hash: lens.target_hash.to_string(),
+        forward: stored_table_lenses(&lens.forward),
+    }
+}
+
+fn stored_table_lenses(transform: &LensTransform) -> Vec<StoredTableLens> {
+    let mut tables: Vec<StoredTableLens> = Vec::new();
+
+    for op in &transform.ops {
+        let table_name = op.table().to_string();
+        let serialized = stored_lens_op(op);
+
+        if let Some(index) = tables.iter().position(|table| table.table == table_name) {
+            tables[index].operations.push(serialized);
+        } else {
+            tables.push(StoredTableLens {
+                table: table_name,
+                operations: vec![serialized],
+            });
+        }
+    }
+
+    tables
+}
+
+fn stored_lens_op(op: &LensOp) -> StoredLensOp {
+    match op {
+        LensOp::AddColumn {
+            column,
+            column_type,
+            default,
+            ..
+        } => StoredLensOp::Introduce {
+            column: column.clone(),
+            column_type: column_type.clone(),
+            value: default.clone(),
+        },
+        LensOp::RemoveColumn {
+            column,
+            column_type,
+            default,
+            ..
+        } => StoredLensOp::Drop {
+            column: column.clone(),
+            column_type: column_type.clone(),
+            value: default.clone(),
+        },
+        LensOp::RenameColumn {
+            old_name, new_name, ..
+        } => StoredLensOp::Rename {
+            column: old_name.clone(),
+            value: new_name.clone(),
+        },
+        LensOp::AddTable { schema, .. } => StoredLensOp::AddTable {
+            schema: schema.clone(),
+        },
+        LensOp::RemoveTable { schema, .. } => StoredLensOp::RemoveTable {
+            schema: schema.clone(),
+        },
+    }
+}
+
 async fn admin_subscription_introspection_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -1598,7 +1761,10 @@ mod tests {
             .route("/admin/schemas", post(publish_schema_handler))
             .route("/admin/permissions/head", get(permissions_head_handler))
             .route("/admin/permissions", post(publish_permissions_handler))
-            .route("/admin/migrations", post(publish_migration_handler))
+            .route(
+                "/admin/migrations",
+                get(migration_edges_handler).post(publish_migration_handler),
+            )
             .route(
                 "/admin/introspection/subscriptions",
                 get(admin_subscription_introspection_handler),
@@ -1875,6 +2041,111 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bad_hash_response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn migration_edges_handler_requires_admin_secret() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+        let app = make_test_router(make_state_with_schema(schema).await);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/migrations")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn migration_edges_handler_returns_registered_lenses() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email", ColumnType::Text),
+            )
+            .build();
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("email_address", ColumnType::Text),
+            )
+            .build();
+        let v1_hash = SchemaHash::compute(&v1);
+        let v2_hash = SchemaHash::compute(&v2);
+
+        let state = make_state_with_schema(v2).await;
+        state
+            .runtime
+            .add_known_schema(v1)
+            .expect("seed known schema for migration-edge read");
+
+        let app = make_test_router(state.clone());
+        let publish_request_body = serde_json::json!({
+            "fromHash": v1_hash.to_string(),
+            "toHash": v2_hash.to_string(),
+            "forward": [{
+                "table": "users",
+                "operations": [{
+                    "type": "rename",
+                    "column": "email",
+                    "value": "email_address"
+                }]
+            }]
+        });
+
+        let publish_response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/admin/migrations")
+                    .header("Content-Type", "application/json")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::from(publish_request_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(publish_response.status(), StatusCode::CREATED);
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin/migrations")
+                    .header("X-Jazz-Admin-Secret", "admin-secret")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("migration edges body");
+        let json: Value = serde_json::from_slice(&body).expect("migration edges json");
+
+        assert_eq!(json["migrations"].as_array().map(Vec::len), Some(1));
+        assert_eq!(json["migrations"][0]["fromHash"], v1_hash.to_string());
+        assert_eq!(json["migrations"][0]["toHash"], v2_hash.to_string());
+        assert_eq!(json["migrations"][0]["forward"][0]["table"], "users");
+        assert_eq!(
+            json["migrations"][0]["forward"][0]["operations"][0]["type"],
+            "rename"
+        );
     }
 
     #[tokio::test]

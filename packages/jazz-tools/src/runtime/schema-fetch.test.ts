@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchSchemaHashes, fetchStoredWasmSchema } from "./schema-fetch.js";
+import { fetchSchemaHashes, fetchStoredMigrations, fetchStoredWasmSchema } from "./schema-fetch.js";
 import { fetchServerSubscriptions } from "./introspection-fetch.js";
 
 describe("schema-fetch", () => {
@@ -101,6 +101,54 @@ describe("schema-fetch", () => {
     expect(fetchMock.mock.calls[0]![0]).toBe(
       "http://localhost:1625/schema/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     );
+  });
+
+  it("fetches stored migrations with admin secret header", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        migrations: [
+          {
+            fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            forward: [
+              {
+                table: "users",
+                operations: [
+                  {
+                    type: "rename",
+                    column: "email",
+                    value: "email_address",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await fetchStoredMigrations("http://localhost:1625/", {
+      adminSecret: "admin-secret",
+      pathPrefix: "/apps/app-123",
+    });
+
+    expect(result.migrations).toHaveLength(1);
+    expect(result.migrations[0]).toMatchObject({
+      fromHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![0]).toBe("http://localhost:1625/apps/app-123/admin/migrations");
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({
+      method: "GET",
+      headers: {
+        "X-Jazz-Admin-Secret": "admin-secret",
+      },
+    });
   });
 
   it("fetches grouped server subscriptions with admin secret and app id", async () => {

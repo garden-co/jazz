@@ -455,6 +455,22 @@ impl SchemaManager {
         self.context.lenses.keys().copied().collect()
     }
 
+    /// Get all registered lenses sorted by source/target hash.
+    pub fn lenses(&self) -> Vec<Lens> {
+        let mut lenses: Vec<_> = self.context.lenses.values().cloned().collect();
+        lenses.sort_by(|left, right| {
+            left.source_hash
+                .as_bytes()
+                .cmp(right.source_hash.as_bytes())
+                .then_with(|| {
+                    left.target_hash
+                        .as_bytes()
+                        .cmp(right.target_hash.as_bytes())
+                })
+        });
+        lenses
+    }
+
     /// Compute a canonical digest of the catalogue state known to this manager.
     pub fn catalogue_state_hash(&self) -> String {
         let mut hasher = Hasher::new();

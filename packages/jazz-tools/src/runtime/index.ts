@@ -31,9 +31,14 @@ export {
 export { allRowsInTableQuery, type DynamicTableRow } from "./dynamic-query.js";
 export { deriveLocalPrincipalId, resolveClientSession } from "./client-session.js";
 export {
+  fetchStoredMigrations,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
+  type FetchStoredMigrationsOptions,
   type FetchStoredWasmSchemaOptions,
+  type StoredMigrationEdge,
+  type StoredMigrationOp,
+  type StoredTableLens,
 } from "./schema-fetch.js";
 export {
   fetchServerSubscriptions,

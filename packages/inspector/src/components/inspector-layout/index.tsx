@@ -18,6 +18,14 @@ export function InspectorLayout() {
             Data Explorer
           </NavLink>
           <NavLink
+            to="/schemas"
+            className={({ isActive }) =>
+              `${styles.tabLink} ${isActive ? styles.tabLinkActive : ""}`
+            }
+          >
+            Schemas
+          </NavLink>
+          <NavLink
             to="/live-query"
             className={({ isActive }) =>
               `${styles.tabLink} ${isActive ? styles.tabLinkActive : ""}`
