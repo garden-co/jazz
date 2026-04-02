@@ -38,6 +38,7 @@
     "calm-pumas-arrive",
     "clean-hills-wave",
     "codex-quoted-identifiers",
+    "codex-schema-dir-src-resolution",
     "codex-scoped-napi-loader",
     "cold-load-history",
     "deep-reactivity",
