@@ -18,14 +18,15 @@ required-features = ["cli"]
 [features]
 default = []
 fjall = ["dep:fjall"]
+rocksdb = ["dep:rocksdb"]
 runtime-tokio = ["dep:tokio"]
 transport = []
 transport-http = ["transport", "dep:reqwest", "dep:base64", "dep:bytes"]
-client = ["runtime-tokio", "transport-http", "fjall", "dep:thiserror", "dep:tokio"]
+client = ["runtime-tokio", "transport-http", "rocksdb", "dep:thiserror", "dep:tokio"]
 cli = [
   "runtime-tokio",
   "transport",
-  "fjall",
+  "rocksdb",
   "dep:tokio",
   "dep:axum",
   "dep:clap",
@@ -72,6 +73,7 @@ sha2 = "0.10"
 
 tokio = { version = "1", features = ["full"], optional = true }
 fjall = { version = "3.0.2", optional = true }
+rocksdb = { version = "0.24", default-features = false, features = ["lz4", "zstd"], optional = true }
 
 axum = { version = "0.7", optional = true }
 bytes = { version = "1", optional = true }

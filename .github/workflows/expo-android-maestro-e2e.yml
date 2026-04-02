@@ -33,9 +33,59 @@ jobs:
       disableAndroid: false
       disableIOS: true
 
+  build-jazz-tools-sandbox:
+    name: Build jazz-tools sandbox binary (${{ matrix.target }})
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    env:
+      CARGO_ZIGBUILD_CACHE_DIR: /tmp/cargo-zigbuild-cache
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.1
+          targets: ${{ matrix.target }}
+
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install libclang (needed by rocksdb bindgen)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
+      - name: Build sandbox binary
+        run: |
+          mkdir -p .artifacts/jazz-tools
+          cargo zigbuild --release -p jazz-tools --bin jazz-tools --features cli --target "${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/jazz-tools" ".artifacts/jazz-tools/jazz-tools-${{ matrix.target }}"
+
+      - name: Upload sandbox binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: jazz-tools-sandbox-${{ matrix.target }}
+          if-no-files-found: error
+          path: .artifacts/jazz-tools/jazz-tools-${{ matrix.target }}
+
   expo-android-e2e:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: build-rn
+    needs:
+      - build-rn
+      - build-jazz-tools-sandbox
     timeout-minutes: 60
     env:
       JAZZ_E2E_APP_ID: 6316f08d-d5d1-41df-82b8-8c16aa26db84
@@ -55,27 +105,50 @@ jobs:
           name: jazz-rn-android
           path: crates/jazz-rn
 
-      - uses: actions/setup-java@v5
+      - name: Download jazz-tools sandbox binaries
+        uses: actions/download-artifact@v5
         with:
-          distribution: temurin
-          java-version: "17"
+          pattern: jazz-tools-sandbox-*
+          path: .artifacts/jazz-tools
+          merge-multiple: true
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
-          targets: wasm32-unknown-unknown, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
-          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
 
       - uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack
 
-      - name: pnpm build
-        run: pnpm build
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
 
-      - name: Expo prebuild
+      - name: Build Expo E2E JS dependencies
+        run: |
+          pnpm --filter jazz-wasm run build
+          pnpm --filter jazz-tools run build:runtime
+
+      - name: Validate Expo app schema and types
         working-directory: examples/todo-client-localfirst-expo
-        run: pnpm expo prebuild --clean
+        run: |
+          pnpm exec jazz-tools validate
+          pnpm exec tsc --noEmit
+
+      - name: Expo prebuild (Android)
+        run: pnpm --filter todo-client-localfirst-expo run verify:expo:android
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            examples/todo-client-localfirst-expo/android/**/*.gradle*
+            examples/todo-client-localfirst-expo/android/gradle/wrapper/gradle-wrapper.properties
+            crates/jazz-rn/android/**/*.gradle*
+            crates/jazz-rn/android/gradle.properties
 
       - name: Install Vercel Sandbox CLI
         run: npm install -g sandbox
@@ -105,13 +178,15 @@ jobs:
 
           ARCH="$(sandbox exec "${COMMON[@]}" "$SANDBOX_ID" uname -m | tr -d '\r' | tail -n1)"
           case "$ARCH" in
-            x86_64|amd64)  TARGET=x86_64-unknown-linux-gnu ;;
-            aarch64|arm64) TARGET=aarch64-unknown-linux-gnu ;;
+            x86_64|amd64) BINARY=".artifacts/jazz-tools/jazz-tools-x86_64-unknown-linux-musl" ;;
+            aarch64|arm64) BINARY=".artifacts/jazz-tools/jazz-tools-aarch64-unknown-linux-musl" ;;
             *) echo "::error::Unsupported sandbox arch: $ARCH"; exit 1 ;;
           esac
-
-          cargo build --release -p jazz-tools --bin jazz-tools --features cli --target "$TARGET"
-          sandbox copy "${COMMON[@]}" "target/$TARGET/release/jazz-tools" "$SANDBOX_ID:/tmp/jazz-tools"
+          if [ ! -f "$BINARY" ]; then
+            echo "::error::Missing prebuilt jazz-tools binary for sandbox arch: $ARCH"
+            exit 1
+          fi
+          sandbox copy "${COMMON[@]}" "$BINARY" "$SANDBOX_ID:/tmp/jazz-tools"
 
           sandbox exec "${COMMON[@]}" "$SANDBOX_ID" chmod +x /tmp/jazz-tools
 
@@ -125,7 +200,9 @@ jobs:
       - name: Verify Server URL
         run: |
           echo "Verifying server URL: ${SERVER_PUBLIC_URL}"
-          curl --fail --retry 20 --retry-delay 1 "${SERVER_PUBLIC_URL}/health"
+          HEALTH_BODY="$(curl --silent --show-error --fail --retry 20 --retry-delay 1 "${SERVER_PUBLIC_URL}/health")"
+          echo "$HEALTH_BODY"
+          echo "$HEALTH_BODY" | grep -F '"status":"healthy"'
 
       - name: Build release APK
         working-directory: examples/todo-client-localfirst-expo/android
@@ -133,7 +210,7 @@ jobs:
           EXPO_PUBLIC_JAZZ_APP_ID: ${{ env.JAZZ_E2E_APP_ID }}
           EXPO_PUBLIC_JAZZ_ADMIN_SECRET: ${{ env.JAZZ_E2E_ADMIN_SECRET }}
           EXPO_PUBLIC_JAZZ_SERVER_URL: ${{ env.SERVER_PUBLIC_URL }}
-        run: chmod +x gradlew && ./gradlew :app:assembleRelease --no-daemon
+        run: chmod +x gradlew && ./gradlew :app:assembleRelease --build-cache --no-daemon
 
       - name: Run Maestro Cloud flows
         id: maestro

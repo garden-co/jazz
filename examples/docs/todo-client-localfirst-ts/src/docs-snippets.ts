@@ -190,6 +190,18 @@ export async function readTodoEditMetadata(db: Db, currentUserId: string, update
 }
 // #endregion reading-edit-metadata-magic-columns-ts
 
+// #region reading-reverse-relation-ts
+export async function readProjectsWithTodos(db: Db) {
+  return db.all(app.projects.include({ todosViaProject: app.todos.where({ done: false }) }));
+}
+// #endregion reading-reverse-relation-ts
+
+// #region reading-require-includes-ts
+export async function readTodosWithRequiredProject(db: Db) {
+  return db.all(app.todos.where({ done: false }).include({ project: true }).requireIncludes());
+}
+// #endregion reading-require-includes-ts
+
 // #region reading-recursive-ts
 export function buildTodoLineageQuery() {
   return app.todos.gather({

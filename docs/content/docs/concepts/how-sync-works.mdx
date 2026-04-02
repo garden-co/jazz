@@ -1,7 +1,7 @@
 ---
 title: How Sync Works
 description: An overview of how Jazz syncs data between clients, covering query subscriptions, infrastructure tiers, how Jazz behaves offline, and the eventual consistency model.
-reviewedAt: "14cd73f0"
+reviewedAt: "4059cdef"
 ---
 
 Traditional apps send queries to a remote server, which queries a database and returns data.
@@ -95,4 +95,4 @@ As clients can write concurrently, Jazz uses **last-writer-wins (LWW)** to resol
 
 ## See it in action
 
-[Wequencer](https://github.com/garden-co/jazz2/tree/main/docs/examples/wequencer) is a collaborative real-time music sequencer built with Jazz and Svelte. Multiple users place beats on a shared grid and hear each other's changes immediately&hairsp;—&hairsp;a good example of query subscriptions, real-time sync, and conflict-free collaboration in practice.
+[Wequencer](https://github.com/garden-co/jazz2/tree/main/examples/wequencer) is a collaborative real-time music sequencer built with Jazz and Svelte. Multiple users place beats on a shared grid and hear each other's changes immediately&hairsp;—&hairsp;a good example of query subscriptions, real-time sync, and conflict-free collaboration in practice.

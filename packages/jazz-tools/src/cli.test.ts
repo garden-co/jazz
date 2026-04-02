@@ -208,14 +208,11 @@ describe("cli validate", () => {
     expect(await fileExists(join(root, "permissions.test.ts"))).toBe(false);
   });
 
-  it("finds root schema.ts when pointed at the default ./schema shim directory", async () => {
+  it("fails when pointed at the legacy ./schema shim directory", async () => {
     const { root, schemaDir } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
 
-    await validate({ schemaDir });
-
-    expect(await fileExists(join(schemaDir, "current.sql"))).toBe(false);
-    expect(await fileExists(join(schemaDir, "app.ts"))).toBe(false);
+    await expect(validate({ schemaDir })).rejects.toThrow(/schema file not found/i);
   });
 
   it("loads root permissions.ts that imports ./schema.ts", async () => {
@@ -232,6 +229,19 @@ describe("cli validate", () => {
     expect(logs).toContain(
       "Permission-only changes do not create schema hashes or require migrations.",
     );
+  });
+
+  it("loads src/schema.ts and src/permissions.ts when schemaDir points at the app root", async () => {
+    const { root } = await createWorkspace();
+    const srcDir = join(root, "src");
+    await mkdir(srcDir, { recursive: true });
+    await writeFile(join(srcDir, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(srcDir, "permissions.ts"), rootPermissionsSchema());
+
+    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+
+    expect(logs).toContain(`Loaded structural schema from ${join(srcDir, "schema.ts")}.`);
+    expect(logs).toContain(`Loaded current permissions from ${join(srcDir, "permissions.ts")}.`);
   });
 
   it("accepts named permissions exports for transitional ergonomics", async () => {
@@ -307,6 +317,37 @@ describe("cli schema export", () => {
       "ownerId",
     ]);
     expect(exported.todos.policies).toBeUndefined();
+  });
+
+  it("prints the compiled schema representation from src/schema.ts", async () => {
+    const { root } = await createWorkspace();
+    const srcDir = join(root, "src");
+    await mkdir(srcDir, { recursive: true });
+    await writeFile(join(srcDir, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(srcDir, "permissions.ts"), rootPermissionsSchema());
+
+    const writes: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+      chunk: string | Uint8Array,
+    ) => {
+      writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    }) as typeof process.stdout.write);
+
+    try {
+      await exportSchema({ schemaDir: root, format: "json" });
+    } finally {
+      writeSpy.mockRestore();
+      process.stdout.write = originalWrite;
+    }
+
+    const exported = JSON.parse(writes.join(""));
+    expect(exported.projects.columns[0].name).toBe("name");
+    expect(exported.todos.columns.map((column: { name: string }) => column.name)).toEqual([
+      "title",
+      "ownerId",
+    ]);
   });
 });
 
@@ -854,6 +895,43 @@ describe("cli permissions", () => {
     );
   });
 
+  it("loads src/permissions.ts when reporting the current permissions head", async () => {
+    const { root } = await createWorkspace();
+    const srcDir = join(root, "src");
+    await mkdir(srcDir, { recursive: true });
+    await writeFile(join(srcDir, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(srcDir, "permissions.ts"), rootPermissionsSchema());
+
+    const schemaHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [schemaHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${schemaHash}`)) {
+        return new Response(JSON.stringify(storedRootSchema()), { status: 200 });
+      }
+
+      if (input.endsWith("/admin/permissions/head")) {
+        return new Response(JSON.stringify({ head: null }), { status: 200 });
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs } = await captureConsoleLogs(() =>
+      permissionsStatus({
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+        schemaDir: root,
+      }),
+    );
+
+    expect(logs).toContain(`Loaded structural schema from ${join(srcDir, "schema.ts")}.`);
+    expect(logs).toContain(`Loaded current permissions from ${join(srcDir, "permissions.ts")}.`);
+  });
+
   it("publishes permissions with the current head bundle as the expected parent", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
@@ -1034,6 +1112,35 @@ describe("bin integration", () => {
 
     expect(result.status).toBe(0);
     expect(await fileExists(join(root, "permissions.test.ts"))).toBe(false);
+  });
+
+  it("loads src/schema.ts and src/permissions.ts through the validate command", async () => {
+    const { root } = await createWorkspace();
+    const srcDir = join(root, "src");
+    await mkdir(srcDir, { recursive: true });
+    await writeFile(join(srcDir, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+    await writeFile(
+      join(srcDir, "permissions.ts"),
+      rootPermissionsSchema("./schema.ts", distIndexPath),
+    );
+
+    const result = runBin(["validate", "--schema-dir", root]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(`Loaded structural schema from ${join(srcDir, "schema.ts")}.`);
+    expect(result.stdout).toContain(
+      `Loaded current permissions from ${join(srcDir, "permissions.ts")}.`,
+    );
+  });
+
+  it("fails when validate is pointed at the legacy ./schema shim directory", async () => {
+    const { root, schemaDir } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+
+    const result = runBin(["validate", "--schema-dir", schemaDir]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Schema file not found");
   });
 
   it("fails when no root schema.ts can be found", async () => {

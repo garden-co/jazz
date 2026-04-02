@@ -1,0 +1,200 @@
+.poster-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  animation: overlay-in 0.3s ease-out;
+}
+
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.poster {
+  position: relative;
+  width: min(420px, 90vw);
+  aspect-ratio: 595 / 842;
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 25px 80px rgba(0, 0, 0, 0.6),
+    0 0 120px rgba(255, 45, 123, 0.08);
+  animation: poster-in 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes poster-in {
+  from {
+    opacity: 0;
+    transform: scale(0.9) translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.poster-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.poster-content {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 10% 8%;
+}
+
+.poster-top {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.poster-tag {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.3em;
+  color: var(--accent-primary);
+  border: 1px solid var(--accent-primary);
+  padding: 3px 12px;
+  border-radius: 2px;
+}
+
+.poster-main {
+  text-align: center;
+}
+
+.poster-band {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: clamp(32px, 8vw, 52px);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #fff;
+  margin: 0;
+  line-height: 1;
+  text-shadow: 0 2px 40px rgba(0, 0, 0, 0.5);
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.poster-divider {
+  width: 60px;
+  height: 2px;
+  background: var(--accent-primary);
+  margin: 20px auto;
+  box-shadow: 0 0 12px rgba(255, 45, 123, 0.5);
+}
+
+.poster-venue {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(16px, 4vw, 22px);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.85);
+  margin: 0 0 6px;
+}
+
+.poster-location {
+  font-family: var(--font-body);
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.5);
+  margin: 0;
+  letter-spacing: 0.06em;
+}
+
+.poster-bottom {
+  text-align: center;
+}
+
+.poster-date {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.poster-date-day {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: clamp(40px, 10vw, 64px);
+  color: #fff;
+  line-height: 1;
+}
+
+.poster-date-month {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(16px, 4vw, 22px);
+  letter-spacing: 0.2em;
+  color: var(--accent-primary);
+  text-transform: uppercase;
+}
+
+.poster-date-year {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.poster-description {
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-style: italic;
+  color: rgba(255, 255, 255, 0.55);
+  margin: 0 0 8px;
+  line-height: 1.5;
+}
+
+.poster-capacity {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.3);
+  margin: 0;
+  letter-spacing: 0.06em;
+}
+
+.poster-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;
+  background: rgba(0, 0, 0, 0.4);
+  border: none;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 24px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    color 0.15s,
+    background 0.15s;
+}
+
+.poster-close:hover {
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+}

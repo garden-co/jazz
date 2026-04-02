@@ -245,7 +245,7 @@ impl<'a> TestingClient<'a> {
 
         context.storage = match self.storage {
             TestingClientStorage::Memory => ClientStorage::Memory,
-            TestingClientStorage::Persistent => ClientStorage::Fjall,
+            TestingClientStorage::Persistent => ClientStorage::Persistent,
         };
 
         context

@@ -10,8 +10,8 @@
     "ios": "expo run:ios",
     "build": "jazz-tools validate && tsc --noEmit",
     "prebuild": "expo prebuild --clean",
-    "verify:expo:android": "expo prebuild --platform android --clean --no-install --non-interactive",
-    "verify:expo:ios": "expo prebuild --platform ios --clean --no-install --non-interactive"
+    "verify:expo:android": "CI=1 expo prebuild --platform android --clean --no-install",
+    "verify:expo:ios": "CI=1 expo prebuild --platform ios --clean --no-install"
   },
   "dependencies": {
     "expo": "^54.0.0",

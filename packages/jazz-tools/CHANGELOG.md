@@ -1,5 +1,29 @@
 # jazz-tools
 
+## 2.0.0-alpha.24
+
+### Patch Changes
+
+- 08f10b9: CLI schema resolution now accepts apps that keep `schema.ts` and `permissions.ts` in `src/` as well as the app root.
+
+  The legacy `--schema-dir ./schema` shim is no longer supported. Point CLI commands at the app root instead, where Jazz will resolve `schema.ts` from either the root or `src/`.
+  - jazz-wasm@2.0.0-alpha.24
+  - jazz-rn@2.0.0-alpha.24
+
+## 2.0.0-alpha.23
+
+### Patch Changes
+
+- d1d19a5: Allow development-mode clients to auto-publish the current structural schema from `schema.ts` without an admin secret, while keeping non-schema catalogue writes admin-only. Improve `jazz-tools --help` and the docs so the CLI and publishing workflow more clearly explain when schema auto-push is enough versus when to run `permissions push` or `migrations push`.
+- a41135e: Self-hosted servers now clean up disconnected client state after a configurable TTL, while deferring cleanup for clients that still have unprocessed inbox entries.
+- 8b16d59: Replace Fjall with RocksDB as the default persistent storage engine for server, Node.js client, and CLI.
+
+  **BREAKING:** Server data stored with Fjall is not compatible — existing servers must start from a clean data directory.
+
+- b5193ad: Add World Tour Vue 3 example app demonstrating schema, permissions, live queries, file handling, and co-located component data access.
+  - jazz-wasm@2.0.0-alpha.23
+  - jazz-rn@2.0.0-alpha.23
+
 ## 2.0.0-alpha.22
 
 ### Patch Changes

@@ -52,7 +52,7 @@ sudo RUNNER_TOKEN="<repo registration token>" \
 The bootstrap script will:
 
 - create the runner user if it does not exist
-- install Rust, Node, `pnpm`, and `wasm-pack`
+- install Rust, Node, `pnpm`, `wasm-pack`, and `libclang`
 - install and register the GitHub Actions runner as a systemd service
 - skip AWS SSM installation automatically on non-AWS hardware
 - apply `benchmarks/realistic/harden_runner.sh` unless `SKIP_HARDENING=1`

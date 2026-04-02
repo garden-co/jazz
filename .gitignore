@@ -28,6 +28,9 @@ __screenshots__
 playwright-report/
 test-results/
 
+# Walkthrough compiled output
+**/walkthrough/*.html
+
 # Generated
 examples/wequencer/walkthrough/*.html
 
