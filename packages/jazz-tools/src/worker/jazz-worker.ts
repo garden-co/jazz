@@ -53,6 +53,11 @@ let initComplete = false;
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 let bootstrapCatalogueForwarding = false;
 
+function abortActiveStreamForReconnect(): void {
+  if (!streamAbortController || streamAbortController.signal.aborted) return;
+  streamAbortController.abort();
+}
+
 // Accumulates non-catalogue server-bound payloads within a microtask boundary
 // and flushes them as a single ordered batch POST.
 const serverPayloadBatcher = new ServerPayloadBatcher(async (payloads) => {
@@ -75,6 +80,7 @@ const serverPayloadBatcher = new ServerPayloadBatcher(async (payloads) => {
     if (!isExpectedFetchAbortError(error)) {
       console.error("[worker] Sync batch POST error:", error);
     }
+    abortActiveStreamForReconnect();
     detachServer();
     scheduleReconnect();
   }
@@ -273,6 +279,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
                 if (!isExpectedFetchAbortError(error)) {
                   console.error("[worker] Sync POST error:", error);
                 }
+                abortActiveStreamForReconnect();
                 detachServer();
                 scheduleReconnect();
               });
