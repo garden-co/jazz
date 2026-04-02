@@ -3142,14 +3142,17 @@ criterion_group!(
     realistic_r1_crud,
     realistic_r1_crud_fjall,
     realistic_r1_crud_rocksdb,
+    realistic_r1_crud_sqlite,
     realistic_r1_crud_single_hop,
     realistic_r2_reads,
     realistic_r2_reads_fjall,
     realistic_r2_reads_rocksdb,
+    realistic_r2_reads_sqlite,
     realistic_r2_reads_single_hop,
     realistic_r2_reads_with_write_churn,
     realistic_r3_cold_load_fjall,
     realistic_r3_cold_load_rocksdb,
+    realistic_r3_cold_load_sqlite,
     realistic_r4_fanout_updates,
     realistic_r5_permission_recursive,
     realistic_r6_permission_write_heavy,
@@ -3159,6 +3162,7 @@ criterion_group!(
     realistic_r8_many_branches_scan_leaf_heads,
     realistic_r8_many_branches_cold_load_fjall,
     realistic_r8_many_branches_cold_load_rocksdb,
+    realistic_r8_many_branches_cold_load_sqlite,
     realistic_r9_subscribed_write_path
 );
 criterion_main!(benches);
