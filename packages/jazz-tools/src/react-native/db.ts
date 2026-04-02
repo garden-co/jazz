@@ -59,13 +59,13 @@ export class Db extends RuntimeDb {
     return this.nativeClients.get(key)!;
   }
 
-  override updateAuth(jwtToken?: string): void {
+  override updateAuth(jwtToken: string | null): void {
     if (!this.applyAuthUpdate(jwtToken)) {
       return;
     }
 
     for (const client of this.nativeClients.values()) {
-      client.updateAuth(jwtToken);
+      client.updateAuth(jwtToken ?? undefined);
     }
   }
 

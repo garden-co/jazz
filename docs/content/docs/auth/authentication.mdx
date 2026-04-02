@@ -1,7 +1,7 @@
 ---
 title: Authentication
-description: "How and when to use Jazz's three different auth modes: anonymous, demo, and external JWTs."
-reviewedAt: "f6535a533"
+description: "How and when to use Jazz's three auth modes, and how to manage JWT auth over the lifetime of a live client."
+reviewedAt: "b129226f"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -158,6 +158,71 @@ For more details, the [Auth0 docs](https://auth0.com/docs/secure/tokens/json-web
     </include>
   </Tab>
 </Tabs>
+
+<Callout type="warn">
+  Use `jwtToken` in `JazzProvider` or `createDb(...)` for initial setup only. After the client is
+  created, update auth on the existing `Db` with `db.updateAuth(...)` instead of changing provider
+  config or remounting the provider.
+</Callout>
+
+### Managing JWT changes on a live client
+
+For sign-in, sign-out, token refresh, and token rotation, keep the same Jazz client alive and call
+`db.updateAuth(...)`:
+
+```ts
+const db = await createDb({
+  appId: "my-app",
+  serverUrl: "https://sync.example.com",
+  jwtToken: initialJwtToken,
+});
+
+auth.onTokenChange((jwtToken) => {
+  db.updateAuth(jwtToken ?? null);
+});
+```
+
+`updateAuth()` accepts only the JWT. Jazz re-derives the session from that token internally.
+
+- `db.updateAuth(jwt)` switches the live client to bearer auth with the new token.
+- `db.updateAuth(null)` clears bearer auth.
+
+If you change the `config` passed to `JazzProvider`, Jazz recreates the client. That is useful for a
+full reset, but it is not the recommended path for normal auth refresh and logout flows.
+
+### Reacting to expiry and unauthenticated responses
+
+Jazz exposes first-class auth state on `Db`:
+
+```ts
+const stop = db.onAuthChanged(async (state) => {
+  if (state.status !== "unauthenticated") return;
+
+  console.log(state.reason);
+  // "expired" | "missing" | "invalid" | "disabled"
+
+  const freshJwt = await auth.getFreshToken().catch(() => null);
+  db.updateAuth(freshJwt);
+});
+```
+
+You can also read the current snapshot synchronously with `db.getAuthState()`.
+
+When Jazz receives a structured unauthenticated response from the sync server, it:
+
+- transitions the client to `status: "unauthenticated"`
+- preserves the last known `session`
+- pauses authenticated sync and reconnects until the app calls `db.updateAuth(...)`
+
+This means app code should treat `authState.status` as the source of truth for whether Jazz is
+currently authenticated.
+
+<Callout type="info">
+  `useSession()` and `db.getAuthState().session` can still return the last known session while the
+  auth state is unauthenticated. That's intentional: it keeps user-scoped UI and local authorship
+  stable while your app refreshes or replaces the JWT. For signed-in vs signed-out UI, check
+  `db.getAuthState().status` instead of only checking whether a session exists.
+</Callout>
 
 ### Server configuration
 

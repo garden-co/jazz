@@ -15,8 +15,6 @@ function ChatShell() {
   const db = useDb();
   const session = db.getAuthState().session;
 
-  console.log("session", session);
-
   const role = typeof session?.claims?.role === "string" ? session.claims.role : null;
 
   async function handleSignIn(email: string, password: string) {
@@ -87,17 +85,6 @@ export function App() {
       userBranch: "main",
       serverUrl: SYNC_SERVER_URL,
       jwtToken: token,
-      driver: { type: "memory" },
-    };
-
-    const localAuth = getActiveSyntheticAuth(DEFAULT_APP_ID, { defaultMode: "anonymous" });
-    return {
-      appId: DEFAULT_APP_ID,
-      env: "dev",
-      userBranch: "main",
-      serverUrl: SYNC_SERVER_URL,
-      localAuthMode: localAuth.localAuthMode,
-      localAuthToken: localAuth.localAuthToken,
       driver: { type: "memory" },
     };
   }, []);
