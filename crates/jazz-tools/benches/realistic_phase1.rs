@@ -2379,6 +2379,45 @@ fn realistic_r8_many_branches_cold_load_rocksdb(c: &mut Criterion) {
 #[cfg(not(all(feature = "rocksdb", not(target_arch = "wasm32"))))]
 fn realistic_r8_many_branches_cold_load_rocksdb(_c: &mut Criterion) {}
 
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+fn realistic_r8_many_branches_cold_load_sqlite(c: &mut Criterion) {
+    let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
+    let scenario = load_r8_scenario(select_ci_path(
+        "benchmarks/realistic/scenarios/r8_many_branches.json",
+        "benchmarks/realistic/ci/scenarios/r8_many_branches.json",
+    ));
+    let benchmark_name = many_branches_benchmark_name(&scenario, &profile, "sqlite_cold_load");
+    let seeded = ManyBranchesSeededDb::new_sqlite(&scenario);
+
+    let mut group = c.benchmark_group("realistic_phase1/many_branches_cold_load_sqlite");
+    configure_group(&mut group, 10, 5);
+    group.throughput(Throughput::Elements(scenario.branch_count as u64));
+
+    group.bench_with_input(
+        BenchmarkId::from_parameter(benchmark_name),
+        &seeded,
+        |b, seeded| {
+            b.iter(|| {
+                let storage = SqliteStorage::open(&seeded.db_path)
+                    .expect("open sqlite for many-branches cold-load benchmark");
+                let mut manager = ObjectManager::new();
+                let object = manager
+                    .get_or_load(seeded.object_id, &storage, &seeded.branch_names)
+                    .expect("cold-load many-branches object");
+                let scan = scan_branch_heads(object, &seeded.prefix);
+                storage.flush();
+                storage.close().expect("close many-branches sqlite storage");
+                black_box(scan);
+            });
+        },
+    );
+
+    group.finish();
+}
+
+#[cfg(not(all(feature = "sqlite", not(target_arch = "wasm32"))))]
+fn realistic_r8_many_branches_cold_load_sqlite(_c: &mut Criterion) {}
+
 fn realistic_r9_subscribed_write_path(c: &mut Criterion) {
     let profile: ProfileConfig = load_json("benchmarks/realistic/profiles/s.json");
     let scenario = load_r9_scenario(select_ci_path(
