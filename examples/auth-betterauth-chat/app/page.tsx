@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { type DbConfig } from "jazz-tools";
-import { JazzProvider, getActiveSyntheticAuth, useSession } from "jazz-tools/react";
+import { JazzProvider, useDb, useSession } from "jazz-tools/react";
 import { ANNOUNCEMENTS_CHAT_ID, CHAT_ID, DEFAULT_APP_ID, SYNC_SERVER_URL } from "../constants";
 import { ChatPanel } from "../../auth-simple-chat/src/ChatPanel";
 import { AuthCard } from "../../auth-simple-chat/src/AuthCard";
@@ -70,34 +70,10 @@ function ChatShell() {
   );
 }
 
-export default function Page() {
+function BetterAuthJazzSync({ children }: React.PropsWithChildren<{}>) {
+  const db = useDb();
   const { data: authSession, isPending: authPending } = authClient.useSession();
-  const [token, setToken] = React.useState<string | null>(null);
   const [tokenPending, setTokenPending] = React.useState(true);
-
-  const config = React.useMemo((): DbConfig => {
-    if (token) {
-      return {
-        appId: DEFAULT_APP_ID,
-        env: "dev",
-        userBranch: "main",
-        serverUrl: SYNC_SERVER_URL,
-        jwtToken: token,
-        driver: { type: "memory" },
-      };
-    }
-
-    const localAuth = getActiveSyntheticAuth(DEFAULT_APP_ID, { defaultMode: "anonymous" });
-    return {
-      appId: DEFAULT_APP_ID,
-      env: "dev",
-      userBranch: "main",
-      serverUrl: SYNC_SERVER_URL,
-      localAuthMode: localAuth.localAuthMode,
-      localAuthToken: localAuth.localAuthToken,
-      driver: { type: "memory" },
-    };
-  }, [token]);
 
   React.useEffect(() => {
     if (authPending) {
@@ -105,7 +81,7 @@ export default function Page() {
     }
 
     if (!authSession?.session) {
-      setToken(null);
+      db.updateAuth(null);
       setTokenPending(false);
       return;
     }
@@ -119,24 +95,53 @@ export default function Page() {
         throw new Error(token.error.message ?? "Unable to get JWT token.");
       }
 
-      setToken(token.data.token);
+      db.updateAuth(token.data.token);
+
       setTokenPending(false);
     });
 
     return () => ac.abort();
   }, [authPending, authSession?.session?.id]);
 
+  React.useEffect(() => {
+    return db.onAuthChanged((state) => {
+      // if the sync server throws a 401
+      // we need to try issuing a new token
+      if (state.status === "unauthenticated") {
+        authClient.token().then((token) => {
+          if (token.error) {
+            throw new Error(token.error.message ?? "Unable to get JWT token.");
+          }
+
+          db.updateAuth(token.data.token);
+        });
+      }
+    });
+  }, [db]);
+
   if (authPending || tokenPending) {
     return <p className="loading-state">Connecting to BetterAuth...</p>;
   }
 
+  return children;
+}
+
+export default function Page() {
+  const config = React.useMemo((): DbConfig => {
+    return {
+      appId: DEFAULT_APP_ID,
+      env: "dev",
+      userBranch: "main",
+      serverUrl: SYNC_SERVER_URL,
+      driver: { type: "memory" },
+    };
+  }, []);
+
   return (
-    <JazzProvider
-      key={token ? "jwt" : "local"}
-      config={config}
-      fallback={<p className="loading-state">Connecting to Jazz...</p>}
-    >
-      <ChatShell />
+    <JazzProvider config={config} fallback={<p className="loading-state">Connecting to Jazz...</p>}>
+      <BetterAuthJazzSync>
+        <ChatShell />
+      </BetterAuthJazzSync>
     </JazzProvider>
   );
 }

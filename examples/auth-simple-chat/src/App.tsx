@@ -11,10 +11,6 @@ import { ChatPanel } from "./ChatPanel.js";
 import { AuthCard } from "./AuthCard.js";
 import { requestSignIn, requestSignUp } from "./api.js";
 
-type ChatShellProps = {
-  onTokenChange(token: string | null): void;
-};
-
 function ChatShell() {
   const db = useDb();
   const session = db.getAuthState().session;
@@ -38,14 +34,14 @@ function ChatShell() {
 
   function handleSignOut() {
     clearStoredAuthSession(DEFAULT_APP_ID);
-    db.updateAuth(undefined);
+    db.updateAuth(null);
   }
 
   React.useEffect(() => {
     return db.onAuthChanged((state) => {
       if (state.status === "unauthenticated") {
         clearStoredAuthSession(DEFAULT_APP_ID);
-        db.updateAuth(undefined);
+        db.updateAuth(null);
       }
     });
   }, [db]);

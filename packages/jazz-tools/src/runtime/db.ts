@@ -405,7 +405,8 @@ export class Db {
     this.authStateStore.markUnauthenticated(reason);
   }
 
-  protected applyAuthUpdate(jwtToken?: string): boolean {
+  protected applyAuthUpdate(token: string | null): boolean {
+    const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
     const previousState = this.authStateStore.getState();
     const nextState = this.authStateStore.applyJwtToken(jwtToken);
@@ -1027,7 +1028,7 @@ export class Db {
     return worker;
   }
 
-  updateAuth(jwtToken?: string): void {
+  updateAuth(jwtToken: string | null): void {
     this.applyAuthUpdate(jwtToken);
   }
 
@@ -1510,12 +1511,12 @@ class ClientBackedDb extends Db {
     super(config, null);
   }
 
-  override updateAuth(jwtToken?: string): void {
+  override updateAuth(jwtToken: string | null): void {
     if (!this.applyAuthUpdate(jwtToken)) {
       return;
     }
 
-    this.runtimeClient.updateAuth(jwtToken);
+    this.runtimeClient.updateAuth(jwtToken ?? undefined);
   }
 
   override insert<T, Init>(table: TableProxy<T, Init>, data: Init): T {
