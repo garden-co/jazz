@@ -4,6 +4,7 @@
 
 ### High
 
+- [**forward-inherits-select-bug**](todo/issues/forward-inherits-select-bug.md) — Forward `INHERITS VIA <fk>` select policies fail to expose child rows to sessions that should inherit access from the parent row.
 - [**stale-client-cache-after-scope-removal**](todo/issues/stale-client-cache-after-scope-removal.md) — When a row is deleted (or otherwise exits a query's result set) while a client has no active server-side subscription for that query, the client's local object manager retains stale data indefinitely. Subsequent one-shot `query()` calls with `tier: "edge"` return the stale row because the server never sends the deletion to the client — it considers the object "out of scope" and skips it.
 - [**test_multi-server-sync**](todo/issues/test_multi-server-sync.md) — Missing integration tests simulating client -> edge -> server communication topology.
 - [**update-inherits-policy-bug**](todo/issues/update-inherits-policy-bug.md) — UPDATE operations fail with PolicyDenied even when an INHERITS chain should grant access.
@@ -21,7 +22,6 @@
 ### Mvp
 
 - [**async-persistence-layer**](todo/ideas/1_mvp/async-persistence-layer.md) — Non-blocking persistence for mobile. The Storage trait is synchronous, so RN currently blocks the UI on I/O. We need an async boundary between Jazz and the persisted storage.
-- [**client-state-cleanup**](todo/ideas/1_mvp/client-state-cleanup.md) — Garbage collection of server-side state (sync cursors, query subscriptions, session records) for permanently disconnected clients.
 - [**complex-merge-strategies**](todo/ideas/1_mvp/complex-merge-strategies.md) — Per-column/per-table merge strategies beyond LWW (counters, sets, rich text, custom logic).
 - [**configurable-client-ttl**](todo/ideas/1_mvp/configurable-client-ttl.md) — Expose the client state TTL (how long a disconnected client's server-side state survives before reaping) as a configurable option per app. Currently hardcoded to 5 minutes in `ServerBuilder` with a `set_client_ttl` runtime setter that nothing calls outside of tests.
 - [**count-aggregation**](todo/ideas/1_mvp/count-aggregation.md) — Add terminal `.count()` queries for filtered relations, with the MVP limited to reactive `COUNT(*)` returning `{ count: number }`.
@@ -34,6 +34,6 @@
 
 ## Projects
 
-- [**client-state-lifecycle**](todo/projects/client-state-lifecycle/)
 - [**ordered-index-topk-query-path**](todo/projects/ordered-index-topk-query-path/)
 - [**storage-backend-alternatives**](todo/projects/storage-backend-alternatives/)
+- [**transport-protocol-upgrade**](todo/projects/transport-protocol-upgrade/)
