@@ -24,10 +24,12 @@ separate file. The `migrations/` directory holds reviewed migration stubs — se
 
 ## Table definitions
 
-Tables are defined in `schema.ts` using the Jazz DSL. Each `s.table(...)` call registers a table and `s.ref(...)` defines typed relations between them.
+Tables are defined in `schema.ts` using the Jazz DSL. A typical schema file imports the DSL,
+defines its tables, exports the typed `app`, and can derive helper types in the same module. Each
+`s.table(...)` call registers a table and `s.ref(...)` defines typed relations between them.
 
 <include cwd lang="ts" meta='title="schema.ts"'>
-  ../examples/docs/todo-client-localfirst-ts/schema.ts#schema-todo-client-ts
+  ../examples/docs/schema-defining-tables/schema.ts
 </include>
 
 <Callout type="warn">
@@ -46,12 +48,9 @@ If you need to clear local browser data after a schema change, see [How do I res
 
 ## Exporting the app
 
-`s.defineApp(schema)` converts your schema definition into a typed `app` object. This is what you
-pass to queries, mutations, and subscriptions throughout your application code.
-
-<include cwd lang="ts" meta='title="schema.ts"'>
-  ../examples/docs/todo-client-localfirst-ts/schema.ts#schema-define-app-ts
-</include>
+In the example above, `s.defineApp(schema)` converts your schema definition into a typed `app`
+object. This is what you pass to queries, mutations, and subscriptions throughout your application
+code.
 
 The `app` object has one typed table handle per table (e.g. `app.todos`, `app.projects`). Table handles are query builders&hairsp;—&hairsp;you chain `.where()`, `.include()`, `.orderBy()` and other methods directly on them.
 
