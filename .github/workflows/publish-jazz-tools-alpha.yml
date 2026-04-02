@@ -393,7 +393,7 @@ jobs:
 
   build-linux:
     name: Build CLI Linux (${{ matrix.arch }})
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [release-push-gate, resolve-preview-artifacts]
     if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     env:
@@ -700,7 +700,7 @@ jobs:
 
   build-rn-android:
     name: Build jazz-rn Android payload (${{ matrix.abi }})
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [release-push-gate, resolve-preview-artifacts]
     if: needs.release-push-gate.outputs.should_run == 'true' && needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
     strategy:
