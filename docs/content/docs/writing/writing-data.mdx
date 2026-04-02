@@ -1,7 +1,7 @@
 ---
 title: Writing Data
 description: Insert, update, and delete APIs with local-first execution, framework context hooks, and an intro to durability tiers.
-reviewedAt: "14cd73f0"
+reviewedAt: "4059cdef"
 ---
 
 ## Local-first writes
@@ -87,7 +87,7 @@ Required fields cannot be set to `null`.
 
 ## Write durability tiers
 
-When using `insertDurable`, `updateDurable`, or `deleteDurable`, you need to pass a tier as an option. The tier specified controls how far the mutation must propagate before the promise resolves: locally on the client (`worker`), the nearest edge server (`edge`), or the global core (`global`).
+When using `insertDurable`, `updateDurable`, or `deleteDurable`, you can pass a tier option to control how far the mutation must propagate before the promise resolves: locally on the client (`worker`), the nearest edge server (`edge`), or the global core (`global`). If omitted, the tier defaults based on environment (see table).
 
 | Tier     | Resolves when                       | Default for    |
 | -------- | ----------------------------------- | -------------- |
