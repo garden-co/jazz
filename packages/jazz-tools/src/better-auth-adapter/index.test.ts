@@ -102,6 +102,10 @@ describe("jazzAdapter", () => {
           .slice(1, 3)
           .map((row) => ({ id: row.id, email: row.email })),
       );
+      expect(rows.map((row) => Object.keys(row).sort())).toEqual([
+        ["email", "id"],
+        ["email", "id"],
+      ]);
 
       await expect(
         adapter.count({
