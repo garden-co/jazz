@@ -229,7 +229,7 @@ export async function writeTodoCrud(db: Db, todoId: string) {
   db.insert(app.todos, {
     title: "Write docs",
     done: false,
-    ownerId: EXAMPLE_OWNER_ID,
+    owner_id: EXAMPLE_OWNER_ID,
     projectId: EXAMPLE_PROJECT_ID,
   });
   db.update(app.todos, todoId, { done: true });
@@ -239,7 +239,7 @@ export async function writeTodoCrud(db: Db, todoId: string) {
 
 // #region writing-nullable-update-ts
 export function clearNullableTodoFields(db: Db, todoId: string) {
-  db.update(app.todos, todoId, { ownerId: null }); // clears the nullable FK
+  db.update(app.todos, todoId, { owner_id: null }); // clears the nullable FK
   db.update(app.todos, todoId, { description: undefined }); // leaves the field unchanged
 }
 // #endregion writing-nullable-update-ts
@@ -251,7 +251,7 @@ export async function writeTodoWithDurabilityTiers(db: Db) {
     {
       title: "Write docs with durability tier",
       done: false,
-      ownerId: EXAMPLE_OWNER_ID,
+      owner_id: EXAMPLE_OWNER_ID,
       projectId: EXAMPLE_PROJECT_ID,
     },
     { tier: "edge" },

@@ -62,7 +62,7 @@ export interface RunningServer extends TodoServer {
  */
 export async function createServer(dataPath?: string): Promise<TodoServer> {
   const dbPath = dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
-  const appId = process.env.JAZZ_APP_ID ?? "todo-server-ts";
+  const appId = process.env.JAZZ_APP_ID ?? "019d4349-244c-74d4-8573-8e1b24cf21e2";
 
   const context = createJazzContext({
     appId,
@@ -124,7 +124,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
         title: body.title,
         done: false,
         description: body.description?.trim(),
-        ownerId: body.owner_id ?? "anonymous",
+        owner_id: body.owner_id ?? "anonymous",
       });
 
       res.status(201).json(todo);

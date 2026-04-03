@@ -155,8 +155,6 @@ describe("Vanilla TS Todo App E2E", () => {
   // 3. Toggle todo
   // -------------------------------------------------------------------------
 
-  // TODO: fails — the TS app's toggle handler uses db.one(app.todos.where({ id }))
-  // which returns null. The React app avoids this by keeping the todo in scope.
   it("toggles a todo's done state via checkbox", async () => {
     const el = await mount({ driver: { type: "persistent", dbName: uniqueDbName("toggle") } });
 

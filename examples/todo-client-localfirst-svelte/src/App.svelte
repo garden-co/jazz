@@ -21,7 +21,7 @@
 
 	// #region context-setup-svelte
 	function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
-		const appId = overrides.appId ?? readEnvAppId() ?? 'todo-svelte-example';
+		const appId = overrides.appId ?? readEnvAppId() ?? '019d4349-2408-7275-9b65-ac87f62b7aa2';
 		const active = getActiveSyntheticAuth(appId, { defaultMode: 'demo' });
 
 		return {

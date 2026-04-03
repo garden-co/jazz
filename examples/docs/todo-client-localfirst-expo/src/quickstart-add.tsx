@@ -10,7 +10,7 @@ export function AddTodo() {
 
   const addTodo = () => {
     if (!title.trim() || !session) return;
-    db.insert(app.todos, { title, done: false, ownerId: session.user_id });
+    db.insert(app.todos, { title, done: false, owner_id: session.user_id });
     setTitle("");
   };
 

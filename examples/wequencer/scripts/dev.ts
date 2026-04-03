@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { TestingServer } from "jazz-tools/testing";
 
-const APP_ID = "00000000-0000-0000-0000-000000000099";
+const APP_ID = "019d4349-249b-7714-8b8d-217506ded909";
 const PORT = 4200;
 const ROOT = join(import.meta.dirname ?? __dirname, "..");
 

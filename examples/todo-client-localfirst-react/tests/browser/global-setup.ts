@@ -28,5 +28,6 @@ export async function setup(): Promise<void> {
 }
 
 export async function teardown(): Promise<void> {
-  await (await server)?.stop();
+  const s = await server;
+  await s?.stop();
 }

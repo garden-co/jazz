@@ -26,6 +26,7 @@
 	type LoadedPlayer = {
 		instrumentId: string;
 		player: Player | undefined;
+		blobUrl: string | undefined;
 	};
 
 	type ChannelStrip = {
@@ -40,16 +41,11 @@
 	const db = getDb();
 	const session = getSession();
 
-	// Subscriptions — unfiltered to enable cross-user sync, filtered client-side
-	const allJams = new QuerySubscription(app.jams);
-	const jam = $derived({ current: (allJams.current ?? []).filter((j) => j.id === jamId) });
-	const allBeats = new QuerySubscription(app.beats);
-	const beats = $derived({ current: (allBeats.current ?? []).filter((b) => b.jam === jamId) });
+	// Subscriptions — filtered server-side to the current jam
+	const jam = new QuerySubscription(app.jams.where({ id: jamId }));
+	const beats = new QuerySubscription(app.beats.where({ jamId }));
 	const instruments = new QuerySubscription(app.instruments.orderBy('display_order'));
-	const allParticipants = new QuerySubscription(app.participants);
-	const participants = $derived({
-		current: (allParticipants.current ?? []).filter((p) => p.jam === jamId),
-	});
+	const participants = new QuerySubscription(app.participants.where({ jamId }));
 
 	// Constants
 	// Beat count is reactive, read from jam row
@@ -120,7 +116,7 @@
 		loadedPlayers.forEach(({ instrumentId, player }) => {
 			if (
 				player &&
-				currentBeats.some((b) => b.instrument === instrumentId && b.beat_index === currBeat)
+				currentBeats.some((b) => b.instrumentId === instrumentId && b.beat_index === currBeat)
 			) {
 				player.start(time);
 			}
@@ -168,8 +164,9 @@
 	}
 
 	function cleanUpPlayers() {
-		loadedPlayers.forEach(({ player }) => {
+		loadedPlayers.forEach(({ player, blobUrl }) => {
 			player?.dispose();
+			if (blobUrl) URL.revokeObjectURL(blobUrl);
 		});
 		channelStrips.forEach(({ gain, panner }) => {
 			gain.dispose();
@@ -296,13 +293,13 @@
 
 		const userId = session.user_id;
 
-		db.all(app.participants.where({ jam: jamId, user_id: userId })).then((existing) => {
+		db.all(app.participants.where({ jamId: jamId, userId: userId })).then((existing) => {
 			if (existing.length === 0) {
 				const name = localStorage.getItem('wequencer-name') ?? getRandomName();
 				localStorage.setItem('wequencer-name', name);
 				db.insert(app.participants, {
-					jam: jamId,
-					user_id: userId,
+					jamId: jamId,
+					userId: userId,
 					display_name: name,
 				});
 			}
@@ -370,21 +367,19 @@
 				loadedPlayers.set(instrument.id, {
 					instrumentId: instrument.id,
 					player: undefined,
+					blobUrl: undefined,
 				});
 
 				db.loadFileAsBlob(app, instrument.soundFileId, { tier: 'edge' })
 					.then(async (blob) => {
 						const url = URL.createObjectURL(blob);
-						try {
-							return await loadPlayer(url, instrument.id);
-						} finally {
-							URL.revokeObjectURL(url);
-						}
+						return loadPlayer(url, instrument.id).then((player) => ({ player, url }));
 					})
-					.then((player) => {
+					.then(({ player, url }) => {
 						loadedPlayers.set(instrument.id, {
 							instrumentId: instrument.id,
 							player,
+							blobUrl: url,
 						});
 					})
 					.catch((err) => {

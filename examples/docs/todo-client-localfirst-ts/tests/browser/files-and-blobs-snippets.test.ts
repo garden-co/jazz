@@ -43,7 +43,7 @@ describe("files and blobs docs snippets", () => {
     expect(db.insertDurable).toHaveBeenCalledWith(
       app.uploads,
       {
-        ownerId: "local:example-owner",
+        owner_id: "local:example-owner",
         label: "Profile photo",
         fileId: "file-blob-1",
       },
@@ -65,7 +65,7 @@ describe("files and blobs docs snippets", () => {
     expect(db.insertDurable).toHaveBeenCalledWith(
       app.uploads,
       {
-        ownerId: "local:example-owner",
+        owner_id: "local:example-owner",
         label: "Camera import",
         fileId: "file-stream-1",
       },
@@ -77,7 +77,7 @@ describe("files and blobs docs snippets", () => {
     const db = makeDb();
     db.one.mockResolvedValueOnce({
       id: "upload-1",
-      ownerId: "local:example-owner",
+      owner_id: "local:example-owner",
       label: "x",
       fileId: "file-1",
     });
@@ -92,7 +92,7 @@ describe("files and blobs docs snippets", () => {
     const db = makeDb();
     db.one.mockResolvedValueOnce({
       id: "upload-1",
-      ownerId: "local:example-owner",
+      owner_id: "local:example-owner",
       label: "x",
       fileId: "file-1",
     });
@@ -108,7 +108,7 @@ describe("files and blobs docs snippets", () => {
     db.one
       .mockResolvedValueOnce({
         id: "upload-1",
-        ownerId: "local:example-owner",
+        owner_id: "local:example-owner",
         label: "x",
         fileId: "file-1",
       })

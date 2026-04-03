@@ -104,7 +104,7 @@ export async function writeWithDurabilityTier(db: Db, todoTitle: string) {
     {
       title: todoTitle,
       done: false,
-      ownerId: EXAMPLE_OWNER_ID,
+      owner_id: EXAMPLE_OWNER_ID,
       projectId: EXAMPLE_PROJECT_ID,
     },
     { tier: "worker" },

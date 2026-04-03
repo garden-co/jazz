@@ -1526,9 +1526,9 @@ export async function loadWasmModule(): Promise<WasmModule> {
   let nodeInitDone = false;
   if (typeof process !== "undefined" && process.versions?.node) {
     try {
-      const { existsSync, readFileSync } = await import("node:fs");
-      const { createRequire } = await import("node:module");
-      const { dirname, resolve } = await import("node:path");
+      const { existsSync, readFileSync } = await import(/* @vite-ignore */ "node:fs");
+      const { createRequire } = await import(/* @vite-ignore */ "node:module");
+      const { dirname, resolve } = await import(/* @vite-ignore */ "node:path");
 
       const require = createRequire(import.meta.url);
       const packageJsonPath = require.resolve("jazz-wasm/package.json");
