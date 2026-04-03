@@ -25,6 +25,9 @@ mod tests {
         assert_eq!(users["columns"][2]["name"], "email");
         assert_eq!(users["columns"][2]["column_type"]["type"], "Text");
         assert_eq!(users["columns"][2]["nullable"], true);
+        assert!(users["columns"][0].get("references").is_none());
+        assert!(users["columns"][1].get("references").is_none());
+        assert!(users["columns"][2].get("references").is_none());
         assert!(users["columns"][2].get("default").is_none());
     }
 }
