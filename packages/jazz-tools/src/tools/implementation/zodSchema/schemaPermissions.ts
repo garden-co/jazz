@@ -1,10 +1,8 @@
 import {
   Account,
-  CoValueCreateOptions,
-  CoValueCreateOptionsInternal,
   Group,
-  TypeSym,
   type GroupRole,
+  isAccountOrGroup,
 } from "../../internal.js";
 
 /**
@@ -189,7 +187,7 @@ export function withSchemaPermissions<T extends { owner?: Account | Group }>(
       ...(schemaRestrictDeletion ? { restrictDeletion: true } : {}),
     } as T & { onCreate?: OnCreateCallback };
   }
-  if (TypeSym in options) {
+  if (isAccountOrGroup(options)) {
     return {
       owner: options,
       onCreate,

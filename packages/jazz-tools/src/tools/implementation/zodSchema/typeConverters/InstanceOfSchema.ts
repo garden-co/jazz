@@ -14,6 +14,8 @@ import {
   CoreCoVectorSchema,
   FileStream,
   Group,
+  CoreSnapshotRefSchema,
+  SnapshotRef,
 } from "../../../internal.js";
 import { CoreGroupSchema } from "../schemaTypes/GroupSchema.js";
 import { CoreCoFeedSchema } from "../schemaTypes/CoFeedSchema.js";
@@ -70,11 +72,15 @@ export type InstanceOfSchema<S extends CoValueClass | AnyZodOrCoValueSchema> =
                       ? FileStream
                       : S extends CoreCoVectorSchema
                         ? Readonly<CoVector>
-                        : S extends CoreCoOptionalSchema<infer T>
-                          ? InstanceOrPrimitiveOfSchema<T> | undefined
-                          : S extends CoDiscriminatedUnionSchema<infer Members>
-                            ? InstanceOrPrimitiveOfSchema<Members[number]>
-                            : never
+                        : S extends CoreSnapshotRefSchema<infer T, any>
+                          ? SnapshotRef<InstanceOfSchema<T>>
+                          : S extends CoreCoOptionalSchema<infer T>
+                            ? InstanceOrPrimitiveOfSchema<T> | undefined
+                            : S extends CoDiscriminatedUnionSchema<
+                                  infer Members
+                                >
+                              ? InstanceOrPrimitiveOfSchema<Members[number]>
+                              : never
     : S extends CoValueClass
       ? InstanceType<S>
       : never;

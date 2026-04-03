@@ -1,7 +1,13 @@
 import clsx from "clsx";
 import { CoPlainText, ImageDefinition, Account } from "jazz-tools";
 import { Image, useCoState } from "jazz-tools/react";
-import { ImageIcon, SendIcon } from "lucide-react";
+import {
+  ImageIcon,
+  PencilIcon,
+  ReplyIcon,
+  SendIcon,
+  XIcon,
+} from "lucide-react";
 import { useId, useRef } from "react";
 import { inIframe } from "@/util.ts";
 
@@ -52,10 +58,15 @@ export function EmptyChatMessage() {
 export function BubbleContainer(props: {
   children: React.ReactNode;
   fromMe: boolean | undefined;
+  messageId?: string;
 }) {
   const align = props.fromMe ? "items-end" : "items-start";
   return (
-    <div className={`${align} flex flex-col m-3`} role="row">
+    <div
+      className={`${align} flex flex-col m-3`}
+      role="row"
+      data-message-id={props.messageId}
+    >
       {props.children}
     </div>
   );
@@ -69,7 +80,7 @@ export function BubbleBody(props: {
     <div
       className={clsx(
         "line-clamp-10 text-ellipsis whitespace-pre-wrap",
-        "rounded-2xl overflow-hidden max-w-[calc(100%-5rem)] shadow-sm p-1",
+        "rounded-2xl overflow-hidden shadow-sm p-1",
         props.fromMe
           ? "bg-white dark:bg-stone-900 dark:text-white"
           : "bg-blue text-white",
@@ -119,7 +130,7 @@ export function BubbleInfo(props: { by: string | undefined; madeAt: number }) {
 
 export function InputBar(props: { children: React.ReactNode }) {
   return (
-    <div className="px-3 pb-3 pt-1 bg-stone-100 mt-auto flex gap-1 dark:bg-transparent dark:border-stone-900">
+    <div className="px-3 pb-3 pt-1 bg-stone-100 mt-auto flex flex-col gap-1 dark:bg-transparent dark:border-stone-900">
       {props.children}
     </div>
   );
@@ -161,9 +172,15 @@ export function ImageInput({
   );
 }
 
-export function TextInput(props: { onSubmit: (text: string) => void }) {
+export function TextInput(props: {
+  onSubmit: (text: string) => void;
+  onCancel?: () => void;
+  inputRef?: React.RefObject<HTMLInputElement | null>;
+  placeholder?: string;
+}) {
   const inputId = useId();
-  const inputRef = useRef<HTMLInputElement>(null);
+  const internalRef = useRef<HTMLInputElement>(null);
+  const inputRef = props.inputRef ?? internalRef;
 
   const handleSubmit = () => {
     const input = inputRef.current;
@@ -181,11 +198,11 @@ export function TextInput(props: { onSubmit: (text: string) => void }) {
         ref={inputRef}
         id={inputId}
         className="rounded-full h-10 px-4 border border-stone-400 block w-full placeholder:text-stone-500 dark:bg-stone-925 dark:text-white dark:border-stone-900"
-        placeholder="Message"
+        placeholder={props.placeholder ?? "Message"}
         maxLength={2048}
         onKeyDown={({ key }) => {
-          if (key !== "Enter") return;
-          handleSubmit();
+          if (key === "Enter") handleSubmit();
+          else if (key === "Escape" && props.onCancel) props.onCancel();
         }}
       />
 
@@ -197,6 +214,84 @@ export function TextInput(props: { onSubmit: (text: string) => void }) {
         className="text-stone-500 dark:text-stone-400 absolute right-1 top-1/2 -translate-y-1/2 h-8 w-8 grid place-items-center cursor-pointer rounded-full hover:bg-stone-100 hover:text-stone-800 dark:hover:bg-stone-900 dark:hover:text-stone-200 transition-colors"
       >
         <SendIcon className="size-4" />
+      </button>
+    </div>
+  );
+}
+
+export function BubbleActions(props: {
+  fromMe: boolean | undefined;
+  onReply: () => void;
+  onEdit?: () => void;
+}) {
+  return (
+    <div className="absolute -top-3 right-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity flex bg-white dark:bg-stone-800 rounded-full shadow-sm border border-stone-200 dark:border-stone-700">
+      <button
+        type="button"
+        onClick={props.onReply}
+        className="p-1.5 text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-200 hover:bg-stone-100 dark:hover:bg-stone-700 rounded-full transition-colors cursor-pointer"
+        title="Reply"
+        aria-label="Reply to message"
+      >
+        <ReplyIcon size={14} />
+      </button>
+      {props.onEdit && (
+        <button
+          type="button"
+          onClick={props.onEdit}
+          className="p-1.5 text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-200 hover:bg-stone-100 dark:hover:bg-stone-700 rounded-full transition-colors cursor-pointer"
+          title="Edit"
+          aria-label="Edit message"
+        >
+          <PencilIcon size={14} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+export function ReplyPreviewBubble(props: {
+  text: string;
+  fromMe: boolean;
+  onClick?: () => void;
+}) {
+  return (
+    <div
+      className={clsx(
+        "mx-2 mt-1.5 px-2 py-1 text-xs rounded border-l-2 truncate",
+        props.fromMe
+          ? "opacity-70 bg-black/5 dark:bg-white/10 border-blue"
+          : "opacity-80 bg-white/15 border-white/50",
+        props.onClick && "cursor-pointer",
+      )}
+      onClick={props.onClick}
+    >
+      {props.text}
+    </div>
+  );
+}
+
+export function InputBarBanner(props: {
+  label: string;
+  text?: string;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-stone-600 dark:text-stone-400 bg-stone-200/50 dark:bg-stone-800/50 rounded-lg">
+      <span className="font-medium shrink-0">{props.label}</span>
+      {props.text && (
+        <span className="truncate flex-1 text-stone-500 dark:text-stone-500">
+          {props.text}
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={props.onCancel}
+        className="ml-auto shrink-0 text-stone-400 hover:text-stone-700 dark:hover:text-stone-200 cursor-pointer transition-colors"
+        title="Cancel"
+        aria-label="Cancel"
+      >
+        <XIcon size={14} />
       </button>
     </div>
   );

@@ -524,6 +524,19 @@ export function isAnonymousAgentInstance(
   return TypeSym in instance && instance[TypeSym] === "Anonymous";
 }
 
+export function isAccountOrGroup(
+  instance: unknown,
+): instance is Account | Group {
+  if (typeof instance !== "object" || instance === null) {
+    return false;
+  }
+
+  return (
+    TypeSym in instance &&
+    (instance[TypeSym] === "Account" || instance[TypeSym] === "Group")
+  );
+}
+
 export type CoValueCreateOptions<
   MoreOptions extends object = {},
   Owner extends Group | Account = Group,
@@ -576,25 +589,15 @@ export function parseCoValueCreateOptions(
     };
   }
 
-  if (TypeSym in options) {
-    if (options[TypeSym] === "Account") {
-      const owner = accountOrGroupToGroup(options);
-      onCreate?.(owner);
-      return {
-        owner,
-        uniqueness: undefined,
-        firstComesWins: false,
-        restrictDeletion: undefined,
-      };
-    } else if (options[TypeSym] === "Group") {
-      onCreate?.(options);
-      return {
-        owner: options,
-        uniqueness: undefined,
-        firstComesWins: false,
-        restrictDeletion: undefined,
-      };
-    }
+  if (isAccountOrGroup(options)) {
+    const owner = accountOrGroupToGroup(options);
+    onCreate?.(owner);
+    return {
+      owner,
+      uniqueness: undefined,
+      firstComesWins: false,
+      restrictDeletion: undefined,
+    };
   }
 
   const firstComesWins = options.firstComesWins ?? false;
@@ -638,7 +641,7 @@ export function parseGroupCreateOptions(
     return { owner: activeAccountContext.get() };
   }
 
-  if (TypeSym in options && isAccountInstance(options)) {
+  if (isAccountInstance(options)) {
     return { owner: options };
   }
 
@@ -652,8 +655,9 @@ export function getIdFromHeader(
 ) {
   loadAs ||= activeAccountContext.get();
 
-  const node =
-    loadAs[TypeSym] === "Anonymous" ? loadAs.node : loadAs.$jazz.localNode;
+  const node = isAnonymousAgentInstance(loadAs)
+    ? loadAs.node
+    : loadAs.$jazz.localNode;
 
   return cojsonInternals.idforHeader(header, node.crypto);
 }
@@ -760,8 +764,9 @@ export async function internalLoadUnique<
 ): Promise<Settled<Resolved<V, R>>> {
   const loadAs = options.owner.$jazz.loadedAs;
 
-  const node =
-    loadAs[TypeSym] === "Anonymous" ? loadAs.node : loadAs.$jazz.localNode;
+  const node = isAnonymousAgentInstance(loadAs)
+    ? loadAs.node
+    : loadAs.$jazz.localNode;
 
   const header = getUniqueHeader(
     options.type,

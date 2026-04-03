@@ -14,7 +14,6 @@ import {
   SubscribeCallback,
   SubscribeListenerOptions,
   coOptionalDefiner,
-  CoValueCursor,
   LoadCoValueCursorOption,
 } from "../../../internal.js";
 import { z } from "../zodReExport.js";

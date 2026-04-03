@@ -3,6 +3,7 @@ import type { CoreCoFeedSchema } from "./schemaTypes/CoFeedSchema.js";
 import type { CoreCoListSchema } from "./schemaTypes/CoListSchema.js";
 import type { CoreCoMapSchema } from "./schemaTypes/CoMapSchema.js";
 import type { CoreCoValueSchema } from "./schemaTypes/CoValueSchema.js";
+import type { SnapshotRefSchema } from "./schemaTypes/SnapshotRefSchema.js";
 
 type ConstructorWithSchema<S extends CoreCoValueSchema = CoreCoValueSchema> = {
   name?: string;
@@ -38,7 +39,8 @@ type CoValueSchema =
   | CoreCoMapSchema
   | CoreCoListSchema
   | CoreCoFeedSchema
-  | CoreAccountSchema;
+  | CoreAccountSchema
+  | SnapshotRefSchema;
 
 export function assertCoValueSchema<
   T extends CoValueSchema["builtin"],

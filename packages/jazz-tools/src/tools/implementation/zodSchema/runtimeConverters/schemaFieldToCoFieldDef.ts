@@ -111,7 +111,7 @@ function unsupportedZodTypeError(schema: SchemaField): Error {
   );
 }
 
-function resolveCoSchemaField(
+export function resolveCoSchemaField(
   schema: CoreCoValueSchema & { getCoValueClass: () => CoValueClass },
 ): Schema {
   return {

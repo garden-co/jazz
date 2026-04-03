@@ -23,6 +23,8 @@ import {
   hydrateCoreCoValueSchema,
   isAnyCoValueSchema,
   isCoValueClass,
+  ResolveQuery,
+  RefsToResolveStrict,
 } from "../../internal.js";
 import { removeGetters } from "../schemaUtils.js";
 import {
@@ -31,6 +33,10 @@ import {
   createCoreCoDiscriminatedUnionSchema,
 } from "./schemaTypes/CoDiscriminatedUnionSchema.js";
 import { CoOptionalSchema } from "./schemaTypes/CoOptionalSchema.js";
+import {
+  SnapshotRefSchema,
+  createCoreSnapshotRefSchema,
+} from "./schemaTypes/SnapshotRefSchema.js";
 import type { CoreCoValueSchema } from "./schemaTypes/CoValueSchema.js";
 import {
   RichTextSchema,
@@ -240,4 +246,15 @@ export const coDiscriminatedUnionDefiner = <
     schemas,
   );
   return hydrateCoreCoValueSchema(coreSchema);
+};
+
+export const snapshotRefDefiner = <
+  S extends CoreCoValueSchema,
+  const R extends ResolveQuery<S> = true,
+>(
+  schema: S,
+  options?: { cursorResolve?: RefsToResolveStrict<S, R> },
+): SnapshotRefSchema<S, R> => {
+  const coreSchema = createCoreSnapshotRefSchema(schema, options);
+  return hydrateCoreCoValueSchema(coreSchema) as SnapshotRefSchema<S, R>;
 };

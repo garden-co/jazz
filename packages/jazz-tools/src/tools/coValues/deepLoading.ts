@@ -157,7 +157,20 @@ export type RefsToResolve<
                 | boolean
             : V extends { [TypeSym]: "CoPlainText" | "BinaryCoStream" }
               ? boolean | OnError
-              : boolean);
+              : V extends {
+                    [TypeSym]: "SnapshotRef";
+                    ref: infer Item;
+                  }
+                ?
+                    | ({
+                        ref: RefsToResolve<
+                          AsLoaded<Item>,
+                          DepthLimit,
+                          [0, ...CurrentDepth]
+                        >;
+                      } & OnError)
+                    | boolean
+                : boolean);
 
 export type RefsToResolveStrict<T, V> = [V] extends [RefsToResolve<T>]
   ? RefsToResolve<T>
@@ -268,28 +281,46 @@ export type DeeplyLoaded<
               CoMapLikeLoaded<V, Depth, DepthLimit, CurrentDepth>
         : [V] extends [
               {
-                [TypeSym]: "CoStream";
-                byMe: CoFeedEntry<infer Item> | undefined;
+                [TypeSym]: "SnapshotRef";
+                ref: infer Item;
               },
             ]
-          ? // Deeply loaded CoStream
-            {
-              byMe?: { value: AsLoaded<Item> };
-              inCurrentSession?: { value: AsLoaded<Item> };
-              perSession: {
-                [key: SessionID]: { value: AsLoaded<Item> };
-              };
-            } & { [key: ID<Account>]: { value: AsLoaded<Item> } } & V // same reason as in CoList
+          ? Depth extends { ref: infer ItemDepth }
+            ? {
+                readonly ref:
+                  | DeeplyLoaded<
+                      AsLoaded<Item>,
+                      ItemDepth,
+                      DepthLimit,
+                      [0, ...CurrentDepth]
+                    >
+                  | OnErrorResolvedValue<AsLoaded<Item>, ItemDepth>;
+              } & V
+            : V
           : [V] extends [
                 {
-                  [TypeSym]: "BinaryCoStream";
+                  [TypeSym]: "CoStream";
+                  byMe: CoFeedEntry<infer Item> | undefined;
                 },
               ]
-            ? V
+            ? // Deeply loaded CoStream
+              {
+                byMe?: { value: AsLoaded<Item> };
+                inCurrentSession?: { value: AsLoaded<Item> };
+                perSession: {
+                  [key: SessionID]: { value: AsLoaded<Item> };
+                };
+              } & { [key: ID<Account>]: { value: AsLoaded<Item> } } & V // same reason as in CoList
             : [V] extends [
                   {
-                    [TypeSym]: "CoPlainText";
+                    [TypeSym]: "BinaryCoStream";
                   },
                 ]
               ? V
-              : never;
+              : [V] extends [
+                    {
+                      [TypeSym]: "CoPlainText";
+                    },
+                  ]
+                ? V
+                : never;

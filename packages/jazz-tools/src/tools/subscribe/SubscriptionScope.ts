@@ -792,7 +792,11 @@ export class SubscriptionScope<D extends CoValue> {
     // This helps alot with correctness when triggering the autoloading while rendering components (on React and Svelte)
     this.silenceUpdates = true;
 
-    if (value[TypeSym] === "CoMap" || value[TypeSym] === "Account") {
+    if (
+      value[TypeSym] === "CoMap" ||
+      value[TypeSym] === "Account" ||
+      value[TypeSym] === "SnapshotRef"
+    ) {
       const map = value as unknown as CoMap;
 
       this.loadCoMapKey(map, key, true);
@@ -918,7 +922,8 @@ export class SubscriptionScope<D extends CoValue> {
       if (
         coValueType === "CoMap" ||
         coValueType === "Account" ||
-        coValueType === "Group"
+        coValueType === "Group" ||
+        coValueType === "SnapshotRef"
       ) {
         const map = value as unknown as CoMap;
         const keys =
@@ -1036,7 +1041,11 @@ export class SubscriptionScope<D extends CoValue> {
 
     if (isRefEncoded(descriptor)) {
       if (id) {
-        this.loadChildNode(id, depth, descriptor, key);
+        const cursor = descriptor.isSnapshot
+          ? (map.$jazz.raw.get("cursor") as CoValueCursor)
+          : undefined;
+
+        this.loadChildNode(id, depth, descriptor, key, cursor);
         this.validationErrors.delete(key);
 
         return id;
@@ -1105,6 +1114,7 @@ export class SubscriptionScope<D extends CoValue> {
     query: RefsToResolve<any>,
     descriptor: RefEncoded<any>,
     key?: string,
+    cursorOverride?: CoValueCursor,
   ) {
     if (this.isSubscribedToId(id)) {
       return;
@@ -1135,6 +1145,14 @@ export class SubscriptionScope<D extends CoValue> {
       this.pendingAutoloadedChildren.add(id);
     }
 
+    let subscriptionCursor: typeof this._cursor | CoValueCursor = this._cursor;
+
+    if (cursorOverride) {
+      subscriptionCursor = cursorOverride;
+    } else if (isAutoloaded) {
+      subscriptionCursor = undefined;
+    }
+
     const child = new SubscriptionScope(
       this.node,
       resolve,
@@ -1143,7 +1161,7 @@ export class SubscriptionScope<D extends CoValue> {
       this.skipRetry,
       this.bestEffortResolution,
       this.unstable_branch,
-      isAutoloaded ? undefined : this._cursor,
+      subscriptionCursor,
     );
     this.childNodes.set(id, child);
     child.setListener((value) => this.handleChildUpdate(id, value, key));

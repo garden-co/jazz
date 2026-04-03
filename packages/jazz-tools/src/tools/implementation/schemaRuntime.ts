@@ -29,6 +29,7 @@ export type RefEncoded<V extends CoValue> = {
   ref: CoValueClass<V> | ((raw: RawCoValue) => CoValueClass<V>);
   optional: boolean;
   permissions?: RefPermissions;
+  isSnapshot?: boolean;
 };
 
 export function isRefEncoded<V extends CoValue>(

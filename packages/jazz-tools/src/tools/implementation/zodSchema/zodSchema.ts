@@ -11,7 +11,7 @@ import {
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
-  Simplify,
+  SnapshotRefSchema,
 } from "../../internal.js";
 import {
   AccountSchema,
@@ -46,6 +46,7 @@ import {
   CoreRichTextSchema,
   RichTextSchema,
 } from "./schemaTypes/RichTextSchema.js";
+import { CoreSnapshotRefSchema } from "./schemaTypes/SnapshotRefSchema.js";
 import { InstanceOfSchemaCoValuesMaybeLoaded } from "./typeConverters/InstanceOfSchemaCoValuesMaybeLoaded.js";
 import { z } from "./zodReExport.js";
 import { CoreGroupSchema } from "./schemaTypes/GroupSchema.js";
@@ -88,7 +89,12 @@ export type CoValueSchemaFromCoreSchema<S extends CoreCoValueSchema> =
                               infer Members
                             >
                           ? CoDiscriminatedUnionSchema<Members>
-                          : never;
+                          : S extends CoreSnapshotRefSchema<
+                                infer Inner,
+                                infer R
+                              >
+                            ? SnapshotRefSchema<Inner, R>
+                            : never;
 
 export type CoValueClassFromAnySchema<S extends CoValueClassOrSchema> =
   S extends CoValueClass<any>
@@ -114,7 +120,8 @@ export type AnyCoreCoValueSchema =
   | CorePlainTextSchema
   | CoreRichTextSchema
   | CoreFileStreamSchema
-  | CoreCoVectorSchema;
+  | CoreCoVectorSchema
+  | CoreSnapshotRefSchema<any, any>;
 
 export type AnyZodSchema = z.core.$ZodType;
 
