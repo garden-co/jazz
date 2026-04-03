@@ -38,7 +38,7 @@ server = [
 ]
 cli = ["server", "rocksdb", "dep:clap"]
 test-utils = ["server", "client", "sqlite"]
-test = ["test-utils"]
+test = ["test-utils", "cli"]
 otel = [
   "cli",
   "dep:opentelemetry",
