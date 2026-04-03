@@ -1,9 +1,10 @@
 import { Account } from "jazz-tools";
 import { createImage } from "jazz-tools/media";
 import { useSuspenseAccount, useSuspenseCoState } from "jazz-tools/react";
-import { useState } from "react";
-import { Chat, Message } from "./schema.ts";
+import { useRef, useState } from "react";
+import { Chat, Message, MessageSnapshot } from "./schema.ts";
 import {
+  BubbleActions,
   BubbleBody,
   BubbleContainer,
   BubbleImage,
@@ -13,6 +14,8 @@ import {
   EmptyChatMessage,
   ImageInput,
   InputBar,
+  InputBarBanner,
+  ReplyPreviewBubble,
   TextInput,
 } from "./ui.tsx";
 import { useCoStates } from "jazz-tools/react-core";
@@ -25,6 +28,9 @@ export function ChatScreen(props: { chatID: string }) {
   const [showNLastMessages, setShowNLastMessages] = useState(
     INITIAL_MESSAGES_TO_SHOW,
   );
+  const [replyingTo, setReplyingTo] = useState<Message | null>(null);
+  const [editingMessage, setEditingMessage] = useState<Message | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const messageIds = Array.from(chat.$jazz.refs)
     // We call slice before reverse to avoid mutating the original array
@@ -57,13 +63,65 @@ export function ChatScreen(props: { chatID: string }) {
     });
   };
 
+  const handleReply = (msg: Message) => {
+    setEditingMessage(null);
+    setReplyingTo(msg);
+    if (inputRef.current) {
+      inputRef.current.value = "";
+      inputRef.current.focus();
+    }
+  };
+
+  const handleEdit = (msg: Message) => {
+    setReplyingTo(null);
+    setEditingMessage(msg);
+    if (inputRef.current) {
+      inputRef.current.value = msg.text.toString();
+      inputRef.current.focus();
+    }
+  };
+
+  const handleCancelReply = () => {
+    setReplyingTo(null);
+    inputRef.current?.focus();
+  };
+
+  const handleCancelEdit = () => {
+    setEditingMessage(null);
+    if (inputRef.current) {
+      inputRef.current.value = "";
+      inputRef.current.focus();
+    }
+  };
+
+  const handleSubmit = async (text: string) => {
+    if (editingMessage) {
+      editingMessage.text.$jazz.applyDiff(text);
+      setEditingMessage(null);
+    } else if (replyingTo) {
+      const snapshot = await MessageSnapshot.create(replyingTo, {
+        owner: chat.$jazz.owner,
+      });
+      chat.$jazz.push({ text, replyOf: snapshot });
+      setReplyingTo(null);
+    } else {
+      chat.$jazz.push({ text });
+    }
+  };
+
   return (
     <>
       <ChatBody>
         {messages.length > 0 ? (
           messages.map((msg) =>
             msg.$isLoaded ? (
-              <ChatBubble me={me} msg={msg} key={msg.$jazz.id} />
+              <ChatBubble
+                me={me}
+                msg={msg}
+                key={msg.$jazz.id}
+                onReply={handleReply}
+                onEdit={handleEdit}
+              />
             ) : null,
           )
         ) : (
@@ -80,28 +138,110 @@ export function ChatScreen(props: { chatID: string }) {
       </ChatBody>
 
       <InputBar>
-        <ImageInput onImageChange={sendImage} />
-
-        <TextInput
-          onSubmit={(text) => {
-            chat.$jazz.push({ text });
-          }}
-        />
+        {replyingTo && (
+          <InputBarBanner
+            label="Replying to"
+            text={replyingTo.text.toString()}
+            onCancel={handleCancelReply}
+          />
+        )}
+        {editingMessage && (
+          <InputBarBanner label="Editing message" onCancel={handleCancelEdit} />
+        )}
+        <div className="flex gap-1">
+          {!editingMessage && <ImageInput onImageChange={sendImage} />}
+          <TextInput
+            inputRef={inputRef}
+            onSubmit={handleSubmit}
+            onCancel={
+              editingMessage
+                ? handleCancelEdit
+                : replyingTo
+                  ? handleCancelReply
+                  : undefined
+            }
+            placeholder={
+              editingMessage
+                ? "Edit message..."
+                : replyingTo
+                  ? "Reply..."
+                  : "Message"
+            }
+          />
+        </div>
       </InputBar>
     </>
   );
 }
 
-function ChatBubble({ me, msg }: { me: Account; msg: Message }) {
+function ChatBubble({
+  me,
+  msg,
+  onReply,
+  onEdit,
+}: {
+  me: Account;
+  msg: Message;
+  onReply: (msg: Message) => void;
+  onEdit: (msg: Message) => void;
+}) {
   const fromMe = msg.$jazz.createdBy === me.$jazz.id;
+  const isEdited =
+    msg.text.$jazz.raw.core.latestTxMadeAt >
+    msg.text.$jazz.raw.core.earliestTxMadeAt;
 
   return (
-    <BubbleContainer fromMe={fromMe}>
+    <BubbleContainer fromMe={fromMe} messageId={msg.$jazz.id}>
       <BubbleInfo by={msg.$jazz.createdBy} madeAt={msg.$jazz.createdAt} />
-      <BubbleBody fromMe={fromMe}>
-        {msg.image ? <BubbleImage image={msg.image} /> : null}
-        <BubbleText text={msg.text} />
-      </BubbleBody>
+      <div className="group relative max-w-[calc(100%-5rem)]">
+        <BubbleBody fromMe={fromMe}>
+          {msg.replyOf ? (
+            <ReplyContext replyOf={msg.replyOf} fromMe={fromMe} />
+          ) : null}
+          {msg.image ? <BubbleImage image={msg.image} /> : null}
+          <BubbleText text={msg.text} />
+          {isEdited ? (
+            <div className="text-right text-xs opacity-70 mr-2">Edited</div>
+          ) : null}
+        </BubbleBody>
+        <BubbleActions
+          fromMe={fromMe}
+          onReply={() => onReply(msg)}
+          onEdit={fromMe ? () => onEdit(msg) : undefined}
+        />
+      </div>
     </BubbleContainer>
+  );
+}
+
+function ReplyContext({
+  replyOf,
+  fromMe,
+}: {
+  replyOf: MessageSnapshot;
+  fromMe: boolean;
+}) {
+  const scrollToOriginal = () => {
+    const el = document.querySelector(
+      `[data-message-id="${replyOf.ref.$jazz.id}"]`,
+    );
+    if (!el) return;
+
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.animate(
+      [
+        { backgroundColor: "rgba(59,130,246,0.3)" },
+        { backgroundColor: "transparent" },
+      ],
+      { duration: 2500, easing: "ease-out" },
+    );
+  };
+
+  return (
+    <ReplyPreviewBubble
+      text={replyOf.ref.text.toString()}
+      fromMe={fromMe}
+      onClick={scrollToOriginal}
+    />
   );
 }
