@@ -1,4 +1,4 @@
-import type { Account, CoMap, Group } from "../internal.js";
+import { Account, CoMap, Group } from "../internal.js";
 
 /**
  * Regisering schemas into this Record to avoid circular dependencies.

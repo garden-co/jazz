@@ -17,6 +17,7 @@ export * from "./coValues/coPlainText.js";
 export * from "./coValues/coRichText.js";
 export * from "./coValues/schemaUnion.js";
 export * from "./coValues/coVector.js";
+export * from "./coValues/snapshotRef.js";
 
 export type * from "./subscribe/types.js";
 
@@ -38,6 +39,7 @@ export * from "./implementation/zodSchema/zodSchema.js";
 export * from "./implementation/zodSchema/zodCo.js";
 export * as co from "./implementation/zodSchema/coExport.js";
 export * from "./implementation/zodSchema/schemaTypes/CoMapSchema.js";
+export * from "./implementation/zodSchema/schemaTypes/SnapshotRefSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/CoDiscriminatedUnionSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/CoRecordSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/CoListSchema.js";

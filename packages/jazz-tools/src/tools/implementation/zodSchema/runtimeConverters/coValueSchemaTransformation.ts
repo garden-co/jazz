@@ -18,11 +18,13 @@ import {
   schemaUnionClassFromDiscriminator,
   isCoValueClass,
   CoVector as CoVectorClass,
+  SnapshotRef as SnapshotRefClass,
 } from "../../../internal.js";
 
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
 import { RichTextSchema } from "../schemaTypes/RichTextSchema.js";
 import { GroupSchema } from "../schemaTypes/GroupSchema.js";
+import { SnapshotRefSchema } from "../schemaTypes/SnapshotRefSchema.js";
 import { schemaUnionDiscriminatorFor } from "../unionUtils.js";
 import {
   AnyCoreCoValueSchema,
@@ -72,6 +74,14 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
   } else if (schema.builtin === "CoMap") {
     const coValueClass = class _CoMap extends CoMapClass {};
     coValueClass.coValueSchema = new CoMapSchema(
+      schema as any,
+      coValueClass as any,
+    );
+
+    return coValueClass.coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
+  } else if (schema.builtin === "SnapshotRef") {
+    const coValueClass = class _SnapshotRef extends SnapshotRefClass {};
+    coValueClass.coValueSchema = new SnapshotRefSchema(
       schema as any,
       coValueClass as any,
     );

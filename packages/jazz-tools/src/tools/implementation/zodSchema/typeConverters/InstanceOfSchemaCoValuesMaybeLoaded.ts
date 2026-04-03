@@ -18,6 +18,7 @@ import {
   FileStream,
   Group,
   MaybeLoaded,
+  SnapshotRef,
 } from "../../../internal.js";
 import { CoreCoOptionalSchema } from "../schemaTypes/CoOptionalSchema.js";
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
@@ -25,6 +26,7 @@ import { CoreFileStreamSchema } from "../schemaTypes/FileStreamSchema.js";
 import { CorePlainTextSchema } from "../schemaTypes/PlainTextSchema.js";
 import { CoreRichTextSchema } from "../schemaTypes/RichTextSchema.js";
 import { CoreGroupSchema } from "../schemaTypes/GroupSchema.js";
+import { CoreSnapshotRefSchema } from "../schemaTypes/SnapshotRefSchema.js";
 import { z } from "../zodReExport.js";
 import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "./InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
 
@@ -82,17 +84,23 @@ export type InstanceOfSchemaCoValuesMaybeLoaded<
                     ? MaybeLoaded<FileStream>
                     : S extends CoreCoVectorSchema
                       ? MaybeLoaded<Readonly<CoVector>>
-                      : S extends CoreCoOptionalSchema<infer Inner>
-                        ?
-                            | InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<Inner>
-                            | undefined
-                        : S extends CoreCoDiscriminatedUnionSchema<
-                              infer Members
+                      : S extends CoreSnapshotRefSchema<infer Inner, any>
+                        ? MaybeLoaded<
+                            SnapshotRef<
+                              InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<Inner>
                             >
-                          ? InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<
-                              Members[number]
-                            >
-                          : never
+                          >
+                        : S extends CoreCoOptionalSchema<infer Inner>
+                          ?
+                              | InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<Inner>
+                              | undefined
+                          : S extends CoreCoDiscriminatedUnionSchema<
+                                infer Members
+                              >
+                            ? InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<
+                                Members[number]
+                              >
+                            : never
   : S extends CoValueClass
     ? MaybeLoaded<InstanceType<S>>
     : never;

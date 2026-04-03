@@ -8,6 +8,7 @@ export { PlainTextSchema as PlainText } from "./schemaTypes/PlainTextSchema.js";
 export { RichTextSchema as RichText } from "./schemaTypes/RichTextSchema.js";
 export { FileStreamSchema as FileStream } from "./schemaTypes/FileStreamSchema.js";
 export { CoVectorSchema as Vector } from "./schemaTypes/CoVectorSchema.js";
+export { SnapshotRefSchema as Snapshot } from "./schemaTypes/SnapshotRefSchema.js";
 export { CoInput as input } from "./typeConverters/CoFieldSchemaInit.js";
 export {
   AccountSchema as Account,
@@ -25,6 +26,7 @@ export {
   coRichTextDefiner as richText,
   coFileStreamDefiner as fileStream,
   coVectorDefiner as vector,
+  snapshotRefDefiner as snapshotRef,
   coImageDefiner as image,
   coAccountDefiner as account,
   coGroupDefiner as group,
