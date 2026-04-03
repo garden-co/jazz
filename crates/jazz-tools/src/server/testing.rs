@@ -30,6 +30,8 @@ pub struct TestingServerBuilder {
     data_dir: Option<PathBuf>,
     schema: Option<Schema>,
     persistent_storage: bool,
+    sqlite_storage: bool,
+    rocksdb_storage: bool,
     admin_secret: Option<String>,
     backend_secret: Option<String>,
     jwks_url: Option<String>,
@@ -62,6 +64,24 @@ impl TestingServerBuilder {
     }
 
     pub fn with_persistent_storage(mut self) -> Self {
+        self.persistent_storage = true;
+        self
+    }
+
+    /// Use SQLite as the server storage backend, regardless of which other
+    /// storage features are compiled in.  Implies persistent storage.
+    #[cfg(feature = "sqlite")]
+    pub fn with_sqlite_storage(mut self) -> Self {
+        self.sqlite_storage = true;
+        self.persistent_storage = true;
+        self
+    }
+
+    /// Use RocksDB as the server storage backend, regardless of which other
+    /// storage features are compiled in.  Implies persistent storage.
+    #[cfg(feature = "rocksdb")]
+    pub fn with_rocksdb_storage(mut self) -> Self {
+        self.rocksdb_storage = true;
         self.persistent_storage = true;
         self
     }
@@ -162,6 +182,8 @@ impl TestingServer {
             data_dir,
             schema,
             persistent_storage,
+            sqlite_storage,
+            rocksdb_storage,
             admin_secret,
             backend_secret,
             jwks_url,
@@ -193,12 +215,15 @@ impl TestingServer {
             admin_secret: Some(admin_secret.clone()),
         };
 
-        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
-        server_builder = if persistent_storage {
-            server_builder.with_persistent_storage(data_dir.to_string_lossy().into_owned())
-        } else {
-            server_builder.with_in_memory_storage()
-        };
+        let server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
+        let data_dir_str = data_dir.to_string_lossy().into_owned();
+        let mut server_builder = apply_storage_mode(
+            server_builder,
+            data_dir_str,
+            persistent_storage,
+            sqlite_storage,
+            rocksdb_storage,
+        );
 
         if let Some(schema) = schema {
             server_builder = server_builder.with_schema(schema);
@@ -452,6 +477,31 @@ fn prepare_data_dir(data_dir: Option<PathBuf>) -> (PathBuf, Option<OwnedTempDir>
             let temp_dir = OwnedTempDir::new("jazz-tools-testing-server");
             (temp_dir.path().to_path_buf(), Some(temp_dir))
         }
+    }
+}
+
+/// Applies the storage mode flags from [`TestingServerBuilder`] to a
+/// [`ServerBuilder`].  Kept as a free function to avoid nested `#[cfg]`
+/// blocks inside `start_from_builder`.
+fn apply_storage_mode(
+    builder: ServerBuilder,
+    data_dir: String,
+    persistent: bool,
+    #[allow(unused_variables)] sqlite: bool,
+    #[allow(unused_variables)] rocksdb: bool,
+) -> ServerBuilder {
+    #[cfg(feature = "sqlite")]
+    if sqlite {
+        return builder.with_sqlite_storage(data_dir);
+    }
+    #[cfg(feature = "rocksdb")]
+    if rocksdb {
+        return builder.with_rocksdb_storage(data_dir);
+    }
+    if persistent {
+        builder.with_persistent_storage(data_dir)
+    } else {
+        builder.with_in_memory_storage()
     }
 }
 

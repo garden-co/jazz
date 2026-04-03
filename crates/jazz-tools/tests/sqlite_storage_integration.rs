@@ -1,4 +1,4 @@
-#![cfg(all(feature = "test", feature = "rocksdb"))]
+#![cfg(feature = "test")]
 
 mod support;
 
@@ -101,15 +101,12 @@ async fn make_client_external_jwks(
     client
 }
 
-/// Single entry point — all subtests run sequentially so only one RocksDB
+/// Single entry point — all subtests run sequentially so only one SQLite
 /// server instance exists at a time (avoids file-descriptor exhaustion).
 #[tokio::test]
-async fn rocksdb_server_storage() {
+async fn sqlite_server_storage() {
     // --- shared-server subtests ---
-    let server = TestingServer::builder()
-        .with_rocksdb_storage()
-        .start()
-        .await;
+    let server = TestingServer::builder().with_sqlite_storage().start().await;
 
     large_dataset_correctness(&server).await;
     update_and_delete(&server).await;
@@ -128,7 +125,7 @@ async fn rocksdb_server_storage() {
 /// correct, unique titles.
 ///
 /// ```text
-/// alice ──create 200 todos──► server (fjall)
+/// alice ──create 200 todos──► server (sqlite)
 ///                                 │
 ///                  bob connects and queries
 ///                                 │
@@ -199,7 +196,7 @@ async fn large_dataset_correctness(server: &TestingServer) {
 /// surviving, updated state.
 ///
 /// ```text
-/// alice ──create 5──► update 3 titles──► delete 2──► server (fjall)
+/// alice ──create 5──► update 3 titles──► delete 2──► server (sqlite)
 ///                                                        │
 ///                                         bob connects and queries
 ///                                                        │
@@ -308,7 +305,7 @@ async fn update_and_delete(server: &TestingServer) {
 /// latest value.
 ///
 /// ```text
-/// alice ──create + update ×200──► server (fjall)
+/// alice ──create + update ×200──► server (sqlite)
 ///                                     │
 ///                      bob connects and queries
 ///                                     │
@@ -389,7 +386,7 @@ async fn deep_update_history(server: &TestingServer) {
 /// into "notes" and vice versa.
 ///
 /// ```text
-/// alice ──create 5 todos + 3 notes──► server (fjall)
+/// alice ──create 5 todos + 3 notes──► server (sqlite)
 ///                                         │
 ///                          bob queries each table separately
 ///                                         │
@@ -516,7 +513,7 @@ async fn multi_table_isolation(server: &TestingServer) {
 /// filter_eq and filter_gt return correct results through the server.
 ///
 /// ```text
-/// alice ──create 20 products──► server (fjall)
+/// alice ──create 20 products──► server (sqlite)
 ///                                   │
 ///                    bob queries with filters
 ///                                   │
@@ -631,7 +628,7 @@ async fn index_queries(server: &TestingServer) {
 /// data. Alice then creates more rows and Bob sees the combined set.
 ///
 /// ```text
-/// alice ──create 10──► server₁ (fjall, data_dir)
+/// alice ──create 10──► server₁ (sqlite, data_dir)
 ///                          │
 ///                      server₁ stops
 ///                          │
@@ -650,7 +647,7 @@ async fn restart_preserves_data() {
 
     // --- server₁ ---
     let server1 = TestingServer::builder()
-        .with_rocksdb_storage()
+        .with_sqlite_storage()
         .with_data_dir(data_dir.path())
         .with_jwks_url(jwks.endpoint())
         .start()
@@ -699,7 +696,7 @@ async fn restart_preserves_data() {
 
     // --- server₂ (same data_dir) ---
     let server2 = TestingServer::builder()
-        .with_rocksdb_storage()
+        .with_sqlite_storage()
         .with_data_dir(data_dir.path())
         .with_jwks_url(jwks.endpoint())
         .start()
@@ -785,7 +782,7 @@ async fn restart_preserves_data() {
 /// server needing to re-discover the schema.
 ///
 /// ```text
-/// alice ──create + query──► server₁ (fjall, data_dir)
+/// alice ──create + query──► server₁ (sqlite, data_dir)
 ///                               │
 ///                           server₁ stops
 ///                               │
@@ -801,7 +798,7 @@ async fn catalogue_manifest_survives_restart() {
     let schema = todos_schema();
 
     let server1 = TestingServer::builder()
-        .with_rocksdb_storage()
+        .with_sqlite_storage()
         .with_data_dir(data_dir.path())
         .with_jwks_url(jwks.endpoint())
         .start()
@@ -839,7 +836,7 @@ async fn catalogue_manifest_survives_restart() {
 
     // Restart with same data_dir — catalogue manifest should be rehydrated.
     let server2 = TestingServer::builder()
-        .with_rocksdb_storage()
+        .with_sqlite_storage()
         .with_data_dir(data_dir.path())
         .with_jwks_url(jwks.endpoint())
         .start()
