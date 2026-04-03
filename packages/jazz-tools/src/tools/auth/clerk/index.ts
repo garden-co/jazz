@@ -118,6 +118,12 @@ export class JazzClerkAuth {
 
     await this.authenticate(credentials);
 
+    await Account.getMe().$jazz.ensureLoaded({
+      resolve: {
+        profile: true,
+      },
+    });
+
     await JazzClerkAuth.loadClerkAuthData(
       {
         jazzAccountID: credentials.accountID,
