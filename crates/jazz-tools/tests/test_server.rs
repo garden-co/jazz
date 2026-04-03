@@ -1,4 +1,4 @@
-#![cfg(feature = "cli")]
+#![cfg(any(feature = "cli", feature = "server"))]
 
 //! Test server infrastructure for self-spawning integration tests.
 //!

@@ -23,13 +23,11 @@ runtime-tokio = ["dep:tokio"]
 transport = []
 transport-http = ["transport", "dep:reqwest", "dep:base64", "dep:bytes"]
 client = ["runtime-tokio", "transport-http", "dep:thiserror", "dep:tokio"]
-cli = [
+server = [
   "runtime-tokio",
   "transport",
-  "rocksdb",
   "dep:tokio",
   "dep:axum",
-  "dep:clap",
   "dep:tracing-subscriber",
   "dep:tower-http",
   "dep:async-stream",
@@ -38,7 +36,8 @@ cli = [
   "dep:bytes",
   "dep:reqwest",
 ]
-test-utils = ["cli", "client"]
+cli = ["server", "rocksdb", "dep:clap"]
+test-utils = ["server", "client", "sqlite"]
 test = ["test-utils"]
 otel = [
   "cli",

@@ -63,6 +63,13 @@ pub struct SqliteStorage {
     inner: RefCell<Option<SqliteInner>>,
 }
 
+// `rusqlite::Connection` is `Send` (it holds no thread-local state). The
+// `RefCell` wrapper makes `SqliteStorage` `!Send` by default, but callers
+// are expected to access it exclusively through an outer `Mutex` (e.g.
+// `Mutex<RuntimeCore<SqliteStorage, …>>`), so cross-thread access is
+// serialised and the `RefCell` is never accessed concurrently.
+unsafe impl Send for SqliteStorage {}
+
 impl SqliteStorage {
     /// Compute the lexicographic successor of `prefix` for use as an
     /// exclusive upper bound. Same logic as RocksDB's `prefix_upper_bound`.
