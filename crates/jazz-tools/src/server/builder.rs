@@ -14,8 +14,6 @@ use crate::routes;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
 use crate::server::{CatalogueAuthorityMode, DynStorage, ExternalIdentityStore, ServerState};
-#[cfg(all(feature = "fjall", not(feature = "rocksdb"), not(feature = "sqlite")))]
-use crate::storage::FjallStorage;
 #[cfg(feature = "rocksdb")]
 use crate::storage::RocksDBStorage;
 #[cfg(feature = "sqlite")]
@@ -255,15 +253,6 @@ impl ServerBuilder {
                     })?;
                     Ok(Box::new(storage))
                 }
-                #[cfg(all(feature = "fjall", not(feature = "rocksdb"), not(feature = "sqlite")))]
-                {
-                    let db_path = Path::new(data_dir).join("jazz.fjall");
-                    let storage =
-                        FjallStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES).map_err(|e| {
-                            format!("failed to open storage '{}': {e:?}", db_path.display())
-                        })?;
-                    Ok(Box::new(storage))
-                }
             }
             #[cfg(feature = "sqlite")]
             ServerStorageMode::PersistentSqlite { data_dir } => {
@@ -313,15 +302,6 @@ impl ServerBuilder {
                     let storage = SqliteStorage::open(&db_path).map_err(|e| {
                         format!("failed to open meta storage '{}': {e:?}", db_path.display())
                     })?;
-                    ExternalIdentityStore::new_with_storage(Box::new(storage))
-                }
-                #[cfg(all(feature = "fjall", not(feature = "rocksdb"), not(feature = "sqlite")))]
-                {
-                    let db_path = meta_dir.join("jazz.fjall");
-                    let storage =
-                        FjallStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES).map_err(|e| {
-                            format!("failed to open meta storage '{}': {e:?}", db_path.display())
-                        })?;
                     ExternalIdentityStore::new_with_storage(Box::new(storage))
                 }
             }

@@ -13,8 +13,6 @@ use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
 use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_manifest};
-#[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
-use crate::storage::FjallStorage;
 #[cfg(feature = "rocksdb")]
 use crate::storage::RocksDBStorage;
 use crate::storage::{MemoryStorage, Storage, StorageError};
@@ -676,8 +674,6 @@ mod tests {
     use crate::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
     use crate::schema_manager::AppId;
     use crate::storage::CatalogueManifestOp;
-    #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
-    use crate::storage::FjallStorage;
     #[cfg(feature = "rocksdb")]
     use crate::storage::RocksDBStorage;
     use crate::{ColumnType, ObjectId, SchemaBuilder, TableSchema};
@@ -758,12 +754,6 @@ mod tests {
             let db_path = data_dir.join("jazz.rocksdb");
             RocksDBStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
         };
-        #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
-        let storage = {
-            let db_path = data_dir.join("jazz.fjall");
-            FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
-        };
-
         let bundled_schema = declared_todo_schema();
         let learned_schema = learned_runtime_todo_schema();
         let bundled_hash = SchemaHash::compute(&bundled_schema);
@@ -832,11 +822,6 @@ mod tests {
         let storage = {
             let db_path = context.data_dir.join("jazz.rocksdb");
             RocksDBStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
-        };
-        #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
-        let storage = {
-            let db_path = context.data_dir.join("jazz.fjall");
-            FjallStorage::open(&db_path, 64 * 1024 * 1024).expect("open seeded client storage")
         };
         let schema_manager = build_client_schema_manager(&storage, context)
             .expect("rehydrate client schema manager");
@@ -1194,11 +1179,7 @@ async fn open_persistent_storage(data_dir: &std::path::Path) -> Result<DynStorag
     {
         Ok(Box::new(open_rocksdb_storage(data_dir).await?))
     }
-    #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
-    {
-        Ok(Box::new(open_fjall_storage(data_dir).await?))
-    }
-    #[cfg(not(any(feature = "rocksdb", feature = "fjall")))]
+    #[cfg(not(feature = "rocksdb"))]
     {
         tracing::warn!("no persistent storage backend enabled, falling back to MemoryStorage");
         Ok(Box::new(MemoryStorage::new()))
@@ -1244,46 +1225,4 @@ async fn open_rocksdb_storage(data_dir: &std::path::Path) -> Result<RocksDBStora
             last_err
         ))
     })
-}
-
-#[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
-async fn open_fjall_storage(data_dir: &std::path::Path) -> Result<FjallStorage> {
-    const MAX_ATTEMPTS: usize = 100;
-    const RETRY_DELAY_MS: u64 = 25;
-
-    std::fs::create_dir_all(data_dir)?;
-
-    let db_path = data_dir.join("jazz.fjall");
-    let mut opened = None;
-    let mut last_err = None;
-
-    for attempt in 0..MAX_ATTEMPTS {
-        match FjallStorage::open(&db_path, 64 * 1024 * 1024) {
-            Ok(storage) => {
-                opened = Some(storage);
-                break;
-            }
-            Err(err) => {
-                let is_lock_error = matches!(
-                    &err,
-                    StorageError::IoError(msg)
-                        if msg.contains("lock") || msg.contains("Lock") || msg.contains("busy")
-                );
-                if !is_lock_error || attempt + 1 == MAX_ATTEMPTS {
-                    last_err = Some(err);
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-            }
-        }
-    }
-
-    if let Some(storage) = opened {
-        Ok(storage)
-    } else {
-        let err = last_err.unwrap_or_else(|| {
-            StorageError::IoError("fjall open failed without error details".to_string())
-        });
-        Err(JazzError::Storage(format!("{:?}", err)))
-    }
 }

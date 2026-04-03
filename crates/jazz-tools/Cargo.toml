@@ -17,13 +17,12 @@ required-features = ["cli"]
 
 [features]
 default = []
-fjall = ["dep:fjall"]
 rocksdb = ["dep:rocksdb"]
 sqlite = ["dep:rusqlite"]
 runtime-tokio = ["dep:tokio"]
 transport = []
 transport-http = ["transport", "dep:reqwest", "dep:base64", "dep:bytes"]
-client = ["runtime-tokio", "transport-http", "rocksdb", "dep:thiserror", "dep:tokio"]
+client = ["runtime-tokio", "transport-http", "dep:thiserror", "dep:tokio"]
 cli = [
   "runtime-tokio",
   "transport",
@@ -73,7 +72,6 @@ ahash = "0.8"
 sha2 = "0.10"
 
 tokio = { version = "1", features = ["full"], optional = true }
-fjall = { version = "3.0.2", optional = true }
 rocksdb = { version = "0.24", default-features = false, features = ["lz4", "zstd"], optional = true }
 rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 
