@@ -93,30 +93,39 @@ See **[WebSocket Transport Spec](../../specs/todo/a_mvp/websocket_transport.md)*
 ┌──────────────────────────────────────────────────────┐
 │  RuntimeCore<S, Sch>  (no more SyncSender generic)   │
 │                                                      │
-│  batched_tick() → TransportHandle.send(entry)        │
-│    └── mpsc channel push [non-blocking, FIFO]        │
+│  batched_tick():                                     │
+│    drain inbound_rx → park messages                  │
+│    drain outbox → outbox_tx.send() [channel push]    │
 │                                                      │
-│  park_sync_message() ← called by TransportManager    │
-└──────────────┬─────────────────┬─────────────────────┘
-               │ channel         │ direct call
+│  TransportHandle                                     │
+│  ├── outbox_tx  (RuntimeCore → TransportManager)     │
+│  └── inbound_rx (TransportManager → RuntimeCore)     │
+└──────────────┬─────────────────▲─────────────────────┘
+               │ channel (out)   │ channel (in)
                ▼                 │
 ┌──────────────────────────────────────────────────────┐
-│  TransportManager<W: WebSocketAdapter>               │
-│  (async task, platform-spawned)                      │
+│  TransportManager<W: StreamAdapter, T: TickNotifier> │
+│  (async task, no RuntimeCore reference)              │
 │                                                      │
-│  Send loop: channel.recv() → serialize → ws.send()   │
-│  Recv loop: ws.recv() → deserialize → park_message() │
+│  Send loop: outbox_rx.recv() → serialize → ws.send() │
+│  Recv loop: ws.recv() → deserialize                  │
+│             → inbound_tx.send() + tick.notify()      │
+│                                                      │
 │  Reconnection, auth handshake, heartbeat             │
 │                                                      │
-│  WebSocketAdapter impls:                             │
-│  ├── NativeWebSocket (tokio-tungstenite)             │
+│  StreamAdapter impls:                                │
+│  ├── NativeWsStream (tokio-tungstenite)              │
 │  │   used by: NAPI, React Native, server, tests     │
-│  └── WasmWebSocket (web-sys::WebSocket)              │
+│  └── WasmWsStream (web-sys::WebSocket)               │
 │      used by: browser WASM                           │
+│                                                      │
+│  TickNotifier impls (~5 LOC each):                   │
+│  ├── WasmTickNotifier (clones WasmScheduler)         │
+│  └── NativeTickNotifier (clones NAPI/RN scheduler)   │
 └──────────────────────────────────────────────────────┘
 ```
 
-**What gets deleted:** `JsSyncSender`, `NapiSyncSender`, `RnSyncSender`, `SyncSender` trait, `onSyncMessageToSend()` callback, `onSyncMessageReceived()` JS→Rust call, `sync-transport.ts` (650+ LOC), `StreamController`, `sendSyncPayloadBatch()`, `readBinaryFrames()`, `reqwest`-based transport.
+**What gets deleted:** `JsSyncSender`, `NapiSyncSender`, `RnSyncSender`, `SyncSender` trait, network-facing JS in `sync-transport.ts`, `StreamController`, `sendSyncPayloadBatch()`, `readBinaryFrames()`, `reqwest`-based transport.
 
 **Single bidirectional connection for sync (both transports):**
 

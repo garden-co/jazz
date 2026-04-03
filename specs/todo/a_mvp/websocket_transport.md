@@ -18,51 +18,46 @@ The current SSE + HTTP POST transport has three issues:
 
 Today `RuntimeCore<S, Sch, Sy>` is generic over `SyncSender` — a trait that hands messages to JS via callbacks. JS then does the actual network I/O. This means transport logic is split between Rust (outbox draining) and JS (HTTP POST, SSE parsing, reconnection).
 
-The new design replaces `SyncSender` with a channel-based `TransportHandle`. A separate `TransportManager` async task owns the WebSocket connection and runs send/recv loops. All transport logic — framing, reconnection, auth, heartbeat — lives in Rust.
+The new design replaces `SyncSender` with channel-based communication. `TransportManager` is a standalone async task that talks to `RuntimeCore` exclusively through two channels. It has no reference to RuntimeCore, no lock, no borrow — just channels in, channels out. This eliminates lock contention between the JS thread and the background transport thread (NAPI/RN) and borrow conflicts (WASM).
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  RuntimeCore<S, Sch>                                            │
-│                                                                 │
-│  Scheduler (unchanged)                                          │
-│  ├── schedule_batched_tick() — platform event loop              │
-│  └── batched_tick():                                            │
-│       ├── drain outbox → TransportHandle.send() [channel push]  │
-│       └── process parked inbound messages                       │
-│                                                                 │
-│  TransportHandle (replaces SyncSender)                          │
-│  └── send(OutboxEntry) → mpsc::UnboundedSender                  │
-│       non-blocking, FIFO — preserves write order                │
-│                                                                 │
-│  park_sync_message(InboxEntry) ← called by TransportManager     │
-└──────────────────┬───────────────────┬──────────────────────────┘
-                   │ channel (outbound)│ direct call (inbound)
+┌──────────────────────────────────────────────────────────────────┐
+│  RuntimeCore<S, Sch>                                             │
+│                                                                  │
+│  Scheduler (unchanged)                                           │
+│  ├── schedule_batched_tick() — platform event loop               │
+│  └── batched_tick():                                             │
+│       ├── drain inbound channel → park messages                  │
+│       ├── drain outbox → outbound channel push                   │
+│       └── handle_sync_messages() + immediate_tick()              │
+│                                                                  │
+│  TransportHandle (replaces SyncSender)                           │
+│  ├── outbox_tx: mpsc::UnboundedSender<OutboxEntry>               │
+│  └── inbound_rx: mpsc::UnboundedReceiver<InboxEntry>             │
+└──────────────────┬───────────────────▲───────────────────────────┘
+                   │ channel (out)     │ channel (in)
                    ▼                   │
-┌──────────────────────────────────────┴──────────────────────────┐
-│  TransportManager<W: WebSocketAdapter>                          │
-│  (async task, spawned per platform)                             │
-│                                                                 │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │ Send loop                                               │    │
-│  │   mpsc::Receiver<OutboxEntry> → serialize → ws.send()   │    │
-│  │   FIFO: channel order = wire order = server arrival     │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                 │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │ Recv loop                                               │    │
-│  │   ws.recv() → deserialize → runtime.park_sync_message() │    │
-│  │   → scheduler.schedule_batched_tick()                    │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                                                                 │
-│  Reconnection state machine                                     │
-│  Auth handshake (first message after connect)                   │
-│  Heartbeat (WebSocket ping/pong)                                │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────┴───────────────────────────┐
+│  TransportManager<W: StreamAdapter>                              │
+│  (async task, spawned per platform — no RuntimeCore reference)   │
+│                                                                  │
+│  Send loop:                                                      │
+│    outbox_rx.recv() → serialize → ws.send()                      │
+│    FIFO: channel order = wire order = server arrival             │
+│                                                                  │
+│  Recv loop:                                                      │
+│    ws.recv() → deserialize → inbound_tx.send(entry)              │
+│    then notify scheduler via tick_notify                         │
+│                                                                  │
+│  Reconnection, auth handshake, heartbeat                         │
+└──────────────────────────────────────────────────────────────────┘
 ```
+
+When TransportManager pushes an inbound message to the channel, it also signals the scheduler to run `batched_tick()`. This signal is a per-platform tick notifier (~5 lines) — the only platform-specific piece besides the `StreamAdapter`.
 
 ### What changes in RuntimeCore
 
-`RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender>` becomes `RuntimeCore<S: Storage, Sch: Scheduler>`. The `SyncSender` generic parameter is removed. The runtime holds a `TransportHandle` (concrete type, not generic — it's just a channel sender).
+`RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender>` becomes `RuntimeCore<S: Storage, Sch: Scheduler>`. The `SyncSender` generic is removed. The runtime holds a `TransportHandle` — a concrete type containing both channel endpoints.
 
 ```rust
 // Before
@@ -80,24 +75,68 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler> {
 }
 ```
 
-`batched_tick()` changes from calling `self.sync_sender.send_sync_message(msg)` to calling `self.transport.send(msg)` — which is a non-blocking channel push.
-
 ### TransportHandle
 
 ```rust
-/// Replaces SyncSender. Concrete type on all platforms — just a channel sender.
+/// Replaces SyncSender. Concrete type on all platforms.
+/// Holds both ends of the transport channels that RuntimeCore uses.
 pub struct TransportHandle {
     outbox_tx: mpsc::UnboundedSender<OutboxEntry>,
-}
-
-impl TransportHandle {
-    pub fn send(&self, msg: OutboxEntry) {
-        // Non-blocking push. If the receiver is dropped (connection lost),
-        // messages buffer until reconnection establishes a new channel.
-        let _ = self.outbox_tx.send(msg);
-    }
+    inbound_rx: mpsc::UnboundedReceiver<InboxEntry>,
 }
 ```
+
+### batched_tick() changes
+
+```rust
+pub fn batched_tick(&mut self) {
+    // 1. Drain inbound channel → park messages
+    if let Some(ref mut transport) = self.transport {
+        while let Ok(msg) = transport.inbound_rx.try_recv() {
+            self.parked_sync_messages.push(msg);
+        }
+    }
+
+    // 2. Drain outbox → push to outbound channel
+    let outbox = self.sync_manager_mut().take_outbox();
+    if let Some(ref transport) = self.transport {
+        for msg in outbox {
+            let _ = transport.outbox_tx.send(msg);
+        }
+    }
+
+    // 3. Process parked sync messages (unchanged)
+    self.handle_sync_messages();
+
+    // 4. Flush post-process outbox
+    let outbox = self.sync_manager_mut().take_outbox();
+    if let Some(ref transport) = self.transport {
+        for msg in outbox {
+            let _ = transport.outbox_tx.send(msg);
+        }
+    }
+
+    self.storage.flush_wal();
+}
+```
+
+### Tick notification
+
+When TransportManager pushes to the inbound channel, it needs to tell the scheduler "there's new data — run batched_tick()". This is a per-platform tick notifier:
+
+```rust
+/// Platform-specific: notifies the scheduler that inbound messages arrived.
+/// Needed because TransportManager has no reference to RuntimeCore or Scheduler.
+pub trait TickNotifier: Send {
+    fn notify(&self);
+}
+```
+
+| Platform | Implementation                                                                                                                                    |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WASM     | Holds clone of `WasmScheduler` (Rc-based, !Send — but same thread). Calls `schedule_batched_tick()`.                                              |
+| NAPI     | Holds clone of `NapiScheduler` (Arc-based, Send). Calls `schedule_batched_tick()` from background thread → TSFN dispatches to JS thread.          |
+| RN       | Holds clone of `RnScheduler` (Arc-based, Send). Calls `schedule_batched_tick()` from background thread → UniFFI callback dispatches to JS thread. |
 
 ### StreamAdapter trait
 
@@ -160,24 +199,23 @@ pub trait MultiStreamAdapter: Sized {
 }
 ```
 
-When we add multi-stream, `TransportManager` gains stream routing logic (which message types go to which stream), but the **channel architecture is unchanged** — RuntimeCore still pushes to `outbox_tx` and drains `inbound_rx`. Stream multiplexing is internal to TransportManager.
+When we add multi-stream, `TransportManager` gains stream routing logic (which message types go to which stream), but the **outbound channel and RuntimeHandle are unchanged**. Stream multiplexing is internal to TransportManager.
 
 ### TransportManager
 
-The core transport logic. Generic over `WebSocketAdapter`, lives in `jazz-tools` core.
+The core transport logic. Generic over `StreamAdapter` and `TickNotifier`. Lives in `jazz-tools` core — one implementation shared across all platforms. Has no reference to RuntimeCore.
 
 ```rust
-pub struct TransportManager<W: WebSocketAdapter> {
+pub struct TransportManager<W: StreamAdapter, T: TickNotifier> {
     url: String,
     auth: AuthConfig,
     outbox_rx: mpsc::UnboundedReceiver<OutboxEntry>,
-    // Weak reference to RuntimeCore for parking inbound messages
-    runtime: RuntimeRef,
-    // Reconnection state
+    inbound_tx: mpsc::UnboundedSender<InboxEntry>,
+    tick: T,
     reconnect: ReconnectState,
 }
 
-impl<W: WebSocketAdapter> TransportManager<W> {
+impl<W: StreamAdapter, T: TickNotifier> TransportManager<W, T> {
     /// Main loop. Runs until explicitly stopped.
     pub async fn run(mut self) {
         loop {
@@ -194,10 +232,44 @@ impl<W: WebSocketAdapter> TransportManager<W> {
     }
 
     async fn run_connected(&mut self, mut ws: W) {
-        // Two concurrent loops via select!:
-        // 1. outbox_rx.recv() → serialize frame → ws.send()
-        // 2. ws.recv() → deserialize → runtime.park_sync_message()
+        loop {
+            select! {
+                // Outbound: channel → WebSocket
+                msg = self.outbox_rx.recv() => {
+                    let Some(entry) = msg else { break }; // channel closed = disconnect
+                    let frame = serialize(entry);
+                    if ws.send(&frame).await.is_err() { break }
+                }
+                // Inbound: WebSocket → channel → notify scheduler
+                frame = ws.recv() => {
+                    match frame {
+                        Ok(Some(data)) => {
+                            let entry = deserialize(&data);
+                            let _ = self.inbound_tx.send(entry);
+                            self.tick.notify(); // triggers schedule_batched_tick()
+                        }
+                        _ => break, // connection closed or error
+                    }
+                }
+            }
+        }
     }
+}
+
+/// Constructor — returns both halves
+pub fn create<W: StreamAdapter, T: TickNotifier>(
+    url: String,
+    auth: AuthConfig,
+    tick: T,
+) -> (TransportHandle, TransportManager<W, T>) {
+    let (outbox_tx, outbox_rx) = mpsc::unbounded_channel();
+    let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
+    let handle = TransportHandle { outbox_tx, inbound_rx };
+    let manager = TransportManager {
+        url, auth, outbox_rx, inbound_tx, tick,
+        reconnect: ReconnectState::new(),
+    };
+    (handle, manager)
 }
 ```
 
@@ -241,11 +313,13 @@ Server sends ServerEvent (SyncUpdate, Connected, etc.)
 TransportManager recv loop:
   ws.recv() → binary frame
   ├── deserialize → InboxEntry
-  ├── runtime.park_sync_message(entry)
-  └── scheduler.schedule_batched_tick()
+  ├── inbound_tx.send(entry)         [channel push]
+  └── tick.notify()                  [triggers schedule_batched_tick()]
   │
   ▼ (platform event loop fires)
 RuntimeCore.batched_tick()
+  ├── inbound_rx.try_recv() loop     [drain inbound channel]
+  │     └── push each to parked_sync_messages
   ├── handle_sync_messages()
   │     └── apply parked messages → push to SyncManager inbox
   └── immediate_tick()
@@ -424,21 +498,19 @@ JS event loop                            WASM (same thread)
                                           select! resumes: ws.recv() has data.
                                           ├── deserializes frame → InboxEntry
                                           ├── inbound_tx.send(entry)
-                                          │   [pushes to inbound channel]
-                                          └── .await PAUSES.
+                                          │   [pushes to channel — non-blocking]
+                                          └── tick.notify()
+                                              └── scheduler.schedule_batched_tick()
+                                                  └── spawn_local(tick_future)
+
+                                          Back to select! — .await PAUSES.
    ◄────────────────────────────────────
 
-5. Tick bridge future wakes (inbound channel has data).
-   ────────────────────────────────────►
-                                          scheduler.schedule_batched_tick()
-                                          └── spawn_local(tick_future)
-   ◄────────────────────────────────────
-
-6. JS event loop picks up batched_tick future.
+5. JS event loop picks up batched_tick future.
    ────────────────────────────────────►
                                           batched_tick() runs:
                                           ├── inbound_rx.try_recv() → got entry
-                                          ├── park_sync_message(entry)
+                                          │   pushes to parked_sync_messages
                                           ├── handle_sync_messages()
                                           ├── immediate_tick()
                                           │   └── subscription callbacks fire
@@ -453,23 +525,27 @@ With threads, two things run **simultaneously** and need locks (`Mutex`). With `
 
 The `select!` macro is the key primitive: it registers wakers on multiple sources (channel + WebSocket) and pauses the future until any one of them fires. This is how TransportManager "listens" to both directions without threads.
 
-### NAPI and React Native: same model, real threads
+### NAPI and React Native: real threads, no lock contention
 
-In NAPI and React Native, `TransportManager` runs on a real async runtime (`tokio::spawn` or a background thread). This is safe because those platforms use `Arc<Mutex<RuntimeCore>>` (Send + Sync). The channel-based design means TransportManager never holds a lock on RuntimeCore — it only pushes/pulls from channels.
+In NAPI and React Native, `TransportManager` runs on a real async runtime (`tokio::spawn` or a background thread). Because TransportManager only touches channels (no RuntimeCore reference), there is **zero lock contention** between the JS thread and the background transport thread. Both channels are `Send` — `OutboxEntry` and `InboxEntry` are plain data types (no `Rc`, no `RefCell`).
+
+The `TickNotifier` calls `scheduler.schedule_batched_tick()` from the background thread. In NAPI this dispatches to the JS thread via `ThreadsafeFunction`. In RN this dispatches via the UniFFI callback interface (`BatchedTickCallback: Send + Sync`). Both are designed for cross-thread calls.
 
 ## Platform integration
 
 ### WASM (browser)
 
 ```rust
-// crates/jazz-wasm/src/runtime.rs — ~10 lines of transport glue
+// crates/jazz-wasm/src/runtime.rs
 
 #[wasm_bindgen]
 impl WasmRuntime {
     pub fn connect(&self, url: String, auth_json: String) {
         let auth: AuthConfig = serde_json::from_str(&auth_json).unwrap();
-        let (handle, manager) = transport::create::<WasmWebSocket>(url, auth, self.core_ref());
-        self.core.borrow_mut().set_transport(handle);
+        let tick = WasmTickNotifier { scheduler: self.scheduler().clone() };
+        let (transport, manager) =
+            transport::create::<WasmWsStream, WasmTickNotifier>(url, auth, tick);
+        self.core.borrow_mut().set_transport(transport);
         wasm_bindgen_futures::spawn_local(manager.run());
     }
 
@@ -477,11 +553,22 @@ impl WasmRuntime {
         self.core.borrow_mut().clear_transport();
     }
 }
+
+/// TickNotifier for WASM — calls WasmScheduler directly (same thread)
+struct WasmTickNotifier {
+    scheduler: WasmScheduler,  // Clone: Rc<RefCell<bool>> + Weak<RefCell<Core>>
+}
+
+impl TickNotifier for WasmTickNotifier {
+    fn notify(&self) {
+        self.scheduler.schedule_batched_tick();
+    }
+}
 ```
 
-`WasmWebSocket` wraps `web-sys::WebSocket`:
+`WasmWsStream` wraps `web-sys::WebSocket` (~30 LOC):
 
-- `connect()` → `WebSocket::new(url)`, wait for `onopen`
+- `connect()` → `WebSocket::new(url)`, await `onopen`
 - `send()` → `WebSocket::send_with_u8_array()`
 - `recv()` → `onmessage` events bridged to an async stream
 - `close()` → `WebSocket::close()`
@@ -489,15 +576,17 @@ impl WasmRuntime {
 ### NAPI (Node.js)
 
 ```rust
-// crates/jazz-napi/src/lib.rs — ~10 lines of transport glue
+// crates/jazz-napi/src/lib.rs
 
 #[napi]
 impl NapiRuntime {
     #[napi]
     pub fn connect(&self, url: String, auth_json: String) {
         let auth: AuthConfig = serde_json::from_str(&auth_json).unwrap();
-        let (handle, manager) = transport::create::<NativeWebSocket>(url, auth, self.core_ref());
-        self.core.lock().unwrap().set_transport(handle);
+        let tick = NativeTickNotifier { scheduler: self.scheduler().clone() };
+        let (transport, manager) =
+            transport::create::<NativeWsStream, NativeTickNotifier>(url, auth, tick);
+        self.core.lock().unwrap().set_transport(transport);
         tokio::spawn(manager.run());
     }
 
@@ -508,25 +597,22 @@ impl NapiRuntime {
 }
 ```
 
-`NativeWebSocket` wraps `tokio-tungstenite`. Same implementation used for native server and tests.
-
 ### React Native (UniFFI)
 
 ```rust
-// crates/jazz-rn/rust/src/lib.rs — ~10 lines of transport glue
+// crates/jazz-rn/rust/src/lib.rs
 
 #[uniffi::export]
 impl RnRuntime {
     pub fn connect(&self, url: String, auth_json: String) -> Result<(), JazzRnError> {
         let auth: AuthConfig = serde_json::from_str(&auth_json).map_err(json_err)?;
-        let (handle, manager) = transport::create::<NativeWebSocket>(url, auth, self.core_ref());
-        self.core.lock().unwrap().set_transport(handle);
-        // React Native: spawn on a background thread with a tokio runtime
+        let tick = NativeTickNotifier { scheduler: self.scheduler().clone() };
+        let (transport, manager) =
+            transport::create::<NativeWsStream, NativeTickNotifier>(url, auth, tick);
+        self.core.lock().unwrap().set_transport(transport);
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
+                .enable_all().build().unwrap();
             rt.block_on(manager.run());
         });
         Ok(())
@@ -534,15 +620,32 @@ impl RnRuntime {
 }
 ```
 
-Same `NativeWebSocket` adapter as NAPI. The only difference is how the async task is spawned (dedicated thread with tokio runtime, since React Native's main thread is the JS event loop).
+Same `NativeWsStream` and `NativeTickNotifier` as NAPI. Only difference: spawns a dedicated thread with tokio runtime.
+
+```rust
+/// TickNotifier for NAPI + React Native — calls scheduler across threads
+/// NapiScheduler uses ThreadsafeFunction, RnScheduler uses UniFFI callback.
+/// Both are Send + Sync — designed for cross-thread calls.
+struct NativeTickNotifier {
+    scheduler: NativeScheduler,  // Clone: Arc<AtomicBool> + Arc<Mutex<Callback>>
+}
+
+impl TickNotifier for NativeTickNotifier {
+    fn notify(&self) {
+        self.scheduler.schedule_batched_tick();
+    }
+}
+```
 
 ### Native (server-to-server, integration tests)
 
 ```rust
-// crates/jazz-tools/src/transport.rs — same pattern
+// crates/jazz-tools/src/transport.rs — same pattern as NAPI
 
-let (handle, manager) = transport::create::<NativeWebSocket>(url, auth, core_ref);
-core.set_transport(handle);
+let tick = NativeTickNotifier { scheduler: scheduler.clone() };
+let (transport, manager) =
+    transport::create::<NativeWsStream, NativeTickNotifier>(url, auth, tick);
+core.lock().unwrap().set_transport(transport);
 tokio::spawn(manager.run());
 ```
 
@@ -604,81 +707,20 @@ Unchanged. Both directions use the same binary length-prefixed frames:
 
 The transport is now binary-native (WebSocket binary frames), so the base64 encoding overhead on SSE disappears. The JSON payload format stays for now — binary serialization (MessagePack, etc.) is a future optimization that's now unblocked by the transport.
 
-## Inbound message flow: channels, not direct RuntimeRef
+## Design rationale: channels both directions, no RuntimeCore reference
 
-The `TransportManager` never holds a reference to `RuntimeCore`. Instead it communicates via channels:
+TransportManager communicates with RuntimeCore **exclusively through channels**. It holds no reference to RuntimeCore, no Mutex, no RefCell. This means:
 
-```
-TransportManager                    RuntimeCore
-     │                                   │
-     │── outbox_rx ◄── outbox_tx ────────│  (outbound: batched_tick pushes here)
-     │                                   │
-     │── inbound_tx ───► inbound_rx ─────│  (inbound: batched_tick drains here)
-     │                                   │
-```
+- **Zero lock contention** (NAPI/RN) — background transport thread and JS thread never contend on the same lock.
+- **Zero borrow conflicts** (WASM) — TransportManager's async loop can't conflict with `batched_tick()`.
+- **TransportManager is fully `Send`** — it only holds channels, a stream adapter, and a tick notifier. Works on any thread, any platform.
+- **Testable in isolation** — feed outbox channel, drain inbound channel, assert behavior without a RuntimeCore.
 
-**Outbound:** `batched_tick()` drains the SyncManager outbox and pushes each `OutboxEntry` to `outbox_tx`. TransportManager's send loop reads `outbox_rx` and writes to WebSocket.
+**Outbound channel:** `batched_tick()` is sync, `ws.send()` is async — the channel bridges the gap.
 
-**Inbound:** TransportManager's recv loop reads from WebSocket and pushes each `InboxEntry` to `inbound_tx`. `batched_tick()` drains `inbound_rx` (via `try_recv()` loop) and parks each message. A small per-platform bridge (~5 lines) watches the inbound channel and calls `scheduler.schedule_batched_tick()` when new messages arrive.
+**Inbound channel:** TransportManager pushes received messages to a channel. `batched_tick()` drains it via `try_recv()` loop into `parked_sync_messages`. The `TickNotifier` tells the scheduler to run `batched_tick()` when new messages arrive.
 
-This avoids the `RuntimeRef` problem entirely:
-
-- No `Rc<RefCell<RuntimeCore>>` crossing async boundaries in WASM
-- No borrow conflicts between TransportManager recv loop and `batched_tick()`
-- No `Arc<Mutex<RuntimeCore>>` contention in NAPI/RN
-- `TransportManager` is purely `Send` — it only holds channels and the WebSocket adapter
-
-The per-platform bridge that triggers ticks on inbound messages:
-
-```rust
-// WASM: ~5 lines
-spawn_local(async move {
-    while inbound_notify_rx.recv().await.is_some() {
-        scheduler.schedule_batched_tick();
-    }
-});
-
-// NAPI/RN: ~5 lines
-tokio::spawn(async move {
-    while inbound_notify_rx.recv().await.is_some() {
-        scheduler.schedule_batched_tick();
-    }
-});
-```
-
-### `batched_tick()` changes
-
-```rust
-pub fn batched_tick(&mut self) {
-    // NEW: drain inbound channel first
-    if let Some(ref transport) = self.transport {
-        while let Ok(msg) = transport.inbound_rx.try_recv() {
-            self.parked_sync_messages.push(msg);
-        }
-    }
-
-    // EXISTING: drain outbox → send via channel (replaces SyncSender callback)
-    let outbox = self.sync_manager_mut().take_outbox();
-    if let Some(ref transport) = self.transport {
-        for msg in outbox {
-            let _ = transport.outbox_tx.send(msg);
-        }
-    }
-
-    // EXISTING: process parked sync messages
-    self.handle_sync_messages();
-
-    // EXISTING: flush post-process outbox
-    let outbox = self.sync_manager_mut().take_outbox();
-    if let Some(ref transport) = self.transport {
-        for msg in outbox {
-            let _ = transport.outbox_tx.send(msg);
-        }
-    }
-
-    self.storage.flush_wal();
-}
-```
+**Trade-off accepted:** Channels use unbounded `mpsc` — no capacity limit, but memory grows if the consumer falls behind. In practice: outbound grows if the network is slow (same as today — outbox grows), inbound grows if `batched_tick()` is slow (unlikely — it's a tight loop). If needed, bounded channels with backpressure can be added later.
 
 ## Worker bridge (browser): `onSyncMessageReceived()` stays for inter-runtime sync
 
