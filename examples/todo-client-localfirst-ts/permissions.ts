@@ -3,9 +3,9 @@ import { app } from "./schema.js";
 
 export default s.definePermissions(app, ({ policy, session }) => {
   policy.todos.allowRead.where({});
-  policy.todos.allowInsert.where({ ownerId: session.user_id });
+  policy.todos.allowInsert.where({ owner_id: session.user_id });
   policy.todos.allowUpdate
-    .whereOld({ ownerId: session.user_id })
-    .whereNew({ ownerId: session.user_id });
-  policy.todos.allowDelete.where({ ownerId: session.user_id });
+    .whereOld({ owner_id: session.user_id })
+    .whereNew({ owner_id: session.user_id });
+  policy.todos.allowDelete.where({ owner_id: session.user_id });
 });

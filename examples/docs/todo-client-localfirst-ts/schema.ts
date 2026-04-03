@@ -9,7 +9,7 @@ const schema = {
     title: s.string(),
     done: s.boolean(),
     description: s.string().optional(),
-    ownerId: s.string().optional(),
+    owner_id: s.string().optional(),
     parentId: s.ref("todos").optional(),
     projectId: s.ref("projects").optional(),
   }),
@@ -26,7 +26,7 @@ const schema = {
     partSizes: s.array(s.int()),
   }),
   uploads: s.table({
-    ownerId: s.string(),
+    owner_id: s.string(),
     label: s.string(),
     fileId: s.ref("files"),
   }),

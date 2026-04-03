@@ -40,7 +40,7 @@ function subscribeToEntry<T extends { id: string }>(
 }
 
 export function useAll<T extends { id: string }>(
-  query: MaybeRefOrGetter<QueryBuilder<T>>,
+  query: MaybeRefOrGetter<QueryBuilder<T> | undefined>,
   options?: MaybeRefOrGetter<QueryOptions | undefined>,
 ): Ref<T[] | undefined> {
   const { manager } = useJazzClient();
@@ -48,6 +48,10 @@ export function useAll<T extends { id: string }>(
 
   watchEffect((onCleanup) => {
     const resolvedQuery = toValue(query);
+    if (!resolvedQuery) {
+      data.value = undefined;
+      return;
+    }
     const resolvedOptions = toValue(options);
     const key = manager.makeQueryKey(resolvedQuery, resolvedOptions);
     const entry = manager.getCacheEntry<T>(key);

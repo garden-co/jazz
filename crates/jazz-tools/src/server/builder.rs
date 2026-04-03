@@ -61,6 +61,7 @@ pub struct ServerBuilder {
     catalogue_authority: CatalogueAuthorityMode,
     schema_mode: ServerSchemaMode,
     storage_mode: ServerStorageMode,
+    sync_tracer: Option<crate::sync_tracer::SyncTracer>,
 }
 
 impl ServerBuilder {
@@ -73,7 +74,13 @@ impl ServerBuilder {
             storage_mode: ServerStorageMode::Persistent {
                 data_dir: "./data".to_string(),
             },
+            sync_tracer: None,
         }
+    }
+
+    pub fn with_sync_tracer(mut self, tracer: crate::sync_tracer::SyncTracer) -> Self {
+        self.sync_tracer = Some(tracer);
+        self
     }
 
     pub fn with_auth_config(mut self, auth_config: AuthConfig) -> Self {
@@ -163,6 +170,7 @@ impl ServerBuilder {
             external_identities: RwLock::new(external_identities),
             disconnect_candidates: RwLock::new(HashMap::new()),
             client_ttl: RwLock::new(Duration::from_secs(300)),
+            sync_tracer: self.sync_tracer.clone(),
         });
 
         // Spawn periodic client state sweep (uses Weak so the task exits
@@ -200,11 +208,16 @@ impl ServerBuilder {
     > {
         let (sync_tx, _) = broadcast::channel::<(ClientId, SyncPayload)>(SYNC_BROADCAST_CAPACITY);
         let sync_tx_clone = sync_tx.clone();
+        let tracer_for_outgoing = self.sync_tracer.clone();
 
         let storage = self.build_main_storage()?;
         let schema_manager = self.build_schema_manager(storage.as_ref())?;
         let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
             if let Destination::Client(client_id) = entry.destination {
+                // Record outgoing server message to tracer if present
+                if let Some(ref tracer) = tracer_for_outgoing {
+                    tracer.record_outgoing("server", &entry.destination, &entry.payload);
+                }
                 let _ = sync_tx_clone.send((client_id, entry.payload));
             }
         });

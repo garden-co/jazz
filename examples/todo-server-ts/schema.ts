@@ -10,7 +10,7 @@ const schema = {
     description: s.string().optional(),
     parentId: s.ref("todos").optional(),
     projectId: s.ref("projects").optional(),
-    ownerId: s.string(),
+    owner_id: s.string(),
   }),
 };
 
