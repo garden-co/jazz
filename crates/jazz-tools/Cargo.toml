@@ -19,6 +19,7 @@ required-features = ["cli"]
 default = []
 fjall = ["dep:fjall"]
 rocksdb = ["dep:rocksdb"]
+sqlite = ["dep:rusqlite"]
 runtime-tokio = ["dep:tokio"]
 transport = []
 transport-http = ["transport", "dep:reqwest", "dep:base64", "dep:bytes"]
@@ -74,6 +75,7 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["full"], optional = true }
 fjall = { version = "3.0.2", optional = true }
 rocksdb = { version = "0.24", default-features = false, features = ["lz4", "zstd"], optional = true }
+rusqlite = { version = "0.34", features = ["bundled"], optional = true }
 
 axum = { version = "0.7", optional = true }
 bytes = { version = "1", optional = true }
@@ -124,3 +126,11 @@ harness = false
 [[example]]
 name = "realistic_bench"
 required-features = ["client"]
+
+[[test]]
+name = "rocksdb_storage_integration"
+required-features = ["rocksdb", "test"]
+
+[[test]]
+name = "sqlite_storage_integration"
+required-features = ["sqlite", "test"]

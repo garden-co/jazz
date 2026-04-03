@@ -14,10 +14,12 @@ use crate::routes;
 use crate::runtime_tokio::TokioRuntime;
 use crate::schema_manager::{AppId, SchemaManager, rehydrate_schema_manager_from_manifest};
 use crate::server::{CatalogueAuthorityMode, DynStorage, ExternalIdentityStore, ServerState};
-#[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+#[cfg(all(feature = "fjall", not(feature = "rocksdb"), not(feature = "sqlite")))]
 use crate::storage::FjallStorage;
 #[cfg(feature = "rocksdb")]
 use crate::storage::RocksDBStorage;
+#[cfg(feature = "sqlite")]
+use crate::storage::SqliteStorage;
 use crate::storage::{MemoryStorage, Storage};
 use crate::sync_manager::{ClientId, Destination, DurabilityTier, SyncManager, SyncPayload};
 
@@ -37,7 +39,21 @@ enum ServerSchemaMode {
 }
 
 enum ServerStorageMode {
-    Persistent { data_dir: String },
+    Persistent {
+        data_dir: String,
+    },
+    /// Explicitly selects SQLite regardless of which other storage features are
+    /// enabled.  Created via [`ServerBuilder::with_sqlite_storage`].
+    #[cfg(feature = "sqlite")]
+    PersistentSqlite {
+        data_dir: String,
+    },
+    /// Explicitly selects RocksDB regardless of which other storage features
+    /// are enabled.  Created via [`ServerBuilder::with_rocksdb_storage`].
+    #[cfg(feature = "rocksdb")]
+    PersistentRocksDb {
+        data_dir: String,
+    },
     InMemory,
 }
 
@@ -74,6 +90,30 @@ impl ServerBuilder {
 
     pub fn with_persistent_storage(mut self, data_dir: impl Into<String>) -> Self {
         self.storage_mode = ServerStorageMode::Persistent {
+            data_dir: data_dir.into(),
+        };
+        self
+    }
+
+    /// Use SQLite as the persistent storage backend, regardless of which other
+    /// storage features (e.g. `rocksdb`) are enabled.  Prefer this over
+    /// [`with_persistent_storage`] whenever you need to pin the backend to
+    /// SQLite (e.g. in tests or on mobile).
+    #[cfg(feature = "sqlite")]
+    pub fn with_sqlite_storage(mut self, data_dir: impl Into<String>) -> Self {
+        self.storage_mode = ServerStorageMode::PersistentSqlite {
+            data_dir: data_dir.into(),
+        };
+        self
+    }
+
+    /// Use RocksDB as the persistent storage backend, regardless of which
+    /// other storage features are enabled.  Prefer this over
+    /// [`with_persistent_storage`] whenever you need to pin the backend to
+    /// RocksDB (e.g. in tests or on desktop/server deployments).
+    #[cfg(feature = "rocksdb")]
+    pub fn with_rocksdb_storage(mut self, data_dir: impl Into<String>) -> Self {
+        self.storage_mode = ServerStorageMode::PersistentRocksDb {
             data_dir: data_dir.into(),
         };
         self
@@ -207,7 +247,15 @@ impl ServerBuilder {
                         })?;
                     Ok(Box::new(storage))
                 }
-                #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+                #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
+                {
+                    let db_path = Path::new(data_dir).join("jazz.sqlite");
+                    let storage = SqliteStorage::open(&db_path).map_err(|e| {
+                        format!("failed to open storage '{}': {e:?}", db_path.display())
+                    })?;
+                    Ok(Box::new(storage))
+                }
+                #[cfg(all(feature = "fjall", not(feature = "rocksdb"), not(feature = "sqlite")))]
                 {
                     let db_path = Path::new(data_dir).join("jazz.fjall");
                     let storage =
@@ -216,6 +264,27 @@ impl ServerBuilder {
                         })?;
                     Ok(Box::new(storage))
                 }
+            }
+            #[cfg(feature = "sqlite")]
+            ServerStorageMode::PersistentSqlite { data_dir } => {
+                std::fs::create_dir_all(data_dir)
+                    .map_err(|e| format!("failed to create data dir '{}': {e}", data_dir))?;
+                let db_path = Path::new(data_dir).join("jazz.sqlite");
+                let storage = SqliteStorage::open(&db_path).map_err(|e| {
+                    format!("failed to open storage '{}': {e:?}", db_path.display())
+                })?;
+                Ok(Box::new(storage))
+            }
+            #[cfg(feature = "rocksdb")]
+            ServerStorageMode::PersistentRocksDb { data_dir } => {
+                std::fs::create_dir_all(data_dir)
+                    .map_err(|e| format!("failed to create data dir '{}': {e}", data_dir))?;
+                let db_path = Path::new(data_dir).join("jazz.rocksdb");
+                let storage =
+                    RocksDBStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES).map_err(|e| {
+                        format!("failed to open storage '{}': {e:?}", db_path.display())
+                    })?;
+                Ok(Box::new(storage))
             }
             ServerStorageMode::InMemory => Ok(Box::new(MemoryStorage::new())),
         }
@@ -238,7 +307,15 @@ impl ServerBuilder {
                         })?;
                     ExternalIdentityStore::new_with_storage(Box::new(storage))
                 }
-                #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
+                #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
+                {
+                    let db_path = meta_dir.join("jazz.sqlite");
+                    let storage = SqliteStorage::open(&db_path).map_err(|e| {
+                        format!("failed to open meta storage '{}': {e:?}", db_path.display())
+                    })?;
+                    ExternalIdentityStore::new_with_storage(Box::new(storage))
+                }
+                #[cfg(all(feature = "fjall", not(feature = "rocksdb"), not(feature = "sqlite")))]
                 {
                     let db_path = meta_dir.join("jazz.fjall");
                     let storage =
@@ -247,6 +324,31 @@ impl ServerBuilder {
                         })?;
                     ExternalIdentityStore::new_with_storage(Box::new(storage))
                 }
+            }
+            #[cfg(feature = "sqlite")]
+            ServerStorageMode::PersistentSqlite { data_dir } => {
+                let meta_dir = Path::new(data_dir).join("meta");
+                std::fs::create_dir_all(&meta_dir).map_err(|e| {
+                    format!("failed to create meta dir '{}': {e}", meta_dir.display())
+                })?;
+                let db_path = meta_dir.join("jazz.sqlite");
+                let storage = SqliteStorage::open(&db_path).map_err(|e| {
+                    format!("failed to open meta storage '{}': {e:?}", db_path.display())
+                })?;
+                ExternalIdentityStore::new_with_storage(Box::new(storage))
+            }
+            #[cfg(feature = "rocksdb")]
+            ServerStorageMode::PersistentRocksDb { data_dir } => {
+                let meta_dir = Path::new(data_dir).join("meta");
+                std::fs::create_dir_all(&meta_dir).map_err(|e| {
+                    format!("failed to create meta dir '{}': {e}", meta_dir.display())
+                })?;
+                let db_path = meta_dir.join("jazz.rocksdb");
+                let storage =
+                    RocksDBStorage::open(&db_path, STORAGE_CACHE_SIZE_BYTES).map_err(|e| {
+                        format!("failed to open meta storage '{}': {e:?}", db_path.display())
+                    })?;
+                ExternalIdentityStore::new_with_storage(Box::new(storage))
             }
             ServerStorageMode::InMemory => {
                 ExternalIdentityStore::new_with_storage(Box::new(MemoryStorage::new()))

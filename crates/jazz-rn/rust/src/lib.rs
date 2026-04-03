@@ -27,7 +27,7 @@ use jazz_tools::runtime_core::{
     SyncSender,
 };
 use jazz_tools::schema_manager::{AppId, SchemaManager};
-use jazz_tools::storage::{FjallStorage, Storage};
+use jazz_tools::storage::{SqliteStorage, Storage};
 use jazz_tools::sync_manager::{
     ClientId, DurabilityTier, InboxEntry, OutboxEntry, QueryPropagation, ServerId, Source,
     SyncManager, SyncPayload,
@@ -268,7 +268,7 @@ impl SyncSender for RnSyncSender {
 // RnRuntime
 // ============================================================================
 
-type RnCoreType = RuntimeCore<FjallStorage, RnScheduler, RnSyncSender>;
+type RnCoreType = RuntimeCore<SqliteStorage, RnScheduler, RnSyncSender>;
 
 #[derive(uniffi::Object)]
 pub struct RnRuntime {
@@ -308,7 +308,6 @@ impl RnRuntime {
                         message: format!("{:?}", e),
                     })?;
 
-            let cache_size_bytes = 64 * 1024 * 1024; // 64MB
             let resolved_data_path = data_path.unwrap_or_else(|| {
                 let sanitized_app_id: String = app_id
                     .chars()
@@ -321,17 +320,15 @@ impl RnRuntime {
                     })
                     .collect();
                 let mut default_path = std::env::temp_dir();
-                default_path.push(format!("{sanitized_app_id}.fjall"));
+                default_path.push(format!("{sanitized_app_id}.sqlite"));
                 default_path.to_string_lossy().into_owned()
             });
             let storage =
-                FjallStorage::open(&resolved_data_path, cache_size_bytes).map_err(|e| {
-                    JazzRnError::Runtime {
-                        message: format!(
-                            "Failed to open Fjall storage at '{}': {:?}",
-                            resolved_data_path, e
-                        ),
-                    }
+                SqliteStorage::open(&resolved_data_path).map_err(|e| JazzRnError::Runtime {
+                    message: format!(
+                        "Failed to open SQLite storage at '{}': {:?}",
+                        resolved_data_path, e
+                    ),
                 })?;
             let scheduler = RnScheduler::default();
             let sync_sender = RnSyncSender::default();
