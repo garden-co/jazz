@@ -1,7 +1,10 @@
 //! SQLite-backed Storage implementation.
 //!
 //! Uses `rusqlite` with bundled SQLite. Single KV table on a WITHOUT ROWID
-//! B-tree, WAL mode, SAVEPOINT-scoped writes. Targets React Native / mobile.
+//! B-tree, WAL mode. Writes are batched into a lazy explicit transaction that
+//! stays open across multiple calls and is committed on `flush()` / `close()`.
+//! Per-operation SAVEPOINTs nested inside that transaction provide rollback
+//! semantics for individual operations. Targets React Native / mobile.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -24,10 +27,36 @@ use super::{
     },
 };
 
-#[allow(dead_code)]
 struct SqliteInner {
     conn: rusqlite::Connection,
+    #[allow(dead_code)]
     path: PathBuf,
+    /// Whether an explicit `BEGIN` transaction is currently open.
+    write_tx_open: bool,
+}
+
+impl SqliteInner {
+    /// Start a write transaction if one isn't already open.
+    fn ensure_write_tx(&mut self) -> Result<(), StorageError> {
+        if !self.write_tx_open {
+            self.conn
+                .execute_batch("BEGIN")
+                .map_err(|e| StorageError::IoError(format!("sqlite begin: {e}")))?;
+            self.write_tx_open = true;
+        }
+        Ok(())
+    }
+
+    /// Commit the open write transaction, if any.
+    fn commit_write_tx(&mut self) -> Result<(), StorageError> {
+        if self.write_tx_open {
+            self.conn
+                .execute_batch("COMMIT")
+                .map_err(|e| StorageError::IoError(format!("sqlite commit: {e}")))?;
+            self.write_tx_open = false;
+        }
+        Ok(())
+    }
 }
 
 pub struct SqliteStorage {
@@ -57,7 +86,7 @@ impl SqliteStorage {
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             PRAGMA cache_size = -2000;
+             PRAGMA cache_size = -65536;
              PRAGMA busy_timeout = 5000;
              PRAGMA foreign_keys = OFF;
              CREATE TABLE IF NOT EXISTS kv (
@@ -71,6 +100,7 @@ impl SqliteStorage {
             inner: RefCell::new(Some(SqliteInner {
                 conn,
                 path: path.to_path_buf(),
+                write_tx_open: false,
             })),
         })
     }
@@ -82,6 +112,17 @@ impl SqliteStorage {
         let inner = self.inner.borrow();
         let inner = inner
             .as_ref()
+            .ok_or_else(|| StorageError::IoError("sqlite storage already closed".to_string()))?;
+        f(inner)
+    }
+
+    fn with_inner_mut<T>(
+        &self,
+        f: impl FnOnce(&mut SqliteInner) -> Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
+        let mut inner = self.inner.borrow_mut();
+        let inner = inner
+            .as_mut()
             .ok_or_else(|| StorageError::IoError("sqlite storage already closed".to_string()))?;
         f(inner)
     }
@@ -221,7 +262,8 @@ impl Storage for SqliteStorage {
         id: ObjectId,
         metadata: HashMap<String, String>,
     ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
             create_object_core(id, metadata, |key, value| {
                 Self::set(&inner.conn, key, value)
             })
@@ -253,7 +295,8 @@ impl Storage for SqliteStorage {
         branch: &BranchName,
         commit: Commit,
     ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
             Self::with_savepoint(&inner.conn, || {
                 append_commit_core(
                     object_id,
@@ -271,7 +314,8 @@ impl Storage for SqliteStorage {
         branch: &BranchName,
         commit_id: CommitId,
     ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
             Self::with_savepoint(&inner.conn, || {
                 delete_commit_core(
                     object_id,
@@ -290,7 +334,8 @@ impl Storage for SqliteStorage {
         branch: &BranchName,
         tails: Option<HashSet<CommitId>>,
     ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
             set_branch_tails_core(
                 object_id,
                 branch,
@@ -305,7 +350,8 @@ impl Storage for SqliteStorage {
         commit_id: CommitId,
         tier: DurabilityTier,
     ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
             Self::with_savepoint(&inner.conn, || {
                 store_ack_tier_core(
                     commit_id,
@@ -321,7 +367,8 @@ impl Storage for SqliteStorage {
         app_id: ObjectId,
         op: CatalogueManifestOp,
     ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
             Self::with_savepoint(&inner.conn, || {
                 append_catalogue_manifest_op_core(
                     app_id,
@@ -337,7 +384,8 @@ impl Storage for SqliteStorage {
         app_id: ObjectId,
         ops: &[CatalogueManifestOp],
     ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
             Self::with_savepoint(&inner.conn, || {
                 append_catalogue_manifest_ops_core(
                     app_id,
@@ -364,7 +412,8 @@ impl Storage for SqliteStorage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
             index_insert_core(table, column, branch, value, row_id, |key, bytes| {
                 Self::set(&inner.conn, key, bytes)
             })
@@ -378,7 +427,8 @@ impl Storage for SqliteStorage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
             index_remove_core(table, column, branch, value, row_id, |key| {
                 Self::delete(&inner.conn, key)
             })
@@ -427,19 +477,27 @@ impl Storage for SqliteStorage {
         .unwrap_or_default()
     }
 
-    fn flush(&self) {
-        if let Some(inner) = self.inner.borrow().as_ref() {
-            // PASSIVE checkpoint: moves pages from WAL to DB without blocking
-            // concurrent readers. This is compaction/cleanup, not a durability
-            // barrier — WAL commits are already durable for process crashes.
+    fn flush_wal(&self) {
+        if let Some(inner) = self.inner.borrow_mut().as_mut() {
+            // Commit the open write transaction so writes land in the WAL
+            // and survive a process crash.
+            let _ = inner.commit_write_tx();
+            // PASSIVE checkpoint: moves WAL pages into the main db file without
+            // blocking concurrent readers.
             let _ = inner.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE)");
         }
     }
 
+    fn flush(&self) {
+        self.flush_wal();
+    }
+
     fn close(&self) -> Result<(), StorageError> {
-        let Some(inner) = self.inner.borrow_mut().take() else {
+        let Some(mut inner) = self.inner.borrow_mut().take() else {
             return Ok(());
         };
+        // Commit any pending writes before closing.
+        inner.commit_write_tx()?;
         // Best-effort compaction before dropping the connection.
         let _ = inner.conn.execute_batch("PRAGMA wal_checkpoint(PASSIVE)");
         drop(inner);
