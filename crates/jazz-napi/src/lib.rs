@@ -67,8 +67,7 @@ fn parse_node_durability_tier(tier: Option<String>) -> napi::Result<Vec<Durabili
 }
 
 fn open_sqlite_storage(data_path: &str) -> napi::Result<SqliteStorage> {
-    let path = std::path::Path::new(data_path).join("jazz.sqlite");
-    SqliteStorage::open(&path)
+    SqliteStorage::open(data_path)
         .map_err(|e| napi::Error::from_reason(format!("Failed to open storage: {:?}", e)))
 }
 
