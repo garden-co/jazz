@@ -1,5 +1,25 @@
 # jazz-tools
 
+## 2.0.0-alpha.25
+
+### Patch Changes
+
+- 30df2b4: Fix browser worker reconnect after network loss when offline `worker`-tier writes were queued locally.
+
+  The worker now aborts its stale upstream events stream before scheduling reconnect after sync POST failures, which lets later writes promote normally once network access returns. This also adds browser regression coverage for the split-context reconnect case where one client stays online while another writes offline and reconnects.
+  - jazz-wasm@2.0.0-alpha.25
+  - jazz-rn@2.0.0-alpha.25
+
+## 2.0.0-alpha.24
+
+### Patch Changes
+
+- 08f10b9: CLI schema resolution now accepts apps that keep `schema.ts` and `permissions.ts` in `src/` as well as the app root.
+
+  The legacy `--schema-dir ./schema` shim is no longer supported. Point CLI commands at the app root instead, where Jazz will resolve `schema.ts` from either the root or `src/`.
+  - jazz-wasm@2.0.0-alpha.24
+  - jazz-rn@2.0.0-alpha.24
+
 ## 2.0.0-alpha.23
 
 ### Patch Changes
