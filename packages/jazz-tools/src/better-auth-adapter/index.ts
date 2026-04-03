@@ -45,9 +45,25 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
       disableIdGeneration: true,
       transaction: false,
     },
-    adapter: ({ schema, getModelName, getFieldName }) => {
+    adapter: ({ schema, getModelName, getFieldName, getDefaultModelName }) => {
       const getPrefixedModelName = (model: string) => `${prefix}${getModelName(model)}`;
       const wasmSchema = resolveSchemaSource(config.schema);
+
+      const getUniqueFields = (model: string): Array<{ storedFieldName: string }> => {
+        const defaultModelName = getDefaultModelName(model);
+        const modelSchema = schema[defaultModelName];
+        if (!modelSchema) return [];
+
+        const result: Array<{ storedFieldName: string }> = [];
+        for (const [fieldName, field] of Object.entries(modelSchema.fields)) {
+          if (field.unique) {
+            result.push({
+              storedFieldName: getFieldName({ model: defaultModelName, field: fieldName }),
+            });
+          }
+        }
+        return result;
+      };
 
       const toQueryCondition = (model: string, condition: CleanedWhere): JazzBuiltCondition => {
         const column = getFieldName({ model, field: condition.field });
@@ -128,8 +144,28 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
       return {
         async create({ model, data }): Promise<any> {
           const table = getPrefixedModelName(model);
-          const qb = createQueryBuilder(table, wasmSchema);
 
+          const uniqueFields = getUniqueFields(model);
+          for (const { storedFieldName } of uniqueFields) {
+            const value = (data as Record<string, unknown>)[storedFieldName];
+            if (value === undefined || value === null) continue;
+
+            const checkQb = createQueryBuilder(table, wasmSchema, {
+              conditions: [{ column: storedFieldName, op: "eq", value }],
+              limit: 1,
+            });
+
+            const existing = (await config
+              .db()
+              .all(checkQb, { tier: durabilityTier })) as JazzRowRecord[];
+            if (existing.length > 0) {
+              throw new Error(
+                `Unique constraint violated: "${table}.${storedFieldName}" already has a row with value "${String(value)}"`,
+              );
+            }
+          }
+
+          const qb = createQueryBuilder(table, wasmSchema);
           return config.db().insertDurable(qb, data, { tier: durabilityTier });
         },
 

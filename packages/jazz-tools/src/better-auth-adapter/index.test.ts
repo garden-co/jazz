@@ -289,6 +289,66 @@ describe("jazzAdapter", () => {
       });
     });
 
+    it("rejects duplicate inserts on unique columns", async () => {
+      await adapter.create({
+        model: "user",
+        data: {
+          name: "Alice",
+          email: "alice@example.com",
+          emailVerified: false,
+          image: null,
+        },
+      });
+
+      await expect(
+        adapter.create({
+          model: "user",
+          data: {
+            name: "Bob",
+            email: "alice@example.com",
+            emailVerified: false,
+            image: null,
+          },
+        }),
+      ).rejects.toThrow();
+
+      await expect(
+        adapter.create({
+          model: "user",
+          data: {
+            name: "Carol",
+            email: "carol@example.com",
+            emailVerified: false,
+            image: null,
+          },
+        }),
+      ).resolves.toMatchObject({ email: "carol@example.com" });
+    });
+
+    it("allows inserts when unique column value is null or undefined", async () => {
+      await adapter.create({
+        model: "user",
+        data: {
+          name: "Alice",
+          email: "alice@example.com",
+          emailVerified: false,
+          image: null,
+        },
+      });
+
+      const second = await adapter.create({
+        model: "user",
+        data: {
+          name: "Bob",
+          email: "bob@example.com",
+          emailVerified: false,
+          image: null,
+        },
+      });
+
+      expect(second.email).toBe("bob@example.com");
+    });
+
     it("accepts app-like schema sources from root schema.ts modules", async () => {
       const authSchema = { wasmSchema: wasmSchemaExample };
       const appAdapter = jazzAdapter({
