@@ -49,6 +49,7 @@ But it may be **too early to depend on it**:
 Ship WebSocket as the transport — it solves ordering, drops base64 overhead, works everywhere, trivial infra (axum built-in, ALB-compatible, mkcert for local dev). Design the `TransportProvider` abstraction from day one so WebTransport slots in later without touching sync logic. When the infra story stabilizes and we have real latency data showing WebSocket isn't enough, add WebTransport as an upgrade path.
 
 This gives us:
+
 1. **Immediate fix** for the ordering bugs blocking tests today
 2. **Clean architecture** that doesn't lock out WebTransport
 3. **Zero infra migration risk** — stays on ALB, no cert management changes
@@ -76,55 +77,55 @@ The `TransportProvider` abstraction makes WebTransport a drop-in upgrade when th
 
 No sync logic changes, no wire format changes, no test changes. Pure transport swap.
 
+Beyond the performance upgrade, WebTransport unlocks a capability WebSocket can't match: **dedicated streams for large data transfer**. A single WebTransport connection can open multiple independent streams — one for sync control flow, another for bulk data (file uploads, large blob sync, initial state hydration). These streams don't block each other: a 50MB file transfer on stream B doesn't stall real-time sync deltas on stream A. With WebSocket's single ordered channel, everything shares one pipe — a large transfer starves small messages behind it.
+
 ### Transport architecture
 
-```
-                      ┌─────────────────────────┐
-                      │    TransportProvider     │
-                      │  (trait / interface)      │
-                      │                           │
-                      │  connect()                │
-                      │  send(frame)              │
-                      │  recv() -> frame          │
-                      │  close()                  │
-                      └────────┬─────────────────┘
-                               │
-                  ┌────────────┴────────────────┐
-                  │                              │
-         ┌───────▼──────┐              ┌────────▼───────┐
-         │ WebTransport  │              │   WebSocket    │
-         │ Provider      │              │   Provider     │
-         └───────────────┘              └────────────────┘
-```
+**Key design: Rust owns the connection, not JS.**
 
-**Negotiation flow:**
+Today `RuntimeCore<S, Sch, Sy>` is generic over `SyncSender` — a trait that hands messages to JS via callbacks. JS does the HTTP POST / SSE consumption. Transport logic is split: outbox draining in Rust, everything else (HTTP, SSE parsing, reconnection) in JS/TS.
+
+The new design replaces `SyncSender` with a channel-based `TransportHandle` (concrete type, not generic). A `TransportManager` async task runs in Rust, owns the WebSocket, and handles send/recv/reconnection. All transport logic lives once in `jazz-tools` core Rust. Each platform provides only a thin `WebSocketAdapter` (~30 LOC).
+
+See **[WebSocket Transport Spec](../../specs/todo/a_mvp/websocket_transport.md)** for full flow definitions.
 
 ```
-Client                                  Server
-  │                                       │
-  │─── Try WebTransport ─────────────────>│
-  │    (HTTP/3 CONNECT)                   │
-  │                                       │
-  │<── WebTransport session ──────────────│  (success path)
-  │    bidirectional stream opened        │
-  │                                       │
-  ├── OR timeout / fail ──────────────────┤
-  │                                       │
-  │─── Fallback: WebSocket ──────────────>│
-  │    (HTTP/1.1 Upgrade)                 │
-  │                                       │
-  │<── WebSocket connection ──────────────│  (fallback path)
-  │                                       │
+┌──────────────────────────────────────────────────────┐
+│  RuntimeCore<S, Sch>  (no more SyncSender generic)   │
+│                                                      │
+│  batched_tick() → TransportHandle.send(entry)        │
+│    └── mpsc channel push [non-blocking, FIFO]        │
+│                                                      │
+│  park_sync_message() ← called by TransportManager    │
+└──────────────┬─────────────────┬─────────────────────┘
+               │ channel         │ direct call
+               ▼                 │
+┌──────────────────────────────────────────────────────┐
+│  TransportManager<W: WebSocketAdapter>               │
+│  (async task, platform-spawned)                      │
+│                                                      │
+│  Send loop: channel.recv() → serialize → ws.send()   │
+│  Recv loop: ws.recv() → deserialize → park_message() │
+│  Reconnection, auth handshake, heartbeat             │
+│                                                      │
+│  WebSocketAdapter impls:                             │
+│  ├── NativeWebSocket (tokio-tungstenite)             │
+│  │   used by: NAPI, React Native, server, tests     │
+│  └── WasmWebSocket (web-sys::WebSocket)              │
+│      used by: browser WASM                           │
+└──────────────────────────────────────────────────────┘
 ```
 
-**Single bidirectional stream for sync (both transports):**
+**What gets deleted:** `JsSyncSender`, `NapiSyncSender`, `RnSyncSender`, `SyncSender` trait, `onSyncMessageToSend()` callback, `onSyncMessageReceived()` JS→Rust call, `sync-transport.ts` (650+ LOC), `StreamController`, `sendSyncPayloadBatch()`, `readBinaryFrames()`, `reqwest`-based transport.
+
+**Single bidirectional connection for sync (both transports):**
 
 Both transports use the same binary framing protocol Jazz already has (4-byte length-prefixed frames with JSON payloads). The existing `SyncBatchRequest` / `SyncBatchResponse` / `ServerEvent` types remain unchanged — only the transport underneath changes.
 
 ```
 Client                             Server
   │                                  │
-  │── frame: SyncBatchRequest ──────>│  (ordered, same stream)
+  │── frame: SyncBatchRequest ──────>│  (ordered, same connection)
   │── frame: SyncBatchRequest ──────>│  (guaranteed after previous)
   │                                  │
   │<── frame: ServerEvent ───────────│  (Connected, SyncUpdate, etc.)
@@ -132,7 +133,7 @@ Client                             Server
   │                                  │
 ```
 
-The critical change: instead of SSE (read) + POST (write) as two separate channels, **one bidirectional stream carries both directions**. Writes go out in the order they're enqueued. The server processes them in arrival order. Done.
+The critical change: instead of SSE (read) + POST (write) as two separate channels, **one bidirectional connection carries both directions**. Writes go out in the order they're enqueued. The server processes them in arrival order. Done.
 
 ### Server side (Rust)
 
@@ -142,18 +143,23 @@ The Rust server (`crates/jazz-tools/src/routes.rs`) currently exposes `GET /even
 - `/ws` — WebSocket upgrade endpoint (via `axum`'s built-in WebSocket support)
 
 Rust WebTransport libraries to evaluate:
+
 - [`wtransport`](https://github.com/BiagioFesta/wtransport) — pure Rust, built on `quinn`, async-native
 - [`web-transport`](https://github.com/moq-dev/web-transport) — from the moq-dev project, also `quinn`-based
 
 Both feed into the same `SyncManager` pipeline. The broadcast channel currently used for SSE events gets replaced with per-connection channels that work for either transport.
 
-### Client side (TypeScript)
+### Client side (TypeScript + Rust)
 
-`packages/jazz-tools/src/runtime/sync-transport.ts` currently manages:
-- `StreamController` for SSE
-- `sendSyncPayloadBatch()` for POST
+The TypeScript transport layer (`sync-transport.ts`, 650+ LOC) gets **deleted entirely**. Transport logic moves to Rust's `TransportManager`. The JS API shrinks to:
 
-New `TransportProvider` interface with implementations for WebTransport and WebSocket. The `StreamController` reconnection logic (exponential backoff, jitter) stays — it just reconnects the appropriate transport.
+```typescript
+// All platforms — the only transport API exposed to JS
+runtime.connect(url, authConfigJson);
+runtime.disconnect();
+```
+
+No more `StreamController`, `sendSyncPayloadBatch()`, `readBinaryFrames()`, or `onSyncMessageToSend()` callback registration. JS calls `connect()` and Rust handles everything.
 
 ### Wire format
 
@@ -204,11 +210,11 @@ NLB passthrough means TLS terminates in the Jazz server process, not at the load
 
 **Certificate options for ECS:**
 
-| Approach | Pros | Cons |
-|----------|------|------|
-| **Let's Encrypt + certbot** | Free, automated, trusted by all browsers | Needs ACME challenge solver (DNS-01 via Route53 API, or HTTP-01 on port 80). Renewal runs inside container or as a sidecar. |
-| **AWS Secrets Manager** | Centralized, IAM-controlled access, easy to mount into ECS tasks | Manual rotation (or Lambda-based auto-renewal). Extra cost per secret. |
-| **ACM (Certificate Manager)** | Free, auto-renewing | **Cannot export private keys** — only works with ALB/CloudFront/API Gateway. **Not usable** for server-side TLS. |
+| Approach                      | Pros                                                             | Cons                                                                                                                        |
+| ----------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| **Let's Encrypt + certbot**   | Free, automated, trusted by all browsers                         | Needs ACME challenge solver (DNS-01 via Route53 API, or HTTP-01 on port 80). Renewal runs inside container or as a sidecar. |
+| **AWS Secrets Manager**       | Centralized, IAM-controlled access, easy to mount into ECS tasks | Manual rotation (or Lambda-based auto-renewal). Extra cost per secret.                                                      |
+| **ACM (Certificate Manager)** | Free, auto-renewing                                              | **Cannot export private keys** — only works with ALB/CloudFront/API Gateway. **Not usable** for server-side TLS.            |
 
 **Recommended path**: Let's Encrypt with DNS-01 challenge via Route53. The Jazz server (or an init container) runs certbot, stores certs on an EFS volume or tmpfs, and reloads on renewal. `wtransport` supports certificate hot-reload.
 
@@ -223,6 +229,7 @@ NLB is L4 — no path-based routing, no WAF, no request-level access logs, no HT
 #### Local development: Chrome + TLS gotcha
 
 Chrome [does not support custom root CAs for WebTransport](https://moq.dev/blog/tls-and-quic/) despite supporting them for HTTPS. This means `mkcert`-style local dev doesn't work for WebTransport. Options:
+
 - **Self-signed certs with fingerprint verification** — WebTransport API supports `serverCertificateHashes`, but certs must be <2 weeks validity.
 - **Chrome flags** — `--ignore-certificate-errors-spki-list` for development.
 - **Fallback to WebSocket locally** — simplest DX. WebSocket works fine with mkcert. Use WebTransport only in staging/production.
@@ -231,7 +238,9 @@ The recommended local dev story: **WebSocket by default, WebTransport opt-in via
 
 ### Rust client
 
-`crates/jazz-tools/src/transport.rs` (used for server-to-server and tests) switches from `reqwest` HTTP to [`wtransport`](https://github.com/BiagioFesta/wtransport), which supports both client and server side. Same library on both ends — shared types, consistent behavior, single dependency for QUIC/WebTransport. WebSocket fallback via `tokio-tungstenite`. Tests get ordered delivery for free.
+`crates/jazz-tools/src/transport.rs` (used for server-to-server and tests) switches from `reqwest` HTTP to the same `NativeWebSocket` adapter (`tokio-tungstenite`) used by NAPI and React Native. One `WebSocketAdapter` implementation shared across all native targets. Tests get ordered delivery for free.
+
+Future WebTransport upgrade: [`wtransport`](https://github.com/BiagioFesta/wtransport) supports both client and server — same library on both ends when we add the `WebTransportAdapter`.
 
 ## Rabbit Holes
 
@@ -259,7 +268,7 @@ The recommended local dev story: **WebSocket by default, WebTransport opt-in via
 
 1. **No custom protocol on raw UDP/QUIC** — We use WebTransport's HTTP/3 mapping, not a bespoke QUIC protocol. Standards compliance, browser support, and proxy traversal matter more than squeezing out protocol-level optimizations.
 
-2. **No payload format changes in this project** — The binary framing stays, payloads remain JSON. The base64 encoding overhead disappears naturally (binary-native transport), but switching to a compact binary payload format (MessagePack, etc.) is a separate effort. We're changing the *transport*, not the *serialization*.
+2. **No payload format changes in this project** — The binary framing stays, payloads remain JSON. The base64 encoding overhead disappears naturally (binary-native transport), but switching to a compact binary payload format (MessagePack, etc.) is a separate effort. We're changing the _transport_, not the _serialization_.
 
 3. **No multi-stream optimization in v1** — Start with one bidirectional stream per connection. Multi-stream (separate streams for subscriptions vs data) is a future optimization after the single-stream migration is stable.
 
@@ -274,17 +283,21 @@ The recommended local dev story: **WebSocket by default, WebTransport opt-in via
 Integration-first, realistic fixtures, human actor names.
 
 **Ordering correctness (the primary goal):**
+
 - Un-ignore `subscription_reflects_final_state_after_rapid_bulk_updates` — 500 rapid writes must arrive in order. This is the **north-star test**.
 - Un-ignore `single_client_operations_reach_server_in_causal_order` — ownership transfer then write must land in causal order so policy enforcement is correct.
 - New test: `concurrent_writers_maintain_per_client_order` — Alice and Bob both write rapidly; each client's writes arrive in their authored order (cross-client interleaving is fine).
 
 **Transport fallback:**
+
 - Test WebTransport → WebSocket fallback by simulating WebTransport connection failure.
 - Test reconnection: kill connection mid-sync, verify ordered resume after reconnect.
 
 **Parity:**
+
 - All existing sync tests must pass identically on both WebTransport and WebSocket transports. Parameterize the test suite over transport type.
 
 **Performance:**
+
 - Benchmark: latency and throughput comparison between SSE+HTTP, WebSocket, and WebTransport for the 500-rapid-update scenario.
 - Measure reconnection time after network interruption.
