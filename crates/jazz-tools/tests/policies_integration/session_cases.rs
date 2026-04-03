@@ -10,6 +10,7 @@ use jazz_tools::middleware::auth::{LocalAuthMode, derive_local_principal_id};
 use jazz_tools::query_manager::policy::PolicyExpr;
 use jazz_tools::query_manager::types::{TablePolicies, TableSchemaBuilder};
 use jazz_tools::server::TestingServer;
+use jazz_tools::sync_tracer::SyncTracer;
 use jazz_tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, QueryBuilder, Schema, SchemaBuilder,
     TableSchema, Value,

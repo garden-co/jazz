@@ -117,6 +117,7 @@ pub struct TestingClient<'a> {
     storage: TestingClientStorage,
     ready_table: Option<String>,
     ready_timeout: Option<Duration>,
+    sync_tracer: Option<(jazz_tools::sync_tracer::SyncTracer, String)>,
 }
 
 #[allow(dead_code)]
@@ -130,6 +131,7 @@ impl<'a> TestingClient<'a> {
             storage: TestingClientStorage::Memory,
             ready_table: None,
             ready_timeout: None,
+            sync_tracer: None,
         }
     }
 
@@ -173,6 +175,15 @@ impl<'a> TestingClient<'a> {
 
     pub fn with_persistent_storage(mut self) -> Self {
         self.storage = TestingClientStorage::Persistent;
+        self
+    }
+
+    pub fn with_tracer(
+        mut self,
+        tracer: &jazz_tools::sync_tracer::SyncTracer,
+        name: impl Into<String>,
+    ) -> Self {
+        self.sync_tracer = Some((tracer.clone(), name.into()));
         self
     }
 
@@ -247,6 +258,8 @@ impl<'a> TestingClient<'a> {
             TestingClientStorage::Memory => ClientStorage::Memory,
             TestingClientStorage::Persistent => ClientStorage::Persistent,
         };
+
+        context.sync_tracer = self.sync_tracer.clone();
 
         context
     }

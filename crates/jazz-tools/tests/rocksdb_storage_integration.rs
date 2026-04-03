@@ -84,6 +84,7 @@ async fn make_client_external_jwks(
         jwt_token: Some(TestingServer::jwt_for_user(user_id)),
         backend_secret: Some(TestingServer::BACKEND_SECRET.to_string()),
         admin_secret: Some(TestingServer::ADMIN_SECRET.to_string()),
+        sync_tracer: None,
     };
 
     let client = JazzClient::connect(context).await.expect("connect client");
