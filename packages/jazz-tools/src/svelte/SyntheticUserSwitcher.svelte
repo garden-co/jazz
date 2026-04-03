@@ -27,9 +27,13 @@
 		defaultMode
 	}: Props = $props();
 
-	const storageOptions: SyntheticUserStorageOptions = { storage, storageKey, defaultMode };
+	let storageOptions = $derived({ storage, storageKey, defaultMode });
 
-	let store = $state<SyntheticUserStore>(loadSyntheticUserStore(appId, storageOptions));
+	let store = $state<SyntheticUserStore>(undefined!);
+
+	$effect.pre(() => {
+		store = loadSyntheticUserStore(appId, storageOptions);
+	});
 
 	function getActiveProfile(s: SyntheticUserStore): SyntheticUserProfile {
 		return s.profiles.find((p) => p.id === s.activeProfileId) ?? s.profiles[0];
