@@ -360,6 +360,103 @@ TransportManager.outbox_rx.recv() returns None
   └── run() exits
 ```
 
+## Execution model: single-threaded cooperative scheduling (WASM)
+
+WASM in the browser runs on the **same thread as JS**. There are no background threads. `spawn_local` does not create a thread — it registers a Rust `Future` on the JS microtask queue, exactly like `Promise.then()` or `queueMicrotask()`.
+
+A Rust `Future` is a state machine that **pauses** at every `.await` and **resumes** when the awaited thing completes. Between pauses, the JS event loop runs other work (React renders, user input, other promises). All futures take turns on the same thread — they're cooperative, not concurrent.
+
+### How TransportManager runs without threads
+
+`spawn_local(manager.run())` registers the TransportManager's async loop on the microtask queue. The loop uses `select!` to listen to both the outbox channel and the WebSocket simultaneously — not by running two threads, but by registering interest in both wakers. Whichever fires first resumes the future.
+
+### Full cycle: React insert → server → React re-render
+
+```
+JS event loop                            WASM (same thread)
+─────────────                            ──────────────────
+
+1. User clicks "Add Todo"
+   React calls db.insert(...)
+   ────────────────────────────────────►
+                                          insert() runs SYNCHRONOUSLY:
+                                          ├── writes to storage
+                                          ├── queues OutboxEntry in SyncManager
+                                          └── scheduler.schedule_batched_tick()
+                                                └── spawn_local(tick_future)
+                                                    [registers on microtask queue,
+                                                     does NOT run yet]
+   ◄────────────────────────────────────
+   insert() returns immediately.
+   React re-renders with local state.
+
+2. JS event loop is idle.
+   Picks up batched_tick future from microtask queue.
+   ────────────────────────────────────►
+                                          batched_tick() runs:
+                                          └── outbox_tx.send(entry)
+                                              [pushes to channel — non-blocking]
+
+                                          Channel push WAKES the TransportManager
+                                          future (which was paused in select!).
+   ◄────────────────────────────────────
+
+3. JS event loop picks up TransportManager future.
+   ────────────────────────────────────►
+                                          select! resumes: outbox_rx has a message.
+                                          ├── reads OutboxEntry from channel
+                                          ├── serializes → binary frame
+                                          └── ws.send(data)
+                                              [calls web_sys::WebSocket::send()
+                                               which is sync in the browser]
+
+                                          Back to select! — nothing pending.
+                                          .await PAUSES the future.
+   ◄────────────────────────────────────
+   Control returns to JS event loop.
+   JS can do other things.
+
+4. ...time passes, server processes, sends response...
+
+   Browser WebSocket fires "onmessage".
+   This WAKES the TransportManager future.
+   ────────────────────────────────────►
+                                          select! resumes: ws.recv() has data.
+                                          ├── deserializes frame → InboxEntry
+                                          ├── inbound_tx.send(entry)
+                                          │   [pushes to inbound channel]
+                                          └── .await PAUSES.
+   ◄────────────────────────────────────
+
+5. Tick bridge future wakes (inbound channel has data).
+   ────────────────────────────────────►
+                                          scheduler.schedule_batched_tick()
+                                          └── spawn_local(tick_future)
+   ◄────────────────────────────────────
+
+6. JS event loop picks up batched_tick future.
+   ────────────────────────────────────►
+                                          batched_tick() runs:
+                                          ├── inbound_rx.try_recv() → got entry
+                                          ├── park_sync_message(entry)
+                                          ├── handle_sync_messages()
+                                          ├── immediate_tick()
+                                          │   └── subscription callbacks fire
+                                          └── React hook dispatch() called
+   ◄────────────────────────────────────
+   React re-renders with server data.
+```
+
+### Why this works without races
+
+With threads, two things run **simultaneously** and need locks (`Mutex`). With `spawn_local`, futures run **interleaved** on the same thread — they take turns. Only one piece of Rust code executes at any moment. That's why WASM uses `Rc<RefCell>` (not `Arc<Mutex>`) — there's no concurrent access, just cooperative scheduling.
+
+The `select!` macro is the key primitive: it registers wakers on multiple sources (channel + WebSocket) and pauses the future until any one of them fires. This is how TransportManager "listens" to both directions without threads.
+
+### NAPI and React Native: same model, real threads
+
+In NAPI and React Native, `TransportManager` runs on a real async runtime (`tokio::spawn` or a background thread). This is safe because those platforms use `Arc<Mutex<RuntimeCore>>` (Send + Sync). The channel-based design means TransportManager never holds a lock on RuntimeCore — it only pushes/pulls from channels.
+
 ## Platform integration
 
 ### WASM (browser)
