@@ -284,6 +284,58 @@ describe("jazzAdapter", () => {
         },
       });
     });
+
+    it("accepts app-like schema sources from root schema.ts modules", async () => {
+      const authSchema = { wasmSchema: wasmSchemaExample };
+      const appAdapter = jazzAdapter({
+        db: () => context.db(authSchema),
+        schema: authSchema,
+      })({});
+
+      const created = await appAdapter.create({
+        model: "user",
+        data: {
+          name: "Schema App User",
+          email: "schema-app@example.com",
+          emailVerified: false,
+          image: null,
+        },
+      });
+
+      expect(created.id).toEqual(expect.any(String));
+      await expect(
+        appAdapter.findOne({
+          model: "user",
+          where: [{ field: "id", operator: "eq", value: created.id, connector: "AND" }],
+        }),
+      ).resolves.toMatchObject({
+        id: created.id,
+        email: "schema-app@example.com",
+      });
+    });
+
+    it("creates root schema.ts output for Better Auth CLI generation", async () => {
+      const generated = await (adapter as any).createSchema({
+        tables: {
+          user: {
+            modelName: "user",
+            fields: {
+              name: {
+                type: "string",
+                required: true,
+              },
+            },
+          },
+        },
+      });
+
+      expect(generated).toMatchObject({
+        path: "./schema-better-auth/schema.ts",
+        overwrite: true,
+      });
+      expect(generated.code).toContain('import { schema as s } from "jazz-tools";');
+      expect(generated.code).toContain("export const app: s.App<AppSchema> = s.defineApp(schema);");
+    });
   });
 
   /**

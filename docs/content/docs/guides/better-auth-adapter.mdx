@@ -13,7 +13,7 @@ Create a server-side Jazz context, then pass it to `jazzAdapter(...)` as the `da
 import { betterAuth } from "better-auth";
 import { createJazzContext } from "jazz-tools/backend";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
-import { wasmSchema } from "../../schema-better-auth/app";
+import { app as authSchema } from "../../schema-better-auth/schema";
 
 const jazzContext = createJazzContext({
   appId: process.env.APP_ID!,
@@ -27,20 +27,20 @@ const jazzContext = createJazzContext({
 
 export const auth = betterAuth({
   database: jazzAdapter({
-    db: () => jazzContext.asBackend(wasmSchema),
-    schema: wasmSchema,
+    db: () => jazzContext.asBackend(authSchema),
+    schema: authSchema,
     durabilityTier: "worker",
   }),
   // ...your Better Auth config
 });
 ```
 
-| Option           | Description                                                   |
-| ---------------- | ------------------------------------------------------------- |
-| `db`             | A function returning a `Db` handle via `context.asBackend()`. |
-| `schema`         | The compiled WASM schema from `schema-better-auth/app`.       |
-| `durabilityTier` | `"worker"` or `"edge"` (defaults to `"edge"`).                |
-| `prefix`         | Table name prefix (defaults to `"better_auth_"`).             |
+| Option           | Description                                                                          |
+| ---------------- | ------------------------------------------------------------------------------------ |
+| `db`             | A function returning a `Db` handle via `context.asBackend()`.                        |
+| `schema`         | A Jazz schema source such as the exported `app` from `schema-better-auth/schema.ts`. |
+| `durabilityTier` | `"worker"` or `"edge"` (defaults to `"edge"`).                                       |
+| `prefix`         | Table name prefix (defaults to `"better_auth_"`).                                    |
 
 <Callout title="Leave Better Auth joins disabled">
   The Jazz adapter does not support Better Auth experimental joins yet, so do not enable
@@ -52,13 +52,13 @@ export const auth = betterAuth({
 Better Auth tables live in a separate `schema-better-auth/` directory from your app schema.
 
 ```bash
-# Generate the Better Auth schema into schema-better-auth/
+# Generate the Better Auth root schema module into schema-better-auth/
 npx @better-auth/cli@latest generate \
   --config ./src/lib/auth.ts \
-  --output ./schema-better-auth/current.ts
+  --output ./schema-better-auth/schema.ts
 
-# Build schemas and migrations
-npx jazz-tools@alpha build --schema-dir ./schema-better-auth
+# Validate the generated schema source
+npx jazz-tools@alpha validate --schema-dir ./schema-better-auth
 
 # Push the Better Auth schema
 npx jazz-tools@alpha schema:push "$JAZZ_APP_ID" \
@@ -80,5 +80,5 @@ The adapter is currently aligned with Better Auth `1.5.5`.
 <Callout title="Compatibility scope">
   This section reflects the adapter behavior currently covered by this repo's Better Auth
   integration and tests. If you add plugins that introduce extra tables or custom schema fields,
-  regenerate `schema-better-auth/current.ts` and re-run the Jazz schema workflow.
+  regenerate `schema-better-auth/schema.ts` and re-run the Jazz schema workflow.
 </Callout>

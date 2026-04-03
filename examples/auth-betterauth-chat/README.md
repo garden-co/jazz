@@ -47,15 +47,21 @@ Open `http://127.0.0.1:3000`.
 
 ## How the Better Auth integration works
 
-### Server — `src/lib/create-better-auth.ts`, `src/lib/auth-jazz-context.ts`, and `app/api/auth/[...all]/route.ts`
+### Server — `src/lib/auth.ts`, `src/lib/auth-jazz-context.ts`, and `schema-better-auth/schema.ts`
 
-`createBetterAuth` wires up the Better Auth instance with four plugins:
+`auth.ts` wires up the Better Auth instance with four plugins and points the adapter at the
+root Better Auth schema module:
 
 ```ts
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
+import { app as authSchema } from "../../schema-better-auth/schema";
 
 betterAuth({
-  database: jazzAdapter(authJazzContext, { durabilityTier: "worker" }),
+  database: jazzAdapter({
+    db: () => authJazzContext.asBackend(authSchema),
+    schema: authSchema,
+    durabilityTier: "worker",
+  }),
   emailAndPassword: { enabled: true, autoSignIn: true, minPasswordLength: 1 },
   plugins: [
     nextCookies(),
@@ -77,10 +83,11 @@ betterAuth({
 });
 ```
 
-`authJazzContext` is a server-side Jazz context configured with `driver: { type: "memory" }`,
-the example app schema, and the same `serverUrl` / backend secret as the local sync server. That
-keeps Better Auth state out of Better Auth's in-process memory adapter while still avoiding local
-on-disk storage in the Next app.
+`schema-better-auth/schema.ts` is the Better Auth schema source file that the Jazz adapter now
+generates for the new root-schema workflow. `authJazzContext` is a server-side Jazz context
+configured with `driver: { type: "memory" }`, the same `serverUrl`, and the same backend secret
+as the local sync server. That keeps Better Auth state out of Better Auth's in-process memory
+adapter while still avoiding local on-disk storage in the Next app.
 
 - **`nextCookies` integration** — lets Better Auth session cookies participate in Next.js route
   handlers and server actions.

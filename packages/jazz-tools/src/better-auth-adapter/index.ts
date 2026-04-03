@@ -3,8 +3,10 @@ import {
   DBAdapterDebugLogOption,
   type CleanedWhere,
 } from "better-auth/adapters";
-import type { Db, DurabilityTier, WasmSchema } from "jazz-tools";
-import { buildJazzCurrentSchemaText } from "./schema.js";
+import type { Db, DurabilityTier } from "jazz-tools";
+import type { BackendSchemaInput } from "../backend/index.js";
+import { resolveSchemaSource } from "../schema-source.js";
+import { createJazzSchemaSourceFile } from "./schema.js";
 import type { JazzBuiltCondition, JazzRowRecord, JazzSortBy } from "./types.js";
 import {
   filterListByWhere,
@@ -21,7 +23,7 @@ interface JazzAdapterConfig {
   durabilityTier?: DurabilityTier;
   prefix?: string;
   db: () => Db;
-  schema: WasmSchema;
+  schema: BackendSchemaInput;
 }
 
 export const jazzAdapter = (config: JazzAdapterConfig) => {
@@ -45,7 +47,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
     },
     adapter: ({ schema, getModelName, getFieldName }) => {
       const getPrefixedModelName = (model: string) => `${prefix}${getModelName(model)}`;
-      const wasmSchema = config.schema;
+      const wasmSchema = resolveSchemaSource(config.schema);
 
       const toQueryCondition = (model: string, condition: CleanedWhere): JazzBuiltCondition => {
         const column = getFieldName({ model, field: condition.field });
@@ -224,15 +226,12 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         },
 
         async createSchema({ file, tables }) {
-          return {
-            path: file ?? "./schema-better-auth/current.ts",
-            overwrite: true,
-            code: buildJazzCurrentSchemaText({
-              tables,
-              getModelName: getPrefixedModelName,
-              getFieldName,
-            }),
-          };
+          return createJazzSchemaSourceFile({
+            file,
+            tables,
+            getModelName: getPrefixedModelName,
+            getFieldName,
+          });
         },
       };
     },
