@@ -14,7 +14,7 @@ const schema = {
     size: s.int(),
     lastModified: s.timestamp(),
     fileId: s.ref("files"),
-    ownerId: s.string(),
+    owner_id: s.string(),
   }),
 };
 

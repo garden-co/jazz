@@ -80,7 +80,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Configuration from environment or defaults
-    let app_id = std::env::var("JAZZ_APP_ID").unwrap_or_else(|_| "todo-app".to_string());
+    let app_id = std::env::var("JAZZ_APP_ID")
+        .unwrap_or_else(|_| "019d4349-2460-73fc-9e98-5d67c9697598".to_string());
     let server_url =
         std::env::var("JAZZ_SERVER_URL").unwrap_or_else(|_| "http://localhost:1625".to_string());
     let data_dir = std::env::var("TODO_DATA_DIR").unwrap_or_else(|_| "./todo-data".to_string());
@@ -103,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create Jazz client
     let context = AppContext {
-        app_id: AppId::from_name(&app_id),
+        app_id: AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id)),
         client_id: None,
         schema,
         server_url,

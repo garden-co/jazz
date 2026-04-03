@@ -58,7 +58,7 @@ export async function startApp(
   container: HTMLElement,
   config?: Partial<DbConfig>,
 ): Promise<{ db: Db; destroy: () => Promise<void> }> {
-  const appId = config?.appId ?? readEnvAppId() ?? "todo-client-example";
+  const appId = config?.appId ?? readEnvAppId() ?? "019d4349-241f-71c6-a453-e4754063b3dc";
   const activeAuth = getActiveSyntheticAuth(appId, { defaultMode: "demo" });
 
   const resolvedConfig: DbConfig = {
@@ -120,7 +120,7 @@ export async function startApp(
   container.appendChild(list);
   // Subscribe to all todos.
   const query = app.todos;
-  db.subscribeAll(query, ({ all: todos }) => {
+  const unsubscribe = db.subscribeAll(query, ({ all: todos }) => {
     const ordered = orderTodosWithDepth(todos);
     parentSelect.innerHTML = "";
     parentSelect.appendChild(noParentOption);
@@ -153,7 +153,7 @@ export async function startApp(
     db.insert(app.todos, {
       title: input.value,
       done: false,
-      ownerId: sessionUserId,
+      owner_id: sessionUserId,
       ...(selectedParentId ? { parentId: selectedParentId } : {}),
     });
     input.value = "";
@@ -177,6 +177,7 @@ export async function startApp(
   return {
     db,
     destroy: async () => {
+      unsubscribe();
       switcher.destroy();
       await db.shutdown();
       container.innerHTML = "";
