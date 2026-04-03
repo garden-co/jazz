@@ -39,6 +39,8 @@ export const auth = betterAuth({
 | ---------------- | ------------------------------------------------------------------------------------ |
 | `db`             | A function returning a `Db` handle via `context.asBackend()`.                        |
 | `schema`         | A Jazz schema source such as the exported `app` from `schema-better-auth/schema.ts`. |
+| `debugLogs`      | Better Auth adapter debug logging controls.                                          |
+| `usePlural`      | Whether Better Auth model names should use plural table names.                       |
 | `durabilityTier` | `"worker"` or `"edge"` (defaults to `"edge"`).                                       |
 | `prefix`         | Table name prefix (defaults to `"better_auth_"`).                                    |
 
@@ -60,11 +62,11 @@ npx @better-auth/cli@latest generate \
 # Validate the generated schema source
 npx jazz-tools@alpha validate --schema-dir ./schema-better-auth
 
-# Push the Better Auth schema
-npx jazz-tools@alpha schema:push "$JAZZ_APP_ID" \
-  --server-url "$JAZZ_SERVER_URL" \
-  --admin-secret "$JAZZ_ADMIN_SECRET" \
-  --schema-dir ./schema-better-auth
+# In development, connecting the app to a local Jazz server auto-publishes
+# the structural schema hash. For an existing deployed schema, create and
+# publish the migration edge instead:
+npx jazz-tools@alpha migrations create <fromHash> <toHash>
+npx jazz-tools@alpha migrations push <fromHash> <toHash>
 ```
 
 ## Compatibility

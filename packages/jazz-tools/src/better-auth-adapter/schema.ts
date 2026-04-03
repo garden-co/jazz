@@ -163,7 +163,7 @@ function toJazzSchemaReferenceExpression(args: {
       }
 
       const targetTableName = getModelName(reference.model);
-      return withOptionalSuffix(`col.ref(${formatStringLiteral(targetTableName)})`, field);
+      return withOptionalSuffix(`s.ref(${formatStringLiteral(targetTableName)})`, field);
     }
     case "string[]": {
       if (!isArrayReferenceFieldName(storedFieldName)) {
@@ -173,10 +173,7 @@ function toJazzSchemaReferenceExpression(args: {
       }
 
       const targetTableName = getModelName(reference.model);
-      return withOptionalSuffix(
-        `col.array(col.ref(${formatStringLiteral(targetTableName)}))`,
-        field,
-      );
+      return withOptionalSuffix(`s.array(s.ref(${formatStringLiteral(targetTableName)}))`, field);
     }
     case "number":
     case "number[]":
@@ -211,36 +208,36 @@ function toJazzSchemaColumnExpression(args: {
 
   if (Array.isArray(field.type)) {
     return withOptionalSuffix(
-      `col.enum(${field.type.map((variant) => formatStringLiteral(variant)).join(", ")})`,
+      `s.enum(${field.type.map((variant) => formatStringLiteral(variant)).join(", ")})`,
       field,
     );
   }
 
   switch (field.type) {
     case "string":
-      return withOptionalSuffix("col.string()", field);
+      return withOptionalSuffix("s.string()", field);
     case "number":
       if (field.bigint) {
         throw new Error(
           `Field "${modelName}.${fieldName}" uses Better Auth bigint numbers, which Jazz schema.ts cannot represent.`,
         );
       }
-      return withOptionalSuffix("col.int()", field);
+      return withOptionalSuffix("s.int()", field);
     case "boolean":
-      return withOptionalSuffix("col.boolean()", field);
+      return withOptionalSuffix("s.boolean()", field);
     case "date":
-      return withOptionalSuffix("col.timestamp()", field);
+      return withOptionalSuffix("s.timestamp()", field);
     case "json":
-      return withOptionalSuffix("col.json()", field);
+      return withOptionalSuffix("s.json()", field);
     case "string[]":
-      return withOptionalSuffix("col.array(col.string())", field);
+      return withOptionalSuffix("s.array(s.string())", field);
     case "number[]":
       if (field.bigint) {
         throw new Error(
           `Field "${modelName}.${fieldName}" uses Better Auth bigint arrays, which Jazz schema.ts cannot represent.`,
         );
       }
-      return withOptionalSuffix("col.array(col.int())", field);
+      return withOptionalSuffix("s.array(s.int())", field);
     default:
       throw new Error(`Unsupported Better Auth field type: ${String(field.type)}`);
   }
@@ -357,9 +354,7 @@ export function buildJazzSchemaSourceText(args: {
         getModelName,
       });
 
-      lines.push(
-        `    ${formatObjectKey(storedFieldName)}: ${expression.replaceAll("col.", "s.")},`,
-      );
+      lines.push(`    ${formatObjectKey(storedFieldName)}: ${expression},`);
     }
 
     lines.push("  }),");
@@ -411,20 +406,4 @@ export function createJazzSchemaSourceFile(args: {
       getFieldName,
     }),
   };
-}
-
-export function createJazzSchemaSourceFileFromTables(args: {
-  file?: string;
-  tables: BetterAuthDBSchema;
-  usePlural?: boolean;
-}): DBAdapterSchemaCreation {
-  const { file, tables, usePlural } = args;
-  const resolvers = createSchemaNameResolvers({ tables, usePlural });
-
-  return createJazzSchemaSourceFile({
-    file,
-    tables,
-    getModelName: resolvers.getModelName,
-    getFieldName: resolvers.getFieldName,
-  });
 }
