@@ -92,6 +92,7 @@ case "$(uname -s)" in
       exit 1
     fi
 
+    install_brew_formula_if_missing sccache sccache
     install_brew_formula_if_missing cmake cmake
     install_brew_formula_if_missing ninja ninja
 
@@ -119,16 +120,16 @@ case "$(uname -s)" in
       if command -v sudo >/dev/null 2>&1; then
         sudo apt-get update
         if [[ "$JAZZ_RN_PLATFORM" == "all" ]]; then
-          sudo apt-get install -y cmake ninja-build clang-format
+          sudo apt-get install -y sccache cmake ninja-build clang-format
         else
-          sudo apt-get install -y cmake ninja-build
+          sudo apt-get install -y sccache cmake ninja-build
         fi
       else
         apt-get update
         if [[ "$JAZZ_RN_PLATFORM" == "all" ]]; then
-          apt-get install -y cmake ninja-build clang-format
+          apt-get install -y sccache cmake ninja-build clang-format
         else
-          apt-get install -y cmake ninja-build
+          apt-get install -y sccache cmake ninja-build
         fi
       fi
     else
