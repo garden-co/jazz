@@ -3,7 +3,7 @@ import { nextCookies } from "better-auth/next-js";
 import { admin, bearer, jwt } from "better-auth/plugins";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { authJazzContext } from "./auth-jazz-context";
-import { wasmSchema } from "../../schema-better-auth/app";
+import { app as authSchema } from "../../schema-better-auth/schema";
 
 const BETTER_AUTH_SECRET = "auth-betterauth-chat-development-secret";
 const APP_ORIGIN = process.env.NEXT_PUBLIC_APP_ORIGIN!;
@@ -11,8 +11,8 @@ const APP_ORIGIN = process.env.NEXT_PUBLIC_APP_ORIGIN!;
 export const auth = betterAuth({
   baseURL: APP_ORIGIN,
   database: jazzAdapter({
-    db: () => authJazzContext.asBackend(wasmSchema),
-    schema: wasmSchema,
+    db: () => authJazzContext.asBackend(authSchema),
+    schema: authSchema,
     durabilityTier: "worker",
   }),
   secret: BETTER_AUTH_SECRET,

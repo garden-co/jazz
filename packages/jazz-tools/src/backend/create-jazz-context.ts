@@ -7,16 +7,16 @@ import type { AppContext, Session } from "../runtime/context.js";
 import { createDbFromClient, type Db, type DbConfig } from "../runtime/db.js";
 import { resolveLocalAuthDefaults } from "../runtime/local-auth.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
+import {
+  resolveSchemaSource,
+  type QuerySchemaSource,
+  type SchemaSourceInput,
+  type WasmSchemaSource,
+} from "../schema-source.js";
 
-export interface BackendSchemaSource {
-  wasmSchema: WasmSchema;
-}
-
-export interface BackendQuerySchemaSource {
-  _schema: WasmSchema;
-}
-
-export type BackendSchemaInput = WasmSchema | BackendSchemaSource | BackendQuerySchemaSource;
+export type BackendSchemaSource = WasmSchemaSource;
+export type BackendQuerySchemaSource = QuerySchemaSource;
+export type BackendSchemaInput = SchemaSourceInput;
 
 export type BackendDriver =
   | {
@@ -58,39 +58,6 @@ function assertValidBackendConfig(config: BackendContextConfig): void {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function isTableSchema(value: unknown): boolean {
-  return isRecord(value) && Array.isArray(value.columns);
-}
-
-function isWasmSchema(value: unknown): value is WasmSchema {
-  return (
-    isRecord(value) &&
-    !("_schema" in value) &&
-    !("wasmSchema" in value) &&
-    Object.values(value).every((table) => isTableSchema(table))
-  );
-}
-
-function resolveSchema(input: BackendSchemaInput): WasmSchema {
-  if (isWasmSchema(input)) {
-    return input;
-  }
-  if (isRecord(input) && "_schema" in input && isWasmSchema(input._schema)) {
-    return input._schema;
-  }
-  if (isRecord(input) && "wasmSchema" in input && isWasmSchema(input.wasmSchema)) {
-    return input.wasmSchema;
-  }
-
-  throw new Error(
-    "Invalid schema source. Pass a WasmSchema, a generated app object, or a generated query/table object.",
-  );
-}
-
 /**
  * Server-side Jazz context with lazy runtime setup.
  *
@@ -119,7 +86,7 @@ export class JazzContext {
         "No schema source provided. Pass `app` to createJazzContext or provide a schema source when calling db()/asBackend()/forRequest()/forSession().",
       );
     }
-    const schema = resolveSchema(selected);
+    const schema = resolveSchemaSource(selected);
     return this.config.permissions
       ? mergePermissionsIntoWasmSchema(schema, this.config.permissions)
       : schema;

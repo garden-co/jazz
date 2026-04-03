@@ -4,7 +4,7 @@ import type { BetterAuthDBSchema, DBFieldAttribute } from "better-auth/db";
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
 import { assertUserColumnNameAllowed } from "../magic-columns.js";
 
-const DEFAULT_SCHEMA_FILE_PATH = "./better-auth-jazz-schema.ts";
+const DEFAULT_SCHEMA_FILE_PATH = "./schema-better-auth/schema.ts";
 const JS_IDENTIFIER_PATTERN = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
 interface SchemaNameResolvers {
@@ -134,7 +134,7 @@ function withOptionalSuffix(expression: string, field: DBFieldAttribute): string
   return field.required === false ? `${expression}.optional()` : expression;
 }
 
-function toJazzCurrentReferenceExpression(args: {
+function toJazzSchemaReferenceExpression(args: {
   modelName: string;
   fieldName: string;
   storedFieldName: string;
@@ -150,7 +150,7 @@ function toJazzCurrentReferenceExpression(args: {
 
   if (reference.field !== "id") {
     throw new Error(
-      `Field "${modelName}.${fieldName}" references "${reference.model}.${reference.field}", but Jazz current.ts only supports references to "id".`,
+      `Field "${modelName}.${fieldName}" references "${reference.model}.${reference.field}", but Jazz schema.ts only supports references to "id".`,
     );
   }
 
@@ -190,7 +190,7 @@ function toJazzCurrentReferenceExpression(args: {
   }
 }
 
-function toJazzCurrentColumnExpression(args: {
+function toJazzSchemaColumnExpression(args: {
   modelName: string;
   fieldName: string;
   storedFieldName: string;
@@ -200,7 +200,7 @@ function toJazzCurrentColumnExpression(args: {
   const { modelName, fieldName, storedFieldName, field, getModelName } = args;
 
   if (field.references) {
-    return toJazzCurrentReferenceExpression({
+    return toJazzSchemaReferenceExpression({
       modelName,
       fieldName,
       storedFieldName,
@@ -222,7 +222,7 @@ function toJazzCurrentColumnExpression(args: {
     case "number":
       if (field.bigint) {
         throw new Error(
-          `Field "${modelName}.${fieldName}" uses Better Auth bigint numbers, which Jazz current.ts cannot represent.`,
+          `Field "${modelName}.${fieldName}" uses Better Auth bigint numbers, which Jazz schema.ts cannot represent.`,
         );
       }
       return withOptionalSuffix("col.int()", field);
@@ -237,7 +237,7 @@ function toJazzCurrentColumnExpression(args: {
     case "number[]":
       if (field.bigint) {
         throw new Error(
-          `Field "${modelName}.${fieldName}" uses Better Auth bigint arrays, which Jazz current.ts cannot represent.`,
+          `Field "${modelName}.${fieldName}" uses Better Auth bigint arrays, which Jazz schema.ts cannot represent.`,
         );
       }
       return withOptionalSuffix("col.array(col.int())", field);
@@ -329,7 +329,7 @@ export function buildJazzSchemaFromTables(args: {
   });
 }
 
-export function buildJazzCurrentSchemaText(args: {
+export function buildJazzSchemaSourceText(args: {
   tables: BetterAuthDBSchema;
   getModelName: (model: string) => string;
   getFieldName: ({ model, field }: { model: string; field: string }) => string;
@@ -339,7 +339,7 @@ export function buildJazzCurrentSchemaText(args: {
 
   for (const [modelName, model] of Object.entries(tables)) {
     const tableName = getModelName(modelName);
-    const lines = [`table(${formatStringLiteral(tableName)}, {`];
+    const lines = [`  ${formatObjectKey(tableName)}: s.table({`];
 
     for (const [fieldName, field] of Object.entries(model.fields)) {
       if (fieldName === "id") {
@@ -349,7 +349,7 @@ export function buildJazzCurrentSchemaText(args: {
       const storedFieldName = getFieldName({ model: modelName, field: fieldName });
       assertStoredFieldNameAllowed({ modelName, fieldName, storedFieldName });
 
-      const expression = toJazzCurrentColumnExpression({
+      const expression = toJazzSchemaColumnExpression({
         modelName,
         fieldName,
         storedFieldName,
@@ -357,47 +357,74 @@ export function buildJazzCurrentSchemaText(args: {
         getModelName,
       });
 
-      lines.push(`  ${formatObjectKey(storedFieldName)}: ${expression},`);
+      lines.push(
+        `    ${formatObjectKey(storedFieldName)}: ${expression.replaceAll("col.", "s.")},`,
+      );
     }
 
-    lines.push("});");
+    lines.push("  }),");
     blocks.push(lines.join("\n"));
   }
 
-  return ['import { table, col } from "jazz-tools";', ...blocks].join("\n\n") + "\n";
+  return [
+    'import { schema as s } from "jazz-tools";',
+    "",
+    "const schema = {",
+    ...blocks.flatMap((block, index) => (index === 0 ? [block] : ["", block])),
+    "};",
+    "",
+    "type AppSchema = s.Schema<typeof schema>;",
+    "export const app: s.App<AppSchema> = s.defineApp(schema);",
+    "export const wasmSchema = app.wasmSchema;",
+    "",
+  ].join("\n");
 }
 
-export function buildJazzCurrentSchemaTextFromTables(args: {
+export function buildJazzSchemaSourceTextFromTables(args: {
   tables: BetterAuthDBSchema;
   usePlural?: boolean;
 }): string {
   const { tables, usePlural } = args;
   const resolvers = createSchemaNameResolvers({ tables, usePlural });
 
-  return buildJazzCurrentSchemaText({
+  return buildJazzSchemaSourceText({
     tables,
     getModelName: resolvers.getModelName,
     getFieldName: resolvers.getFieldName,
   });
 }
 
-export function createJazzSchemaModule(args: {
+export function createJazzSchemaSourceFile(args: {
   file?: string;
-  wasmSchema: WasmSchema;
+  tables: BetterAuthDBSchema;
+  getModelName: (model: string) => string;
+  getFieldName: ({ model, field }: { model: string; field: string }) => string;
 }): DBAdapterSchemaCreation {
-  const { file, wasmSchema } = args;
+  const { file, tables, getModelName, getFieldName } = args;
 
   return {
     path: file ?? DEFAULT_SCHEMA_FILE_PATH,
     overwrite: true,
-    code: [
-      "// AUTO-GENERATED FILE - DO NOT EDIT",
-      'import type { WasmSchema } from "jazz-tools";',
-      "",
-      `export const wasmSchema: WasmSchema = ${JSON.stringify(wasmSchema, null, 2)};`,
-      "",
-      "export const app = { wasmSchema };",
-      "",
-    ].join("\n"),
+    code: buildJazzSchemaSourceText({
+      tables,
+      getModelName,
+      getFieldName,
+    }),
   };
+}
+
+export function createJazzSchemaSourceFileFromTables(args: {
+  file?: string;
+  tables: BetterAuthDBSchema;
+  usePlural?: boolean;
+}): DBAdapterSchemaCreation {
+  const { file, tables, usePlural } = args;
+  const resolvers = createSchemaNameResolvers({ tables, usePlural });
+
+  return createJazzSchemaSourceFile({
+    file,
+    tables,
+    getModelName: resolvers.getModelName,
+    getFieldName: resolvers.getFieldName,
+  });
 }
