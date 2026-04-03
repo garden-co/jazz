@@ -48,3 +48,42 @@ sudo apt install libclang-dev
 ```sh
 sudo dnf install clang-devel
 ```
+
+## Testing
+
+### Running tests
+
+```sh
+pnpm test          # everything (via turbo)
+cargo test -p jazz-tools --features test   # rust core only
+```
+
+### Snapshot testing with insta in rust
+
+Sync integration tests use [insta](https://insta.rs) for inline snapshot assertions. Snapshots live directly in the test source as `@"..."` strings — no separate `.snap` files.
+
+```rust
+insta::assert_snapshot!(tracer.tally(), @"
+alice    -> server  : ObjectUpdated (1)
+server   -> alice   : PersistenceAck (2)
+");
+```
+
+When a snapshot doesn't match, the test fails and insta records the new value. To review and update:
+
+```sh
+# Install the insta CLI (once)
+cargo install cargo-insta
+
+# Run the failing tests
+cargo test -p jazz-tools --features test
+
+# Review each pending change interactively — shows a diff, asks accept/reject
+cargo insta review
+
+# Or accept all pending snapshots at once (when you trust the new output)
+cargo insta accept
+```
+
+`cargo insta review` rewrites the `@"..."` string in the source file directly.
+No git-tracked `.snap` files to manage.
