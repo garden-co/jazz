@@ -736,7 +736,7 @@ mod tests {
                 &branch1,
                 commit1.clone(),
                 Some(PrefixBatchUpdate {
-                    prefix: prefix.clone(),
+                    prefix: prefix.clone().into(),
                     batch_meta: PrefixBatchMeta {
                         batch_id: batch1_id,
                         batch_ord: crate::query_manager::types::BatchOrd(0),
@@ -762,7 +762,7 @@ mod tests {
                 &branch2,
                 commit2.clone(),
                 Some(PrefixBatchUpdate {
-                    prefix: prefix.clone(),
+                    prefix: prefix.clone().into(),
                     batch_meta: PrefixBatchMeta {
                         batch_id: batch2_id,
                         batch_ord: crate::query_manager::types::BatchOrd(1),

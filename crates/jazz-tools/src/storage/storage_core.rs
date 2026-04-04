@@ -717,7 +717,7 @@ pub(super) fn append_commit_core(
 
     if let Some(update) = prefix_batch_update {
         let mut catalog =
-            load_prefix_batch_catalog_core(object_id, &update.prefix, |key| get(key))?
+            load_prefix_batch_catalog_core(object_id, update.prefix.as_str(), |key| get(key))?
                 .unwrap_or_default();
 
         for parent_batch_ord in &update.increment_parent_child_counts {
@@ -730,7 +730,7 @@ pub(super) fn append_commit_core(
         }
         catalog.insert_batch_meta(update.batch_meta.clone());
         catalog.insert_leaf_batch_ord(update.batch_meta.batch_ord);
-        persist_prefix_batch_catalog(object_id, &update.prefix, &catalog, |key, value| {
+        persist_prefix_batch_catalog(object_id, update.prefix.as_str(), &catalog, |key, value| {
             set(key, value)
         })?;
     }

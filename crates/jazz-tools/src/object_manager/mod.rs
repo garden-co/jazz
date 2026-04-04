@@ -95,7 +95,7 @@ pub enum TruncateError {
 
 #[derive(Debug, Clone)]
 struct PendingBatchCatalogUpdate {
-    prefix: String,
+    prefix: BranchName,
     storage_update: PrefixBatchUpdate,
     resolved_parent_branches: Vec<(CommitId, BatchBranchKey)>,
 }
@@ -468,7 +468,8 @@ impl ObjectManager {
         object_id: ObjectId,
         prefix: &str,
     ) -> Result<Cow<'a, PrefixBatchCatalog>, Error> {
-        if let Some(catalog) = object.prefix_batches.get(prefix) {
+        let prefix_name = BranchName::new(prefix);
+        if let Some(catalog) = object.prefix_batches.get(&prefix_name) {
             Ok(Cow::Borrowed(catalog))
         } else {
             Ok(Cow::Owned(
@@ -500,8 +501,8 @@ impl ObjectManager {
         commit: &Commit,
     ) -> Result<PendingBatchCatalogUpdate, Error> {
         let prefix_name = branch_key.prefix_name();
-        let prefix = prefix_name.as_str().to_string();
-        let loaded_catalog = Self::load_prefix_batch_catalog(object, io, object_id, &prefix)?;
+        let loaded_catalog =
+            Self::load_prefix_batch_catalog(object, io, object_id, prefix_name.as_str())?;
         let existing_meta = loaded_catalog.batch_meta(&branch_key.batch_id()).cloned();
         let mut resolved_parent_branches = Vec::new();
         let mut parent_batch_ords = Vec::new();
@@ -546,9 +547,9 @@ impl ObjectManager {
             };
 
         Ok(PendingBatchCatalogUpdate {
-            prefix,
+            prefix: prefix_name,
             storage_update: PrefixBatchUpdate {
-                prefix: prefix_name.as_str().to_string(),
+                prefix: prefix_name,
                 batch_meta,
                 remove_leaf_batch_ords,
                 increment_parent_child_counts,
@@ -812,10 +813,7 @@ impl ObjectManager {
             .expect("object existence already validated");
 
         if let Some(update) = &pending_batch_update {
-            let catalog = object
-                .prefix_batches
-                .entry(update.prefix.clone())
-                .or_default();
+            let catalog = object.prefix_batches.entry(update.prefix).or_default();
             Self::apply_prefix_batch_update(catalog, &update.storage_update);
             for (parent_commit_id, parent_branch_key) in &update.resolved_parent_branches {
                 object
@@ -986,7 +984,7 @@ impl ObjectManager {
         prefix: &BranchPrefixName,
         storage: &dyn Storage,
     ) -> Result<HashMap<BranchName, CommitId>, Error> {
-        let prefix_key = prefix.branch_prefix();
+        let prefix_key = BranchName::new(prefix.branch_prefix());
         self.ensure_prefix_batch_catalog_loaded(object_id, prefix, storage)?;
         let Some(catalog) = self
             .get(object_id)
@@ -1014,7 +1012,7 @@ impl ObjectManager {
         prefix: &BranchPrefixName,
         storage: &dyn Storage,
     ) -> Result<HashMap<BranchName, CommitId>, Error> {
-        let prefix_key = prefix.branch_prefix();
+        let prefix_key = BranchName::new(prefix.branch_prefix());
         self.ensure_prefix_batch_catalog_loaded(object_id, prefix, storage)?;
         let Some(catalog) = self
             .get(object_id)
@@ -1040,7 +1038,7 @@ impl ObjectManager {
         prefix: &BranchPrefixName,
         storage: &dyn Storage,
     ) -> Result<(), Error> {
-        let prefix_key = prefix.branch_prefix();
+        let prefix_key = BranchName::new(prefix.branch_prefix());
 
         if self.get(object_id).is_none() && self.get_or_load(object_id, storage, &[]).is_none() {
             return Err(Error::ObjectNotFound(object_id));
@@ -1055,7 +1053,7 @@ impl ObjectManager {
         }
 
         let catalog = storage
-            .load_prefix_batch_catalog(object_id, &prefix_key)
+            .load_prefix_batch_catalog(object_id, prefix_key.as_str())
             .map_err(Error::StorageError)?
             .unwrap_or_default();
 
@@ -1264,10 +1262,7 @@ impl ObjectManager {
         let object = self.get_mut(object_id).expect("validated above");
 
         if let Some(update) = &pending_batch_update {
-            let catalog = object
-                .prefix_batches
-                .entry(update.prefix.clone())
-                .or_default();
+            let catalog = object.prefix_batches.entry(update.prefix).or_default();
             Self::apply_prefix_batch_update(catalog, &update.storage_update);
             for (parent_commit_id, parent_branch_key) in &update.resolved_parent_branches {
                 object
@@ -1717,7 +1712,7 @@ impl ObjectManager {
         }
 
         for (prefix, catalog) in &obj.prefix_batches {
-            size += prefix.len() + 24;
+            size += prefix.as_str().len() + 24;
             size += 48;
             size += catalog.leaf_batch_count() * (std::mem::size_of::<u32>() + 16);
             for batch_meta in catalog.batch_metas() {

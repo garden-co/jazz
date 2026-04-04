@@ -644,7 +644,7 @@ pub struct Object {
     pub metadata: HashMap<String, String>,
     pub branches: ObjectBranches,
     pub commit_branches: HashMap<CommitId, BatchBranchKey>,
-    pub prefix_batches: HashMap<String, PrefixBatchCatalog>,
+    pub prefix_batches: HashMap<BranchName, PrefixBatchCatalog>,
 }
 
 impl Object {

@@ -296,7 +296,7 @@ fn apply_prefix_batch_update_mutates_catalog_in_place() {
     catalog.insert_leaf_batch_ord(BatchOrd(0));
 
     let update = PrefixBatchUpdate {
-        prefix,
+        prefix: prefix.into(),
         batch_meta: PrefixBatchMeta {
             batch_id: batch2,
             batch_ord: BatchOrd(1),
@@ -1695,7 +1695,7 @@ fn get_leaf_head_ids_for_prefix_cold_loads_only_leaf_branches() {
     assert_eq!(
         object
             .prefix_batches
-            .get(&prefix.branch_prefix())
+            .get(&BranchName::new(prefix.branch_prefix()))
             .map(|catalog| catalog.leaf_batch_ids().collect::<HashSet<_>>()),
         Some(HashSet::from([batch3_id]))
     );
@@ -1764,7 +1764,7 @@ fn get_head_ids_for_prefix_cold_loads_without_loading_branches() {
     assert_eq!(
         object
             .prefix_batches
-            .get(&prefix.branch_prefix())
+            .get(&BranchName::new(prefix.branch_prefix()))
             .map(|catalog| catalog.batch_metas().count()),
         Some(3)
     );

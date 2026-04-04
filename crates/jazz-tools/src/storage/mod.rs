@@ -28,12 +28,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
 
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use smolset::SmolSet;
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId, PrefixBatchCatalog, PrefixBatchMeta};
 use crate::query_manager::types::{
-    BatchBranchKey, BatchId, BatchOrd, PrefixId, QueryBranchRef, SchemaHash, ScopedObject, Value,
+    BatchBranchKey, BatchId, BatchOrd, ColumnName, PrefixId, QueryBranchRef, SchemaHash,
+    ScopedObject, TableName, Value,
 };
 use crate::sync_manager::DurabilityTier;
 
@@ -105,7 +107,7 @@ pub struct LoadedBranchTips {
 /// Batch catalog updates applied when appending one commit on a composed batch branch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrefixBatchUpdate {
-    pub prefix: String,
+    pub prefix: BranchName,
     pub batch_meta: PrefixBatchMeta,
     pub remove_leaf_batch_ords: SmolSet<[BatchOrd; 4]>,
     pub increment_parent_child_counts: Vec<BatchOrd>,
@@ -136,6 +138,12 @@ pub(crate) struct TablePrefixBatchManifest {
 }
 
 impl TablePrefixBatchManifest {
+    fn ensure_lookup(&mut self) {
+        if self.lookup_by_id.len() != self.entries_by_ord.len() {
+            self.rebuild_lookup();
+        }
+    }
+
     fn rebuild_lookup(&mut self) {
         self.lookup_by_id = self
             .entries_by_ord
@@ -158,6 +166,39 @@ impl TablePrefixBatchManifest {
             .map(|index| self.lookup_by_id[index].batch_ord)
     }
 
+    fn insert_lookup(&mut self, batch_id: BatchId, batch_ord: BatchOrd) {
+        let key = *batch_id.as_bytes();
+        match self
+            .lookup_by_id
+            .binary_search_by_key(&key, |entry| *entry.batch_id.as_bytes())
+        {
+            Ok(index) => self.lookup_by_id[index].batch_ord = batch_ord,
+            Err(index) => self.lookup_by_id.insert(
+                index,
+                TablePrefixBatchLookupEntry {
+                    batch_id,
+                    batch_ord,
+                },
+            ),
+        }
+    }
+
+    fn remove_lookup_and_shift_after(&mut self, batch_id: &BatchId, removed_ord: BatchOrd) {
+        let key = *batch_id.as_bytes();
+        if let Ok(index) = self
+            .lookup_by_id
+            .binary_search_by_key(&key, |entry| *entry.batch_id.as_bytes())
+        {
+            self.lookup_by_id.remove(index);
+        }
+
+        for entry in &mut self.lookup_by_id {
+            if entry.batch_ord.as_usize() > removed_ord.as_usize() {
+                entry.batch_ord = BatchOrd(entry.batch_ord.0 - 1);
+            }
+        }
+    }
+
     pub fn branch_keys(&self, prefix: BranchName) -> Vec<BatchBranchKey> {
         self.entries_by_ord
             .iter()
@@ -166,9 +207,7 @@ impl TablePrefixBatchManifest {
     }
 
     pub fn adjust_refcount(&mut self, batch_id: BatchId, delta: i64) {
-        if self.lookup_by_id.len() != self.entries_by_ord.len() {
-            self.rebuild_lookup();
-        }
+        self.ensure_lookup();
 
         if let Some(batch_ord) = self.lookup_ord(&batch_id) {
             let index = batch_ord.as_usize();
@@ -180,16 +219,17 @@ impl TablePrefixBatchManifest {
             };
             if next == 0 {
                 self.entries_by_ord.remove(index);
-                self.rebuild_lookup();
+                self.remove_lookup_and_shift_after(&batch_id, batch_ord);
             } else {
                 self.entries_by_ord[index].ref_count = next;
             }
         } else if delta > 0 {
+            let batch_ord = BatchOrd(self.entries_by_ord.len() as u32);
             self.entries_by_ord.push(TablePrefixBatchEntry {
                 batch_id,
                 ref_count: delta as u64,
             });
-            self.rebuild_lookup();
+            self.insert_lookup(batch_id, batch_ord);
         }
     }
 
@@ -725,10 +765,100 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 // ============================================================================
 
 /// Index key: (table, column, compact prefix id, batch id).
-type IndexKey = (String, String, PrefixId, BatchId);
+type IndexKey = (TableName, ColumnName, PrefixId, BatchId);
+
+const INLINE_INDEX_ROW_IDS: usize = 4;
+
+#[derive(Debug, Clone, Default)]
+enum IndexRowIdSet {
+    #[default]
+    Inline,
+    Packed(SmallVec<[ObjectId; INLINE_INDEX_ROW_IDS]>),
+    Spill(HashSet<ObjectId>),
+}
+
+impl IndexRowIdSet {
+    fn insert(&mut self, row_id: ObjectId) -> bool {
+        match self {
+            Self::Inline => {
+                let mut rows = SmallVec::<[ObjectId; INLINE_INDEX_ROW_IDS]>::new();
+                rows.push(row_id);
+                *self = Self::Packed(rows);
+                true
+            }
+            Self::Packed(rows) => {
+                if rows.contains(&row_id) {
+                    return false;
+                }
+
+                rows.push(row_id);
+                if rows.len() > INLINE_INDEX_ROW_IDS {
+                    let mut spill = HashSet::with_capacity(rows.len());
+                    spill.extend(rows.iter().copied());
+                    *self = Self::Spill(spill);
+                }
+                true
+            }
+            Self::Spill(rows) => rows.insert(row_id),
+        }
+    }
+
+    fn remove(&mut self, row_id: &ObjectId) -> bool {
+        match self {
+            Self::Inline => false,
+            Self::Packed(rows) => {
+                let Some(index) = rows.iter().position(|existing| existing == row_id) else {
+                    return false;
+                };
+                rows.swap_remove(index);
+                if rows.is_empty() {
+                    *self = Self::Inline;
+                }
+                true
+            }
+            Self::Spill(rows) => {
+                let removed = rows.remove(row_id);
+                if removed && rows.len() <= INLINE_INDEX_ROW_IDS {
+                    let mut packed = SmallVec::<[ObjectId; INLINE_INDEX_ROW_IDS]>::new();
+                    packed.extend(rows.iter().copied());
+                    *self = if packed.is_empty() {
+                        Self::Inline
+                    } else {
+                        Self::Packed(packed)
+                    };
+                }
+                removed
+            }
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Inline => true,
+            Self::Packed(rows) => rows.is_empty(),
+            Self::Spill(rows) => rows.is_empty(),
+        }
+    }
+
+    fn extend_vec(&self, out: &mut Vec<ObjectId>) {
+        match self {
+            Self::Inline => {}
+            Self::Packed(rows) => out.extend(rows.iter().copied()),
+            Self::Spill(rows) => out.extend(rows.iter().copied()),
+        }
+    }
+
+    fn extend_hash_set(&self, out: &mut HashSet<ObjectId>) {
+        match self {
+            Self::Inline => {}
+            Self::Packed(rows) => out.extend(rows.iter().copied()),
+            Self::Spill(rows) => out.extend(rows.iter().copied()),
+        }
+    }
+}
 
 /// Index storage: encoded_value -> row_ids. BTreeMap for correct range query ordering.
-type IndexEntries = BTreeMap<Vec<u8>, HashSet<ObjectId>>;
+type IndexEntries = BTreeMap<Vec<u8>, IndexRowIdSet>;
 
 /// In-memory Storage for testing and main-thread use.
 ///
@@ -748,7 +878,7 @@ pub struct MemoryStorage {
     /// Persistence ack tiers per commit.
     ack_tiers: HashMap<CommitId, HashSet<DurabilityTier>>,
     /// Active table batches keyed by shared batch prefix.
-    table_batches_by_prefix: HashMap<(String, BranchName), TablePrefixBatchManifest>,
+    table_batches_by_prefix: HashMap<(TableName, BranchName), TablePrefixBatchManifest>,
     /// Append-only manifest ops keyed by app_id then op object_id.
     catalogue_manifest_ops: HashMap<ObjectId, HashMap<ObjectId, CatalogueManifestOp>>,
 }
@@ -757,9 +887,9 @@ pub struct MemoryStorage {
 #[derive(Debug, Clone, Default)]
 struct ObjectData {
     metadata: HashMap<String, String>,
-    branches: HashMap<BatchBranchKey, BranchData>,
+    branches: ObjectBranchDataStore,
     commit_branches: HashMap<CommitId, BatchBranchKey>,
-    prefix_batches: HashMap<String, PrefixBatchCatalog>,
+    prefix_batches: HashMap<BranchName, PrefixBatchCatalog>,
 }
 
 /// Internal branch storage structure.
@@ -767,6 +897,86 @@ struct ObjectData {
 struct BranchData {
     commits: Vec<Commit>,
     tails: HashSet<CommitId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BranchDataSlotLookupEntry {
+    batch_id: BatchId,
+    slot_index: u32,
+}
+
+#[derive(Debug, Clone)]
+struct BranchDataSlot {
+    branch_data: BranchData,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PrefixBranchDataStore {
+    branch_slots: Vec<BranchDataSlot>,
+    lookup_by_id: Vec<BranchDataSlotLookupEntry>,
+}
+
+impl PrefixBranchDataStore {
+    fn lookup_index(&self, batch_id: &BatchId) -> Result<usize, usize> {
+        let key = *batch_id.as_bytes();
+        self.lookup_by_id
+            .binary_search_by_key(&key, |entry| *entry.batch_id.as_bytes())
+    }
+
+    fn slot_index(&self, batch_id: &BatchId) -> Option<usize> {
+        self.lookup_index(batch_id)
+            .ok()
+            .map(|index| self.lookup_by_id[index].slot_index as usize)
+    }
+
+    fn get(&self, batch_id: &BatchId) -> Option<&BranchData> {
+        let slot_index = self.slot_index(batch_id)?;
+        self.branch_slots
+            .get(slot_index)
+            .map(|slot| &slot.branch_data)
+    }
+
+    fn get_or_insert_default(&mut self, batch_id: BatchId) -> &mut BranchData {
+        if let Some(slot_index) = self.slot_index(&batch_id) {
+            return &mut self.branch_slots[slot_index].branch_data;
+        }
+
+        let slot_index = self.branch_slots.len() as u32;
+        self.branch_slots.push(BranchDataSlot {
+            branch_data: BranchData::default(),
+        });
+        let insert_index = self
+            .lookup_index(&batch_id)
+            .expect_err("branch batch should be absent before insert");
+        self.lookup_by_id.insert(
+            insert_index,
+            BranchDataSlotLookupEntry {
+                batch_id,
+                slot_index,
+            },
+        );
+        &mut self.branch_slots[slot_index as usize].branch_data
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ObjectBranchDataStore {
+    branches_by_prefix: HashMap<BranchName, PrefixBranchDataStore>,
+}
+
+impl ObjectBranchDataStore {
+    fn get(&self, branch_key: &BatchBranchKey) -> Option<&BranchData> {
+        self.branches_by_prefix
+            .get(&branch_key.prefix_name())?
+            .get(&branch_key.batch_id())
+    }
+
+    fn get_or_insert_default(&mut self, branch_key: BatchBranchKey) -> &mut BranchData {
+        self.branches_by_prefix
+            .entry(branch_key.prefix_name())
+            .or_default()
+            .get_or_insert_default(branch_key.batch_id())
+    }
 }
 
 impl MemoryStorage {
@@ -882,6 +1092,16 @@ impl MemoryStorage {
     fn index_branch_key(branch: &QueryBranchRef) -> (PrefixId, BatchId) {
         let branch_key = branch.batch_branch_key();
         (branch_key.prefix_id(), branch_key.batch_id())
+    }
+
+    fn index_key(table: &str, column: &str, branch: &QueryBranchRef) -> IndexKey {
+        let (prefix_id, batch_id) = Self::index_branch_key(branch);
+        (
+            TableName::new(table),
+            ColumnName::new(column),
+            prefix_id,
+            batch_id,
+        )
     }
 }
 
@@ -1000,7 +1220,7 @@ impl Storage for MemoryStorage {
             id,
             ObjectData {
                 metadata,
-                branches: HashMap::new(),
+                branches: ObjectBranchDataStore::default(),
                 commit_branches: HashMap::new(),
                 prefix_batches: HashMap::new(),
             },
@@ -1089,7 +1309,7 @@ impl Storage for MemoryStorage {
         Ok(self
             .objects
             .get(&object_id)
-            .and_then(|obj| obj.prefix_batches.get(prefix).cloned()))
+            .and_then(|obj| obj.prefix_batches.get(&BranchName::new(prefix)).cloned()))
     }
 
     fn load_table_prefix_batch_keys(
@@ -1099,7 +1319,7 @@ impl Storage for MemoryStorage {
     ) -> Result<Vec<BatchBranchKey>, StorageError> {
         Ok(self
             .table_batches_by_prefix
-            .get(&(table.to_string(), prefix))
+            .get(&(TableName::new(table), prefix))
             .map(|manifest| manifest.branch_keys(prefix))
             .unwrap_or_default())
     }
@@ -1113,7 +1333,7 @@ impl Storage for MemoryStorage {
     ) -> Result<(), StorageError> {
         let obj = self.objects.entry(object_id).or_default();
         let branch_key = branch.batch_branch_key();
-        let branch_data = obj.branches.entry(branch_key).or_default();
+        let branch_data = obj.branches.get_or_insert_default(branch_key);
 
         let commit_id = commit.id();
 
@@ -1153,7 +1373,7 @@ impl Storage for MemoryStorage {
     ) -> Result<(), StorageError> {
         if let Some(obj) = self.objects.get_mut(&object_id) {
             let branch_key = branch.batch_branch_key();
-            let branch_data = obj.branches.entry(branch_key).or_default();
+            let branch_data = obj.branches.get_or_insert_default(branch_key);
             let old_commit_ids: HashSet<CommitId> =
                 branch_data.commits.iter().map(Commit::id).collect();
             let new_commit_ids: HashSet<CommitId> = commits.iter().map(Commit::id).collect();
@@ -1246,15 +1466,14 @@ impl Storage for MemoryStorage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
-        let (prefix_id, batch_id) = Self::index_branch_key(branch);
-        let key = (table.to_string(), column.to_string(), prefix_id, batch_id);
+        let key = Self::index_key(table, column, branch);
         let index = self.indices.entry(key).or_default();
         let encoded = encode_value(value);
         let inserted = index.entry(encoded).or_default().insert(row_id);
         if inserted && matches!(column, "_id" | "_id_deleted") {
             let (prefix, batch_id) = Self::composed_table_batch(branch);
             self.table_batches_by_prefix
-                .entry((table.to_string(), prefix))
+                .entry((TableName::new(table), prefix))
                 .or_default()
                 .adjust_refcount(batch_id, 1);
         }
@@ -1269,8 +1488,7 @@ impl Storage for MemoryStorage {
         value: &Value,
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
-        let (prefix_id, batch_id) = Self::index_branch_key(branch);
-        let key = (table.to_string(), column.to_string(), prefix_id, batch_id);
+        let key = Self::index_key(table, column, branch);
         let mut removed = false;
         if let Some(index) = self.indices.get_mut(&key) {
             let encoded = encode_value(value);
@@ -1285,12 +1503,12 @@ impl Storage for MemoryStorage {
             let (prefix, batch_id) = Self::composed_table_batch(branch);
             if let Some(manifest) = self
                 .table_batches_by_prefix
-                .get_mut(&(table.to_string(), prefix))
+                .get_mut(&(TableName::new(table), prefix))
             {
                 manifest.adjust_refcount(batch_id, -1);
                 if manifest.is_empty() {
                     self.table_batches_by_prefix
-                        .remove(&(table.to_string(), prefix));
+                        .remove(&(TableName::new(table), prefix));
                 }
             }
         }
@@ -1304,8 +1522,7 @@ impl Storage for MemoryStorage {
         branch: &QueryBranchRef,
         value: &Value,
     ) -> Vec<ObjectId> {
-        let (prefix_id, batch_id) = Self::index_branch_key(branch);
-        let key = (table.to_string(), column.to_string(), prefix_id, batch_id);
+        let key = Self::index_key(table, column, branch);
         let Some(index) = self.indices.get(&key) else {
             return Vec::new();
         };
@@ -1315,17 +1532,19 @@ impl Storage for MemoryStorage {
             let mut result = HashSet::new();
             for zero in &[Value::Double(0.0), Value::Double(-0.0)] {
                 if let Some(ids) = index.get(&encode_value(zero)) {
-                    result.extend(ids.iter().copied());
+                    ids.extend_hash_set(&mut result);
                 }
             }
             return result.into_iter().collect();
         }
 
         let encoded = encode_value(value);
-        index
-            .get(&encoded)
-            .map(|ids| ids.iter().copied().collect())
-            .unwrap_or_default()
+        let Some(ids) = index.get(&encoded) else {
+            return Vec::new();
+        };
+        let mut result = Vec::new();
+        ids.extend_vec(&mut result);
+        result
     }
 
     fn index_range(
@@ -1336,8 +1555,7 @@ impl Storage for MemoryStorage {
         start: Bound<&Value>,
         end: Bound<&Value>,
     ) -> Vec<ObjectId> {
-        let (prefix_id, batch_id) = Self::index_branch_key(branch);
-        let key = (table.to_string(), column.to_string(), prefix_id, batch_id);
+        let key = Self::index_key(table, column, branch);
         let Some(index) = self.indices.get(&key) else {
             return Vec::new();
         };
@@ -1374,17 +1592,21 @@ impl Storage for MemoryStorage {
 
         index
             .range((start_bound, end_bound))
-            .flat_map(|(_, ids)| ids.iter().copied())
-            .collect()
+            .fold(Vec::new(), |mut result, (_, ids)| {
+                ids.extend_vec(&mut result);
+                result
+            })
     }
 
     fn index_scan_all(&self, table: &str, column: &str, branch: &QueryBranchRef) -> Vec<ObjectId> {
-        let (prefix_id, batch_id) = Self::index_branch_key(branch);
-        let key = (table.to_string(), column.to_string(), prefix_id, batch_id);
+        let key = Self::index_key(table, column, branch);
         let Some(index) = self.indices.get(&key) else {
             return Vec::new();
         };
-        index.values().flat_map(|ids| ids.iter().copied()).collect()
+        index.values().fold(Vec::new(), |mut result, ids| {
+            ids.extend_vec(&mut result);
+            result
+        })
     }
 }
 
@@ -1408,6 +1630,75 @@ mod tests {
             user_branch.as_bytes(),
         ));
         QueryBranchRef::from_prefix_and_batch(&prefix, batch_id)
+    }
+
+    #[test]
+    fn table_prefix_batch_manifest_shifts_dense_ords_after_middle_removal() {
+        let prefix = BranchName::new(format!("dev-{}-alice", SchemaHash::from_bytes([0x44; 32])));
+        let batch_a = BatchId::parse_segment("b0000000000000000000000000000000a").unwrap();
+        let batch_b = BatchId::parse_segment("b0000000000000000000000000000000b").unwrap();
+        let batch_c = BatchId::parse_segment("b0000000000000000000000000000000c").unwrap();
+        let batch_d = BatchId::parse_segment("b0000000000000000000000000000000d").unwrap();
+
+        let mut manifest = TablePrefixBatchManifest::default();
+        manifest.adjust_refcount(batch_a, 1);
+        manifest.adjust_refcount(batch_b, 1);
+        manifest.adjust_refcount(batch_c, 1);
+
+        assert_eq!(manifest.lookup_ord(&batch_a), Some(BatchOrd(0)));
+        assert_eq!(manifest.lookup_ord(&batch_b), Some(BatchOrd(1)));
+        assert_eq!(manifest.lookup_ord(&batch_c), Some(BatchOrd(2)));
+
+        manifest.adjust_refcount(batch_b, -1);
+
+        assert_eq!(manifest.lookup_ord(&batch_a), Some(BatchOrd(0)));
+        assert_eq!(manifest.lookup_ord(&batch_b), None);
+        assert_eq!(manifest.lookup_ord(&batch_c), Some(BatchOrd(1)));
+        assert_eq!(
+            manifest
+                .branch_keys(prefix)
+                .into_iter()
+                .map(|branch_key| branch_key.batch_id())
+                .collect::<Vec<_>>(),
+            vec![batch_a, batch_c]
+        );
+
+        manifest.adjust_refcount(batch_d, 1);
+        assert_eq!(manifest.lookup_ord(&batch_d), Some(BatchOrd(2)));
+    }
+
+    #[test]
+    fn index_row_id_set_promotes_and_compacts_without_duplicates() {
+        let rows = [
+            ObjectId::new(),
+            ObjectId::new(),
+            ObjectId::new(),
+            ObjectId::new(),
+            ObjectId::new(),
+        ];
+
+        let mut row_ids = IndexRowIdSet::default();
+        for row_id in rows {
+            assert!(row_ids.insert(row_id));
+        }
+        assert!(!row_ids.insert(rows[0]));
+
+        let mut seen = Vec::new();
+        row_ids.extend_vec(&mut seen);
+        let seen: HashSet<_> = seen.into_iter().collect();
+        assert_eq!(seen, HashSet::from(rows));
+
+        assert!(row_ids.remove(&rows[4]));
+        assert!(row_ids.remove(&rows[3]));
+        assert!(!row_ids.remove(&rows[3]));
+
+        let mut seen_after_compact = Vec::new();
+        row_ids.extend_vec(&mut seen_after_compact);
+        let seen_after_compact: HashSet<_> = seen_after_compact.into_iter().collect();
+        assert_eq!(
+            seen_after_compact,
+            HashSet::from([rows[0], rows[1], rows[2]])
+        );
     }
 
     fn make_commit(content: &[u8]) -> Commit {
@@ -1480,6 +1771,41 @@ mod tests {
     }
 
     #[test]
+    fn memory_storage_keeps_same_prefix_batches_in_separate_branch_slots() {
+        let mut storage = MemoryStorage::new();
+        let id = ObjectId::new();
+        storage.create_object(id, HashMap::new()).unwrap();
+
+        let prefix = crate::query_manager::types::BranchPrefixName::new(
+            "dev",
+            crate::query_manager::types::SchemaHash::from_bytes([7; 32]),
+            "main",
+        );
+        let branch_a = QueryBranchRef::from_prefix_and_batch(
+            &prefix,
+            BatchId::from_uuid(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, b"batch-a")),
+        );
+        let branch_b = QueryBranchRef::from_prefix_and_batch(
+            &prefix,
+            BatchId::from_uuid(uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, b"batch-b")),
+        );
+
+        storage
+            .append_commit(id, &branch_a, make_commit(b"one"), None)
+            .unwrap();
+        storage
+            .append_commit(id, &branch_b, make_commit(b"two"), None)
+            .unwrap();
+
+        let loaded_a = storage.load_branch(id, &branch_a).unwrap().unwrap();
+        let loaded_b = storage.load_branch(id, &branch_b).unwrap().unwrap();
+        assert_eq!(loaded_a.commits.len(), 1);
+        assert_eq!(loaded_b.commits.len(), 1);
+        assert_eq!(loaded_a.commits[0].content, b"one".to_vec());
+        assert_eq!(loaded_b.commits[0].content, b"two".to_vec());
+    }
+
+    #[test]
     fn memory_storage_tracks_commit_branches_and_prefix_leaves() {
         let mut storage = MemoryStorage::new();
         let id = ObjectId::new();
@@ -1503,7 +1829,7 @@ mod tests {
                 &branch1,
                 commit1.clone(),
                 Some(PrefixBatchUpdate {
-                    prefix: prefix.clone(),
+                    prefix: prefix.clone().into(),
                     batch_meta: PrefixBatchMeta {
                         batch_id: batch1_id,
                         batch_ord: crate::query_manager::types::BatchOrd(0),
@@ -1541,7 +1867,7 @@ mod tests {
                 &branch2,
                 commit2.clone(),
                 Some(PrefixBatchUpdate {
-                    prefix: prefix.clone(),
+                    prefix: prefix.clone().into(),
                     batch_meta: PrefixBatchMeta {
                         batch_id: batch2_id,
                         batch_ord: crate::query_manager::types::BatchOrd(1),
