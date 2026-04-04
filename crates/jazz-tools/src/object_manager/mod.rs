@@ -447,7 +447,7 @@ impl ObjectManager {
         self.objects.get_mut(&id)
     }
 
-    fn resolve_commit_branch_key<H: Storage>(
+    fn resolve_commit_branch_key<H: Storage + ?Sized>(
         object: &Object,
         io: &H,
         object_id: ObjectId,
@@ -462,7 +462,7 @@ impl ObjectManager {
             .map_err(Error::StorageError)
     }
 
-    fn load_prefix_batch_catalog<'a, H: Storage>(
+    fn load_prefix_batch_catalog<'a, H: Storage + ?Sized>(
         object: &'a Object,
         io: &H,
         object_id: ObjectId,
@@ -492,7 +492,7 @@ impl ObjectManager {
         catalog.insert_leaf_batch_ord(update.batch_meta.batch_ord);
     }
 
-    fn plan_prefix_batch_update<H: Storage>(
+    fn plan_prefix_batch_update<H: Storage + ?Sized>(
         object: &Object,
         io: &H,
         object_id: ObjectId,
@@ -980,11 +980,11 @@ impl ObjectManager {
         Ok(&branch.commits)
     }
 
-    pub fn get_leaf_head_ids_for_prefix<H: Storage>(
+    pub fn get_leaf_head_ids_for_prefix(
         &mut self,
         object_id: ObjectId,
         prefix: &BranchPrefixName,
-        storage: &H,
+        storage: &dyn Storage,
     ) -> Result<HashMap<BranchName, CommitId>, Error> {
         let prefix_key = prefix.branch_prefix();
         self.ensure_prefix_batch_catalog_loaded(object_id, prefix, storage)?;
@@ -1008,11 +1008,11 @@ impl ObjectManager {
         Ok(head_ids)
     }
 
-    pub fn get_head_ids_for_prefix<H: Storage>(
+    pub fn get_head_ids_for_prefix(
         &mut self,
         object_id: ObjectId,
         prefix: &BranchPrefixName,
-        storage: &H,
+        storage: &dyn Storage,
     ) -> Result<HashMap<BranchName, CommitId>, Error> {
         let prefix_key = prefix.branch_prefix();
         self.ensure_prefix_batch_catalog_loaded(object_id, prefix, storage)?;
@@ -1034,11 +1034,11 @@ impl ObjectManager {
         Ok(head_ids)
     }
 
-    pub fn ensure_prefix_batch_catalog_loaded<H: Storage>(
+    pub fn ensure_prefix_batch_catalog_loaded(
         &mut self,
         object_id: ObjectId,
         prefix: &BranchPrefixName,
-        storage: &H,
+        storage: &dyn Storage,
     ) -> Result<(), Error> {
         let prefix_key = prefix.branch_prefix();
 
@@ -1066,11 +1066,11 @@ impl ObjectManager {
         Ok(())
     }
 
-    pub fn resolve_latest_visible_tip<H: Storage>(
+    pub fn resolve_latest_visible_tip(
         &mut self,
         object_id: ObjectId,
         branch_name: impl Into<BranchName>,
-        storage: &H,
+        storage: &dyn Storage,
     ) -> Result<Option<(BranchName, CommitId, Commit)>, Error> {
         let branch_name = Self::normalize_branch_name(branch_name.into())?;
         let branch_key = BatchBranchKey::from_branch_name(branch_name);
@@ -1124,11 +1124,11 @@ impl ObjectManager {
             .max_by_key(|(_, head_id, commit)| (commit.timestamp, *head_id)))
     }
 
-    pub fn resolve_visible_parent_ids<H: Storage>(
+    pub fn resolve_visible_parent_ids(
         &mut self,
         object_id: ObjectId,
         branch_name: impl Into<BranchName>,
-        storage: &H,
+        storage: &dyn Storage,
     ) -> Result<Vec<CommitId>, Error> {
         let branch_name = Self::normalize_branch_name(branch_name.into())?;
         let branch_key = BatchBranchKey::from_branch_name(branch_name);

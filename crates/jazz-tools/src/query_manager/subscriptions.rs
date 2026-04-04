@@ -122,6 +122,7 @@ impl QueryManager {
             &self.schema_context,
         )
         .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
+        let needs_initial_recompile = query.branches.is_empty();
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -140,7 +141,7 @@ impl QueryManager {
                 graph,
                 branches,
                 session,
-                needs_recompile: false,
+                needs_recompile: needs_initial_recompile,
                 settled_once: false,
                 durability_tier,
                 local_updates,
@@ -213,6 +214,7 @@ impl QueryManager {
             schema_context,
         )
         .map_err(|err| QueryError::QueryCompilationError(err.to_string()))?;
+        let needs_initial_recompile = query.branches.is_empty();
 
         let id = QuerySubscriptionId(self.next_subscription_id);
         self.next_subscription_id += 1;
@@ -224,7 +226,7 @@ impl QueryManager {
                 graph,
                 branches,
                 session,
-                needs_recompile: false,
+                needs_recompile: needs_initial_recompile,
                 settled_once: false,
                 durability_tier: None,
                 local_updates: LocalUpdates::Immediate,
@@ -544,7 +546,7 @@ impl QueryManager {
     ) -> std::collections::HashSet<(crate::object::ObjectId, crate::object::BranchName)> {
         self.subscriptions
             .get(&sub_id)
-            .map(|sub| sub.graph.contributing_object_ids())
+            .map(|sub| sub.graph.sync_scope_object_ids())
             .unwrap_or_default()
     }
 }

@@ -11,7 +11,10 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 use futures::StreamExt;
-use jazz_tools::jazz_transport::ServerEvent;
+use jazz_tools::jazz_transport::{
+    DecodedServerEvent, ServerEvent, decode_binary_server_event_frame,
+};
+use jazz_tools::sync_manager::SyncConnectionCodec;
 use reqwest::Client;
 use tempfile::TempDir;
 
@@ -161,24 +164,51 @@ fn get_free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Read the next complete ServerEvent from a binary stream.
+/// Read the next complete ServerEvent from the production binary stream format.
 async fn read_next_event(
     body: &mut (impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin),
     buffer: &mut BytesMut,
+    sync_codec: &mut SyncConnectionCodec,
 ) -> Option<ServerEvent> {
     loop {
-        // Try to decode a frame from the buffer
         if buffer.len() >= 4 {
             let len = u32::from_be_bytes(buffer[..4].try_into().unwrap()) as usize;
             if buffer.len() >= 4 + len {
-                let json = &buffer[4..4 + len];
-                let event: ServerEvent = serde_json::from_slice(json).ok()?;
+                let (event, consumed) = decode_binary_server_event_frame(&buffer[..4 + len])
+                    .ok()
+                    .flatten()?;
                 let _ = buffer.split_to(4 + len);
+                debug_assert_eq!(consumed, 4 + len);
+
+                let event = match event {
+                    DecodedServerEvent::Connected {
+                        connection_id,
+                        client_id,
+                        next_sync_seq,
+                        catalogue_state_hash,
+                    } => ServerEvent::Connected {
+                        connection_id,
+                        client_id,
+                        next_sync_seq,
+                        catalogue_state_hash,
+                    },
+                    DecodedServerEvent::Subscribed { query_id } => {
+                        ServerEvent::Subscribed { query_id }
+                    }
+                    DecodedServerEvent::SyncUpdate { seq, payload } => ServerEvent::SyncUpdate {
+                        seq,
+                        payload: Box::new(sync_codec.decode_payload(&payload).ok()?),
+                    },
+                    DecodedServerEvent::Error { message, code } => {
+                        ServerEvent::Error { message, code }
+                    }
+                    DecodedServerEvent::Heartbeat => ServerEvent::Heartbeat,
+                };
+
                 return Some(event);
             }
         }
 
-        // Need more data
         match body.next().await {
             Some(Ok(chunk)) => buffer.extend_from_slice(&chunk),
             _ => return None,
@@ -241,11 +271,12 @@ async fn test_stream_connection_receives_connected_event() {
 
     let mut body = response.bytes_stream();
     let mut buffer = BytesMut::new();
+    let mut sync_codec = SyncConnectionCodec::default();
 
     // First event should be Connected
     let event = tokio::time::timeout(
         Duration::from_secs(5),
-        read_next_event(&mut body, &mut buffer),
+        read_next_event(&mut body, &mut buffer, &mut sync_codec),
     )
     .await
     .expect("timeout waiting for event")
@@ -286,11 +317,12 @@ async fn test_stream_heartbeat() {
 
     let mut body = response.bytes_stream();
     let mut buffer = BytesMut::new();
+    let mut sync_codec = SyncConnectionCodec::default();
 
     // Read the Connected event
     let event = tokio::time::timeout(
         Duration::from_secs(5),
-        read_next_event(&mut body, &mut buffer),
+        read_next_event(&mut body, &mut buffer, &mut sync_codec),
     )
     .await
     .expect("timeout")
@@ -320,11 +352,12 @@ async fn test_sync_payload_broadcast_to_stream_client() {
 
     let mut body = response.bytes_stream();
     let mut buffer = BytesMut::new();
+    let mut sync_codec = SyncConnectionCodec::default();
 
     // Wait for Connected event to verify connection works
     let event = tokio::time::timeout(
         Duration::from_secs(5),
-        read_next_event(&mut body, &mut buffer),
+        read_next_event(&mut body, &mut buffer, &mut sync_codec),
     )
     .await
     .expect("timeout waiting for Connected")

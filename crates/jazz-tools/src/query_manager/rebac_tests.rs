@@ -68,6 +68,7 @@ fn stored_row_commit(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_row_commit(
     qm: &mut QueryManager,
     storage: &mut MemoryStorage,
@@ -1998,7 +1999,7 @@ fn rebac_update_denied_by_using_policy() {
         &mut qm,
         &mut storage,
         obj_id,
-        "main",
+        &branch,
         vec![],
         alice_content,
         1000,
@@ -2170,7 +2171,7 @@ fn rebac_inherits_filters_select_query_results() {
         &mut qm,
         &mut storage,
         folder_id,
-        "main",
+        &_branch,
         vec![],
         folder_content,
         1000,
@@ -2198,7 +2199,7 @@ fn rebac_inherits_filters_select_query_results() {
         &mut qm,
         &mut storage,
         doc_id,
-        "main",
+        &_branch,
         vec![],
         doc_content,
         1000,
@@ -2207,7 +2208,7 @@ fn rebac_inherits_filters_select_query_results() {
 
     // Charlie subscribes to documents query with his session
     let charlie_session = Session::new("charlie");
-    let query = QueryBuilder::new("documents").branch("main").build();
+    let query = QueryBuilder::new("documents").branch(&_branch).build();
     let sub_id = qm
         .subscribe_with_session(query, Some(charlie_session), None)
         .unwrap();

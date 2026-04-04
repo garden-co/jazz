@@ -1227,7 +1227,7 @@ fn user_schema_catalogue_write_allowed_when_enabled() {
                 id: obj_id,
                 metadata: cat_metadata,
             }),
-            branch_name: "main".into(),
+            branch_name: catalogue_branch(),
             commits: vec![commit.clone()],
         },
     });
@@ -1256,7 +1256,7 @@ fn user_schema_catalogue_write_allowed_when_enabled() {
     );
     let tips = sm
         .object_manager
-        .get_tip_ids(obj_id, "main")
+        .get_tip_ids(obj_id, catalogue_branch())
         .expect("schema branch should exist");
     assert!(tips.contains(&commit.id()));
 }
@@ -1296,7 +1296,7 @@ fn user_non_schema_catalogue_write_still_rejected_when_enabled() {
                 id: obj_id,
                 metadata: cat_metadata,
             }),
-            branch_name: "main".into(),
+            branch_name: catalogue_branch(),
             commits: vec![commit],
         },
     });
@@ -1311,7 +1311,9 @@ fn user_non_schema_catalogue_write_still_rejected_when_enabled() {
             destination: Destination::Client(id),
             payload:
                 SyncPayload::Error(SyncError::CatalogueWriteDenied { object_id, branch_name }),
-        } if *id == client_id && *object_id == obj_id && branch_name.as_str() == "main"
+        } if *id == client_id
+            && *object_id == obj_id
+            && branch_name == &catalogue_branch()
     ));
     assert!(sm.object_manager.get(obj_id).is_none());
 }

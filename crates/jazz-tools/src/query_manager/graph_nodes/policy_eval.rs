@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::object::ObjectId;
 use crate::query_manager::policy::{
@@ -125,25 +125,52 @@ impl<'a> PolicyContextEvaluator<'a> {
             return false;
         }
 
-        let candidate_ids = match &col.column_type {
-            ColumnType::Uuid => {
-                let branch_ref = QueryBranchRef::from_branch_name(self.branch.to_string());
-                io.index_lookup(
+        let seed_branch = QueryBranchRef::from_branch_name(self.branch.to_string());
+        let active_branches = io
+            .resolve_active_table_batch_keys(
+                source_table_name.as_str(),
+                &[seed_branch.batch_branch_key()],
+            )
+            .map(|keys| {
+                if keys.is_empty() {
+                    vec![seed_branch]
+                } else {
+                    keys.into_iter()
+                        .map(QueryBranchRef::from_batch_branch_key)
+                        .collect()
+                }
+            })
+            .unwrap_or_else(|_| vec![seed_branch]);
+
+        let candidate_rows: HashMap<ObjectId, TupleProvenance> = match &col.column_type {
+            ColumnType::Uuid => io
+                .index_lookup_scoped(
                     source_table_name.as_str(),
                     col.name.as_str(),
-                    &branch_ref,
+                    &active_branches,
                     &Value::Uuid(row.id),
                 )
-            }
-            ColumnType::Array { element } if **element == ColumnType::Uuid => {
-                let branch_ref = QueryBranchRef::from_branch_name(self.branch.to_string());
-                io.index_scan_all(source_table_name.as_str(), col.name.as_str(), &branch_ref)
-            }
+                .into_iter()
+                .fold(HashMap::new(), |mut rows, (row_id, branch_key)| {
+                    rows.entry(row_id).or_default().insert((row_id, branch_key));
+                    rows
+                }),
+            ColumnType::Array { element } if **element == ColumnType::Uuid => io
+                .index_scan_all_scoped(
+                    source_table_name.as_str(),
+                    col.name.as_str(),
+                    &active_branches,
+                )
+                .into_iter()
+                .fold(HashMap::new(), |mut rows, (row_id, branch_key)| {
+                    rows.entry(row_id).or_default().insert((row_id, branch_key));
+                    rows
+                }),
             _ => return false,
         };
 
-        for source_row_id in candidate_ids {
-            let Some(source_row) = row_loader(source_row_id, None) else {
+        for (source_row_id, source_provenance) in candidate_rows {
+            let Some(source_row) = row_loader(source_row_id, Some(&source_provenance)) else {
                 continue;
             };
 

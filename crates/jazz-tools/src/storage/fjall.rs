@@ -647,7 +647,7 @@ mod tests {
             parents: smallvec![],
             content: content.to_vec(),
             timestamp: 12345,
-            author: ObjectId::new(),
+            author: "jazz:test".to_string(),
             metadata: None,
             stored_state: Default::default(),
             ack_state: Default::default(),

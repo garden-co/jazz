@@ -113,20 +113,12 @@ impl QueryManager {
         object_id: ObjectId,
         branch_name: BranchName,
     ) -> Option<RowProvenance> {
-        let branches = vec![branch_name.as_str().to_string()];
-        let object = self
+        let (_, _, commit) = self
             .sync_manager
             .object_manager
-            .get_or_load(object_id, storage, &branches)?;
-        let branch = object
-            .branches
-            .get_by_key(BatchBranchKey::from_branch_name(branch_name))?;
-        branch
-            .tips
-            .iter()
-            .filter_map(|tip_id| branch.commits.get(tip_id))
-            .max_by_key(|commit| commit.timestamp)
-            .and_then(|commit| commit.row_provenance())
+            .resolve_latest_visible_tip(object_id, branch_name, storage)
+            .ok()??;
+        commit.row_provenance()
     }
 
     fn payload_tip_provenance(payload: &SyncPayload) -> Option<RowProvenance> {
@@ -286,31 +278,26 @@ impl QueryManager {
         branch_name: BranchName,
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<LoadedRow> {
-        let branches = vec![branch_name.as_str().to_string()];
-        let branch_key = BatchBranchKey::from_branch_name(branch_name);
-        let (table, tip_commit_id, tip_content, tip_provenance) = {
-            let object = self
-                .sync_manager
-                .object_manager
-                .get_or_load(object_id, storage, &branches)?;
+        let (resolved_branch_name, tip_commit_id, tip_commit) = self
+            .sync_manager
+            .object_manager
+            .resolve_latest_visible_tip(object_id, branch_name, storage)
+            .ok()??;
+        if tip_commit.content.is_empty() {
+            return None;
+        }
+        let tip_provenance = tip_commit.row_provenance()?;
+        let (table, tip_content) = {
+            let object = self.sync_manager.object_manager.get(object_id)?;
             let table = object.metadata.get(MetadataKey::Table.as_str())?.clone();
-            let branch = object.branches.get_by_key(branch_key)?;
-            let tip = branch
-                .tips
-                .iter()
-                .filter_map(|tip_id| branch.commits.get(tip_id).map(|commit| (*tip_id, commit)))
-                .max_by_key(|(_, commit)| commit.timestamp)?;
-            if tip.1.content.is_empty() {
-                return None;
-            }
-            Some((table, tip.0, tip.1.content.clone(), tip.1.row_provenance()?))
-        }?;
+            (table, tip_commit.content.clone())
+        };
 
         let transformed = self.transform_content_to_authorization_schema(
             &table,
             &tip_content,
             tip_commit_id,
-            branch_name,
+            resolved_branch_name,
             auth_context,
         )?;
 
@@ -318,7 +305,12 @@ impl QueryManager {
             transformed,
             tip_commit_id,
             tip_provenance,
-            [(object_id, branch_key)].into_iter().collect(),
+            [(
+                object_id,
+                BatchBranchKey::from_branch_name(resolved_branch_name),
+            )]
+            .into_iter()
+            .collect(),
         ))
     }
 
