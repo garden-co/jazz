@@ -148,6 +148,7 @@ impl<'a> PolicyContextEvaluator<'a> {
                     source_table_name.as_str(),
                     col.name.as_str(),
                     &active_branches,
+                    false,
                     &Value::Uuid(row.id),
                 )
                 .into_iter()
@@ -160,6 +161,7 @@ impl<'a> PolicyContextEvaluator<'a> {
                     source_table_name.as_str(),
                     col.name.as_str(),
                     &active_branches,
+                    false,
                 )
                 .into_iter()
                 .fold(HashMap::new(), |mut rows, (row_id, branch_key)| {

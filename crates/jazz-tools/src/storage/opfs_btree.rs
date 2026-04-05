@@ -27,7 +27,7 @@ use opfs_btree::StdFile;
 use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
 
 use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId};
+use crate::object::{BranchName, ObjectId, VisibleCommit, VisibleStateSlots};
 #[cfg(test)]
 use crate::query_manager::types::SchemaHash;
 use crate::query_manager::types::{BatchBranchKey, BatchId, QueryBranchRef, Value};
@@ -47,8 +47,8 @@ use super::{
         load_branch_tips_core, load_branch_tips_core_existing_object, load_catalogue_manifest_core,
         load_commit_branch_core, load_object_metadata_core, load_prefix_batch_catalog_core,
         load_prefix_head_entries_core, load_prefix_leaf_head_entries_core,
-        load_table_prefix_batch_keys_core, object_exists_core, replace_branch_core,
-        store_ack_tier_core,
+        load_table_prefix_batch_keys_core, load_visible_states_core, object_exists_core,
+        replace_branch_core, store_ack_tier_core, store_visible_commit_core,
     },
 };
 
@@ -356,6 +356,28 @@ impl Storage for OpfsBTreeStorage {
         object_exists_core(id, |key| self.tree_read(key))
     }
 
+    fn load_visible_states(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Option<VisibleStateSlots>, StorageError> {
+        load_visible_states_core(object_id, |key| self.tree_read(key))
+    }
+
+    fn store_visible_commit(
+        &mut self,
+        object_id: ObjectId,
+        prefix: BranchName,
+        visible_commit: VisibleCommit,
+    ) -> Result<(), StorageError> {
+        store_visible_commit_core(
+            object_id,
+            prefix,
+            visible_commit,
+            |key| self.tree_read(key),
+            |key, value| self.tree_insert(key, value),
+        )
+    }
+
     fn load_branch(
         &self,
         object_id: ObjectId,
@@ -426,6 +448,24 @@ impl Storage for OpfsBTreeStorage {
         prefix: BranchName,
     ) -> Result<Vec<BatchBranchKey>, StorageError> {
         load_table_prefix_batch_keys_core(table, prefix, |key| self.tree_read(key))
+    }
+
+    fn adjust_table_prefix_batch_refcount(
+        &mut self,
+        table: &str,
+        prefix: BranchName,
+        batch_id: BatchId,
+        delta: i64,
+    ) -> Result<(), StorageError> {
+        let branch = QueryBranchRef::from_prefix_name_and_batch(prefix, batch_id);
+        adjust_table_prefix_batch_refcount_core(
+            table,
+            &branch,
+            delta,
+            |key| self.tree_read(key),
+            |key, value| self.tree_insert(key, value),
+            |key| self.tree_delete(key),
+        )
     }
 
     fn append_commit(

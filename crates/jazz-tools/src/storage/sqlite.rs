@@ -12,7 +12,7 @@ use std::ops::Bound;
 use std::path::{Path, PathBuf};
 
 use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId, PrefixBatchCatalog};
+use crate::object::{BranchName, ObjectId, PrefixBatchCatalog, VisibleCommit, VisibleStateSlots};
 use crate::query_manager::types::{BatchBranchKey, BatchId, QueryBranchRef, Value};
 use crate::sync_manager::DurabilityTier;
 
@@ -27,8 +27,8 @@ use super::{
         load_branch_tips_core, load_branch_tips_core_existing_object, load_catalogue_manifest_core,
         load_commit_branch_core, load_object_metadata_core, load_prefix_batch_catalog_core,
         load_prefix_head_entries_core, load_prefix_leaf_head_entries_core,
-        load_table_prefix_batch_keys_core, object_exists_core, replace_branch_core,
-        store_ack_tier_core,
+        load_table_prefix_batch_keys_core, load_visible_states_core, object_exists_core,
+        replace_branch_core, store_ack_tier_core, store_visible_commit_core,
     },
 };
 
@@ -283,6 +283,33 @@ impl Storage for SqliteStorage {
     fn object_exists(&self, id: ObjectId) -> Result<bool, StorageError> {
         self.with_inner(|inner| object_exists_core(id, |key| Self::get(&inner.conn, key)))
     }
+    fn load_visible_states(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Option<VisibleStateSlots>, StorageError> {
+        self.with_inner(|inner| {
+            load_visible_states_core(object_id, |key| Self::get(&inner.conn, key))
+        })
+    }
+    fn store_visible_commit(
+        &mut self,
+        object_id: ObjectId,
+        prefix: BranchName,
+        visible_commit: VisibleCommit,
+    ) -> Result<(), StorageError> {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
+            Self::with_savepoint(&inner.conn, || {
+                store_visible_commit_core(
+                    object_id,
+                    prefix,
+                    visible_commit,
+                    |key| Self::get(&inner.conn, key),
+                    |key, value| Self::set(&inner.conn, key, value),
+                )
+            })
+        })
+    }
     fn load_branch(
         &self,
         object_id: ObjectId,
@@ -364,6 +391,28 @@ impl Storage for SqliteStorage {
     ) -> Result<Vec<BatchBranchKey>, StorageError> {
         self.with_inner(|inner| {
             load_table_prefix_batch_keys_core(table, prefix, |key| Self::get(&inner.conn, key))
+        })
+    }
+    fn adjust_table_prefix_batch_refcount(
+        &mut self,
+        table: &str,
+        prefix: BranchName,
+        batch_id: BatchId,
+        delta: i64,
+    ) -> Result<(), StorageError> {
+        self.with_inner_mut(|inner| {
+            inner.ensure_write_tx()?;
+            let branch = QueryBranchRef::from_prefix_name_and_batch(prefix, batch_id);
+            Self::with_savepoint(&inner.conn, || {
+                adjust_table_prefix_batch_refcount_core(
+                    table,
+                    &branch,
+                    delta,
+                    |key| Self::get(&inner.conn, key),
+                    |key, value| Self::set(&inner.conn, key, value),
+                    |key| Self::delete(&inner.conn, key),
+                )
+            })
         })
     }
     fn append_commit(

@@ -14,7 +14,7 @@ use fjall::{
 };
 
 use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId};
+use crate::object::{BranchName, ObjectId, VisibleCommit, VisibleStateSlots};
 #[cfg(test)]
 use crate::query_manager::types::SchemaHash;
 use crate::query_manager::types::{BatchBranchKey, BatchId, QueryBranchRef, Value};
@@ -33,8 +33,8 @@ use super::{
         load_branch_tips_core, load_branch_tips_core_existing_object, load_catalogue_manifest_core,
         load_commit_branch_core, load_object_metadata_core, load_prefix_batch_catalog_core,
         load_prefix_head_entries_core, load_prefix_leaf_head_entries_core,
-        load_table_prefix_batch_keys_core, object_exists_core, replace_branch_core,
-        store_ack_tier_core,
+        load_table_prefix_batch_keys_core, load_visible_states_core, object_exists_core,
+        replace_branch_core, store_ack_tier_core, store_visible_commit_core,
     },
 };
 
@@ -323,6 +323,35 @@ impl Storage for FjallStorage {
         })
     }
 
+    fn load_visible_states(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Option<VisibleStateSlots>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            load_visible_states_core(object_id, |key| Self::read_get(&tx, &inner.keyspace, key))
+        })
+    }
+
+    fn store_visible_commit(
+        &mut self,
+        object_id: ObjectId,
+        prefix: BranchName,
+        visible_commit: VisibleCommit,
+    ) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
+            store_visible_commit_core(
+                object_id,
+                prefix,
+                visible_commit,
+                |key| Self::read_get(&*tx.borrow(), &inner.keyspace, key),
+                |key, value| Self::set_on_tx(&mut *tx.borrow_mut(), &inner.keyspace, key, value),
+            )?;
+            Self::commit_tx(tx.into_inner())
+        })
+    }
+
     fn load_branch(
         &self,
         object_id: ObjectId,
@@ -437,6 +466,28 @@ impl Storage for FjallStorage {
             load_table_prefix_batch_keys_core(table, prefix, |key| {
                 Self::read_get(&tx, &inner.keyspace, key)
             })
+        })
+    }
+
+    fn adjust_table_prefix_batch_refcount(
+        &mut self,
+        table: &str,
+        prefix: BranchName,
+        batch_id: BatchId,
+        delta: i64,
+    ) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
+            let branch = QueryBranchRef::from_prefix_name_and_batch(prefix, batch_id);
+            adjust_table_prefix_batch_refcount_core(
+                table,
+                &branch,
+                delta,
+                |key| Self::read_get(&*tx.borrow(), &inner.keyspace, key),
+                |key, value| Self::set_on_tx(&mut *tx.borrow_mut(), &inner.keyspace, key, value),
+                |key| Self::delete_on_tx(&mut *tx.borrow_mut(), &inner.keyspace, key),
+            )?;
+            Self::commit_tx(tx.into_inner())
         })
     }
 

@@ -215,7 +215,6 @@ impl PolicyGraph {
         branch: &str,
         io: &dyn Storage,
     ) -> Option<Self> {
-        let branches = vec![QueryBranchRef::from_branch_name(branch.to_string())];
         let schema_context = match crate::query_manager::types::ComposedBranchName::parse(
             &BranchName::new(branch.to_string()),
         ) {
@@ -231,7 +230,7 @@ impl PolicyGraph {
             QueryGraph::compile_relation_ir_with_branch_refs_and_schema_context_using_storage(
                 rel,
                 schema,
-                &branches,
+                &[],
                 None,
                 &schema_context,
                 Some(io),

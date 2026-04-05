@@ -640,6 +640,31 @@ impl QueryManager {
             .collect())
     }
 
+    pub(super) fn seed_query_branches_for_context(
+        schema_context: &SchemaContext,
+    ) -> Vec<QueryBranchRef> {
+        schema_context
+            .all_branch_names()
+            .into_iter()
+            .map(QueryBranchRef::from_branch_name)
+            .collect()
+    }
+
+    pub(super) fn resolve_local_query_branches_for_context(
+        query: &Query,
+        schema_context: &SchemaContext,
+    ) -> Vec<QueryBranchRef> {
+        if query.branches.is_empty() {
+            Self::seed_query_branches_for_context(schema_context)
+        } else {
+            query
+                .branches
+                .iter()
+                .map(|branch| Self::resolve_query_branch_ref_for_context(schema_context, branch))
+                .collect()
+        }
+    }
+
     pub(crate) fn visible_branch_names_for_table(
         &self,
         storage: &dyn Storage,
@@ -663,11 +688,10 @@ impl QueryManager {
         if query.branches.is_empty() {
             Self::default_query_branches_for_table(storage, query.table.as_str(), schema_context)
         } else {
-            Ok(query
-                .branches
-                .iter()
-                .map(|branch| Self::resolve_query_branch_ref_for_context(schema_context, branch))
-                .collect())
+            Ok(Self::resolve_local_query_branches_for_context(
+                query,
+                schema_context,
+            ))
         }
     }
 
@@ -721,22 +745,8 @@ impl QueryManager {
 
         // Recompile local subscriptions
         for (sub_id, sub) in &mut self.subscriptions {
-            let next_branches = match Self::resolve_query_branches_for_context(
-                storage,
-                &sub.query,
-                &current_schema_context,
-            ) {
-                Ok(branches) => branches,
-                Err(error) => {
-                    tracing::warn!(
-                        sub_id = sub_id.0,
-                        table = %sub.query.table,
-                        error = %error,
-                        "failed to resolve local query branches; keeping previous branch set"
-                    );
-                    sub.branches.clone()
-                }
-            };
+            let next_branches =
+                Self::resolve_local_query_branches_for_context(&sub.query, &current_schema_context);
             let uses_explicit_authorization_filtering = sub.session.is_some()
                 && authorization_schema
                     .as_ref()
@@ -1529,11 +1539,15 @@ impl QueryManager {
         for subscription in self.subscriptions.values_mut() {
             if Self::subscription_involves_table(&subscription.graph, table) {
                 subscription.graph.mark_dirty_for_table(table);
-                if !subscription
-                    .branches
-                    .iter()
-                    .any(|branch| branch == updated_branch)
-                {
+                let requires_recompile = if subscription.query.branches.is_empty() {
+                    !subscription
+                        .branches
+                        .iter()
+                        .any(|branch| branch.prefix_name() == updated_branch.prefix_name())
+                } else {
+                    false
+                };
+                if requires_recompile {
                     subscription.needs_recompile = true;
                 }
             }

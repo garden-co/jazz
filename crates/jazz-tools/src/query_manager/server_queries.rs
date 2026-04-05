@@ -583,6 +583,63 @@ impl QueryManager {
         branches: &[QueryBranchRef],
         context: &mut RowTransformContext<'_>,
     ) -> Option<ResolvedSchemaRow> {
+        let mut visible_candidates: Vec<(QueryBranchRef, CommitId, bool, RowProvenance)> =
+            Vec::new();
+        let mut seen_prefixes = HashSet::new();
+        for branch_ref in branches {
+            let prefix = branch_ref.prefix_name();
+            if !seen_prefixes.insert(prefix) {
+                continue;
+            }
+            let Some(visible_commit) = obj.visible_states.get(&prefix).copied() else {
+                continue;
+            };
+            let visible_branch_ref = QueryBranchRef::from_batch_branch_key(visible_commit.branch);
+            if !branches.contains(&visible_branch_ref) {
+                continue;
+            }
+            if visible_commit.state == crate::object::VisibleCommitState::HardDeleted {
+                continue;
+            }
+            let branch = obj.branches.get_by_key(visible_commit.branch)?;
+            let commit = branch.commits.get(&visible_commit.commit_id)?;
+            let row_provenance = commit.row_provenance()?;
+            visible_candidates.push((
+                visible_branch_ref,
+                visible_commit.commit_id,
+                visible_commit.state == crate::object::VisibleCommitState::SoftDeleted,
+                row_provenance,
+            ));
+        }
+
+        if !visible_candidates.is_empty() {
+            let (branch_ref, commit_id, is_soft_deleted, row_provenance) = visible_candidates
+                .into_iter()
+                .max_by_key(|(branch_ref, commit_id, _, _)| {
+                    let timestamp = obj
+                        .branches
+                        .get_by_key(branch_ref.batch_branch_key())
+                        .and_then(|branch| branch.commits.get(commit_id))
+                        .map(|commit| commit.timestamp)
+                        .unwrap_or(0);
+                    (timestamp, *commit_id)
+                })?;
+            let branch = obj.branches.get_by_key(branch_ref.batch_branch_key())?;
+            let content = branch.commits.get(&commit_id)?.content.clone();
+            if content.is_empty() {
+                return None;
+            }
+            return Self::transform_row_with_schema(
+                id,
+                content,
+                commit_id,
+                branch_ref,
+                is_soft_deleted,
+                row_provenance,
+                context,
+            );
+        }
+
         let mut best: Option<(u64, CommitId, QueryBranchRef, bool, RowProvenance)> = None;
 
         for branch_ref in branches {

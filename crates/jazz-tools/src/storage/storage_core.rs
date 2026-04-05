@@ -2,7 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
 
 use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId, PrefixBatchCatalog, PrefixBatchMeta};
+use crate::object::{
+    BranchName, ObjectId, PrefixBatchCatalog, PrefixBatchMeta, VisibleCommit, VisibleCommitState,
+    VisibleStateSlot, VisibleStateSlots,
+};
 use crate::sync_manager::DurabilityTier;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use smallvec::SmallVec;
@@ -13,8 +16,9 @@ use crate::query_manager::types::{BatchBranchKey, BatchId, BatchOrd, QueryBranch
 use super::key_codec::{
     ack_key, branch_manifest_key, branch_segment_key, catalogue_manifest_op_key,
     catalogue_manifest_op_prefix, commit_branch_key, index_entry_key, index_prefix,
-    index_range_scan_bounds, index_value_prefix, obj_meta_key, parse_uuid_from_index_key,
-    prefix_batch_catalog_key, prefix_batch_catalog_key_for_id, table_prefix_batches_key,
+    index_range_scan_bounds, index_value_prefix, obj_meta_key, obj_visible_states_key,
+    parse_uuid_from_index_key, prefix_batch_catalog_key, prefix_batch_catalog_key_for_id,
+    table_prefix_batches_key,
 };
 use super::{
     CatalogueManifest, CatalogueManifestOp, LoadedBranch, LoadedBranchTips, PrefixBatchUpdate,
@@ -873,6 +877,55 @@ fn decode_prefix_head_entries(
     Ok(heads)
 }
 
+fn encode_visible_states(visible_states: &VisibleStateSlots) -> Result<Vec<u8>, StorageError> {
+    let mut out = Vec::new();
+    out.push(STORAGE_BINARY_V1);
+    encode_len(&mut out, "visible states", visible_states.0.len())?;
+    for slot in visible_states.iter() {
+        encode_string(&mut out, "visible states", slot.prefix.as_str())?;
+        out.extend_from_slice(slot.visible_commit.branch.batch_id().as_bytes());
+        out.extend_from_slice(&slot.visible_commit.commit_id.0);
+        out.push(match slot.visible_commit.state {
+            VisibleCommitState::Live => 0,
+            VisibleCommitState::SoftDeleted => 1,
+            VisibleCommitState::HardDeleted => 2,
+        });
+    }
+    Ok(out)
+}
+
+fn decode_visible_states(bytes: &[u8]) -> Result<VisibleStateSlots, StorageError> {
+    let mut cursor = decode_binary_payload(bytes, "visible states")?;
+    let slot_count = cursor.read_var_u32("visible states")? as usize;
+    let mut slots = SmallVec::<[VisibleStateSlot; 2]>::with_capacity(slot_count);
+    for _ in 0..slot_count {
+        let prefix = BranchName::new(cursor.read_string("visible states")?);
+        let batch_id = BatchId(cursor.read_fixed::<16>("visible states")?);
+        let commit_id = CommitId(cursor.read_fixed::<32>("visible states")?);
+        let state = match cursor.read_u8("visible states")? {
+            0 => VisibleCommitState::Live,
+            1 => VisibleCommitState::SoftDeleted,
+            2 => VisibleCommitState::HardDeleted,
+            other => {
+                return Err(codec_error(
+                    "visible states",
+                    format!("unknown visible state {other}"),
+                ));
+            }
+        };
+        slots.push(VisibleStateSlot {
+            prefix,
+            visible_commit: VisibleCommit {
+                branch: BatchBranchKey::from_prefix_name_and_batch(prefix, batch_id),
+                commit_id,
+                state,
+            },
+        });
+    }
+    cursor.expect_end("visible states")?;
+    Ok(VisibleStateSlots(slots))
+}
+
 fn encode_table_prefix_batch_manifest(
     manifest: &TablePrefixBatchManifest,
 ) -> Result<Vec<u8>, StorageError> {
@@ -939,6 +992,32 @@ pub(super) fn object_exists_core(
 ) -> Result<bool, StorageError> {
     let key = obj_meta_key(id);
     Ok(get(&key)?.is_some())
+}
+
+pub(super) fn load_visible_states_core(
+    object_id: ObjectId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<VisibleStateSlots>, StorageError> {
+    let key = obj_visible_states_key(object_id);
+    match get(&key)? {
+        Some(data) => Ok(Some(decode_visible_states(&data)?)),
+        None => Ok(None),
+    }
+}
+
+pub(super) fn store_visible_commit_core(
+    object_id: ObjectId,
+    prefix: BranchName,
+    visible_commit: VisibleCommit,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let mut visible_states =
+        load_visible_states_core(object_id, |key| get(key))?.unwrap_or_default();
+    visible_states.set(prefix, visible_commit);
+    let key = obj_visible_states_key(object_id);
+    let data = encode_visible_states(&visible_states)?;
+    set(&key, &data)
 }
 
 fn load_branch_manifest(

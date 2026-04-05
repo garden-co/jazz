@@ -59,11 +59,9 @@ fn index_key_too_large_error(
 }
 
 pub(super) fn encode_index_branch_key(branch: &QueryBranchRef) -> String {
-    let prefix_id = branch.batch_branch_key().prefix_id();
     format!(
-        "c{}:{}",
-        hex::encode(prefix_id.as_bytes()),
-        branch.batch_id().branch_segment()
+        "c{}",
+        hex::encode(branch.batch_branch_key().prefix_id().as_bytes())
     )
 }
 
@@ -155,6 +153,10 @@ pub(super) fn format_uuid(id: ObjectId) -> String {
 
 pub(super) fn obj_meta_key(id: ObjectId) -> String {
     format!("obj:{}:meta", format_uuid(id))
+}
+
+pub(super) fn obj_visible_states_key(id: ObjectId) -> String {
+    format!("obj:{}:visible", format_uuid(id))
 }
 
 pub(super) fn branch_manifest_key(object_id: ObjectId, branch: &QueryBranchRef) -> String {

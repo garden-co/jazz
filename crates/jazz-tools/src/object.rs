@@ -711,6 +711,54 @@ impl PrefixBatchCatalog {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VisibleCommitState {
+    Live,
+    SoftDeleted,
+    HardDeleted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VisibleCommit {
+    pub branch: BatchBranchKey,
+    pub commit_id: CommitId,
+    pub state: VisibleCommitState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VisibleStateSlot {
+    pub prefix: BranchName,
+    pub visible_commit: VisibleCommit,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VisibleStateSlots(pub SmallVec<[VisibleStateSlot; 2]>);
+
+impl VisibleStateSlots {
+    pub fn get(&self, prefix: &BranchName) -> Option<&VisibleCommit> {
+        self.0
+            .iter()
+            .find(|slot| &slot.prefix == prefix)
+            .map(|slot| &slot.visible_commit)
+    }
+
+    pub fn set(&mut self, prefix: BranchName, visible_commit: VisibleCommit) {
+        if let Some(slot) = self.0.iter_mut().find(|slot| slot.prefix == prefix) {
+            slot.visible_commit = visible_commit;
+            return;
+        }
+
+        self.0.push(VisibleStateSlot {
+            prefix,
+            visible_commit,
+        });
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &VisibleStateSlot> {
+        self.0.iter()
+    }
+}
+
 /// An object with metadata and named branches.
 #[derive(Debug, Clone)]
 pub struct Object {
@@ -718,6 +766,7 @@ pub struct Object {
     pub metadata: HashMap<String, String>,
     pub branches: ObjectBranches,
     pub commit_branches: HashMap<CommitId, BatchBranchKey>,
+    pub visible_states: VisibleStateSlots,
 }
 
 impl Object {
@@ -727,6 +776,7 @@ impl Object {
             metadata: metadata.unwrap_or_default(),
             branches: ObjectBranches::default(),
             commit_branches: HashMap::new(),
+            visible_states: VisibleStateSlots::default(),
         }
     }
 }

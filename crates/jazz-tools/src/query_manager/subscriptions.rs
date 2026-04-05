@@ -92,18 +92,8 @@ impl QueryManager {
             tracing::debug_span!("QM::subscribe", table = %query.table, ?durability_tier).entered();
         // Determine branches
         let branches: Vec<crate::query_manager::types::QueryBranchRef> =
-            if !query.branches.is_empty() {
-                query
-                    .branches
-                    .iter()
-                    .map(|branch| self.resolve_query_branch_ref(branch))
-                    .collect()
-            } else if self.schema_context.is_initialized() {
-                self.schema_context
-                    .all_branch_names()
-                    .into_iter()
-                    .map(crate::query_manager::types::QueryBranchRef::from_branch_name)
-                    .collect()
+            if self.schema_context.is_initialized() {
+                Self::resolve_local_query_branches_for_context(&query, &self.schema_context)
             } else {
                 return Err(QueryError::QueryCompilationError(
                     "schema context not initialized - call set_current_schema() first".into(),
@@ -187,22 +177,8 @@ impl QueryManager {
             .collect();
 
         // Determine branches from query or context
-        let branches: Vec<crate::query_manager::types::QueryBranchRef> = if !query
-            .branches
-            .is_empty()
-        {
-            query
-                .branches
-                .iter()
-                .map(|branch| Self::resolve_query_branch_ref_for_context(schema_context, branch))
-                .collect()
-        } else {
-            schema_context
-                .all_branch_names()
-                .into_iter()
-                .map(crate::query_manager::types::QueryBranchRef::from_branch_name)
-                .collect()
-        };
+        let branches: Vec<crate::query_manager::types::QueryBranchRef> =
+            Self::resolve_local_query_branches_for_context(&query, schema_context);
 
         // Compile query graph with explicit schema context
         let graph = Self::compile_graph(

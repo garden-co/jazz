@@ -263,6 +263,7 @@ impl ObjectManager {
             metadata: metadata.clone().unwrap_or_default(),
             branches: ObjectBranches::default(),
             commit_branches: HashMap::new(),
+            visible_states: Default::default(),
         };
 
         // Sync storage - returns immediately
@@ -301,6 +302,11 @@ impl ObjectManager {
                 metadata,
                 branches: ObjectBranches::default(),
                 commit_branches: HashMap::new(),
+                visible_states: storage
+                    .load_visible_states(id)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default(),
             },
         );
         Some(())
@@ -456,7 +462,7 @@ impl ObjectManager {
     }
 
     /// Get mutable object by id.
-    fn get_mut(&mut self, id: ObjectId) -> Option<&mut Object> {
+    pub(crate) fn get_mut(&mut self, id: ObjectId) -> Option<&mut Object> {
         self.objects.get_mut(&id)
     }
 
@@ -1301,6 +1307,7 @@ impl ObjectManager {
             metadata: metadata.clone(),
             branches: ObjectBranches::default(),
             commit_branches: HashMap::new(),
+            visible_states: Default::default(),
         };
 
         // Sync storage - returns immediately

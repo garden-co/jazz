@@ -706,12 +706,6 @@ impl QueryGraph {
         } else {
             plan.branches.clone()
         };
-        let branches = if let Some(storage) = storage {
-            Self::resolve_active_branches_for_table(storage, plan.table, &branches)?
-        } else {
-            branches
-        };
-
         if !plan.joins.is_empty() {
             return Self::compile_join_plan(
                 plan,
@@ -774,10 +768,11 @@ impl QueryGraph {
             for (translated_column, scan_branches) in scan_groups {
                 index_columns.push(scan_column.clone());
                 let scan_column_name = ColumnName::new(&translated_column);
-                let scan_node = IndexScanNode::new_with_branches(
+                let scan_node = IndexScanNode::new_with_branches_and_match_mode(
                     plan.table,
                     scan_column_name,
                     scan_branches,
+                    plan.branches_are_explicit,
                     scan_condition.clone(),
                     descriptor.clone(),
                 );
@@ -791,10 +786,11 @@ impl QueryGraph {
 
         if plan.include_deleted {
             let deleted_column = ColumnName::new("_id_deleted");
-            let deleted_scan_node = IndexScanNode::new_with_branches(
+            let deleted_scan_node = IndexScanNode::new_with_branches_and_match_mode(
                 plan.table,
                 deleted_column,
                 branches.clone(),
+                plan.branches_are_explicit,
                 ScanCondition::All,
                 descriptor.clone(),
             );
@@ -1476,7 +1472,7 @@ impl QueryGraph {
         branches: &[QueryBranchRef],
         session: Option<Session>,
         schema_context: &SchemaContext,
-        storage: Option<&dyn Storage>,
+        _storage: Option<&dyn Storage>,
     ) -> Option<Self> {
         let base_table_schema = schema.get(&plan.table)?;
         let base_descriptor = base_table_schema.columns.clone();
@@ -1488,11 +1484,7 @@ impl QueryGraph {
         } else {
             branches.to_vec()
         };
-        let base_scan_branches = if let Some(storage) = storage {
-            Self::resolve_active_branches_for_table(storage, plan.table, &join_branches)?
-        } else {
-            join_branches.clone()
-        };
+        let base_scan_branches = join_branches.clone();
 
         // Track all table names and descriptors for TupleDescriptor
         let mut table_names = vec![plan.base_scope.clone()];
@@ -1502,10 +1494,11 @@ impl QueryGraph {
 
         // Build pipeline for base table: one multi-branch IndexScan -> Materialize.
         let id_column = ColumnName::new("_id");
-        let base_scan = IndexScanNode::new_with_branches(
+        let base_scan = IndexScanNode::new_with_branches_and_match_mode(
             plan.table,
             id_column,
             base_scan_branches.clone(),
+            plan.branches_are_explicit,
             ScanCondition::All,
             base_descriptor.clone(),
         );
@@ -1588,18 +1581,15 @@ impl QueryGraph {
 
             let right_table_schema = schema.get(&join_spec.table)?;
             let right_descriptor = right_table_schema.columns.clone();
-            let right_scan_branches = if let Some(storage) = storage {
-                Self::resolve_active_branches_for_table(storage, join_spec.table, &join_branches)?
-            } else {
-                join_branches.clone()
-            };
+            let right_scan_branches = join_branches.clone();
 
             // Build pipeline for right table: one multi-branch IndexScan -> Materialize.
             let id_column = ColumnName::new("_id");
-            let right_scan = IndexScanNode::new_with_branches(
+            let right_scan = IndexScanNode::new_with_branches_and_match_mode(
                 join_spec.table,
                 id_column,
                 right_scan_branches.clone(),
+                plan.branches_are_explicit,
                 ScanCondition::All,
                 right_descriptor.clone(),
             );

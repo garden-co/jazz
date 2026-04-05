@@ -36,7 +36,10 @@ use smallvec::SmallVec;
 use smolset::SmolSet;
 
 use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId, PrefixBatchCatalog, PrefixBatchMeta};
+use crate::object::{
+    BranchName, ObjectId, PrefixBatchCatalog, PrefixBatchMeta, VisibleCommit, VisibleCommitState,
+    VisibleStateSlots,
+};
 use crate::query_manager::types::{
     BatchBranchKey, BatchId, BatchOrd, ColumnName, PrefixId, QueryBranchRef, SchemaHash,
     ScopedObject, TableName, Value,
@@ -356,6 +359,31 @@ pub trait Storage {
         Ok(self.load_object_metadata(id)?.is_some())
     }
 
+    /// Load persisted row-local visible state slots for an object.
+    fn load_visible_states(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Option<VisibleStateSlots>, StorageError>;
+
+    /// Load the current visible commit for one shared prefix on an object.
+    fn load_visible_commit(
+        &self,
+        object_id: ObjectId,
+        prefix: BranchName,
+    ) -> Result<Option<VisibleCommit>, StorageError> {
+        Ok(self
+            .load_visible_states(object_id)?
+            .and_then(|states| states.get(&prefix).copied()))
+    }
+
+    /// Persist the current visible commit for one shared prefix on an object.
+    fn store_visible_commit(
+        &mut self,
+        object_id: ObjectId,
+        prefix: BranchName,
+        visible_commit: VisibleCommit,
+    ) -> Result<(), StorageError>;
+
     /// Load a branch's commits and tails. Returns None if branch doesn't exist.
     fn load_branch(
         &self,
@@ -450,6 +478,14 @@ pub trait Storage {
         table: &str,
         prefix: BranchName,
     ) -> Result<Vec<BatchBranchKey>, StorageError>;
+
+    fn adjust_table_prefix_batch_refcount(
+        &mut self,
+        table: &str,
+        prefix: BranchName,
+        batch_id: BatchId,
+        delta: i64,
+    ) -> Result<(), StorageError>;
 
     fn resolve_active_table_batch_keys(
         &self,
@@ -594,13 +630,47 @@ pub trait Storage {
         table: &str,
         column: &str,
         branches: &[QueryBranchRef],
+        exact_branch_match: bool,
         value: &Value,
     ) -> Vec<ScopedObject> {
-        let mut scoped_ids = HashSet::new();
-        for branch in branches {
-            let branch_key = branch.batch_branch_key();
+        if !exact_branch_match && let [branch] = branches {
+            let prefix = branch.prefix_name();
+            let mut scoped_ids = Vec::new();
+            let mut seen_rows = HashSet::new();
             for row_id in self.index_lookup(table, column, branch, value) {
-                scoped_ids.insert((row_id, branch_key));
+                if !seen_rows.insert(row_id) {
+                    continue;
+                }
+                let Ok(Some(visible_commit)) = self.load_visible_commit(row_id, prefix) else {
+                    continue;
+                };
+                if visible_commit.state != VisibleCommitState::HardDeleted {
+                    scoped_ids.push((row_id, visible_commit.branch));
+                }
+            }
+            return scoped_ids;
+        }
+
+        let mut scoped_ids = HashSet::new();
+        let mut seen_prefixes = HashSet::new();
+        let requested_branches: HashSet<_> = branches
+            .iter()
+            .map(QueryBranchRef::batch_branch_key)
+            .collect();
+        for branch in branches {
+            let prefix = branch.prefix_name();
+            if !seen_prefixes.insert(prefix) {
+                continue;
+            }
+            for row_id in self.index_lookup(table, column, branch, value) {
+                let Ok(Some(visible_commit)) = self.load_visible_commit(row_id, prefix) else {
+                    continue;
+                };
+                if visible_commit.state != VisibleCommitState::HardDeleted
+                    && (!exact_branch_match || requested_branches.contains(&visible_commit.branch))
+                {
+                    scoped_ids.insert((row_id, visible_commit.branch));
+                }
             }
         }
         scoped_ids.into_iter().collect()
@@ -612,14 +682,48 @@ pub trait Storage {
         table: &str,
         column: &str,
         branches: &[QueryBranchRef],
+        exact_branch_match: bool,
         start: Bound<&Value>,
         end: Bound<&Value>,
     ) -> Vec<ScopedObject> {
-        let mut scoped_ids = HashSet::new();
-        for branch in branches {
-            let branch_key = branch.batch_branch_key();
+        if !exact_branch_match && let [branch] = branches {
+            let prefix = branch.prefix_name();
+            let mut scoped_ids = Vec::new();
+            let mut seen_rows = HashSet::new();
             for row_id in self.index_range(table, column, branch, start, end) {
-                scoped_ids.insert((row_id, branch_key));
+                if !seen_rows.insert(row_id) {
+                    continue;
+                }
+                let Ok(Some(visible_commit)) = self.load_visible_commit(row_id, prefix) else {
+                    continue;
+                };
+                if visible_commit.state != VisibleCommitState::HardDeleted {
+                    scoped_ids.push((row_id, visible_commit.branch));
+                }
+            }
+            return scoped_ids;
+        }
+
+        let mut scoped_ids = HashSet::new();
+        let mut seen_prefixes = HashSet::new();
+        let requested_branches: HashSet<_> = branches
+            .iter()
+            .map(QueryBranchRef::batch_branch_key)
+            .collect();
+        for branch in branches {
+            let prefix = branch.prefix_name();
+            if !seen_prefixes.insert(prefix) {
+                continue;
+            }
+            for row_id in self.index_range(table, column, branch, start, end) {
+                let Ok(Some(visible_commit)) = self.load_visible_commit(row_id, prefix) else {
+                    continue;
+                };
+                if visible_commit.state != VisibleCommitState::HardDeleted
+                    && (!exact_branch_match || requested_branches.contains(&visible_commit.branch))
+                {
+                    scoped_ids.insert((row_id, visible_commit.branch));
+                }
             }
         }
         scoped_ids.into_iter().collect()
@@ -631,12 +735,46 @@ pub trait Storage {
         table: &str,
         column: &str,
         branches: &[QueryBranchRef],
+        exact_branch_match: bool,
     ) -> Vec<ScopedObject> {
-        let mut scoped_ids = HashSet::new();
-        for branch in branches {
-            let branch_key = branch.batch_branch_key();
+        if !exact_branch_match && let [branch] = branches {
+            let prefix = branch.prefix_name();
+            let mut scoped_ids = Vec::new();
+            let mut seen_rows = HashSet::new();
             for row_id in self.index_scan_all(table, column, branch) {
-                scoped_ids.insert((row_id, branch_key));
+                if !seen_rows.insert(row_id) {
+                    continue;
+                }
+                let Ok(Some(visible_commit)) = self.load_visible_commit(row_id, prefix) else {
+                    continue;
+                };
+                if visible_commit.state != VisibleCommitState::HardDeleted {
+                    scoped_ids.push((row_id, visible_commit.branch));
+                }
+            }
+            return scoped_ids;
+        }
+
+        let mut scoped_ids = HashSet::new();
+        let mut seen_prefixes = HashSet::new();
+        let requested_branches: HashSet<_> = branches
+            .iter()
+            .map(QueryBranchRef::batch_branch_key)
+            .collect();
+        for branch in branches {
+            let prefix = branch.prefix_name();
+            if !seen_prefixes.insert(prefix) {
+                continue;
+            }
+            for row_id in self.index_scan_all(table, column, branch) {
+                let Ok(Some(visible_commit)) = self.load_visible_commit(row_id, prefix) else {
+                    continue;
+                };
+                if visible_commit.state != VisibleCommitState::HardDeleted
+                    && (!exact_branch_match || requested_branches.contains(&visible_commit.branch))
+                {
+                    scoped_ids.insert((row_id, visible_commit.branch));
+                }
             }
         }
         scoped_ids.into_iter().collect()
@@ -673,6 +811,30 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 
     fn object_exists(&self, id: ObjectId) -> Result<bool, StorageError> {
         (**self).object_exists(id)
+    }
+
+    fn load_visible_states(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Option<VisibleStateSlots>, StorageError> {
+        (**self).load_visible_states(object_id)
+    }
+
+    fn load_visible_commit(
+        &self,
+        object_id: ObjectId,
+        prefix: BranchName,
+    ) -> Result<Option<VisibleCommit>, StorageError> {
+        (**self).load_visible_commit(object_id, prefix)
+    }
+
+    fn store_visible_commit(
+        &mut self,
+        object_id: ObjectId,
+        prefix: BranchName,
+        visible_commit: VisibleCommit,
+    ) -> Result<(), StorageError> {
+        (**self).store_visible_commit(object_id, prefix, visible_commit)
     }
 
     fn load_branch(
@@ -729,6 +891,16 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         prefix: BranchName,
     ) -> Result<Vec<BatchBranchKey>, StorageError> {
         (**self).load_table_prefix_batch_keys(table, prefix)
+    }
+
+    fn adjust_table_prefix_batch_refcount(
+        &mut self,
+        table: &str,
+        prefix: BranchName,
+        batch_id: BatchId,
+        delta: i64,
+    ) -> Result<(), StorageError> {
+        (**self).adjust_table_prefix_batch_refcount(table, prefix, batch_id, delta)
     }
 
     fn resolve_active_table_batch_keys(
@@ -854,8 +1026,8 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 // MemoryStorage - In-memory implementation for testing and main thread
 // ============================================================================
 
-/// Index key: (table, column, compact prefix id, batch id).
-type IndexKey = (TableName, ColumnName, PrefixId, BatchId);
+/// Index key: (table, column, compact prefix id).
+type IndexKey = (TableName, ColumnName, PrefixId);
 
 const INLINE_INDEX_ROW_IDS: usize = 4;
 
@@ -979,6 +1151,7 @@ struct ObjectData {
     metadata: HashMap<String, String>,
     branches: ObjectBranchDataStore,
     commit_branches: HashMap<CommitId, BatchBranchKey>,
+    visible_states: VisibleStateSlots,
 }
 
 /// Internal branch storage structure.
@@ -1200,22 +1373,11 @@ impl MemoryStorage {
         <Self as Storage>::index_scan_all(self, table, column, &Self::branch_ref(branch))
     }
 
-    fn composed_table_batch(branch: &QueryBranchRef) -> (BranchName, BatchId) {
-        (branch.prefix_name(), branch.batch_id())
-    }
-
-    fn index_branch_key(branch: &QueryBranchRef) -> (PrefixId, BatchId) {
-        let branch_key = branch.batch_branch_key();
-        (branch_key.prefix_id(), branch_key.batch_id())
-    }
-
     fn index_key(table: &str, column: &str, branch: &QueryBranchRef) -> IndexKey {
-        let (prefix_id, batch_id) = Self::index_branch_key(branch);
         (
             TableName::new(table),
             ColumnName::new(column),
-            prefix_id,
-            batch_id,
+            branch.batch_branch_key().prefix_id(),
         )
     }
 }
@@ -1337,6 +1499,7 @@ impl Storage for MemoryStorage {
                 metadata,
                 branches: ObjectBranchDataStore::default(),
                 commit_branches: HashMap::new(),
+                visible_states: VisibleStateSlots::default(),
             },
         );
         Ok(())
@@ -1351,6 +1514,29 @@ impl Storage for MemoryStorage {
 
     fn object_exists(&self, id: ObjectId) -> Result<bool, StorageError> {
         Ok(self.objects.contains_key(&id))
+    }
+
+    fn load_visible_states(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Option<VisibleStateSlots>, StorageError> {
+        Ok(self
+            .objects
+            .get(&object_id)
+            .map(|object| object.visible_states.clone()))
+    }
+
+    fn store_visible_commit(
+        &mut self,
+        object_id: ObjectId,
+        prefix: BranchName,
+        visible_commit: VisibleCommit,
+    ) -> Result<(), StorageError> {
+        let Some(object) = self.objects.get_mut(&object_id) else {
+            return Err(StorageError::NotFound);
+        };
+        object.visible_states.set(prefix, visible_commit);
+        Ok(())
     }
 
     fn load_branch(
@@ -1510,6 +1696,32 @@ impl Storage for MemoryStorage {
             .unwrap_or_default())
     }
 
+    fn adjust_table_prefix_batch_refcount(
+        &mut self,
+        table: &str,
+        prefix: BranchName,
+        batch_id: BatchId,
+        delta: i64,
+    ) -> Result<(), StorageError> {
+        let table_name = TableName::new(table);
+        let key = (table_name, prefix);
+        if delta > 0 {
+            self.table_batches_by_prefix
+                .entry(key)
+                .or_default()
+                .adjust_refcount(batch_id, delta);
+            return Ok(());
+        }
+
+        if let Some(manifest) = self.table_batches_by_prefix.get_mut(&key) {
+            manifest.adjust_refcount(batch_id, delta);
+            if manifest.is_empty() {
+                self.table_batches_by_prefix.remove(&key);
+            }
+        }
+        Ok(())
+    }
+
     fn append_commit(
         &mut self,
         object_id: ObjectId,
@@ -1655,14 +1867,7 @@ impl Storage for MemoryStorage {
         let key = Self::index_key(table, column, branch);
         let index = self.indices.entry(key).or_default();
         let encoded = encode_value(value);
-        let inserted = index.entry(encoded).or_default().insert(row_id);
-        if inserted && matches!(column, "_id" | "_id_deleted") {
-            let (prefix, batch_id) = Self::composed_table_batch(branch);
-            self.table_batches_by_prefix
-                .entry((TableName::new(table), prefix))
-                .or_default()
-                .adjust_refcount(batch_id, 1);
-        }
+        index.entry(encoded).or_default().insert(row_id);
         Ok(())
     }
 
@@ -1675,26 +1880,12 @@ impl Storage for MemoryStorage {
         row_id: ObjectId,
     ) -> Result<(), StorageError> {
         let key = Self::index_key(table, column, branch);
-        let mut removed = false;
         if let Some(index) = self.indices.get_mut(&key) {
             let encoded = encode_value(value);
             if let Some(row_ids) = index.get_mut(&encoded) {
-                removed = row_ids.remove(&row_id);
+                row_ids.remove(&row_id);
                 if row_ids.is_empty() {
                     index.remove(&encoded);
-                }
-            }
-        }
-        if removed && matches!(column, "_id" | "_id_deleted") {
-            let (prefix, batch_id) = Self::composed_table_batch(branch);
-            if let Some(manifest) = self
-                .table_batches_by_prefix
-                .get_mut(&(TableName::new(table), prefix))
-            {
-                manifest.adjust_refcount(batch_id, -1);
-                if manifest.is_empty() {
-                    self.table_batches_by_prefix
-                        .remove(&(TableName::new(table), prefix));
                 }
             }
         }

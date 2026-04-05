@@ -793,7 +793,7 @@ fn update_after_tips_only_read_on_fresh_batch_branch_merges_from_prefix_leaf_hea
 }
 
 #[test]
-fn subscription_recompiles_when_external_batch_arrives_for_same_prefix() {
+fn subscription_tracks_external_batch_on_same_prefix_without_recompile() {
     use crate::query_manager::encoding::encode_row;
     use std::collections::HashMap;
 
@@ -818,7 +818,7 @@ fn subscription_recompiles_when_external_batch_arrives_for_same_prefix() {
     .to_branch_name();
 
     let row_id = ObjectId::new();
-    let mut metadata = HashMap::new();
+    let mut metadata = std::collections::HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
@@ -846,11 +846,20 @@ fn subscription_recompiles_when_external_batch_arrives_for_same_prefix() {
         .expect("default query should fan out to the new external batch");
     assert_eq!(results.len(), 1);
 
+    let subscription = qm
+        .subscriptions
+        .get(&sub_id)
+        .expect("subscription should still exist after processing");
+    assert!(
+        !subscription.needs_recompile,
+        "same-prefix fresh batches should not force local default subscriptions to recompile"
+    );
+
     let updates = qm.take_updates();
     let update = updates
         .iter()
         .find(|u| u.subscription_id == sub_id)
-        .expect("subscription should recompile onto the new batch and emit the row");
+        .expect("subscription should settle onto the new batch and emit the row");
     assert_eq!(update.delta.added.len(), 1);
 }
 
@@ -1924,7 +1933,7 @@ fn synced_update_updates_column_indices() {
     let author = row_id;
 
     // Receive object with table metadata
-    let mut metadata = HashMap::new();
+    let mut metadata = std::collections::HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
@@ -2064,7 +2073,7 @@ fn synced_update_missing_old_content_reconciles_from_current_head() {
 
     let row_id = crate::object::ObjectId::new();
     let author = row_id;
-    let mut metadata = HashMap::new();
+    let mut metadata = std::collections::HashMap::new();
     metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
     qm.sync_manager_mut()
         .object_manager
@@ -3306,6 +3315,104 @@ fn peer_client_update_on_external_batch_becomes_query_visible() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1[0], Value::Text("PeerUser".into()));
     assert_eq!(results[0].1[1], Value::Integer(42));
+}
+
+#[test]
+fn stale_external_batch_value_does_not_remain_index_visible() {
+    use crate::query_manager::encoding::encode_row;
+    use crate::query_manager::types::{BatchId, ComposedBranchName, SchemaHash};
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    let schema = test_schema();
+    let schema_hash = SchemaHash::compute(&schema);
+    let mut qm = create_query_manager_with_batch(SyncManager::new(), schema, 32);
+    let mut storage = MemoryStorage::new();
+    qm.set_known_schemas(Arc::new(std::collections::HashMap::from([(
+        schema_hash,
+        test_schema(),
+    )])));
+
+    let row_id = crate::object::ObjectId::new();
+    let author = row_id;
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+
+    let mut metadata = std::collections::HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_object(&mut storage, row_id, metadata);
+
+    let fresh_branch = ComposedBranchName::new(
+        "dev",
+        schema_hash,
+        "main",
+        BatchId::from_uuid(Uuid::from_u128(31)),
+    )
+    .to_branch_name();
+    let stale_branch = ComposedBranchName::new(
+        "dev",
+        schema_hash,
+        "main",
+        BatchId::from_uuid(Uuid::from_u128(32)),
+    )
+    .to_branch_name();
+
+    let fresh_commit = stored_row_commit(
+        smallvec![],
+        encode_row(
+            &descriptor,
+            &[Value::Text("Fresh".into()), Value::Integer(200)],
+        )
+        .unwrap(),
+        2_000,
+        author.to_string(),
+    );
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut storage, row_id, fresh_branch, fresh_commit)
+        .unwrap();
+    qm.process(&mut storage);
+
+    let stale_commit = stored_row_commit(
+        smallvec![],
+        encode_row(
+            &descriptor,
+            &[Value::Text("Stale".into()), Value::Integer(100)],
+        )
+        .unwrap(),
+        1_000,
+        author.to_string(),
+    );
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut storage, row_id, stale_branch, stale_commit)
+        .unwrap();
+    qm.process(&mut storage);
+
+    let fresh_query = qm
+        .query("users")
+        .filter_eq("name", Value::Text("Fresh".into()))
+        .build();
+    let fresh_results = execute_query(&mut qm, &mut storage, fresh_query).unwrap();
+    assert_eq!(
+        fresh_results.len(),
+        1,
+        "newer batch should stay query-visible"
+    );
+
+    let stale_query = qm
+        .query("users")
+        .filter_eq("name", Value::Text("Stale".into()))
+        .build();
+    let stale_results = execute_query(&mut qm, &mut storage, stale_query).unwrap();
+    assert!(
+        stale_results.is_empty(),
+        "older concurrent batch should not keep stale indexed values query-visible"
+    );
 }
 
 #[test]
@@ -10310,6 +10417,109 @@ fn e2e_client_subscription_replays_remote_fresh_batch_update() {
         updated_results[0].1[1],
         Value::Integer(125),
         "client should observe the fresh-batch update"
+    );
+}
+
+#[test]
+fn local_default_subscription_uses_seed_branch_frontier_but_tracks_fresh_batch_updates() {
+    use crate::query_manager::encoding::encode_row;
+
+    // local subscription ──default prefix query──► visible_commit on batch A
+    //                                              │
+    //                                              └── remote fresh batch B arrives
+    //                                                        │
+    //                                                        └── result updates without expanding
+    //                                                            the subscription frontier to B
+    let schema = test_schema();
+    let mut qm = create_query_manager_with_batch(SyncManager::new(), schema, 500);
+    let mut storage = MemoryStorage::new();
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(75)],
+        )
+        .unwrap();
+    qm.process(&mut storage);
+
+    let initial_branch = BranchName::new(get_branch(&qm));
+    let initial_tip = qm
+        .sync_manager_mut()
+        .object_manager
+        .get(handle.row_id)
+        .and_then(|object| object.branches.get(&initial_branch))
+        .and_then(|branch| branch.tips.iter().next().copied())
+        .expect("row tip should exist after initial insert");
+
+    let sub_id = qm.subscribe(qm.query("users").build()).unwrap();
+    qm.process(&mut storage);
+
+    let subscription = qm
+        .subscriptions
+        .get(&sub_id)
+        .expect("subscription should exist after initial settle");
+    assert_eq!(
+        subscription.branches.len(),
+        1,
+        "default local subscription should keep only the seed branch frontier"
+    );
+    assert_eq!(
+        subscription.graph.current_result().len(),
+        1,
+        "subscription should initially include the inserted row"
+    );
+
+    let remote_branch = ComposedBranchName::new(
+        "dev",
+        ComposedBranchName::parse(&initial_branch)
+            .expect("initial branch should be composed")
+            .schema_hash,
+        "main",
+        BatchId::from_uuid(uuid::Uuid::from_u128(501)),
+    )
+    .to_branch_name();
+    let descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("score", ColumnType::Integer),
+    ]);
+    let remote_commit = stored_row_commit(
+        smallvec![initial_tip],
+        encode_row(
+            &descriptor,
+            &[Value::Text("Alice".into()), Value::Integer(125)],
+        )
+        .unwrap(),
+        2_000,
+        handle.row_id.to_string(),
+    );
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut storage, handle.row_id, remote_branch, remote_commit)
+        .unwrap();
+
+    qm.process(&mut storage);
+
+    let updated_results = qm.get_subscription_results(sub_id);
+    assert_eq!(
+        updated_results.len(),
+        1,
+        "subscription should still see one row"
+    );
+    assert_eq!(
+        updated_results[0].1[1],
+        Value::Integer(125),
+        "subscription should follow the fresh-batch visible commit"
+    );
+
+    let subscription = qm
+        .subscriptions
+        .get(&sub_id)
+        .expect("subscription should still exist after fresh-batch update");
+    assert_eq!(
+        subscription.branches.len(),
+        1,
+        "local default subscription should still keep only the seed branch frontier"
     );
 }
 

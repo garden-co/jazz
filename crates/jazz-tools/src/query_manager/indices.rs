@@ -1,21 +1,61 @@
-use std::collections::HashMap;
-
 use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId};
+use crate::object::{BranchName, Object, ObjectId, VisibleCommit, VisibleCommitState};
 use crate::storage::{Storage, StorageError, validate_index_value_size};
+use std::collections::{HashSet, VecDeque};
 
 use super::encoding::decode_column;
 use super::manager::{QueryError, QueryManager};
-use super::types::{ColumnDescriptor, ColumnType, QueryBranchRef, RowDescriptor, TableName, Value};
+use super::types::{
+    BatchBranchKey, ColumnDescriptor, ColumnType, QueryBranchRef, RowDescriptor, TableName, Value,
+};
 
 #[derive(Debug, Clone)]
-struct IndexSourceState {
-    branch: BranchName,
+struct VisibleIndexState {
+    visible_commit: VisibleCommit,
     data: Vec<u8>,
-    is_deleted: bool,
+    timestamp: u64,
 }
 
 impl QueryManager {
+    fn commit_by_id(object: &Object, commit_id: CommitId) -> Option<&Commit> {
+        let branch_key = object.commit_branches.get(&commit_id)?;
+        object
+            .branches
+            .get_by_key(*branch_key)
+            .and_then(|branch| branch.commits.get(&commit_id))
+    }
+
+    fn commit_is_descendant_of(
+        object: &Object,
+        commit_id: CommitId,
+        ancestor_id: CommitId,
+    ) -> bool {
+        if commit_id == ancestor_id {
+            return true;
+        }
+
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::from([commit_id]);
+        while let Some(current) = queue.pop_front() {
+            if !visited.insert(current) {
+                continue;
+            }
+
+            let Some(commit) = Self::commit_by_id(object, current) else {
+                continue;
+            };
+
+            for parent_id in &commit.parents {
+                if *parent_id == ancestor_id {
+                    return true;
+                }
+                queue.push_back(*parent_id);
+            }
+        }
+
+        false
+    }
+
     fn branch_ref(branch: &BranchName) -> QueryBranchRef {
         QueryBranchRef::from_branch_name(*branch)
     }
@@ -228,32 +268,6 @@ impl QueryManager {
             .map_err(Self::map_index_storage_error)
     }
 
-    fn retire_source_indices(
-        storage: &mut dyn Storage,
-        table: &str,
-        object_id: ObjectId,
-        descriptor: &RowDescriptor,
-        source_state: &IndexSourceState,
-    ) -> Result<(), QueryError> {
-        if source_state.is_deleted {
-            Self::remove_deleted_row_index_on_branch(
-                storage,
-                table,
-                &source_state.branch,
-                object_id,
-            )
-        } else {
-            Self::remove_live_row_indices_on_branch(
-                storage,
-                table,
-                &source_state.branch,
-                object_id,
-                &source_state.data,
-                descriptor,
-            )
-        }
-    }
-
     pub(super) fn tip_commit_on_branch(
         &self,
         object_id: ObjectId,
@@ -277,92 +291,222 @@ impl QueryManager {
         Some((tip_id, commit))
     }
 
-    fn commit_branch_for_object<H: Storage + ?Sized>(
-        &self,
-        storage: &H,
-        object_id: ObjectId,
-        commit_id: CommitId,
-    ) -> Option<BranchName> {
-        self.sync_manager
-            .object_manager
-            .get(object_id)
-            .and_then(|object| {
-                object
-                    .commit_branches
-                    .get(&commit_id)
-                    .copied()
-                    .map(|branch| branch.branch_name())
-            })
-            .or_else(|| {
-                storage
-                    .load_commit_branch(object_id, commit_id)
-                    .ok()
-                    .flatten()
-                    .map(|branch| branch.branch_name())
-            })
+    fn visible_state_kind(commit: &Commit) -> VisibleCommitState {
+        if commit.content.is_empty() && commit.is_hard_deleted() {
+            VisibleCommitState::HardDeleted
+        } else if commit.is_soft_deleted() {
+            VisibleCommitState::SoftDeleted
+        } else {
+            VisibleCommitState::Live
+        }
     }
 
-    fn source_states_for_head_commit(
+    fn visible_state_counts_toward_manifest(state: VisibleCommitState) -> bool {
+        !matches!(state, VisibleCommitState::HardDeleted)
+    }
+
+    fn resolve_visible_state(
         &mut self,
         storage: &dyn Storage,
         object_id: ObjectId,
-        branch: &BranchName,
-        head_commit_id: CommitId,
-    ) -> Result<Vec<IndexSourceState>, QueryError> {
-        let requested_branches = [branch.as_str().to_string()];
+        prefix: BranchName,
+    ) -> Result<Option<VisibleIndexState>, QueryError> {
         self.sync_manager
             .object_manager
-            .get_or_load(object_id, storage, &requested_branches)
+            .get_or_load(object_id, storage, &[])
             .ok_or(QueryError::ObjectNotFound(object_id))?;
 
-        let head_commit = self
+        let Some(visible_commit) = self
             .sync_manager
             .object_manager
             .get(object_id)
-            .and_then(|object| object.branches.get(branch))
+            .and_then(|object| object.visible_states.get(&prefix).copied())
+        else {
+            return Ok(None);
+        };
+
+        let branch_name = visible_commit.branch.branch_name();
+        let requested_branches = [branch_name.as_str().to_string()];
+        self.sync_manager
+            .object_manager
+            .get_or_load_tips(object_id, storage, &requested_branches)
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
+
+        let object = self
+            .sync_manager
+            .object_manager
+            .get(object_id)
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
+        let commit = object
+            .branches
+            .get_by_key(visible_commit.branch)
+            .and_then(|branch| branch.commits.get(&visible_commit.commit_id))
+            .cloned()
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
+
+        Ok(Some(VisibleIndexState {
+            visible_commit,
+            data: commit.content,
+            timestamp: commit.timestamp,
+        }))
+    }
+
+    fn retire_visible_indices(
+        storage: &mut dyn Storage,
+        table: &str,
+        object_id: ObjectId,
+        descriptor: &RowDescriptor,
+        visible_state: &VisibleIndexState,
+    ) -> Result<(), QueryError> {
+        let branch_name = visible_state.visible_commit.branch.branch_name();
+        match visible_state.visible_commit.state {
+            VisibleCommitState::Live => Self::remove_live_row_indices_on_branch(
+                storage,
+                table,
+                &branch_name,
+                object_id,
+                &visible_state.data,
+                descriptor,
+            ),
+            VisibleCommitState::SoftDeleted => {
+                Self::remove_deleted_row_index_on_branch(storage, table, &branch_name, object_id)
+            }
+            VisibleCommitState::HardDeleted => Ok(()),
+        }
+    }
+
+    fn publish_visible_indices(
+        storage: &mut dyn Storage,
+        table: &str,
+        object_id: ObjectId,
+        descriptor: &RowDescriptor,
+        visible_commit: VisibleCommit,
+        data: &[u8],
+    ) -> Result<(), QueryError> {
+        let branch_name = visible_commit.branch.branch_name();
+        match visible_commit.state {
+            VisibleCommitState::Live => Self::insert_live_row_indices_on_branch(
+                storage,
+                table,
+                &branch_name,
+                object_id,
+                data,
+                descriptor,
+            ),
+            VisibleCommitState::SoftDeleted => {
+                Self::insert_deleted_row_index_on_branch(storage, table, &branch_name, object_id)
+            }
+            VisibleCommitState::HardDeleted => Ok(()),
+        }
+    }
+
+    fn update_cached_visible_commit(
+        &mut self,
+        object_id: ObjectId,
+        prefix: BranchName,
+        visible_commit: VisibleCommit,
+    ) {
+        if let Some(object) = self.sync_manager.object_manager.get_mut(object_id) {
+            object.visible_states.set(prefix, visible_commit);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reconcile_visible_state_after_commit(
+        &mut self,
+        storage: &mut dyn Storage,
+        table: &str,
+        branch: &BranchName,
+        object_id: ObjectId,
+        head_commit_id: CommitId,
+        descriptor: &RowDescriptor,
+    ) -> Result<bool, QueryError> {
+        let branch_key = BatchBranchKey::from_branch_name(*branch);
+        let prefix = branch_key.prefix_name();
+        let old_visible = self.resolve_visible_state(storage, object_id, prefix)?;
+
+        let object = self
+            .sync_manager
+            .object_manager
+            .get(object_id)
+            .ok_or(QueryError::ObjectNotFound(object_id))?;
+        let head_commit = object
+            .branches
+            .get(branch)
             .and_then(|object_branch| object_branch.commits.get(&head_commit_id))
             .cloned()
             .ok_or(QueryError::ObjectNotFound(object_id))?;
 
-        let mut states_by_branch = HashMap::new();
-        for parent_id in &head_commit.parents {
-            let Some(parent_branch) = self.commit_branch_for_object(storage, object_id, *parent_id)
-            else {
-                continue;
-            };
+        let new_visible_commit = VisibleCommit {
+            branch: branch_key,
+            commit_id: head_commit_id,
+            state: Self::visible_state_kind(&head_commit),
+        };
 
-            let parent_branch_request = [parent_branch.as_str().to_string()];
-            let _ = self.sync_manager.object_manager.get_or_load_tips(
-                object_id,
-                storage,
-                &parent_branch_request,
-            );
+        if let Some(old_visible) = &old_visible {
+            let old_commit_id = old_visible.visible_commit.commit_id;
+            let new_beats_old =
+                if Self::commit_is_descendant_of(object, head_commit_id, old_commit_id) {
+                    true
+                } else if Self::commit_is_descendant_of(object, old_commit_id, head_commit_id) {
+                    false
+                } else {
+                    (head_commit.timestamp, head_commit_id) > (old_visible.timestamp, old_commit_id)
+                };
 
-            let Some(parent_commit) = self
-                .sync_manager
-                .object_manager
-                .get(object_id)
-                .and_then(|object| object.branches.get(&parent_branch))
-                .and_then(|object_branch| object_branch.commits.get(parent_id))
-                .cloned()
-            else {
-                continue;
-            };
-
-            if parent_commit.content.is_empty() && parent_commit.is_hard_deleted() {
-                continue;
+            if !new_beats_old {
+                return Ok(false);
             }
-
-            states_by_branch
-                .entry(parent_branch)
-                .or_insert_with(|| IndexSourceState {
-                    branch: parent_branch,
-                    is_deleted: parent_commit.is_soft_deleted(),
-                    data: parent_commit.content,
-                });
         }
 
-        Ok(states_by_branch.into_values().collect())
+        if let Some(old_visible) = &old_visible {
+            Self::retire_visible_indices(storage, table, object_id, descriptor, old_visible)?;
+        }
+        Self::publish_visible_indices(
+            storage,
+            table,
+            object_id,
+            descriptor,
+            new_visible_commit,
+            &head_commit.content,
+        )?;
+
+        let old_manifest_batch = old_visible.as_ref().and_then(|visible| {
+            Self::visible_state_counts_toward_manifest(visible.visible_commit.state)
+                .then_some(visible.visible_commit.branch.batch_id())
+        });
+        let new_manifest_batch =
+            Self::visible_state_counts_toward_manifest(new_visible_commit.state)
+                .then_some(new_visible_commit.branch.batch_id());
+
+        match (old_manifest_batch, new_manifest_batch) {
+            (Some(old_batch), Some(new_batch)) if old_batch != new_batch => {
+                storage
+                    .adjust_table_prefix_batch_refcount(table, prefix, old_batch, -1)
+                    .map_err(Self::map_index_storage_error)?;
+                storage
+                    .adjust_table_prefix_batch_refcount(table, prefix, new_batch, 1)
+                    .map_err(Self::map_index_storage_error)?;
+            }
+            (Some(old_batch), None) => {
+                storage
+                    .adjust_table_prefix_batch_refcount(table, prefix, old_batch, -1)
+                    .map_err(Self::map_index_storage_error)?;
+            }
+            (None, Some(new_batch)) => {
+                storage
+                    .adjust_table_prefix_batch_refcount(table, prefix, new_batch, 1)
+                    .map_err(Self::map_index_storage_error)?;
+            }
+            _ => {}
+        }
+
+        storage
+            .store_visible_commit(object_id, prefix, new_visible_commit)
+            .map_err(Self::map_index_storage_error)?;
+        self.update_cached_visible_commit(object_id, prefix, new_visible_commit);
+
+        Ok(true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -373,17 +517,16 @@ impl QueryManager {
         branch: &BranchName,
         object_id: ObjectId,
         head_commit_id: CommitId,
-        new_data: &[u8],
+        _new_data: &[u8],
         descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
-        for source_state in
-            self.source_states_for_head_commit(storage, object_id, branch, head_commit_id)?
-        {
-            Self::retire_source_indices(storage, table, object_id, descriptor, &source_state)?;
-        }
-
-        Self::insert_live_row_indices_on_branch(
-            storage, table, branch, object_id, new_data, descriptor,
+    ) -> Result<bool, QueryError> {
+        self.reconcile_visible_state_after_commit(
+            storage,
+            table,
+            branch,
+            object_id,
+            head_commit_id,
+            descriptor,
         )
     }
 
@@ -396,14 +539,15 @@ impl QueryManager {
         object_id: ObjectId,
         head_commit_id: CommitId,
         descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
-        for source_state in
-            self.source_states_for_head_commit(storage, object_id, branch, head_commit_id)?
-        {
-            Self::retire_source_indices(storage, table, object_id, descriptor, &source_state)?;
-        }
-
-        Self::insert_deleted_row_index_on_branch(storage, table, branch, object_id)
+    ) -> Result<bool, QueryError> {
+        self.reconcile_visible_state_after_commit(
+            storage,
+            table,
+            branch,
+            object_id,
+            head_commit_id,
+            descriptor,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -415,12 +559,14 @@ impl QueryManager {
         object_id: ObjectId,
         head_commit_id: CommitId,
         descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
-        for source_state in
-            self.source_states_for_head_commit(storage, object_id, branch, head_commit_id)?
-        {
-            Self::retire_source_indices(storage, table, object_id, descriptor, &source_state)?;
-        }
-        Ok(())
+    ) -> Result<bool, QueryError> {
+        self.reconcile_visible_state_after_commit(
+            storage,
+            table,
+            branch,
+            object_id,
+            head_commit_id,
+            descriptor,
+        )
     }
 }

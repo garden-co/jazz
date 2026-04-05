@@ -1,6 +1,6 @@
 use super::*;
 use crate::commit::CommitAckState;
-use crate::object::PrefixBatchCatalog;
+use crate::object::{PrefixBatchCatalog, VisibleCommit, VisibleStateSlots};
 use crate::query_manager::types::{
     BatchId, BatchOrd, BranchPrefixName, ComposedBranchName, QueryBranchRef, SchemaHash, Value,
 };
@@ -64,6 +64,23 @@ impl Storage for CountingLoadStorage {
         self.inner.load_branch(object_id, branch)
     }
 
+    fn load_visible_states(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Option<VisibleStateSlots>, StorageError> {
+        self.inner.load_visible_states(object_id)
+    }
+
+    fn store_visible_commit(
+        &mut self,
+        object_id: ObjectId,
+        prefix: BranchName,
+        visible_commit: VisibleCommit,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .store_visible_commit(object_id, prefix, visible_commit)
+    }
+
     fn load_branch_existing_object(
         &self,
         object_id: ObjectId,
@@ -118,6 +135,17 @@ impl Storage for CountingLoadStorage {
         prefix: BranchName,
     ) -> Result<Vec<BatchBranchKey>, StorageError> {
         self.inner.load_table_prefix_batch_keys(table, prefix)
+    }
+
+    fn adjust_table_prefix_batch_refcount(
+        &mut self,
+        table: &str,
+        prefix: BranchName,
+        batch_id: BatchId,
+        delta: i64,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .adjust_table_prefix_batch_refcount(table, prefix, batch_id, delta)
     }
 
     fn append_commit(

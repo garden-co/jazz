@@ -16,6 +16,7 @@ pub struct IndexScanNode {
     pub table: TableName,
     pub column: ColumnName,
     pub branches: Vec<QueryBranchRef>,
+    pub exact_branch_match: bool,
     pub condition: ScanCondition,
 
     /// Output tuple descriptor (single element, unmaterialized).
@@ -38,12 +39,31 @@ impl IndexScanNode {
         condition: ScanCondition,
         row_descriptor: RowDescriptor,
     ) -> Self {
+        Self::new_with_branches_and_match_mode(
+            table,
+            column,
+            branches,
+            true,
+            condition,
+            row_descriptor,
+        )
+    }
+
+    pub fn new_with_branches_and_match_mode(
+        table: impl Into<TableName>,
+        column: impl Into<ColumnName>,
+        branches: Vec<QueryBranchRef>,
+        exact_branch_match: bool,
+        condition: ScanCondition,
+        row_descriptor: RowDescriptor,
+    ) -> Self {
         let table = table.into();
         let output_descriptor = TupleDescriptor::single(table.as_str(), row_descriptor);
         Self {
             table,
             column: column.into(),
             branches,
+            exact_branch_match,
             condition,
             output_descriptor,
             current_tuples: AHashSet::new(),
@@ -59,7 +79,25 @@ impl IndexScanNode {
         condition: ScanCondition,
         row_descriptor: RowDescriptor,
     ) -> Self {
-        Self::new_with_branches(table, column, vec![branch], condition, row_descriptor)
+        Self::new_with_branch_and_match_mode(table, column, branch, true, condition, row_descriptor)
+    }
+
+    pub fn new_with_branch_and_match_mode(
+        table: impl Into<TableName>,
+        column: impl Into<ColumnName>,
+        branch: QueryBranchRef,
+        exact_branch_match: bool,
+        condition: ScanCondition,
+        row_descriptor: RowDescriptor,
+    ) -> Self {
+        Self::new_with_branches_and_match_mode(
+            table,
+            column,
+            vec![branch],
+            exact_branch_match,
+            condition,
+            row_descriptor,
+        )
     }
 
     /// Get the output tuple descriptor.
@@ -83,6 +121,17 @@ impl IndexScanNode {
         tuples.sort_by_key(|tuple| tuple.first_id().map(|id| *id.uuid().as_bytes()));
         tuples
     }
+
+    fn tuples_from_unique_scoped_rows(scoped_rows: Vec<ScopedObject>) -> Vec<Tuple> {
+        let mut tuples: Vec<_> = scoped_rows
+            .into_iter()
+            .map(|(row_id, branch_key)| {
+                Tuple::from_id(row_id).with_provenance([(row_id, branch_key)].into_iter().collect())
+            })
+            .collect();
+        tuples.sort_by_key(|tuple| tuple.first_id().map(|id| *id.uuid().as_bytes()));
+        tuples
+    }
 }
 
 impl SourceNode for IndexScanNode {
@@ -92,11 +141,13 @@ impl SourceNode for IndexScanNode {
                 self.table.as_str(),
                 self.column.as_str(),
                 &self.branches,
+                self.exact_branch_match,
             ),
             ScanCondition::Eq(value) => ctx.storage.index_lookup_scoped(
                 self.table.as_str(),
                 self.column.as_str(),
                 &self.branches,
+                self.exact_branch_match,
                 value,
             ),
             ScanCondition::Range { min, max } => {
@@ -106,12 +157,17 @@ impl SourceNode for IndexScanNode {
                     self.table.as_str(),
                     self.column.as_str(),
                     &self.branches,
+                    self.exact_branch_match,
                     start,
                     end,
                 )
             }
         };
-        let new_tuple_order = Self::merged_scoped_tuples(scoped_rows);
+        let new_tuple_order = if !self.exact_branch_match && self.branches.len() == 1 {
+            Self::tuples_from_unique_scoped_rows(scoped_rows)
+        } else {
+            Self::merged_scoped_tuples(scoped_rows)
+        };
         let new_tuples: AHashSet<Tuple> = new_tuple_order.iter().cloned().collect();
         let delta = compute_tuple_delta(&self.current_tuple_order, &new_tuple_order);
 
