@@ -298,24 +298,22 @@ export const TableFilterBuilder = forwardRef<TableFilterBuilderHandle, TableFilt
 
     return (
       <>
-        {showTrigger || clauses.length > 0 ? (
-          <section className={styles.container}>
-            {showTrigger ? (
-              <button
-                type="button"
-                className={`${styles.button} ${styles.triggerButton}`}
-                onClick={openDialog}
-              >
-                {filterButtonLabel}
-              </button>
-            ) : null}
-            {clauses.length > 0 ? (
-              <div className={styles.summaryBox}>
-                <code className={styles.summary}>{activeFiltersSummary}</code>
-              </div>
-            ) : null}
-          </section>
-        ) : null}
+        <section className={styles.container}>
+          {showTrigger ? (
+            <button
+              type="button"
+              className={`${styles.button} ${styles.triggerButton}`}
+              onClick={openDialog}
+            >
+              {filterButtonLabel}
+            </button>
+          ) : null}
+          {clauses.length > 0 ? (
+            <div className={styles.summaryBox}>
+              <code className={styles.summary}>{activeFiltersSummary}</code>
+            </div>
+          ) : null}
+        </section>
         <dialog
           ref={dialogRef}
           className={styles.modal}

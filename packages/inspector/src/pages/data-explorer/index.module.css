@@ -36,7 +36,6 @@
   left: 2px;
   width: 2px;
   background: #232c3a;
-  border-radius: 999px;
   transition: background 140ms ease;
 }
 
@@ -144,6 +143,7 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  padding-top: 8px;
 }
 
 .emptyState {

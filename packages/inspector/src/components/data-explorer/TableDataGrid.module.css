@@ -2,7 +2,7 @@
   position: relative;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
-  gap: 10px;
+  gap: 4px;
   height: 100%;
   min-height: 0;
   background: transparent;
@@ -14,6 +14,8 @@
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+  padding-left: 12px;
+  padding-right: 12px;
 }
 
 .headerActions {
@@ -140,12 +142,11 @@
 .resizeHandle::after {
   content: "";
   position: absolute;
-  top: 6px;
-  bottom: 6px;
+  top: 0;
+  bottom: 0;
   left: 2px;
   width: 2px;
   background: #232c3a;
-  border-radius: 999px;
   transition: background 140ms ease;
 }
 
@@ -338,7 +339,7 @@
   display: grid;
   gap: 6px;
   border-top: 1px solid #232c3a;
-  padding-top: 8px;
+  padding: 0 12px;
 }
 
 .paginationInfo {

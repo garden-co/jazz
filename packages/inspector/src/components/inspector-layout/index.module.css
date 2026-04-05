@@ -9,12 +9,12 @@
 }
 
 .topBar {
-  height: 52px;
+  height: 44px;
   box-sizing: border-box;
-  flex: 0 0 52px;
-  border-bottom: 1px solid #273344;
-  background: #161d28;
-  padding: 0 16px;
+  flex: 0 0 44px;
+  border-bottom: 1px solid #1c2430;
+  background: #10151d;
+  padding: 0 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -43,11 +43,11 @@
 }
 
 .schemaSelect {
-  border: 1px solid #36465d;
-  background: #202937;
-  color: #d6dde7;
-  border-radius: 6px;
-  padding: 6px 8px;
+  border: 1px solid #1c2430;
+  background: #161b24;
+  color: #9ca8b9;
+  border-radius: 4px;
+  padding: 5px 8px;
   font-size: 12px;
   min-width: 220px;
 }
@@ -60,37 +60,36 @@
 .tabLink {
   display: inline-flex;
   align-items: center;
-  height: 34px;
-  padding: 0 14px;
-  border-radius: 6px;
-  color: #9ca8b9;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 4px;
+  color: #6b7a8d;
   text-decoration: none;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tabLink:hover {
-  background: #202937;
-  color: #d4dae3;
+  color: #b0bcc9;
 }
 
 .tabLinkActive {
-  background: #233246;
-  color: #e5e9f0;
+  color: #dbe1ea;
 }
 
 .resetButton {
-  border: 1px solid #36465d;
-  background: #202937;
-  color: #d6dde7;
-  border-radius: 6px;
-  padding: 6px 10px;
+  border: 1px solid #1c2430;
+  background: #161b24;
+  color: #9ca8b9;
+  border-radius: 4px;
+  padding: 5px 10px;
   font-size: 12px;
   cursor: pointer;
 }
 
 .resetButton:hover {
-  background: #273245;
+  background: #1c2430;
+  color: #d4dae3;
 }
 
 .content {
@@ -98,5 +97,5 @@
   min-height: 0;
   box-sizing: border-box;
   overflow: hidden;
-  padding: 0 12px 12px;
+  padding: 0;
 }
