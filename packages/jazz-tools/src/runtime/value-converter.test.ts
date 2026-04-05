@@ -70,12 +70,12 @@ describe("toValue", () => {
     const colType: ColumnType = { type: "Bytea" };
     const bytes = new Uint8Array([0, 10, 255]);
     const converted = toValue(bytes, colType);
-    expect(converted.type).toBe("Bytea");
-    if (converted.type !== "Bytea") {
-      throw new Error("expected Bytea value");
-    }
-    expect(converted.value).toBeInstanceOf(Uint8Array);
-    expect(Array.from(converted.value)).toEqual([0, 10, 255]);
+    expect(converted).toEqual({ type: "Bytea", value: [0, 10, 255] });
+  });
+
+  it("converts Bytea arrays without changing their JSON shape", () => {
+    const colType: ColumnType = { type: "Bytea" };
+    expect(toValue([0, 10, 255], colType)).toEqual({ type: "Bytea", value: [0, 10, 255] });
   });
 
   it("rejects invalid Bytea values", () => {
@@ -162,6 +162,7 @@ describe("toInsertRecord", () => {
         { name: "title", column_type: { type: "Text" }, nullable: false },
         { name: "done", column_type: { type: "Boolean" }, nullable: false },
         { name: "priority", column_type: { type: "Integer" }, nullable: true },
+        { name: "payload", column_type: { type: "Bytea" }, nullable: true },
       ],
     },
   };
@@ -199,6 +200,20 @@ describe("toInsertRecord", () => {
     expect(result).not.toHaveProperty("priority");
   });
 
+  it("normalizes Bytea inserts to JSON-friendly byte arrays", () => {
+    const data = {
+      title: "Buy milk",
+      done: false,
+      payload: new Uint8Array([1, 2, 3]),
+    };
+
+    const result = toInsertRecord(data, schema, "todos");
+
+    expect(result).toMatchObject({
+      payload: { type: "Bytea", value: [1, 2, 3] },
+    });
+  });
+
   it("throws for unknown table", () => {
     expect(() => toInsertRecord({}, schema, "nonexistent")).toThrow('Unknown table "nonexistent"');
   });
@@ -223,6 +238,7 @@ describe("toUpdateRecord", () => {
         { name: "title", column_type: { type: "Text" }, nullable: false },
         { name: "done", column_type: { type: "Boolean" }, nullable: false },
         { name: "priority", column_type: { type: "Integer" }, nullable: true },
+        { name: "payload", column_type: { type: "Bytea" }, nullable: true },
       ],
     },
   };
@@ -262,6 +278,15 @@ describe("toUpdateRecord", () => {
 
     expect(result).toEqual({
       priority: { type: "Null" },
+    });
+  });
+
+  it("normalizes Bytea updates to JSON-friendly byte arrays", () => {
+    const data = { payload: new Uint8Array([4, 5, 6]) };
+    const result = toUpdateRecord(data, schema, "todos");
+
+    expect(result).toEqual({
+      payload: { type: "Bytea", value: [4, 5, 6] },
     });
   });
 
