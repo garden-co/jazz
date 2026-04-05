@@ -1,7 +1,9 @@
 /**
- * Shared TS boundary types used by the Jazz runtimes.
+ * Shared TS value and FFI boundary types used by the Jazz runtimes.
  *
- * These mirror the JSON contracts used across TS, WASM, and NAPI.
+ * `Value` is the logical runtime-facing value shape used throughout the TS client.
+ * `FFIValue` names that same shape when values are crossing into a specific runtime
+ * adapter or native binding, where transport details may differ by platform.
  */
 
 export type Value =
@@ -18,10 +20,17 @@ export type Value =
   | { type: "Null" };
 
 export type InsertValues = Record<string, Value>;
+export type FFIValue = Value;
+export type FFIRecord = Record<string, FFIValue>;
 
 export interface WasmRow {
   id: string;
   values: Value[];
+}
+
+export interface FFIRow {
+  id: string;
+  values: FFIValue[];
 }
 
 export type RowAdded = 0;
