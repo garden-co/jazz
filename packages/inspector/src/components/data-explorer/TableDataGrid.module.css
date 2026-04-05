@@ -76,7 +76,9 @@
   align-items: center;
   gap: 12px;
   min-height: 28px;
-  padding: 0 0 6px;
+  padding: 6px 12px;
+  background: rgba(200, 150, 50, 0.1);
+  border-top: 1px solid rgba(200, 150, 50, 0.25);
 }
 
 .queuedBannerCopy {
@@ -85,12 +87,12 @@
   flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
-  color: #9fb0c8;
+  color: #d4a94e;
   font-size: 12px;
 }
 
 .queuedBannerLabel {
-  color: #d6deea;
+  color: #e8c46a;
   font-weight: 600;
 }
 
@@ -133,7 +135,7 @@
 
 .resizeHandle {
   position: relative;
-  width: 6px;
+  width: 1px;
   flex: 0 0 6px;
   cursor: col-resize;
   background: transparent;
@@ -144,8 +146,8 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  left: 2px;
-  width: 2px;
+  left: 0px;
+  width: 1px;
   background: #232c3a;
   transition: background 140ms ease;
 }
@@ -264,6 +266,10 @@
   background: rgba(120, 139, 166, 0.08);
 }
 
+.rowQueuedDelete :global(.rdg-cell) {
+  background: rgba(200, 60, 60, 0.12);
+}
+
 .cellUpdated {
   animation: cellPulse 1.2s ease-out;
 }
@@ -333,13 +339,13 @@
   gap: 12px;
   height: 40px;
   min-height: 40px;
+  padding: 0 12px;
 }
 
 .bottomRail {
   display: grid;
-  gap: 6px;
+  gap: 1px;
   border-top: 1px solid #232c3a;
-  padding: 0 12px;
 }
 
 .paginationInfo {

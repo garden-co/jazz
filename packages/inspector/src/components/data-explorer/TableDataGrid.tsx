@@ -487,7 +487,7 @@ export function TableDataGrid() {
   const [queuedEdits, setQueuedEdits] = useState<Record<string, QueuedRowEdits>>({});
   const [isQueuedSavePending, setIsQueuedSavePending] = useState(false);
   const [queuedSaveError, setQueuedSaveError] = useState<string | null>(null);
-  const [deletingRowId, setDeletingRowId] = useState<string | null>(null);
+  const [queuedDeletes, setQueuedDeletes] = useState<Set<string>>(new Set());
   const filterBuilderRef = useRef<TableFilterBuilderHandle | null>(null);
   const schemaColumns = schema[table]?.columns ?? [];
   const schemaColumnById = useMemo(
@@ -556,6 +556,7 @@ export function TableDataGrid() {
   }, [queuedEdits]);
   const queuedEditedRowCount = useMemo(() => Object.keys(queuedEdits).length, [queuedEdits]);
   const hasQueuedEdits = queuedEditCount > 0;
+  const hasQueuedChanges = hasQueuedEdits || queuedDeletes.size > 0;
   const isAnyMutationPending = isSidebarMutationPending || isQueuedSavePending;
   const filterButtonLabel = filters.length > 0 ? `Filter (${filters.length})` : "Filter";
   const gridAnimationScopeKey = useMemo(
@@ -636,25 +637,6 @@ export function TableDataGrid() {
     setSorting(nextSort);
     setPageIndex(0);
   };
-  const handleDeleteRow = async (rowId: string): Promise<void> => {
-    const confirmed = globalThis.confirm(`Delete row "${rowId}" from "${table}"?`);
-    if (!confirmed) return;
-
-    try {
-      setDeletingRowId(rowId);
-      await db.deleteDurable(tableProxy, rowId, {
-        tier: mutationDurabilityTier,
-      });
-      if (selectedRowId === rowId) {
-        setSelectedRowId(null);
-      }
-    } finally {
-      setDeletingRowId(null);
-    }
-  };
-  const handleEditRow = (rowId: string): void => {
-    setSelectedRowId(rowId);
-  };
   const handleSaveSelectedRow = async (updates: Record<string, unknown>): Promise<void> => {
     if (!selectedRowId) {
       return;
@@ -681,10 +663,11 @@ export function TableDataGrid() {
   };
   const handleDiscardQueuedEdits = (): void => {
     setQueuedEdits({});
+    setQueuedDeletes(new Set());
     setQueuedSaveError(null);
   };
   const handleSaveQueuedEdits = async (): Promise<void> => {
-    if (!hasQueuedEdits) {
+    if (!hasQueuedChanges) {
       return;
     }
 
@@ -692,27 +675,38 @@ export function TableDataGrid() {
       setIsQueuedSavePending(true);
       setQueuedSaveError(null);
 
-      const rowUpdates = Object.entries(queuedEdits).map(([rowId, rowEdits]) => {
-        const updates: Record<string, unknown> = {};
-        for (const [columnId, queuedEdit] of Object.entries(rowEdits)) {
-          const schemaColumn = schemaColumnById.get(columnId);
-          if (!schemaColumn || getFieldReadOnlyReason(schemaColumn) !== null) {
-            continue;
+      const rowUpdates = Object.entries(queuedEdits)
+        .filter(([rowId]) => !queuedDeletes.has(rowId))
+        .map(([rowId, rowEdits]) => {
+          const updates: Record<string, unknown> = {};
+          for (const [columnId, queuedEdit] of Object.entries(rowEdits)) {
+            const schemaColumn = schemaColumnById.get(columnId);
+            if (!schemaColumn || getFieldReadOnlyReason(schemaColumn) !== null) {
+              continue;
+            }
+            updates[columnId] = parseQueuedEditValue(schemaColumn, queuedEdit.text);
           }
-          updates[columnId] = parseQueuedEditValue(schemaColumn, queuedEdit.text);
-        }
-        return { rowId, updates };
-      });
+          return { rowId, updates };
+        });
 
-      await Promise.all(
-        rowUpdates.map(({ rowId, updates }) =>
+      await Promise.all([
+        ...rowUpdates.map(({ rowId, updates }) =>
           db.updateDurable(tableProxy, rowId, updates, {
             tier: mutationDurabilityTier,
           }),
         ),
-      );
+        ...[...queuedDeletes].map((rowId) =>
+          db.deleteDurable(tableProxy, rowId, {
+            tier: mutationDurabilityTier,
+          }),
+        ),
+      ]);
 
+      if (selectedRowId && queuedDeletes.has(selectedRowId)) {
+        setSelectedRowId(null);
+      }
       setQueuedEdits({});
+      setQueuedDeletes(new Set());
     } catch (error) {
       setQueuedSaveError(
         error instanceof Error ? error.message : "Could not persist queued cell edits.",
@@ -779,7 +773,7 @@ export function TableDataGrid() {
               onClick={() => {
                 setMutationState({ mode: "insert" });
               }}
-              disabled={hasQueuedEdits || isAnyMutationPending || deletingRowId !== null}
+              disabled={hasQueuedChanges || isAnyMutationPending}
             >
               Insert
             </button>
@@ -807,16 +801,13 @@ export function TableDataGrid() {
                     sorting={sorting}
                     schemaColumnById={schemaColumnById}
                     queuedEdits={queuedEdits}
-                    isSidebarMutationPending={isSidebarMutationPending}
-                    isQueuedSavePending={isQueuedSavePending}
-                    deletingRowId={deletingRowId}
+                    queuedDeletes={queuedDeletes}
                     animationScopeKey={gridAnimationScopeKey}
                     onSortColumnsChange={handleSortColumnsChange}
                     onQueuedEditsChange={setQueuedEdits}
                     onQueuedSaveErrorChange={setQueuedSaveError}
                     onSelectedRowIdChange={setSelectedRowId}
-                    onEditRow={handleEditRow}
-                    onDeleteRow={handleDeleteRow}
+                    onQueuedDeletesChange={setQueuedDeletes}
                   />
                 </div>
               </Panel>
@@ -844,22 +835,19 @@ export function TableDataGrid() {
                 sorting={sorting}
                 schemaColumnById={schemaColumnById}
                 queuedEdits={queuedEdits}
-                isSidebarMutationPending={isSidebarMutationPending}
-                isQueuedSavePending={isQueuedSavePending}
-                deletingRowId={deletingRowId}
+                queuedDeletes={queuedDeletes}
                 animationScopeKey={gridAnimationScopeKey}
                 onSortColumnsChange={handleSortColumnsChange}
                 onQueuedEditsChange={setQueuedEdits}
                 onQueuedSaveErrorChange={setQueuedSaveError}
                 onSelectedRowIdChange={setSelectedRowId}
-                onEditRow={handleEditRow}
-                onDeleteRow={handleDeleteRow}
+                onQueuedDeletesChange={setQueuedDeletes}
               />
             </div>
           )}
         </div>
         <div className={styles.bottomRail}>
-          {hasQueuedEdits || queuedSaveError ? (
+          {hasQueuedChanges || queuedSaveError ? (
             <div
               className={styles.queuedBanner}
               role={queuedSaveError ? "alert" : "status"}
@@ -867,10 +855,17 @@ export function TableDataGrid() {
             >
               <div className={styles.queuedBannerCopy}>
                 <span className={styles.queuedBannerLabel}>Queued</span>
-                <span>
-                  {queuedEditCount} change{queuedEditCount === 1 ? "" : "s"} across{" "}
-                  {queuedEditedRowCount} row{queuedEditedRowCount === 1 ? "" : "s"}
-                </span>
+                {hasQueuedEdits ? (
+                  <span>
+                    {queuedEditCount} edit{queuedEditCount === 1 ? "" : "s"} across{" "}
+                    {queuedEditedRowCount} row{queuedEditedRowCount === 1 ? "" : "s"}
+                  </span>
+                ) : null}
+                {queuedDeletes.size > 0 ? (
+                  <span>
+                    {queuedDeletes.size} row{queuedDeletes.size === 1 ? "" : "s"} will be deleted
+                  </span>
+                ) : null}
                 {queuedSaveError ? (
                   <span className={styles.queuedBannerError}>{queuedSaveError}</span>
                 ) : null}
@@ -1129,32 +1124,26 @@ function PlainTableView({
   sorting,
   schemaColumnById,
   queuedEdits,
-  isSidebarMutationPending,
-  isQueuedSavePending,
-  deletingRowId,
+  queuedDeletes,
   animationScopeKey,
   onSortColumnsChange,
   onQueuedEditsChange,
   onQueuedSaveErrorChange,
   onSelectedRowIdChange,
-  onEditRow,
-  onDeleteRow,
+  onQueuedDeletesChange,
 }: {
   rows: DynamicTableRow[];
   gridColumns: GridColumn[];
   sorting: readonly SortColumn[];
   schemaColumnById: Map<string, ColumnDescriptor>;
   queuedEdits: Record<string, QueuedRowEdits>;
-  isSidebarMutationPending: boolean;
-  isQueuedSavePending: boolean;
-  deletingRowId: string | null;
+  queuedDeletes: Set<string>;
   animationScopeKey: string;
   onSortColumnsChange: (sortColumns: SortColumn[]) => void;
   onQueuedEditsChange: Dispatch<SetStateAction<Record<string, QueuedRowEdits>>>;
   onQueuedSaveErrorChange: (value: string | null) => void;
   onSelectedRowIdChange: (rowId: string | null) => void;
-  onEditRow: (rowId: string) => void;
-  onDeleteRow: (rowId: string) => Promise<void>;
+  onQueuedDeletesChange: Dispatch<SetStateAction<Set<string>>>;
 }) {
   const suppressNextSelectedCellChangeRef = useRef(false);
   const pointerSidebarOpenTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1186,7 +1175,6 @@ function PlainTableView({
       };
     });
   }, [animatedRows, queuedEdits]);
-  const hasQueuedEdits = Object.keys(queuedEdits).length > 0;
   const rowClass = (row: EditableGridRow): string | undefined => {
     if (row.rowChangeState === "added") {
       return styles.rowAdded;
@@ -1194,6 +1182,10 @@ function PlainTableView({
 
     if (row.rowChangeState === "removed") {
       return styles.rowRemoved;
+    }
+
+    if (queuedDeletes.has(getGridRowId(row.sourceRow))) {
+      return styles.rowQueuedDelete;
     }
 
     return undefined;
@@ -1252,47 +1244,13 @@ function PlainTableView({
       };
     });
 
-    return [
-      ...dataColumns,
-      {
-        key: "__actions__",
-        name: "Actions",
-        resizable: false,
-        minWidth: 132,
-        width: 132,
-        headerCellClass: styles.actionsHeaderCell,
-        cellClass: styles.actionsGridCell,
-        renderCell: ({ row }) => (
-          <RowActionsCell
-            rowId={getGridRowId(row.sourceRow)}
-            isSidebarMutationPending={isSidebarMutationPending}
-            isQueuedSavePending={isQueuedSavePending || hasQueuedEdits}
-            deletingRowId={deletingRowId}
-            isRowRemoved={row.rowChangeState === "removed"}
-            onEditRow={onEditRow}
-            onDeleteRow={onDeleteRow}
-          />
-        ),
-      },
-    ];
-  }, [
-    deletingRowId,
-    gridColumns,
-    hasQueuedEdits,
-    isQueuedSavePending,
-    isSidebarMutationPending,
-    onDeleteRow,
-    onEditRow,
-    schemaColumnById,
-  ]);
+    return dataColumns;
+  }, [gridColumns, schemaColumnById]);
   const handleRowsChange = (
     nextRows: EditableGridRow[],
     data: RowsChangeData<EditableGridRow>,
   ): void => {
     const columnId = String(data.column.key);
-    if (columnId === "__actions__") {
-      return;
-    }
 
     onQueuedSaveErrorChange(null);
     onQueuedEditsChange((currentQueuedEdits) => {
@@ -1339,11 +1297,24 @@ function PlainTableView({
         suppressNextSelectedCellChangeRef.current = true;
         clearPendingSidebarOpen();
       }}
-      onCellClick={(args, event) => {
-        if (String(args.column.key) === "__actions__") {
-          return;
+      onCellKeyDown={(args, event) => {
+        if (event.key === "Backspace" || event.key === "Delete") {
+          const rowId = args.row ? getGridRowId(args.row.sourceRow) : null;
+          if (rowId) {
+            event.preventGridDefault();
+            onQueuedDeletesChange((current) => {
+              const next = new Set(current);
+              if (next.has(rowId)) {
+                next.delete(rowId);
+              } else {
+                next.add(rowId);
+              }
+              return next;
+            });
+          }
         }
-
+      }}
+      onCellClick={(args, event) => {
         clearPendingSidebarOpen();
         const rowId = args.row ? getGridRowId(args.row.sourceRow) : null;
         if (rowId === null) {
@@ -1387,62 +1358,5 @@ function PlainTableView({
       headerRowHeight={40}
       enableVirtualization={false}
     />
-  );
-}
-
-function RowActionsCell({
-  rowId,
-  isSidebarMutationPending,
-  isQueuedSavePending,
-  deletingRowId,
-  isRowRemoved,
-  onEditRow,
-  onDeleteRow,
-}: {
-  rowId: string;
-  isSidebarMutationPending: boolean;
-  isQueuedSavePending: boolean;
-  deletingRowId: string | null;
-  isRowRemoved: boolean;
-  onEditRow: (rowId: string) => void;
-  onDeleteRow: (rowId: string) => Promise<void>;
-}) {
-  return (
-    <div className={styles.actionsCellContent}>
-      <div className={styles.rowActions}>
-        <button
-          type="button"
-          className={styles.actionButton}
-          disabled={
-            isRowRemoved ||
-            isQueuedSavePending ||
-            isSidebarMutationPending ||
-            deletingRowId !== null
-          }
-          onClick={(event) => {
-            event.stopPropagation();
-            onEditRow(rowId);
-          }}
-        >
-          Edit
-        </button>
-        <button
-          type="button"
-          className={styles.dangerActionButton}
-          disabled={
-            isRowRemoved ||
-            isQueuedSavePending ||
-            isSidebarMutationPending ||
-            deletingRowId !== null
-          }
-          onClick={async (event) => {
-            event.stopPropagation();
-            await onDeleteRow(rowId);
-          }}
-        >
-          {deletingRowId === rowId ? "Deleting..." : "Delete"}
-        </button>
-      </div>
-    </div>
   );
 }
