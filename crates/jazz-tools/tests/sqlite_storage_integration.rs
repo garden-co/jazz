@@ -1,0 +1,862 @@
+#![cfg(feature = "test")]
+
+mod support;
+
+use std::collections::{BTreeSet, HashMap};
+use std::time::Duration;
+
+use jazz_tools::server::{TestingJwksServer, TestingServer};
+use jazz_tools::{
+    AppContext, ClientStorage, ColumnType, DurabilityTier, JazzClient, QueryBuilder, SchemaBuilder,
+    TableSchema, Value,
+};
+use support::{TestingClient, wait_for_query};
+use tempfile::TempDir;
+
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn todos_schema() -> jazz_tools::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("completed", ColumnType::Boolean),
+        )
+        .build()
+}
+
+fn multi_table_schema() -> jazz_tools::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("todos")
+                .column("title", ColumnType::Text)
+                .column("completed", ColumnType::Boolean),
+        )
+        .table(
+            TableSchema::builder("notes")
+                .column("body", ColumnType::Text)
+                .column("priority", ColumnType::Integer),
+        )
+        .build()
+}
+
+fn indexed_schema() -> jazz_tools::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("products")
+                .column("name", ColumnType::Text)
+                .column("price", ColumnType::Double)
+                .column("category", ColumnType::Text),
+        )
+        .build()
+}
+
+async fn make_client(
+    server: &TestingServer,
+    schema: jazz_tools::Schema,
+    user_id: &str,
+    ready_table: &str,
+) -> JazzClient {
+    TestingClient::builder()
+        .with_server(server)
+        .with_schema(schema)
+        .with_user_id(user_id)
+        .ready_on(ready_table, READY_TIMEOUT)
+        .connect()
+        .await
+}
+
+/// Connects a client to a server that uses an external JWKS URL (where the
+/// built-in `make_client_context_for_user` helper is unavailable).
+async fn make_client_external_jwks(
+    server: &TestingServer,
+    schema: jazz_tools::Schema,
+    user_id: &str,
+    ready_table: &str,
+) -> JazzClient {
+    let context = AppContext {
+        app_id: server.app_id(),
+        client_id: None,
+        schema,
+        server_url: server.base_url(),
+        data_dir: tempfile::TempDir::new().expect("temp client dir").keep(),
+        storage: ClientStorage::Memory,
+        jwt_token: Some(TestingServer::jwt_for_user(user_id)),
+        backend_secret: Some(TestingServer::BACKEND_SECRET.to_string()),
+        admin_secret: Some(TestingServer::ADMIN_SECRET.to_string()),
+    };
+
+    let client = JazzClient::connect(context).await.expect("connect client");
+
+    wait_for_query(
+        &client,
+        QueryBuilder::new(ready_table).build(),
+        Some(DurabilityTier::EdgeServer),
+        READY_TIMEOUT,
+        format!("EdgeServer query readiness for {ready_table}"),
+        |_| Some(()),
+    )
+    .await;
+
+    client
+}
+
+/// Single entry point — all subtests run sequentially so only one SQLite
+/// server instance exists at a time (avoids file-descriptor exhaustion).
+#[tokio::test]
+async fn sqlite_server_storage() {
+    // --- shared-server subtests ---
+    let server = TestingServer::builder().with_sqlite_storage().start().await;
+
+    large_dataset_correctness(&server).await;
+    update_and_delete(&server).await;
+    deep_update_history(&server).await;
+    multi_table_isolation(&server).await;
+    index_queries(&server).await;
+
+    server.shutdown().await;
+
+    // --- restart subtests (need their own server lifecycle) ---
+    restart_preserves_data().await;
+    catalogue_manifest_survives_restart().await;
+}
+
+/// Alice creates 200 todos. Bob connects fresh and must see all 200 with
+/// correct, unique titles.
+///
+/// ```text
+/// alice ──create 200 todos──► server (sqlite)
+///                                 │
+///                  bob connects and queries
+///                                 │
+///                                 └──► all 200 rows, correct titles
+/// ```
+async fn large_dataset_correctness(server: &TestingServer) {
+    const ROW_COUNT: usize = 200;
+
+    let schema = todos_schema();
+    let alice = make_client(server, schema.clone(), "alice-bulk", "todos").await;
+
+    let mut expected_titles: BTreeSet<String> = BTreeSet::new();
+    for i in 0..ROW_COUNT {
+        let title = format!("todo-{i:03}");
+        expected_titles.insert(title.clone());
+        alice
+            .create(
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text(title)),
+                    ("completed".to_string(), Value::Boolean(false)),
+                ]),
+            )
+            .await
+            .expect("create todo");
+    }
+
+    wait_for_query(
+        &alice,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(120),
+        format!("alice sees {ROW_COUNT} todos"),
+        |rows| (rows.len() == ROW_COUNT).then_some(()),
+    )
+    .await;
+
+    let bob = make_client(server, schema, "bob-bulk", "todos").await;
+
+    let bob_rows = wait_for_query(
+        &bob,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(120),
+        format!("bob sees {ROW_COUNT} todos"),
+        |rows| (rows.len() == ROW_COUNT).then_some(rows),
+    )
+    .await;
+
+    let actual_titles: BTreeSet<String> = bob_rows
+        .iter()
+        .filter_map(|(_, cols)| match cols.first() {
+            Some(Value::Text(t)) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        actual_titles, expected_titles,
+        "every title must be present"
+    );
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+}
+
+/// Create, update, then delete rows. A fresh client must see only the
+/// surviving, updated state.
+///
+/// ```text
+/// alice ──create 5──► update 3 titles──► delete 2──► server (sqlite)
+///                                                        │
+///                                         bob connects and queries
+///                                                        │
+///                                         3 rows with updated titles
+/// ```
+async fn update_and_delete(server: &TestingServer) {
+    let schema = todos_schema();
+    let alice = make_client(server, schema.clone(), "alice-crud", "todos").await;
+
+    let mut ids = Vec::new();
+    for i in 0..5u32 {
+        let (id, _) = alice
+            .create(
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text(format!("original-{i}"))),
+                    ("completed".to_string(), Value::Boolean(false)),
+                ]),
+            )
+            .await
+            .expect("create todo");
+        ids.push(id);
+    }
+
+    wait_for_query(
+        &alice,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        "alice sees new todos after bulk",
+        |rows| {
+            ids.iter()
+                .all(|id| rows.iter().any(|(rid, _)| rid == id))
+                .then_some(())
+        },
+    )
+    .await;
+
+    // Update first 3.
+    for (i, id) in ids.iter().take(3).enumerate() {
+        alice
+            .update(
+                *id,
+                vec![("title".to_string(), Value::Text(format!("updated-{i}")))],
+            )
+            .await
+            .expect("update todo");
+    }
+
+    // Delete last 2.
+    for id in ids.iter().skip(3) {
+        alice.delete(*id).await.expect("delete todo");
+    }
+
+    // Wait for alice to see the deletes reflected.
+    wait_for_query(
+        &alice,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        "alice sees deletes applied",
+        |rows| (!rows.iter().any(|(id, _)| ids[3..].contains(id))).then_some(()),
+    )
+    .await;
+
+    // Bob connects fresh.
+    let bob = make_client(server, schema, "bob-crud", "todos").await;
+
+    let bob_rows = wait_for_query(
+        &bob,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        "bob sees updated state",
+        |rows| {
+            let has_all_updated = ids[..3]
+                .iter()
+                .all(|id| rows.iter().any(|(rid, _)| rid == id));
+            let has_no_deleted = !rows.iter().any(|(id, _)| ids[3..].contains(id));
+            (has_all_updated && has_no_deleted).then_some(rows)
+        },
+    )
+    .await;
+
+    let titles: BTreeSet<String> = bob_rows
+        .iter()
+        .filter(|(id, _)| ids[..3].contains(id))
+        .filter_map(|(_, cols)| match cols.first() {
+            Some(Value::Text(t)) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    let expected: BTreeSet<String> = (0..3).map(|i| format!("updated-{i}")).collect();
+    assert_eq!(titles, expected, "bob should see updated titles");
+
+    let bob_ids: BTreeSet<_> = bob_rows.iter().map(|(id, _)| *id).collect();
+    for id in ids.iter().skip(3) {
+        assert!(!bob_ids.contains(id), "deleted row {id:?} should be absent");
+    }
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+}
+
+/// Many updates to the same object. A fresh client must resolve only the
+/// latest value.
+///
+/// ```text
+/// alice ──create + update ×200──► server (sqlite)
+///                                     │
+///                      bob connects and queries
+///                                     │
+///                                     └──► latest title only
+/// ```
+async fn deep_update_history(server: &TestingServer) {
+    const UPDATE_COUNT: usize = 200;
+
+    let schema = todos_schema();
+    let alice = make_client(server, schema.clone(), "alice-deep", "todos").await;
+
+    let (todo_id, _) = alice
+        .create(
+            "todos",
+            HashMap::from([
+                ("title".to_string(), Value::Text("revision-000".to_string())),
+                ("completed".to_string(), Value::Boolean(false)),
+            ]),
+        )
+        .await
+        .expect("create todo");
+
+    let final_title = format!("revision-{UPDATE_COUNT:03}");
+    for rev in 1..=UPDATE_COUNT {
+        alice
+            .update(
+                todo_id,
+                vec![(
+                    "title".to_string(),
+                    Value::Text(format!("revision-{rev:03}")),
+                )],
+            )
+            .await
+            .expect("update todo");
+    }
+
+    wait_for_query(
+        &alice,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        format!("alice sees final title {final_title}"),
+        |rows| {
+            (rows.iter().any(|(id, cols)| {
+                *id == todo_id && cols.first() == Some(&Value::Text(final_title.clone()))
+            }))
+            .then_some(())
+        },
+    )
+    .await;
+
+    let bob = make_client(server, schema, "bob-deep", "todos").await;
+
+    let bob_row = wait_for_query(
+        &bob,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        format!("bob sees final title {final_title}"),
+        |rows| {
+            rows.iter()
+                .find(|(id, cols)| {
+                    *id == todo_id && cols.first() == Some(&Value::Text(final_title.clone()))
+                })
+                .cloned()
+        },
+    )
+    .await;
+
+    assert_eq!(bob_row.0, todo_id);
+    assert_eq!(bob_row.1[0], Value::Text(final_title));
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+}
+
+/// Rows in different tables are isolated: creating in "todos" does not leak
+/// into "notes" and vice versa.
+///
+/// ```text
+/// alice ──create 5 todos + 3 notes──► server (sqlite)
+///                                         │
+///                          bob queries each table separately
+///                                         │
+///                          todos: 5   notes: 3
+/// ```
+async fn multi_table_isolation(server: &TestingServer) {
+    let schema = multi_table_schema();
+    let alice = make_client(server, schema.clone(), "alice-multi", "todos").await;
+
+    let mut todo_ids = Vec::new();
+    for i in 0..5 {
+        let (id, _) = alice
+            .create(
+                "todos",
+                HashMap::from([
+                    ("title".to_string(), Value::Text(format!("mt-todo-{i}"))),
+                    ("completed".to_string(), Value::Boolean(false)),
+                ]),
+            )
+            .await
+            .expect("create todo");
+        todo_ids.push(id);
+    }
+
+    let mut note_ids = Vec::new();
+    for i in 0..3 {
+        let (id, _) = alice
+            .create(
+                "notes",
+                HashMap::from([
+                    ("body".to_string(), Value::Text(format!("mt-note-{i}"))),
+                    ("priority".to_string(), Value::Integer(i as i32)),
+                ]),
+            )
+            .await
+            .expect("create note");
+        note_ids.push(id);
+    }
+
+    wait_for_query(
+        &alice,
+        QueryBuilder::new("notes").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        "alice sees 3 notes",
+        |rows| {
+            note_ids
+                .iter()
+                .all(|id| rows.iter().any(|(rid, _)| rid == id))
+                .then_some(())
+        },
+    )
+    .await;
+
+    let bob = make_client(server, schema, "bob-multi", "todos").await;
+
+    let todos = wait_for_query(
+        &bob,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        "bob sees multi-table todos",
+        |rows| {
+            todo_ids
+                .iter()
+                .all(|id| rows.iter().any(|(rid, _)| rid == id))
+                .then_some(rows)
+        },
+    )
+    .await;
+
+    let notes = wait_for_query(
+        &bob,
+        QueryBuilder::new("notes").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        "bob sees multi-table notes",
+        |rows| {
+            note_ids
+                .iter()
+                .all(|id| rows.iter().any(|(rid, _)| rid == id))
+                .then_some(rows)
+        },
+    )
+    .await;
+
+    // Verify correct content in each table.
+    for (id, cols) in &todos {
+        if todo_ids.contains(id) {
+            if let Some(Value::Text(t)) = cols.first() {
+                assert!(t.starts_with("mt-todo-"), "unexpected title in todos: {t}");
+            }
+        }
+    }
+    for (id, cols) in &notes {
+        if note_ids.contains(id) {
+            if let Some(Value::Text(t)) = cols.first() {
+                assert!(t.starts_with("mt-note-"), "unexpected body in notes: {t}");
+            }
+        }
+    }
+
+    // Notes should not contain todo IDs and vice versa.
+    let note_row_ids: BTreeSet<_> = notes.iter().map(|(id, _)| *id).collect();
+    for id in &todo_ids {
+        assert!(
+            !note_row_ids.contains(id),
+            "todo id {id:?} should not appear in notes"
+        );
+    }
+    let todo_row_ids: BTreeSet<_> = todos.iter().map(|(id, _)| *id).collect();
+    for id in &note_ids {
+        assert!(
+            !todo_row_ids.contains(id),
+            "note id {id:?} should not appear in todos"
+        );
+    }
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+}
+
+/// Creates products with varying prices and categories, then verifies that
+/// filter_eq and filter_gt return correct results through the server.
+///
+/// ```text
+/// alice ──create 20 products──► server (sqlite)
+///                                   │
+///                    bob queries with filters
+///                                   │
+///              filter_eq(category, "electronics") → 10 rows
+///              filter_gt(price, 150.0) → 4 rows
+/// ```
+async fn index_queries(server: &TestingServer) {
+    let schema = indexed_schema();
+    let alice = make_client(server, schema.clone(), "alice-index", "products").await;
+
+    let mut product_ids = Vec::new();
+    for i in 0..20u32 {
+        let category = if i % 2 == 0 { "electronics" } else { "books" };
+        let (id, _) = alice
+            .create(
+                "products",
+                HashMap::from([
+                    ("name".to_string(), Value::Text(format!("product-{i:02}"))),
+                    ("price".to_string(), Value::Double(i as f64 * 10.0)),
+                    ("category".to_string(), Value::Text(category.to_string())),
+                ]),
+            )
+            .await
+            .expect("create product");
+        product_ids.push(id);
+    }
+
+    wait_for_query(
+        &alice,
+        QueryBuilder::new("products").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        "alice sees 20 products",
+        |rows| {
+            product_ids
+                .iter()
+                .all(|id| rows.iter().any(|(rid, _)| rid == id))
+                .then_some(())
+        },
+    )
+    .await;
+
+    let bob = make_client(server, schema, "bob-index", "products").await;
+
+    // Wait for bob to see all products before filtering.
+    wait_for_query(
+        &bob,
+        QueryBuilder::new("products").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        "bob sees 20 products",
+        |rows| {
+            product_ids
+                .iter()
+                .all(|id| rows.iter().any(|(rid, _)| rid == id))
+                .then_some(())
+        },
+    )
+    .await;
+
+    // Exact match on category.
+    let electronics = wait_for_query(
+        &bob,
+        QueryBuilder::new("products")
+            .filter_eq("category", Value::Text("electronics".to_string()))
+            .build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        "bob sees 10 electronics",
+        |rows| (rows.len() == 10).then_some(rows),
+    )
+    .await;
+    for (_, cols) in &electronics {
+        if let Some(Value::Text(cat)) = cols.get(2) {
+            assert_eq!(
+                cat, "electronics",
+                "filter_eq should only return electronics"
+            );
+        }
+    }
+
+    // Greater-than filter: products with price > 150.0.
+    // Prices are i*10 for i in 0..20 (0, 10, ..., 190).
+    // price > 150: 160, 170, 180, 190 → 4 products.
+    let expensive = wait_for_query(
+        &bob,
+        QueryBuilder::new("products")
+            .filter_gt("price", Value::Double(150.0))
+            .build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        "bob sees 4 expensive products",
+        |rows| (rows.len() == 4).then_some(rows),
+    )
+    .await;
+    for (_, cols) in &expensive {
+        if let Some(Value::Double(p)) = cols.get(1) {
+            assert!(*p > 150.0, "price {p} should be > 150.0");
+        }
+    }
+
+    alice.shutdown().await.expect("shutdown alice");
+    bob.shutdown().await.expect("shutdown bob");
+}
+
+// ---------------------------------------------------------------------------
+// Restart tests — need their own server lifecycle
+// ---------------------------------------------------------------------------
+
+/// Alice creates rows, the server shuts down and restarts from the same
+/// data_dir. Bob connects to the restarted server and must see pre-restart
+/// data. Alice then creates more rows and Bob sees the combined set.
+///
+/// ```text
+/// alice ──create 10──► server₁ (sqlite, data_dir)
+///                          │
+///                      server₁ stops
+///                          │
+///                server₂ starts (same data_dir)
+///                          │
+///          bob connects ──► sees 10 pre-restart rows
+///          alice creates 5 more ──► bob sees all 15
+/// ```
+async fn restart_preserves_data() {
+    const BEFORE_COUNT: usize = 10;
+    const AFTER_COUNT: usize = 5;
+
+    let data_dir = TempDir::new().expect("temp data dir");
+    let jwks = TestingJwksServer::start().await;
+    let schema = todos_schema();
+
+    // --- server₁ ---
+    let server1 = TestingServer::builder()
+        .with_sqlite_storage()
+        .with_data_dir(data_dir.path())
+        .with_jwks_url(jwks.endpoint())
+        .start()
+        .await;
+
+    let alice = make_client_external_jwks(&server1, schema.clone(), "alice-restart", "todos").await;
+
+    let mut before_ids = Vec::new();
+    for i in 0..BEFORE_COUNT {
+        let (id, _) = alice
+            .create(
+                "todos",
+                HashMap::from([
+                    (
+                        "title".to_string(),
+                        Value::Text(format!("before-restart-{i:02}")),
+                    ),
+                    ("completed".to_string(), Value::Boolean(false)),
+                ]),
+            )
+            .await
+            .expect("create before restart");
+        before_ids.push(id);
+    }
+
+    wait_for_query(
+        &alice,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        format!("alice sees {BEFORE_COUNT} todos"),
+        |rows| {
+            before_ids
+                .iter()
+                .all(|id| rows.iter().any(|(rid, _)| rid == id))
+                .then_some(())
+        },
+    )
+    .await;
+
+    alice
+        .shutdown()
+        .await
+        .expect("shutdown alice before restart");
+    server1.shutdown().await;
+
+    // --- server₂ (same data_dir) ---
+    let server2 = TestingServer::builder()
+        .with_sqlite_storage()
+        .with_data_dir(data_dir.path())
+        .with_jwks_url(jwks.endpoint())
+        .start()
+        .await;
+
+    let bob = make_client_external_jwks(&server2, schema.clone(), "bob-restart", "todos").await;
+
+    let pre_restart_rows = wait_for_query(
+        &bob,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        format!("bob sees {BEFORE_COUNT} pre-restart todos"),
+        |rows| {
+            before_ids
+                .iter()
+                .all(|id| rows.iter().any(|(rid, _)| rid == id))
+                .then_some(rows)
+        },
+    )
+    .await;
+
+    let pre_titles: BTreeSet<String> = pre_restart_rows
+        .iter()
+        .filter(|(id, _)| before_ids.contains(id))
+        .filter_map(|(_, cols)| match cols.first() {
+            Some(Value::Text(t)) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    for i in 0..BEFORE_COUNT {
+        assert!(
+            pre_titles.contains(&format!("before-restart-{i:02}")),
+            "missing pre-restart title {i}"
+        );
+    }
+
+    // Alice reconnects and creates more.
+    let alice = make_client_external_jwks(&server2, schema, "alice-restart", "todos").await;
+    for i in 0..AFTER_COUNT {
+        alice
+            .create(
+                "todos",
+                HashMap::from([
+                    (
+                        "title".to_string(),
+                        Value::Text(format!("after-restart-{i:02}")),
+                    ),
+                    ("completed".to_string(), Value::Boolean(false)),
+                ]),
+            )
+            .await
+            .expect("create after restart");
+    }
+
+    wait_for_query(
+        &bob,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        "bob sees post-restart todos",
+        |rows| {
+            let has_after = (0..AFTER_COUNT).all(|i| {
+                let title = format!("after-restart-{i:02}");
+                rows.iter()
+                    .any(|(_, cols)| cols.first() == Some(&Value::Text(title.clone())))
+            });
+            has_after.then_some(())
+        },
+    )
+    .await;
+
+    alice
+        .shutdown()
+        .await
+        .expect("shutdown alice after restart");
+    bob.shutdown().await.expect("shutdown bob");
+    server2.shutdown().await;
+}
+
+/// Verifies that schema metadata (catalogue manifest) persists across a
+/// server restart. After restart, a fresh client can query without the
+/// server needing to re-discover the schema.
+///
+/// ```text
+/// alice ──create + query──► server₁ (sqlite, data_dir)
+///                               │
+///                           server₁ stops
+///                               │
+///                     server₂ starts (same data_dir)
+///                               │
+///                  bob connects and queries immediately
+///                               │
+///                               └──► rows available (schema was persisted)
+/// ```
+async fn catalogue_manifest_survives_restart() {
+    let data_dir = TempDir::new().expect("temp data dir");
+    let jwks = TestingJwksServer::start().await;
+    let schema = todos_schema();
+
+    let server1 = TestingServer::builder()
+        .with_sqlite_storage()
+        .with_data_dir(data_dir.path())
+        .with_jwks_url(jwks.endpoint())
+        .start()
+        .await;
+
+    let alice =
+        make_client_external_jwks(&server1, schema.clone(), "alice-catalogue", "todos").await;
+
+    let (todo_id, _) = alice
+        .create(
+            "todos",
+            HashMap::from([
+                (
+                    "title".to_string(),
+                    Value::Text("catalogue-test".to_string()),
+                ),
+                ("completed".to_string(), Value::Boolean(true)),
+            ]),
+        )
+        .await
+        .expect("create todo");
+
+    wait_for_query(
+        &alice,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        "alice sees 1 todo",
+        |rows| rows.iter().any(|(id, _)| *id == todo_id).then_some(()),
+    )
+    .await;
+
+    alice.shutdown().await.expect("shutdown alice");
+    server1.shutdown().await;
+
+    // Restart with same data_dir — catalogue manifest should be rehydrated.
+    let server2 = TestingServer::builder()
+        .with_sqlite_storage()
+        .with_data_dir(data_dir.path())
+        .with_jwks_url(jwks.endpoint())
+        .start()
+        .await;
+
+    let bob = make_client_external_jwks(&server2, schema, "bob-catalogue", "todos").await;
+
+    let bob_row = wait_for_query(
+        &bob,
+        QueryBuilder::new("todos").build(),
+        Some(DurabilityTier::EdgeServer),
+        Duration::from_secs(30),
+        "bob sees todo after restart",
+        |rows| rows.iter().find(|(id, _)| *id == todo_id).cloned(),
+    )
+    .await;
+
+    assert_eq!(bob_row.0, todo_id);
+    assert_eq!(bob_row.1[0], Value::Text("catalogue-test".to_string()));
+
+    bob.shutdown().await.expect("shutdown bob");
+    server2.shutdown().await;
+}

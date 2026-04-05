@@ -133,6 +133,11 @@ impl JazzClient {
             ClientStorage::Memory => context.client_id.unwrap_or_default(),
         };
 
+        // Register client name with tracer so server-side hooks resolve the human name
+        if let Some((ref tracer, ref name)) = context.sync_tracer {
+            tracer.register_client(client_id, name);
+        }
+
         // Connect to server if URL provided (before creating runtime so we have the connection)
         let auth_config = AuthConfig::from_context(&context);
         let server_connection = if !context.server_url.is_empty() {
@@ -158,9 +163,14 @@ impl JazzClient {
         let server_conn_for_sync = server_connection.clone();
         let client_id_for_sync = client_id;
         let server_id = ServerId::default();
+        let tracer_for_outgoing = context.sync_tracer.clone();
 
         // Create runtime with sync callback
         let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
+            // Record outgoing message to tracer if present
+            if let Some((ref tracer, ref name)) = tracer_for_outgoing {
+                tracer.record_outgoing(name, &entry.destination, &entry.payload);
+            }
             // Send to server if connected and destination is server
             if let Destination::Server(_) = entry.destination
                 && let Some(ref conn) = server_conn_for_sync
@@ -200,6 +210,7 @@ impl JazzClient {
             let stream_headers = conn.build_stream_headers();
             let server_id_for_stream = server_id;
             let mut initial_stream_ready_tx = initial_stream_ready_tx;
+            let tracer_for_incoming = context.sync_tracer.clone();
 
             Some(tokio::spawn(async move {
                 let http_client = reqwest::Client::new();
@@ -306,6 +317,7 @@ impl JazzClient {
                                                         event,
                                                         &runtime_for_stream,
                                                         server_id_for_stream,
+                                                        tracer_for_incoming.as_ref(),
                                                     ) {
                                                         tracing::warn!(
                                                             "Error handling server event: {}",
@@ -777,6 +789,7 @@ mod tests {
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
+            sync_tracer: None,
         }
     }
 
@@ -1143,6 +1156,7 @@ fn handle_server_event(
     event: ServerEvent,
     runtime: &ClientRuntime,
     server_id: ServerId,
+    sync_tracer: Option<&(crate::sync_tracer::SyncTracer, String)>,
 ) -> Result<()> {
     fn short_hash(hash: &impl ToString) -> String {
         let hash = hash.to_string();
@@ -1182,6 +1196,10 @@ fn handle_server_event(
                     short_hash(&warning.from_hash),
                     short_hash(&warning.to_hash),
                 );
+            }
+            // Record incoming message to tracer if present
+            if let Some((tracer, name)) = sync_tracer {
+                tracer.record_incoming(&Source::Server(server_id), name, &payload);
             }
             let entry = InboxEntry {
                 source: Source::Server(server_id),

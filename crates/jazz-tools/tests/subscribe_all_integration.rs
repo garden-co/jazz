@@ -8,6 +8,7 @@ use std::time::Duration;
 use jazz_tools::query_manager::encoding::decode_row;
 use jazz_tools::query_manager::types::RowDescriptor;
 use jazz_tools::server::TestingServer;
+use jazz_tools::sync_tracer::SyncTracer;
 use jazz_tools::{
     AppContext, AppId, ClientStorage, ColumnType, JazzClient, ObjectId, OrderedRowDelta, Query,
     QueryBuilder, Schema, SchemaBuilder, TableSchema, Value,
@@ -77,22 +78,42 @@ struct ClientPair {
 
 impl ClientPair {
     async fn start() -> Self {
-        let server = TestingServer::start().await;
+        Self::start_inner(None).await
+    }
+
+    async fn start_traced(tracer: &jazz_tools::sync_tracer::SyncTracer) -> Self {
+        Self::start_inner(Some(tracer)).await
+    }
+
+    async fn start_inner(tracer: Option<&jazz_tools::sync_tracer::SyncTracer>) -> Self {
+        let server = if let Some(t) = tracer {
+            TestingServer::builder()
+                .with_tracer(t.clone())
+                .start()
+                .await
+        } else {
+            TestingServer::start().await
+        };
         let schema = subscription_schema();
-        let writer = TestingClient::builder()
+        let mut writer_builder = TestingClient::builder()
             .with_server(&server)
             .with_schema(schema.clone())
             .with_user_id("subscribe-all-writer")
-            .ready_on("todos", READY_TIMEOUT)
-            .connect()
-            .await;
-        let subscriber = TestingClient::builder()
+            .ready_on("todos", READY_TIMEOUT);
+        if let Some(t) = tracer {
+            writer_builder = writer_builder.with_tracer(t, "alice");
+        }
+        let writer = writer_builder.connect().await;
+
+        let mut subscriber_builder = TestingClient::builder()
             .with_server(&server)
             .with_schema(schema)
             .with_user_id("subscribe-all-subscriber")
-            .ready_on("todos", READY_TIMEOUT)
-            .connect()
-            .await;
+            .ready_on("todos", READY_TIMEOUT);
+        if let Some(t) = tracer {
+            subscriber_builder = subscriber_builder.with_tracer(t, "bob");
+        }
+        let subscriber = subscriber_builder.connect().await;
 
         Self {
             server,
@@ -340,6 +361,7 @@ async fn start_local_client(schema: Schema) -> (TempDir, JazzClient) {
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
+        sync_tracer: None,
     };
 
     let client = JazzClient::connect(context)

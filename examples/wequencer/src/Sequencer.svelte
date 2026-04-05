@@ -11,11 +11,11 @@
   const instruments = new QuerySubscription(
     app.instruments.orderBy("display_order"),
   );
-  const allBeats = new QuerySubscription(app.beats);
+  const beats = new QuerySubscription(app.beats.where({ jamId }));
 
   function beatsForInstrument(instrumentId: string) {
-    return (allBeats.current ?? []).filter(
-      (b) => b.jam === jamId && b.instrument === instrumentId,
+    return (beats.current ?? []).filter(
+      (b) => b.instrumentId === instrumentId,
     );
   }
 </script>

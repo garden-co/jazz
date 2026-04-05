@@ -23,6 +23,10 @@ pub use fjall::FjallStorage;
 mod rocksdb;
 #[cfg(all(feature = "rocksdb", not(target_arch = "wasm32")))]
 pub use rocksdb::RocksDBStorage;
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+mod sqlite;
+#[cfg(all(feature = "sqlite", not(target_arch = "wasm32")))]
+pub use sqlite::SqliteStorage;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;

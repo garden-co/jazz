@@ -51,7 +51,7 @@ type PolicyTodo = {
   description?: string;
   parentId?: string;
   projectId?: string;
-  ownerId: string;
+  owner_id: string;
 };
 
 type PolicyTodoInit = {
@@ -60,7 +60,7 @@ type PolicyTodoInit = {
   description?: string;
   parentId?: string;
   projectId?: string;
-  ownerId: string;
+  owner_id: string;
 };
 
 type SyncRequestBody = {
@@ -888,7 +888,7 @@ describe("NAPI integration", () => {
             title: "session-created-item",
             done: false,
             description: "created via forSession",
-            ownerId: "alice",
+            owner_id: "alice",
           },
           { tier: "edge" },
         ),
@@ -910,7 +910,7 @@ describe("NAPI integration", () => {
             id: createdTodo.id,
             title: "session-created-item",
             done: false,
-            ownerId: "alice",
+            owner_id: "alice",
           });
         },
         { timeout: 20_000 },
@@ -923,7 +923,7 @@ describe("NAPI integration", () => {
             title: "session-policy-denied",
             done: false,
             description: "",
-            ownerId: "bob",
+            owner_id: "bob",
           },
           { tier: "edge" },
         ),
@@ -1043,7 +1043,7 @@ describe("NAPI integration", () => {
             title: "request-created-item",
             done: false,
             description: "created via forRequest",
-            ownerId: "request-user",
+            owner_id: "request-user",
           },
           { tier: "edge" },
         ),
@@ -1063,7 +1063,7 @@ describe("NAPI integration", () => {
             expect.objectContaining({
               id: createdTodo.id,
               title: "request-created-item",
-              ownerId: "request-user",
+              owner_id: "request-user",
             }),
           ]);
         },
@@ -1077,7 +1077,7 @@ describe("NAPI integration", () => {
             title: "request-policy-denied",
             done: false,
             description: "",
-            ownerId: "someone-else",
+            owner_id: "someone-else",
           },
           { tier: "edge" },
         ),
@@ -1096,7 +1096,7 @@ describe("NAPI integration", () => {
           ).toMatchObject({
             id: createdTodo.id,
             title: "request-created-item",
-            ownerId: "request-user",
+            owner_id: "request-user",
           });
         },
         { timeout: 20_000 },
@@ -1216,7 +1216,7 @@ describe("NAPI integration", () => {
             title: "bob-item",
             done: false,
             description: "",
-            ownerId: "bob",
+            owner_id: "bob",
           },
           { tier: "edge" },
         ),
@@ -1230,7 +1230,7 @@ describe("NAPI integration", () => {
             title: "carol-item",
             done: false,
             description: "",
-            ownerId: "carol",
+            owner_id: "carol",
           },
           { tier: "edge" },
         ),
@@ -1244,7 +1244,7 @@ describe("NAPI integration", () => {
             title: "alice-item",
             done: false,
             description: "",
-            ownerId: "alice",
+            owner_id: "alice",
           },
           { tier: "edge" },
         ),

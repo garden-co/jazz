@@ -20,6 +20,16 @@ import {
   waitForWorkerMessageType,
   withTimeout,
 } from "./support.js";
+import {
+  blockTestingServerNetwork,
+  getTestingServerInfo,
+  unblockTestingServerNetwork,
+} from "./testing-server.js";
+import {
+  closeRemoteBrowserDb,
+  createRemoteBrowserDb,
+  waitForRemoteBrowserDbTitle,
+} from "./remote-browser-db.js";
 
 interface DebugLensEdgeState {
   sourceHash: string;
@@ -173,6 +183,27 @@ const allCatalogueTodos: QueryBuilder<CatalogueTodo> = {
 
 describe("Worker Bridge with OPFS", () => {
   const ctx = new TestCleanup();
+  const remoteBrowserDbIds = new Set<string>();
+
+  function trackRemoteBrowserDb(id: string): string {
+    remoteBrowserDbIds.add(id);
+    return id;
+  }
+
+  async function waitForRemoteTodoTitle(
+    id: string,
+    title: string,
+    label: string,
+    timeoutMs: number,
+    tier?: "worker" | "edge",
+  ): Promise<Record<string, unknown>[]> {
+    try {
+      return await waitForRemoteBrowserDbTitle({ id, title, timeoutMs, tier });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`${label}: ${message}`);
+    }
+  }
 
   /** Shorthand: track a Db for cleanup. */
   function track(db: Db): Db {
@@ -252,7 +283,17 @@ describe("Worker Bridge with OPFS", () => {
     return leader;
   }
 
-  afterEach(() => ctx.cleanup());
+  afterEach(async () => {
+    for (const id of remoteBrowserDbIds) {
+      try {
+        await closeRemoteBrowserDb(id);
+      } catch {
+        // Best effort
+      }
+    }
+    remoteBrowserDbIds.clear();
+    await ctx.cleanup();
+  });
 
   // -------------------------------------------------------------------------
   // 1. Worker initialization
@@ -816,6 +857,176 @@ describe("Worker Bridge with OPFS", () => {
     );
     expect(rowsOnA.some((row) => row.title === title)).toBe(true);
   }, 60000);
+
+  it("recovers sync after browser-side network loss with B in a separate context", async () => {
+    const sharedLocalAuthToken = `sync-network-recover-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
+    const dbA = await createSyncedDb(ctx, "sync-recover-a", sharedLocalAuthToken);
+    const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-recover-remote"));
+    await createRemoteBrowserDb({
+      id: remoteDbId,
+      appId,
+      dbName: uniqueDbName("sync-recover-b"),
+      table: "todos",
+      schemaJson: JSON.stringify(schema),
+      serverUrl,
+      adminSecret,
+      localAuthMode: "anonymous",
+      localAuthToken: sharedLocalAuthToken,
+    });
+
+    const baselineTitle = `baseline-network-recover-${Date.now()}`;
+    await withTimeout(
+      dbA.insertDurable(todos, { title: baselineTitle, done: false }, { tier: "worker" }),
+      10000,
+      "Baseline insert(worker) did not resolve",
+    );
+
+    await waitForRemoteTodoTitle(
+      remoteDbId,
+      baselineTitle,
+      "B sees baseline row before browser-side network block",
+      20000,
+    );
+
+    await blockTestingServerNetwork(serverUrl);
+    await sleep(500);
+    await unblockTestingServerNetwork(serverUrl);
+    await sleep(250);
+
+    (dbA as any).sendLifecycleHint?.("freeze");
+    await sleep(50);
+    (dbA as any).sendLifecycleHint?.("resume");
+    (dbA as any).workerBridge?.replayServerConnection?.();
+
+    const recoveredTitle = `network-recovered-${Date.now()}`;
+    await withTimeout(
+      dbA.insertDurable(todos, { title: recoveredTitle, done: false }, { tier: "worker" }),
+      10000,
+      "Recovered insert(worker) did not resolve",
+    );
+
+    const rowsOnB = await waitForRemoteTodoTitle(
+      remoteDbId,
+      recoveredTitle,
+      "B sees row written after browser-side network recovery",
+      20000,
+    );
+    expect(rowsOnB.some((row) => row.title === recoveredTitle)).toBe(true);
+  }, 60000);
+
+  /**
+   *   A ──baseline write──► server ◄── B sees baseline
+   *   browser blocks Jazz server traffic without reloading the page
+   *   A ──offline write(worker)──X server
+   *   A ──new online write──► server ◄── B sees control write
+   *   expected: the earlier offline worker write also promotes to B + fresh edge client
+   */
+  it("promotes offline worker rows after reconnect while the worker stays alive", async () => {
+    const sharedLocalAuthToken = `sync-offline-reconnect-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const { appId, serverUrl, adminSecret } = await getTestingServerInfo();
+    const dbA = await createSyncedDb(ctx, "sync-offline-a", sharedLocalAuthToken);
+    const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-offline-remote"));
+    await createRemoteBrowserDb({
+      id: remoteDbId,
+      appId,
+      dbName: uniqueDbName("sync-offline-b"),
+      table: "todos",
+      schemaJson: JSON.stringify(schema),
+      serverUrl,
+      adminSecret,
+      localAuthMode: "anonymous",
+      localAuthToken: sharedLocalAuthToken,
+    });
+
+    const baselineTitle = `baseline-before-offline-${Date.now()}`;
+    await withTimeout(
+      dbA.insertDurable(todos, { title: baselineTitle, done: false }, { tier: "worker" }),
+      10000,
+      "Baseline insert(worker) did not resolve",
+    );
+
+    await waitForRemoteTodoTitle(
+      remoteDbId,
+      baselineTitle,
+      "B sees baseline row before disconnect",
+      20000,
+    );
+
+    await blockTestingServerNetwork(serverUrl);
+    await sleep(250);
+
+    const offlineTitle = `offline-worker-row-${Date.now()}`;
+    await withTimeout(
+      dbA.insertDurable(todos, { title: offlineTitle, done: true }, { tier: "worker" }),
+      10000,
+      "Offline insert(worker) did not resolve",
+    );
+
+    await waitForTodos(
+      dbA,
+      (rows) => rows.some((row) => row.title === offlineTitle),
+      "A sees offline worker row locally",
+      10000,
+      "worker",
+    );
+
+    await expect(
+      waitForRemoteTodoTitle(
+        remoteDbId,
+        offlineTitle,
+        "B should not see offline row while A is disconnected",
+        2500,
+      ),
+    ).rejects.toThrow();
+
+    await unblockTestingServerNetwork(serverUrl);
+    await sleep(250);
+
+    (dbA as any).sendLifecycleHint?.("freeze");
+    await sleep(50);
+    (dbA as any).sendLifecycleHint?.("resume");
+    (dbA as any).workerBridge?.replayServerConnection?.();
+
+    const postReconnectTitle = `post-reconnect-control-${Date.now()}`;
+    await withTimeout(
+      dbA.insertDurable(todos, { title: postReconnectTitle, done: false }, { tier: "worker" }),
+      10000,
+      "Post-reconnect control insert(worker) did not resolve",
+    );
+
+    await waitForTodos(
+      dbA,
+      (rows) => rows.some((row) => row.title === postReconnectTitle),
+      "A sees control row locally after reconnect",
+      10000,
+      "worker",
+    );
+    await waitForRemoteTodoTitle(
+      remoteDbId,
+      postReconnectTitle,
+      "B sees control row written after reconnect",
+      20000,
+    );
+
+    const rowsOnB = await waitForRemoteTodoTitle(
+      remoteDbId,
+      offlineTitle,
+      "B sees offline worker row after reconnect",
+      20000,
+    );
+    expect(rowsOnB.some((row) => row.title === offlineTitle)).toBe(true);
+
+    const dbProbe = await createSyncedDb(ctx, "sync-offline-probe", sharedLocalAuthToken);
+    const rowsOnProbe = await waitForTodos(
+      dbProbe,
+      (rows) => rows.some((row) => row.title === offlineTitle),
+      "Fresh client sees offline worker row at edge after reconnect",
+      20000,
+      "edge",
+    );
+    expect(rowsOnProbe.some((row) => row.title === offlineTitle)).toBe(true);
+  }, 120000);
 
   it("local-only subscriptions receive rows from opfs", async () => {
     const dbName = uniqueDbName("sync-local-only");

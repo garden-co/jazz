@@ -68,6 +68,8 @@ struct PersistedPrefixBatchCatalog {
 const MAX_COMMITS_PER_BRANCH_SEGMENT: usize = 32;
 const MAX_INLINE_COMMITS_PER_BRANCH: usize = 8;
 const STORAGE_BINARY_V1: u8 = 1;
+const BRANCH_TAILS_DERIVE_FROM_TIPS: u8 = 0;
+const BRANCH_TAILS_EXPLICIT: u8 = 1;
 
 impl StoredBranchRef {
     fn from_prefix_batch(prefix_id: PrefixId, batch_ord: BatchOrd) -> Self {
@@ -489,11 +491,24 @@ fn encode_branch_manifest(manifest: &PersistedBranchManifest) -> Result<Vec<u8>,
         previous_timestamp = Some(commit.timestamp);
     }
 
-    let mut tails: Vec<CommitId> = Vec::new();
-    tails.sort_unstable();
-    encode_len(&mut out, "branch manifest", tails.len())?;
-    for tail in &tails {
-        out.extend_from_slice(&tail.0);
+    let derived_tail_ids: HashSet<CommitId> = if manifest.inline_commits.is_empty() {
+        persisted_tip_commits.iter().map(Commit::id).collect()
+    } else {
+        tip_commits_for_branch(&manifest.inline_commits)
+            .iter()
+            .map(Commit::id)
+            .collect()
+    };
+    if manifest.tails == derived_tail_ids {
+        out.push(BRANCH_TAILS_DERIVE_FROM_TIPS);
+    } else {
+        out.push(BRANCH_TAILS_EXPLICIT);
+        let mut tails: Vec<CommitId> = manifest.tails.iter().copied().collect();
+        tails.sort_unstable();
+        encode_len(&mut out, "branch manifest", tails.len())?;
+        for tail in &tails {
+            out.extend_from_slice(&tail.0);
+        }
     }
 
     encode_len(&mut out, "branch manifest", persisted_tip_commits.len())?;
@@ -527,11 +542,24 @@ fn decode_branch_manifest(bytes: &[u8]) -> Result<PersistedBranchManifest, Stora
         inline_commits.push(commit);
     }
 
-    let tail_count = cursor.read_var_u32("branch manifest")? as usize;
-    let mut tails = HashSet::with_capacity(tail_count);
-    for _ in 0..tail_count {
-        tails.insert(CommitId(cursor.read_fixed::<32>("branch manifest")?));
-    }
+    let tail_mode = cursor.read_u8("branch manifest")?;
+    let explicit_tails = match tail_mode {
+        BRANCH_TAILS_DERIVE_FROM_TIPS => None,
+        BRANCH_TAILS_EXPLICIT => {
+            let tail_count = cursor.read_var_u32("branch manifest")? as usize;
+            let mut tails = HashSet::with_capacity(tail_count);
+            for _ in 0..tail_count {
+                tails.insert(CommitId(cursor.read_fixed::<32>("branch manifest")?));
+            }
+            Some(tails)
+        }
+        other => {
+            return Err(codec_error(
+                "branch manifest",
+                format!("unknown tail mode {other}"),
+            ));
+        }
+    };
 
     let tip_count = cursor.read_var_u32("branch manifest")? as usize;
     let mut tip_commits = Vec::with_capacity(tip_count);
@@ -550,10 +578,7 @@ fn decode_branch_manifest(bytes: &[u8]) -> Result<PersistedBranchManifest, Stora
     if !inline_commits.is_empty() {
         tip_commits = tip_commits_for_branch(&inline_commits);
     }
-    if tails.is_empty() {
-        tails = tip_commits.iter().map(Commit::id).collect();
-    }
-
+    let tails = explicit_tails.unwrap_or_else(|| tip_commits.iter().map(Commit::id).collect());
     Ok(PersistedBranchManifest {
         segment_ids,
         inline_commits,

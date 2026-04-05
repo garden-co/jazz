@@ -1,4 +1,5 @@
 import { TestingServer } from "jazz-napi";
+import type { BrowserContext, Route } from "playwright";
 
 interface StartedTestingServer {
   server: TestingServer;
@@ -8,6 +9,7 @@ interface StartedTestingServer {
 }
 
 let testingServerPromise: Promise<StartedTestingServer> | null = null;
+const blockedServerRoutes = new WeakMap<BrowserContext, Map<string, (route: Route) => void>>();
 
 async function startTestingServer(): Promise<StartedTestingServer> {
   const server = await TestingServer.start();
@@ -62,4 +64,44 @@ export async function stopTestingServer(): Promise<void> {
     // Swallow all errors: either startup never produced a server (nothing to stop),
     // or stop() itself failed (nothing recoverable during teardown).
   }
+}
+
+function testingServerUrlPattern(serverUrl: string): string {
+  return `${serverUrl.replace(/\/+$/, "")}/**`;
+}
+
+export async function blockTestingServerNetwork(
+  context: BrowserContext,
+  serverUrl: string,
+): Promise<void> {
+  const pattern = testingServerUrlPattern(serverUrl);
+  let contextRoutes = blockedServerRoutes.get(context);
+  if (!contextRoutes) {
+    contextRoutes = new Map();
+    blockedServerRoutes.set(context, contextRoutes);
+  }
+  if (contextRoutes.has(pattern)) {
+    return;
+  }
+
+  const handler = (route: Route) => {
+    void route.abort("internetdisconnected");
+  };
+  contextRoutes.set(pattern, handler);
+  await context.route(pattern, handler);
+}
+
+export async function unblockTestingServerNetwork(
+  context: BrowserContext,
+  serverUrl: string,
+): Promise<void> {
+  const pattern = testingServerUrlPattern(serverUrl);
+  const contextRoutes = blockedServerRoutes.get(context);
+  const handler = contextRoutes?.get(pattern);
+  if (!handler) {
+    return;
+  }
+
+  await context.unroute(pattern, handler);
+  contextRoutes?.delete(pattern);
 }

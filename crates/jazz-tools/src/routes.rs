@@ -657,6 +657,10 @@ async fn sync_handler(
     // Apply each payload in order, collecting per-payload results.
     let mut results = Vec::with_capacity(payloads.len());
     for payload in payloads {
+        if let Some(ref tracer) = state.sync_tracer {
+            tracer.record_incoming(&Source::Client(request_client_id), "server", &payload);
+        }
+
         let entry = InboxEntry {
             source: Source::Client(request_client_id),
             payload,

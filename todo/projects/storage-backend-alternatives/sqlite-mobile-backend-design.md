@@ -73,10 +73,11 @@ PRAGMA foreign_keys = OFF;
 - **`busy_timeout = 5000`** — If another connection holds a lock, retry for up to 5 seconds before returning SQLITE_BUSY. Defensive measure — our single-connection model shouldn't contend, but this avoids hard failures if something unexpected holds the WAL.
 - **`foreign_keys = OFF`** — We have a single table with no foreign key relationships. Disabling avoids per-statement FK enforcement overhead.
 
-### flush and close
+### flush, flush_wal, and close
 
-- `flush()` → `PRAGMA wal_checkpoint(TRUNCATE)` — forces WAL contents to the main DB file and truncates the WAL. Guarantees all writes are durable on disk, equivalent to Fjall's `persist(SyncData)`.
-- `close()` → checkpoint, then drop the connection. Checkpointing before close ensures no data sits in the WAL when the connection is released. Dropping the connection releases the file lock so the same path can be reopened (required by the conformance suite's reopen-after-close test).
+- `flush_wal()` → **no-op** (trait default). SQLite targets mobile clients, not the cloud server. In WAL mode with autocommit, each SAVEPOINT/RELEASE commits to the WAL — writes survive process crashes without an explicit fsync. Power-safe durability is the cloud server's job (RocksDB/Fjall handle that via their own `flush_wal` implementations). Keeping this as a no-op means `batched_tick` does zero storage I/O on mobile, which is the right trade-off.
+- `flush()` → `PRAGMA wal_checkpoint(PASSIVE)` — non-blocking compaction that moves checkpointed pages from WAL to the main DB file without blocking concurrent readers. This is cleanup, not a durability barrier.
+- `close()` → passive checkpoint, then drop the connection. The checkpoint is best-effort cleanup. Dropping the connection releases the file lock so the same path can be reopened (required by the conformance suite's reopen-after-close test).
 
 ## Feature flag and mobile wiring
 

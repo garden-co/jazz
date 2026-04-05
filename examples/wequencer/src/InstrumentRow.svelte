@@ -33,8 +33,8 @@
       db.delete(app.beats, existing.id);
     } else {
       db.insert(app.beats, {
-        jam: jamId,
-        instrument: instrument.id,
+        jamId: jamId,
+        instrumentId: instrument.id,
         beat_index: index,
         placed_by: session?.user_id ?? "anonymous",
       });

@@ -8,7 +8,7 @@ const schema = {
     title: s.string(),
     done: s.boolean(),
     description: s.string().optional(),
-    ownerId: s.string(),
+    owner_id: s.string(),
     parentId: s.ref("todos").optional(),
     projectId: s.ref("projects").optional(),
   }),
