@@ -15,7 +15,7 @@ type UseAllStatefulfilledData<T> = {
   error: null;
 };
 
-type UseAllStateError<T> = {
+type UseAllStateError = {
   status: "rejected";
   data: undefined;
   error: unknown;
@@ -24,7 +24,7 @@ type UseAllStateError<T> = {
 export type UseAllState<T extends { id: string }> =
   | UseAllStatePending<T>
   | UseAllStatefulfilledData<T>
-  | UseAllStateError<T>;
+  | UseAllStateError;
 
 export type QueryEntryCallbacks<T extends { id: string }> = {
   onfulfilled?: (data: T[]) => void;
