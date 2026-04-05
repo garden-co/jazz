@@ -70,6 +70,22 @@ describe("JazzRnRuntimeAdapter", () => {
     await expect(adapter.query("{}", null, null)).resolves.toEqual([{ id: "row-1", values: [] }]);
   });
 
+  it("encodes Bytea mutations with an explicit FFI transport shape", () => {
+    const binding = createBinding();
+    const adapter = new JazzRnRuntimeAdapter(binding, {});
+
+    adapter.insert("files", {
+      data: { type: "Bytea", value: new Uint8Array([0x01, 0x02, 0xff]) },
+    });
+
+    expect(binding.insert).toHaveBeenCalledWith(
+      "files",
+      JSON.stringify({
+        data: { type: "Bytea", value: "0102ff" },
+      }),
+    );
+  });
+
   it("serializes write context payloads for session-aware mutations", async () => {
     const binding = createBinding();
     const adapter = new JazzRnRuntimeAdapter(binding, {});
