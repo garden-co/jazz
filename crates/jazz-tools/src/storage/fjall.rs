@@ -33,7 +33,8 @@ use super::{
         load_branch_tips_core, load_branch_tips_core_existing_object, load_catalogue_manifest_core,
         load_commit_branch_core, load_object_metadata_core, load_prefix_batch_catalog_core,
         load_prefix_head_entries_core, load_prefix_leaf_head_entries_core,
-        load_table_prefix_batch_keys_core, replace_branch_core, store_ack_tier_core,
+        load_table_prefix_batch_keys_core, object_exists_core, replace_branch_core,
+        store_ack_tier_core,
     },
 };
 
@@ -315,6 +316,13 @@ impl Storage for FjallStorage {
         })
     }
 
+    fn object_exists(&self, id: ObjectId) -> Result<bool, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            object_exists_core(id, |key| Self::read_get(&tx, &inner.keyspace, key))
+        })
+    }
+
     fn load_branch(
         &self,
         object_id: ObjectId,
@@ -436,8 +444,8 @@ impl Storage for FjallStorage {
         &mut self,
         object_id: ObjectId,
         branch: &QueryBranchRef,
-        commit: Commit,
-        prefix_batch_update: Option<PrefixBatchUpdate>,
+        commit: &Commit,
+        prefix_batch_update: Option<&PrefixBatchUpdate>,
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let tx = RefCell::new(inner.db.write_tx());
@@ -758,7 +766,7 @@ mod tests {
 
         let commit = make_commit(b"first");
         let commit_id = commit.id();
-        storage.append_commit(id, &branch, commit, None).unwrap();
+        storage.append_commit(id, &branch, &commit, None).unwrap();
 
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 1);
@@ -771,7 +779,7 @@ mod tests {
         let mut commit2 = make_commit(b"second");
         commit2.parents = smallvec![commit_id];
         let commit2_id = commit2.id();
-        storage.append_commit(id, &branch, commit2, None).unwrap();
+        storage.append_commit(id, &branch, &commit2, None).unwrap();
 
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 2);
@@ -807,7 +815,7 @@ mod tests {
                 commit.parents = smallvec![parent_id];
             }
             parent_id = Some(commit.id());
-            storage.append_commit(id, &branch, commit, None).unwrap();
+            storage.append_commit(id, &branch, &commit, None).unwrap();
         }
 
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
@@ -846,8 +854,8 @@ mod tests {
             .append_commit(
                 id,
                 &branch1,
-                commit1.clone(),
-                Some(PrefixBatchUpdate {
+                &commit1,
+                Some(&PrefixBatchUpdate {
                     prefix: prefix.clone().into(),
                     batch_meta: PrefixBatchMeta {
                         batch_id: batch1_id,
@@ -872,8 +880,8 @@ mod tests {
             .append_commit(
                 id,
                 &branch2,
-                commit2.clone(),
-                Some(PrefixBatchUpdate {
+                &commit2,
+                Some(&PrefixBatchUpdate {
                     prefix: prefix.clone().into(),
                     batch_meta: PrefixBatchMeta {
                         batch_id: batch2_id,
@@ -1043,7 +1051,7 @@ mod tests {
             storage.create_object(id, metadata.clone()).unwrap();
 
             let commit = make_commit(commit_content);
-            storage.append_commit(id, &branch, commit, None).unwrap();
+            storage.append_commit(id, &branch, &commit, None).unwrap();
 
             storage
                 .index_insert(

@@ -2870,7 +2870,7 @@ fn persistence_ack_survives_reload() {
     io.append_commit(
         obj_id,
         &crate::query_manager::types::QueryBranchRef::from_branch_name(main_branch()),
-        commit,
+        &commit,
         None,
     )
     .unwrap();

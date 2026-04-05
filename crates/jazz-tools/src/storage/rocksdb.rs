@@ -32,7 +32,8 @@ use super::{
         load_branch_tips_core, load_branch_tips_core_existing_object, load_catalogue_manifest_core,
         load_commit_branch_core, load_object_metadata_core, load_prefix_batch_catalog_core,
         load_prefix_head_entries_core, load_prefix_leaf_head_entries_core,
-        load_table_prefix_batch_keys_core, replace_branch_core, store_ack_tier_core,
+        load_table_prefix_batch_keys_core, object_exists_core, replace_branch_core,
+        store_ack_tier_core,
     },
 };
 
@@ -344,6 +345,10 @@ impl Storage for RocksDBStorage {
         })
     }
 
+    fn object_exists(&self, id: ObjectId) -> Result<bool, StorageError> {
+        self.with_inner(|inner| object_exists_core(id, |key| Self::get_from_db(&inner.db, key)))
+    }
+
     fn load_branch(
         &self,
         object_id: ObjectId,
@@ -452,8 +457,8 @@ impl Storage for RocksDBStorage {
         &mut self,
         object_id: ObjectId,
         branch: &QueryBranchRef,
-        commit: Commit,
-        prefix_batch_update: Option<PrefixBatchUpdate>,
+        commit: &Commit,
+        prefix_batch_update: Option<&PrefixBatchUpdate>,
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let txn = RefCell::new(inner.db.transaction());

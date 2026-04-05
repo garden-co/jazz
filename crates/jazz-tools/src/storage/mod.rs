@@ -351,6 +351,11 @@ pub trait Storage {
         id: ObjectId,
     ) -> Result<Option<HashMap<String, String>>, StorageError>;
 
+    /// Cheap existence check for an object.
+    fn object_exists(&self, id: ObjectId) -> Result<bool, StorageError> {
+        Ok(self.load_object_metadata(id)?.is_some())
+    }
+
     /// Load a branch's commits and tails. Returns None if branch doesn't exist.
     fn load_branch(
         &self,
@@ -476,8 +481,8 @@ pub trait Storage {
         &mut self,
         object_id: ObjectId,
         branch: &QueryBranchRef,
-        commit: Commit,
-        prefix_batch_update: Option<PrefixBatchUpdate>,
+        commit: &Commit,
+        prefix_batch_update: Option<&PrefixBatchUpdate>,
     ) -> Result<(), StorageError>;
 
     /// Replace the persisted state for a branch.
@@ -666,6 +671,10 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).load_object_metadata(id)
     }
 
+    fn object_exists(&self, id: ObjectId) -> Result<bool, StorageError> {
+        (**self).object_exists(id)
+    }
+
     fn load_branch(
         &self,
         object_id: ObjectId,
@@ -734,8 +743,8 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         &mut self,
         object_id: ObjectId,
         branch: &QueryBranchRef,
-        commit: Commit,
-        prefix_batch_update: Option<PrefixBatchUpdate>,
+        commit: &Commit,
+        prefix_batch_update: Option<&PrefixBatchUpdate>,
     ) -> Result<(), StorageError> {
         (**self).append_commit(object_id, branch, commit, prefix_batch_update)
     }
@@ -1340,6 +1349,10 @@ impl Storage for MemoryStorage {
         Ok(self.objects.get(&id).map(|obj| obj.metadata.clone()))
     }
 
+    fn object_exists(&self, id: ObjectId) -> Result<bool, StorageError> {
+        Ok(self.objects.contains_key(&id))
+    }
+
     fn load_branch(
         &self,
         object_id: ObjectId,
@@ -1501,8 +1514,8 @@ impl Storage for MemoryStorage {
         &mut self,
         object_id: ObjectId,
         branch: &QueryBranchRef,
-        commit: Commit,
-        prefix_batch_update: Option<PrefixBatchUpdate>,
+        commit: &Commit,
+        prefix_batch_update: Option<&PrefixBatchUpdate>,
     ) -> Result<(), StorageError> {
         let obj = self.objects.entry(object_id).or_default();
         let branch_key = branch.batch_branch_key();
@@ -1517,18 +1530,18 @@ impl Storage for MemoryStorage {
 
         // Add this commit as a tip
         branch_data.tails.insert(commit_id);
-        branch_data.commits.push(commit);
+        branch_data.commits.push(commit.clone());
         obj.commit_branches.insert(commit_id, branch_key);
 
         if let Some(update) = prefix_batch_update {
             let catalog = obj.branches.prefix_catalog_mut_or_default(update.prefix);
-            for parent_batch_ord in update.increment_parent_child_counts {
-                if let Some(parent_meta) = catalog.batch_meta_by_ord_mut(parent_batch_ord) {
+            for parent_batch_ord in &update.increment_parent_child_counts {
+                if let Some(parent_meta) = catalog.batch_meta_by_ord_mut(*parent_batch_ord) {
                     parent_meta.child_count = parent_meta.child_count.saturating_add(1);
                 }
             }
-            for removed_batch_ord in update.remove_leaf_batch_ords {
-                catalog.remove_leaf_batch_ord(removed_batch_ord);
+            for removed_batch_ord in &update.remove_leaf_batch_ords {
+                catalog.remove_leaf_batch_ord(*removed_batch_ord);
             }
             catalog.insert_batch_meta(update.batch_meta.clone());
             catalog.insert_leaf_batch_ord(update.batch_meta.batch_ord);
@@ -1924,7 +1937,7 @@ mod tests {
         // Append commit creates branch
         let commit = make_commit(b"first");
         let commit_id = commit.id();
-        storage.append_commit(id, &branch, commit, None).unwrap();
+        storage.append_commit(id, &branch, &commit, None).unwrap();
 
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 1);
@@ -1968,10 +1981,10 @@ mod tests {
         );
 
         storage
-            .append_commit(id, &branch_a, make_commit(b"one"), None)
+            .append_commit(id, &branch_a, &make_commit(b"one"), None)
             .unwrap();
         storage
-            .append_commit(id, &branch_b, make_commit(b"two"), None)
+            .append_commit(id, &branch_b, &make_commit(b"two"), None)
             .unwrap();
 
         let loaded_a = storage.load_branch(id, &branch_a).unwrap().unwrap();
@@ -2004,8 +2017,8 @@ mod tests {
             .append_commit(
                 id,
                 &branch1,
-                commit1.clone(),
-                Some(PrefixBatchUpdate {
+                &commit1,
+                Some(&PrefixBatchUpdate {
                     prefix: prefix.clone().into(),
                     batch_meta: PrefixBatchMeta {
                         batch_id: batch1_id,
@@ -2042,8 +2055,8 @@ mod tests {
             .append_commit(
                 id,
                 &branch2,
-                commit2.clone(),
-                Some(PrefixBatchUpdate {
+                &commit2,
+                Some(&PrefixBatchUpdate {
                     prefix: prefix.clone().into(),
                     batch_meta: PrefixBatchMeta {
                         batch_id: batch2_id,

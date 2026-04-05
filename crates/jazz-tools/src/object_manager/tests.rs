@@ -21,16 +21,18 @@ struct CountingLoadStorage {
     load_branch_tips_calls: Cell<usize>,
     load_branch_existing_object_calls: Cell<usize>,
     load_branch_tips_existing_object_calls: Cell<usize>,
+    load_prefix_batch_catalog_calls: Cell<usize>,
 }
 
 impl CountingLoadStorage {
-    fn load_counts(&self) -> (usize, usize, usize, usize, usize) {
+    fn load_counts(&self) -> (usize, usize, usize, usize, usize, usize) {
         (
             self.load_object_metadata_calls.get(),
             self.load_branch_calls.get(),
             self.load_branch_tips_calls.get(),
             self.load_branch_existing_object_calls.get(),
             self.load_branch_tips_existing_object_calls.get(),
+            self.load_prefix_batch_catalog_calls.get(),
         )
     }
 }
@@ -105,6 +107,8 @@ impl Storage for CountingLoadStorage {
         object_id: ObjectId,
         prefix: &str,
     ) -> Result<Option<PrefixBatchCatalog>, StorageError> {
+        self.load_prefix_batch_catalog_calls
+            .set(self.load_prefix_batch_catalog_calls.get() + 1);
         self.inner.load_prefix_batch_catalog(object_id, prefix)
     }
 
@@ -120,8 +124,8 @@ impl Storage for CountingLoadStorage {
         &mut self,
         object_id: ObjectId,
         branch: &QueryBranchRef,
-        commit: Commit,
-        prefix_batch_update: Option<PrefixBatchUpdate>,
+        commit: &Commit,
+        prefix_batch_update: Option<&PrefixBatchUpdate>,
     ) -> Result<(), StorageError> {
         self.inner
             .append_commit(object_id, branch, commit, prefix_batch_update)
@@ -1603,12 +1607,14 @@ fn get_or_load_uses_existing_object_branch_load_path() {
         .expect("object should load from storage");
     assert!(loaded.branches.contains_key(&main_branch()));
 
-    let (metadata, branch, branch_tips, existing_branch, existing_branch_tips) = io.load_counts();
+    let (metadata, branch, branch_tips, existing_branch, existing_branch_tips, prefix_catalogs) =
+        io.load_counts();
     assert_eq!(metadata, 1);
     assert_eq!(branch, 0);
     assert_eq!(branch_tips, 0);
     assert_eq!(existing_branch, 1);
     assert_eq!(existing_branch_tips, 0);
+    assert_eq!(prefix_catalogs, 0);
 }
 
 #[test]
@@ -1638,12 +1644,63 @@ fn get_or_load_tips_uses_existing_object_branch_tip_load_path() {
         .expect("object should load tip frontier from storage");
     assert!(loaded.branches.contains_key(&main_branch()));
 
-    let (metadata, branch, branch_tips, existing_branch, existing_branch_tips) = io.load_counts();
+    let (metadata, branch, branch_tips, existing_branch, existing_branch_tips, prefix_catalogs) =
+        io.load_counts();
     assert_eq!(metadata, 1);
     assert_eq!(branch, 0);
     assert_eq!(branch_tips, 0);
     assert_eq!(existing_branch, 0);
     assert_eq!(existing_branch_tips, 1);
+    assert_eq!(prefix_catalogs, 0);
+}
+
+#[test]
+fn add_commit_reuses_cached_batch_meta_for_follow_up_commits() {
+    let mut io = CountingLoadStorage::default();
+    let mut manager = ObjectManager::new();
+    let object_id = manager.create(&mut io, None);
+    let author = ObjectId::new();
+    let branch = main_branch();
+
+    manager
+        .add_commit(
+            &mut io,
+            object_id,
+            branch,
+            vec![],
+            b"first".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    let after_first_commit = io.load_counts().5;
+
+    let parent_id = manager
+        .get_tip_ids(object_id, branch)
+        .unwrap()
+        .iter()
+        .copied()
+        .next()
+        .unwrap();
+
+    manager
+        .add_commit(
+            &mut io,
+            object_id,
+            branch,
+            vec![parent_id],
+            b"second".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(
+        io.load_counts().5,
+        after_first_commit,
+        "follow-up commits on the same batch should not reload the prefix catalog"
+    );
 }
 
 #[test]
@@ -1782,15 +1839,9 @@ fn get_leaf_head_ids_for_prefix_cold_loads_only_leaf_branches() {
 
     assert_eq!(leaf_heads.len(), 1);
     assert_eq!(leaf_heads.get(&batch3), Some(&merged_head));
-
-    let object = reloaded.get(object_id).unwrap();
-    assert!(object.branches.is_empty());
     assert!(
-        object
-            .branches
-            .prefix_catalog(&BranchName::new(prefix.branch_prefix()))
-            .is_none(),
-        "leaf-head scan should not materialize the full prefix catalog"
+        reloaded.get(object_id).is_none(),
+        "leaf-head scan should not cache an object shell just to answer the query"
     );
 }
 
@@ -1851,15 +1902,9 @@ fn get_head_ids_for_prefix_cold_loads_without_loading_branches() {
     assert_eq!(head_ids.get(&batch1), Some(&head1));
     assert_eq!(head_ids.get(&batch2), Some(&head2));
     assert_eq!(head_ids.get(&batch3), Some(&head3));
-
-    let object = reloaded.get(object_id).unwrap();
-    assert!(object.branches.is_empty());
     assert!(
-        object
-            .branches
-            .prefix_catalog(&BranchName::new(prefix.branch_prefix()))
-            .is_none(),
-        "head scan should not materialize the full prefix catalog"
+        reloaded.get(object_id).is_none(),
+        "head scan should not cache an object shell just to answer the query"
     );
 }
 

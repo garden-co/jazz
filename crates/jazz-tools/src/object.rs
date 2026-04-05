@@ -140,6 +140,8 @@ pub struct Branch {
     /// Truncation boundary. None = full history from roots.
     /// Some(tails) = history only includes tails and their descendants.
     pub tails: Option<SmolSet<[CommitId; 2]>>,
+    /// Cached batch metadata for this branch's current batch.
+    pub batch_meta: Option<PrefixBatchMeta>,
     pub loaded_state: BranchLoadedState,
 }
 

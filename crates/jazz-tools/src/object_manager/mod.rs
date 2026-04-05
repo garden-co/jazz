@@ -97,6 +97,7 @@ pub enum TruncateError {
 struct PendingBatchCatalogUpdate {
     prefix: BranchName,
     base_catalog: Option<PrefixBatchCatalog>,
+    update_cached_catalog: bool,
     storage_update: PrefixBatchUpdate,
     resolved_parent_branches: Vec<(CommitId, BatchBranchKey)>,
 }
@@ -167,6 +168,7 @@ impl ObjectManager {
                 } else {
                     Some(loaded.tails.into_iter().collect())
                 },
+                batch_meta: None,
                 loaded_state: BranchLoadedState::AllCommits,
             },
             commit_ids,
@@ -190,6 +192,7 @@ impl ObjectManager {
                 commits,
                 tips,
                 tails: None,
+                batch_meta: None,
                 loaded_state: BranchLoadedState::TipsOnly,
             },
             commit_ids,
@@ -340,11 +343,16 @@ impl ObjectManager {
                 continue;
             }
             let branch_ref = branch_key.as_query_branch_ref();
+            let cached_batch_meta = object
+                .branches
+                .prefix_catalog(&branch_key.prefix_name())
+                .and_then(|catalog| catalog.batch_meta(&branch_key.batch_id()).cloned());
 
             if full_history {
                 match storage.load_branch_existing_object(id, &branch_ref) {
                     Ok(Some(loaded)) => {
-                        let (branch, commit_ids_for_branch) = Self::branch_from_loaded(loaded);
+                        let (mut branch, commit_ids_for_branch) = Self::branch_from_loaded(loaded);
+                        branch.batch_meta = cached_batch_meta.clone();
                         object.branches.insert_by_key(*branch_key, branch);
                         for commit_id in commit_ids_for_branch {
                             object.commit_branches.insert(commit_id, *branch_key);
@@ -363,7 +371,9 @@ impl ObjectManager {
             } else {
                 match storage.load_branch_tips_existing_object(id, &branch_ref) {
                     Ok(Some(loaded)) => {
-                        let (branch, commit_ids_for_branch) = Self::branch_from_loaded_tips(loaded);
+                        let (mut branch, commit_ids_for_branch) =
+                            Self::branch_from_loaded_tips(loaded);
+                        branch.batch_meta = cached_batch_meta.clone();
                         object.branches.insert_by_key(*branch_key, branch);
                         for commit_id in commit_ids_for_branch {
                             object.commit_branches.insert(commit_id, *branch_key);
@@ -504,16 +514,8 @@ impl ObjectManager {
         commit: &Commit,
     ) -> Result<PendingBatchCatalogUpdate, Error> {
         let prefix_name = branch_key.prefix_name();
-        let loaded_catalog =
-            Self::load_prefix_batch_catalog(object, io, object_id, prefix_name.as_str())?;
-        let base_catalog = object
-            .branches
-            .prefix_catalog(&prefix_name)
-            .is_none()
-            .then(|| loaded_catalog.clone().into_owned());
-        let existing_meta = loaded_catalog.batch_meta(&branch_key.batch_id()).cloned();
+        let update_cached_catalog = object.branches.prefix_catalog(&prefix_name).is_some();
         let mut resolved_parent_branches = Vec::new();
-        let mut parent_batch_ords = SmallVec::<[_; 4]>::new();
 
         for parent in &commit.parents {
             let Some(parent_branch_key) =
@@ -522,7 +524,41 @@ impl ObjectManager {
                 continue;
             };
             resolved_parent_branches.push((*parent, parent_branch_key));
+        }
 
+        if let Some(mut batch_meta) = object
+            .branches
+            .get_by_key(branch_key)
+            .and_then(|branch| branch.batch_meta.clone())
+        {
+            batch_meta.head_commit_id = commit.id();
+            batch_meta.last_timestamp = commit.timestamp;
+
+            return Ok(PendingBatchCatalogUpdate {
+                prefix: prefix_name,
+                base_catalog: None,
+                update_cached_catalog,
+                storage_update: PrefixBatchUpdate {
+                    prefix: prefix_name,
+                    batch_meta,
+                    remove_leaf_batch_ords: SmolSet::new(),
+                    increment_parent_child_counts: SmallVec::new(),
+                },
+                resolved_parent_branches,
+            });
+        }
+
+        let loaded_catalog =
+            Self::load_prefix_batch_catalog(object, io, object_id, prefix_name.as_str())?;
+        let base_catalog = object
+            .branches
+            .prefix_catalog(&prefix_name)
+            .is_none()
+            .then(|| loaded_catalog.clone().into_owned());
+        let existing_meta = loaded_catalog.batch_meta(&branch_key.batch_id()).cloned();
+        let mut parent_batch_ords = SmallVec::<[_; 4]>::new();
+
+        for (_, parent_branch_key) in &resolved_parent_branches {
             if parent_branch_key.prefix_name() == prefix_name
                 && let Some(parent_batch_ord) =
                     loaded_catalog.batch_ord(&parent_branch_key.batch_id())
@@ -560,6 +596,7 @@ impl ObjectManager {
         Ok(PendingBatchCatalogUpdate {
             prefix: prefix_name,
             base_catalog,
+            update_cached_catalog: true,
             storage_update: PrefixBatchUpdate {
                 prefix: prefix_name,
                 batch_meta,
@@ -809,10 +846,10 @@ impl ObjectManager {
             .append_commit(
                 object_id,
                 &QueryBranchRef::from_batch_branch_key(branch_key),
-                commit.clone(),
+                &commit,
                 pending_batch_update
                     .as_ref()
-                    .map(|update| update.storage_update.clone()),
+                    .map(|update| &update.storage_update),
             )
             .is_ok()
         {
@@ -830,8 +867,10 @@ impl ObjectManager {
                     .branches
                     .ensure_prefix_catalog(update.prefix, base_catalog.clone());
             }
-            let catalog = object.branches.prefix_catalog_mut_or_default(update.prefix);
-            Self::apply_prefix_batch_update(catalog, &update.storage_update);
+            if update.update_cached_catalog {
+                let catalog = object.branches.prefix_catalog_mut_or_default(update.prefix);
+                Self::apply_prefix_batch_update(catalog, &update.storage_update);
+            }
             for (parent_commit_id, parent_branch_key) in &update.resolved_parent_branches {
                 object
                     .commit_branches
@@ -846,6 +885,9 @@ impl ObjectManager {
             loaded_state: BranchLoadedState::AllCommits,
             ..Default::default()
         });
+        if let Some(update) = &pending_batch_update {
+            branch.batch_meta = Some(update.storage_update.batch_meta.clone());
+        }
 
         // Update tips: remove parents, add new commit
         for parent in &parents {
@@ -995,44 +1037,105 @@ impl ObjectManager {
         Ok(&branch.commits)
     }
 
+    pub fn get_leaf_heads_for_prefix_keys(
+        &mut self,
+        object_id: ObjectId,
+        prefix: &BranchPrefixName,
+        storage: &dyn Storage,
+    ) -> Result<Vec<(BatchBranchKey, CommitId)>, Error> {
+        let prefix_key = BranchName::new(prefix.branch_prefix());
+        if let Some(catalog) = self
+            .get(object_id)
+            .and_then(|object| object.branches.prefix_catalog(&prefix_key))
+        {
+            let mut head_ids = Vec::with_capacity(catalog.leaf_batch_count());
+            for batch_ord in catalog.leaf_batch_ords() {
+                if let Some(batch_meta) = catalog.batch_meta_by_ord(batch_ord) {
+                    head_ids.push((
+                        BatchBranchKey::from_prefix_name_and_batch(prefix_key, batch_meta.batch_id),
+                        batch_meta.head_commit_id,
+                    ));
+                }
+            }
+            return Ok(head_ids);
+        }
+
+        if self.get(object_id).is_none()
+            && !storage
+                .object_exists(object_id)
+                .map_err(Error::StorageError)?
+        {
+            return Err(Error::ObjectNotFound(object_id));
+        }
+
+        let leaf_heads = storage
+            .load_prefix_leaf_head_entries(object_id, prefix_key.as_str())
+            .map_err(Error::StorageError)?;
+        Ok(leaf_heads
+            .into_iter()
+            .map(|(batch_id, head_commit_id)| {
+                (
+                    BatchBranchKey::from_prefix_name_and_batch(prefix_key, batch_id),
+                    head_commit_id,
+                )
+            })
+            .collect())
+    }
+
     pub fn get_leaf_head_ids_for_prefix(
         &mut self,
         object_id: ObjectId,
         prefix: &BranchPrefixName,
         storage: &dyn Storage,
     ) -> Result<HashMap<BranchName, CommitId>, Error> {
+        Ok(self
+            .get_leaf_heads_for_prefix_keys(object_id, prefix, storage)?
+            .into_iter()
+            .map(|(branch_key, commit_id)| (branch_key.branch_name(), commit_id))
+            .collect())
+    }
+
+    pub fn get_heads_for_prefix_keys(
+        &mut self,
+        object_id: ObjectId,
+        prefix: &BranchPrefixName,
+        storage: &dyn Storage,
+    ) -> Result<Vec<(BatchBranchKey, CommitId)>, Error> {
         let prefix_key = BranchName::new(prefix.branch_prefix());
-        if self.get(object_id).is_none() && self.ensure_object_cached(object_id, storage).is_none()
-        {
-            return Err(Error::ObjectNotFound(object_id));
-        }
         if let Some(catalog) = self
             .get(object_id)
             .and_then(|object| object.branches.prefix_catalog(&prefix_key))
         {
-            let mut head_ids = HashMap::with_capacity(catalog.leaf_batch_count());
-            for batch_ord in catalog.leaf_batch_ords() {
-                if let Some(batch_meta) = catalog.batch_meta_by_ord(batch_ord) {
-                    head_ids.insert(
-                        prefix.with_batch_id(batch_meta.batch_id).to_branch_name(),
-                        batch_meta.head_commit_id,
-                    );
-                }
+            let mut head_ids = Vec::with_capacity(catalog.batch_count());
+            for batch_meta in catalog.batch_metas() {
+                head_ids.push((
+                    BatchBranchKey::from_prefix_name_and_batch(prefix_key, batch_meta.batch_id),
+                    batch_meta.head_commit_id,
+                ));
             }
             return Ok(head_ids);
         }
 
-        let leaf_heads = storage
-            .load_prefix_leaf_head_entries(object_id, prefix_key.as_str())
-            .map_err(Error::StorageError)?;
-        let mut head_ids = HashMap::with_capacity(leaf_heads.len());
-        for (batch_id, head_commit_id) in leaf_heads {
-            head_ids.insert(
-                prefix.with_batch_id(batch_id).to_branch_name(),
-                head_commit_id,
-            );
+        if self.get(object_id).is_none()
+            && !storage
+                .object_exists(object_id)
+                .map_err(Error::StorageError)?
+        {
+            return Err(Error::ObjectNotFound(object_id));
         }
-        Ok(head_ids)
+
+        let heads = storage
+            .load_prefix_head_entries(object_id, prefix_key.as_str())
+            .map_err(Error::StorageError)?;
+        Ok(heads
+            .into_iter()
+            .map(|(batch_id, head_commit_id)| {
+                (
+                    BatchBranchKey::from_prefix_name_and_batch(prefix_key, batch_id),
+                    head_commit_id,
+                )
+            })
+            .collect())
     }
 
     pub fn get_head_ids_for_prefix(
@@ -1041,36 +1144,11 @@ impl ObjectManager {
         prefix: &BranchPrefixName,
         storage: &dyn Storage,
     ) -> Result<HashMap<BranchName, CommitId>, Error> {
-        let prefix_key = BranchName::new(prefix.branch_prefix());
-        if self.get(object_id).is_none() && self.ensure_object_cached(object_id, storage).is_none()
-        {
-            return Err(Error::ObjectNotFound(object_id));
-        }
-        if let Some(catalog) = self
-            .get(object_id)
-            .and_then(|object| object.branches.prefix_catalog(&prefix_key))
-        {
-            let mut head_ids = HashMap::with_capacity(catalog.batch_count());
-            for batch_meta in catalog.batch_metas() {
-                head_ids.insert(
-                    prefix.with_batch_id(batch_meta.batch_id).to_branch_name(),
-                    batch_meta.head_commit_id,
-                );
-            }
-            return Ok(head_ids);
-        }
-
-        let heads = storage
-            .load_prefix_head_entries(object_id, prefix_key.as_str())
-            .map_err(Error::StorageError)?;
-        let mut head_ids = HashMap::with_capacity(heads.len());
-        for (batch_id, head_commit_id) in heads {
-            head_ids.insert(
-                prefix.with_batch_id(batch_id).to_branch_name(),
-                head_commit_id,
-            );
-        }
-        Ok(head_ids)
+        Ok(self
+            .get_heads_for_prefix_keys(object_id, prefix, storage)?
+            .into_iter()
+            .map(|(branch_key, commit_id)| (branch_key.branch_name(), commit_id))
+            .collect())
     }
 
     pub fn ensure_prefix_batch_catalog_loaded(
@@ -1097,9 +1175,17 @@ impl ObjectManager {
             .load_prefix_batch_catalog(object_id, prefix_key.as_str())
             .map_err(Error::StorageError)?
             .unwrap_or_default();
+        let seeded_branch_metas: Vec<_> = catalog.batch_metas().cloned().collect();
 
         if let Some(object) = self.get_mut(object_id) {
             object.branches.ensure_prefix_catalog(prefix_key, catalog);
+            for batch_meta in seeded_branch_metas {
+                let branch_key =
+                    BatchBranchKey::from_prefix_name_and_batch(prefix_key, batch_meta.batch_id);
+                if let Some(branch) = object.branches.get_mut_by_key(branch_key) {
+                    branch.batch_meta = Some(batch_meta);
+                }
+            }
         }
 
         Ok(())
@@ -1132,16 +1218,18 @@ impl ObjectManager {
         let composed_branch =
             ComposedBranchName::parse(&branch_name).ok_or(Error::InvalidBranchName(branch_name))?;
         let leaf_heads =
-            self.get_leaf_head_ids_for_prefix(object_id, &composed_branch.prefix(), storage)?;
+            self.get_leaf_heads_for_prefix_keys(object_id, &composed_branch.prefix(), storage)?;
 
         let missing_leaf_branches: Vec<BatchBranchKey> = {
             let object = self
                 .get(object_id)
                 .ok_or(Error::ObjectNotFound(object_id))?;
             leaf_heads
-                .keys()
-                .filter(|leaf_branch_name| !object.branches.contains_key(leaf_branch_name))
-                .map(|leaf_branch_name| BatchBranchKey::from_branch_name(*leaf_branch_name))
+                .iter()
+                .map(|(leaf_branch_key, _)| *leaf_branch_key)
+                .filter(|leaf_branch_key| {
+                    !object.branches.contains_key(&leaf_branch_key.branch_name())
+                })
                 .collect()
         };
         if !missing_leaf_branches.is_empty() {
@@ -1153,12 +1241,12 @@ impl ObjectManager {
             .ok_or(Error::ObjectNotFound(object_id))?;
         Ok(leaf_heads
             .into_iter()
-            .filter_map(|(leaf_branch_name, head_id)| {
+            .filter_map(|(leaf_branch_key, head_id)| {
                 object
                     .branches
-                    .get(&leaf_branch_name)
+                    .get_by_key(leaf_branch_key)
                     .and_then(|branch| branch.commits.get(&head_id))
-                    .map(|commit| (leaf_branch_name, head_id, commit.clone()))
+                    .map(|commit| (leaf_branch_key.branch_name(), head_id, commit.clone()))
             })
             .max_by_key(|(_, head_id, commit)| (commit.timestamp, *head_id)))
     }
@@ -1186,10 +1274,10 @@ impl ObjectManager {
         let composed_branch =
             ComposedBranchName::parse(&branch_name).ok_or(Error::InvalidBranchName(branch_name))?;
         let mut parents: Vec<_> = self
-            .get_leaf_head_ids_for_prefix(object_id, &composed_branch.prefix(), storage)?
+            .get_leaf_heads_for_prefix_keys(object_id, &composed_branch.prefix(), storage)?
             .into_iter()
-            .filter_map(|(leaf_branch_name, head_id)| {
-                (leaf_branch_name != branch_name).then_some(head_id)
+            .filter_map(|(leaf_branch_key, head_id)| {
+                (leaf_branch_key.branch_name() != branch_name).then_some(head_id)
             })
             .collect();
         parents.sort();
@@ -1288,10 +1376,10 @@ impl ObjectManager {
             .append_commit(
                 object_id,
                 &QueryBranchRef::from_batch_branch_key(branch_key),
-                commit.clone(),
+                &commit,
                 pending_batch_update
                     .as_ref()
-                    .map(|update| update.storage_update.clone()),
+                    .map(|update| &update.storage_update),
             )
             .is_ok()
         {
@@ -1307,8 +1395,10 @@ impl ObjectManager {
                     .branches
                     .ensure_prefix_catalog(update.prefix, base_catalog.clone());
             }
-            let catalog = object.branches.prefix_catalog_mut_or_default(update.prefix);
-            Self::apply_prefix_batch_update(catalog, &update.storage_update);
+            if update.update_cached_catalog {
+                let catalog = object.branches.prefix_catalog_mut_or_default(update.prefix);
+                Self::apply_prefix_batch_update(catalog, &update.storage_update);
+            }
             for (parent_commit_id, parent_branch_key) in &update.resolved_parent_branches {
                 object
                     .commit_branches
@@ -1322,6 +1412,9 @@ impl ObjectManager {
             loaded_state: BranchLoadedState::AllCommits,
             ..Default::default()
         });
+        if let Some(update) = &pending_batch_update {
+            branch.batch_meta = Some(update.storage_update.batch_meta.clone());
+        }
 
         // Update tips: remove any parents that are tips, add this commit as tip
         for parent in &commit.parents {

@@ -933,6 +933,14 @@ pub(super) fn load_object_metadata_core(
     }
 }
 
+pub(super) fn object_exists_core(
+    id: ObjectId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<bool, StorageError> {
+    let key = obj_meta_key(id);
+    Ok(get(&key)?.is_some())
+}
+
 fn load_branch_manifest(
     object_id: ObjectId,
     branch: &QueryBranchRef,
@@ -1315,8 +1323,8 @@ pub(super) fn adjust_table_prefix_batch_refcount_core(
 pub(super) fn append_commit_core(
     object_id: ObjectId,
     branch: &QueryBranchRef,
-    commit: Commit,
-    prefix_batch_update: Option<PrefixBatchUpdate>,
+    commit: &Commit,
+    prefix_batch_update: Option<&PrefixBatchUpdate>,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
@@ -1324,15 +1332,15 @@ pub(super) fn append_commit_core(
     let commit_timestamp = commit.timestamp;
     let mut manifest = load_branch_manifest(object_id, branch, |key| get(key))?.unwrap_or_default();
 
-    append_commit_to_manifest_state(&mut manifest, &commit);
+    append_commit_to_manifest_state(&mut manifest, commit);
 
     if manifest.segment_ids.is_empty()
         && manifest.inline_commits.len() < MAX_INLINE_COMMITS_PER_BRANCH
     {
-        manifest.inline_commits.push(commit);
+        manifest.inline_commits.push(commit.clone());
     } else if manifest.segment_ids.is_empty() {
         let mut commits = std::mem::take(&mut manifest.inline_commits);
-        commits.push(commit);
+        commits.push(commit.clone());
         manifest.segment_ids.clear();
         for (segment_id, commit_chunk) in commits.chunks(MAX_COMMITS_PER_BRANCH_SEGMENT).enumerate()
         {
@@ -1360,7 +1368,7 @@ pub(super) fn append_commit_core(
             current_segment = PersistedBranchSegment::default();
         }
 
-        current_segment.commits.push(commit);
+        current_segment.commits.push(commit.clone());
         persist_branch_segment(
             object_id,
             branch,
@@ -1372,7 +1380,7 @@ pub(super) fn append_commit_core(
 
     persist_branch_manifest(object_id, branch, &manifest, |key, value| set(key, value))?;
 
-    if let Some(ref update) = prefix_batch_update {
+    if let Some(update) = prefix_batch_update {
         let mut catalog =
             load_prefix_batch_catalog_core(object_id, update.prefix.as_str(), |key| get(key))?
                 .unwrap_or_default();
@@ -2147,7 +2155,7 @@ mod tests {
             append_commit_core(
                 object_id,
                 &branch,
-                commit,
+                &commit,
                 None,
                 |key| Ok(store.borrow().get(key).cloned()),
                 |key, value| {
@@ -2189,7 +2197,7 @@ mod tests {
         append_commit_core(
             object_id,
             &branch,
-            spill_commit,
+            &spill_commit,
             None,
             |key| Ok(store.borrow().get(key).cloned()),
             |key, value| {

@@ -101,7 +101,7 @@ trait StorageTestCompat: Storage {
         commit: Commit,
     ) -> Result<(), StorageError> {
         let branch = branch.into_compat_branch_ref();
-        Storage::append_commit(self, object_id, &branch, commit, None)
+        Storage::append_commit(self, object_id, &branch, &commit, None)
     }
 
     fn compat_delete_commit<B: IntoCompatBranchRef>(

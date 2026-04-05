@@ -29,7 +29,6 @@ use jazz_tools::object_manager::ObjectManager;
 use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr};
 use jazz_tools::query_manager::query::{Query, QueryBuilder};
 use jazz_tools::query_manager::session::{Session, WriteContext};
-use jazz_tools::query_manager::types::ComposedBranchName;
 use jazz_tools::query_manager::types::{
     BatchId, BranchPrefixName, ColumnType, Schema, SchemaBuilder, SchemaHash, TablePolicies,
     TableSchema, Value,
@@ -2700,14 +2699,11 @@ fn scan_prefix_heads<H: jazz_tools::storage::Storage>(
     prefix: &BranchPrefixName,
 ) -> BranchHeadScan {
     let heads = manager
-        .get_head_ids_for_prefix(object_id, prefix, storage)
+        .get_heads_for_prefix_keys(object_id, prefix, storage)
         .expect("load prefix heads");
     let mut scan = BranchHeadScan { checksum: 0 };
-    for (branch_name, head_commit_id) in heads {
-        let batch_id = ComposedBranchName::parse(&branch_name)
-            .expect("prefix head branch should be composed")
-            .batch_id;
-        scan.checksum ^= batch_head_checksum(batch_id, head_commit_id);
+    for (branch_key, head_commit_id) in heads {
+        scan.checksum ^= batch_head_checksum(branch_key.batch_id(), head_commit_id);
     }
     scan
 }
@@ -2719,14 +2715,11 @@ fn scan_prefix_leaf_heads<H: jazz_tools::storage::Storage>(
     prefix: &BranchPrefixName,
 ) -> BranchHeadScan {
     let heads = manager
-        .get_leaf_head_ids_for_prefix(object_id, prefix, storage)
+        .get_leaf_heads_for_prefix_keys(object_id, prefix, storage)
         .expect("load prefix leaf heads");
     let mut scan = BranchHeadScan { checksum: 0 };
-    for (branch_name, head_commit_id) in heads {
-        let batch_id = ComposedBranchName::parse(&branch_name)
-            .expect("prefix leaf head branch should be composed")
-            .batch_id;
-        scan.checksum ^= batch_head_checksum(batch_id, head_commit_id);
+    for (branch_key, head_commit_id) in heads {
+        scan.checksum ^= batch_head_checksum(branch_key.batch_id(), head_commit_id);
     }
     scan
 }
