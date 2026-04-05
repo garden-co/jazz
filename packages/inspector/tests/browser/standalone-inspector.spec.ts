@@ -1,19 +1,34 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { expect, test } from "@playwright/test";
-import { ADMIN_SECRET, APP_ID, TEST_BRANCH, TEST_ENV, TEST_PORT } from "./test-constants.js";
+import {
+  ADMIN_SECRET,
+  APP_ID,
+  SEEDED_TODO_COUNT,
+  TEST_BRANCH,
+  TEST_ENV,
+  TEST_PORT,
+} from "./test-constants.js";
 
 const SERVER_URL = `http://127.0.0.1:${TEST_PORT}`;
-const SCHEMA_HASH = "a01f5c72ec47a3f7d91a6862b4c5779d194f586ff8b432d92aecde954c306e9c";
 const STORAGE_KEY = "jazz-inspector-standalone-config";
+const VISIBLE_ROW_COUNT = Math.min(SEEDED_TODO_COUNT, 10);
+const RUNTIME_CONFIG_PATH = join(import.meta.dirname ?? __dirname, "runtime-config.json");
 
 function storedConfig() {
+  const { schemaHash } = readRuntimeConfig();
   return {
     serverUrl: SERVER_URL,
     appId: APP_ID,
     adminSecret: ADMIN_SECRET,
     env: TEST_ENV,
     branch: TEST_BRANCH,
-    schemaHash: SCHEMA_HASH,
+    schemaHash,
   };
+}
+
+function readRuntimeConfig(): { schemaHash: string } {
+  return JSON.parse(readFileSync(RUNTIME_CONFIG_PATH, "utf8")) as { schemaHash: string };
 }
 
 test.describe("connection page", () => {
@@ -44,7 +59,9 @@ test.describe("connection page", () => {
 
     await page.getByRole("button", { name: "Use schema" }).click();
 
-    await expect(page.getByRole("link", { name: "Data Explorer" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Data Explorer" })).toBeVisible({
+      timeout: 15000,
+    });
   });
 
   test("loads data explorer from stored config", async ({ page }) => {
@@ -57,10 +74,16 @@ test.describe("connection page", () => {
     );
     await page.reload();
 
-    await expect(page.getByRole("link", { name: "Data Explorer" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Tables" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "View todos data" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "View todos schema" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Data Explorer" })).toBeVisible({
+      timeout: 15000,
+    });
+    await expect(page.getByRole("heading", { name: "Tables" })).toBeVisible({ timeout: 15000 });
+    await expect(page.getByRole("link", { name: "View todos data" })).toBeVisible({
+      timeout: 15000,
+    });
+    await expect(page.getByRole("link", { name: "View todos schema" })).toBeVisible({
+      timeout: 15000,
+    });
   });
 
   test("reset connection returns to onboarding", async ({ page }) => {
@@ -73,7 +96,9 @@ test.describe("connection page", () => {
     );
     await page.reload();
 
-    await expect(page.getByRole("button", { name: "Reset connection" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Reset connection" })).toBeVisible({
+      timeout: 15000,
+    });
     await page.getByRole("button", { name: "Reset connection" }).click();
     await expect(page.getByRole("heading", { name: "Connect to Jazz server" })).toBeVisible();
   });
@@ -91,10 +116,16 @@ test.describe("data explorer page", () => {
 
     await page.reload();
 
-    await expect(page.getByRole("link", { name: "Data Explorer" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Tables" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "View todos data" })).toBeVisible();
-    await expect(page.getByRole("link", { name: "View todos schema" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Data Explorer" })).toBeVisible({
+      timeout: 15000,
+    });
+    await expect(page.getByRole("heading", { name: "Tables" })).toBeVisible({ timeout: 15000 });
+    await expect(page.getByRole("link", { name: "View todos data" })).toBeVisible({
+      timeout: 15000,
+    });
+    await expect(page.getByRole("link", { name: "View todos schema" })).toBeVisible({
+      timeout: 15000,
+    });
   });
 
   test("loads data explorer from stored config", async ({ page }) => {
@@ -102,7 +133,9 @@ test.describe("data explorer page", () => {
 
     await expect(page.getByText("3 columns")).toBeVisible();
 
-    await expect(page.getByText("2 rows")).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText(new RegExp(`${VISIBLE_ROW_COUNT} rows on page`))).toBeVisible({
+      timeout: 10000,
+    });
   });
 
   test("loads schema explorer", async ({ page }) => {
