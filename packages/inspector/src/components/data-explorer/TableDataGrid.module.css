@@ -34,13 +34,18 @@
 }
 
 .secondaryButton {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
   border: 1px solid #2a3647;
   background: #161d27;
   color: #d7deea;
   border-radius: 4px;
   padding: 6px 10px;
   font-size: 12px;
+  line-height: 1;
   cursor: pointer;
+  text-decoration: none;
 }
 
 .secondaryButton:hover {

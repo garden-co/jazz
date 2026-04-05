@@ -21,7 +21,7 @@ import {
   type Dispatch,
   type SetStateAction,
 } from "react";
-import { Navigate, useParams } from "react-router";
+import { Link, Navigate, useParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
 import { RowMutationSidebar } from "./RowMutationSidebar.js";
@@ -758,6 +758,9 @@ export function TableDataGrid() {
         <header className={styles.header}>
           <h2 className={styles.title}>{table}</h2>
           <div className={styles.headerActions}>
+            <Link to={`/data-explorer/${table}/schema`} className={styles.secondaryButton}>
+              Schema
+            </Link>
             <button
               type="button"
               className={styles.secondaryButton}

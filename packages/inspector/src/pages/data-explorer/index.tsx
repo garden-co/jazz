@@ -38,23 +38,13 @@ export function DataExplorer() {
           <ul className={styles.tableList}>
             {tableNames.map((tableName) => (
               <li key={tableName}>
-                <div className={styles.tableRow}>
-                  <NavLink
-                    to={`/data-explorer/${tableName}/data`}
-                    className={`${styles.tableLink} ${table === tableName ? styles.tableLinkActive : ""}`}
-                    aria-label={`View ${tableName} data`}
-                  >
-                    {tableName}
-                  </NavLink>
-                  <NavLink
-                    to={`/data-explorer/${tableName}/schema`}
-                    className={styles.schemaLink}
-                    aria-label={`View ${tableName} schema`}
-                  >
-                    <span className={styles.schemaIcon}>⌘</span>
-                    <span className={styles.schemaLabel}>Schema</span>
-                  </NavLink>
-                </div>
+                <NavLink
+                  to={`/data-explorer/${tableName}/data`}
+                  className={`${styles.tableLink} ${table === tableName ? styles.tableLinkActive : ""}`}
+                  aria-label={`View ${tableName} data`}
+                >
+                  {tableName}
+                </NavLink>
               </li>
             ))}
           </ul>
