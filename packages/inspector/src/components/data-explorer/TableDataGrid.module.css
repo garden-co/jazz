@@ -2,11 +2,11 @@
   position: relative;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
-  gap: 12px;
+  gap: 10px;
   height: 100%;
   min-height: 0;
   background: transparent;
-  padding: 6px 0 0;
+  padding: 0;
 }
 
 .header {
@@ -16,17 +16,18 @@
   gap: 12px;
 }
 
+.headerActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .title {
   margin: 0;
   font-size: 18px;
   text-transform: capitalize;
   color: #eff3f8;
-}
-
-.stats {
-  margin: 4px 0 0;
-  font-size: 12px;
-  color: #92a0b4;
 }
 
 .secondaryButton {
@@ -71,24 +72,24 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 14px;
-  border-top: 1px solid #20344d;
-  border-bottom: 1px solid #20344d;
-  background: rgba(19, 31, 45, 0.72);
-  padding: 10px 0;
+  gap: 12px;
+  min-height: 28px;
+  padding: 0 0 6px;
 }
 
 .queuedBannerCopy {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
   min-width: 0;
-  color: #d7e8ed;
+  color: #9fb0c8;
   font-size: 12px;
 }
 
-.queuedBannerHint {
-  color: #8ea6c0;
+.queuedBannerLabel {
+  color: #d6deea;
+  font-weight: 600;
 }
 
 .queuedBannerError {
@@ -97,30 +98,60 @@
 
 .queuedBannerActions {
   display: inline-flex;
+  align-items: center;
   gap: 8px;
   flex-shrink: 0;
 }
 
+.queuedBannerButton {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
 .gridFrame {
   display: block;
-  flex: 1 1 auto;
+  height: 100%;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
 }
 
 .contentArea {
-  display: flex;
-  flex-direction: row;
-  align-items: stretch;
   min-height: 0;
   border-top: 1px solid #232c3a;
   overflow: hidden;
 }
 
-.contentArea .gridFrame {
-  border: 0;
-  border-radius: 0;
+.contentPanels,
+.gridPanel,
+.detailsPanel {
+  min-width: 0;
+  min-height: 0;
+}
+
+.resizeHandle {
+  position: relative;
+  width: 6px;
+  flex: 0 0 6px;
+  cursor: col-resize;
+  background: transparent;
+}
+
+.resizeHandle::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 2px;
+  width: 2px;
+  background: #232c3a;
+  border-radius: 999px;
+  transition: background 140ms ease;
+}
+
+.resizeHandle:hover::after,
+.resizeHandle[data-resize-handle-state="drag"]::after {
+  background: #345273;
 }
 
 .sidebarOverlay {
@@ -135,7 +166,9 @@
 
 .sidebarPanel {
   margin-left: auto;
-  width: fit-content;
+  width: min(560px, 38vw);
+  min-width: 420px;
+  max-width: 100%;
   height: 100%;
   box-shadow: -18px 0 28px rgba(6, 12, 20, 0.5);
 }
@@ -297,8 +330,15 @@
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+  height: 40px;
+  min-height: 40px;
+}
+
+.bottomRail {
+  display: grid;
+  gap: 6px;
   border-top: 1px solid #232c3a;
-  padding-top: 10px;
+  padding-top: 8px;
 }
 
 .paginationInfo {

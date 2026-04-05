@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TableDataGrid } from "./TableDataGrid";
 
@@ -93,7 +93,11 @@ describe("TableDataGrid", () => {
     render(<TableDataGrid />);
 
     expect(screen.getByRole("heading", { name: "todos" })).not.toBeNull();
-    expect(screen.getByText("6 columns · 2 rows on page · 0 filters")).not.toBeNull();
+    expect(screen.queryByText("6 columns · 2 rows on page · 0 filters")).toBeNull();
+    const header = screen.getByRole("heading", { name: "todos" }).closest("header");
+    expect(header).not.toBeNull();
+    expect(within(header as HTMLElement).getByRole("button", { name: "Filter" })).not.toBeNull();
+    expect(within(header as HTMLElement).getByRole("button", { name: "Insert" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: /ID/ })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "title" })).not.toBeNull();
     expect(screen.getByRole("columnheader", { name: "done" })).not.toBeNull();
@@ -102,6 +106,7 @@ describe("TableDataGrid", () => {
     expect(screen.getByText("row-2")).not.toBeNull();
     expect(screen.getByText("zeta")).not.toBeNull();
     expect(screen.getByText('{"done":true}')).not.toBeNull();
+    expect((screen.getByLabelText("Rows per page") as HTMLSelectElement).value).toBe("25");
   });
 
   it("updates query sorting when a sortable column header is clicked", () => {
@@ -110,7 +115,7 @@ describe("TableDataGrid", () => {
     const firstQuery = mockUseAll.mock.calls[0]?.[0] as { _build: () => string };
     expect(JSON.parse(firstQuery._build())).toMatchObject({
       orderBy: [["id", "asc"]],
-      limit: 11,
+      limit: 26,
       offset: 0,
     });
 
@@ -120,7 +125,7 @@ describe("TableDataGrid", () => {
     const sortedQuery = mockUseAll.mock.calls.at(-1)?.[0] as { _build: () => string };
     expect(JSON.parse(sortedQuery._build())).toMatchObject({
       orderBy: [["title", "asc"]],
-      limit: 11,
+      limit: 26,
       offset: 0,
     });
   });
@@ -150,7 +155,7 @@ describe("TableDataGrid", () => {
     expect(JSON.parse(filteredQuery._build())).toMatchObject({
       conditions: [{ column: "title", op: "contains", value: "alpha" }],
       orderBy: [["id", "asc"]],
-      limit: 11,
+      limit: 26,
       offset: 0,
     });
   });
@@ -197,7 +202,10 @@ describe("TableDataGrid", () => {
 
     fireEvent.click(screen.getByRole("gridcell", { name: "zeta" }));
 
-    expect(screen.getByRole("heading", { name: "Edit row" })).not.toBeNull();
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Edit row" })).not.toBeNull();
+    });
+    expect(screen.getAllByRole("separator")).toHaveLength(1);
     expect(screen.getByDisplayValue("row-2")).not.toBeNull();
     expect(screen.getByDisplayValue("zeta")).not.toBeNull();
     expect(screen.getByDisplayValue("false")).not.toBeNull();
@@ -228,11 +236,12 @@ describe("TableDataGrid", () => {
     fireEvent.change(editor, { target: { value: "zeta queued" } });
     fireEvent.blur(editor);
 
-    expect(screen.getByText("1 queued change across 1 row")).not.toBeNull();
+    expect(screen.getByText("Queued")).not.toBeNull();
+    expect(screen.getByText("1 change across 1 row")).not.toBeNull();
     expect(screen.getByText("zeta queued")).not.toBeNull();
     expect(mockUpdateDurable).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Save queued changes" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
     await waitFor(() => {
       expect(mockUpdateDurable).toHaveBeenCalledWith(

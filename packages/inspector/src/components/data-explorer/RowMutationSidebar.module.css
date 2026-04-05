@@ -1,8 +1,7 @@
 .sidebar {
-  width: 30vw;
-  min-width: 480px;
+  width: 100%;
+  min-width: 0;
   height: 100%;
-  border-left: 1px solid #232c3a;
   background: #10161d;
   min-height: 0;
 }

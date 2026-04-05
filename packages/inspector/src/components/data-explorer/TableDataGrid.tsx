@@ -9,6 +9,7 @@ import {
   type RowsChangeData,
   type SortColumn,
 } from "react-data-grid";
+import { Group, Panel, Separator } from "react-resizable-panels";
 import type { ColumnDescriptor, ColumnType, DynamicTableRow, TableProxy } from "jazz-tools";
 import { useAll, useDb } from "jazz-tools/react";
 import {
@@ -24,7 +25,11 @@ import { Navigate, useParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
 import { RowMutationSidebar } from "./RowMutationSidebar.js";
-import { TableFilterBuilder, type TableFilterClause } from "./TableFilterBuilder.js";
+import {
+  TableFilterBuilder,
+  type TableFilterBuilderHandle,
+  type TableFilterClause,
+} from "./TableFilterBuilder.js";
 import {
   formatMutationFieldValue,
   getFieldReadOnlyReason,
@@ -41,11 +46,13 @@ function formatCellValue(value: unknown): string {
 }
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
+const DEFAULT_PAGE_SIZE = 25;
 const EMPTY_ROWS: DynamicTableRow[] = [];
 const CELL_UPDATE_ANIMATION_MS = 1_200;
 const ROW_ADDED_ANIMATION_MS = 2_000;
 const ROW_REMOVED_ANIMATION_MS = 650;
 const DATA_COLUMN_MAX_WIDTH = 360;
+const POINTER_SIDEBAR_OPEN_DELAY_MS = 180;
 
 interface MutationState {
   mode: "insert";
@@ -471,7 +478,7 @@ export function TableDataGrid() {
   const [sorting, setSorting] = useState<readonly SortColumn[]>([
     { columnKey: "id", direction: "ASC" },
   ]);
-  const [pageSize, setPageSize] = useState<number>(PAGE_SIZE_OPTIONS[0]);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
   const [pageIndex, setPageIndex] = useState(0);
   const [filters, setFilters] = useState<TableFilterClause[]>([]);
   const [mutationState, setMutationState] = useState<MutationState | null>(null);
@@ -481,6 +488,7 @@ export function TableDataGrid() {
   const [isQueuedSavePending, setIsQueuedSavePending] = useState(false);
   const [queuedSaveError, setQueuedSaveError] = useState<string | null>(null);
   const [deletingRowId, setDeletingRowId] = useState<string | null>(null);
+  const filterBuilderRef = useRef<TableFilterBuilderHandle | null>(null);
   const schemaColumns = schema[table]?.columns ?? [];
   const schemaColumnById = useMemo(
     () => new Map(schemaColumns.map((column) => [column.name, column])),
@@ -549,6 +557,7 @@ export function TableDataGrid() {
   const queuedEditedRowCount = useMemo(() => Object.keys(queuedEdits).length, [queuedEdits]);
   const hasQueuedEdits = queuedEditCount > 0;
   const isAnyMutationPending = isSidebarMutationPending || isQueuedSavePending;
+  const filterButtonLabel = filters.length > 0 ? `Filter (${filters.length})` : "Filter";
   const gridAnimationScopeKey = useMemo(
     () => `${table}:${builtQuery}:${gridColumns.map((column) => column.id).join("|")}`,
     [builtQuery, gridColumns, table],
@@ -753,68 +762,34 @@ export function TableDataGrid() {
     >
       <section className={styles.container}>
         <header className={styles.header}>
-          <div>
-            <h2 className={styles.title}>{table}</h2>
-            <p className={styles.stats}>
-              {gridColumns.length} column{gridColumns.length === 1 ? "" : "s"} ·{" "}
-              {visibleRows.length} row{visibleRows.length === 1 ? "" : "s"} on page ·{" "}
-              {filters.length} filter{filters.length === 1 ? "" : "s"}
-            </p>
+          <h2 className={styles.title}>{table}</h2>
+          <div className={styles.headerActions}>
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              onClick={() => {
+                filterBuilderRef.current?.open();
+              }}
+            >
+              {filterButtonLabel}
+            </button>
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              onClick={() => {
+                setMutationState({ mode: "insert" });
+              }}
+              disabled={hasQueuedEdits || isAnyMutationPending || deletingRowId !== null}
+            >
+              Insert
+            </button>
           </div>
-          <button
-            type="button"
-            className={styles.secondaryButton}
-            onClick={() => {
-              setMutationState({ mode: "insert" });
-            }}
-            disabled={hasQueuedEdits || isAnyMutationPending || deletingRowId !== null}
-          >
-            Insert
-          </button>
         </header>
-        {hasQueuedEdits || queuedSaveError ? (
-          <div
-            className={styles.queuedBanner}
-            role={queuedSaveError ? "alert" : "status"}
-            aria-live="polite"
-          >
-            <div className={styles.queuedBannerCopy}>
-              <strong>
-                {queuedEditCount} queued change{queuedEditCount === 1 ? "" : "s"} across{" "}
-                {queuedEditedRowCount} row{queuedEditedRowCount === 1 ? "" : "s"}
-              </strong>
-              <span className={styles.queuedBannerHint}>
-                Double-click a cell to stage edits locally, then save them together.
-              </span>
-              {queuedSaveError ? (
-                <span className={styles.queuedBannerError}>{queuedSaveError}</span>
-              ) : null}
-            </div>
-            <div className={styles.queuedBannerActions}>
-              <button
-                type="button"
-                className={styles.secondaryButton}
-                onClick={handleDiscardQueuedEdits}
-                disabled={isQueuedSavePending}
-              >
-                Discard queued changes
-              </button>
-              <button
-                type="button"
-                className={styles.primaryButton}
-                onClick={() => {
-                  void handleSaveQueuedEdits();
-                }}
-                disabled={isQueuedSavePending}
-              >
-                {isQueuedSavePending ? "Saving..." : "Save queued changes"}
-              </button>
-            </div>
-          </div>
-        ) : null}
         <TableFilterBuilder
+          ref={filterBuilderRef}
           schemaColumns={schemaColumns}
           clauses={filters}
+          showTrigger={false}
           onClausesChange={(nextFilters) => {
             recordGridEvent("filters-change", { nextFilterCount: nextFilters.length });
             setFilters(nextFilters);
@@ -822,93 +797,160 @@ export function TableDataGrid() {
           }}
         />
         <div className={styles.contentArea}>
-          <div className={styles.gridFrame}>
-            <PlainTableView
-              rows={visibleRows}
-              gridColumns={gridColumns}
-              sorting={sorting}
-              schemaColumnById={schemaColumnById}
-              queuedEdits={queuedEdits}
-              isSidebarMutationPending={isSidebarMutationPending}
-              isQueuedSavePending={isQueuedSavePending}
-              deletingRowId={deletingRowId}
-              animationScopeKey={gridAnimationScopeKey}
-              onSortColumnsChange={handleSortColumnsChange}
-              onQueuedEditsChange={setQueuedEdits}
-              onQueuedSaveErrorChange={setQueuedSaveError}
-              onSelectedRowIdChange={setSelectedRowId}
-              onEditRow={handleEditRow}
-              onDeleteRow={handleDeleteRow}
-            />
-          </div>
           {!mutationState && selectedRowValues ? (
-            <RowMutationSidebar
-              key={`edit:${selectedRowId}`}
-              mode="edit"
-              tableName={table}
-              schemaColumns={schemaColumns}
-              targetRowId={selectedRowId}
-              rowValues={selectedRowValues}
-              onCancel={() => {
-                setSelectedRowId(null);
-              }}
-              onSave={handleSaveSelectedRow}
-            />
-          ) : null}
+            <Group className={styles.contentPanels} orientation="horizontal">
+              <Panel className={styles.gridPanel} defaultSize="68%" minSize="35%">
+                <div className={styles.gridFrame}>
+                  <PlainTableView
+                    rows={visibleRows}
+                    gridColumns={gridColumns}
+                    sorting={sorting}
+                    schemaColumnById={schemaColumnById}
+                    queuedEdits={queuedEdits}
+                    isSidebarMutationPending={isSidebarMutationPending}
+                    isQueuedSavePending={isQueuedSavePending}
+                    deletingRowId={deletingRowId}
+                    animationScopeKey={gridAnimationScopeKey}
+                    onSortColumnsChange={handleSortColumnsChange}
+                    onQueuedEditsChange={setQueuedEdits}
+                    onQueuedSaveErrorChange={setQueuedSaveError}
+                    onSelectedRowIdChange={setSelectedRowId}
+                    onEditRow={handleEditRow}
+                    onDeleteRow={handleDeleteRow}
+                  />
+                </div>
+              </Panel>
+              <Separator className={styles.resizeHandle} />
+              <Panel className={styles.detailsPanel} defaultSize="32%" minSize="22%" maxSize="45%">
+                <RowMutationSidebar
+                  key={`edit:${selectedRowId}`}
+                  mode="edit"
+                  tableName={table}
+                  schemaColumns={schemaColumns}
+                  targetRowId={selectedRowId}
+                  rowValues={selectedRowValues}
+                  onCancel={() => {
+                    setSelectedRowId(null);
+                  }}
+                  onSave={handleSaveSelectedRow}
+                />
+              </Panel>
+            </Group>
+          ) : (
+            <div className={styles.gridFrame}>
+              <PlainTableView
+                rows={visibleRows}
+                gridColumns={gridColumns}
+                sorting={sorting}
+                schemaColumnById={schemaColumnById}
+                queuedEdits={queuedEdits}
+                isSidebarMutationPending={isSidebarMutationPending}
+                isQueuedSavePending={isQueuedSavePending}
+                deletingRowId={deletingRowId}
+                animationScopeKey={gridAnimationScopeKey}
+                onSortColumnsChange={handleSortColumnsChange}
+                onQueuedEditsChange={setQueuedEdits}
+                onQueuedSaveErrorChange={setQueuedSaveError}
+                onSelectedRowIdChange={setSelectedRowId}
+                onEditRow={handleEditRow}
+                onDeleteRow={handleDeleteRow}
+              />
+            </div>
+          )}
         </div>
-        <footer className={styles.footer}>
-          <div className={styles.paginationInfo}>
-            Showing {visibleRows.length === 0 ? 0 : startRow + 1}-{endRow}
-          </div>
-          <div className={styles.paginationControls}>
-            <label className={styles.pageSizeLabel}>
-              Rows per page
-              <select
-                className={styles.pageSizeSelect}
-                value={pageSize}
-                onChange={(event) => {
-                  const nextPageSize = Number(event.target.value);
-                  recordGridEvent("page-size-change", { nextPageSize });
-                  setPageSize(nextPageSize);
-                  setPageIndex(0);
+        <div className={styles.bottomRail}>
+          {hasQueuedEdits || queuedSaveError ? (
+            <div
+              className={styles.queuedBanner}
+              role={queuedSaveError ? "alert" : "status"}
+              aria-live="polite"
+            >
+              <div className={styles.queuedBannerCopy}>
+                <span className={styles.queuedBannerLabel}>Queued</span>
+                <span>
+                  {queuedEditCount} change{queuedEditCount === 1 ? "" : "s"} across{" "}
+                  {queuedEditedRowCount} row{queuedEditedRowCount === 1 ? "" : "s"}
+                </span>
+                {queuedSaveError ? (
+                  <span className={styles.queuedBannerError}>{queuedSaveError}</span>
+                ) : null}
+              </div>
+              <div className={styles.queuedBannerActions}>
+                <button
+                  type="button"
+                  className={`${styles.secondaryButton} ${styles.queuedBannerButton}`}
+                  onClick={handleDiscardQueuedEdits}
+                  disabled={isQueuedSavePending}
+                >
+                  Discard
+                </button>
+                <button
+                  type="button"
+                  className={`${styles.primaryButton} ${styles.queuedBannerButton}`}
+                  onClick={() => {
+                    void handleSaveQueuedEdits();
+                  }}
+                  disabled={isQueuedSavePending}
+                >
+                  {isQueuedSavePending ? "Saving..." : "Save changes"}
+                </button>
+              </div>
+            </div>
+          ) : null}
+          <footer className={styles.footer}>
+            <div className={styles.paginationInfo}>
+              Showing {visibleRows.length === 0 ? 0 : startRow + 1}-{endRow}
+            </div>
+            <div className={styles.paginationControls}>
+              <label className={styles.pageSizeLabel}>
+                Rows per page
+                <select
+                  className={styles.pageSizeSelect}
+                  value={pageSize}
+                  onChange={(event) => {
+                    const nextPageSize = Number(event.target.value);
+                    recordGridEvent("page-size-change", { nextPageSize });
+                    setPageSize(nextPageSize);
+                    setPageIndex(0);
+                  }}
+                >
+                  {PAGE_SIZE_OPTIONS.map((sizeOption) => (
+                    <option key={sizeOption} value={sizeOption}>
+                      {sizeOption}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <span className={styles.pageIndicator}>Page {pageIndex + 1}</span>
+              <button
+                type="button"
+                className={styles.secondaryButton}
+                onClick={() => {
+                  recordGridEvent("previous-page-click", {
+                    nextPageIndex: Math.max(0, pageIndex - 1),
+                  });
+                  setPageIndex((current) => Math.max(0, current - 1));
                 }}
+                disabled={pageIndex === 0}
               >
-                {PAGE_SIZE_OPTIONS.map((sizeOption) => (
-                  <option key={sizeOption} value={sizeOption}>
-                    {sizeOption}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <span className={styles.pageIndicator}>Page {pageIndex + 1}</span>
-            <button
-              type="button"
-              className={styles.secondaryButton}
-              onClick={() => {
-                recordGridEvent("previous-page-click", {
-                  nextPageIndex: Math.max(0, pageIndex - 1),
-                });
-                setPageIndex((current) => Math.max(0, current - 1));
-              }}
-              disabled={pageIndex === 0}
-            >
-              Previous
-            </button>
-            <button
-              type="button"
-              className={styles.secondaryButton}
-              onClick={() => {
-                recordGridEvent("next-page-click", {
-                  nextPageIndex: pageIndex + 1,
-                });
-                setPageIndex((current) => current + 1);
-              }}
-              disabled={!hasNextPage}
-            >
-              Next
-            </button>
-          </div>
-        </footer>
+                Previous
+              </button>
+              <button
+                type="button"
+                className={styles.secondaryButton}
+                onClick={() => {
+                  recordGridEvent("next-page-click", {
+                    nextPageIndex: pageIndex + 1,
+                  });
+                  setPageIndex((current) => current + 1);
+                }}
+                disabled={!hasNextPage}
+              >
+                Next
+              </button>
+            </div>
+          </footer>
+        </div>
         {mutationState ? (
           <div
             className={styles.sidebarOverlay}
@@ -1114,7 +1156,23 @@ function PlainTableView({
   onEditRow: (rowId: string) => void;
   onDeleteRow: (rowId: string) => Promise<void>;
 }) {
+  const suppressNextSelectedCellChangeRef = useRef(false);
+  const pointerSidebarOpenTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const animatedRows = useAnimatedGridRows(rows, gridColumns, animationScopeKey);
+  const clearPendingSidebarOpen = (): void => {
+    const timeout = pointerSidebarOpenTimeoutRef.current;
+    if (timeout) {
+      clearTimeout(timeout);
+      pointerSidebarOpenTimeoutRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      clearPendingSidebarOpen();
+    };
+  }, []);
+
   const editableRows = useMemo<EditableGridRow[]>(() => {
     return animatedRows.map((entry) => {
       const rowId = getGridRowId(entry.row);
@@ -1277,19 +1335,51 @@ function PlainTableView({
       sortColumns={sorting}
       onSortColumnsChange={onSortColumnsChange}
       onRowsChange={handleRowsChange}
-      onCellClick={(args) => {
-        onSelectedRowIdChange(args.row ? getGridRowId(args.row.sourceRow) : null);
+      onCellMouseDown={() => {
+        suppressNextSelectedCellChangeRef.current = true;
+        clearPendingSidebarOpen();
+      }}
+      onCellClick={(args, event) => {
+        if (String(args.column.key) === "__actions__") {
+          return;
+        }
+
+        clearPendingSidebarOpen();
+        const rowId = args.row ? getGridRowId(args.row.sourceRow) : null;
+        if (rowId === null) {
+          onSelectedRowIdChange(null);
+          return;
+        }
+
+        if (event.detail > 1) {
+          return;
+        }
+
+        pointerSidebarOpenTimeoutRef.current = setTimeout(() => {
+          pointerSidebarOpenTimeoutRef.current = null;
+          onSelectedRowIdChange(rowId);
+        }, POINTER_SIDEBAR_OPEN_DELAY_MS);
       }}
       onSelectedCellChange={(args) => {
+        if (suppressNextSelectedCellChangeRef.current) {
+          suppressNextSelectedCellChangeRef.current = false;
+          return;
+        }
+
+        clearPendingSidebarOpen();
         onSelectedRowIdChange(args.row ? getGridRowId(args.row.sourceRow) : null);
       }}
       onCellDoubleClick={(args, event) => {
+        clearPendingSidebarOpen();
         const schemaColumn = schemaColumnById.get(String(args.column.key));
         if (!schemaColumn || getFieldReadOnlyReason(schemaColumn) !== null) {
           event.preventGridDefault();
           return;
         }
+
+        suppressNextSelectedCellChangeRef.current = true;
         args.selectCell(true);
+        event.preventGridDefault();
       }}
       rowClass={rowClass}
       renderers={renderers}

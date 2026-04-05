@@ -1,16 +1,48 @@
 .layout {
-  display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
-  gap: 0;
   height: 100%;
   min-height: 0;
 }
 
+.sidebarPanel,
+.contentPanel {
+  min-width: 0;
+  min-height: 0;
+}
+
+.contentPanel {
+  overflow: hidden;
+}
+
 .sidebar {
-  border-right: 1px solid #232c3a;
+  height: 100%;
   background: #0f141b;
   padding: 14px 12px 14px 0;
   overflow: auto;
+}
+
+.resizeHandle {
+  position: relative;
+  width: 6px;
+  flex: 0 0 6px;
+  cursor: col-resize;
+  background: transparent;
+}
+
+.resizeHandle::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 2px;
+  width: 2px;
+  background: #232c3a;
+  border-radius: 999px;
+  transition: background 140ms ease;
+}
+
+.resizeHandle:hover::after,
+.resizeHandle[data-resize-handle-state="drag"]::after {
+  background: #345273;
 }
 
 .sidebarTitle {
@@ -108,9 +140,10 @@
 }
 
 .content {
+  height: 100%;
   min-width: 0;
   min-height: 0;
-  padding-left: 20px;
+  overflow: hidden;
 }
 
 .emptyState {
