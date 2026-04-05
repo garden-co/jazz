@@ -6,8 +6,8 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import type { ColumnType, DynamicTableRow, TableProxy } from "jazz-tools";
-import { useAll, useDb } from "jazz-tools/react";
-import { useMemo, useState } from "react";
+import { useDb } from "jazz-tools/react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
@@ -25,6 +25,7 @@ function formatCellValue(value: unknown): string {
 }
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
+const DEFAULT_SORTING: SortingState = [{ id: "id", desc: false }];
 
 interface MutationState {
   mode: MutationFormMode;
@@ -56,22 +57,33 @@ export function TableDataGrid() {
 
   const { wasmSchema: schema, queryPropagation, runtime } = useDevtoolsContext();
   const db = useDb();
-  const [sorting, setSorting] = useState<SortingState>([{ id: "id", desc: false }]);
+  const [sorting, setSorting] = useState<SortingState>(DEFAULT_SORTING);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZE_OPTIONS[0]);
   const [pageIndex, setPageIndex] = useState(0);
   const [filters, setFilters] = useState<TableFilterClause[]>([]);
   const [mutationState, setMutationState] = useState<MutationState | null>(null);
   const [isSidebarMutationPending, setIsSidebarMutationPending] = useState(false);
   const [deletingRowId, setDeletingRowId] = useState<string | null>(null);
+  const [rows, setRows] = useState<DynamicTableRow[]>([]);
+  const previousTableRef = useRef(table);
   const schemaColumns = schema[table]?.columns ?? [];
-  const activeSort = sorting[0] ?? { id: "id", desc: false };
+  const availableColumnIds = useMemo(
+    () => new Set(["id", ...schemaColumns.map((column) => column.name)]),
+    [schemaColumns],
+  );
+  const activeSort =
+    sorting[0] && availableColumnIds.has(sorting[0].id) ? sorting[0] : DEFAULT_SORTING[0]!;
+  const effectiveFilters = useMemo(
+    () => filters.filter((filter) => availableColumnIds.has(filter.column)),
+    [availableColumnIds, filters],
+  );
   const sortColumn = activeSort.id;
   const sortDirection = activeSort.desc ? "desc" : "asc";
   const queryOffset = pageIndex * pageSize;
   const queryLimit = pageSize + 1;
   const queryBuilder = useMemo(() => {
     let builder = new GenericQueryBuilder(table, schema);
-    for (const filter of filters) {
+    for (const filter of effectiveFilters) {
       if (filter.operator === "eq") {
         builder = builder.where({ [filter.column]: filter.value });
       } else {
@@ -83,14 +95,42 @@ export function TableDataGrid() {
       }
     }
     return builder.orderBy(sortColumn, sortDirection).limit(queryLimit).offset(queryOffset);
-  }, [table, schema, filters, sortColumn, sortDirection, queryLimit, queryOffset]);
+  }, [table, schema, effectiveFilters, sortColumn, sortDirection, queryLimit, queryOffset]);
   const mutationDurabilityTier = runtime === "standalone" ? "edge" : "worker";
-
-  const rows =
-    useAll<DynamicTableRow>(queryBuilder, {
+  const queryOptions = useMemo(
+    () => ({
       propagation: queryPropagation,
-      visibility: "hidden_from_live_query_list",
-    }) ?? [];
+      visibility: "hidden_from_live_query_list" as const,
+    }),
+    [queryPropagation],
+  );
+  const hasNextPage = rows.length > pageSize;
+  const visibleRows = hasNextPage ? rows.slice(0, pageSize) : rows;
+
+  useEffect(() => {
+    if (previousTableRef.current === table) {
+      return;
+    }
+
+    previousTableRef.current = table;
+    setSorting(DEFAULT_SORTING);
+    setPageIndex(0);
+    setFilters([]);
+    setMutationState(null);
+    setIsSidebarMutationPending(false);
+    setDeletingRowId(null);
+  }, [table]);
+
+  useEffect(() => {
+    setRows([]);
+    return db.subscribeAll<DynamicTableRow>(
+      queryBuilder,
+      (delta) => {
+        setRows(delta.all);
+      },
+      queryOptions,
+    );
+  }, [db, queryBuilder, queryOptions]);
 
   const columnDefs = useMemo<ColumnDef<DynamicTableRow>[]>(
     () => [
@@ -98,6 +138,7 @@ export function TableDataGrid() {
         id: "id",
         accessorKey: "id",
         header: "ID",
+        enableSorting: true,
         cell: (cellContext) => formatCellValue(cellContext.getValue()),
       },
       ...schemaColumns.map(
@@ -114,15 +155,15 @@ export function TableDataGrid() {
   );
 
   const tableState = useReactTable({
-    data: rows,
+    data: visibleRows,
     columns: columnDefs,
     state: { sorting },
     onSortingChange: setSorting,
     getCoreRowModel: getCoreRowModel(),
+    manualSorting: true,
+    enableSortingRemoval: false,
   });
 
-  const hasNextPage = rows.length > pageSize;
-  const visibleRows = hasNextPage ? rows.slice(0, pageSize) : rows;
   const rowById = useMemo(() => {
     return new Map(visibleRows.map((row) => [row.id, row]));
   }, [visibleRows]);
@@ -189,17 +230,19 @@ export function TableDataGrid() {
                   {headerGroup.headers.map((header) => {
                     const sortDirection = header.column.getIsSorted();
                     const canSort = header.column.getCanSort();
+
                     return (
                       <th
                         key={header.id}
                         onClick={
                           canSort
                             ? () => {
-                                const nextSort =
-                                  sortDirection === "asc"
-                                    ? [{ id: header.column.id, desc: true }]
-                                    : [{ id: header.column.id, desc: false }];
-                                setSorting(nextSort);
+                                setSorting([
+                                  {
+                                    id: header.column.id,
+                                    desc: sortDirection === "asc",
+                                  },
+                                ]);
                                 setPageIndex(0);
                               }
                             : undefined
@@ -218,58 +261,55 @@ export function TableDataGrid() {
               ))}
             </thead>
             <tbody>
-              {tableState
-                .getRowModel()
-                .rows.slice(0, pageSize)
-                .map((row) => (
-                  <tr key={row.id}>
-                    {row.getVisibleCells().map((cell) => (
-                      <td key={cell.id}>
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                      </td>
-                    ))}
-                    <td className={styles.actionsCell}>
-                      <div className={styles.rowActions}>
-                        <button
-                          type="button"
-                          className={styles.actionButton}
-                          disabled={isSidebarMutationPending || deletingRowId !== null}
-                          onClick={() => {
-                            setMutationState({ mode: "edit", rowId: String(row.original.id) });
-                          }}
-                        >
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          className={styles.dangerActionButton}
-                          disabled={isSidebarMutationPending || deletingRowId !== null}
-                          onClick={async () => {
-                            const rowId = String(row.original.id);
-                            const confirmed = globalThis.confirm(
-                              `Delete row "${rowId}" from "${table}"?`,
-                            );
-                            if (!confirmed) return;
-
-                            try {
-                              setDeletingRowId(rowId);
-                              await db.deleteDurable(tableProxy, rowId, {
-                                tier: mutationDurabilityTier,
-                              });
-                              if (mutationState?.mode === "edit" && mutationState.rowId === rowId) {
-                                setMutationState(null);
-                              }
-                            } finally {
-                              setDeletingRowId(null);
-                            }
-                          }}
-                        >
-                          {deletingRowId === String(row.original.id) ? "Deleting..." : "Delete"}
-                        </button>
-                      </div>
+              {tableState.getRowModel().rows.map((row) => (
+                <tr key={row.id}>
+                  {row.getVisibleCells().map((cell) => (
+                    <td key={cell.id}>
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </td>
-                  </tr>
-                ))}
+                  ))}
+                  <td className={styles.actionsCell}>
+                    <div className={styles.rowActions}>
+                      <button
+                        type="button"
+                        className={styles.actionButton}
+                        disabled={isSidebarMutationPending || deletingRowId !== null}
+                        onClick={() => {
+                          setMutationState({ mode: "edit", rowId: String(row.original.id) });
+                        }}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        className={styles.dangerActionButton}
+                        disabled={isSidebarMutationPending || deletingRowId !== null}
+                        onClick={async () => {
+                          const rowId = String(row.original.id);
+                          const confirmed = globalThis.confirm(
+                            `Delete row "${rowId}" from "${table}"?`,
+                          );
+                          if (!confirmed) return;
+
+                          try {
+                            setDeletingRowId(rowId);
+                            await db.deleteDurable(tableProxy, rowId, {
+                              tier: mutationDurabilityTier,
+                            });
+                            if (mutationState?.mode === "edit" && mutationState.rowId === rowId) {
+                              setMutationState(null);
+                            }
+                          } finally {
+                            setDeletingRowId(null);
+                          }
+                        }}
+                      >
+                        {deletingRowId === String(row.original.id) ? "Deleting..." : "Delete"}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
