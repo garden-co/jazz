@@ -21,7 +21,7 @@ import {
   type Dispatch,
   type SetStateAction,
 } from "react";
-import { Link, Navigate, useParams } from "react-router";
+import { Link, Navigate, useParams, useSearchParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
 import { RowMutationSidebar } from "./RowMutationSidebar.js";
@@ -475,12 +475,114 @@ export function TableDataGrid() {
 
   const { wasmSchema: schema, queryPropagation, runtime } = useDevtoolsContext();
   const db = useDb();
-  const [sorting, setSorting] = useState<readonly SortColumn[]>([
-    { columnKey: "id", direction: "ASC" },
-  ]);
-  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
-  const [pageIndex, setPageIndex] = useState(0);
-  const [filters, setFilters] = useState<TableFilterClause[]>([]);
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const sorting = useMemo<readonly SortColumn[]>(() => {
+    const col = searchParams.get("sort");
+    const dir = searchParams.get("dir");
+    if (col) {
+      return [{ columnKey: col, direction: dir === "DESC" ? "DESC" : "ASC" }];
+    }
+    return [{ columnKey: "id", direction: "ASC" }];
+  }, [searchParams]);
+
+  const pageSize = useMemo(() => {
+    const raw = searchParams.get("pageSize");
+    if (raw) {
+      const n = Number(raw);
+      if (PAGE_SIZE_OPTIONS.includes(n as (typeof PAGE_SIZE_OPTIONS)[number])) return n;
+    }
+    return DEFAULT_PAGE_SIZE;
+  }, [searchParams]);
+
+  const pageIndex = useMemo(() => {
+    const raw = searchParams.get("page");
+    if (raw) {
+      const n = Number(raw);
+      if (Number.isInteger(n) && n >= 0) return n;
+    }
+    return 0;
+  }, [searchParams]);
+
+  const filters = useMemo<TableFilterClause[]>(() => {
+    const raw = searchParams.get("filters");
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed;
+      } catch {
+        // ignore malformed
+      }
+    }
+    return [];
+  }, [searchParams]);
+
+  const setSorting = (next: readonly SortColumn[]) => {
+    setSearchParams(
+      (prev) => {
+        const p = new URLSearchParams(prev);
+        const col = next[0];
+        if (col && (col.columnKey !== "id" || col.direction !== "ASC")) {
+          p.set("sort", col.columnKey);
+          p.set("dir", col.direction);
+        } else {
+          p.delete("sort");
+          p.delete("dir");
+        }
+        return p;
+      },
+      { replace: true },
+    );
+  };
+
+  const setPageSize = (next: number) => {
+    setSearchParams(
+      (prev) => {
+        const p = new URLSearchParams(prev);
+        if (next !== DEFAULT_PAGE_SIZE) {
+          p.set("pageSize", String(next));
+        } else {
+          p.delete("pageSize");
+        }
+        p.delete("page");
+        return p;
+      },
+      { replace: true },
+    );
+  };
+
+  const setPageIndex = (next: number | ((current: number) => number)) => {
+    setSearchParams(
+      (prev) => {
+        const p = new URLSearchParams(prev);
+        const currentPage = Number(p.get("page") ?? 0);
+        const resolved = typeof next === "function" ? next(currentPage) : next;
+        if (resolved > 0) {
+          p.set("page", String(resolved));
+        } else {
+          p.delete("page");
+        }
+        return p;
+      },
+      { replace: true },
+    );
+  };
+
+  const setFilters = (next: TableFilterClause[]) => {
+    setSearchParams(
+      (prev) => {
+        const p = new URLSearchParams(prev);
+        if (next.length > 0) {
+          p.set("filters", JSON.stringify(next));
+        } else {
+          p.delete("filters");
+        }
+        p.delete("page");
+        return p;
+      },
+      { replace: true },
+    );
+  };
   const [mutationState, setMutationState] = useState<MutationState | null>(null);
   const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
   const [isSidebarMutationPending, setIsSidebarMutationPending] = useState(false);
@@ -634,8 +736,22 @@ export function TableDataGrid() {
       columnId: nextSort[0]?.columnKey,
       nextSortDirection: nextSort[0]?.direction === "DESC" ? "desc" : "asc",
     });
-    setSorting(nextSort);
-    setPageIndex(0);
+    setSearchParams(
+      (prev) => {
+        const p = new URLSearchParams(prev);
+        const col = nextSort[0];
+        if (col && (col.columnKey !== "id" || col.direction !== "ASC")) {
+          p.set("sort", col.columnKey);
+          p.set("dir", col.direction);
+        } else {
+          p.delete("sort");
+          p.delete("dir");
+        }
+        p.delete("page");
+        return p;
+      },
+      { replace: true },
+    );
   };
   const handleSaveSelectedRow = async (updates: Record<string, unknown>): Promise<void> => {
     if (!selectedRowId) {
@@ -739,6 +855,19 @@ export function TableDataGrid() {
     }
   }, [rowById, selectedRowId]);
 
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      if (mutationState) {
+        setMutationState(null);
+      } else if (selectedRowId) {
+        setSelectedRowId(null);
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [mutationState, selectedRowId]);
+
   return (
     <Profiler
       id="TableDataGrid"
@@ -790,7 +919,6 @@ export function TableDataGrid() {
           onClausesChange={(nextFilters) => {
             recordGridEvent("filters-change", { nextFilterCount: nextFilters.length });
             setFilters(nextFilters);
-            setPageIndex(0);
           }}
         />
         <div className={styles.contentArea}>
@@ -915,7 +1043,6 @@ export function TableDataGrid() {
                     const nextPageSize = Number(event.target.value);
                     recordGridEvent("page-size-change", { nextPageSize });
                     setPageSize(nextPageSize);
-                    setPageIndex(0);
                   }}
                 >
                   {PAGE_SIZE_OPTIONS.map((sizeOption) => (
