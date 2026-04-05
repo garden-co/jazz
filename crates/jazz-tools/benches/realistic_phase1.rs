@@ -1,7 +1,7 @@
 #[path = "common/mod.rs"]
 mod permission_bench_common;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 #[cfg(any(
@@ -24,7 +24,7 @@ use std::time::Instant;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use futures::executor::block_on;
 use jazz_tools::commit::{Commit, CommitId, StoredState};
-use jazz_tools::object::ObjectId;
+use jazz_tools::object::{BranchName, ObjectId};
 use jazz_tools::object_manager::ObjectManager;
 use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr};
 use jazz_tools::query_manager::query::{Query, QueryBuilder};
@@ -2702,7 +2702,7 @@ fn scan_prefix_heads<H: jazz_tools::storage::Storage>(
         .expect("many-branches object should be loaded");
     let catalog = object
         .prefix_batches
-        .get(&prefix.branch_prefix())
+        .get(&BranchName::new(prefix.branch_prefix()))
         .expect("prefix catalog should be cached");
 
     for batch_meta in catalog.batch_metas() {
@@ -2734,7 +2734,7 @@ fn scan_prefix_leaf_heads<H: jazz_tools::storage::Storage>(
         .expect("many-branches object should be loaded");
     let catalog = object
         .prefix_batches
-        .get(&prefix.branch_prefix())
+        .get(&BranchName::new(prefix.branch_prefix()))
         .expect("prefix catalog should be cached");
 
     for batch_ord in catalog.leaf_batch_ords() {
