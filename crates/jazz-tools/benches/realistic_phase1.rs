@@ -2364,10 +2364,12 @@ fn realistic_r8_many_branches_cold_load_rocksdb(c: &mut Criterion) {
                 let storage = RocksDBStorage::open(&seeded.db_path, seeded.cache_size_bytes)
                     .expect("open rocksdb for many-branches cold-load benchmark");
                 let mut manager = ObjectManager::new();
-                let object = manager
-                    .get_or_load(seeded.object_id, &storage, &seeded.branch_names)
-                    .expect("cold-load many-branches object");
-                let scan = scan_branch_heads(object, &seeded.prefix);
+                let scan = scan_prefix_heads(
+                    &mut manager,
+                    &storage,
+                    seeded.object_id,
+                    &seeded.prefix_name,
+                );
                 storage.flush();
                 storage
                     .close()
@@ -2551,8 +2553,7 @@ impl ManyBranchesSeededDb {
             _tempdir: tempdir,
             db_path,
             object_id: dataset.object_id,
-            branch_names: dataset.branch_names,
-            prefix: dataset.prefix,
+            prefix_name: dataset.prefix_name,
             cache_size_bytes: scenario.cache_size_bytes,
         }
     }
@@ -2575,8 +2576,7 @@ impl ManyBranchesSeededDb {
             _tempdir: tempdir,
             db_path,
             object_id: dataset.object_id,
-            branch_names: dataset.branch_names,
-            prefix: dataset.prefix,
+            prefix_name: dataset.prefix_name,
             cache_size_bytes: 0,
         }
     }
