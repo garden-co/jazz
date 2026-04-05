@@ -101,11 +101,49 @@
 
 .actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
   padding: 12px 14px;
   border-top: 1px solid #232c3a;
   background: #10161d;
+}
+
+.actionsRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.deleteConfirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.deleteConfirmText {
+  font-size: 12px;
+  color: #f39ba5;
+}
+
+.dangerButton {
+  border: 1px solid #6b2a2a;
+  background: #3a1c1c;
+  color: #f39ba5;
+  border-radius: 4px;
+  padding: 7px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.dangerButton:hover {
+  background: #4a2222;
+}
+
+.dangerButton:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .primaryButton {

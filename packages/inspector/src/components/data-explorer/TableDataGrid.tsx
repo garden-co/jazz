@@ -824,6 +824,12 @@ export function TableDataGrid() {
                     setSelectedRowId(null);
                   }}
                   onSave={handleSaveSelectedRow}
+                  onDelete={async () => {
+                    await db.deleteDurable(tableProxy, selectedRowId, {
+                      tier: mutationDurabilityTier,
+                    });
+                    setSelectedRowId(null);
+                  }}
                 />
               </Panel>
             </Group>

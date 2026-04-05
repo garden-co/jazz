@@ -21,6 +21,7 @@ interface RowMutationSidebarProps {
   rowValues: Record<string, unknown> | null;
   onCancel: () => void;
   onSave: (updates: Record<string, unknown>) => void | Promise<void>;
+  onDelete?: () => void | Promise<void>;
 }
 
 function modeLabel(mode: MutationFormMode): string {
@@ -82,6 +83,7 @@ export function RowMutationSidebar({
   rowValues,
   onCancel,
   onSave,
+  onDelete,
 }: RowMutationSidebarProps) {
   const [fields, setFields] = useState<Record<string, FieldState>>(() =>
     createInitialFields(rowValues, mode, schemaColumns),
@@ -89,6 +91,8 @@ export function RowMutationSidebar({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
 
   const formFields = useMemo(() => buildMutationFormFields(schemaColumns), [schemaColumns]);
 
@@ -287,17 +291,58 @@ export function RowMutationSidebar({
         {saveError ? <p className={styles.error}>{saveError}</p> : null}
 
         <footer className={styles.actions}>
-          <button type="submit" className={styles.primaryButton} disabled={isSaving}>
-            {isSaving ? "Saving..." : saveLabel(mode)}
-          </button>
-          <button
-            type="button"
-            className={styles.secondaryButton}
-            onClick={onCancel}
-            disabled={isSaving}
-          >
-            Cancel
-          </button>
+          {mode === "edit" && onDelete ? (
+            deleteConfirm ? (
+              <div className={styles.deleteConfirm}>
+                <span className={styles.deleteConfirmText}>Delete this row?</span>
+                <button
+                  type="button"
+                  className={styles.dangerButton}
+                  disabled={isDeleting}
+                  onClick={async () => {
+                    try {
+                      setIsDeleting(true);
+                      await onDelete();
+                    } finally {
+                      setIsDeleting(false);
+                    }
+                  }}
+                >
+                  {isDeleting ? "Deleting..." : "Confirm"}
+                </button>
+                <button
+                  type="button"
+                  className={styles.secondaryButton}
+                  onClick={() => setDeleteConfirm(false)}
+                  disabled={isDeleting}
+                >
+                  No
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className={styles.dangerButton}
+                onClick={() => setDeleteConfirm(true)}
+                disabled={isSaving}
+              >
+                Delete
+              </button>
+            )
+          ) : null}
+          <div className={styles.actionsRight}>
+            <button type="submit" className={styles.primaryButton} disabled={isSaving}>
+              {isSaving ? "Saving..." : saveLabel(mode)}
+            </button>
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              onClick={onCancel}
+              disabled={isSaving}
+            >
+              Cancel
+            </button>
+          </div>
         </footer>
       </form>
     </aside>
