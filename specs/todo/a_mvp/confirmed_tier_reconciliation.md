@@ -73,6 +73,62 @@ After first delivery, later deliveries use the same per-commit rule. There is no
 
 `local_updates = Immediate` stays as the existing carve-out for optimistic local updates. It remains an explicit exception, not a side effect of stale tier state.
 
+### Read-side provenance plumbing
+
+The read-side implementation needs one additional internal structure: output-version provenance.
+
+Today the graph already carries some of the right pieces:
+
+- each materialized `TupleElement::Row` has a `commit_id`
+- `Tuple` already carries `TupleProvenance` for contributing `(object_id, branch)` scope
+- `QueryGraph::current_output_rows_with_provenance()` already exposes `(Row, TupleProvenance)`
+
+But that is not enough for tier gating:
+
+- `Row.commit_id` only tells us the primary row version
+- `TupleProvenance` only tells us contributing objects/branches, not which commit versions are visible
+- `RowProvenance` is authorship/timestamp metadata and should not be overloaded with durability state
+
+The spec should introduce a separate internal read-side shadow type, adjacent to query-manager row delivery, for example:
+
+```rust
+struct ReadProvenance {
+    visible_commit_ids: AHashSet<CommitId>,
+    visible_scope: TupleProvenance,
+}
+
+struct VisibleRowState {
+    row: Row,
+    provenance: ReadProvenance,
+}
+```
+
+Where this provenance should be built:
+
+- At the `QueryGraph` output boundary, not after wire encoding.
+- Single-table queries can populate `visible_commit_ids` from `row.commit_id`.
+- Join / projection / flattened outputs must union the `commit_id` of every materialized `TupleElement::Row` that contributes to the visible tuple.
+- Array subqueries and recursive relation outputs must merge nested child commit ids into the outer tuple's read provenance at the same places they already merge tuple scope provenance.
+
+Where this provenance should live after graph settlement:
+
+- `QuerySubscription` should keep last-delivered visible state with provenance, not just plain rows for explicit auth filtering.
+- The current `current_visible_rows: HashMap<ObjectId, Row>` is the closest existing hook. It should be replaced or mirrored with `HashMap<ObjectId, VisibleRowState>`.
+- The same shadow state should be used for both explicit-auth and non-explicit-auth subscriptions so read-tier gating does not depend on two different delivery models.
+
+How delivery should use it:
+
+- The read-tier gate should check `visible_commit_ids` for each candidate visible row.
+- A row is deliverable when every non-local commit in its `visible_commit_ids` satisfies the requested tier.
+- `QueryUpdate` and the public wire format should stay row-based; `VisibleRowState` is internal delivery state only.
+
+One subtle but important consequence:
+
+- commit-tier advancement must be able to unblock delivery even when row bytes do not change
+- therefore a tier update for a visible commit must trigger a delivery re-check against the already-settled graph output / stored `VisibleRowState`, not only against fresh `RowDelta` content changes
+
+This is the main implementation detail needed to make the read-side part concrete.
+
 ### Protocol changes
 
 Use the existing per-client stream sequence machinery as the backbone for reconciliation.
