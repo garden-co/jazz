@@ -79,14 +79,16 @@ The intent of this spec is not to make every write transactional. It is to keep 
 
 ## Terms used here
 
-- **public prefix**: the ordinary reader-visible prefix where direct writes and accepted transactional merges live
-- **tx-private prefix**: a staging prefix used only for transactional batches before acceptance
+- **replayable**: a fact is replayable if the client can recover it after a dropped live event, reconnect, or restart from durable protocol state such as ordered replay, snapshot fallback, or persisted local records. In other words, it is not "only true if you happened to catch the live callback"
+- **public prefix**: the ordinary reader-visible branch-prefix namespace introduced by the batch-branch substrate. Concretely, within an `(object_id, branch_name)` lineage, this is the prefix where direct public batches and accepted transactional merges are stored under their `BatchId`
+- **tx-private prefix**: a sibling branch-prefix namespace used only for staging transactional batches before acceptance. Ordinary readers ignore it
 - **authority**: the first durable upstream node allowed to turn a local batch into replayable truth; this is a responsibility of the existing upstream owner path, not a new server tier introduced by this spec. For transactional batches that same durable upstream node also validates the batch and emits the accepted merge set
+- **remote visibility**: whether a change is allowed to affect what another runtime, or any non-local subscription result, can see over sync
 - **strict transaction visibility**: an opt-in query mode that waits for accepted transactional results to be complete for the query's current local scope before showing them
 
 One master invariant runs through the whole design:
 
-- only public commits participate in remote visibility
+- only public commits may affect remote visibility
 - tx-private commits are staging state and optional local overlay state only
 
 ## Goals
@@ -156,7 +158,14 @@ The MVP should not make applications pay transaction latency, authority dependen
 
 ### 3. `BatchId` is the transaction id for transactional writes
 
-For a transactional write, there is no second semantic id beside the batch id.
+For every write, `BatchId` remains the batch identifier from the batch-branch substrate.
+
+The only extra rule is:
+
+- for **direct public batches**, `BatchId` is just the batch id
+- for **transactional batches**, that same `BatchId` also acts as the transaction id
+
+So for a transactional write, there is no second semantic id beside the batch id.
 
 - `BatchId` is the logical transaction id
 - the same `BatchId` is reused across every touched prefix/object
