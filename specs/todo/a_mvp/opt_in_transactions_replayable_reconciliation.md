@@ -66,23 +66,25 @@ The intent of this spec is not to make every write transactional. It is to keep 
 
 ### After (`#415` substrate + this spec)
 
-| Topic                     | Proposed MVP                                                                  |
-| ------------------------- | ----------------------------------------------------------------------------- |
-| History unit              | explicit batches under a shared prefix                                        |
-| Default write model       | direct public batches remain default                                          |
-| Transactional write model | explicit opt-in, authority-decided                                            |
-| Durable completion        | replayable batch settlement                                                   |
-| Write rejection           | one replayable batch-settlement model                                         |
-| Tier-gated reads          | per visible batch, not per subscription high-water mark                       |
-| Reconnect                 | replay first, snapshot fallback, pending-batch reconciliation                 |
-| Offline restart           | persisted local batch records + replayable accepted transactional public refs |
+| Topic                     | Proposed MVP                                                                           |
+| ------------------------- | -------------------------------------------------------------------------------------- |
+| History unit              | explicit batches under a shared prefix                                                 |
+| Default write model       | direct public batches remain default                                                   |
+| Transactional write model | explicit opt-in, authority-decided                                                     |
+| Durable completion        | replayable batch settlement                                                            |
+| Write rejection           | one replayable batch-settlement model                                                  |
+| Tier-gated reads          | per visible batch, not per subscription high-water mark                                |
+| Reconnect                 | replay first, snapshot fallback, pending-batch reconciliation                          |
+| Offline restart           | persisted local batch records + replayable accepted transactional public batch members |
 
 ## Terms used here
 
 - **replayable**: a fact is replayable if the client can recover it after a dropped live event, reconnect, or restart from durable protocol state such as ordered replay, snapshot fallback, or persisted local records. In other words, it is not "only true if you happened to catch the live callback"
-- **public prefix**: the ordinary reader-visible branch-prefix namespace introduced by the batch-branch substrate. Concretely, within an `(object_id, branch_name)` lineage, this is the prefix where direct public batches and accepted transactional public refs are stored under their `BatchId`
+- **logical batch**: one user-visible write unit identified by one `BatchId`. A logical batch may touch multiple objects/branches, so it may materialize as multiple per-object batch members
+- **public batch member**: one per-object `(object_id, branch_name, batch_id)` materialization of a logical batch on the public prefix
+- **public prefix**: the ordinary reader-visible branch-prefix namespace introduced by the batch-branch substrate. Concretely, within an `(object_id, branch_name)` lineage, this is the prefix where direct public batch members and accepted transactional public batch members are stored under their shared `BatchId`
 - **tx-private prefix**: a sibling branch-prefix namespace used only for staging transactional batches before acceptance. Ordinary readers ignore it
-- **authority**: the first durable upstream node allowed to turn a local batch into replayable truth; this is a responsibility of the existing upstream owner path, not a new server tier introduced by this spec. For transactional batches that same durable upstream node also validates the batch and emits the accepted public-ref set
+- **authority**: the first durable upstream node allowed to turn a local batch into replayable truth; this is a responsibility of the existing upstream owner path, not a new server tier introduced by this spec. For transactional batches that same durable upstream node also validates the batch and emits the accepted public-batch-member set
 - **remote visibility**: whether a change is allowed to affect what another runtime, or any non-local subscription result, can see over sync
 - **strict transaction visibility**: an opt-in query mode that waits for accepted transactional results to be complete for the query's current local scope before showing them
 
@@ -193,31 +195,31 @@ BatchSettlement =
   DurableDirect {
     batch_id,
     confirmed_tier,
-    public_refs: Vec<PublicRef>,
+    public_members: Vec<PublicBatchMember>,
   }
   AcceptedTransaction {
     batch_id,
     confirmed_tier,
-    public_refs: Vec<PublicRef>,
+    public_members: Vec<PublicBatchMember>,
   }
 ```
 
-`PublicRef` identifies one public-prefix batch materialization:
+`PublicBatchMember` identifies one per-object public-prefix member of a logical batch:
 
 ```text
-PublicRef {
+PublicBatchMember {
   object_id,
   branch_name,
   batch_id,
 }
 ```
 
-`confirmed_tier` is a property of the whole batch settlement, not of individual commits. For any settled public batch, its `confirmed_tier` is the minimum confirmed tier reached by its `public_refs`.
+`confirmed_tier` is a property of the whole batch settlement, not of individual commits. For any settled public batch, its `confirmed_tier` is the minimum confirmed tier reached by its `public_members`.
 
 This means:
 
 - a single-ref batch behaves exactly like the old intuitive model
-- a multi-ref batch only reaches tier `T` when every public ref in that batch reaches `T`
+- a multi-member batch only reaches tier `T` when every public batch member in that batch reaches `T`
 - if an application wants independent visibility, it should emit independent batches
 
 `Rejected` is terminal. `Missing` is a replayable absence result that tells the client to retransmit the original submission if it still cares about that batch. `DurableDirect` and `AcceptedTransaction` are monotonic replayable states whose `confirmed_tier` may advance over time.
@@ -242,7 +244,7 @@ Read delivery should check the currently visible batches, not a subscription-wid
 In plain terms:
 
 - `BatchSettlement.DurableDirect` answers "this direct public batch exists durably at tier T"
-- `BatchSettlement.AcceptedTransaction` answers "this transaction was accepted and its published public refs currently sit at tier T"
+- `BatchSettlement.AcceptedTransaction` answers "this transaction was accepted and its published public batch members currently sit at tier T"
 
 ### 6. Strict transaction visibility is opt-in and has one optional local overlay
 
@@ -317,7 +319,7 @@ Durable completion for a direct public batch requires:
 1. `BatchSettlement.DurableDirect`
 2. `confirmed_tier >= requested_tier`
 
-If a direct public batch spans multiple public refs, its batch `confirmed_tier` is the minimum across those refs. Apps that want one row to become visible independently of another should issue separate batches.
+If a direct public batch spans multiple public batch members, its batch `confirmed_tier` is the minimum across those members. Apps that want one row to become visible independently of another should issue separate batches.
 
 ### Transactional batches (explicit opt-in)
 
@@ -345,8 +347,8 @@ For a successful transactional batch, the end-to-end shape is:
 1. create one `BatchId`
 2. stage changes on tx-private prefixes carrying that `BatchId`
 3. ask the authority to validate and decide that batch
-4. receive `BatchSettlement.AcceptedTransaction { batch_id, confirmed_tier, public_refs }`
-5. wait for the accepted public refs in `public_refs` to become locally present and for `confirmed_tier` to satisfy any requested tier
+4. receive `BatchSettlement.AcceptedTransaction { batch_id, confirmed_tier, public_members }`
+5. wait for the accepted public batch members in `public_members` to become locally present and for `confirmed_tier` to satisfy any requested tier
 
 For a rejected transactional batch, the shape is shorter:
 
@@ -362,7 +364,7 @@ Semantics for the unified `BatchSettlement` model:
 - `Missing`: the authority has no durable record of this batch; the client must retransmit the original direct or transactional submission
 - `Rejected`: the batch was refused before or during authoritative apply
 - `DurableDirect`: a direct public batch exists durably on the public prefix and currently has batch `confirmed_tier = T`
-- `AcceptedTransaction`: the authority accepted a transactional batch, published the authoritative public refs, and those public refs currently have batch `confirmed_tier = T`
+- `AcceptedTransaction`: the authority accepted a transactional batch, published the authoritative public batch members, and those public batch members currently have batch `confirmed_tier = T`
 
 `Rejected` covers cases such as:
 
@@ -370,9 +372,9 @@ Semantics for the unified `BatchSettlement` model:
 - session required
 - catalogue write denied
 
-### Accepted public-batch metadata
+### Accepted public-batch-member metadata
 
-Every accepted transactional public ref should carry enough metadata to mark it as an accepted transaction output rather than an ordinary direct public batch.
+Every accepted transactional public batch member should carry enough metadata to mark it as an accepted transaction output rather than an ordinary direct public batch member.
 
 Minimum metadata:
 
@@ -380,10 +382,10 @@ Minimum metadata:
 
 This is needed for two reasons:
 
-1. after restart, the runtime must be able to map a visible public ref back to accepted-transaction semantics rather than treating it like an ordinary direct batch
-2. `BatchSettlement.AcceptedTransaction { public_refs }` and the public history must agree about which public refs belong to the accepted transaction
+1. after restart, the runtime must be able to map a visible public batch member back to accepted-transaction semantics rather than treating it like an ordinary direct batch member
+2. `BatchSettlement.AcceptedTransaction { public_members }` and the public history must agree about which public batch members belong to the accepted transaction
 
-`AcceptedTransaction { public_refs }` remains the authoritative replayable settlement. The accepted public-batch metadata exists so the public history itself still carries transaction attribution after persistence and reload.
+`AcceptedTransaction { public_members }` remains the authoritative replayable settlement. The accepted public-batch-member metadata exists so the public history itself still carries transaction attribution after persistence and reload.
 
 ## Local persisted records
 
@@ -446,15 +448,15 @@ The MVP completeness rule stays the one from the earlier transaction work:
 Definition:
 
 1. compute the query's current local contributing scope
-2. intersect that scope with the batch's accepted `public_refs`
-3. the transaction is complete for that query only when every intersecting accepted public ref is locally present
+2. intersect that scope with the batch's accepted `public_members`
+3. the transaction is complete for that query only when every intersecting accepted public batch member is locally present
 
 This is intentionally weaker than exact global query completeness.
 
 It is still strong enough to guarantee:
 
 - no partial accepted transaction visibility inside the query's current local scope
-- restart-safe re-derivation from persisted accepted public refs
+- restart-safe re-derivation from persisted accepted public batch members
 
 ### Optional local pending overlay
 
@@ -535,7 +537,7 @@ The client then:
 - resolves accepted transactional batches waiting on completeness and tier
 - retransmits `Missing` batches
 - fails `Rejected` batches
-- re-checks strict query visibility using the now-current frontier and accepted public refs
+- re-checks strict query visibility using the now-current frontier and accepted public batch members
 
 ## Before / After flow sketches
 
@@ -562,14 +564,14 @@ Reconnect:
 Alice writes public batch B1 with tier=global
   -> LocalBatchRecord(B1, mode=Direct, Pending)
 
-Live BatchSettlement.DurableDirect(B1, confirmed_tier=global, public_refs=[...]) is dropped
+Live BatchSettlement.DurableDirect(B1, confirmed_tier=global, public_members=[...]) is dropped
 
 Reconnect:
   -> replay active queries
   -> ResumeSync(last_seen_seq=N, pending_batches=[{B1, Direct}])
 
 Server replies:
-  -> BatchSettlement.DurableDirect(B1, confirmed_tier=global, public_refs=[...]) via replay or snapshot
+  -> BatchSettlement.DurableDirect(B1, confirmed_tier=global, public_members=[...]) via replay or snapshot
 
 Alice:
   -> marks B1 durably published
@@ -598,7 +600,7 @@ Later Bob writes C2 on Alice's edge only
 Alice subscribes with tier=global
 
 QueryFrontierSettled(through_seq=41) arrives
-BatchSettlement.DurableDirect(B1, confirmed_tier=global, public_refs=[...]) arrives
+BatchSettlement.DurableDirect(B1, confirmed_tier=global, public_members=[...]) arrives
   -> first delivery allowed
 
 Later Bob writes batch B2 on Alice's edge only
@@ -630,13 +632,13 @@ Authority validates B7
   -> BatchSettlement.AcceptedTransaction(
        B7,
        confirmed_tier=edge,
-       public_refs=[todo ref, project ref],
+       public_members=[todo member, project member],
      )
 
 Bob runs a strict transaction-visible query
   -> Bob sees nothing until:
      - AcceptedTransaction is present
-     - accepted public refs relevant to Bob's local query scope are present
+     - accepted public batch members relevant to Bob's local query scope are present
      - the batch's confirmed_tier satisfies any requested tier
 ```
 
@@ -674,7 +676,7 @@ After restart, a durable runtime should be able to reconstruct:
 - still-pending direct public batches
 - still-pending transactional batches
 - public batch settlements and their current confirmed tiers
-- accepted transaction public refs
+- accepted transaction public batch members
 - rejected outcomes awaiting acknowledgement
 
 What it should **not** need:
@@ -716,7 +718,7 @@ Prefer RuntimeCore and SchemaManager integration tests with realistic actors and
 - `alice` starts transactional batch `B8`, the authority rejects it, the local pending view rolls back, and the rejected outcome survives restart until acknowledged.
 - a reconnect within the replay window replays missed `ObjectUpdated`, `QueryFrontierSettled`, and `BatchSettlement` events without needing a full snapshot.
 - a reconnect after the replay window expires falls back to a frontier snapshot plus pending-batch reconciliation and still converges.
-- the optional local pending overlay shows Alice her own pending transactional edits locally, while Bob never sees those pending edits and still waits for accepted public refs.
+- the optional local pending overlay shows Alice her own pending transactional edits locally, while Bob never sees those pending edits and still waits for accepted public batch members.
 
 ## Planning summary
 
@@ -730,7 +732,7 @@ The MVP should be shaped as one design with two write modes over one shared batc
 2. **transactional batches are explicit opt-in**
    - `BatchId` also acts as tx id
    - authority emits `AcceptedTransaction` or `Rejected` inside `BatchSettlement`
-   - accepted public refs drive strict query visibility
+   - accepted public batch members drive strict query visibility
    - rejected outcomes roll back and survive restart
 
 This keeps the everyday local-first path simple while giving applications one coherent stricter path when they explicitly need it.
