@@ -1,13 +1,17 @@
 .root {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
   background: #10151d;
   color: #dbe1ea;
 }
 
 .topBar {
   height: 52px;
+  box-sizing: border-box;
+  flex: 0 0 52px;
   border-bottom: 1px solid #273344;
   background: #161d28;
   padding: 0 16px;
@@ -92,5 +96,7 @@
 .content {
   flex: 1;
   min-height: 0;
-  padding: 12px;
+  box-sizing: border-box;
+  overflow: hidden;
+  padding: 0 12px 12px;
 }
