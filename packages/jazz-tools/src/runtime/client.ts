@@ -45,12 +45,12 @@ export interface RequestLike {
  * satisfy this interface, allowing `JazzClient` to work with either backend.
  */
 export interface Runtime {
-  insert(table: string, values: InsertValues): Row;
-  insertWithSession?(table: string, values: InsertValues, write_context_json?: string | null): Row;
-  insertDurable(table: string, values: InsertValues, tier: string): Promise<Row>;
+  insert(table: string, values: unknown): Row;
+  insertWithSession?(table: string, values: unknown, write_context_json?: string | null): Row;
+  insertDurable(table: string, values: unknown, tier: string): Promise<Row>;
   insertDurableWithSession?(
     table: string,
-    values: InsertValues,
+    values: unknown,
     write_context_json: string | null | undefined,
     tier: string,
   ): Promise<Row>;
@@ -144,6 +144,53 @@ export interface Row {
 interface WriteContextPayload {
   session?: Session;
   attribution?: string;
+}
+
+type SerializedMutationValue =
+  | { type: "Integer"; value: number }
+  | { type: "BigInt"; value: number }
+  | { type: "Double"; value: number }
+  | { type: "Boolean"; value: boolean }
+  | { type: "Text"; value: string }
+  | { type: "Timestamp"; value: number }
+  | { type: "Uuid"; value: string }
+  | { type: "Bytea"; value: number[] }
+  | { type: "Array"; value: SerializedMutationValue[] }
+  | { type: "Row"; value: { id?: string; values: SerializedMutationValue[] } }
+  | { type: "Null" };
+
+type SerializedMutationRecord = Record<string, SerializedMutationValue>;
+
+function serializeMutationValue(value: Value): SerializedMutationValue {
+  switch (value.type) {
+    case "Bytea":
+      return { type: "Bytea", value: [...value.value] };
+    case "Array":
+      return { type: "Array", value: value.value.map((entry) => serializeMutationValue(entry)) };
+    case "Row":
+      return {
+        type: "Row",
+        value: {
+          id: value.value.id,
+          values: value.value.values.map((entry) => serializeMutationValue(entry)),
+        },
+      };
+    case "Integer":
+    case "BigInt":
+    case "Double":
+    case "Boolean":
+    case "Text":
+    case "Timestamp":
+    case "Uuid":
+    case "Null":
+      return value;
+  }
+}
+
+function serializeMutationRecord(values: Record<string, Value>): SerializedMutationRecord {
+  return Object.fromEntries(
+    Object.entries(values).map(([key, value]) => [key, serializeMutationValue(value)]),
+  );
 }
 
 /**
@@ -1050,15 +1097,16 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
   ): Row {
+    const serializedValues = serializeMutationRecord(values);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
       effectiveSession || attribution !== undefined
         ? this.requireSessionWriteMethod("insertWithSession")(
             table,
-            values,
+            serializedValues,
             this.encodeWriteContext(effectiveSession, attribution),
           )
-        : this.runtime.insert(table, values);
+        : this.runtime.insert(table, serializedValues);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
@@ -1087,17 +1135,18 @@ export class JazzClient {
     attribution?: string,
     options?: WriteDurabilityOptions,
   ): Promise<Row> {
+    const serializedValues = serializeMutationRecord(values);
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const row =
       effectiveSession || attribution !== undefined
         ? await this.requireSessionWriteMethod("insertDurableWithSession")(
             table,
-            values,
+            serializedValues,
             this.encodeWriteContext(effectiveSession, attribution),
             tier,
           )
-        : await this.runtime.insertDurable(table, values, tier);
+        : await this.runtime.insertDurable(table, serializedValues, tier);
     return {
       ...row,
       values: this.alignRowValuesToDeclaredSchema(table, row.values as Value[], this.getSchema()),
@@ -1155,16 +1204,17 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
   ): void {
+    const serializedUpdates = serializeMutationRecord(updates);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     if (effectiveSession || attribution !== undefined) {
       this.requireSessionWriteMethod("updateWithSession")(
         objectId,
-        updates,
+        serializedUpdates,
         this.encodeWriteContext(effectiveSession, attribution),
       );
       return;
     }
-    this.runtime.update(objectId, updates);
+    this.runtime.update(objectId, serializedUpdates);
   }
 
   /**
@@ -1189,18 +1239,19 @@ export class JazzClient {
     attribution?: string,
     options?: WriteDurabilityOptions,
   ): Promise<void> {
+    const serializedUpdates = serializeMutationRecord(updates);
     const tier = this.resolveWriteTier(options);
     const effectiveSession = this.resolveWriteSession(session, attribution);
     if (effectiveSession || attribution !== undefined) {
       await this.requireSessionWriteMethod("updateDurableWithSession")(
         objectId,
-        updates,
+        serializedUpdates,
         this.encodeWriteContext(effectiveSession, attribution),
         tier,
       );
       return;
     }
-    await this.runtime.updateDurable(objectId, updates, tier);
+    await this.runtime.updateDurable(objectId, serializedUpdates, tier);
   }
 
   /**

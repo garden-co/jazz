@@ -70,12 +70,23 @@ describe("toValue", () => {
     const colType: ColumnType = { type: "Bytea" };
     const bytes = new Uint8Array([0, 10, 255]);
     const converted = toValue(bytes, colType);
-    expect(converted).toEqual({ type: "Bytea", value: [0, 10, 255] });
+    expect(converted.type).toBe("Bytea");
+    if (converted.type !== "Bytea") {
+      throw new Error("expected Bytea value");
+    }
+    expect(converted.value).toBeInstanceOf(Uint8Array);
+    expect(Array.from(converted.value)).toEqual([0, 10, 255]);
   });
 
-  it("converts Bytea arrays without changing their JSON shape", () => {
+  it("converts Bytea arrays to Uint8Array values", () => {
     const colType: ColumnType = { type: "Bytea" };
-    expect(toValue([0, 10, 255], colType)).toEqual({ type: "Bytea", value: [0, 10, 255] });
+    const converted = toValue([0, 10, 255], colType);
+    expect(converted.type).toBe("Bytea");
+    if (converted.type !== "Bytea") {
+      throw new Error("expected Bytea value");
+    }
+    expect(converted.value).toBeInstanceOf(Uint8Array);
+    expect(Array.from(converted.value)).toEqual([0, 10, 255]);
   });
 
   it("rejects invalid Bytea values", () => {
@@ -209,9 +220,11 @@ describe("toInsertRecord", () => {
 
     const result = toInsertRecord(data, schema, "todos");
 
-    expect(result).toMatchObject({
-      payload: { type: "Bytea", value: [1, 2, 3] },
-    });
+    expect(result.payload?.type).toBe("Bytea");
+    expect(result.payload?.value).toBeInstanceOf(Uint8Array);
+    expect(Array.from((result.payload as { type: "Bytea"; value: Uint8Array }).value)).toEqual([
+      1, 2, 3,
+    ]);
   });
 
   it("throws for unknown table", () => {
@@ -285,9 +298,11 @@ describe("toUpdateRecord", () => {
     const data = { payload: new Uint8Array([4, 5, 6]) };
     const result = toUpdateRecord(data, schema, "todos");
 
-    expect(result).toEqual({
-      payload: { type: "Bytea", value: [4, 5, 6] },
-    });
+    expect(result.payload?.type).toBe("Bytea");
+    expect(result.payload?.value).toBeInstanceOf(Uint8Array);
+    expect(Array.from((result.payload as { type: "Bytea"; value: Uint8Array }).value)).toEqual([
+      4, 5, 6,
+    ]);
   });
 
   it("throws when null is used to unset a required field", () => {

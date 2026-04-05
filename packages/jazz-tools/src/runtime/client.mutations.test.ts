@@ -3,6 +3,7 @@ import { JazzClient, type Runtime } from "./client.js";
 import type { AppContext, Session } from "./context.js";
 
 function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
+  const insertCalls: Array<[string, Record<string, unknown>]> = [];
   const insertWithSessionCalls: Array<[string, Record<string, unknown>, string | undefined]> = [];
   const insertDurableWithSessionCalls: Array<
     [string, Record<string, unknown>, string | undefined, string]
@@ -19,7 +20,10 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const deleteDurableWithSessionCalls: Array<[string, string | undefined, string]> = [];
 
   const runtimeBase: Runtime = {
-    insert: () => ({ id: "00000000-0000-0000-0000-000000000001", values: [] }),
+    insert: (table: string, values: Record<string, unknown>) => {
+      insertCalls.push([table, values]);
+      return { id: "00000000-0000-0000-0000-000000000001", values: [] };
+    },
     insertWithSession: (
       table: string,
       values: Record<string, unknown>,
@@ -107,6 +111,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
 
   return {
     client: new JazzClientCtor(runtime, context, "edge"),
+    insertCalls,
     insertWithSessionCalls,
     insertDurableWithSessionCalls,
     updateCalls,
@@ -121,6 +126,35 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
 }
 
 describe("JazzClient mutation durability split", () => {
+  it("serializes Bytea mutations to plain arrays at the runtime boundary", () => {
+    const { client, insertCalls, updateCalls } = makeClient();
+    const payload = new Uint8Array([1, 2, 3]);
+
+    client.create("todos", {
+      payload: { type: "Bytea", value: payload },
+    });
+    client.update("row-1", {
+      payload: { type: "Bytea", value: payload },
+    });
+
+    expect(insertCalls).toEqual([
+      [
+        "todos",
+        {
+          payload: { type: "Bytea", value: [1, 2, 3] },
+        },
+      ],
+    ]);
+    expect(updateCalls).toEqual([
+      [
+        "row-1",
+        {
+          payload: { type: "Bytea", value: [1, 2, 3] },
+        },
+      ],
+    ]);
+  });
+
   it("rethrows synchronous runtime mutation errors", () => {
     const insertError = new Error("Insert failed: indexed value too large");
     const updateError = new Error("Update failed: indexed value too large");

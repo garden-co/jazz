@@ -16,20 +16,20 @@ function toTimestampMs(value: unknown): number {
   return numeric;
 }
 
-// Keep BYTEA writes JSON-serializable across WASM, RN, and N-API boundaries.
-function normalizeByteaValue(value: unknown): number[] {
+function normalizeByteaValue(value: unknown): Uint8Array {
   if (value instanceof Uint8Array) {
-    return [...value];
+    return value;
   }
 
   if (Array.isArray(value)) {
-    return value.map((entry) => {
+    const bytes = value.map((entry) => {
       const n = Number(entry);
       if (!Number.isInteger(n) || n < 0 || n > 255) {
         throw new Error("Bytea arrays must contain integers in range 0..255");
       }
       return n;
     });
+    return new Uint8Array(bytes);
   }
 
   throw new Error("Expected Uint8Array or byte array for Bytea column type");
