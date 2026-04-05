@@ -2,4 +2,4 @@
 "jazz-tools": patch
 ---
 
-Improve inspector data-grid stability and diagnostics around pending query transitions.
+Fix the inspector data grid freezing the browser tab when paging or sorting, and improve diagnostics around pending query transitions.
