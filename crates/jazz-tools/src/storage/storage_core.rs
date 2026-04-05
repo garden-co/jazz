@@ -7,28 +7,38 @@ use crate::sync_manager::DurabilityTier;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use smallvec::SmallVec;
 
+use crate::query_manager::types::PrefixId;
 use crate::query_manager::types::{BatchBranchKey, BatchId, BatchOrd, QueryBranchRef, Value};
 
 use super::key_codec::{
     ack_key, branch_manifest_key, branch_segment_key, catalogue_manifest_op_key,
     catalogue_manifest_op_prefix, commit_branch_key, index_entry_key, index_prefix,
     index_range_scan_bounds, index_value_prefix, obj_meta_key, parse_uuid_from_index_key,
-    prefix_batch_catalog_key, table_prefix_batches_key,
+    prefix_batch_catalog_key, prefix_batch_catalog_key_for_id, table_prefix_batches_key,
 };
 use super::{
     CatalogueManifest, CatalogueManifestOp, LoadedBranch, LoadedBranchTips, PrefixBatchUpdate,
     StorageError, TablePrefixBatchManifest,
 };
 
+#[derive(Debug, Clone, Default)]
+struct CommitEncodingTables {
+    authors: Vec<String>,
+    author_lookup: HashMap<String, u32>,
+    metadata_keys: Vec<String>,
+    metadata_key_lookup: HashMap<String, u32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct StoredBranchRef {
-    prefix: String,
-    batch_id: BatchId,
+    prefix_id: PrefixId,
+    batch_ord: BatchOrd,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedBranchManifest {
     segment_ids: Vec<u32>,
+    inline_commits: Vec<Commit>,
     tails: HashSet<CommitId>,
     tip_commits: Vec<Commit>,
 }
@@ -41,32 +51,30 @@ struct PersistedBranchSegment {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedPrefixBatchCatalogEntry {
     batch_id: BatchId,
+    root_commit_id: CommitId,
     head_commit_id: CommitId,
+    first_timestamp: u64,
     last_timestamp: u64,
+    parent_batch_ords: Vec<BatchOrd>,
     child_count: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedPrefixBatchCatalog {
+    prefix_name: String,
     batches: Vec<PersistedPrefixBatchCatalogEntry>,
 }
 
 const MAX_COMMITS_PER_BRANCH_SEGMENT: usize = 32;
+const MAX_INLINE_COMMITS_PER_BRANCH: usize = 8;
 const STORAGE_BINARY_V1: u8 = 1;
 
 impl StoredBranchRef {
-    fn from_branch_ref(branch: &QueryBranchRef) -> Self {
+    fn from_prefix_batch(prefix_id: PrefixId, batch_ord: BatchOrd) -> Self {
         Self {
-            prefix: branch.prefix_name().as_str().to_string(),
-            batch_id: branch.batch_id(),
+            prefix_id,
+            batch_ord,
         }
-    }
-
-    fn to_branch_ref(&self) -> QueryBranchRef {
-        QueryBranchRef::from_prefix_name_and_batch(
-            BranchName::new(self.prefix.clone()),
-            self.batch_id,
-        )
     }
 }
 
@@ -107,16 +115,27 @@ impl<'a> BinaryCursor<'a> {
         Ok(self.read_exact(label, 1)?[0])
     }
 
-    fn read_u32(&mut self, label: &str) -> Result<u32, StorageError> {
-        let mut bytes = [0u8; 4];
-        bytes.copy_from_slice(self.read_exact(label, 4)?);
-        Ok(u32::from_le_bytes(bytes))
+    fn read_var_u32(&mut self, label: &str) -> Result<u32, StorageError> {
+        let value = self.read_var_u64(label)?;
+        u32::try_from(value).map_err(|_| codec_error(label, "u32 varint overflow"))
     }
 
-    fn read_u64(&mut self, label: &str) -> Result<u64, StorageError> {
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(self.read_exact(label, 8)?);
-        Ok(u64::from_le_bytes(bytes))
+    fn read_var_u64(&mut self, label: &str) -> Result<u64, StorageError> {
+        let mut shift = 0_u32;
+        let mut value = 0_u64;
+
+        loop {
+            let byte = self.read_u8(label)?;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+
+            shift += 7;
+            if shift >= 64 {
+                return Err(codec_error(label, "u64 varint overflow"));
+            }
+        }
     }
 
     fn read_fixed<const N: usize>(&mut self, label: &str) -> Result<[u8; N], StorageError> {
@@ -126,7 +145,7 @@ impl<'a> BinaryCursor<'a> {
     }
 
     fn read_len_prefixed_bytes(&mut self, label: &str) -> Result<Vec<u8>, StorageError> {
-        let len = self.read_u32(label)? as usize;
+        let len = self.read_var_u32(label)? as usize;
         Ok(self.read_exact(label, len)?.to_vec())
     }
 
@@ -144,17 +163,38 @@ impl<'a> BinaryCursor<'a> {
     }
 }
 
-fn encode_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
+fn encode_var_u32(out: &mut Vec<u8>, value: u32) {
+    encode_var_u64(out, u64::from(value));
 }
 
-fn encode_u64(out: &mut Vec<u8>, value: u64) {
-    out.extend_from_slice(&value.to_le_bytes());
+fn encode_var_u64(out: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+}
+
+fn encode_var_i64(out: &mut Vec<u8>, value: i64) {
+    let zigzag = ((value << 1) ^ (value >> 63)) as u64;
+    encode_var_u64(out, zigzag);
+}
+
+fn decode_var_i64(cursor: &mut BinaryCursor<'_>, label: &str) -> Result<i64, StorageError> {
+    let zigzag = cursor.read_var_u64(label)?;
+    let value = ((zigzag >> 1) as i64) ^ (-((zigzag & 1) as i64));
+    Ok(value)
 }
 
 fn encode_len(out: &mut Vec<u8>, label: &str, len: usize) -> Result<(), StorageError> {
     let len = u32::try_from(len).map_err(|_| codec_error(label, "length exceeds u32"))?;
-    encode_u32(out, len);
+    encode_var_u32(out, len);
     Ok(())
 }
 
@@ -183,33 +223,150 @@ fn decode_binary_payload<'a>(
 fn encode_branch_ref(branch_ref: &StoredBranchRef) -> Result<Vec<u8>, StorageError> {
     let mut out = Vec::new();
     out.push(STORAGE_BINARY_V1);
-    encode_string(&mut out, "commit branch", &branch_ref.prefix)?;
-    out.extend_from_slice(branch_ref.batch_id.as_bytes());
+    out.extend_from_slice(branch_ref.prefix_id.as_bytes());
+    encode_var_u32(&mut out, branch_ref.batch_ord.0);
     Ok(out)
 }
 
 fn decode_branch_ref(bytes: &[u8]) -> Result<StoredBranchRef, StorageError> {
     let mut cursor = decode_binary_payload(bytes, "commit branch")?;
-    let prefix = cursor.read_string("commit branch")?;
-    let batch_id = BatchId(cursor.read_fixed::<16>("commit branch")?);
+    let prefix_id = PrefixId(cursor.read_fixed::<16>("commit branch")?);
+    let batch_ord = BatchOrd(cursor.read_var_u32("commit branch")?);
     cursor.expect_end("commit branch")?;
-    Ok(StoredBranchRef { prefix, batch_id })
+    Ok(StoredBranchRef {
+        prefix_id,
+        batch_ord,
+    })
 }
 
-fn encode_commit(out: &mut Vec<u8>, commit: &Commit, label: &str) -> Result<(), StorageError> {
-    encode_len(out, label, commit.parents.len())?;
-    for parent in &commit.parents {
-        out.extend_from_slice(&parent.0);
+fn collect_commit_encoding_tables<'a>(
+    commits: impl IntoIterator<Item = &'a Commit>,
+) -> CommitEncodingTables {
+    let mut tables = CommitEncodingTables::default();
+    for commit in commits {
+        if !tables.author_lookup.contains_key(&commit.author) {
+            let index = tables.authors.len() as u32;
+            tables.author_lookup.insert(commit.author.clone(), index);
+            tables.authors.push(commit.author.clone());
+        }
+
+        if let Some(metadata) = &commit.metadata {
+            for key in metadata.keys() {
+                if !tables.metadata_key_lookup.contains_key(key) {
+                    let index = tables.metadata_keys.len() as u32;
+                    tables.metadata_key_lookup.insert(key.clone(), index);
+                    tables.metadata_keys.push(key.clone());
+                }
+            }
+        }
+    }
+    tables
+}
+
+fn encode_commit_tables(
+    out: &mut Vec<u8>,
+    label: &str,
+    tables: &CommitEncodingTables,
+) -> Result<(), StorageError> {
+    encode_len(out, label, tables.authors.len())?;
+    for author in &tables.authors {
+        if let Ok(uuid) = uuid::Uuid::parse_str(author)
+            && uuid.to_string() == *author
+        {
+            out.push(1);
+            out.extend_from_slice(uuid.as_bytes());
+            continue;
+        }
+        out.push(0);
+        encode_string(out, label, author)?;
+    }
+
+    encode_len(out, label, tables.metadata_keys.len())?;
+    for key in &tables.metadata_keys {
+        encode_string(out, label, key)?;
+    }
+    Ok(())
+}
+
+fn decode_commit_tables(
+    cursor: &mut BinaryCursor<'_>,
+    label: &str,
+) -> Result<(Vec<String>, Vec<String>), StorageError> {
+    let author_count = cursor.read_var_u32(label)? as usize;
+    let mut authors = Vec::with_capacity(author_count);
+    for _ in 0..author_count {
+        match cursor.read_u8(label)? {
+            0 => authors.push(cursor.read_string(label)?),
+            1 => authors.push(uuid::Uuid::from_bytes(cursor.read_fixed::<16>(label)?).to_string()),
+            other => {
+                return Err(codec_error(
+                    label,
+                    format!("unknown author encoding mode {other}"),
+                ));
+            }
+        }
+    }
+
+    let metadata_key_count = cursor.read_var_u32(label)? as usize;
+    let mut metadata_keys = Vec::with_capacity(metadata_key_count);
+    for _ in 0..metadata_key_count {
+        metadata_keys.push(cursor.read_string(label)?);
+    }
+
+    Ok((authors, metadata_keys))
+}
+
+fn encode_commit(
+    out: &mut Vec<u8>,
+    commit: &Commit,
+    label: &str,
+    tables: &CommitEncodingTables,
+    previous_commit_id: Option<CommitId>,
+    previous_timestamp: Option<u64>,
+) -> Result<(), StorageError> {
+    let explicit_parent_count = commit.parents.len();
+    if explicit_parent_count == 0 {
+        out.push(0);
+    } else if explicit_parent_count == 1 && previous_commit_id == Some(commit.parents[0]) {
+        out.push(1);
+    } else {
+        out.push(2);
+        encode_len(out, label, explicit_parent_count)?;
+        for parent in &commit.parents {
+            out.extend_from_slice(&parent.0);
+        }
     }
     encode_bytes(out, label, &commit.content)?;
-    encode_u64(out, commit.timestamp);
-    encode_string(out, label, &commit.author)?;
+    if let Some(previous_timestamp) = previous_timestamp {
+        let delta = i128::from(commit.timestamp) - i128::from(previous_timestamp);
+        if let Ok(delta) = i64::try_from(delta) {
+            out.push(1);
+            encode_var_i64(out, delta);
+        } else {
+            out.push(0);
+            encode_var_u64(out, commit.timestamp);
+        }
+    } else {
+        out.push(0);
+        encode_var_u64(out, commit.timestamp);
+    }
+    let author_index = tables
+        .author_lookup
+        .get(&commit.author)
+        .copied()
+        .ok_or_else(|| codec_error(label, "missing commit author in string table"))?;
+    encode_var_u32(out, author_index);
     match &commit.metadata {
         Some(metadata) => {
             out.push(1);
             encode_len(out, label, metadata.len())?;
             for (key, value) in metadata {
-                encode_string(out, label, key)?;
+                let key_index = tables
+                    .metadata_key_lookup
+                    .get(key)
+                    .copied()
+                    .ok_or_else(|| codec_error(label, "missing metadata key in string table"))?;
+                encode_var_u32(out, key_index);
                 encode_string(out, label, value)?;
             }
         }
@@ -218,22 +375,65 @@ fn encode_commit(out: &mut Vec<u8>, commit: &Commit, label: &str) -> Result<(), 
     Ok(())
 }
 
-fn decode_commit(cursor: &mut BinaryCursor<'_>, label: &str) -> Result<Commit, StorageError> {
-    let parent_count = cursor.read_u32(label)? as usize;
-    let mut parents = SmallVec::with_capacity(parent_count);
-    for _ in 0..parent_count {
-        parents.push(CommitId(cursor.read_fixed::<32>(label)?));
-    }
+fn decode_commit(
+    cursor: &mut BinaryCursor<'_>,
+    label: &str,
+    authors: &[String],
+    metadata_keys: &[String],
+    previous_commit_id: Option<CommitId>,
+    previous_timestamp: Option<u64>,
+) -> Result<Commit, StorageError> {
+    let parent_mode = cursor.read_u8(label)?;
+    let mut parents = match parent_mode {
+        0 => SmallVec::new(),
+        1 => {
+            let previous_commit_id =
+                previous_commit_id.ok_or_else(|| codec_error(label, "missing previous commit"))?;
+            smallvec::smallvec![previous_commit_id]
+        }
+        2 => {
+            let parent_count = cursor.read_var_u32(label)? as usize;
+            let mut parents = SmallVec::with_capacity(parent_count);
+            for _ in 0..parent_count {
+                parents.push(CommitId(cursor.read_fixed::<32>(label)?));
+            }
+            parents
+        }
+        other => return Err(codec_error(label, format!("unknown parent mode {other}"))),
+    };
     let content = cursor.read_len_prefixed_bytes(label)?;
-    let timestamp = cursor.read_u64(label)?;
-    let author = cursor.read_string(label)?;
+    let timestamp = match cursor.read_u8(label)? {
+        0 => cursor.read_var_u64(label)?,
+        1 => {
+            let previous_timestamp = previous_timestamp
+                .ok_or_else(|| codec_error(label, "missing previous timestamp"))?;
+            let delta = i128::from(decode_var_i64(cursor, label)?);
+            let timestamp = i128::from(previous_timestamp) + delta;
+            u64::try_from(timestamp).map_err(|_| codec_error(label, "timestamp underflow"))?
+        }
+        other => {
+            return Err(codec_error(
+                label,
+                format!("unknown timestamp mode {other}"),
+            ));
+        }
+    };
+    let author_index = cursor.read_var_u32(label)? as usize;
+    let author = authors
+        .get(author_index)
+        .cloned()
+        .ok_or_else(|| codec_error(label, "invalid author index"))?;
     let metadata = match cursor.read_u8(label)? {
         0 => None,
         1 => {
-            let entry_count = cursor.read_u32(label)? as usize;
+            let entry_count = cursor.read_var_u32(label)? as usize;
             let mut metadata = std::collections::BTreeMap::new();
             for _ in 0..entry_count {
-                let key = cursor.read_string(label)?;
+                let key_index = cursor.read_var_u32(label)? as usize;
+                let key = metadata_keys
+                    .get(key_index)
+                    .cloned()
+                    .ok_or_else(|| codec_error(label, "invalid metadata key index"))?;
                 let value = cursor.read_string(label)?;
                 metadata.insert(key, value);
             }
@@ -243,7 +443,10 @@ fn decode_commit(cursor: &mut BinaryCursor<'_>, label: &str) -> Result<Commit, S
     };
 
     Ok(Commit {
-        parents,
+        parents: {
+            parents.shrink_to_fit();
+            parents
+        },
         content,
         timestamp,
         author,
@@ -256,48 +459,104 @@ fn decode_commit(cursor: &mut BinaryCursor<'_>, label: &str) -> Result<Commit, S
 fn encode_branch_manifest(manifest: &PersistedBranchManifest) -> Result<Vec<u8>, StorageError> {
     let mut out = Vec::new();
     out.push(STORAGE_BINARY_V1);
+    let persisted_tip_commits: &[Commit] = if manifest.inline_commits.is_empty() {
+        &manifest.tip_commits
+    } else {
+        &[]
+    };
+    let tables = collect_commit_encoding_tables(
+        manifest
+            .inline_commits
+            .iter()
+            .chain(persisted_tip_commits.iter()),
+    );
+    encode_commit_tables(&mut out, "branch manifest", &tables)?;
     encode_len(&mut out, "branch manifest", manifest.segment_ids.len())?;
-    for segment_id in &manifest.segment_ids {
-        encode_u32(&mut out, *segment_id);
+
+    encode_len(&mut out, "branch manifest", manifest.inline_commits.len())?;
+    let mut previous_commit_id = None;
+    let mut previous_timestamp = None;
+    for commit in &manifest.inline_commits {
+        encode_commit(
+            &mut out,
+            commit,
+            "branch manifest",
+            &tables,
+            previous_commit_id,
+            previous_timestamp,
+        )?;
+        previous_commit_id = Some(commit.id());
+        previous_timestamp = Some(commit.timestamp);
     }
 
-    let mut tails: Vec<_> = manifest.tails.iter().copied().collect();
+    let mut tails: Vec<CommitId> = Vec::new();
     tails.sort_unstable();
     encode_len(&mut out, "branch manifest", tails.len())?;
     for tail in &tails {
         out.extend_from_slice(&tail.0);
     }
 
-    encode_len(&mut out, "branch manifest", manifest.tip_commits.len())?;
-    for commit in &manifest.tip_commits {
-        encode_commit(&mut out, commit, "branch manifest")?;
+    encode_len(&mut out, "branch manifest", persisted_tip_commits.len())?;
+    for commit in persisted_tip_commits {
+        encode_commit(&mut out, commit, "branch manifest", &tables, None, None)?;
     }
     Ok(out)
 }
 
 fn decode_branch_manifest(bytes: &[u8]) -> Result<PersistedBranchManifest, StorageError> {
     let mut cursor = decode_binary_payload(bytes, "branch manifest")?;
-    let segment_count = cursor.read_u32("branch manifest")? as usize;
-    let mut segment_ids = Vec::with_capacity(segment_count);
-    for _ in 0..segment_count {
-        segment_ids.push(cursor.read_u32("branch manifest")?);
+    let (authors, metadata_keys) = decode_commit_tables(&mut cursor, "branch manifest")?;
+    let segment_count = cursor.read_var_u32("branch manifest")? as usize;
+    let segment_ids = (0..segment_count as u32).collect();
+
+    let inline_commit_count = cursor.read_var_u32("branch manifest")? as usize;
+    let mut inline_commits = Vec::with_capacity(inline_commit_count);
+    let mut previous_commit_id = None;
+    let mut previous_timestamp = None;
+    for _ in 0..inline_commit_count {
+        let commit = decode_commit(
+            &mut cursor,
+            "branch manifest",
+            &authors,
+            &metadata_keys,
+            previous_commit_id,
+            previous_timestamp,
+        )?;
+        previous_commit_id = Some(commit.id());
+        previous_timestamp = Some(commit.timestamp);
+        inline_commits.push(commit);
     }
 
-    let tail_count = cursor.read_u32("branch manifest")? as usize;
+    let tail_count = cursor.read_var_u32("branch manifest")? as usize;
     let mut tails = HashSet::with_capacity(tail_count);
     for _ in 0..tail_count {
         tails.insert(CommitId(cursor.read_fixed::<32>("branch manifest")?));
     }
 
-    let tip_count = cursor.read_u32("branch manifest")? as usize;
+    let tip_count = cursor.read_var_u32("branch manifest")? as usize;
     let mut tip_commits = Vec::with_capacity(tip_count);
     for _ in 0..tip_count {
-        tip_commits.push(decode_commit(&mut cursor, "branch manifest")?);
+        tip_commits.push(decode_commit(
+            &mut cursor,
+            "branch manifest",
+            &authors,
+            &metadata_keys,
+            None,
+            None,
+        )?);
     }
     cursor.expect_end("branch manifest")?;
 
+    if !inline_commits.is_empty() {
+        tip_commits = tip_commits_for_branch(&inline_commits);
+    }
+    if tails.is_empty() {
+        tails = tip_commits.iter().map(Commit::id).collect();
+    }
+
     Ok(PersistedBranchManifest {
         segment_ids,
+        inline_commits,
         tails,
         tip_commits,
     })
@@ -306,19 +565,45 @@ fn decode_branch_manifest(bytes: &[u8]) -> Result<PersistedBranchManifest, Stora
 fn encode_branch_segment(segment: &PersistedBranchSegment) -> Result<Vec<u8>, StorageError> {
     let mut out = Vec::new();
     out.push(STORAGE_BINARY_V1);
+    let tables = collect_commit_encoding_tables(segment.commits.iter());
+    encode_commit_tables(&mut out, "branch segment", &tables)?;
     encode_len(&mut out, "branch segment", segment.commits.len())?;
+    let mut previous_commit_id = None;
+    let mut previous_timestamp = None;
     for commit in &segment.commits {
-        encode_commit(&mut out, commit, "branch segment")?;
+        encode_commit(
+            &mut out,
+            commit,
+            "branch segment",
+            &tables,
+            previous_commit_id,
+            previous_timestamp,
+        )?;
+        previous_commit_id = Some(commit.id());
+        previous_timestamp = Some(commit.timestamp);
     }
     Ok(out)
 }
 
 fn decode_branch_segment(bytes: &[u8]) -> Result<PersistedBranchSegment, StorageError> {
     let mut cursor = decode_binary_payload(bytes, "branch segment")?;
-    let commit_count = cursor.read_u32("branch segment")? as usize;
+    let (authors, metadata_keys) = decode_commit_tables(&mut cursor, "branch segment")?;
+    let commit_count = cursor.read_var_u32("branch segment")? as usize;
     let mut commits = Vec::with_capacity(commit_count);
+    let mut previous_commit_id = None;
+    let mut previous_timestamp = None;
     for _ in 0..commit_count {
-        commits.push(decode_commit(&mut cursor, "branch segment")?);
+        let commit = decode_commit(
+            &mut cursor,
+            "branch segment",
+            &authors,
+            &metadata_keys,
+            previous_commit_id,
+            previous_timestamp,
+        )?;
+        previous_commit_id = Some(commit.id());
+        previous_timestamp = Some(commit.timestamp);
+        commits.push(commit);
     }
     cursor.expect_end("branch segment")?;
     Ok(PersistedBranchSegment { commits })
@@ -329,35 +614,101 @@ fn encode_prefix_batch_catalog(
 ) -> Result<Vec<u8>, StorageError> {
     let mut out = Vec::new();
     out.push(STORAGE_BINARY_V1);
+    encode_string(&mut out, "prefix batch catalog", &catalog.prefix_name)?;
     encode_len(&mut out, "prefix batch catalog", catalog.batches.len())?;
     for batch in &catalog.batches {
+        let mut flags = 0_u8;
+        if batch.root_commit_id != batch.head_commit_id {
+            flags |= 0b001;
+        }
+        if batch.first_timestamp != batch.last_timestamp {
+            flags |= 0b010;
+        }
+        if !batch.parent_batch_ords.is_empty() {
+            flags |= 0b100;
+        }
+        out.push(flags);
         out.extend_from_slice(batch.batch_id.as_bytes());
+        if flags & 0b001 != 0 {
+            out.extend_from_slice(&batch.root_commit_id.0);
+        }
         out.extend_from_slice(&batch.head_commit_id.0);
-        encode_u64(&mut out, batch.last_timestamp);
-        encode_u32(&mut out, batch.child_count);
+        if flags & 0b010 != 0 {
+            encode_var_u64(&mut out, batch.first_timestamp);
+        }
+        encode_var_u64(&mut out, batch.last_timestamp);
+        if flags & 0b100 != 0 {
+            encode_len(
+                &mut out,
+                "prefix batch catalog",
+                batch.parent_batch_ords.len(),
+            )?;
+            for parent_batch_ord in &batch.parent_batch_ords {
+                encode_var_u32(&mut out, parent_batch_ord.0);
+            }
+        }
+        encode_var_u32(&mut out, batch.child_count);
     }
     Ok(out)
 }
 
 fn decode_prefix_batch_catalog(bytes: &[u8]) -> Result<PersistedPrefixBatchCatalog, StorageError> {
     let mut cursor = decode_binary_payload(bytes, "prefix batch catalog")?;
-    let batch_count = cursor.read_u32("prefix batch catalog")? as usize;
+    let prefix_name = cursor.read_string("prefix batch catalog")?;
+    let batch_count = cursor.read_var_u32("prefix batch catalog")? as usize;
     let mut batches = Vec::with_capacity(batch_count);
     for _ in 0..batch_count {
+        let flags = cursor.read_u8("prefix batch catalog")?;
         let batch_id = BatchId(cursor.read_fixed::<16>("prefix batch catalog")?);
+        let root_commit_id = if flags & 0b001 != 0 {
+            CommitId(cursor.read_fixed::<32>("prefix batch catalog")?)
+        } else {
+            CommitId([0; 32])
+        };
         let head_commit_id = CommitId(cursor.read_fixed::<32>("prefix batch catalog")?);
-        let last_timestamp = cursor.read_u64("prefix batch catalog")?;
-        let child_count = cursor.read_u32("prefix batch catalog")?;
+        let root_commit_id = if flags & 0b001 != 0 {
+            root_commit_id
+        } else {
+            head_commit_id
+        };
+        let first_timestamp = if flags & 0b010 != 0 {
+            cursor.read_var_u64("prefix batch catalog")?
+        } else {
+            0
+        };
+        let last_timestamp = cursor.read_var_u64("prefix batch catalog")?;
+        let first_timestamp = if flags & 0b010 != 0 {
+            first_timestamp
+        } else {
+            last_timestamp
+        };
+        let parent_batch_ords = if flags & 0b100 != 0 {
+            let parent_count = cursor.read_var_u32("prefix batch catalog")? as usize;
+            let mut parent_batch_ords = Vec::with_capacity(parent_count);
+            for _ in 0..parent_count {
+                parent_batch_ords.push(BatchOrd(cursor.read_var_u32("prefix batch catalog")?));
+            }
+            parent_batch_ords
+        } else {
+            Vec::new()
+        };
+        let child_count = cursor.read_var_u32("prefix batch catalog")?;
         batches.push(PersistedPrefixBatchCatalogEntry {
             batch_id,
+            root_commit_id,
             head_commit_id,
+            first_timestamp,
             last_timestamp,
+            parent_batch_ords,
             child_count,
         });
     }
     cursor.expect_end("prefix batch catalog")?;
 
-    Ok(PersistedPrefixBatchCatalog { batches })
+    Ok(PersistedPrefixBatchCatalog {
+        prefix_name,
+        batches,
+    })
 }
 
 fn encode_table_prefix_batch_manifest(
@@ -372,7 +723,7 @@ fn encode_table_prefix_batch_manifest(
     )?;
     for entry in &manifest.entries_by_ord {
         out.extend_from_slice(entry.batch_id.as_bytes());
-        encode_u64(&mut out, entry.ref_count);
+        encode_var_u64(&mut out, entry.ref_count);
     }
     Ok(out)
 }
@@ -381,12 +732,12 @@ fn decode_table_prefix_batch_manifest(
     bytes: &[u8],
 ) -> Result<TablePrefixBatchManifest, StorageError> {
     let mut cursor = decode_binary_payload(bytes, "table prefix active batches")?;
-    let entry_count = cursor.read_u32("table prefix active batches")? as usize;
+    let entry_count = cursor.read_var_u32("table prefix active batches")? as usize;
     let mut entries_by_ord = Vec::with_capacity(entry_count);
     for _ in 0..entry_count {
         entries_by_ord.push(super::TablePrefixBatchEntry {
             batch_id: BatchId(cursor.read_fixed::<16>("table prefix active batches")?),
-            ref_count: cursor.read_u64("table prefix active batches")?,
+            ref_count: cursor.read_var_u64("table prefix active batches")?,
         });
     }
     cursor.expect_end("table prefix active batches")?;
@@ -446,14 +797,18 @@ fn load_branch_segment(
 }
 
 impl PersistedPrefixBatchCatalog {
-    fn from_catalog(catalog: &PrefixBatchCatalog) -> Self {
+    fn from_catalog(prefix_name: &str, catalog: &PrefixBatchCatalog) -> Self {
         Self {
+            prefix_name: prefix_name.to_string(),
             batches: catalog
                 .batch_metas()
                 .map(|batch| PersistedPrefixBatchCatalogEntry {
                     batch_id: batch.batch_id,
+                    root_commit_id: batch.root_commit_id,
                     head_commit_id: batch.head_commit_id,
+                    first_timestamp: batch.first_timestamp,
                     last_timestamp: batch.last_timestamp,
+                    parent_batch_ords: batch.parent_batch_ords.clone(),
                     child_count: batch.child_count,
                 })
                 .collect(),
@@ -474,17 +829,42 @@ impl PersistedPrefixBatchCatalog {
                 PrefixBatchMeta {
                     batch_id: batch.batch_id,
                     batch_ord,
-                    root_commit_id: batch.head_commit_id,
+                    root_commit_id: batch.root_commit_id,
                     head_commit_id: batch.head_commit_id,
-                    first_timestamp: batch.last_timestamp,
+                    first_timestamp: batch.first_timestamp,
                     last_timestamp: batch.last_timestamp,
-                    parent_batch_ords: Vec::new(),
+                    parent_batch_ords: batch.parent_batch_ords,
                     child_count: batch.child_count,
                 }
             })
             .collect();
         PrefixBatchCatalog::from_persisted_parts(batches_by_ord, leaf_batch_ords)
     }
+}
+
+fn stored_branch_ref_for_batch(
+    object_id: ObjectId,
+    branch: &QueryBranchRef,
+    batch_ord_hint: Option<BatchOrd>,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<StoredBranchRef, StorageError> {
+    let batch_ord = if let Some(batch_ord) = batch_ord_hint {
+        batch_ord
+    } else {
+        let catalog =
+            load_prefix_batch_catalog_core(object_id, branch.prefix_name().as_str(), |key| {
+                get(key)
+            })?
+            .ok_or_else(|| codec_error("commit branch", "missing prefix batch catalog"))?;
+        catalog
+            .batch_ord(&branch.batch_id())
+            .ok_or_else(|| codec_error("commit branch", "missing batch ord in prefix catalog"))?
+    };
+
+    Ok(StoredBranchRef::from_prefix_batch(
+        branch.batch_branch_key().prefix_id(),
+        batch_ord,
+    ))
 }
 
 fn persist_branch_manifest(
@@ -525,6 +905,17 @@ fn tip_commits_for_branch(commits: &[Commit]) -> Vec<Commit> {
         .collect()
 }
 
+fn append_commit_to_manifest_state(manifest: &mut PersistedBranchManifest, commit: &Commit) {
+    for parent in &commit.parents {
+        manifest.tails.remove(parent);
+    }
+    manifest.tails.insert(commit.id());
+    manifest
+        .tip_commits
+        .retain(|tip| !commit.parents.contains(&tip.id()));
+    manifest.tip_commits.push(commit.clone());
+}
+
 pub(super) fn load_branch_core(
     object_id: ObjectId,
     branch: &QueryBranchRef,
@@ -540,20 +931,31 @@ pub(super) fn load_branch_core(
     };
 
     let mut commits = Vec::new();
-    for segment_id in manifest.segment_ids {
-        let Some(segment) = load_branch_segment(object_id, branch, segment_id, |key| get(key))?
-        else {
-            continue;
-        };
-
-        for mut commit in segment.commits {
+    if manifest.segment_ids.is_empty() {
+        for mut commit in manifest.inline_commits {
             let ack_lookup_key = ack_key(commit.id());
             if let Some(ack_data) = get(&ack_lookup_key)? {
                 let tiers: HashSet<DurabilityTier> = decode_json(&ack_data, "ack")?;
                 commit.ack_state.confirmed_tiers = tiers;
             }
-
             commits.push(commit);
+        }
+    } else {
+        for segment_id in manifest.segment_ids {
+            let Some(segment) = load_branch_segment(object_id, branch, segment_id, |key| get(key))?
+            else {
+                continue;
+            };
+
+            for mut commit in segment.commits {
+                let ack_lookup_key = ack_key(commit.id());
+                if let Some(ack_data) = get(&ack_lookup_key)? {
+                    let tiers: HashSet<DurabilityTier> = decode_json(&ack_data, "ack")?;
+                    commit.ack_state.confirmed_tiers = tiers;
+                }
+
+                commits.push(commit);
+            }
         }
     }
 
@@ -599,7 +1001,22 @@ pub(super) fn load_commit_branch_core(
     match get(&key)? {
         Some(data) => {
             let branch_ref = decode_branch_ref(&data)?;
-            Ok(Some(branch_ref.to_branch_ref()))
+            let Some(prefix_catalog) = load_persisted_prefix_batch_catalog_by_id(
+                object_id,
+                branch_ref.prefix_id,
+                |key| get(key),
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(batch_entry) = prefix_catalog.batches.get(branch_ref.batch_ord.as_usize())
+            else {
+                return Ok(None);
+            };
+            Ok(Some(QueryBranchRef::from_prefix_name_and_batch(
+                BranchName::new(prefix_catalog.prefix_name),
+                batch_entry.batch_id,
+            )))
         }
         None => Ok(None),
     }
@@ -627,9 +1044,21 @@ fn persist_prefix_batch_catalog(
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     let key = prefix_batch_catalog_key(object_id, prefix);
-    let persisted = PersistedPrefixBatchCatalog::from_catalog(catalog);
+    let persisted = PersistedPrefixBatchCatalog::from_catalog(prefix, catalog);
     let data = encode_prefix_batch_catalog(&persisted)?;
     set(&key, &data)
+}
+
+fn load_persisted_prefix_batch_catalog_by_id(
+    object_id: ObjectId,
+    prefix_id: PrefixId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<PersistedPrefixBatchCatalog>, StorageError> {
+    let key = prefix_batch_catalog_key_for_id(object_id, prefix_id);
+    match get(&key)? {
+        Some(data) => Ok(Some(decode_prefix_batch_catalog(&data)?)),
+        None => Ok(None),
+    }
 }
 
 pub(super) fn load_table_prefix_batch_keys_core(
@@ -677,45 +1106,58 @@ pub(super) fn append_commit_core(
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     let commit_id = commit.id();
+    let commit_timestamp = commit.timestamp;
     let mut manifest = load_branch_manifest(object_id, branch, |key| get(key))?.unwrap_or_default();
-    let mut current_segment_id = manifest.segment_ids.last().copied().unwrap_or(0);
-    let mut current_segment = if manifest.segment_ids.is_empty() {
-        manifest.segment_ids.push(current_segment_id);
-        PersistedBranchSegment::default()
+
+    append_commit_to_manifest_state(&mut manifest, &commit);
+
+    if manifest.segment_ids.is_empty()
+        && manifest.inline_commits.len() < MAX_INLINE_COMMITS_PER_BRANCH
+    {
+        manifest.inline_commits.push(commit);
+    } else if manifest.segment_ids.is_empty() {
+        let mut commits = std::mem::take(&mut manifest.inline_commits);
+        commits.push(commit);
+        manifest.segment_ids.clear();
+        for (segment_id, commit_chunk) in commits.chunks(MAX_COMMITS_PER_BRANCH_SEGMENT).enumerate()
+        {
+            let segment_id = segment_id as u32;
+            manifest.segment_ids.push(segment_id);
+            persist_branch_segment(
+                object_id,
+                branch,
+                segment_id,
+                &PersistedBranchSegment {
+                    commits: commit_chunk.to_vec(),
+                },
+                |key, value| set(key, value),
+            )?;
+        }
     } else {
-        load_branch_segment(object_id, branch, current_segment_id, |key| get(key))?
-            .unwrap_or_default()
-    };
+        let mut current_segment_id = manifest.segment_ids.last().copied().unwrap_or(0);
+        let mut current_segment =
+            load_branch_segment(object_id, branch, current_segment_id, |key| get(key))?
+                .unwrap_or_default();
 
-    if current_segment.commits.len() >= MAX_COMMITS_PER_BRANCH_SEGMENT {
-        current_segment_id = current_segment_id.saturating_add(1);
-        manifest.segment_ids.push(current_segment_id);
-        current_segment = PersistedBranchSegment::default();
+        if current_segment.commits.len() >= MAX_COMMITS_PER_BRANCH_SEGMENT {
+            current_segment_id = current_segment_id.saturating_add(1);
+            manifest.segment_ids.push(current_segment_id);
+            current_segment = PersistedBranchSegment::default();
+        }
+
+        current_segment.commits.push(commit);
+        persist_branch_segment(
+            object_id,
+            branch,
+            current_segment_id,
+            &current_segment,
+            |key, value| set(key, value),
+        )?;
     }
 
-    let commit_branch_lookup_key = commit_branch_key(object_id, commit_id);
-    let commit_branch_bytes = encode_branch_ref(&StoredBranchRef::from_branch_ref(branch))?;
-    set(&commit_branch_lookup_key, &commit_branch_bytes)?;
-
-    for parent in &commit.parents {
-        manifest.tails.remove(parent);
-    }
-    manifest.tails.insert(commit_id);
-    manifest
-        .tip_commits
-        .retain(|tip| !commit.parents.contains(&tip.id()));
-    manifest.tip_commits.push(commit.clone());
-    current_segment.commits.push(commit);
-    persist_branch_segment(
-        object_id,
-        branch,
-        current_segment_id,
-        &current_segment,
-        |key, value| set(key, value),
-    )?;
     persist_branch_manifest(object_id, branch, &manifest, |key, value| set(key, value))?;
 
-    if let Some(update) = prefix_batch_update {
+    if let Some(ref update) = prefix_batch_update {
         let mut catalog =
             load_prefix_batch_catalog_core(object_id, update.prefix.as_str(), |key| get(key))?
                 .unwrap_or_default();
@@ -725,15 +1167,54 @@ pub(super) fn append_commit_core(
                 parent_meta.child_count = parent_meta.child_count.saturating_add(1);
             }
         }
-        for removed_batch_ord in update.remove_leaf_batch_ords {
-            catalog.remove_leaf_batch_ord(removed_batch_ord);
+        for removed_batch_ord in &update.remove_leaf_batch_ords {
+            catalog.remove_leaf_batch_ord(*removed_batch_ord);
         }
         catalog.insert_batch_meta(update.batch_meta.clone());
         catalog.insert_leaf_batch_ord(update.batch_meta.batch_ord);
         persist_prefix_batch_catalog(object_id, update.prefix.as_str(), &catalog, |key, value| {
             set(key, value)
         })?;
+    } else {
+        let prefix_name = branch.prefix_name();
+        let mut catalog =
+            load_prefix_batch_catalog_core(object_id, prefix_name.as_str(), |key| get(key))?
+                .unwrap_or_default();
+        let batch_meta = if let Some(mut existing) = catalog.batch_meta(&branch.batch_id()).cloned()
+        {
+            existing.head_commit_id = commit_id;
+            existing.last_timestamp = commit_timestamp;
+            existing
+        } else {
+            PrefixBatchMeta {
+                batch_id: branch.batch_id(),
+                batch_ord: catalog.next_batch_ord(),
+                root_commit_id: commit_id,
+                head_commit_id: commit_id,
+                first_timestamp: commit_timestamp,
+                last_timestamp: commit_timestamp,
+                parent_batch_ords: Vec::new(),
+                child_count: 0,
+            }
+        };
+        catalog.insert_batch_meta(batch_meta.clone());
+        catalog.insert_leaf_batch_ord(batch_meta.batch_ord);
+        persist_prefix_batch_catalog(object_id, prefix_name.as_str(), &catalog, |key, value| {
+            set(key, value)
+        })?;
     }
+
+    let stored_branch_ref = stored_branch_ref_for_batch(
+        object_id,
+        branch,
+        prefix_batch_update
+            .as_ref()
+            .map(|update| update.batch_meta.batch_ord),
+        |key| get(key),
+    )?;
+    let commit_branch_lookup_key = commit_branch_key(object_id, commit_id);
+    let commit_branch_bytes = encode_branch_ref(&stored_branch_ref)?;
+    set(&commit_branch_lookup_key, &commit_branch_bytes)?;
 
     Ok(())
 }
@@ -748,7 +1229,9 @@ pub(super) fn replace_branch_core(
     mut delete: impl FnMut(&str) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     let old_manifest = load_branch_manifest(object_id, branch, |key| get(key))?.unwrap_or_default();
-    let mut old_commit_ids = HashSet::new();
+    let stored_branch_ref = stored_branch_ref_for_batch(object_id, branch, None, |key| get(key))?;
+    let mut old_commit_ids: HashSet<CommitId> =
+        old_manifest.inline_commits.iter().map(Commit::id).collect();
     let old_segment_ids: HashSet<u32> = old_manifest.segment_ids.iter().copied().collect();
     for segment_id in &old_manifest.segment_ids {
         if let Some(segment) = load_branch_segment(object_id, branch, *segment_id, |key| get(key))?
@@ -758,16 +1241,22 @@ pub(super) fn replace_branch_core(
     }
 
     let mut segment_ids = Vec::new();
-    for (segment_id, commit_chunk) in commits.chunks(MAX_COMMITS_PER_BRANCH_SEGMENT).enumerate() {
-        let segment_id = segment_id as u32;
-        let segment = PersistedBranchSegment {
-            commits: commit_chunk.to_vec(),
-        };
-        persist_branch_segment(object_id, branch, segment_id, &segment, |key, value| {
-            set(key, value)
-        })?;
-        segment_ids.push(segment_id);
-    }
+    let inline_commits = if commits.len() <= MAX_INLINE_COMMITS_PER_BRANCH {
+        commits.clone()
+    } else {
+        for (segment_id, commit_chunk) in commits.chunks(MAX_COMMITS_PER_BRANCH_SEGMENT).enumerate()
+        {
+            let segment_id = segment_id as u32;
+            let segment = PersistedBranchSegment {
+                commits: commit_chunk.to_vec(),
+            };
+            persist_branch_segment(object_id, branch, segment_id, &segment, |key, value| {
+                set(key, value)
+            })?;
+            segment_ids.push(segment_id);
+        }
+        Vec::new()
+    };
 
     for old_segment_id in old_segment_ids {
         if !segment_ids.contains(&old_segment_id) {
@@ -778,6 +1267,7 @@ pub(super) fn replace_branch_core(
 
     let new_manifest = PersistedBranchManifest {
         segment_ids,
+        inline_commits,
         tails,
         tip_commits: tip_commits_for_branch(&commits),
     };
@@ -792,7 +1282,7 @@ pub(super) fn replace_branch_core(
     }
     for commit in &commits {
         let key = commit_branch_key(object_id, commit.id());
-        let value = encode_branch_ref(&StoredBranchRef::from_branch_ref(branch))?;
+        let value = encode_branch_ref(&stored_branch_ref)?;
         set(&key, &value)?;
     }
 
@@ -985,19 +1475,38 @@ pub(super) fn index_range_core(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
     #[test]
     fn branch_ref_binary_codec_roundtrips() {
         let branch_ref = StoredBranchRef {
-            prefix: "dev-schema-main".to_string(),
-            batch_id: BatchId([7; 16]),
+            prefix_id: PrefixId::from_prefix_str("dev-schema-main"),
+            batch_ord: BatchOrd(7),
         };
 
         let encoded = encode_branch_ref(&branch_ref).unwrap();
 
         assert_eq!(encoded.first().copied(), Some(STORAGE_BINARY_V1));
+        assert_eq!(decode_branch_ref(&encoded).unwrap(), branch_ref);
+    }
+
+    #[test]
+    fn branch_ref_binary_codec_stays_compact_for_long_prefixes() {
+        let long_prefix = format!("dev-{}-feature", "a".repeat(64));
+        let branch_ref = StoredBranchRef {
+            prefix_id: PrefixId::from_prefix_str(&long_prefix),
+            batch_ord: BatchOrd(7),
+        };
+
+        let encoded = encode_branch_ref(&branch_ref).unwrap();
+
+        assert!(
+            encoded.len() < 24,
+            "expected long-prefix commit refs to stay compact, got {} bytes",
+            encoded.len()
+        );
         assert_eq!(decode_branch_ref(&encoded).unwrap(), branch_ref);
     }
 
@@ -1013,13 +1522,106 @@ mod tests {
             ack_state: Default::default(),
         };
         let manifest = PersistedBranchManifest {
-            segment_ids: vec![0, 1, 4],
-            tails: [CommitId([9; 32]), CommitId([8; 32])].into_iter().collect(),
-            tip_commits: vec![commit],
+            segment_ids: vec![0, 1, 2],
+            inline_commits: Vec::new(),
+            tails: [commit.id()].into_iter().collect(),
+            tip_commits: vec![commit.clone()],
         };
 
         let encoded = encode_branch_manifest(&manifest).unwrap();
 
+        assert_eq!(decode_branch_manifest(&encoded).unwrap(), manifest);
+    }
+
+    #[test]
+    fn branch_manifest_binary_codec_stays_compact_for_inline_linear_chain() {
+        let author = ObjectId::from_uuid(Uuid::nil()).to_string();
+        let mut inline_commits = Vec::new();
+        let mut previous_commit_id = None;
+        for index in 0..6 {
+            let commit = Commit {
+                parents: previous_commit_id.into_iter().collect(),
+                content: vec![index as u8],
+                timestamp: 1_744_000_000 + index,
+                author: author.clone(),
+                metadata: None,
+                stored_state: Default::default(),
+                ack_state: Default::default(),
+            };
+            previous_commit_id = Some(commit.id());
+            inline_commits.push(commit);
+        }
+        let tip_commits = tip_commits_for_branch(&inline_commits);
+        let manifest = PersistedBranchManifest {
+            segment_ids: Vec::new(),
+            inline_commits,
+            tails: tip_commits.iter().map(Commit::id).collect(),
+            tip_commits,
+        };
+
+        let encoded = encode_branch_manifest(&manifest).unwrap();
+
+        assert!(
+            encoded.len() < 100,
+            "expected inline manifests to derive frontier state compactly, got {} bytes",
+            encoded.len()
+        );
+        assert_eq!(decode_branch_manifest(&encoded).unwrap(), manifest);
+    }
+
+    #[test]
+    fn branch_manifest_binary_codec_stays_compact_for_segment_frontier() {
+        let tip = Commit {
+            parents: vec![CommitId([1; 32])].into(),
+            content: vec![9],
+            timestamp: 99,
+            author: ObjectId::from_uuid(Uuid::nil()).to_string(),
+            metadata: None,
+            stored_state: Default::default(),
+            ack_state: Default::default(),
+        };
+        let manifest = PersistedBranchManifest {
+            segment_ids: vec![0, 1],
+            inline_commits: Vec::new(),
+            tails: [tip.id()].into_iter().collect(),
+            tip_commits: vec![tip],
+        };
+
+        let encoded = encode_branch_manifest(&manifest).unwrap();
+
+        assert!(
+            encoded.len() < 72,
+            "expected segment manifests to derive tail ids from tip commits, got {} bytes",
+            encoded.len()
+        );
+        assert_eq!(decode_branch_manifest(&encoded).unwrap(), manifest);
+    }
+
+    #[test]
+    fn branch_manifest_binary_codec_stays_compact_for_dense_segment_ids() {
+        let tip = Commit {
+            parents: vec![CommitId([1; 32])].into(),
+            content: vec![9],
+            timestamp: 99,
+            author: ObjectId::from_uuid(Uuid::nil()).to_string(),
+            metadata: None,
+            stored_state: Default::default(),
+            ack_state: Default::default(),
+        };
+        let manifest = PersistedBranchManifest {
+            segment_ids: (0..10).collect(),
+            inline_commits: Vec::new(),
+            tails: [tip.id()].into_iter().collect(),
+            tip_commits: vec![tip],
+        };
+
+        let encoded = encode_branch_manifest(&manifest).unwrap();
+
+        assert!(
+            encoded.len() < 70,
+            "expected dense segment ids to encode as a count, got {} bytes",
+            encoded.len()
+        );
         assert_eq!(decode_branch_manifest(&encoded).unwrap(), manifest);
     }
 
@@ -1057,19 +1659,119 @@ mod tests {
     }
 
     #[test]
+    fn branch_segment_binary_codec_deduplicates_authors_and_metadata_keys() {
+        let author = ObjectId::from_uuid(Uuid::nil()).to_string();
+        let segment = PersistedBranchSegment {
+            commits: (0..8)
+                .map(|index| Commit {
+                    parents: SmallVec::new(),
+                    content: vec![index as u8; 32],
+                    timestamp: 10 + index,
+                    author: author.clone(),
+                    metadata: Some(BTreeMap::from([
+                        ("table".to_string(), "messages".to_string()),
+                        ("kind".to_string(), "append".to_string()),
+                    ])),
+                    stored_state: Default::default(),
+                    ack_state: Default::default(),
+                })
+                .collect(),
+        };
+
+        let encoded = encode_branch_segment(&segment).unwrap();
+
+        assert!(
+            encoded.len() < 700,
+            "expected author/key tables to keep payload compact, got {} bytes",
+            encoded.len()
+        );
+        assert_eq!(decode_branch_segment(&encoded).unwrap(), segment);
+    }
+
+    #[test]
+    fn branch_segment_binary_codec_stays_compact_for_linear_commit_chain() {
+        let author = ObjectId::from_uuid(Uuid::nil()).to_string();
+        let mut commits = Vec::new();
+        let mut previous_commit_id = None;
+        for index in 0..6 {
+            let parents = previous_commit_id.into_iter().collect();
+            let commit = Commit {
+                parents,
+                content: vec![index as u8],
+                timestamp: 100 + index,
+                author: author.clone(),
+                metadata: None,
+                stored_state: Default::default(),
+                ack_state: Default::default(),
+            };
+            previous_commit_id = Some(commit.id());
+            commits.push(commit);
+        }
+
+        let segment = PersistedBranchSegment { commits };
+        let encoded = encode_branch_segment(&segment).unwrap();
+
+        assert!(
+            encoded.len() < 120,
+            "expected implicit parent encoding for linear chains, got {} bytes",
+            encoded.len()
+        );
+        assert_eq!(decode_branch_segment(&encoded).unwrap(), segment);
+    }
+
+    #[test]
+    fn branch_segment_binary_codec_delta_encodes_large_linear_timestamps() {
+        let author = ObjectId::from_uuid(Uuid::nil()).to_string();
+        let mut commits = Vec::new();
+        let mut previous_commit_id = None;
+        let base_timestamp = 1_744_000_000_000_000_u64;
+        for index in 0..6 {
+            let parents = previous_commit_id.into_iter().collect();
+            let commit = Commit {
+                parents,
+                content: vec![index as u8],
+                timestamp: base_timestamp + index,
+                author: author.clone(),
+                metadata: None,
+                stored_state: Default::default(),
+                ack_state: Default::default(),
+            };
+            previous_commit_id = Some(commit.id());
+            commits.push(commit);
+        }
+
+        let segment = PersistedBranchSegment { commits };
+        let encoded = encode_branch_segment(&segment).unwrap();
+
+        assert!(
+            encoded.len() < 100,
+            "expected delta timestamp encoding for linear chains, got {} bytes",
+            encoded.len()
+        );
+        assert_eq!(decode_branch_segment(&encoded).unwrap(), segment);
+    }
+
+    #[test]
     fn prefix_batch_catalog_binary_codec_roundtrips() {
         let persisted = PersistedPrefixBatchCatalog {
+            prefix_name: "dev-schema-main".to_string(),
             batches: vec![
                 PersistedPrefixBatchCatalogEntry {
                     batch_id: BatchId([1; 16]),
+                    root_commit_id: CommitId([3; 32]),
                     head_commit_id: CommitId([3; 32]),
+                    first_timestamp: 11,
                     last_timestamp: 11,
+                    parent_batch_ords: Vec::new(),
                     child_count: 1,
                 },
                 PersistedPrefixBatchCatalogEntry {
                     batch_id: BatchId([4; 16]),
+                    root_commit_id: CommitId([6; 32]),
                     head_commit_id: CommitId([6; 32]),
+                    first_timestamp: 13,
                     last_timestamp: 13,
+                    parent_batch_ords: Vec::new(),
                     child_count: 0,
                 },
             ],
@@ -1078,6 +1780,87 @@ mod tests {
         let encoded = encode_prefix_batch_catalog(&persisted).unwrap();
 
         assert_eq!(decode_prefix_batch_catalog(&encoded).unwrap(), persisted);
+    }
+
+    #[test]
+    fn prefix_batch_catalog_binary_codec_stays_compact_for_small_values() {
+        let persisted = PersistedPrefixBatchCatalog {
+            prefix_name: "dev-schema-main".to_string(),
+            batches: vec![
+                PersistedPrefixBatchCatalogEntry {
+                    batch_id: BatchId([1; 16]),
+                    root_commit_id: CommitId([3; 32]),
+                    head_commit_id: CommitId([3; 32]),
+                    first_timestamp: 11,
+                    last_timestamp: 11,
+                    parent_batch_ords: Vec::new(),
+                    child_count: 1,
+                },
+                PersistedPrefixBatchCatalogEntry {
+                    batch_id: BatchId([4; 16]),
+                    root_commit_id: CommitId([6; 32]),
+                    head_commit_id: CommitId([6; 32]),
+                    first_timestamp: 13,
+                    last_timestamp: 13,
+                    parent_batch_ords: Vec::new(),
+                    child_count: 0,
+                },
+            ],
+        };
+
+        let encoded = encode_prefix_batch_catalog(&persisted).unwrap();
+
+        assert!(
+            encoded.len() < 121,
+            "expected a denser encoding, got {} bytes",
+            encoded.len()
+        );
+    }
+
+    #[test]
+    fn persisted_prefix_batch_catalog_preserves_full_batch_meta() {
+        let catalog = PrefixBatchCatalog::from_persisted_parts(
+            vec![
+                PrefixBatchMeta {
+                    batch_id: BatchId([1; 16]),
+                    batch_ord: BatchOrd(0),
+                    root_commit_id: CommitId([2; 32]),
+                    head_commit_id: CommitId([3; 32]),
+                    first_timestamp: 11,
+                    last_timestamp: 19,
+                    parent_batch_ords: Vec::new(),
+                    child_count: 1,
+                },
+                PrefixBatchMeta {
+                    batch_id: BatchId([4; 16]),
+                    batch_ord: BatchOrd(1),
+                    root_commit_id: CommitId([5; 32]),
+                    head_commit_id: CommitId([6; 32]),
+                    first_timestamp: 23,
+                    last_timestamp: 29,
+                    parent_batch_ords: vec![BatchOrd(0)],
+                    child_count: 0,
+                },
+            ],
+            [BatchOrd(1)],
+        );
+
+        let encoded = encode_prefix_batch_catalog(&PersistedPrefixBatchCatalog::from_catalog(
+            "dev-schema-main",
+            &catalog,
+        ))
+        .unwrap();
+        let decoded = decode_prefix_batch_catalog(&encoded)
+            .unwrap()
+            .into_catalog();
+
+        let decoded_entries: Vec<_> = decoded.batch_metas().cloned().collect();
+        let original_entries: Vec<_> = catalog.batch_metas().cloned().collect();
+        assert_eq!(decoded_entries, original_entries);
+        assert_eq!(
+            decoded.leaf_batch_ords().collect::<Vec<_>>(),
+            catalog.leaf_batch_ords().collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1090,5 +1873,114 @@ mod tests {
         let decoded = decode_table_prefix_batch_manifest(&encoded).unwrap();
 
         assert_eq!(decoded, manifest);
+    }
+
+    #[test]
+    fn table_prefix_batch_manifest_binary_codec_stays_compact_for_small_values() {
+        let mut manifest = TablePrefixBatchManifest::default();
+        manifest.adjust_refcount(BatchId([1; 16]), 2);
+        manifest.adjust_refcount(BatchId([2; 16]), 5);
+
+        let encoded = encode_table_prefix_batch_manifest(&manifest).unwrap();
+
+        assert!(
+            encoded.len() < 53,
+            "expected a denser encoding, got {} bytes",
+            encoded.len()
+        );
+    }
+
+    #[test]
+    fn short_branch_stays_inline_before_spilling_to_segment_storage() {
+        let object_id = ObjectId::from_uuid(Uuid::from_bytes([1; 16]));
+        let prefix = BranchName::new("dev-schema-main");
+        let branch = QueryBranchRef::from_prefix_name_and_batch(prefix, BatchId([7; 16]));
+        let author = ObjectId::from_uuid(Uuid::nil()).to_string();
+        let store = RefCell::new(HashMap::<String, Vec<u8>>::new());
+
+        create_object_core(object_id, HashMap::new(), |key, value| {
+            store.borrow_mut().insert(key.to_string(), value.to_vec());
+            Ok(())
+        })
+        .unwrap();
+
+        let mut previous_commit_id = None;
+        let mut appended_commits = Vec::new();
+        for index in 0..MAX_COMMITS_PER_BRANCH_SEGMENT.min(8) {
+            let commit = Commit {
+                parents: previous_commit_id.into_iter().collect(),
+                content: vec![index as u8],
+                timestamp: 1_744_000_000 + index as u64,
+                author: author.clone(),
+                metadata: None,
+                stored_state: Default::default(),
+                ack_state: Default::default(),
+            };
+            previous_commit_id = Some(commit.id());
+            appended_commits.push(commit.clone());
+            append_commit_core(
+                object_id,
+                &branch,
+                commit,
+                None,
+                |key| Ok(store.borrow().get(key).cloned()),
+                |key, value| {
+                    store.borrow_mut().insert(key.to_string(), value.to_vec());
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+            assert!(
+                !store
+                    .borrow()
+                    .contains_key(&branch_segment_key(object_id, &branch, 0)),
+                "short branch should stay inline before spill"
+            );
+        }
+
+        let loaded = load_branch_core(object_id, &branch, |key| {
+            Ok(store.borrow().get(key).cloned())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(loaded.commits, appended_commits);
+
+        let spill_commit = Commit {
+            parents: previous_commit_id.into_iter().collect(),
+            content: vec![99],
+            timestamp: 1_744_000_999,
+            author,
+            metadata: Some(BTreeMap::from([("kind".to_string(), "spill".to_string())])),
+            stored_state: Default::default(),
+            ack_state: Default::default(),
+        };
+        appended_commits.push(spill_commit.clone());
+        append_commit_core(
+            object_id,
+            &branch,
+            spill_commit,
+            None,
+            |key| Ok(store.borrow().get(key).cloned()),
+            |key, value| {
+                store.borrow_mut().insert(key.to_string(), value.to_vec());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(
+            store
+                .borrow()
+                .contains_key(&branch_segment_key(object_id, &branch, 0)),
+            "branch should spill to segment storage once it grows past the inline threshold"
+        );
+
+        let loaded = load_branch_core(object_id, &branch, |key| {
+            Ok(store.borrow().get(key).cloned())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(loaded.commits, appended_commits);
     }
 }

@@ -4,7 +4,7 @@ use crate::commit::CommitId;
 #[cfg(test)]
 use crate::object::BranchName;
 use crate::object::ObjectId;
-use crate::query_manager::types::{QueryBranchRef, Value};
+use crate::query_manager::types::{PrefixId, QueryBranchRef, Value};
 
 use super::{StorageError, encode_value};
 
@@ -186,11 +186,23 @@ pub(super) fn commit_branch_key(object_id: ObjectId, commit_id: CommitId) -> Str
 }
 
 pub(super) fn prefix_batch_catalog_key(object_id: ObjectId, prefix: &str) -> String {
-    format!("obj:{}:prefix:{}:catalog", format_uuid(object_id), prefix)
+    prefix_batch_catalog_key_for_id(object_id, PrefixId::from_prefix_str(prefix))
+}
+
+pub(super) fn prefix_batch_catalog_key_for_id(object_id: ObjectId, prefix_id: PrefixId) -> String {
+    format!(
+        "obj:{}:pfx:{}:catalog",
+        format_uuid(object_id),
+        hex::encode(prefix_id.as_bytes())
+    )
 }
 
 pub(super) fn table_prefix_batches_key(table: &str, prefix: &str) -> String {
-    format!("tblpfx:{}:{}:batches", table, prefix)
+    format!(
+        "tblpfx:{}:{}:batches",
+        table,
+        hex::encode(PrefixId::from_prefix_str(prefix).as_bytes())
+    )
 }
 
 pub(super) fn ack_key(commit_id: CommitId) -> String {
@@ -457,5 +469,20 @@ mod tests {
         assert!(key.contains(":br:c"));
         assert!(key.contains(":b00000000000000000000000000000001:manifest"));
         assert!(!key.contains(branch.as_str()));
+    }
+
+    #[test]
+    fn prefix_catalog_and_table_batch_keys_store_compact_prefix_ids() {
+        let prefix = format!(
+            "client-{}-alice",
+            crate::query_manager::types::SchemaHash::from_bytes([0x55; 32])
+        );
+        let object_key = prefix_batch_catalog_key(ObjectId::from_uuid(uuid::Uuid::nil()), &prefix);
+        let table_key = table_prefix_batches_key("users", &prefix);
+
+        assert!(object_key.contains(":pfx:"));
+        assert!(table_key.starts_with("tblpfx:users:"));
+        assert!(!object_key.contains(&prefix));
+        assert!(!table_key.contains(&prefix));
     }
 }
