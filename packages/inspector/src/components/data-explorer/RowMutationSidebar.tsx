@@ -117,6 +117,7 @@ export function RowMutationSidebar({
         className={styles.form}
         onSubmit={async (event) => {
           event.preventDefault();
+
           const nextErrors: Record<string, string> = {};
           const updates: Record<string, unknown> = {};
 
@@ -159,7 +160,7 @@ export function RowMutationSidebar({
         <header className={styles.header}>
           <h3 className={styles.title}>{modeLabel(mode)}</h3>
           <p className={styles.meta}>
-            {tableName} · {mode === "edit" ? targetRowId : "new row"}
+            {tableName} · {mode === "insert" ? "new row" : targetRowId}
           </p>
         </header>
 
@@ -168,7 +169,7 @@ export function RowMutationSidebar({
             <span className={styles.label}>id</span>
             <input
               className={styles.input}
-              value={mode === "edit" ? (targetRowId ?? "") : "auto-generated"}
+              value={mode === "insert" ? "auto-generated" : (targetRowId ?? "")}
               readOnly
             />
           </label>
@@ -229,11 +230,14 @@ export function RowMutationSidebar({
                       value={value}
                       readOnly={isReadOnly}
                       disabled={fieldState.isNull}
-                      onChange={(event) =>
-                        updateFieldState(column, (currentField) => ({
-                          ...currentField,
-                          text: event.target.value,
-                        }))
+                      onChange={
+                        isReadOnly
+                          ? undefined
+                          : (event) =>
+                              updateFieldState(column, (currentField) => ({
+                                ...currentField,
+                                text: event.target.value,
+                              }))
                       }
                     />
                   ) : (
@@ -242,11 +246,14 @@ export function RowMutationSidebar({
                       value={value}
                       readOnly={isReadOnly}
                       disabled={fieldState.isNull}
-                      onChange={(event) =>
-                        updateFieldState(column, (currentField) => ({
-                          ...currentField,
-                          text: event.target.value,
-                        }))
+                      onChange={
+                        isReadOnly
+                          ? undefined
+                          : (event) =>
+                              updateFieldState(column, (currentField) => ({
+                                ...currentField,
+                                text: event.target.value,
+                              }))
                       }
                     />
                   )}

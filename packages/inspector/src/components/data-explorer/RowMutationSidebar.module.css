@@ -2,8 +2,8 @@
   width: 30vw;
   min-width: 480px;
   height: 100%;
-  border-left: 1px solid #2f3a4b;
-  background: #131926;
+  border-left: 1px solid #232c3a;
+  background: #10161d;
   min-height: 0;
 }
 
@@ -15,19 +15,19 @@
 
 .header {
   padding: 14px 14px 10px;
-  border-bottom: 1px solid #283345;
+  border-bottom: 1px solid #232c3a;
 }
 
 .title {
   margin: 0;
   font-size: 16px;
-  color: #e4e9f3;
+  color: #eef3f8;
 }
 
 .meta {
   margin: 4px 0 0;
   font-size: 12px;
-  color: #8f9db3;
+  color: #93a1b4;
 }
 
 .fields {
@@ -52,16 +52,16 @@
 .label {
   font-size: 12px;
   font-weight: 700;
-  color: #a3b1c6;
+  color: #95a4b7;
 }
 
 .input,
 .select,
 .textarea {
   width: 100%;
-  border: 1px solid #324359;
-  border-radius: 6px;
-  background: #1d2735;
+  border: 1px solid #293548;
+  border-radius: 4px;
+  background: #151d27;
   color: #d9e2f0;
   padding: 7px 8px;
   font-size: 13px;
@@ -105,36 +105,36 @@
   justify-content: flex-end;
   gap: 8px;
   padding: 12px 14px;
-  border-top: 1px solid #283345;
-  background: #151d2b;
+  border-top: 1px solid #232c3a;
+  background: #10161d;
 }
 
 .primaryButton {
-  border: 1px solid #3f7ee8;
-  background: #2c68d3;
+  border: 1px solid #294d78;
+  background: #1b3552;
   color: #f4f7ff;
-  border-radius: 6px;
+  border-radius: 4px;
   padding: 7px 12px;
   font-size: 12px;
   cursor: pointer;
 }
 
 .primaryButton:hover {
-  background: #366fdb;
+  background: #214062;
 }
 
 .secondaryButton {
-  border: 1px solid #344357;
-  background: #202b3b;
+  border: 1px solid #2a3647;
+  background: #161d27;
   color: #d3dceb;
-  border-radius: 6px;
+  border-radius: 4px;
   padding: 7px 12px;
   font-size: 12px;
   cursor: pointer;
 }
 
 .secondaryButton:hover {
-  background: #273346;
+  background: #1b2430;
 }
 
 .primaryButton:disabled,

@@ -2,13 +2,11 @@
   position: relative;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr) auto;
-  gap: 10px;
+  gap: 12px;
   height: 100%;
   min-height: 0;
-  border: 1px solid #2a3341;
-  border-radius: 8px;
-  background: #151a24;
-  padding: 12px;
+  background: transparent;
+  padding: 6px 0 0;
 }
 
 .header {
@@ -22,27 +20,27 @@
   margin: 0;
   font-size: 18px;
   text-transform: capitalize;
-  color: #e4e9f3;
+  color: #eff3f8;
 }
 
 .stats {
   margin: 4px 0 0;
   font-size: 12px;
-  color: #8f9db3;
+  color: #92a0b4;
 }
 
 .secondaryButton {
-  border: 1px solid #344357;
-  background: #202b3b;
-  color: #d3dceb;
-  border-radius: 6px;
+  border: 1px solid #2a3647;
+  background: #161d27;
+  color: #d7deea;
+  border-radius: 4px;
   padding: 6px 10px;
   font-size: 12px;
   cursor: pointer;
 }
 
 .secondaryButton:hover {
-  background: #273346;
+  background: #1b2430;
 }
 
 .secondaryButton:disabled {
@@ -50,22 +48,73 @@
   cursor: not-allowed;
 }
 
+.primaryButton {
+  border: 1px solid #294d78;
+  background: #1b3552;
+  color: #f3f7fb;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.primaryButton:hover {
+  background: #214062;
+}
+
+.primaryButton:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.queuedBanner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  border-top: 1px solid #20344d;
+  border-bottom: 1px solid #20344d;
+  background: rgba(19, 31, 45, 0.72);
+  padding: 10px 0;
+}
+
+.queuedBannerCopy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  color: #d7e8ed;
+  font-size: 12px;
+}
+
+.queuedBannerHint {
+  color: #8ea6c0;
+}
+
+.queuedBannerError {
+  color: #f2bbc7;
+}
+
+.queuedBannerActions {
+  display: inline-flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .gridFrame {
   display: block;
   flex: 1 1 auto;
   min-height: 0;
-  overflow-x: auto;
-  overflow-y: auto;
-  border: 1px solid #2f3a4b;
-  border-radius: 8px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .contentArea {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  align-items: stretch;
   min-height: 0;
-  border: 1px solid #2f3a4b;
-  border-radius: 8px;
+  border-top: 1px solid #232c3a;
   overflow: hidden;
 }
 
@@ -91,86 +140,137 @@
   box-shadow: -18px 0 28px rgba(6, 12, 20, 0.5);
 }
 
-.table {
-  width: 100%;
-  border-collapse: separate;
-  border-spacing: 0;
-  table-layout: fixed;
+.dataGrid {
+  block-size: 100%;
+  min-block-size: 0;
+  border: 0;
+  background: #0f141b;
+  color: #d6deea;
   font-size: 13px;
+  --rdg-color: #d6deea;
+  --rdg-border-color: #202a37;
+  --rdg-background-color: #0f141b;
+  --rdg-header-background-color: #0f141b;
+  --rdg-header-draggable-background-color: #111823;
+  --rdg-row-hover-background-color: #141b24;
+  --rdg-row-selected-background-color: #17202b;
+  --rdg-row-selected-hover-background-color: #1b2531;
+  --rdg-cell-frozen-box-shadow: 2px 0 10px -6px rgba(0, 0, 0, 0.55);
 }
 
-.table thead th {
-  position: sticky;
-  top: 0;
-  z-index: 3;
-  background: #1b2433;
-}
-
-.headerCell {
-  background: #1b2433;
-  color: #aab8cd;
-  text-align: left;
-  padding: 10px 12px;
-  border-bottom: 1px solid #2f3a4b;
+.gridHeaderCell {
+  color: #8f9bad;
   font-weight: 600;
 }
 
-.sortableHeader {
-  composes: headerCell;
-  cursor: pointer;
+.sortableHeaderCell {
+  composes: gridHeaderCell;
 }
 
-.sortableHeader:hover {
-  background: #222d3f;
-}
-
-.table td {
-  border-bottom: 1px solid #293445;
-  padding: 8px 12px;
+.dataGridCell {
   color: #d7deea;
-  white-space: nowrap;
+}
+
+.cellContent {
+  inline-size: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.table tbody tr:hover td {
-  background: #1c2534;
+.inlineEditorInput,
+.inlineEditorSelect,
+.inlineEditorTextarea {
+  inline-size: 100%;
+  block-size: 100%;
+  border: 1px solid #3c5670;
+  border-radius: 4px;
+  background: #101722;
+  color: #e4edf8;
+  font: inherit;
+  padding: 0 8px;
 }
 
-.actionsHeader {
-  composes: headerCell;
-  position: sticky;
-  right: 0;
-  z-index: 4;
-  min-width: 106px;
+.inlineEditorInput,
+.inlineEditorSelect {
+  min-block-size: 30px;
 }
 
-.actionsCell {
-  position: sticky;
-  right: 0;
-  z-index: 1;
-  min-width: 106px;
-  border-bottom: 1px solid #293445;
-  padding: 8px 10px;
-  background: #151a24;
+.inlineEditorTextarea {
+  min-block-size: 88px;
+  padding: 8px;
+  resize: vertical;
 }
 
-.table tbody tr:hover .actionsCell {
-  background: #1c2534;
+.inlineEditorInput:focus,
+.inlineEditorSelect:focus,
+.inlineEditorTextarea:focus {
+  outline: 1px solid #55b5bf;
+  border-color: #55b5bf;
+}
+
+.rowAdded :global(.rdg-cell) {
+  animation: rowAddedGlow 2s ease-out;
+}
+
+.rowAdded .actionsGridCell {
+  animation: rowAddedGlowSticky 2s ease-out;
+}
+
+.rowRemoved {
+  animation: rowRemovedFade 650ms ease-in forwards;
+  pointer-events: none;
+}
+
+.rowRemoved :global(.rdg-cell) {
+  background: rgba(120, 139, 166, 0.1);
+}
+
+.rowRemoved .actionsGridCell {
+  background: rgba(120, 139, 166, 0.08);
+}
+
+.cellUpdated {
+  animation: cellPulse 1.2s ease-out;
+}
+
+.actionsHeaderCell {
+  composes: gridHeaderCell;
+}
+
+.actionsGridCell {
+  background: #0f141b;
+}
+
+.actionsCellContent {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  inline-size: 100%;
+  block-size: 100%;
+}
+
+.emptyState {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: 96px;
+  color: #8d9cb2;
+  font-size: 12px;
 }
 
 .actionButton {
-  border: 1px solid #3f5067;
-  background: #273245;
+  border: 1px solid #293548;
+  background: #161e29;
   color: #d7e1f1;
-  border-radius: 6px;
+  border-radius: 4px;
   padding: 5px 10px;
   font-size: 12px;
   cursor: pointer;
 }
 
 .actionButton:hover {
-  background: #30415a;
+  background: #1d2734;
 }
 
 .rowActions {
@@ -179,17 +279,17 @@
 }
 
 .dangerActionButton {
-  border: 1px solid #6a3c49;
-  background: #4a2530;
+  border: 1px solid #55333d;
+  background: #311a21;
   color: #f1d6dc;
-  border-radius: 6px;
+  border-radius: 4px;
   padding: 5px 10px;
   font-size: 12px;
   cursor: pointer;
 }
 
 .dangerActionButton:hover {
-  background: #5a2c3a;
+  background: #3b2028;
 }
 
 .footer {
@@ -197,7 +297,7 @@
   justify-content: space-between;
   align-items: center;
   gap: 12px;
-  border-top: 1px solid #273344;
+  border-top: 1px solid #232c3a;
   padding-top: 10px;
 }
 
@@ -216,14 +316,14 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  color: #9aabc2;
+  color: #95a4b7;
   font-size: 12px;
 }
 
 .pageSizeSelect {
-  border: 1px solid #33445d;
-  border-radius: 6px;
-  background: #1d2735;
+  border: 1px solid #2a3647;
+  border-radius: 4px;
+  background: #161d27;
   color: #d9e2f0;
   padding: 4px 6px;
 }
@@ -233,4 +333,89 @@
   color: #a3b1c6;
   min-width: 72px;
   text-align: center;
+}
+
+@keyframes cellPulse {
+  0% {
+    background: rgba(56, 163, 165, 0.5);
+    box-shadow: inset 0 0 0 1px rgba(108, 219, 221, 0.9);
+  }
+
+  45% {
+    background: rgba(56, 163, 165, 0.3);
+    box-shadow: inset 0 0 0 1px rgba(108, 219, 221, 0.65);
+  }
+
+  100% {
+    background: transparent;
+    box-shadow: inset 0 0 0 0 rgba(108, 219, 221, 0);
+  }
+}
+
+@keyframes rowAddedGlow {
+  0% {
+    background: rgba(95, 177, 123, 0.42);
+  }
+
+  55% {
+    background: rgba(95, 177, 123, 0.18);
+  }
+
+  100% {
+    background: transparent;
+  }
+}
+
+@keyframes rowAddedGlowSticky {
+  0% {
+    background: rgba(60, 112, 79, 0.72);
+  }
+
+  55% {
+    background: rgba(60, 112, 79, 0.28);
+  }
+
+  100% {
+    background: #0f141b;
+  }
+}
+
+@keyframes rowRemovedFade {
+  0% {
+    opacity: 1;
+    transform: translateX(0);
+    filter: saturate(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translateX(10px);
+    filter: saturate(0.4);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rowAdded :global(.rdg-cell),
+  .rowAdded .actionsGridCell,
+  .rowRemoved,
+  .cellUpdated {
+    animation: none;
+  }
+
+  .rowAdded :global(.rdg-cell) {
+    background: rgba(95, 177, 123, 0.16);
+  }
+
+  .rowAdded .actionsGridCell {
+    background: rgba(60, 112, 79, 0.34);
+  }
+
+  .rowRemoved {
+    opacity: 0.45;
+  }
+
+  .cellUpdated {
+    background: rgba(56, 163, 165, 0.16);
+    box-shadow: inset 0 0 0 1px rgba(108, 219, 221, 0.4);
+  }
 }

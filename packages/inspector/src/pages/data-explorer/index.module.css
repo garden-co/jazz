@@ -1,16 +1,15 @@
 .layout {
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
-  gap: 12px;
+  gap: 0;
   height: 100%;
   min-height: 0;
 }
 
 .sidebar {
-  border: 1px solid #2a3341;
-  border-radius: 8px;
-  background: #151a24;
-  padding: 14px 10px;
+  border-right: 1px solid #232c3a;
+  background: #0f141b;
+  padding: 14px 12px 14px 0;
   overflow: auto;
 }
 
@@ -27,7 +26,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin: 0 0 10px;
+  margin: 0 12px 12px;
 }
 
 .propagationSwitch {
@@ -35,7 +34,7 @@
   align-items: center;
   gap: 6px;
   font-size: 11px;
-  color: #9aa6ba;
+  color: #8996a8;
 }
 
 .propagationLabel {
@@ -45,11 +44,11 @@
 
 .tableList {
   margin: 0;
-  padding: 0;
+  padding: 0 6px 0 0;
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
 }
 
 .tableRow {
@@ -63,20 +62,20 @@
   flex: 1 1 auto;
   display: block;
   text-decoration: none;
-  color: #b8c3d5;
-  border-radius: 6px;
-  padding: 8px 10px;
+  color: #aab6c7;
+  border-radius: 0;
+  padding: 8px 12px;
   font-size: 13px;
 }
 
 .tableLink:hover {
-  background: #212b39;
-  color: #e2e8f0;
+  background: #151b24;
+  color: #e3e8ef;
 }
 
 .tableLinkActive {
-  background: #233246;
-  color: #eaf0f8;
+  background: #171e28;
+  color: #f2f5f9;
 }
 
 .schemaLink {
@@ -85,17 +84,17 @@
   align-items: center;
   gap: 4px;
   padding: 4px 6px;
-  border-radius: 6px;
+  border-radius: 4px;
   text-decoration: none;
-  color: #9aa6ba;
+  color: #8b98ab;
   font-size: 11px;
   border: 1px solid transparent;
 }
 
 .schemaLink:hover {
-  border-color: #3a4a63;
-  background: #202a39;
-  color: #d4deee;
+  border-color: #283548;
+  background: #151b24;
+  color: #d8e0eb;
 }
 
 .schemaIcon {
@@ -111,18 +110,19 @@
 .content {
   min-width: 0;
   min-height: 0;
+  padding-left: 20px;
 }
 
 .emptyState {
-  border: 1px dashed #2f3949;
-  border-radius: 8px;
+  border: 1px dashed #2a313d;
+  border-radius: 0;
   height: 100%;
   min-height: 220px;
   display: flex;
   flex-direction: column;
   justify-content: center;
   align-items: center;
-  background: #151a24;
+  background: #0f141b;
 }
 
 .emptyTitle {

@@ -1,19 +1,35 @@
+import "react-data-grid/lib/styles.css";
 import {
-  flexRender,
-  getCoreRowModel,
-  type ColumnDef,
-  type SortingState,
-  useReactTable,
-} from "@tanstack/react-table";
-import type { ColumnType, DynamicTableRow, TableProxy } from "jazz-tools";
+  Cell,
+  DataGrid,
+  Row,
+  type Column,
+  type RenderEditCellProps,
+  type Renderers,
+  type RowsChangeData,
+  type SortColumn,
+} from "react-data-grid";
+import type { ColumnDescriptor, ColumnType, DynamicTableRow, TableProxy } from "jazz-tools";
 import { useAll, useDb } from "jazz-tools/react";
-import { Profiler, useEffect, useMemo, useState } from "react";
+import {
+  Profiler,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import { Navigate, useParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
 import { RowMutationSidebar } from "./RowMutationSidebar.js";
 import { TableFilterBuilder, type TableFilterClause } from "./TableFilterBuilder.js";
-import type { MutationFormMode } from "./row-mutation-form.js";
+import {
+  formatMutationFieldValue,
+  getFieldReadOnlyReason,
+  parseMutationFieldValue,
+} from "./row-mutation-form.js";
 import styles from "./TableDataGrid.module.css";
 
 function formatCellValue(value: unknown): string {
@@ -26,10 +42,13 @@ function formatCellValue(value: unknown): string {
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 const EMPTY_ROWS: DynamicTableRow[] = [];
+const CELL_UPDATE_ANIMATION_MS = 1_200;
+const ROW_ADDED_ANIMATION_MS = 2_000;
+const ROW_REMOVED_ANIMATION_MS = 650;
+const DATA_COLUMN_MAX_WIDTH = 360;
 
 interface MutationState {
-  mode: MutationFormMode;
-  rowId: string | null;
+  mode: "insert";
 }
 
 interface TableDataGridProfilerEntry {
@@ -83,6 +102,26 @@ interface GridColumn {
   enableSorting: boolean;
 }
 
+type RowChangeState = "added" | "removed";
+
+interface AnimatedGridRow {
+  row: DynamicTableRow;
+  rowChangeState?: RowChangeState;
+  changedCellIds?: Record<string, true>;
+}
+
+interface QueuedCellEdit {
+  text: string;
+}
+
+type QueuedRowEdits = Record<string, QueuedCellEdit>;
+
+interface EditableGridRow extends AnimatedGridRow {
+  row: DynamicTableRow;
+  sourceRow: DynamicTableRow;
+  queuedEdits?: QueuedRowEdits;
+}
+
 function isColumnSortable(columnType: ColumnType): boolean {
   switch (columnType.type) {
     case "Integer":
@@ -107,6 +146,319 @@ function recordTableDataGridProfilerEntry(entry: TableDataGridProfilerEntry): vo
   profilerWindow.__inspectorProfiler.push(entry);
 }
 
+function getGridRowId(row: DynamicTableRow): string {
+  return String(row.id);
+}
+
+function clearAnimationTimeouts(timeouts: Map<string, ReturnType<typeof setTimeout>>): void {
+  for (const timeout of timeouts.values()) {
+    clearTimeout(timeout);
+  }
+  timeouts.clear();
+}
+
+function mergeChangedCellIds(
+  existingCellIds: Record<string, true> | undefined,
+  nextCellIds: string[],
+): Record<string, true> | undefined {
+  if (!existingCellIds && nextCellIds.length === 0) {
+    return undefined;
+  }
+
+  const mergedCellIds = { ...existingCellIds };
+  for (const cellId of nextCellIds) {
+    mergedCellIds[cellId] = true;
+  }
+
+  return Object.keys(mergedCellIds).length > 0 ? mergedCellIds : undefined;
+}
+
+function getChangedCellIds(
+  previousRow: DynamicTableRow,
+  nextRow: DynamicTableRow,
+  gridColumns: GridColumn[],
+): string[] {
+  const changedCellIds: string[] = [];
+
+  for (const column of gridColumns) {
+    const previousValue = formatCellValue(previousRow[column.accessorKey]);
+    const nextValue = formatCellValue(nextRow[column.accessorKey]);
+    if (previousValue !== nextValue) {
+      changedCellIds.push(column.id);
+    }
+  }
+
+  return changedCellIds;
+}
+
+function createAnimatedGridRow(row: DynamicTableRow): AnimatedGridRow {
+  return { row };
+}
+
+function getQueuedEditText(value: unknown): string {
+  return formatMutationFieldValue(value);
+}
+
+function parseQueuedEditValue(column: ColumnDescriptor, text: string): unknown {
+  const trimmed = text.trim();
+
+  if (column.nullable) {
+    switch (column.column_type.type) {
+      case "Uuid":
+      case "Boolean":
+      case "Integer":
+      case "BigInt":
+      case "Double":
+      case "Timestamp":
+      case "Enum":
+      case "Json":
+      case "Array":
+      case "Row":
+        if (trimmed.length === 0) {
+          return null;
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  return parseMutationFieldValue(column.column_type, text);
+}
+
+function applyQueuedEditsToRow(
+  row: DynamicTableRow,
+  queuedEdits?: QueuedRowEdits,
+): DynamicTableRow {
+  if (!queuedEdits || Object.keys(queuedEdits).length === 0) {
+    return row;
+  }
+
+  const nextRow = { ...row };
+  for (const [columnId, queuedEdit] of Object.entries(queuedEdits)) {
+    nextRow[columnId] = queuedEdit.text;
+  }
+
+  return nextRow;
+}
+
+function removeQueuedCellEdit(
+  queuedEdits: Record<string, QueuedRowEdits>,
+  rowId: string,
+  columnId: string,
+): Record<string, QueuedRowEdits> {
+  const rowEdits = queuedEdits[rowId];
+  if (!rowEdits?.[columnId]) {
+    return queuedEdits;
+  }
+
+  const nextRowEdits = { ...rowEdits };
+  delete nextRowEdits[columnId];
+
+  if (Object.keys(nextRowEdits).length === 0) {
+    const nextQueuedEdits = { ...queuedEdits };
+    delete nextQueuedEdits[rowId];
+    return nextQueuedEdits;
+  }
+
+  return {
+    ...queuedEdits,
+    [rowId]: nextRowEdits,
+  };
+}
+
+function useAnimatedGridRows(
+  rows: DynamicTableRow[],
+  gridColumns: GridColumn[],
+  animationScopeKey: string,
+): AnimatedGridRow[] {
+  const [renderedRows, setRenderedRows] = useState<AnimatedGridRow[]>(() =>
+    rows.map(createAnimatedGridRow),
+  );
+  const previousRowsRef = useRef(rows);
+  const previousScopeKeyRef = useRef(animationScopeKey);
+  const hasEstablishedScopeBaselineRef = useRef(rows.length > 0);
+  const cellAnimationTimeoutsRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const rowAnimationTimeoutsRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+
+  useEffect(() => {
+    return () => {
+      clearAnimationTimeouts(cellAnimationTimeoutsRef.current);
+      clearAnimationTimeouts(rowAnimationTimeoutsRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (previousScopeKeyRef.current !== animationScopeKey) {
+      previousScopeKeyRef.current = animationScopeKey;
+      previousRowsRef.current = rows;
+      hasEstablishedScopeBaselineRef.current = rows.length > 0;
+      clearAnimationTimeouts(cellAnimationTimeoutsRef.current);
+      clearAnimationTimeouts(rowAnimationTimeoutsRef.current);
+      setRenderedRows(rows.map(createAnimatedGridRow));
+      return;
+    }
+
+    const previousRows = previousRowsRef.current;
+    previousRowsRef.current = rows;
+
+    if (!hasEstablishedScopeBaselineRef.current) {
+      if (rows.length === 0) {
+        setRenderedRows([]);
+        return;
+      }
+
+      hasEstablishedScopeBaselineRef.current = true;
+      setRenderedRows(rows.map(createAnimatedGridRow));
+      return;
+    }
+
+    const previousRowById = new Map(previousRows.map((row) => [getGridRowId(row), row]));
+    const nextRowById = new Map(rows.map((row) => [getGridRowId(row), row]));
+    const addedRowIds = new Set(
+      rows.map(getGridRowId).filter((rowId) => !previousRowById.has(rowId)),
+    );
+    const removedRows = previousRows.filter((row) => !nextRowById.has(getGridRowId(row)));
+    const changedCellIdsByRowId = new Map<string, string[]>();
+
+    for (const row of rows) {
+      const rowId = getGridRowId(row);
+      const previousRow = previousRowById.get(rowId);
+      if (!previousRow) {
+        continue;
+      }
+      const changedCellIds = getChangedCellIds(previousRow, row, gridColumns);
+      if (changedCellIds.length > 0) {
+        changedCellIdsByRowId.set(rowId, changedCellIds);
+      }
+    }
+
+    setRenderedRows((currentRenderedRows) => {
+      const currentRenderedRowById = new Map(
+        currentRenderedRows.map((entry) => [getGridRowId(entry.row), entry]),
+      );
+      const nextRenderedRows: AnimatedGridRow[] = rows.map((row) => {
+        const rowId = getGridRowId(row);
+        const currentRenderedRow = currentRenderedRowById.get(rowId);
+        const rowChangeState: RowChangeState | undefined =
+          addedRowIds.has(rowId) || currentRenderedRow?.rowChangeState === "added"
+            ? "added"
+            : undefined;
+
+        return {
+          row,
+          rowChangeState,
+          changedCellIds: mergeChangedCellIds(
+            currentRenderedRow?.changedCellIds,
+            changedCellIdsByRowId.get(rowId) ?? [],
+          ),
+        };
+      });
+
+      const ghostInsertions = new Map<string, { entry: AnimatedGridRow; index: number }>();
+
+      for (const [index, entry] of currentRenderedRows.entries()) {
+        const rowId = getGridRowId(entry.row);
+        if (entry.rowChangeState === "removed" && !nextRowById.has(rowId)) {
+          ghostInsertions.set(rowId, { entry, index });
+        }
+      }
+
+      for (const removedRow of removedRows) {
+        const rowId = getGridRowId(removedRow);
+        ghostInsertions.set(rowId, {
+          entry: { row: removedRow, rowChangeState: "removed" },
+          index: previousRows.findIndex((row) => getGridRowId(row) === rowId),
+        });
+      }
+
+      for (const { entry, index } of [...ghostInsertions.values()].sort((left, right) => {
+        return left.index - right.index;
+      })) {
+        const rowId = getGridRowId(entry.row);
+        if (nextRenderedRows.some((renderedRow) => getGridRowId(renderedRow.row) === rowId)) {
+          continue;
+        }
+
+        nextRenderedRows.splice(Math.max(0, Math.min(index, nextRenderedRows.length)), 0, entry);
+      }
+
+      return nextRenderedRows;
+    });
+
+    for (const rowId of addedRowIds) {
+      const existingTimeout = rowAnimationTimeoutsRef.current.get(rowId);
+      if (existingTimeout) {
+        clearTimeout(existingTimeout);
+      }
+      rowAnimationTimeoutsRef.current.set(
+        rowId,
+        setTimeout(() => {
+          rowAnimationTimeoutsRef.current.delete(rowId);
+          setRenderedRows((currentRenderedRows) =>
+            currentRenderedRows.map((entry) =>
+              getGridRowId(entry.row) === rowId && entry.rowChangeState === "added"
+                ? { ...entry, rowChangeState: undefined }
+                : entry,
+            ),
+          );
+        }, ROW_ADDED_ANIMATION_MS),
+      );
+    }
+
+    for (const removedRow of removedRows) {
+      const rowId = getGridRowId(removedRow);
+      const existingTimeout = rowAnimationTimeoutsRef.current.get(rowId);
+      if (existingTimeout) {
+        clearTimeout(existingTimeout);
+      }
+      rowAnimationTimeoutsRef.current.set(
+        rowId,
+        setTimeout(() => {
+          rowAnimationTimeoutsRef.current.delete(rowId);
+          setRenderedRows((currentRenderedRows) =>
+            currentRenderedRows.filter((entry) => getGridRowId(entry.row) !== rowId),
+          );
+        }, ROW_REMOVED_ANIMATION_MS),
+      );
+    }
+
+    for (const [rowId, changedCellIds] of changedCellIdsByRowId) {
+      for (const cellId of changedCellIds) {
+        const timeoutKey = `${rowId}:${cellId}`;
+        const existingTimeout = cellAnimationTimeoutsRef.current.get(timeoutKey);
+        if (existingTimeout) {
+          clearTimeout(existingTimeout);
+        }
+        cellAnimationTimeoutsRef.current.set(
+          timeoutKey,
+          setTimeout(() => {
+            cellAnimationTimeoutsRef.current.delete(timeoutKey);
+            setRenderedRows((currentRenderedRows) =>
+              currentRenderedRows.map((entry) => {
+                if (getGridRowId(entry.row) !== rowId || !entry.changedCellIds?.[cellId]) {
+                  return entry;
+                }
+
+                const nextChangedCellIds = { ...entry.changedCellIds };
+                delete nextChangedCellIds[cellId];
+
+                return {
+                  ...entry,
+                  changedCellIds:
+                    Object.keys(nextChangedCellIds).length > 0 ? nextChangedCellIds : undefined,
+                };
+              }),
+            );
+          }, CELL_UPDATE_ANIMATION_MS),
+        );
+      }
+    }
+  }, [animationScopeKey, gridColumns, rows]);
+
+  return renderedRows;
+}
+
 export function TableDataGrid() {
   const { table } = useParams();
 
@@ -116,17 +468,27 @@ export function TableDataGrid() {
 
   const { wasmSchema: schema, queryPropagation, runtime } = useDevtoolsContext();
   const db = useDb();
-  const [sorting, setSorting] = useState<SortingState>([{ id: "id", desc: false }]);
+  const [sorting, setSorting] = useState<readonly SortColumn[]>([
+    { columnKey: "id", direction: "ASC" },
+  ]);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZE_OPTIONS[0]);
   const [pageIndex, setPageIndex] = useState(0);
   const [filters, setFilters] = useState<TableFilterClause[]>([]);
   const [mutationState, setMutationState] = useState<MutationState | null>(null);
+  const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
   const [isSidebarMutationPending, setIsSidebarMutationPending] = useState(false);
+  const [queuedEdits, setQueuedEdits] = useState<Record<string, QueuedRowEdits>>({});
+  const [isQueuedSavePending, setIsQueuedSavePending] = useState(false);
+  const [queuedSaveError, setQueuedSaveError] = useState<string | null>(null);
   const [deletingRowId, setDeletingRowId] = useState<string | null>(null);
   const schemaColumns = schema[table]?.columns ?? [];
-  const activeSort = sorting[0] ?? { id: "id", desc: false };
-  const sortColumn = activeSort.id;
-  const sortDirection = activeSort.desc ? "desc" : "asc";
+  const schemaColumnById = useMemo(
+    () => new Map(schemaColumns.map((column) => [column.name, column])),
+    [schemaColumns],
+  );
+  const activeSort = sorting[0] ?? { columnKey: "id", direction: "ASC" };
+  const sortColumn = activeSort.columnKey;
+  const sortDirection = activeSort.direction === "DESC" ? "desc" : "asc";
   const queryOffset = pageIndex * pageSize;
   const queryLimit = pageSize + 1;
   const queryBuilder = useMemo(() => {
@@ -178,13 +540,34 @@ export function TableDataGrid() {
   );
   const hasNextPage = rows.length > pageSize;
   const visibleRows = hasNextPage ? rows.slice(0, pageSize) : rows;
+  const queuedEditCount = useMemo(() => {
+    return Object.values(queuedEdits).reduce(
+      (total, rowEdits) => total + Object.keys(rowEdits).length,
+      0,
+    );
+  }, [queuedEdits]);
+  const queuedEditedRowCount = useMemo(() => Object.keys(queuedEdits).length, [queuedEdits]);
+  const hasQueuedEdits = queuedEditCount > 0;
+  const isAnyMutationPending = isSidebarMutationPending || isQueuedSavePending;
+  const gridAnimationScopeKey = useMemo(
+    () => `${table}:${builtQuery}:${gridColumns.map((column) => column.id).join("|")}`,
+    [builtQuery, gridColumns, table],
+  );
   const rowById = useMemo(() => {
     return new Map(visibleRows.map((row) => [row.id, row]));
   }, [visibleRows]);
-  const editingRow =
-    mutationState?.mode === "edit" && mutationState.rowId
-      ? (rowById.get(mutationState.rowId) ?? null)
-      : null;
+  const selectedRowValues = useMemo(() => {
+    if (!selectedRowId) {
+      return null;
+    }
+
+    const selectedRow = rowById.get(selectedRowId);
+    if (!selectedRow) {
+      return null;
+    }
+
+    return applyQueuedEditsToRow(selectedRow, queuedEdits[selectedRowId]);
+  }, [queuedEdits, rowById, selectedRowId]);
   const insertRowValues = useMemo(() => {
     const values: Record<string, unknown> = {};
     for (const column of schemaColumns) {
@@ -232,17 +615,14 @@ export function TableDataGrid() {
     inspectorWindow.__inspectorGridEvents.push(event);
     globalThis.console?.debug?.("[inspector-grid]", JSON.stringify(event));
   };
-  const handleSort = (columnId: string, canSort: boolean): void => {
-    if (!canSort) {
-      return;
-    }
+  const handleSortColumnsChange = (nextSortColumns: SortColumn[]): void => {
     const nextSort =
-      sortColumn === columnId && sortDirection === "asc"
-        ? [{ id: columnId, desc: true }]
-        : [{ id: columnId, desc: false }];
+      nextSortColumns.length === 0
+        ? [{ columnKey: "id", direction: "ASC" as const }]
+        : [nextSortColumns.at(-1)!];
     recordGridEvent("sort-click", {
-      columnId,
-      nextSortDirection: nextSort[0]?.desc ? "desc" : "asc",
+      columnId: nextSort[0]?.columnKey,
+      nextSortDirection: nextSort[0]?.direction === "DESC" ? "desc" : "asc",
     });
     setSorting(nextSort);
     setPageIndex(0);
@@ -256,15 +636,81 @@ export function TableDataGrid() {
       await db.deleteDurable(tableProxy, rowId, {
         tier: mutationDurabilityTier,
       });
-      if (mutationState?.mode === "edit" && mutationState.rowId === rowId) {
-        setMutationState(null);
+      if (selectedRowId === rowId) {
+        setSelectedRowId(null);
       }
     } finally {
       setDeletingRowId(null);
     }
   };
   const handleEditRow = (rowId: string): void => {
-    setMutationState({ mode: "edit", rowId });
+    setSelectedRowId(rowId);
+  };
+  const handleSaveSelectedRow = async (updates: Record<string, unknown>): Promise<void> => {
+    if (!selectedRowId) {
+      return;
+    }
+
+    try {
+      setIsSidebarMutationPending(true);
+      await db.updateDurable(tableProxy, selectedRowId, updates, {
+        tier: mutationDurabilityTier,
+      });
+      setQueuedEdits((currentQueuedEdits) => {
+        if (!currentQueuedEdits[selectedRowId]) {
+          return currentQueuedEdits;
+        }
+
+        const nextQueuedEdits = { ...currentQueuedEdits };
+        delete nextQueuedEdits[selectedRowId];
+        return nextQueuedEdits;
+      });
+      setQueuedSaveError(null);
+    } finally {
+      setIsSidebarMutationPending(false);
+    }
+  };
+  const handleDiscardQueuedEdits = (): void => {
+    setQueuedEdits({});
+    setQueuedSaveError(null);
+  };
+  const handleSaveQueuedEdits = async (): Promise<void> => {
+    if (!hasQueuedEdits) {
+      return;
+    }
+
+    try {
+      setIsQueuedSavePending(true);
+      setQueuedSaveError(null);
+
+      const rowUpdates = Object.entries(queuedEdits).map(([rowId, rowEdits]) => {
+        const updates: Record<string, unknown> = {};
+        for (const [columnId, queuedEdit] of Object.entries(rowEdits)) {
+          const schemaColumn = schemaColumnById.get(columnId);
+          if (!schemaColumn || getFieldReadOnlyReason(schemaColumn) !== null) {
+            continue;
+          }
+          updates[columnId] = parseQueuedEditValue(schemaColumn, queuedEdit.text);
+        }
+        return { rowId, updates };
+      });
+
+      await Promise.all(
+        rowUpdates.map(({ rowId, updates }) =>
+          db.updateDurable(tableProxy, rowId, updates, {
+            tier: mutationDurabilityTier,
+          }),
+        ),
+      );
+
+      setQueuedEdits({});
+    } catch (error) {
+      setQueuedSaveError(
+        error instanceof Error ? error.message : "Could not persist queued cell edits.",
+      );
+    } finally {
+      setIsQueuedSavePending(false);
+    }
   };
 
   useEffect(() => {
@@ -283,6 +729,12 @@ export function TableDataGrid() {
     hasNextPage,
     builtQuery,
   ]);
+
+  useEffect(() => {
+    if (selectedRowId && !rowById.has(selectedRowId)) {
+      setSelectedRowId(null);
+    }
+  }, [rowById, selectedRowId]);
 
   return (
     <Profiler
@@ -313,13 +765,53 @@ export function TableDataGrid() {
             type="button"
             className={styles.secondaryButton}
             onClick={() => {
-              setMutationState({ mode: "insert", rowId: null });
+              setMutationState({ mode: "insert" });
             }}
-            disabled={isSidebarMutationPending || deletingRowId !== null}
+            disabled={hasQueuedEdits || isAnyMutationPending || deletingRowId !== null}
           >
             Insert
           </button>
         </header>
+        {hasQueuedEdits || queuedSaveError ? (
+          <div
+            className={styles.queuedBanner}
+            role={queuedSaveError ? "alert" : "status"}
+            aria-live="polite"
+          >
+            <div className={styles.queuedBannerCopy}>
+              <strong>
+                {queuedEditCount} queued change{queuedEditCount === 1 ? "" : "s"} across{" "}
+                {queuedEditedRowCount} row{queuedEditedRowCount === 1 ? "" : "s"}
+              </strong>
+              <span className={styles.queuedBannerHint}>
+                Double-click a cell to stage edits locally, then save them together.
+              </span>
+              {queuedSaveError ? (
+                <span className={styles.queuedBannerError}>{queuedSaveError}</span>
+              ) : null}
+            </div>
+            <div className={styles.queuedBannerActions}>
+              <button
+                type="button"
+                className={styles.secondaryButton}
+                onClick={handleDiscardQueuedEdits}
+                disabled={isQueuedSavePending}
+              >
+                Discard queued changes
+              </button>
+              <button
+                type="button"
+                className={styles.primaryButton}
+                onClick={() => {
+                  void handleSaveQueuedEdits();
+                }}
+                disabled={isQueuedSavePending}
+              >
+                {isQueuedSavePending ? "Saving..." : "Save queued changes"}
+              </button>
+            </div>
+          </div>
+        ) : null}
         <TableFilterBuilder
           schemaColumns={schemaColumns}
           clauses={filters}
@@ -331,19 +823,38 @@ export function TableDataGrid() {
         />
         <div className={styles.contentArea}>
           <div className={styles.gridFrame}>
-            <TanStackTableView
-              rows={rows}
+            <PlainTableView
+              rows={visibleRows}
               gridColumns={gridColumns}
-              pageSize={pageSize}
               sorting={sorting}
-              onSortingChange={setSorting}
+              schemaColumnById={schemaColumnById}
+              queuedEdits={queuedEdits}
               isSidebarMutationPending={isSidebarMutationPending}
+              isQueuedSavePending={isQueuedSavePending}
               deletingRowId={deletingRowId}
-              onSort={handleSort}
+              animationScopeKey={gridAnimationScopeKey}
+              onSortColumnsChange={handleSortColumnsChange}
+              onQueuedEditsChange={setQueuedEdits}
+              onQueuedSaveErrorChange={setQueuedSaveError}
+              onSelectedRowIdChange={setSelectedRowId}
               onEditRow={handleEditRow}
               onDeleteRow={handleDeleteRow}
             />
           </div>
+          {!mutationState && selectedRowValues ? (
+            <RowMutationSidebar
+              key={`edit:${selectedRowId}`}
+              mode="edit"
+              tableName={table}
+              schemaColumns={schemaColumns}
+              targetRowId={selectedRowId}
+              rowValues={selectedRowValues}
+              onCancel={() => {
+                setSelectedRowId(null);
+              }}
+              onSave={handleSaveSelectedRow}
+            />
+          ) : null}
         </div>
         <footer className={styles.footer}>
           <div className={styles.paginationInfo}>
@@ -414,12 +925,12 @@ export function TableDataGrid() {
               }}
             >
               <RowMutationSidebar
-                key={`${mutationState.mode}:${mutationState.rowId ?? "new"}`}
-                mode={mutationState.mode}
+                key="insert:new"
+                mode="insert"
                 tableName={table}
                 schemaColumns={schemaColumns}
-                targetRowId={mutationState.mode === "edit" ? (editingRow?.id ?? null) : null}
-                rowValues={mutationState.mode === "edit" ? editingRow : insertRowValues}
+                targetRowId={null}
+                rowValues={insertRowValues}
                 onCancel={() => {
                   if (isSidebarMutationPending) return;
                   setMutationState(null);
@@ -427,16 +938,9 @@ export function TableDataGrid() {
                 onSave={async (updates) => {
                   try {
                     setIsSidebarMutationPending(true);
-                    if (mutationState.mode === "edit") {
-                      if (!editingRow) return;
-                      await db.updateDurable(tableProxy, editingRow.id, updates, {
-                        tier: mutationDurabilityTier,
-                      });
-                    } else {
-                      await db.insertDurable(tableProxy, updates, {
-                        tier: mutationDurabilityTier,
-                      });
-                    }
+                    await db.insertDurable(tableProxy, updates, {
+                      tier: mutationDurabilityTier,
+                    });
                     setMutationState(null);
                   } finally {
                     setIsSidebarMutationPending(false);
@@ -451,123 +955,382 @@ export function TableDataGrid() {
   );
 }
 
-function TanStackTableView({
+function QueuedCellEditor({
+  row,
+  onRowChange,
+  onClose,
+  schemaColumn,
+}: RenderEditCellProps<EditableGridRow> & {
+  schemaColumn: ColumnDescriptor;
+}) {
+  const value = getQueuedEditText(row.row[schemaColumn.name]);
+
+  const updateValue = (nextValue: string) => {
+    onRowChange(
+      {
+        ...row,
+        row: {
+          ...row.row,
+          [schemaColumn.name]: nextValue,
+        },
+      },
+      false,
+    );
+  };
+  const commit = () => {
+    onClose(true, false);
+  };
+
+  if (schemaColumn.column_type.type === "Enum") {
+    return (
+      <select
+        aria-label={`Edit ${schemaColumn.name}`}
+        className={styles.inlineEditorSelect}
+        autoFocus
+        value={value}
+        onChange={(event) => {
+          updateValue(event.target.value);
+        }}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            onClose(false, false);
+          }
+        }}
+      >
+        {schemaColumn.nullable ? <option value="">null</option> : null}
+        {schemaColumn.column_type.variants.map((variant) => (
+          <option key={variant} value={variant}>
+            {variant}
+          </option>
+        ))}
+      </select>
+    );
+  }
+
+  if (schemaColumn.column_type.type === "Boolean") {
+    return (
+      <select
+        aria-label={`Edit ${schemaColumn.name}`}
+        className={styles.inlineEditorSelect}
+        autoFocus
+        value={value}
+        onChange={(event) => {
+          updateValue(event.target.value);
+        }}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            onClose(false, false);
+          }
+        }}
+      >
+        {schemaColumn.nullable ? <option value="">null</option> : null}
+        <option value="true">true</option>
+        <option value="false">false</option>
+      </select>
+    );
+  }
+
+  if (
+    schemaColumn.column_type.type === "Json" ||
+    schemaColumn.column_type.type === "Array" ||
+    schemaColumn.column_type.type === "Row"
+  ) {
+    return (
+      <textarea
+        aria-label={`Edit ${schemaColumn.name}`}
+        className={styles.inlineEditorTextarea}
+        autoFocus
+        value={value}
+        onChange={(event) => {
+          updateValue(event.target.value);
+        }}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+            commit();
+          }
+          if (event.key === "Escape") {
+            onClose(false, false);
+          }
+        }}
+      />
+    );
+  }
+
+  return (
+    <input
+      aria-label={`Edit ${schemaColumn.name}`}
+      className={styles.inlineEditorInput}
+      autoFocus
+      value={value}
+      onChange={(event) => {
+        updateValue(event.target.value);
+      }}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          commit();
+        }
+        if (event.key === "Escape") {
+          onClose(false, false);
+        }
+      }}
+    />
+  );
+}
+
+function PlainTableView({
   rows,
   gridColumns,
-  pageSize,
   sorting,
-  onSortingChange,
+  schemaColumnById,
+  queuedEdits,
   isSidebarMutationPending,
+  isQueuedSavePending,
   deletingRowId,
-  onSort,
+  animationScopeKey,
+  onSortColumnsChange,
+  onQueuedEditsChange,
+  onQueuedSaveErrorChange,
+  onSelectedRowIdChange,
   onEditRow,
   onDeleteRow,
 }: {
   rows: DynamicTableRow[];
   gridColumns: GridColumn[];
-  pageSize: number;
-  sorting: SortingState;
-  onSortingChange: (updater: SortingState) => void;
+  sorting: readonly SortColumn[];
+  schemaColumnById: Map<string, ColumnDescriptor>;
+  queuedEdits: Record<string, QueuedRowEdits>;
   isSidebarMutationPending: boolean;
+  isQueuedSavePending: boolean;
   deletingRowId: string | null;
-  onSort: (columnId: string, canSort: boolean) => void;
+  animationScopeKey: string;
+  onSortColumnsChange: (sortColumns: SortColumn[]) => void;
+  onQueuedEditsChange: Dispatch<SetStateAction<Record<string, QueuedRowEdits>>>;
+  onQueuedSaveErrorChange: (value: string | null) => void;
+  onSelectedRowIdChange: (rowId: string | null) => void;
   onEditRow: (rowId: string) => void;
   onDeleteRow: (rowId: string) => Promise<void>;
 }) {
-  const columns = useMemo<ColumnDef<DynamicTableRow>[]>(
-    () =>
-      gridColumns.map(
-        (column): ColumnDef<DynamicTableRow> => ({
-          id: column.id,
-          accessorKey: column.accessorKey,
-          header: column.header,
-          enableSorting: column.enableSorting,
-          cell: (cellContext) => formatCellValue(cellContext.getValue()),
-        }),
-      ),
-    [gridColumns],
+  const animatedRows = useAnimatedGridRows(rows, gridColumns, animationScopeKey);
+  const editableRows = useMemo<EditableGridRow[]>(() => {
+    return animatedRows.map((entry) => {
+      const rowId = getGridRowId(entry.row);
+      const rowQueuedEdits = queuedEdits[rowId];
+
+      return {
+        ...entry,
+        sourceRow: entry.row,
+        row: applyQueuedEditsToRow(entry.row, rowQueuedEdits),
+        queuedEdits: rowQueuedEdits,
+      };
+    });
+  }, [animatedRows, queuedEdits]);
+  const hasQueuedEdits = Object.keys(queuedEdits).length > 0;
+  const rowClass = (row: EditableGridRow): string | undefined => {
+    if (row.rowChangeState === "added") {
+      return styles.rowAdded;
+    }
+
+    if (row.rowChangeState === "removed") {
+      return styles.rowRemoved;
+    }
+
+    return undefined;
+  };
+  const renderers = useMemo<Renderers<EditableGridRow, unknown>>(
+    () => ({
+      renderCell(key, props) {
+        const columnKey = String(props.column.key);
+        return (
+          <Cell
+            key={key}
+            {...props}
+            data-cell-change-state={props.row.changedCellIds?.[columnKey] ? "updated" : undefined}
+          />
+        );
+      },
+      renderRow(key, props) {
+        return <Row key={key} {...props} data-row-change-state={props.row.rowChangeState} />;
+      },
+      noRowsFallback: <div className={styles.emptyState}>No rows</div>,
+    }),
+    [],
   );
-  const tableState = useReactTable({
-    data: rows,
-    columns,
-    state: { sorting },
-    onSortingChange,
-    getCoreRowModel: getCoreRowModel(),
-  });
+  const columns = useMemo<readonly Column<EditableGridRow>[]>(() => {
+    const dataColumns = gridColumns.map((column): Column<EditableGridRow> => {
+      const isIdColumn = column.id === "id";
+      const schemaColumn = schemaColumnById.get(column.id);
+      const isEditable = schemaColumn ? getFieldReadOnlyReason(schemaColumn) === null : false;
+
+      return {
+        key: column.id,
+        name: column.header,
+        sortable: column.enableSorting,
+        resizable: true,
+        editable: isEditable,
+        minWidth: isIdColumn ? 148 : 120,
+        maxWidth: isIdColumn ? 220 : DATA_COLUMN_MAX_WIDTH,
+        width: isIdColumn ? 180 : undefined,
+        headerCellClass: column.enableSorting ? styles.sortableHeaderCell : styles.gridHeaderCell,
+        cellClass: (row) =>
+          row.changedCellIds?.[column.id]
+            ? `${styles.dataGridCell} ${styles.cellUpdated}`
+            : styles.dataGridCell,
+        renderCell: ({ row }) => {
+          const value = formatCellValue(row.row[column.accessorKey]);
+
+          return (
+            <div className={styles.cellContent} title={value}>
+              {value}
+            </div>
+          );
+        },
+        renderEditCell: schemaColumn
+          ? (props) => <QueuedCellEditor {...props} schemaColumn={schemaColumn} />
+          : undefined,
+      };
+    });
+
+    return [
+      ...dataColumns,
+      {
+        key: "__actions__",
+        name: "Actions",
+        resizable: false,
+        minWidth: 132,
+        width: 132,
+        headerCellClass: styles.actionsHeaderCell,
+        cellClass: styles.actionsGridCell,
+        renderCell: ({ row }) => (
+          <RowActionsCell
+            rowId={getGridRowId(row.sourceRow)}
+            isSidebarMutationPending={isSidebarMutationPending}
+            isQueuedSavePending={isQueuedSavePending || hasQueuedEdits}
+            deletingRowId={deletingRowId}
+            isRowRemoved={row.rowChangeState === "removed"}
+            onEditRow={onEditRow}
+            onDeleteRow={onDeleteRow}
+          />
+        ),
+      },
+    ];
+  }, [
+    deletingRowId,
+    gridColumns,
+    hasQueuedEdits,
+    isQueuedSavePending,
+    isSidebarMutationPending,
+    onDeleteRow,
+    onEditRow,
+    schemaColumnById,
+  ]);
+  const handleRowsChange = (
+    nextRows: EditableGridRow[],
+    data: RowsChangeData<EditableGridRow>,
+  ): void => {
+    const columnId = String(data.column.key);
+    if (columnId === "__actions__") {
+      return;
+    }
+
+    onQueuedSaveErrorChange(null);
+    onQueuedEditsChange((currentQueuedEdits) => {
+      let nextQueuedEdits = currentQueuedEdits;
+
+      for (const rowIndex of data.indexes) {
+        const nextRow = nextRows[rowIndex];
+        if (!nextRow) {
+          continue;
+        }
+
+        const rowId = getGridRowId(nextRow.sourceRow);
+        const nextValueText = getQueuedEditText(nextRow.row[columnId]);
+        const sourceValueText = getQueuedEditText(nextRow.sourceRow[columnId]);
+
+        if (nextValueText === sourceValueText) {
+          nextQueuedEdits = removeQueuedCellEdit(nextQueuedEdits, rowId, columnId);
+          continue;
+        }
+
+        nextQueuedEdits = {
+          ...nextQueuedEdits,
+          [rowId]: {
+            ...nextQueuedEdits[rowId],
+            [columnId]: { text: nextValueText },
+          },
+        };
+      }
+
+      return nextQueuedEdits;
+    });
+  };
 
   return (
-    <table className={styles.table}>
-      <thead>
-        {tableState.getHeaderGroups().map((headerGroup) => (
-          <tr key={headerGroup.id}>
-            {headerGroup.headers.map((header) => {
-              const headerSortDirection = header.column.getIsSorted();
-              const canSort = header.column.getCanSort();
-              return (
-                <th
-                  key={header.id}
-                  onClick={canSort ? () => onSort(header.column.id, canSort) : undefined}
-                  className={canSort ? styles.sortableHeader : styles.headerCell}
-                >
-                  {header.isPlaceholder
-                    ? null
-                    : flexRender(header.column.columnDef.header, header.getContext())}
-                  {headerSortDirection === "asc"
-                    ? " ↑"
-                    : headerSortDirection === "desc"
-                      ? " ↓"
-                      : ""}
-                </th>
-              );
-            })}
-            <th className={styles.actionsHeader}>Actions</th>
-          </tr>
-        ))}
-      </thead>
-      <tbody>
-        {tableState
-          .getRowModel()
-          .rows.slice(0, pageSize)
-          .map((row) => (
-            <tr key={row.id}>
-              {row.getVisibleCells().map((cell) => (
-                <td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
-              ))}
-              <RowActionsCell
-                rowId={String(row.original.id)}
-                isSidebarMutationPending={isSidebarMutationPending}
-                deletingRowId={deletingRowId}
-                onEditRow={onEditRow}
-                onDeleteRow={onDeleteRow}
-              />
-            </tr>
-          ))}
-      </tbody>
-    </table>
+    <DataGrid
+      className={`${styles.dataGrid} rdg-dark`}
+      columns={columns}
+      rows={editableRows}
+      rowKeyGetter={(row) => getGridRowId(row.sourceRow)}
+      sortColumns={sorting}
+      onSortColumnsChange={onSortColumnsChange}
+      onRowsChange={handleRowsChange}
+      onCellClick={(args) => {
+        onSelectedRowIdChange(args.row ? getGridRowId(args.row.sourceRow) : null);
+      }}
+      onSelectedCellChange={(args) => {
+        onSelectedRowIdChange(args.row ? getGridRowId(args.row.sourceRow) : null);
+      }}
+      onCellDoubleClick={(args, event) => {
+        const schemaColumn = schemaColumnById.get(String(args.column.key));
+        if (!schemaColumn || getFieldReadOnlyReason(schemaColumn) !== null) {
+          event.preventGridDefault();
+          return;
+        }
+        args.selectCell(true);
+      }}
+      rowClass={rowClass}
+      renderers={renderers}
+      rowHeight={38}
+      headerRowHeight={40}
+      enableVirtualization={false}
+    />
   );
 }
 
 function RowActionsCell({
   rowId,
   isSidebarMutationPending,
+  isQueuedSavePending,
   deletingRowId,
+  isRowRemoved,
   onEditRow,
   onDeleteRow,
 }: {
   rowId: string;
   isSidebarMutationPending: boolean;
+  isQueuedSavePending: boolean;
   deletingRowId: string | null;
+  isRowRemoved: boolean;
   onEditRow: (rowId: string) => void;
   onDeleteRow: (rowId: string) => Promise<void>;
 }) {
   return (
-    <td className={styles.actionsCell}>
+    <div className={styles.actionsCellContent}>
       <div className={styles.rowActions}>
         <button
           type="button"
           className={styles.actionButton}
-          disabled={isSidebarMutationPending || deletingRowId !== null}
-          onClick={() => {
+          disabled={
+            isRowRemoved ||
+            isQueuedSavePending ||
+            isSidebarMutationPending ||
+            deletingRowId !== null
+          }
+          onClick={(event) => {
+            event.stopPropagation();
             onEditRow(rowId);
           }}
         >
@@ -576,14 +1339,20 @@ function RowActionsCell({
         <button
           type="button"
           className={styles.dangerActionButton}
-          disabled={isSidebarMutationPending || deletingRowId !== null}
-          onClick={async () => {
+          disabled={
+            isRowRemoved ||
+            isQueuedSavePending ||
+            isSidebarMutationPending ||
+            deletingRowId !== null
+          }
+          onClick={async (event) => {
+            event.stopPropagation();
             await onDeleteRow(rowId);
           }}
         >
           {deletingRowId === rowId ? "Deleting..." : "Delete"}
         </button>
       </div>
-    </td>
+    </div>
   );
 }

@@ -15,16 +15,16 @@
   display: inline-flex;
   flex-direction: column;
   gap: 4px;
-  color: #9fb0c8;
+  color: #95a4b7;
   font-size: 12px;
 }
 
 .select,
 .input {
   min-width: 140px;
-  border: 1px solid #33445d;
-  border-radius: 6px;
-  background: #1d2735;
+  border: 1px solid #2a3647;
+  border-radius: 4px;
+  background: #151d27;
   color: #d9e2f0;
   padding: 6px 8px;
   font-size: 12px;
@@ -35,10 +35,10 @@
 }
 
 .button {
-  border: 1px solid #344357;
-  background: #202b3b;
+  border: 1px solid #2a3647;
+  background: #161d27;
   color: #d3dceb;
-  border-radius: 6px;
+  border-radius: 4px;
   padding: 6px 10px;
   font-size: 12px;
   cursor: pointer;
@@ -46,7 +46,7 @@
 }
 
 .button:hover {
-  background: #273346;
+  background: #1b2430;
 }
 
 .triggerButton {
@@ -54,10 +54,10 @@
 }
 
 .summaryBox {
-  border: 1px solid #2f3a4b;
-  border-radius: 8px;
-  background: #131b27;
-  padding: 8px 10px;
+  border-top: 1px solid #232c3a;
+  border-bottom: 1px solid #232c3a;
+  background: rgba(16, 22, 29, 0.72);
+  padding: 8px 0;
 }
 
 .summary {
@@ -74,9 +74,9 @@
 }
 
 .modal {
-  border: 1px solid #2f3a4b;
-  border-radius: 8px;
-  background: #131b27;
+  border: 1px solid #232c3a;
+  border-radius: 4px;
+  background: #10161d;
   color: #d9e2f0;
   padding: 10px;
   min-width: 720px;
@@ -111,9 +111,9 @@
   justify-content: space-between;
   gap: 8px;
   padding: 6px 8px;
-  border: 1px solid #2f3a4b;
-  border-radius: 6px;
-  background: #1a2433;
+  border: 1px solid #232c3a;
+  border-radius: 4px;
+  background: #151d27;
 }
 
 .clauseText {
@@ -122,9 +122,9 @@
 }
 
 .removeButton {
-  border: 1px solid #33445d;
-  border-radius: 6px;
-  background: #1d2735;
+  border: 1px solid #2a3647;
+  border-radius: 4px;
+  background: #161d27;
   color: #c7d3e7;
   font-size: 12px;
   padding: 4px 8px;
@@ -132,5 +132,5 @@
 }
 
 .removeButton:hover {
-  background: #253247;
+  background: #1b2430;
 }
