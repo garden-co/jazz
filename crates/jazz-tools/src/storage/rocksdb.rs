@@ -5,7 +5,7 @@
 //! pattern as FjallStorage, delegating all logic to `storage_core` callbacks.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Bound;
 use std::path::Path;
 
@@ -16,9 +16,9 @@ use rocksdb::{
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::{BatchBranchKey, QueryBranchRef, Value};
+use crate::query_manager::types::{BatchBranchKey, BatchId, QueryBranchRef, Value};
 #[cfg(test)]
-use crate::query_manager::types::{BatchId, BranchPrefixName, ComposedBranchName, SchemaHash};
+use crate::query_manager::types::{BranchPrefixName, ComposedBranchName, SchemaHash};
 use crate::sync_manager::DurabilityTier;
 
 use super::{
@@ -28,8 +28,10 @@ use super::{
         adjust_table_prefix_batch_refcount_core, append_catalogue_manifest_op_core,
         append_catalogue_manifest_ops_core, append_commit_core, create_object_core,
         index_insert_core, index_lookup_core, index_range_core, index_remove_core,
-        index_scan_all_core, load_branch_core, load_branch_tips_core, load_catalogue_manifest_core,
+        index_scan_all_core, load_branch_core, load_branch_core_existing_object,
+        load_branch_tips_core, load_branch_tips_core_existing_object, load_catalogue_manifest_core,
         load_commit_branch_core, load_object_metadata_core, load_prefix_batch_catalog_core,
+        load_prefix_head_entries_core, load_prefix_leaf_head_entries_core,
         load_table_prefix_batch_keys_core, replace_branch_core, store_ack_tier_core,
     },
 };
@@ -352,6 +354,18 @@ impl Storage for RocksDBStorage {
         })
     }
 
+    fn load_branch_existing_object(
+        &self,
+        object_id: ObjectId,
+        branch: &QueryBranchRef,
+    ) -> Result<Option<LoadedBranch>, StorageError> {
+        self.with_inner(|inner| {
+            load_branch_core_existing_object(object_id, branch, |key| {
+                Self::get_from_db(&inner.db, key)
+            })
+        })
+    }
+
     fn load_branch_tips(
         &self,
         object_id: ObjectId,
@@ -359,6 +373,18 @@ impl Storage for RocksDBStorage {
     ) -> Result<Option<LoadedBranchTips>, StorageError> {
         self.with_inner(|inner| {
             load_branch_tips_core(object_id, branch, |key| Self::get_from_db(&inner.db, key))
+        })
+    }
+
+    fn load_branch_tips_existing_object(
+        &self,
+        object_id: ObjectId,
+        branch: &QueryBranchRef,
+    ) -> Result<Option<LoadedBranchTips>, StorageError> {
+        self.with_inner(|inner| {
+            load_branch_tips_core_existing_object(object_id, branch, |key| {
+                Self::get_from_db(&inner.db, key)
+            })
         })
     }
 
@@ -381,6 +407,30 @@ impl Storage for RocksDBStorage {
     ) -> Result<Option<PrefixBatchCatalog>, StorageError> {
         self.with_inner(|inner| {
             load_prefix_batch_catalog_core(object_id, prefix, |key| {
+                Self::get_from_db(&inner.db, key)
+            })
+        })
+    }
+
+    fn load_prefix_head_entries(
+        &self,
+        object_id: ObjectId,
+        prefix: &str,
+    ) -> Result<Vec<(BatchId, CommitId)>, StorageError> {
+        self.with_inner(|inner| {
+            load_prefix_head_entries_core(object_id, prefix, |key| {
+                Self::get_from_db(&inner.db, key)
+            })
+        })
+    }
+
+    fn load_prefix_leaf_head_entries(
+        &self,
+        object_id: ObjectId,
+        prefix: &str,
+    ) -> Result<Vec<(BatchId, CommitId)>, StorageError> {
+        self.with_inner(|inner| {
+            load_prefix_leaf_head_entries_core(object_id, prefix, |key| {
                 Self::get_from_db(&inner.db, key)
             })
         })
@@ -424,7 +474,7 @@ impl Storage for RocksDBStorage {
         object_id: ObjectId,
         branch: &QueryBranchRef,
         commits: Vec<Commit>,
-        tails: HashSet<CommitId>,
+        tails: smolset::SmolSet<[CommitId; 2]>,
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let txn = RefCell::new(inner.db.transaction());

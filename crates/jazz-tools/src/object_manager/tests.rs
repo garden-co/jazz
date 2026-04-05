@@ -19,14 +19,18 @@ struct CountingLoadStorage {
     load_object_metadata_calls: Cell<usize>,
     load_branch_calls: Cell<usize>,
     load_branch_tips_calls: Cell<usize>,
+    load_branch_existing_object_calls: Cell<usize>,
+    load_branch_tips_existing_object_calls: Cell<usize>,
 }
 
 impl CountingLoadStorage {
-    fn load_counts(&self) -> (usize, usize, usize) {
+    fn load_counts(&self) -> (usize, usize, usize, usize, usize) {
         (
             self.load_object_metadata_calls.get(),
             self.load_branch_calls.get(),
             self.load_branch_tips_calls.get(),
+            self.load_branch_existing_object_calls.get(),
+            self.load_branch_tips_existing_object_calls.get(),
         )
     }
 }
@@ -58,6 +62,16 @@ impl Storage for CountingLoadStorage {
         self.inner.load_branch(object_id, branch)
     }
 
+    fn load_branch_existing_object(
+        &self,
+        object_id: ObjectId,
+        branch: &QueryBranchRef,
+    ) -> Result<Option<LoadedBranch>, StorageError> {
+        self.load_branch_existing_object_calls
+            .set(self.load_branch_existing_object_calls.get() + 1);
+        self.inner.load_branch(object_id, branch)
+    }
+
     fn load_branch_tips(
         &self,
         object_id: ObjectId,
@@ -65,6 +79,16 @@ impl Storage for CountingLoadStorage {
     ) -> Result<Option<LoadedBranchTips>, StorageError> {
         self.load_branch_tips_calls
             .set(self.load_branch_tips_calls.get() + 1);
+        self.inner.load_branch_tips(object_id, branch)
+    }
+
+    fn load_branch_tips_existing_object(
+        &self,
+        object_id: ObjectId,
+        branch: &QueryBranchRef,
+    ) -> Result<Option<LoadedBranchTips>, StorageError> {
+        self.load_branch_tips_existing_object_calls
+            .set(self.load_branch_tips_existing_object_calls.get() + 1);
         self.inner.load_branch_tips(object_id, branch)
     }
 
@@ -108,7 +132,7 @@ impl Storage for CountingLoadStorage {
         object_id: ObjectId,
         branch: &QueryBranchRef,
         commits: Vec<Commit>,
-        tails: HashSet<CommitId>,
+        tails: SmolSet<[CommitId; 2]>,
     ) -> Result<(), StorageError> {
         self.inner.replace_branch(object_id, branch, commits, tails)
     }
@@ -290,7 +314,7 @@ fn apply_prefix_batch_update_mutates_catalog_in_place() {
         head_commit_id: commit1,
         first_timestamp: 10,
         last_timestamp: 10,
-        parent_batch_ords: Vec::new(),
+        parent_batch_ords: smallvec::smallvec![],
         child_count: 0,
     });
     catalog.insert_leaf_batch_ord(BatchOrd(0));
@@ -304,11 +328,11 @@ fn apply_prefix_batch_update_mutates_catalog_in_place() {
             head_commit_id: commit2,
             first_timestamp: 20,
             last_timestamp: 20,
-            parent_batch_ords: vec![BatchOrd(0)],
+            parent_batch_ords: smallvec::smallvec![BatchOrd(0)],
             child_count: 0,
         },
         remove_leaf_batch_ords: [BatchOrd(0)].into_iter().collect(),
-        increment_parent_child_counts: vec![BatchOrd(0)],
+        increment_parent_child_counts: smallvec::smallvec![BatchOrd(0)],
     };
 
     ObjectManager::apply_prefix_batch_update(&mut catalog, &update);
@@ -318,7 +342,7 @@ fn apply_prefix_batch_update_mutates_catalog_in_place() {
     assert!(catalog.contains_leaf_batch(&batch2));
     assert_eq!(
         catalog.batch_meta(&batch2).unwrap().parent_batch_ords,
-        vec![BatchOrd(0)]
+        smallvec::SmallVec::<[BatchOrd; 4]>::from_vec(vec![BatchOrd(0)])
     );
 }
 
@@ -1553,6 +1577,76 @@ fn get_or_load_tips_loads_only_frontier_and_full_load_upgrades_it() {
 }
 
 #[test]
+fn get_or_load_uses_existing_object_branch_load_path() {
+    let mut io = CountingLoadStorage::default();
+    let author = ObjectId::new();
+
+    let object_id = {
+        let mut mgr = ObjectManager::new();
+        let oid = mgr.create(&mut io, None);
+        mgr.add_commit(
+            &mut io,
+            oid,
+            main_branch(),
+            vec![],
+            b"A".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+        oid
+    };
+
+    let mut mgr2 = ObjectManager::new();
+    let loaded = mgr2
+        .get_or_load(object_id, &io, &[main_branch().as_str().to_string()])
+        .expect("object should load from storage");
+    assert!(loaded.branches.contains_key(&main_branch()));
+
+    let (metadata, branch, branch_tips, existing_branch, existing_branch_tips) = io.load_counts();
+    assert_eq!(metadata, 1);
+    assert_eq!(branch, 0);
+    assert_eq!(branch_tips, 0);
+    assert_eq!(existing_branch, 1);
+    assert_eq!(existing_branch_tips, 0);
+}
+
+#[test]
+fn get_or_load_tips_uses_existing_object_branch_tip_load_path() {
+    let mut io = CountingLoadStorage::default();
+    let author = ObjectId::new();
+
+    let object_id = {
+        let mut mgr = ObjectManager::new();
+        let oid = mgr.create(&mut io, None);
+        mgr.add_commit(
+            &mut io,
+            oid,
+            main_branch(),
+            vec![],
+            b"A".to_vec(),
+            author,
+            None,
+        )
+        .unwrap();
+        oid
+    };
+
+    let mut mgr2 = ObjectManager::new();
+    let loaded = mgr2
+        .get_or_load_tips(object_id, &io, &[main_branch().as_str().to_string()])
+        .expect("object should load tip frontier from storage");
+    assert!(loaded.branches.contains_key(&main_branch()));
+
+    let (metadata, branch, branch_tips, existing_branch, existing_branch_tips) = io.load_counts();
+    assert_eq!(metadata, 1);
+    assert_eq!(branch, 0);
+    assert_eq!(branch_tips, 0);
+    assert_eq!(existing_branch, 0);
+    assert_eq!(existing_branch_tips, 1);
+}
+
+#[test]
 fn add_commit_accepts_new_batch_root_merge_and_tracks_prefix_leaves() {
     let mut io = MemoryStorage::new();
     let mut manager = ObjectManager::new();
@@ -1691,13 +1785,12 @@ fn get_leaf_head_ids_for_prefix_cold_loads_only_leaf_branches() {
 
     let object = reloaded.get(object_id).unwrap();
     assert!(object.branches.is_empty());
-    let batch3_id = ComposedBranchName::parse(&batch3).unwrap().batch_id;
-    assert_eq!(
+    assert!(
         object
-            .prefix_batches
-            .get(&BranchName::new(prefix.branch_prefix()))
-            .map(|catalog| catalog.leaf_batch_ids().collect::<HashSet<_>>()),
-        Some(HashSet::from([batch3_id]))
+            .branches
+            .prefix_catalog(&BranchName::new(prefix.branch_prefix()))
+            .is_none(),
+        "leaf-head scan should not materialize the full prefix catalog"
     );
 }
 
@@ -1761,12 +1854,12 @@ fn get_head_ids_for_prefix_cold_loads_without_loading_branches() {
 
     let object = reloaded.get(object_id).unwrap();
     assert!(object.branches.is_empty());
-    assert_eq!(
+    assert!(
         object
-            .prefix_batches
-            .get(&BranchName::new(prefix.branch_prefix()))
-            .map(|catalog| catalog.batch_metas().count()),
-        Some(3)
+            .branches
+            .prefix_catalog(&BranchName::new(prefix.branch_prefix()))
+            .is_none(),
+        "head scan should not materialize the full prefix catalog"
     );
 }
 

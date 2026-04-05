@@ -24,11 +24,12 @@ use std::time::Instant;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use futures::executor::block_on;
 use jazz_tools::commit::{Commit, CommitId, StoredState};
-use jazz_tools::object::{BranchName, ObjectId};
+use jazz_tools::object::ObjectId;
 use jazz_tools::object_manager::ObjectManager;
 use jazz_tools::query_manager::policy::{Operation as PolicyOperation, PolicyExpr};
 use jazz_tools::query_manager::query::{Query, QueryBuilder};
 use jazz_tools::query_manager::session::{Session, WriteContext};
+use jazz_tools::query_manager::types::ComposedBranchName;
 use jazz_tools::query_manager::types::{
     BatchId, BranchPrefixName, ColumnType, Schema, SchemaBuilder, SchemaHash, TablePolicies,
     TableSchema, Value,
@@ -288,8 +289,6 @@ struct ManyBranchesDataset {
 
 #[derive(Debug, Clone, Copy)]
 struct BranchHeadScan {
-    branches_scanned: usize,
-    heads_found: usize,
     checksum: u64,
 }
 
@@ -1012,7 +1011,8 @@ impl ColdLoadSeededDb {
             let seeded =
                 seed_project_board_dataset(&mut runtime, profile, profile.seed ^ scenario.seed);
             runtime.flush_storage();
-            runtime.storage().close().expect("close seeded fjall");
+            let storage = runtime.into_storage();
+            storage.close().expect("close seeded fjall");
             seeded
         };
 
@@ -1043,7 +1043,8 @@ impl ColdLoadSeededDb {
             let seeded =
                 seed_project_board_dataset(&mut runtime, profile, profile.seed ^ scenario.seed);
             runtime.flush_storage();
-            runtime.storage().close().expect("close seeded rocksdb");
+            let storage = runtime.into_storage();
+            storage.close().expect("close seeded rocksdb");
             seeded
         };
 
@@ -1073,7 +1074,8 @@ impl ColdLoadSeededDb {
             let seeded =
                 seed_project_board_dataset(&mut runtime, profile, profile.seed ^ scenario.seed);
             runtime.flush_storage();
-            runtime.storage().close().expect("close seeded sqlite");
+            let storage = runtime.into_storage();
+            storage.close().expect("close seeded sqlite");
             seeded
         };
 
@@ -1717,7 +1719,8 @@ fn realistic_r1_crud_fjall(c: &mut Criterion) {
                 black_box(executed);
             });
             state.runtime.flush_storage();
-            state.runtime.storage().close().expect("close fjall");
+            let storage = state.runtime.into_storage();
+            storage.close().expect("close fjall");
         },
     );
 
@@ -1756,7 +1759,8 @@ fn realistic_r1_crud_rocksdb(c: &mut Criterion) {
                 black_box(executed);
             });
             state.runtime.flush_storage();
-            state.runtime.storage().close().expect("close rocksdb");
+            let storage = state.runtime.into_storage();
+            storage.close().expect("close rocksdb");
         },
     );
 
@@ -1794,7 +1798,8 @@ fn realistic_r1_crud_sqlite(c: &mut Criterion) {
                 black_box(executed);
             });
             state.runtime.flush_storage();
-            state.runtime.storage().close().expect("close sqlite");
+            let storage = state.runtime.into_storage();
+            storage.close().expect("close sqlite");
         },
     );
 
@@ -1832,7 +1837,8 @@ fn realistic_r2_reads_fjall(c: &mut Criterion) {
                 black_box(total_rows);
             });
             state.runtime.flush_storage();
-            state.runtime.storage().close().expect("close fjall");
+            let storage = state.runtime.into_storage();
+            storage.close().expect("close fjall");
         },
     );
 
@@ -1871,7 +1877,8 @@ fn realistic_r2_reads_rocksdb(c: &mut Criterion) {
                 black_box(total_rows);
             });
             state.runtime.flush_storage();
-            state.runtime.storage().close().expect("close rocksdb");
+            let storage = state.runtime.into_storage();
+            storage.close().expect("close rocksdb");
         },
     );
 
@@ -1909,7 +1916,8 @@ fn realistic_r2_reads_sqlite(c: &mut Criterion) {
                 black_box(total_rows);
             });
             state.runtime.flush_storage();
-            state.runtime.storage().close().expect("close sqlite");
+            let storage = state.runtime.into_storage();
+            storage.close().expect("close sqlite");
         },
     );
 
@@ -1959,7 +1967,8 @@ fn realistic_r3_cold_load_fjall(c: &mut Criterion) {
                 let query_elapsed = query_start.elapsed();
 
                 runtime.flush_storage();
-                runtime.storage().close().expect("close cold-load fjall");
+                let storage = runtime.into_storage();
+                storage.close().expect("close cold-load fjall");
 
                 black_box(open_elapsed);
                 black_box(query_elapsed);
@@ -2014,7 +2023,8 @@ fn realistic_r3_cold_load_rocksdb(c: &mut Criterion) {
                 let query_elapsed = query_start.elapsed();
 
                 runtime.flush_storage();
-                runtime.storage().close().expect("close cold-load rocksdb");
+                let storage = runtime.into_storage();
+                storage.close().expect("close cold-load rocksdb");
 
                 black_box(open_elapsed);
                 black_box(query_elapsed);
@@ -2065,7 +2075,8 @@ fn realistic_r3_cold_load_sqlite(c: &mut Criterion) {
                 let query_elapsed = query_start.elapsed();
 
                 runtime.flush_storage();
-                runtime.storage().close().expect("close cold-load sqlite");
+                let storage = runtime.into_storage();
+                storage.close().expect("close cold-load sqlite");
 
                 black_box(open_elapsed);
                 black_box(query_elapsed);
@@ -2688,29 +2699,16 @@ fn scan_prefix_heads<H: jazz_tools::storage::Storage>(
     object_id: ObjectId,
     prefix: &BranchPrefixName,
 ) -> BranchHeadScan {
-    let mut scan = BranchHeadScan {
-        branches_scanned: 0,
-        heads_found: 0,
-        checksum: 0,
-    };
-
-    manager
-        .ensure_prefix_batch_catalog_loaded(object_id, prefix, storage)
+    let heads = manager
+        .get_head_ids_for_prefix(object_id, prefix, storage)
         .expect("load prefix heads");
-    let object = manager
-        .get(object_id)
-        .expect("many-branches object should be loaded");
-    let catalog = object
-        .prefix_batches
-        .get(&BranchName::new(prefix.branch_prefix()))
-        .expect("prefix catalog should be cached");
-
-    for batch_meta in catalog.batch_metas() {
-        scan.branches_scanned += 1;
-        scan.heads_found += 1;
-        scan.checksum ^= batch_head_checksum(batch_meta.batch_id, batch_meta.head_commit_id);
+    let mut scan = BranchHeadScan { checksum: 0 };
+    for (branch_name, head_commit_id) in heads {
+        let batch_id = ComposedBranchName::parse(&branch_name)
+            .expect("prefix head branch should be composed")
+            .batch_id;
+        scan.checksum ^= batch_head_checksum(batch_id, head_commit_id);
     }
-
     scan
 }
 
@@ -2720,32 +2718,16 @@ fn scan_prefix_leaf_heads<H: jazz_tools::storage::Storage>(
     object_id: ObjectId,
     prefix: &BranchPrefixName,
 ) -> BranchHeadScan {
-    let mut scan = BranchHeadScan {
-        branches_scanned: 0,
-        heads_found: 0,
-        checksum: 0,
-    };
-
-    manager
-        .ensure_prefix_batch_catalog_loaded(object_id, prefix, storage)
+    let heads = manager
+        .get_leaf_head_ids_for_prefix(object_id, prefix, storage)
         .expect("load prefix leaf heads");
-    let object = manager
-        .get(object_id)
-        .expect("many-branches object should be loaded");
-    let catalog = object
-        .prefix_batches
-        .get(&BranchName::new(prefix.branch_prefix()))
-        .expect("prefix catalog should be cached");
-
-    for batch_ord in catalog.leaf_batch_ords() {
-        let batch_meta = catalog
-            .batch_meta_by_ord(batch_ord)
-            .expect("leaf batch ord should resolve");
-        scan.branches_scanned += 1;
-        scan.heads_found += 1;
-        scan.checksum ^= batch_head_checksum(batch_meta.batch_id, batch_meta.head_commit_id);
+    let mut scan = BranchHeadScan { checksum: 0 };
+    for (branch_name, head_commit_id) in heads {
+        let batch_id = ComposedBranchName::parse(&branch_name)
+            .expect("prefix leaf head branch should be composed")
+            .batch_id;
+        scan.checksum ^= batch_head_checksum(batch_id, head_commit_id);
     }
-
     scan
 }
 

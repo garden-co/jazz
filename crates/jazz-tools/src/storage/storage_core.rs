@@ -37,7 +37,7 @@ struct StoredBranchRef {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedBranchManifest {
-    segment_ids: Vec<u32>,
+    segment_ids: SmallVec<[u32; 2]>,
     inline_commits: Vec<Commit>,
     tails: HashSet<CommitId>,
     tip_commits: Vec<Commit>,
@@ -48,21 +48,10 @@ struct PersistedBranchSegment {
     commits: Vec<Commit>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct PersistedPrefixBatchCatalogEntry {
-    batch_id: BatchId,
-    root_commit_id: CommitId,
-    head_commit_id: CommitId,
-    first_timestamp: u64,
-    last_timestamp: u64,
-    parent_batch_ords: Vec<BatchOrd>,
-    child_count: u32,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-struct PersistedPrefixBatchCatalog {
-    prefix_name: String,
-    batches: Vec<PersistedPrefixBatchCatalogEntry>,
+#[derive(Debug, Clone, PartialEq)]
+struct DecodedPrefixBatchCatalog {
+    prefix_name: BranchName,
+    catalog: PrefixBatchCatalog,
 }
 
 const MAX_COMMITS_PER_BRANCH_SEGMENT: usize = 32;
@@ -147,13 +136,27 @@ impl<'a> BinaryCursor<'a> {
     }
 
     fn read_len_prefixed_bytes(&mut self, label: &str) -> Result<Vec<u8>, StorageError> {
+        Ok(self.read_len_prefixed_slice(label)?.to_vec())
+    }
+
+    fn read_len_prefixed_slice(&mut self, label: &str) -> Result<&'a [u8], StorageError> {
         let len = self.read_var_u32(label)? as usize;
-        Ok(self.read_exact(label, len)?.to_vec())
+        self.read_exact(label, len)
+    }
+
+    fn skip_len_prefixed_bytes(&mut self, label: &str) -> Result<(), StorageError> {
+        let len = self.read_var_u32(label)? as usize;
+        let _ = self.read_exact(label, len)?;
+        Ok(())
     }
 
     fn read_string(&mut self, label: &str) -> Result<String, StorageError> {
         String::from_utf8(self.read_len_prefixed_bytes(label)?)
             .map_err(|e| codec_error(label, format!("invalid utf-8: {e}")))
+    }
+
+    fn skip_string(&mut self, label: &str) -> Result<(), StorageError> {
+        self.skip_len_prefixed_bytes(label)
     }
 
     fn expect_end(&self, label: &str) -> Result<(), StorageError> {
@@ -458,6 +461,67 @@ fn decode_commit(
     })
 }
 
+fn skip_commit(
+    cursor: &mut BinaryCursor<'_>,
+    label: &str,
+    author_count: usize,
+    metadata_key_count: usize,
+    previous_commit_id: Option<CommitId>,
+    previous_timestamp: Option<u64>,
+) -> Result<(), StorageError> {
+    match cursor.read_u8(label)? {
+        0 => {}
+        1 => {
+            previous_commit_id.ok_or_else(|| codec_error(label, "missing previous commit"))?;
+        }
+        2 => {
+            let parent_count = cursor.read_var_u32(label)? as usize;
+            let _ = cursor.read_exact(label, parent_count * 32)?;
+        }
+        other => return Err(codec_error(label, format!("unknown parent mode {other}"))),
+    }
+
+    cursor.skip_len_prefixed_bytes(label)?;
+
+    match cursor.read_u8(label)? {
+        0 => {
+            let _ = cursor.read_var_u64(label)?;
+        }
+        1 => {
+            previous_timestamp.ok_or_else(|| codec_error(label, "missing previous timestamp"))?;
+            let _ = decode_var_i64(cursor, label)?;
+        }
+        other => {
+            return Err(codec_error(
+                label,
+                format!("unknown timestamp mode {other}"),
+            ));
+        }
+    }
+
+    let author_index = cursor.read_var_u32(label)? as usize;
+    if author_index >= author_count {
+        return Err(codec_error(label, "invalid author index"));
+    }
+
+    match cursor.read_u8(label)? {
+        0 => {}
+        1 => {
+            let entry_count = cursor.read_var_u32(label)? as usize;
+            for _ in 0..entry_count {
+                let key_index = cursor.read_var_u32(label)? as usize;
+                if key_index >= metadata_key_count {
+                    return Err(codec_error(label, "invalid metadata key index"));
+                }
+                cursor.skip_string(label)?;
+            }
+        }
+        other => return Err(codec_error(label, format!("unknown metadata flag {other}"))),
+    }
+
+    Ok(())
+}
+
 fn encode_branch_manifest(manifest: &PersistedBranchManifest) -> Result<Vec<u8>, StorageError> {
     let mut out = Vec::new();
     out.push(STORAGE_BINARY_V1);
@@ -518,11 +582,14 @@ fn encode_branch_manifest(manifest: &PersistedBranchManifest) -> Result<Vec<u8>,
     Ok(out)
 }
 
-fn decode_branch_manifest(bytes: &[u8]) -> Result<PersistedBranchManifest, StorageError> {
+fn decode_branch_manifest_with_tips(
+    bytes: &[u8],
+    decode_tip_commits: bool,
+) -> Result<PersistedBranchManifest, StorageError> {
     let mut cursor = decode_binary_payload(bytes, "branch manifest")?;
     let (authors, metadata_keys) = decode_commit_tables(&mut cursor, "branch manifest")?;
     let segment_count = cursor.read_var_u32("branch manifest")? as usize;
-    let segment_ids = (0..segment_count as u32).collect();
+    let segment_ids = (0..segment_count as u32).collect::<SmallVec<[u32; 2]>>();
 
     let inline_commit_count = cursor.read_var_u32("branch manifest")? as usize;
     let mut inline_commits = Vec::with_capacity(inline_commit_count);
@@ -562,16 +629,30 @@ fn decode_branch_manifest(bytes: &[u8]) -> Result<PersistedBranchManifest, Stora
     };
 
     let tip_count = cursor.read_var_u32("branch manifest")? as usize;
-    let mut tip_commits = Vec::with_capacity(tip_count);
-    for _ in 0..tip_count {
-        tip_commits.push(decode_commit(
-            &mut cursor,
-            "branch manifest",
-            &authors,
-            &metadata_keys,
-            None,
-            None,
-        )?);
+    let mut tip_commits = Vec::new();
+    if decode_tip_commits {
+        tip_commits.reserve(tip_count);
+        for _ in 0..tip_count {
+            tip_commits.push(decode_commit(
+                &mut cursor,
+                "branch manifest",
+                &authors,
+                &metadata_keys,
+                None,
+                None,
+            )?);
+        }
+    } else {
+        for _ in 0..tip_count {
+            skip_commit(
+                &mut cursor,
+                "branch manifest",
+                authors.len(),
+                metadata_keys.len(),
+                None,
+                None,
+            )?;
+        }
     }
     cursor.expect_end("branch manifest")?;
 
@@ -585,6 +666,10 @@ fn decode_branch_manifest(bytes: &[u8]) -> Result<PersistedBranchManifest, Stora
         tails,
         tip_commits,
     })
+}
+
+fn decode_branch_manifest(bytes: &[u8]) -> Result<PersistedBranchManifest, StorageError> {
+    decode_branch_manifest_with_tips(bytes, true)
 }
 
 fn encode_branch_segment(segment: &PersistedBranchSegment) -> Result<Vec<u8>, StorageError> {
@@ -635,13 +720,14 @@ fn decode_branch_segment(bytes: &[u8]) -> Result<PersistedBranchSegment, Storage
 }
 
 fn encode_prefix_batch_catalog(
-    catalog: &PersistedPrefixBatchCatalog,
+    prefix_name: &BranchName,
+    catalog: &PrefixBatchCatalog,
 ) -> Result<Vec<u8>, StorageError> {
     let mut out = Vec::new();
     out.push(STORAGE_BINARY_V1);
-    encode_string(&mut out, "prefix batch catalog", &catalog.prefix_name)?;
-    encode_len(&mut out, "prefix batch catalog", catalog.batches.len())?;
-    for batch in &catalog.batches {
+    encode_string(&mut out, "prefix batch catalog", prefix_name.as_str())?;
+    encode_len(&mut out, "prefix batch catalog", catalog.batch_count())?;
+    for batch in catalog.batch_metas() {
         let mut flags = 0_u8;
         if batch.root_commit_id != batch.head_commit_id {
             flags |= 0b001;
@@ -677,12 +763,13 @@ fn encode_prefix_batch_catalog(
     Ok(out)
 }
 
-fn decode_prefix_batch_catalog(bytes: &[u8]) -> Result<PersistedPrefixBatchCatalog, StorageError> {
+fn decode_prefix_batch_catalog(bytes: &[u8]) -> Result<DecodedPrefixBatchCatalog, StorageError> {
     let mut cursor = decode_binary_payload(bytes, "prefix batch catalog")?;
-    let prefix_name = cursor.read_string("prefix batch catalog")?;
+    let prefix_name = BranchName::new(cursor.read_string("prefix batch catalog")?);
     let batch_count = cursor.read_var_u32("prefix batch catalog")? as usize;
     let mut batches = Vec::with_capacity(batch_count);
-    for _ in 0..batch_count {
+    let mut leaf_batch_ords = Vec::new();
+    for batch_index in 0..batch_count {
         let flags = cursor.read_u8("prefix batch catalog")?;
         let batch_id = BatchId(cursor.read_fixed::<16>("prefix batch catalog")?);
         let root_commit_id = if flags & 0b001 != 0 {
@@ -709,17 +796,22 @@ fn decode_prefix_batch_catalog(bytes: &[u8]) -> Result<PersistedPrefixBatchCatal
         };
         let parent_batch_ords = if flags & 0b100 != 0 {
             let parent_count = cursor.read_var_u32("prefix batch catalog")? as usize;
-            let mut parent_batch_ords = Vec::with_capacity(parent_count);
+            let mut parent_batch_ords = SmallVec::<[BatchOrd; 4]>::with_capacity(parent_count);
             for _ in 0..parent_count {
                 parent_batch_ords.push(BatchOrd(cursor.read_var_u32("prefix batch catalog")?));
             }
             parent_batch_ords
         } else {
-            Vec::new()
+            SmallVec::new()
         };
         let child_count = cursor.read_var_u32("prefix batch catalog")?;
-        batches.push(PersistedPrefixBatchCatalogEntry {
+        let batch_ord = BatchOrd(batch_index as u32);
+        if child_count == 0 {
+            leaf_batch_ords.push(batch_ord);
+        }
+        batches.push(PrefixBatchMeta {
             batch_id,
+            batch_ord,
             root_commit_id,
             head_commit_id,
             first_timestamp,
@@ -730,10 +822,55 @@ fn decode_prefix_batch_catalog(bytes: &[u8]) -> Result<PersistedPrefixBatchCatal
     }
     cursor.expect_end("prefix batch catalog")?;
 
-    Ok(PersistedPrefixBatchCatalog {
+    Ok(DecodedPrefixBatchCatalog {
         prefix_name,
-        batches,
+        catalog: PrefixBatchCatalog::from_persisted_parts(batches, leaf_batch_ords),
     })
+}
+
+fn decode_prefix_head_entries(
+    bytes: &[u8],
+    expected_prefix: &str,
+    leaf_only: bool,
+) -> Result<Vec<(BatchId, CommitId)>, StorageError> {
+    let mut cursor = decode_binary_payload(bytes, "prefix batch catalog")?;
+    let persisted_prefix = cursor.read_len_prefixed_slice("prefix batch catalog")?;
+    if persisted_prefix != expected_prefix.as_bytes() {
+        return Err(codec_error(
+            "prefix batch catalog",
+            format!(
+                "catalog key/value prefix mismatch: key='{expected_prefix}', value='{}'",
+                String::from_utf8_lossy(persisted_prefix)
+            ),
+        ));
+    }
+
+    let batch_count = cursor.read_var_u32("prefix batch catalog")? as usize;
+    let mut heads = Vec::with_capacity(batch_count);
+    for _ in 0..batch_count {
+        let flags = cursor.read_u8("prefix batch catalog")?;
+        let batch_id = BatchId(cursor.read_fixed::<16>("prefix batch catalog")?);
+        if flags & 0b001 != 0 {
+            let _ = cursor.read_fixed::<32>("prefix batch catalog")?;
+        }
+        let head_commit_id = CommitId(cursor.read_fixed::<32>("prefix batch catalog")?);
+        if flags & 0b010 != 0 {
+            let _ = cursor.read_var_u64("prefix batch catalog")?;
+        }
+        let _ = cursor.read_var_u64("prefix batch catalog")?;
+        if flags & 0b100 != 0 {
+            let parent_count = cursor.read_var_u32("prefix batch catalog")? as usize;
+            for _ in 0..parent_count {
+                let _ = cursor.read_var_u32("prefix batch catalog")?;
+            }
+        }
+        let child_count = cursor.read_var_u32("prefix batch catalog")?;
+        if !leaf_only || child_count == 0 {
+            heads.push((batch_id, head_commit_id));
+        }
+    }
+    cursor.expect_end("prefix batch catalog")?;
+    Ok(heads)
 }
 
 fn encode_table_prefix_batch_manifest(
@@ -808,6 +945,18 @@ fn load_branch_manifest(
     }
 }
 
+fn load_branch_manifest_for_full_load(
+    object_id: ObjectId,
+    branch: &QueryBranchRef,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<PersistedBranchManifest>, StorageError> {
+    let key = branch_manifest_key(object_id, branch);
+    match get(&key)? {
+        Some(data) => Ok(Some(decode_branch_manifest_with_tips(&data, false)?)),
+        None => Ok(None),
+    }
+}
+
 fn load_branch_segment(
     object_id: ObjectId,
     branch: &QueryBranchRef,
@@ -818,52 +967,6 @@ fn load_branch_segment(
     match get(&key)? {
         Some(data) => Ok(Some(decode_branch_segment(&data)?)),
         None => Ok(None),
-    }
-}
-
-impl PersistedPrefixBatchCatalog {
-    fn from_catalog(prefix_name: &str, catalog: &PrefixBatchCatalog) -> Self {
-        Self {
-            prefix_name: prefix_name.to_string(),
-            batches: catalog
-                .batch_metas()
-                .map(|batch| PersistedPrefixBatchCatalogEntry {
-                    batch_id: batch.batch_id,
-                    root_commit_id: batch.root_commit_id,
-                    head_commit_id: batch.head_commit_id,
-                    first_timestamp: batch.first_timestamp,
-                    last_timestamp: batch.last_timestamp,
-                    parent_batch_ords: batch.parent_batch_ords.clone(),
-                    child_count: batch.child_count,
-                })
-                .collect(),
-        }
-    }
-
-    fn into_catalog(self) -> PrefixBatchCatalog {
-        let mut leaf_batch_ords = Vec::new();
-        let batches_by_ord = self
-            .batches
-            .into_iter()
-            .enumerate()
-            .map(|(index, batch)| {
-                let batch_ord = BatchOrd(index as u32);
-                if batch.child_count == 0 {
-                    leaf_batch_ords.push(batch_ord);
-                }
-                PrefixBatchMeta {
-                    batch_id: batch.batch_id,
-                    batch_ord,
-                    root_commit_id: batch.root_commit_id,
-                    head_commit_id: batch.head_commit_id,
-                    first_timestamp: batch.first_timestamp,
-                    last_timestamp: batch.last_timestamp,
-                    parent_batch_ords: batch.parent_batch_ords,
-                    child_count: batch.child_count,
-                }
-            })
-            .collect();
-        PrefixBatchCatalog::from_persisted_parts(batches_by_ord, leaf_batch_ords)
     }
 }
 
@@ -930,6 +1033,23 @@ fn tip_commits_for_branch(commits: &[Commit]) -> Vec<Commit> {
         .collect()
 }
 
+fn tip_ids_for_branch(commits: &[Commit]) -> SmallVec<[CommitId; 2]> {
+    let mut parent_ids = HashSet::new();
+    for commit in commits {
+        for parent in &commit.parents {
+            parent_ids.insert(*parent);
+        }
+    }
+
+    commits
+        .iter()
+        .filter_map(|commit| {
+            let commit_id = commit.id();
+            (!parent_ids.contains(&commit_id)).then_some(commit_id)
+        })
+        .collect()
+}
+
 fn append_commit_to_manifest_state(manifest: &mut PersistedBranchManifest, commit: &Commit) {
     for parent in &commit.parents {
         manifest.tails.remove(parent);
@@ -951,11 +1071,29 @@ pub(super) fn load_branch_core(
         return Ok(None);
     }
 
-    let Some(manifest) = load_branch_manifest(object_id, branch, |key| get(key))? else {
+    load_branch_core_existing_object(object_id, branch, get)
+}
+
+pub(super) fn load_branch_core_existing_object(
+    object_id: ObjectId,
+    branch: &QueryBranchRef,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<LoadedBranch>, StorageError> {
+    let Some(manifest) = load_branch_manifest_for_full_load(object_id, branch, |key| get(key))?
+    else {
         return Ok(None);
     };
 
+    let mut tip_ids = manifest
+        .tip_commits
+        .iter()
+        .map(Commit::id)
+        .collect::<SmallVec<[CommitId; 2]>>();
     let mut commits = Vec::new();
+    let mut tails = manifest
+        .tails
+        .into_iter()
+        .collect::<SmallVec<[CommitId; 2]>>();
     if manifest.segment_ids.is_empty() {
         for mut commit in manifest.inline_commits {
             let ack_lookup_key = ack_key(commit.id());
@@ -984,9 +1122,19 @@ pub(super) fn load_branch_core(
         }
     }
 
+    if tip_ids.is_empty() && !commits.is_empty() {
+        tip_ids = tip_ids_for_branch(&commits);
+    }
+    tip_ids.sort_unstable();
+    if tails.is_empty() && !commits.is_empty() {
+        tails = tip_ids.clone();
+    }
+    tails.sort_unstable();
+
     Ok(Some(LoadedBranch {
         commits,
-        tails: manifest.tails,
+        tips: tip_ids,
+        tails,
     }))
 }
 
@@ -1000,6 +1148,14 @@ pub(super) fn load_branch_tips_core(
         return Ok(None);
     }
 
+    load_branch_tips_core_existing_object(object_id, branch, get)
+}
+
+pub(super) fn load_branch_tips_core_existing_object(
+    object_id: ObjectId,
+    branch: &QueryBranchRef,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<LoadedBranchTips>, StorageError> {
     let Some(manifest) = load_branch_manifest(object_id, branch, |key| get(key))? else {
         return Ok(None);
     };
@@ -1034,12 +1190,14 @@ pub(super) fn load_commit_branch_core(
             else {
                 return Ok(None);
             };
-            let Some(batch_entry) = prefix_catalog.batches.get(branch_ref.batch_ord.as_usize())
+            let Some(batch_entry) = prefix_catalog
+                .catalog
+                .batch_meta_by_ord(branch_ref.batch_ord)
             else {
                 return Ok(None);
             };
             Ok(Some(QueryBranchRef::from_prefix_name_and_batch(
-                BranchName::new(prefix_catalog.prefix_name),
+                prefix_catalog.prefix_name,
                 batch_entry.batch_id,
             )))
         }
@@ -1055,10 +1213,43 @@ pub(super) fn load_prefix_batch_catalog_core(
     let key = prefix_batch_catalog_key(object_id, prefix);
     match get(&key)? {
         Some(data) => {
-            let persisted = decode_prefix_batch_catalog(&data)?;
-            Ok(Some(persisted.into_catalog()))
+            let decoded = decode_prefix_batch_catalog(&data)?;
+            if decoded.prefix_name.as_str() != prefix {
+                return Err(codec_error(
+                    "prefix batch catalog",
+                    format!(
+                        "catalog key/value prefix mismatch: key='{prefix}', value='{}'",
+                        decoded.prefix_name.as_str()
+                    ),
+                ));
+            }
+            Ok(Some(decoded.catalog))
         }
         None => Ok(None),
+    }
+}
+
+pub(super) fn load_prefix_head_entries_core(
+    object_id: ObjectId,
+    prefix: &str,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Vec<(BatchId, CommitId)>, StorageError> {
+    let key = prefix_batch_catalog_key(object_id, prefix);
+    match get(&key)? {
+        Some(data) => decode_prefix_head_entries(&data, prefix, false),
+        None => Ok(Vec::new()),
+    }
+}
+
+pub(super) fn load_prefix_leaf_head_entries_core(
+    object_id: ObjectId,
+    prefix: &str,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Vec<(BatchId, CommitId)>, StorageError> {
+    let key = prefix_batch_catalog_key(object_id, prefix);
+    match get(&key)? {
+        Some(data) => decode_prefix_head_entries(&data, prefix, true),
+        None => Ok(Vec::new()),
     }
 }
 
@@ -1069,8 +1260,7 @@ fn persist_prefix_batch_catalog(
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
     let key = prefix_batch_catalog_key(object_id, prefix);
-    let persisted = PersistedPrefixBatchCatalog::from_catalog(prefix, catalog);
-    let data = encode_prefix_batch_catalog(&persisted)?;
+    let data = encode_prefix_batch_catalog(&BranchName::new(prefix), catalog)?;
     set(&key, &data)
 }
 
@@ -1078,7 +1268,7 @@ fn load_persisted_prefix_batch_catalog_by_id(
     object_id: ObjectId,
     prefix_id: PrefixId,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<PersistedPrefixBatchCatalog>, StorageError> {
+) -> Result<Option<DecodedPrefixBatchCatalog>, StorageError> {
     let key = prefix_batch_catalog_key_for_id(object_id, prefix_id);
     match get(&key)? {
         Some(data) => Ok(Some(decode_prefix_batch_catalog(&data)?)),
@@ -1218,7 +1408,7 @@ pub(super) fn append_commit_core(
                 head_commit_id: commit_id,
                 first_timestamp: commit_timestamp,
                 last_timestamp: commit_timestamp,
-                parent_batch_ords: Vec::new(),
+                parent_batch_ords: SmallVec::new(),
                 child_count: 0,
             }
         };
@@ -1248,7 +1438,7 @@ pub(super) fn replace_branch_core(
     object_id: ObjectId,
     branch: &QueryBranchRef,
     commits: Vec<Commit>,
-    tails: HashSet<CommitId>,
+    tails: smolset::SmolSet<[CommitId; 2]>,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
     mut delete: impl FnMut(&str) -> Result<(), StorageError>,
@@ -1265,7 +1455,7 @@ pub(super) fn replace_branch_core(
         }
     }
 
-    let mut segment_ids = Vec::new();
+    let mut segment_ids = SmallVec::<[u32; 2]>::new();
     let inline_commits = if commits.len() <= MAX_INLINE_COMMITS_PER_BRANCH {
         commits.clone()
     } else {
@@ -1293,7 +1483,7 @@ pub(super) fn replace_branch_core(
     let new_manifest = PersistedBranchManifest {
         segment_ids,
         inline_commits,
-        tails,
+        tails: tails.into_iter().collect(),
         tip_commits: tip_commits_for_branch(&commits),
     };
     persist_branch_manifest(object_id, branch, &new_manifest, |key, value| {
@@ -1547,7 +1737,7 @@ mod tests {
             ack_state: Default::default(),
         };
         let manifest = PersistedBranchManifest {
-            segment_ids: vec![0, 1, 2],
+            segment_ids: smallvec::smallvec![0, 1, 2],
             inline_commits: Vec::new(),
             tails: [commit.id()].into_iter().collect(),
             tip_commits: vec![commit.clone()],
@@ -1578,7 +1768,7 @@ mod tests {
         }
         let tip_commits = tip_commits_for_branch(&inline_commits);
         let manifest = PersistedBranchManifest {
-            segment_ids: Vec::new(),
+            segment_ids: SmallVec::new(),
             inline_commits,
             tails: tip_commits.iter().map(Commit::id).collect(),
             tip_commits,
@@ -1606,7 +1796,7 @@ mod tests {
             ack_state: Default::default(),
         };
         let manifest = PersistedBranchManifest {
-            segment_ids: vec![0, 1],
+            segment_ids: smallvec::smallvec![0, 1],
             inline_commits: Vec::new(),
             tails: [tip.id()].into_iter().collect(),
             tip_commits: vec![tip],
@@ -1634,7 +1824,7 @@ mod tests {
             ack_state: Default::default(),
         };
         let manifest = PersistedBranchManifest {
-            segment_ids: (0..10).collect(),
+            segment_ids: (0..10).collect::<SmallVec<[u32; 2]>>(),
             inline_commits: Vec::new(),
             tails: [tip.id()].into_iter().collect(),
             tip_commits: vec![tip],
@@ -1778,62 +1968,77 @@ mod tests {
 
     #[test]
     fn prefix_batch_catalog_binary_codec_roundtrips() {
-        let persisted = PersistedPrefixBatchCatalog {
-            prefix_name: "dev-schema-main".to_string(),
-            batches: vec![
-                PersistedPrefixBatchCatalogEntry {
+        let prefix_name = BranchName::new("dev-schema-main");
+        let catalog = PrefixBatchCatalog::from_persisted_parts(
+            vec![
+                PrefixBatchMeta {
                     batch_id: BatchId([1; 16]),
+                    batch_ord: BatchOrd(0),
                     root_commit_id: CommitId([3; 32]),
                     head_commit_id: CommitId([3; 32]),
                     first_timestamp: 11,
                     last_timestamp: 11,
-                    parent_batch_ords: Vec::new(),
+                    parent_batch_ords: SmallVec::new(),
                     child_count: 1,
                 },
-                PersistedPrefixBatchCatalogEntry {
+                PrefixBatchMeta {
                     batch_id: BatchId([4; 16]),
+                    batch_ord: BatchOrd(1),
                     root_commit_id: CommitId([6; 32]),
                     head_commit_id: CommitId([6; 32]),
                     first_timestamp: 13,
                     last_timestamp: 13,
-                    parent_batch_ords: Vec::new(),
+                    parent_batch_ords: SmallVec::new(),
                     child_count: 0,
                 },
             ],
-        };
+            [BatchOrd(1)],
+        );
 
-        let encoded = encode_prefix_batch_catalog(&persisted).unwrap();
+        let encoded = encode_prefix_batch_catalog(&prefix_name, &catalog).unwrap();
+        let decoded = decode_prefix_batch_catalog(&encoded).unwrap();
 
-        assert_eq!(decode_prefix_batch_catalog(&encoded).unwrap(), persisted);
+        assert_eq!(decoded.prefix_name, prefix_name);
+        assert_eq!(
+            decoded.catalog.batch_metas().cloned().collect::<Vec<_>>(),
+            catalog.batch_metas().cloned().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            decoded.catalog.leaf_batch_ords().collect::<Vec<_>>(),
+            catalog.leaf_batch_ords().collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn prefix_batch_catalog_binary_codec_stays_compact_for_small_values() {
-        let persisted = PersistedPrefixBatchCatalog {
-            prefix_name: "dev-schema-main".to_string(),
-            batches: vec![
-                PersistedPrefixBatchCatalogEntry {
+        let prefix_name = BranchName::new("dev-schema-main");
+        let catalog = PrefixBatchCatalog::from_persisted_parts(
+            vec![
+                PrefixBatchMeta {
                     batch_id: BatchId([1; 16]),
+                    batch_ord: BatchOrd(0),
                     root_commit_id: CommitId([3; 32]),
                     head_commit_id: CommitId([3; 32]),
                     first_timestamp: 11,
                     last_timestamp: 11,
-                    parent_batch_ords: Vec::new(),
+                    parent_batch_ords: SmallVec::new(),
                     child_count: 1,
                 },
-                PersistedPrefixBatchCatalogEntry {
+                PrefixBatchMeta {
                     batch_id: BatchId([4; 16]),
+                    batch_ord: BatchOrd(1),
                     root_commit_id: CommitId([6; 32]),
                     head_commit_id: CommitId([6; 32]),
                     first_timestamp: 13,
                     last_timestamp: 13,
-                    parent_batch_ords: Vec::new(),
+                    parent_batch_ords: SmallVec::new(),
                     child_count: 0,
                 },
             ],
-        };
+            [BatchOrd(1)],
+        );
 
-        let encoded = encode_prefix_batch_catalog(&persisted).unwrap();
+        let encoded = encode_prefix_batch_catalog(&prefix_name, &catalog).unwrap();
 
         assert!(
             encoded.len() < 121,
@@ -1853,7 +2058,7 @@ mod tests {
                     head_commit_id: CommitId([3; 32]),
                     first_timestamp: 11,
                     last_timestamp: 19,
-                    parent_batch_ords: Vec::new(),
+                    parent_batch_ords: SmallVec::new(),
                     child_count: 1,
                 },
                 PrefixBatchMeta {
@@ -1863,27 +2068,23 @@ mod tests {
                     head_commit_id: CommitId([6; 32]),
                     first_timestamp: 23,
                     last_timestamp: 29,
-                    parent_batch_ords: vec![BatchOrd(0)],
+                    parent_batch_ords: smallvec::smallvec![BatchOrd(0)],
                     child_count: 0,
                 },
             ],
             [BatchOrd(1)],
         );
 
-        let encoded = encode_prefix_batch_catalog(&PersistedPrefixBatchCatalog::from_catalog(
-            "dev-schema-main",
-            &catalog,
-        ))
-        .unwrap();
-        let decoded = decode_prefix_batch_catalog(&encoded)
-            .unwrap()
-            .into_catalog();
+        let prefix_name = BranchName::new("dev-schema-main");
+        let encoded = encode_prefix_batch_catalog(&prefix_name, &catalog).unwrap();
+        let decoded = decode_prefix_batch_catalog(&encoded).unwrap();
 
-        let decoded_entries: Vec<_> = decoded.batch_metas().cloned().collect();
+        assert_eq!(decoded.prefix_name, prefix_name);
+        let decoded_entries: Vec<_> = decoded.catalog.batch_metas().cloned().collect();
         let original_entries: Vec<_> = catalog.batch_metas().cloned().collect();
         assert_eq!(decoded_entries, original_entries);
         assert_eq!(
-            decoded.leaf_batch_ords().collect::<Vec<_>>(),
+            decoded.catalog.leaf_batch_ords().collect::<Vec<_>>(),
             catalog.leaf_batch_ords().collect::<Vec<_>>()
         );
     }
@@ -1970,6 +2171,10 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(loaded.commits, appended_commits);
+        assert_eq!(
+            loaded.tails,
+            smallvec::SmallVec::<[CommitId; 2]>::from_iter([previous_commit_id.unwrap()])
+        );
 
         let spill_commit = Commit {
             parents: previous_commit_id.into_iter().collect(),
@@ -2007,5 +2212,12 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(loaded.commits, appended_commits);
+        assert_eq!(
+            loaded.tails,
+            smallvec::SmallVec::<[CommitId; 2]>::from_iter([appended_commits
+                .last()
+                .expect("spilled branch should have a tip")
+                .id()])
+        );
     }
 }

@@ -15,7 +15,7 @@
 //! ```
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ops::Bound;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
@@ -29,10 +29,8 @@ use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 #[cfg(test)]
-use crate::query_manager::types::BatchId;
-#[cfg(test)]
 use crate::query_manager::types::SchemaHash;
-use crate::query_manager::types::{BatchBranchKey, QueryBranchRef, Value};
+use crate::query_manager::types::{BatchBranchKey, BatchId, QueryBranchRef, Value};
 use crate::sync_manager::DurabilityTier;
 
 #[cfg(test)]
@@ -45,8 +43,10 @@ use super::{
         adjust_table_prefix_batch_refcount_core, append_catalogue_manifest_op_core,
         append_catalogue_manifest_ops_core, append_commit_core, create_object_core,
         index_insert_core, index_lookup_core, index_range_core, index_remove_core,
-        index_scan_all_core, load_branch_core, load_branch_tips_core, load_catalogue_manifest_core,
+        index_scan_all_core, load_branch_core, load_branch_core_existing_object,
+        load_branch_tips_core, load_branch_tips_core_existing_object, load_catalogue_manifest_core,
         load_commit_branch_core, load_object_metadata_core, load_prefix_batch_catalog_core,
+        load_prefix_head_entries_core, load_prefix_leaf_head_entries_core,
         load_table_prefix_batch_keys_core, replace_branch_core, store_ack_tier_core,
     },
 };
@@ -208,7 +208,7 @@ impl OpfsBTreeStorage {
         &self,
         table: &str,
         prefix: &str,
-    ) -> Result<HashSet<BatchId>, StorageError> {
+    ) -> Result<std::collections::HashSet<BatchId>, StorageError> {
         Ok(self
             .load_table_prefix_batch_keys(table, BranchName::new(prefix))?
             .into_iter()
@@ -359,12 +359,28 @@ impl Storage for OpfsBTreeStorage {
         load_branch_core(object_id, branch, |key| self.tree_read(key))
     }
 
+    fn load_branch_existing_object(
+        &self,
+        object_id: ObjectId,
+        branch: &QueryBranchRef,
+    ) -> Result<Option<LoadedBranch>, StorageError> {
+        load_branch_core_existing_object(object_id, branch, |key| self.tree_read(key))
+    }
+
     fn load_branch_tips(
         &self,
         object_id: ObjectId,
         branch: &QueryBranchRef,
     ) -> Result<Option<LoadedBranchTips>, StorageError> {
         load_branch_tips_core(object_id, branch, |key| self.tree_read(key))
+    }
+
+    fn load_branch_tips_existing_object(
+        &self,
+        object_id: ObjectId,
+        branch: &QueryBranchRef,
+    ) -> Result<Option<LoadedBranchTips>, StorageError> {
+        load_branch_tips_core_existing_object(object_id, branch, |key| self.tree_read(key))
     }
 
     fn load_commit_branch(
@@ -381,6 +397,22 @@ impl Storage for OpfsBTreeStorage {
         prefix: &str,
     ) -> Result<Option<PrefixBatchCatalog>, StorageError> {
         load_prefix_batch_catalog_core(object_id, prefix, |key| self.tree_read(key))
+    }
+
+    fn load_prefix_head_entries(
+        &self,
+        object_id: ObjectId,
+        prefix: &str,
+    ) -> Result<Vec<(BatchId, CommitId)>, StorageError> {
+        load_prefix_head_entries_core(object_id, prefix, |key| self.tree_read(key))
+    }
+
+    fn load_prefix_leaf_head_entries(
+        &self,
+        object_id: ObjectId,
+        prefix: &str,
+    ) -> Result<Vec<(BatchId, CommitId)>, StorageError> {
+        load_prefix_leaf_head_entries_core(object_id, prefix, |key| self.tree_read(key))
     }
 
     fn load_table_prefix_batch_keys(
@@ -413,7 +445,7 @@ impl Storage for OpfsBTreeStorage {
         object_id: ObjectId,
         branch: &QueryBranchRef,
         commits: Vec<Commit>,
-        tails: HashSet<CommitId>,
+        tails: smolset::SmolSet<[CommitId; 2]>,
     ) -> Result<(), StorageError> {
         replace_branch_core(
             object_id,
@@ -586,6 +618,7 @@ fn map_storage_err(error: BTreeError) -> StorageError {
 mod tests {
     use super::*;
     use smallvec::smallvec;
+    use std::collections::HashSet;
 
     fn test_branch_ref(user_branch: &str) -> QueryBranchRef {
         let prefix = crate::query_manager::types::BranchPrefixName::new(
@@ -674,7 +707,7 @@ mod tests {
                 id,
                 &branch,
                 vec![loaded.commits[1].clone()],
-                [commit2_id].into(),
+                std::iter::once(commit2_id).collect(),
             )
             .unwrap();
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
@@ -703,7 +736,10 @@ mod tests {
 
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 40);
-        assert_eq!(loaded.tails, [parent_id.unwrap()].into());
+        assert_eq!(
+            loaded.tails,
+            smallvec::SmallVec::<[CommitId; 2]>::from_iter([parent_id.expect("tip should exist")])
+        );
         let loaded_tips = storage.load_branch_tips(id, &branch).unwrap().unwrap();
         assert_eq!(loaded_tips.tips.len(), 1);
         assert_eq!(loaded_tips.tips[0].id(), parent_id.unwrap());
@@ -744,11 +780,11 @@ mod tests {
                         head_commit_id: commit1_id,
                         first_timestamp: commit1.timestamp,
                         last_timestamp: commit1.timestamp,
-                        parent_batch_ords: Vec::new(),
+                        parent_batch_ords: smallvec::smallvec![],
                         child_count: 0,
                     },
                     remove_leaf_batch_ords: smolset::SmolSet::new(),
-                    increment_parent_child_counts: Vec::new(),
+                    increment_parent_child_counts: smallvec::smallvec![],
                 }),
             )
             .unwrap();
@@ -770,13 +806,17 @@ mod tests {
                         head_commit_id: commit2_id,
                         first_timestamp: commit2.timestamp,
                         last_timestamp: commit2.timestamp,
-                        parent_batch_ords: vec![crate::query_manager::types::BatchOrd(0)],
+                        parent_batch_ords: smallvec::smallvec![
+                            crate::query_manager::types::BatchOrd(0)
+                        ],
                         child_count: 0,
                     },
                     remove_leaf_batch_ords: [crate::query_manager::types::BatchOrd(0)]
                         .into_iter()
                         .collect(),
-                    increment_parent_child_counts: vec![crate::query_manager::types::BatchOrd(0)],
+                    increment_parent_child_counts: smallvec::smallvec![
+                        crate::query_manager::types::BatchOrd(0)
+                    ],
                 }),
             )
             .unwrap();

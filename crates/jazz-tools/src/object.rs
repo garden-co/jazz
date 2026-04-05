@@ -3,6 +3,7 @@ use std::ops::Index;
 
 use internment::Intern;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use smallvec::SmallVec;
 use smolset::SmolSet;
 use uuid::Uuid;
 
@@ -161,6 +162,11 @@ struct PrefixBranchStore {
 }
 
 impl PrefixBranchStore {
+    fn reserve_additional(&mut self, additional: usize) {
+        self.branch_slots.reserve(additional);
+        self.lookup_by_id.reserve(additional);
+    }
+
     fn lookup_index(&self, batch_id: &BatchId) -> Result<usize, usize> {
         let key = *batch_id.as_bytes();
         self.lookup_by_id
@@ -243,6 +249,12 @@ impl PrefixBranchStore {
             .iter()
             .map(|slot| (slot.batch_id, &slot.branch))
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct PrefixBranchState {
+    branches: PrefixBranchStore,
+    batch_catalog: Option<PrefixBatchCatalog>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -335,7 +347,7 @@ impl Iterator for BatchOrdBitSetIter<'_> {
 /// Per-object branch storage organized by `(prefix, batch)` instead of full branch name.
 #[derive(Debug, Clone, Default)]
 pub struct ObjectBranches {
-    branches_by_prefix: HashMap<BranchName, PrefixBranchStore>,
+    branches_by_prefix: HashMap<BranchName, PrefixBranchState>,
     branch_count: usize,
 }
 
@@ -379,13 +391,23 @@ impl ObjectBranches {
     pub fn get_by_key(&self, branch_key: BatchBranchKey) -> Option<&Branch> {
         self.branches_by_prefix
             .get(&branch_key.prefix_name())?
+            .branches
             .get(&branch_key.batch_id())
     }
 
     pub fn get_mut_by_key(&mut self, branch_key: BatchBranchKey) -> Option<&mut Branch> {
         self.branches_by_prefix
             .get_mut(&branch_key.prefix_name())?
+            .branches
             .get_mut(&branch_key.batch_id())
+    }
+
+    pub fn reserve_prefix_additional(&mut self, prefix_name: BranchName, additional: usize) {
+        self.branches_by_prefix
+            .entry(prefix_name)
+            .or_default()
+            .branches
+            .reserve_additional(additional);
     }
 
     pub fn insert(&mut self, branch_name: BranchName, branch: Branch) -> Option<Branch> {
@@ -402,7 +424,7 @@ impl ObjectBranches {
             .branches_by_prefix
             .entry(branch_key.prefix_name())
             .or_default();
-        let previous = prefix_store.insert(branch_key.batch_id(), branch);
+        let previous = prefix_store.branches.insert(branch_key.batch_id(), branch);
         if previous.is_none() {
             self.branch_count += 1;
         }
@@ -431,8 +453,10 @@ impl ObjectBranches {
             .branches_by_prefix
             .entry(branch_key.prefix_name())
             .or_default();
-        let was_present = prefix_store.get(&branch_key.batch_id()).is_some();
-        let branch = prefix_store.get_or_insert_with(branch_key.batch_id(), default);
+        let was_present = prefix_store.branches.get(&branch_key.batch_id()).is_some();
+        let branch = prefix_store
+            .branches
+            .get_or_insert_with(branch_key.batch_id(), default);
         if !was_present {
             self.branch_count += 1;
         }
@@ -442,20 +466,64 @@ impl ObjectBranches {
     pub fn values(&self) -> impl Iterator<Item = &Branch> {
         self.branches_by_prefix
             .values()
-            .flat_map(PrefixBranchStore::values)
+            .flat_map(|state| state.branches.values())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (BranchName, &Branch)> + '_ {
         self.branches_by_prefix
             .iter()
-            .flat_map(|(prefix_name, prefix_store)| {
-                prefix_store.iter().map(move |(batch_id, branch)| {
+            .flat_map(|(prefix_name, prefix_state)| {
+                prefix_state.branches.iter().map(move |(batch_id, branch)| {
                     (
                         QueryBranchRef::from_prefix_name_and_batch(*prefix_name, batch_id)
                             .branch_name(),
                         branch,
                     )
                 })
+            })
+    }
+
+    pub fn prefix_catalog(&self, prefix_name: &BranchName) -> Option<&PrefixBatchCatalog> {
+        self.branches_by_prefix
+            .get(prefix_name)?
+            .batch_catalog
+            .as_ref()
+    }
+
+    pub fn prefix_catalog_mut_or_default(
+        &mut self,
+        prefix_name: BranchName,
+    ) -> &mut PrefixBatchCatalog {
+        self.branches_by_prefix
+            .entry(prefix_name)
+            .or_default()
+            .batch_catalog
+            .get_or_insert_with(PrefixBatchCatalog::default)
+    }
+
+    pub fn set_prefix_catalog(&mut self, prefix_name: BranchName, catalog: PrefixBatchCatalog) {
+        self.branches_by_prefix
+            .entry(prefix_name)
+            .or_default()
+            .batch_catalog = Some(catalog);
+    }
+
+    pub fn ensure_prefix_catalog(&mut self, prefix_name: BranchName, catalog: PrefixBatchCatalog) {
+        self.branches_by_prefix
+            .entry(prefix_name)
+            .or_default()
+            .batch_catalog
+            .get_or_insert(catalog);
+    }
+
+    pub fn prefix_catalogs(&self) -> impl Iterator<Item = (&BranchName, &PrefixBatchCatalog)> {
+        self.branches_by_prefix
+            .iter()
+            .filter_map(|(prefix, state)| {
+                state
+                    .batch_catalog
+                    .as_ref()
+                    .map(|catalog| (prefix, catalog))
             })
     }
 }
@@ -478,7 +546,7 @@ pub struct PrefixBatchMeta {
     pub head_commit_id: CommitId,
     pub first_timestamp: u64,
     pub last_timestamp: u64,
-    pub parent_batch_ords: Vec<BatchOrd>,
+    pub parent_batch_ords: SmallVec<[BatchOrd; 4]>,
     pub child_count: u32,
 }
 
@@ -632,6 +700,10 @@ impl PrefixBatchCatalog {
         self.leaf_batch_ords.len()
     }
 
+    pub fn batch_count(&self) -> usize {
+        self.batches_by_ord.len()
+    }
+
     pub fn batch_metas(&self) -> impl Iterator<Item = &PrefixBatchMeta> {
         self.batches_by_ord.iter()
     }
@@ -644,7 +716,6 @@ pub struct Object {
     pub metadata: HashMap<String, String>,
     pub branches: ObjectBranches,
     pub commit_branches: HashMap<CommitId, BatchBranchKey>,
-    pub prefix_batches: HashMap<BranchName, PrefixBatchCatalog>,
 }
 
 impl Object {
@@ -654,7 +725,6 @@ impl Object {
             metadata: metadata.unwrap_or_default(),
             branches: ObjectBranches::default(),
             commit_branches: HashMap::new(),
-            prefix_batches: HashMap::new(),
         }
     }
 }
@@ -729,5 +799,35 @@ mod tests {
             BranchLoadedState::TipsOnly
         );
         assert_eq!(branches.len(), 2);
+    }
+
+    #[test]
+    fn object_branches_keep_prefix_catalog_optional_per_prefix() {
+        let prefix = BranchPrefixName::new("dev", SchemaHash::from_bytes([9; 32]), "main");
+        let prefix_name = BranchName::new(prefix.branch_prefix());
+        let batch = BatchId::from_uuid(Uuid::from_bytes([1; 16]));
+        let branch_name = QueryBranchRef::from_prefix_and_batch(&prefix, batch).branch_name();
+
+        let mut branches = ObjectBranches::default();
+        branches.insert(branch_name, Branch::default());
+
+        assert!(branches.prefix_catalog(&prefix_name).is_none());
+
+        let catalog = PrefixBatchCatalog::from_persisted_parts(
+            vec![PrefixBatchMeta {
+                batch_id: batch,
+                batch_ord: BatchOrd(0),
+                root_commit_id: CommitId([3; 32]),
+                head_commit_id: CommitId([4; 32]),
+                first_timestamp: 11,
+                last_timestamp: 13,
+                parent_batch_ords: SmallVec::new(),
+                child_count: 0,
+            }],
+            [BatchOrd(0)],
+        );
+        branches.set_prefix_catalog(prefix_name, catalog.clone());
+
+        assert_eq!(branches.prefix_catalog(&prefix_name), Some(&catalog));
     }
 }

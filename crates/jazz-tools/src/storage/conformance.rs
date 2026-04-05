@@ -141,7 +141,7 @@ trait StorageTestCompat: Storage {
             object_id,
             &branch,
             loaded.commits,
-            tails.unwrap_or_default(),
+            tails.unwrap_or_default().into_iter().collect(),
         )
     }
 
@@ -366,7 +366,10 @@ pub fn test_branch_tails_set_and_clear(factory: &dyn Fn() -> Box<dyn Storage>) {
         .unwrap();
 
     let loaded = storage.compat_load_branch(alice, branch).unwrap().unwrap();
-    assert_eq!(loaded.tails, explicit_tails);
+    assert_eq!(
+        loaded.tails.into_iter().collect::<HashSet<_>>(),
+        explicit_tails
+    );
 
     // Clear tails
     storage

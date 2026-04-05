@@ -99,7 +99,8 @@ pub(crate) fn validate_index_value_size(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LoadedBranch {
     pub commits: Vec<Commit>,
-    pub tails: HashSet<CommitId>,
+    pub tips: SmallVec<[CommitId; 2]>,
+    pub tails: SmallVec<[CommitId; 2]>,
 }
 
 /// Tip commits loaded from storage without replaying full branch history.
@@ -114,7 +115,7 @@ pub struct PrefixBatchUpdate {
     pub prefix: BranchName,
     pub batch_meta: PrefixBatchMeta,
     pub remove_leaf_batch_ords: SmolSet<[BatchOrd; 4]>,
-    pub increment_parent_child_counts: Vec<BatchOrd>,
+    pub increment_parent_child_counts: SmallVec<[BatchOrd; 4]>,
 }
 
 /// One active table batch with its visible-row refcount.
@@ -357,12 +358,34 @@ pub trait Storage {
         branch: &QueryBranchRef,
     ) -> Result<Option<LoadedBranch>, StorageError>;
 
+    /// Load a branch when the caller already knows the object exists.
+    ///
+    /// Durable backends can override this to skip redundant object-existence
+    /// probes on hot multi-branch load paths.
+    fn load_branch_existing_object(
+        &self,
+        object_id: ObjectId,
+        branch: &QueryBranchRef,
+    ) -> Result<Option<LoadedBranch>, StorageError> {
+        self.load_branch(object_id, branch)
+    }
+
     /// Load only the visible tip commits for a branch.
     fn load_branch_tips(
         &self,
         object_id: ObjectId,
         branch: &QueryBranchRef,
     ) -> Result<Option<LoadedBranchTips>, StorageError>;
+
+    /// Load only the visible tip commits when the caller already knows the
+    /// object exists.
+    fn load_branch_tips_existing_object(
+        &self,
+        object_id: ObjectId,
+        branch: &QueryBranchRef,
+    ) -> Result<Option<LoadedBranchTips>, StorageError> {
+        self.load_branch_tips(object_id, branch)
+    }
 
     /// Resolve which branch owns a persisted commit.
     fn load_commit_branch(
@@ -377,6 +400,44 @@ pub trait Storage {
         object_id: ObjectId,
         prefix: &str,
     ) -> Result<Option<PrefixBatchCatalog>, StorageError>;
+
+    /// Load `(batch_id, head_commit_id)` pairs for all batches in a prefix.
+    fn load_prefix_head_entries(
+        &self,
+        object_id: ObjectId,
+        prefix: &str,
+    ) -> Result<Vec<(BatchId, CommitId)>, StorageError> {
+        Ok(self
+            .load_prefix_batch_catalog(object_id, prefix)?
+            .map(|catalog| {
+                catalog
+                    .batch_metas()
+                    .map(|batch_meta| (batch_meta.batch_id, batch_meta.head_commit_id))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Load only leaf `(batch_id, head_commit_id)` pairs for a prefix.
+    fn load_prefix_leaf_head_entries(
+        &self,
+        object_id: ObjectId,
+        prefix: &str,
+    ) -> Result<Vec<(BatchId, CommitId)>, StorageError> {
+        Ok(self
+            .load_prefix_batch_catalog(object_id, prefix)?
+            .map(|catalog| {
+                catalog
+                    .leaf_batch_ords()
+                    .filter_map(|batch_ord| {
+                        catalog
+                            .batch_meta_by_ord(batch_ord)
+                            .map(|batch_meta| (batch_meta.batch_id, batch_meta.head_commit_id))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
 
     /// Load all currently indexed table batches for one shared batch prefix.
     fn load_table_prefix_batch_keys(
@@ -427,7 +488,7 @@ pub trait Storage {
         object_id: ObjectId,
         branch: &QueryBranchRef,
         commits: Vec<Commit>,
-        tails: HashSet<CommitId>,
+        tails: SmolSet<[CommitId; 2]>,
     ) -> Result<(), StorageError>;
 
     // ================================================================
@@ -637,6 +698,22 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).load_prefix_batch_catalog(object_id, prefix)
     }
 
+    fn load_prefix_head_entries(
+        &self,
+        object_id: ObjectId,
+        prefix: &str,
+    ) -> Result<Vec<(BatchId, CommitId)>, StorageError> {
+        (**self).load_prefix_head_entries(object_id, prefix)
+    }
+
+    fn load_prefix_leaf_head_entries(
+        &self,
+        object_id: ObjectId,
+        prefix: &str,
+    ) -> Result<Vec<(BatchId, CommitId)>, StorageError> {
+        (**self).load_prefix_leaf_head_entries(object_id, prefix)
+    }
+
     fn load_table_prefix_batch_keys(
         &self,
         table: &str,
@@ -668,7 +745,7 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         object_id: ObjectId,
         branch: &QueryBranchRef,
         commits: Vec<Commit>,
-        tails: HashSet<CommitId>,
+        tails: SmolSet<[CommitId; 2]>,
     ) -> Result<(), StorageError> {
         (**self).replace_branch(object_id, branch, commits, tails)
     }
@@ -893,14 +970,13 @@ struct ObjectData {
     metadata: HashMap<String, String>,
     branches: ObjectBranchDataStore,
     commit_branches: HashMap<CommitId, BatchBranchKey>,
-    prefix_batches: HashMap<BranchName, PrefixBatchCatalog>,
 }
 
 /// Internal branch storage structure.
 #[derive(Debug, Clone, Default)]
 struct BranchData {
     commits: Vec<Commit>,
-    tails: HashSet<CommitId>,
+    tails: SmolSet<[CommitId; 2]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -964,14 +1040,21 @@ impl PrefixBranchDataStore {
 }
 
 #[derive(Debug, Clone, Default)]
+struct PrefixObjectDataState {
+    branches: PrefixBranchDataStore,
+    batch_catalog: Option<PrefixBatchCatalog>,
+}
+
+#[derive(Debug, Clone, Default)]
 struct ObjectBranchDataStore {
-    branches_by_prefix: HashMap<BranchName, PrefixBranchDataStore>,
+    branches_by_prefix: HashMap<BranchName, PrefixObjectDataState>,
 }
 
 impl ObjectBranchDataStore {
     fn get(&self, branch_key: &BatchBranchKey) -> Option<&BranchData> {
         self.branches_by_prefix
             .get(&branch_key.prefix_name())?
+            .branches
             .get(&branch_key.batch_id())
     }
 
@@ -979,7 +1062,26 @@ impl ObjectBranchDataStore {
         self.branches_by_prefix
             .entry(branch_key.prefix_name())
             .or_default()
+            .branches
             .get_or_insert_default(branch_key.batch_id())
+    }
+
+    fn prefix_catalog(&self, prefix_name: &BranchName) -> Option<&PrefixBatchCatalog> {
+        self.branches_by_prefix
+            .get(prefix_name)?
+            .batch_catalog
+            .as_ref()
+    }
+
+    fn prefix_catalog_mut_or_default(
+        &mut self,
+        prefix_name: BranchName,
+    ) -> &mut PrefixBatchCatalog {
+        self.branches_by_prefix
+            .entry(prefix_name)
+            .or_default()
+            .batch_catalog
+            .get_or_insert_with(PrefixBatchCatalog::default)
     }
 }
 
@@ -1226,7 +1328,6 @@ impl Storage for MemoryStorage {
                 metadata,
                 branches: ObjectBranchDataStore::default(),
                 commit_branches: HashMap::new(),
-                prefix_batches: HashMap::new(),
             },
         );
         Ok(())
@@ -1256,10 +1357,31 @@ impl Storage for MemoryStorage {
                 commit.ack_state.confirmed_tiers = tiers.clone();
             }
         }
+        let mut tips = branch_data
+            .tails
+            .iter()
+            .copied()
+            .collect::<SmallVec<[CommitId; 2]>>();
+        tips.sort_unstable();
+        let mut tails = branch_data
+            .tails
+            .iter()
+            .copied()
+            .collect::<SmallVec<[CommitId; 2]>>();
+        tails.sort_unstable();
         Ok(Some(LoadedBranch {
             commits,
-            tails: branch_data.tails.clone(),
+            tips,
+            tails,
         }))
+    }
+
+    fn load_branch_existing_object(
+        &self,
+        object_id: ObjectId,
+        branch: &QueryBranchRef,
+    ) -> Result<Option<LoadedBranch>, StorageError> {
+        self.load_branch(object_id, branch)
     }
 
     fn load_branch_tips(
@@ -1293,6 +1415,14 @@ impl Storage for MemoryStorage {
         Ok(Some(LoadedBranchTips { tips }))
     }
 
+    fn load_branch_tips_existing_object(
+        &self,
+        object_id: ObjectId,
+        branch: &QueryBranchRef,
+    ) -> Result<Option<LoadedBranchTips>, StorageError> {
+        self.load_branch_tips(object_id, branch)
+    }
+
     fn load_commit_branch(
         &self,
         object_id: ObjectId,
@@ -1310,10 +1440,49 @@ impl Storage for MemoryStorage {
         object_id: ObjectId,
         prefix: &str,
     ) -> Result<Option<PrefixBatchCatalog>, StorageError> {
-        Ok(self
-            .objects
-            .get(&object_id)
-            .and_then(|obj| obj.prefix_batches.get(&BranchName::new(prefix)).cloned()))
+        Ok(self.objects.get(&object_id).and_then(|obj| {
+            obj.branches
+                .prefix_catalog(&BranchName::new(prefix))
+                .cloned()
+        }))
+    }
+
+    fn load_prefix_head_entries(
+        &self,
+        object_id: ObjectId,
+        prefix: &str,
+    ) -> Result<Vec<(BatchId, CommitId)>, StorageError> {
+        let Some(obj) = self.objects.get(&object_id) else {
+            return Ok(Vec::new());
+        };
+        let Some(catalog) = obj.branches.prefix_catalog(&BranchName::new(prefix)) else {
+            return Ok(Vec::new());
+        };
+        Ok(catalog
+            .batch_metas()
+            .map(|batch_meta| (batch_meta.batch_id, batch_meta.head_commit_id))
+            .collect())
+    }
+
+    fn load_prefix_leaf_head_entries(
+        &self,
+        object_id: ObjectId,
+        prefix: &str,
+    ) -> Result<Vec<(BatchId, CommitId)>, StorageError> {
+        let Some(obj) = self.objects.get(&object_id) else {
+            return Ok(Vec::new());
+        };
+        let Some(catalog) = obj.branches.prefix_catalog(&BranchName::new(prefix)) else {
+            return Ok(Vec::new());
+        };
+        Ok(catalog
+            .leaf_batch_ords()
+            .filter_map(|batch_ord| {
+                catalog
+                    .batch_meta_by_ord(batch_ord)
+                    .map(|batch_meta| (batch_meta.batch_id, batch_meta.head_commit_id))
+            })
+            .collect())
     }
 
     fn load_table_prefix_batch_keys(
@@ -1352,7 +1521,7 @@ impl Storage for MemoryStorage {
         obj.commit_branches.insert(commit_id, branch_key);
 
         if let Some(update) = prefix_batch_update {
-            let catalog = obj.prefix_batches.entry(update.prefix).or_default();
+            let catalog = obj.branches.prefix_catalog_mut_or_default(update.prefix);
             for parent_batch_ord in update.increment_parent_child_counts {
                 if let Some(parent_meta) = catalog.batch_meta_by_ord_mut(parent_batch_ord) {
                     parent_meta.child_count = parent_meta.child_count.saturating_add(1);
@@ -1373,7 +1542,7 @@ impl Storage for MemoryStorage {
         object_id: ObjectId,
         branch: &QueryBranchRef,
         commits: Vec<Commit>,
-        tails: HashSet<CommitId>,
+        tails: SmolSet<[CommitId; 2]>,
     ) -> Result<(), StorageError> {
         if let Some(obj) = self.objects.get_mut(&object_id) {
             let branch_key = branch.batch_branch_key();
@@ -1759,13 +1928,17 @@ mod tests {
 
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 1);
+        assert_eq!(
+            loaded.tips,
+            SmallVec::<[CommitId; 2]>::from_iter([commit_id])
+        );
         assert!(loaded.tails.contains(&commit_id));
         let loaded_tips = storage.load_branch_tips(id, &branch).unwrap().unwrap();
         assert_eq!(loaded_tips.tips.len(), 1);
         assert_eq!(loaded_tips.tips[0].id(), commit_id);
 
         storage
-            .replace_branch(id, &branch, Vec::new(), HashSet::new())
+            .replace_branch(id, &branch, Vec::new(), SmolSet::new())
             .unwrap();
         let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
         assert_eq!(loaded.commits.len(), 0);
@@ -1841,11 +2014,11 @@ mod tests {
                         head_commit_id: commit1_id,
                         first_timestamp: commit1.timestamp,
                         last_timestamp: commit1.timestamp,
-                        parent_batch_ords: Vec::new(),
+                        parent_batch_ords: smallvec::smallvec![],
                         child_count: 0,
                     },
                     remove_leaf_batch_ords: smolset::SmolSet::new(),
-                    increment_parent_child_counts: Vec::new(),
+                    increment_parent_child_counts: SmallVec::new(),
                 }),
             )
             .unwrap();
@@ -1879,13 +2052,17 @@ mod tests {
                         head_commit_id: commit2_id,
                         first_timestamp: commit2.timestamp,
                         last_timestamp: commit2.timestamp,
-                        parent_batch_ords: vec![crate::query_manager::types::BatchOrd(0)],
+                        parent_batch_ords: smallvec::smallvec![
+                            crate::query_manager::types::BatchOrd(0)
+                        ],
                         child_count: 0,
                     },
                     remove_leaf_batch_ords: [crate::query_manager::types::BatchOrd(0)]
                         .into_iter()
                         .collect(),
-                    increment_parent_child_counts: vec![crate::query_manager::types::BatchOrd(0)],
+                    increment_parent_child_counts: smallvec::smallvec![
+                        crate::query_manager::types::BatchOrd(0)
+                    ],
                 }),
             )
             .unwrap();
