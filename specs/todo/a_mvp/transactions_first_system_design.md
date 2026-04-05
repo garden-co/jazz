@@ -1,6 +1,6 @@
 # Transactions-first system design (MVP)
 
-Focused MVP design for making Jazz2 transaction-first without first solving the full distributed problem.
+Focused MVP design for making Jazz2 transaction-capable, with per-table transaction enforcement, without first solving the full distributed problem.
 
 Related specs:
 
@@ -11,37 +11,43 @@ Related specs:
 
 Give Jazz2 one coherent write model now:
 
-1. all writes are transactions
-2. tx fate is authority-decided
-3. clients still get immediate local optimistic UX
-4. strict subscriptions work after crash and offline restart
-5. the design reuses current branch/object machinery as much as possible
+1. every table can participate in explicit transactions
+2. some tables can require transactions for confirmed writes
+3. direct writes on other tables remain simple general-branch batches
+4. explicit tx fate is authority-decided
+5. clients still get immediate local optimistic UX
+6. strict subscriptions work after crash and offline restart
+7. the design reuses current branch/object machinery as much as possible
 
 ## Non-goals
 
 The MVP does **not** try to solve:
 
-1. exact distributed query completeness
-2. strong secrecy of hidden row existence
-3. movable / sharded authorities beyond simple `appId` routing
-4. merge-operator tx semantics
-5. full query-scoped tx coverage protocols
+1. forcing every write through the authority path
+2. exact distributed query completeness
+3. strong secrecy of hidden row existence
+4. movable / sharded authorities beyond simple `appId` routing
+5. merge-operator tx semantics
+6. full query-scoped tx coverage protocols
 
 Those move to the later-stage doc.
 
 ## MVP decisions
 
-1. All writes are transaction intents.
-2. Each `appId` has one semantically central tx authority.
-3. Tx row data uses tx-private branches plus authoritative merge commits onto the general branch.
-4. Clients persist one global `TxDecision` per tx.
-5. Strict visibility uses `complete_for_current_local_scope`.
-6. Permissions protect row content, not row existence or tx touch-set secrecy.
-7. Server and client use the same visibility rule.
+1. Every table supports explicit transactions.
+2. Each table has tx write-admission mode: `Optional` or `Required`.
+3. Direct writes on `Optional` tables land as ordinary general-branch batches with no `tx_id`.
+4. Explicit tx row data uses tx-private branches plus authoritative merge commits onto the general branch.
+5. Clients persist one global `TxDecision` per explicit tx.
+6. Strict visibility uses `complete_for_current_local_scope` only for commits tagged with `tx_id`.
+7. Permissions protect row content, not row existence or tx touch-set secrecy.
+8. Server and client use the same visibility rule.
 
 ## Terminology
 
-- **Tx intent**: immutable write intent(s) associated with `tx_id`.
+- **TxMode**: table write-admission mode, either `Optional` or `Required`.
+- **Direct write**: confirmed general-branch batch with no `tx_id`.
+- **Tx intent**: immutable write intent(s) associated with `tx_id` for one explicit transaction.
 - **Tx branch**: transaction-private branch such as `tx/<tx_id>`.
 - **General branch**: the ordinary branch outside-the-tx readers use.
 - **TxDecision**: global tx update carrying fate, order, and the full accepted merge set.
@@ -50,7 +56,7 @@ Those move to the later-stage doc.
 - **Current local scope**: the query engine's currently materialized contributing frontier for one query instance.
 - **Compile epoch**: one compiled interpretation of a query under one schema context.
 
-## Transaction lifecycle
+## Explicit transaction lifecycle
 
 1. `DraftPending`
    - local-only optimistic draft
@@ -64,6 +70,8 @@ Those move to the later-stage doc.
 Optional durability progression can remain separate from tx fate:
 
 - `Accepted@Worker -> Accepted@Edge -> Accepted@Global`
+
+Direct writes on `Optional` tables do not enter this lifecycle. They become immediately confirmed general-branch commits.
 
 ## Authority model
 
@@ -84,17 +92,48 @@ This proves the hard semantic core first:
 
 without first paying the cost of distributed coordination.
 
+## Table transaction mode
+
+Every table declares one tx write-admission mode in schema:
+
+1. `Optional`
+   - direct writes allowed
+   - explicit tx writes also allowed
+2. `Required`
+   - direct writes rejected
+   - confirmed writes must be part of an explicit tx
+
+Rules:
+
+1. all tables can participate in explicit txs regardless of mode
+2. touching any `Required` table makes the overall operation explicit-tx only
+3. the mode changes write admission, not the underlying branch/storage representation
+4. MVP keeps this knob table-level only
+
 ## Branch-native transaction representation
 
 ### Data plane
 
-Represent tx writes using existing object branches:
+Represent direct and tx-backed writes using existing object branches:
 
-1. inside the tx, writes land on tx-private branches on touched row objects
-2. in-tx reads query `general_branch + tx_branch`
-3. outside reads query only the general branch
-4. acceptance is an authority-created merge commit from tx branch into general branch
-5. rejection means the tx branch is never merged and can later be GC'd
+1. direct writes on `Optional` tables land on the general branch as ordinary batches with no `tx_id`
+2. inside an explicit tx, writes land on tx-private branches on touched row objects
+3. in-tx reads query `general_branch + tx_branch`
+4. outside reads query only the general branch
+5. acceptance is an authority-created merge commit from tx branch into general branch
+6. rejection means the tx branch is never merged and can later be GC'd
+
+## Mixed direct and transactional writes
+
+`Optional` tables deliberately admit both direct writes and explicit tx writes.
+
+Rules:
+
+1. direct writes and accepted tx writes both become general-branch state
+2. direct writes have no `tx_id`; accepted tx writes do
+3. when an explicit tx binds or validates, the authority snapshot/frontier includes current general-branch state, including direct writes on `Optional` tables
+4. direct writes are not a bypass around tx conflict checking; later tx validation must treat them as part of the observed frontier
+5. if a product surface needs stronger guarantees for a table, mark that table `Required`
 
 ### Why not same-branch twigs
 
@@ -135,6 +174,7 @@ Notes:
 1. `tx_id` should be UUIDv7 or another k-sortable unique ID.
 2. `decision_seq` can be a monotonic per-`appId` sequence assigned by the authority.
 3. Durability progression can stay separate from `TxDecision`.
+4. Direct writes do not produce a `TxDecision`.
 
 ### Accepted merge commit metadata
 
@@ -144,6 +184,8 @@ Minimum keys:
 
 1. `tx_id`
 2. `tx_role=accepted_merge`
+
+Direct writes on the general branch intentionally omit `tx_id`.
 
 Why commit metadata is the right place:
 
@@ -182,7 +224,7 @@ The client should still not learn row content unless separately authorized to re
 
 ## Schema and lens interaction
 
-Bound pending txs should pin:
+Bound pending explicit txs should pin:
 
 1. `snapshot_token`
 2. `execution_schema_hash`
@@ -193,6 +235,8 @@ This prevents tx meaning from changing if the lens graph changes mid-tx.
 Accepted writes land as authoritative merge commits on the execution schema's general branch.
 
 `TxDecision.Accepted { merges }` refers to those authoritative merge commits on their actual execution branches.
+
+Direct writes on `Optional` tables execute immediately on the current general branch under the current schema context and do not create a `TxDecision`.
 
 ### Query compile boundaries
 
@@ -214,33 +258,36 @@ MVP simplification:
 
 ## Completeness model
 
-MVP has one completeness rule:
+MVP has one tx completeness rule:
 
 1. `complete_for_current_local_scope`
    - all tx rows whose refs lie in the query's current local contributing scope are present
 
-This is the only completeness model in MVP.
+This is the only tx completeness model in MVP. Direct general-branch commits without `tx_id` remain visible under normal branch rules.
 
 ## Query visibility rule
 
-For MVP strict visibility, a tx is visible to a query iff:
+For MVP strict visibility:
 
-1. there is a persisted `TxDecision` for that `tx_id`
-2. the decision is `Accepted { merges }`
-3. for every `MergeRef` in that tx whose `RowRef` lies in the query's current local contributing scope, the referenced merge commit is present locally
+1. if the winning general-branch commit has no `tx_id`, it is visible normally
+2. if the winning general-branch commit has `tx_id`, that tx is visible to the query iff:
+   - there is a persisted `TxDecision` for that `tx_id`
+   - the decision is `Accepted { merges }`
+   - for every `MergeRef` in that tx whose `RowRef` lies in the query's current local contributing scope, the referenced merge commit is present locally
 
 Equivalently:
 
 1. compute the query's current local scope
-2. intersect it with `TxDecision.Accepted.merges`
-3. if any merge in that intersection is missing locally, the tx stays invisible for that query
-4. if all merges in that intersection are present locally, the tx is eligible for that query
+2. if the winning commit has no `tx_id`, no tx gating applies
+3. if it has `tx_id`, intersect `TxDecision.Accepted.merges` with the local scope
+4. if any merge in that intersection is missing locally, the tx stays invisible for that query
+5. if all merges in that intersection are present locally, the tx is eligible for that query
 
 This rule is the same on server and client.
 
 ## What this guarantee means
 
-The guarantee is local-scope transactional consistency, not full global query atomicity.
+The guarantee is local-scope transactional consistency for explicit tx-backed writes, not full global query atomicity for all writes.
 
 Concrete examples:
 
@@ -282,18 +329,19 @@ Strict transactional subscriptions need continuous gating for tx visibility.
 
 ### Integration approach
 
-1. raw intents are not directly subscription-visible
-2. row data still arrives through normal `ObjectUpdated`
-3. persisted `TxDecision` provides tx fate and full merge scope
-4. local query scope determines which subset of a tx matters to the current query
-5. accepted tx appears atomically after decision + local-scope completeness checks
-6. rejected tx never enters confirmed view
+1. direct writes on `Optional` tables are visible as normal confirmed general-branch updates
+2. raw tx intents are not directly subscription-visible
+3. row data still arrives through normal `ObjectUpdated`
+4. persisted `TxDecision` provides tx fate and full merge scope
+5. local query scope determines which subset of a tx matters to the current query
+6. accepted tx appears atomically after decision + local-scope completeness checks
+7. rejected tx never enters confirmed view
 
 ## Query-manager algorithm sketch
 
 Recommended MVP algorithm:
 
-1. persist `TxDecision` records in a local `tx_visibility_index`
+1. persist `TxDecision` records for explicit txs in a local `tx_visibility_index`
 2. build a local `commit_id -> tx_id` index from:
    - `TxDecision.Accepted.merges`
    - accepted merge commit metadata (`tx_id`)
@@ -334,7 +382,7 @@ This is the main reason for using global `TxDecision` in MVP: it makes offline r
 
 MVP keeps the data plane branch-native:
 
-1. row tx branches and authoritative merge commits flow through normal `ObjectUpdated`
+1. direct writes, row tx branches, and authoritative merge commits all flow through normal `ObjectUpdated`
 2. tx-branch GC can use normal `ObjectTruncated`
 3. `TxDecision` can be a dedicated payload or a normal object encoding
 
@@ -344,17 +392,19 @@ The important thing is the logical record, not the transport choice.
 
 ### Phase 0: metadata and lifecycle groundwork
 
-1. add tx IDs/state to write path
-2. introduce tx-private branch naming/creation
-3. define tx control object schema
-4. keep existing read semantics outside txs
+1. add table tx mode metadata with `Optional` as the default
+2. add tx IDs/state to the explicit tx path
+3. introduce tx-private branch naming/creation
+4. define tx control object schema
+5. keep direct writes on `Optional` tables using existing general branches
 
 ### Phase 1: centralized authority
 
 1. route every `appId` to one authority core
-2. decide accepted/rejected + order there
-3. accept via authoritative merge commits onto general branches
-4. reject via durable `TxDecision` + unmerged branches
+2. enforce that direct writes to `Required` tables are rejected
+3. decide accepted/rejected + order there
+4. accept via authoritative merge commits onto general branches
+5. reject via durable `TxDecision` + unmerged branches
 
 ### Phase 2: strict visibility correctness
 
@@ -362,7 +412,8 @@ The important thing is the logical record, not the transport choice.
 2. persist it locally
 3. tag accepted merge commits with `tx_id`
 4. gate tx visibility continuously for strict queries using `complete_for_current_local_scope`
-5. enforce the documented MVP permission model
+5. keep direct writes with no `tx_id` visible normally
+6. enforce the documented MVP permission model
 
 ### Phase 3: offline restart hardening
 
@@ -374,13 +425,18 @@ The important thing is the logical record, not the transport choice.
 
 1. What exact schema/object layout should `TxDecision` use?
 2. Should `TxDecision` be a dedicated payload, a normal object, or both?
-3. Which query shapes need a wider local-scope approximation to make `complete_for_current_local_scope` practical and defensible?
-4. How do we want to present rejected reasons safely to clients?
+3. How should table-level `TxMode` be declared and exposed in schema APIs?
+4. Do we eventually need an object-level override that can tighten `Optional -> Required`?
+5. Which query shapes need a wider local-scope approximation to make `complete_for_current_local_scope` practical and defensible?
+6. How do we want to present rejected reasons safely to clients?
 
 ## Decision summary
 
-1. One global persisted `TxDecision` per tx.
-2. Accepted merge commits carry `tx_id` in commit metadata.
-3. Strict visibility uses `complete_for_current_local_scope`.
-4. MVP permissions protect row content, not existence/touch-set secrecy.
-5. Offline restart is a first-class requirement.
+1. Every table can participate in explicit txs.
+2. Tables choose `Optional` or `Required` write admission.
+3. Direct writes on `Optional` tables remain general-branch commits with no `tx_id`.
+4. One global persisted `TxDecision` exists per explicit tx.
+5. Accepted merge commits carry `tx_id` in commit metadata.
+6. Strict visibility uses `complete_for_current_local_scope` only for tx-tagged commits.
+7. MVP permissions protect row content, not existence/touch-set secrecy.
+8. Offline restart is a first-class requirement.

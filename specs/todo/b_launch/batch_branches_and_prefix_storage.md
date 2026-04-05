@@ -2,14 +2,15 @@
 
 Replace today's "one branch with many concurrent tips" model with many linear batches under a shared branch prefix.
 
-This is a precursor to opt-in globally consistent transactions and also a storage redesign for the case where a single object may accumulate millions of branches over time.
+This is a precursor to the transactions-first MVP and also a storage redesign for the case where a single object may accumulate millions of branches over time.
 
 Related:
 
 - [Object Manager](../../status-quo/object_manager.md)
 - [Storage](../../status-quo/storage.md)
 - [HTTP/SSE Transport Protocol](../../status-quo/http_transport.md)
-- [Globally Consistent Transactions](./globally_consistent_transactions.md)
+- [Transactions-first system design (MVP)](../a_mvp/transactions_first_system_design.md)
+- [Transactions-first system design (later stages)](../c_later/transactions_first_system_design.md)
 - [Storage Compression Strategy](./storage_compression_strategy.md)
 
 ## Summary
@@ -292,18 +293,21 @@ Sealing:
 
 - when a tail segment crosses a size threshold, compress and seal it
 
-## Interaction with Globally Consistent Transactions
+## Interaction with Transactions-first MVP
 
-This model gives a natural transaction read frontier:
+This model gives a natural frontier for mixed direct and explicit-transaction writes:
 
-- the root merge commit of a batch captures the prefix frontier the writer observed
+1. direct writes on `Optional` tables are ordinary general-branch batches
+2. explicit txs write intents on tx-private branches such as `tx/<tx_id>`
+3. the root merge commit of a batch captures the prefix frontier the writer observed
 
-Later, an opt-in transaction authority can validate a candidate batch against that captured frontier and either:
+Later, the tx authority can validate a candidate explicit tx against that captured frontier, including both direct writes and prior accepted tx merges, and then:
 
-- accept it as the next globally consistent write
-- reject it and force retry on a newer frontier
+1. accept it by materializing authoritative general-branch merge commits tagged with `tx_id`
+2. reject it and force retry on a newer frontier
+3. reject direct writes entirely for tables marked `Required`
 
-In other words, this proposal does not implement globally consistent transactions, but it creates a cleaner object-history substrate for them.
+In other words, this proposal does not implement `TxDecision` or tx visibility gating, but it creates the shared object-history substrate for both direct writes and tx-backed writes.
 
 ## Migration Direction
 

@@ -14,11 +14,14 @@ Related specs:
 
 The MVP establishes:
 
-1. branch-native tx data (`tx/<tx_id>` branches + authoritative merge commits)
-2. one global persisted `TxDecision` per tx
-3. centralized authority per `appId`
-4. `complete_for_current_local_scope`
-5. weak permission secrecy (content protected, existence/touch-set not secret)
+1. every table can participate in explicit txs
+2. tables choose `Optional` or `Required` write admission
+3. direct writes on `Optional` tables remain general-branch batches with no `tx_id`
+4. branch-native tx data uses `tx/<tx_id>` branches plus authoritative merge commits
+5. one global persisted `TxDecision` per explicit tx
+6. centralized authority per `appId`
+7. `complete_for_current_local_scope`
+8. weak permission secrecy (content protected, existence/touch-set not secret)
 
 Later work revisits each of those constraints where necessary.
 
@@ -267,6 +270,7 @@ The main questions that will probably force a redesign after MVP are:
 3. What is the final shared affinity key model for tx routing and distributed queries?
 4. Which query families deserve stronger-than-local-scope completeness?
 5. How should tx metadata be compressed without complicating recovery?
+6. Do we need finer-grained write-admission than table-level `Optional` / `Required`?
 
 ## Planning summary
 
