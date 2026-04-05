@@ -75,11 +75,11 @@
 
 .tableList {
   margin: 0;
-  padding: 0 6px 0 0;
+  padding: 0 6px;
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
 }
 
 .tableRow {
@@ -93,20 +93,20 @@
   flex: 1 1 auto;
   display: block;
   text-decoration: none;
-  color: #aab6c7;
-  border-radius: 0;
-  padding: 8px 12px;
-  font-size: 13px;
+  color: #8d9ab0;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 12px;
 }
 
 .tableLink:hover {
-  background: #151b24;
-  color: #e3e8ef;
+  background: #171e28;
+  color: #d6dde8;
 }
 
 .tableLinkActive {
-  background: #171e28;
-  color: #f2f5f9;
+  background: #1a2332;
+  color: #e8ecf2;
 }
 
 .schemaLink {
