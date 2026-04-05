@@ -12,7 +12,7 @@ export type Value =
   | { type: "Text"; value: string }
   | { type: "Timestamp"; value: number }
   | { type: "Uuid"; value: string }
-  | { type: "Bytea"; value: Uint8Array | number[] }
+  | { type: "Bytea"; value: Uint8Array }
   | { type: "Array"; value: Value[] }
   | { type: "Row"; value: { id?: string; values: Value[] } }
   | { type: "Null" };
