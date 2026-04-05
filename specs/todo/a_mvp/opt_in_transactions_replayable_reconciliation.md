@@ -66,16 +66,28 @@ The intent of this spec is not to make every write transactional. It is to keep 
 
 ### After (`#415` substrate + this spec)
 
-| Topic                     | Proposed MVP                                                    |
-| ------------------------- | --------------------------------------------------------------- | ------- | ----------------------- |
-| History unit              | explicit batches under a shared prefix                          |
-| Default write model       | ordinary public batches remain default                          |
-| Transactional write model | explicit opt-in, authority-decided                              |
-| Durable completion        | authority outcome + confirmed tier                              |
-| Write rejection           | replayable `Accepted                                            | Missing | Rejected`or`TxDecision` |
-| Tier-gated reads          | per visible commit, not per subscription high-water mark        |
-| Reconnect                 | replay first, snapshot fallback, pending-write reconciliation   |
-| Offline restart           | persisted local batch records + persisted transaction decisions |
+| Topic                     | Proposed MVP                                                                 |
+| ------------------------- | ---------------------------------------------------------------------------- |
+| History unit              | explicit batches under a shared prefix                                       |
+| Default write model       | direct public batches remain default                                         |
+| Transactional write model | explicit opt-in, authority-decided                                           |
+| Durable completion        | replayable batch outcome + confirmed tier                                    |
+| Write rejection           | one replayable batch-outcome model                                           |
+| Tier-gated reads          | per visible commit, not per subscription high-water mark                     |
+| Reconnect                 | replay first, snapshot fallback, pending-batch reconciliation                |
+| Offline restart           | persisted local batch records + replayable accepted transactional merge refs |
+
+## Terms used here
+
+- **public prefix**: the ordinary reader-visible prefix where direct writes and accepted transactional merges live
+- **tx-private prefix**: a staging prefix used only for transactional batches before acceptance
+- **authority**: the first durable upstream node allowed to turn a local batch into replayable truth; this is a responsibility of the existing upstream owner path, not a new server tier introduced by this spec. For transactional batches that same durable upstream node also validates the batch and emits the accepted merge set
+- **strict transaction visibility**: an opt-in query mode that waits for accepted transactional results to be complete for the query's current local scope before showing them
+
+One master invariant runs through the whole design:
+
+- only public commits participate in remote visibility
+- tx-private commits are staging state and optional local overlay state only
 
 ## Goals
 
@@ -117,10 +129,10 @@ This spec does not add a separate transaction log format or second object-histor
 
 Jazz keeps two write modes:
 
-1. **ordinary public batches** — default
+1. **direct public batches** — default
 2. **transactional batches** — explicit opt-in
 
-Ordinary public batches preserve the current local-first shape:
+Direct public batches preserve the current local-first shape:
 
 - they write directly to the ordinary public prefix
 - they do not require authority-decided multi-object acceptance
@@ -148,7 +160,6 @@ For a transactional write, there is no second semantic id beside the batch id.
 
 - `BatchId` is the logical transaction id
 - the same `BatchId` is reused across every touched prefix/object
-- `BatchOrd` remains only a per-`(object, prefix)` storage ordinal
 
 This means:
 
@@ -161,19 +172,45 @@ Example:
 - she touches `todo/1` and `project/9`
 - those become separate physical branches that both carry `BatchId = B7`
 
-### 4. Fate, durability, and completeness stay separate
+### 4. One fate model, separate durability and completeness
 
 The status quo mixes or conflates these concepts. The MVP should keep them distinct:
 
-- **fate**: did the first authority accept, reject, or never receive this write?
+- **fate**: what replayable outcome did the authority report for this batch?
 - **durability**: for accepted public commits, what is the highest `confirmed_tier`?
 - **completeness**: for an accepted transaction, is it complete for this query's current local scope?
 
+Every pending local batch, whether direct or transactional, should reconcile through one replayable outcome type:
+
+```text
+BatchOutcome =
+  Missing { batch_id }
+  Rejected { batch_id, code, reason }
+  AcceptedDirect { batch_id }
+  AcceptedTransaction { batch_id, merges: Vec<MergeRef> }
+```
+
+`MergeRef` identifies one authoritative accepted public merge commit:
+
+```text
+MergeRef {
+  object_id,
+  branch_name,
+  batch_id,
+  commit_id,
+}
+```
+
 These answer different questions:
 
-- a write can be accepted before it reaches `Global`
-- a transaction can be accepted before a given query has all relevant accepted merges locally
-- a dropped write can be `Missing` even though the local client believes it was sent
+- a batch can have a replayable accepted outcome before its visible public commits reach `Global`
+- a transactional batch can have an accepted outcome before a given query has all relevant accepted merges locally
+- a dropped batch can be `Missing` even though the local client believes it was sent
+
+This one `BatchOutcome` model replaces two separate reconciliation languages:
+
+- a special status type for ordinary direct writes
+- a separate transactional fate type
 
 ### 5. Per-commit confirmed tier becomes the read-side durability truth
 
@@ -186,24 +223,28 @@ Instead:
 
 Read delivery should check the currently visible commits, not a subscription-wide high-water mark.
 
-### 6. Strict transaction visibility is also opt-in
+In plain terms:
 
-Queries and subscriptions keep ordinary behavior by default. A caller may opt into transaction-aware visibility modes:
+- `BatchOutcome.Accepted*` answers "did the authority durably accept this batch?"
+- `CommitConfirmedTier` answers "how far has each accepted public commit advanced through the durability lattice?"
 
-- `confirmed_only`
-- `confirmed_plus_local_pending`
+### 6. Strict transaction visibility is opt-in and has one optional local overlay
 
-`confirmed_only` means:
+Queries and subscriptions keep ordinary behavior by default.
 
-- only accepted public transaction results may affect the visible query result
+A caller may opt into strict transaction visibility. In that mode:
+
+- only accepted public transactional results may affect the visible query result
 - a transaction is visible only when it is complete for the query's current local scope
 - any requested durability tier must be satisfied by the visible accepted commits
 
-`confirmed_plus_local_pending` adds exactly one exception:
+Queries that do not opt into this mode keep ordinary public-prefix behavior. Accepted transactional results become atomic only for queries that explicitly ask for strict transaction visibility.
 
-- the current runtime may overlay its own local pending transactional state
+Strict mode may additionally enable one optional local overlay:
 
-This replaces the broad "local updates while waiting" loophole with a narrower rule:
+- the current runtime may also show its own pending transactional state locally
+
+That optional overlay is the narrow replacement for today's broad "local updates while waiting" loophole:
 
 - only the author's own local pending transaction may bypass acceptance
 - remote edge-only updates must not bypass strict visibility
@@ -222,7 +263,7 @@ Replay remains the fast path. Snapshot fallback remains the correctness path.
 
 ### 8. Rejected outcomes survive restart until acknowledged
 
-For both ordinary public batches and transactional batches:
+For both direct public batches and transactional batches:
 
 - rejected outcomes must survive restart
 - they must be queryable after long offline periods
@@ -232,7 +273,7 @@ This is required for correctness and debuggability. A rejection should not exist
 
 ## Write modes
 
-### Ordinary public batches (default)
+### Direct public batches (default)
 
 This is the default write mode for today's insert/update/delete APIs.
 
@@ -241,19 +282,22 @@ Behavior:
 1. the client creates a new public `BatchId`
 2. writes append directly to the ordinary public prefix
 3. local optimistic UX behaves as today
-4. reconnect reconciliation tracks whether the first authority reports that batch as:
-   - `Accepted`
-   - `Missing`
-   - `Rejected`
+4. the batch remains pending until reconciliation yields one replayable `BatchOutcome`
 
-`Accepted` here does **not** mean "globally durable". It only means:
+For direct public batches, the relevant outcomes are:
 
-- the first authority durably knows this public batch
+- `Missing`
+- `Rejected`
+- `AcceptedDirect`
+
+`AcceptedDirect` does **not** mean "globally durable". It only means:
+
+- the authority durably knows this public batch
 - the write is no longer in the "maybe dropped before acceptance" state
 
-Durable completion for an ordinary public batch requires:
+Durable completion for a direct public batch requires:
 
-1. `Accepted`
+1. `AcceptedDirect`
 2. every written public commit reaching the caller's requested `confirmed_tier`
 
 ### Transactional batches (explicit opt-in)
@@ -266,7 +310,7 @@ Behavior:
 2. all staged row changes land on tx-private prefixes
 3. ordinary readers do not include tx-private prefixes
 4. the authority validates the batch against its captured frontier
-5. the authority emits one terminal `TxDecision`
+5. the authority emits one terminal `BatchOutcome`
 6. if accepted, the authority creates accepted public merge batches
 7. if rejected, the tx-private batches never become public and local pending state rolls back
 
@@ -275,68 +319,37 @@ Because transactionality is opt-in:
 - ordinary writes keep current latency/availability semantics
 - the authority is only on the path for writes that asked for transactional guarantees
 
+### Transactional batch lifecycle at a glance
+
+For a successful transactional batch, the end-to-end shape is:
+
+1. create one `BatchId`
+2. stage changes on tx-private prefixes carrying that `BatchId`
+3. ask the authority to validate and decide that batch
+4. receive `BatchOutcome.AcceptedTransaction { batch_id, merges }`
+5. wait for the accepted public merge commits in `merges` to become locally present and reach any requested `confirmed_tier`
+
+For a rejected transactional batch, the shape is shorter:
+
+1. create one `BatchId`
+2. stage local tx-private changes
+3. receive `BatchOutcome.Rejected`
+4. roll back the local pending view and retain the rejection across restart until acknowledged
+
 ## Authority outcomes
 
-### Ordinary public batch reconciliation
+Semantics for the unified `BatchOutcome` model:
 
-Ordinary public batches reconcile to:
-
-```text
-PendingPublicBatchStatus =
-  Accepted { batch_id }
-  Missing  { batch_id }
-  Rejected { batch_id, code, reason }
-```
-
-Semantics:
-
-- `Accepted`: the first authority durably knows the public batch
-- `Missing`: the first authority has no durable record of the public batch; the client must retransmit
+- `Missing`: the authority has no durable record of this batch; the client must retransmit the original direct or transactional submission
 - `Rejected`: the batch was refused before or during authoritative apply
+- `AcceptedDirect`: the authority durably knows a direct public batch
+- `AcceptedTransaction`: the authority accepted a transactional batch and returns the authoritative accepted public merge set
 
 `Rejected` covers cases such as:
 
 - permission denied
 - session required
 - catalogue write denied
-
-It may also cover later ordinary-write rejection paths if the first authority validates something stronger than today's direct apply path.
-
-### Transactional fate
-
-Transactional batches reconcile through a durable `TxDecision`:
-
-```text
-TxDecision =
-  Accepted {
-    batch_id,
-    decision_seq,
-    merges: Vec<MergeRef>,
-  }
-  Rejected {
-    batch_id,
-    code,
-    reason,
-  }
-```
-
-`MergeRef` identifies one authoritative accepted public merge commit:
-
-```text
-MergeRef {
-  object_id,
-  branch_name,
-  batch_id,
-  commit_id,
-}
-```
-
-`decision_seq` is a monotonic per-authority ordering token. The MVP only needs one semantically central authority, so no distributed sequence design is required.
-
-Why `TxDecision` exists separately from `BatchId`:
-
-- `BatchId` identifies the logical transaction
-- `TxDecision` tells us its fate, order, and accepted public merge set
 
 ### Accepted merge commit metadata
 
@@ -350,9 +363,9 @@ Minimum metadata:
 This is needed for two reasons:
 
 1. after restart, the runtime must be able to map a visible accepted public commit back to its transaction
-2. `TxDecision.Accepted { merges }` and the public commit graph must agree about which commits belong to which accepted transaction
+2. `BatchOutcome.AcceptedTransaction { merges }` and the public commit graph must agree about which commits belong to which accepted transaction
 
-`TxDecision` remains the authoritative fate record. The accepted merge commit metadata exists so the public history itself still carries transaction attribution after persistence and reload.
+`AcceptedTransaction { merges }` remains the authoritative fate record. The accepted merge commit metadata exists so the public history itself still carries transaction attribution after persistence and reload.
 
 ## Local persisted records
 
@@ -361,9 +374,9 @@ Each runtime with durable local storage should persist one record for each still
 ```text
 LocalBatchRecord {
   batch_id,
-  mode: Public | Transactional,
+  mode: Direct | Transactional,
   requested_tier,
-  state,
+  latest_outcome,
 }
 ```
 
@@ -371,12 +384,11 @@ High-level state machine:
 
 ```text
 Pending
-  -> Accepted + waiting for tier
   -> Missing
   -> Rejected
+  -> AcceptedDirect + waiting for tier
+  -> AcceptedTransaction + waiting for tier / completeness
 ```
-
-For transactional batches, `Accepted` points at the current `TxDecision.Accepted { merges }`.
 
 Persisted local records exist to support:
 
@@ -399,9 +411,11 @@ The important fix is that durability is checked per visible commit, not per subs
 
 A later remote update must not become visible until the visible public commits for that delivery satisfy the requested tier.
 
-### Transaction-aware queries
+Ordinary queries do **not** get transactional completeness guarantees. If an accepted transactional merge reaches a public prefix and satisfies any requested tier, ordinary queries may observe it like any other public update.
 
-Transaction-aware queries add one more rule on top of ordinary public visibility:
+### Strict transaction visibility (opt-in)
+
+Strict transaction visibility adds one more rule on top of ordinary public visibility:
 
 - accepted transaction results are only visible when complete for the query's current local scope
 
@@ -412,7 +426,7 @@ The MVP completeness rule stays the one from the earlier transaction work:
 Definition:
 
 1. compute the query's current local contributing scope
-2. intersect that scope with `TxDecision.Accepted.merges`
+2. intersect that scope with the batch's accepted `merges`
 3. the transaction is complete for that query only when every intersecting accepted merge is locally present
 
 This is intentionally weaker than exact global query completeness.
@@ -422,9 +436,9 @@ It is still strong enough to guarantee:
 - no partial accepted transaction visibility inside the query's current local scope
 - restart-safe re-derivation from persisted accepted merge refs
 
-### `confirmed_plus_local_pending`
+### Optional local pending overlay
 
-If the caller opts into `confirmed_plus_local_pending`, the runtime may overlay its own local pending transactional state before authority acceptance.
+If the caller opts into the local pending overlay, the runtime may overlay its own local pending transactional state before authority acceptance.
 
 That exception is intentionally narrow:
 
@@ -468,8 +482,12 @@ After query replay, the client sends:
 ```text
 ResumeSync {
   last_seen_seq,
-  pending_public_batch_ids,
-  pending_tx_batch_ids,
+  pending_batches: Vec<PendingBatchRef>,
+}
+
+PendingBatchRef {
+  batch_id,
+  mode: Direct | Transactional,
 }
 ```
 
@@ -482,8 +500,7 @@ If the replay window still covers `last_seen_seq + 1 .. current`, the server rep
 - `ObjectUpdated`
 - `QueryFrontierSettled`
 - `CommitConfirmedTier`
-- `TxDecision`
-- current-status responses for pending ordinary public batches where needed
+- `BatchOutcome`
 
 ### Snapshot fallback
 
@@ -491,12 +508,12 @@ If the replay window is gone, the server sends compact current truth:
 
 - the current query frontier for active queries
 - current confirmed tiers for the relevant frontier commits
-- `PendingPublicBatchStatus` for `pending_public_batch_ids`
-- `TxDecision` or `Missing` for `pending_tx_batch_ids`
+- `BatchOutcome` for each `pending_batches` entry
 
 The client then:
 
-- resolves accepted writes waiting only on tier
+- resolves accepted direct batches waiting only on tier
+- resolves accepted transactional batches waiting on completeness and tier
 - retransmits `Missing` batches
 - fails `Rejected` batches
 - re-checks strict query visibility using the now-current frontier, confirmed tiers, and accepted merge refs
@@ -524,16 +541,16 @@ Reconnect:
 
 ```text
 Alice writes public batch B1 with tier=global
-  -> LocalBatchRecord(B1, mode=Public, Pending)
+  -> LocalBatchRecord(B1, mode=Direct, Pending)
 
 Live CommitConfirmedTier(B1, global) is dropped
 
 Reconnect:
   -> replay active queries
-  -> ResumeSync(last_seen_seq=N, pending_public_batch_ids=[B1])
+  -> ResumeSync(last_seen_seq=N, pending_batches=[{B1, Direct}])
 
 Server replies:
-  -> PendingPublicBatchStatus(B1 -> Accepted)
+  -> BatchOutcome.AcceptedDirect(B1)
   -> CommitConfirmedTier(B1, global) via replay or snapshot
 
 Alice:
@@ -579,7 +596,7 @@ Later Bob writes C2 on Alice's edge only
 ```text
 Alice wants one strict write touching todo/1 and project/9
 
-Only ordinary public optimistic writes exist
+Only direct public optimistic writes exist
   -> partial visibility and rollback semantics are ad hoc
   -> reconnect cannot re-derive one authority-owned fate record
 ```
@@ -589,14 +606,14 @@ Only ordinary public optimistic writes exist
 ```text
 Alice starts transactional batch B7
   -> writes stage on tx-private prefixes for todo/1 and project/9
-  -> local mode is confirmed_plus_local_pending, so Alice may see her own pending state
+  -> strict mode + local pending overlay lets Alice see her own pending state
 
 Authority validates B7
-  -> TxDecision.Accepted(B7, merges=[todo merge, project merge])
+  -> BatchOutcome.AcceptedTransaction(B7, merges=[todo merge, project merge])
 
-Bob runs confirmed_only query
+Bob runs a strict transaction-visible query
   -> Bob sees nothing until:
-     - TxDecision.Accepted is present
+     - AcceptedTransaction is present
      - accepted merges relevant to Bob's local query scope are present
      - visible accepted commits satisfy any requested tier
 ```
@@ -616,10 +633,10 @@ Alice makes an optimistic multi-object change
 
 ```text
 Alice starts transactional batch B8
-  -> local pending view visible only to Alice via confirmed_plus_local_pending
+  -> local pending view visible only to Alice via the optional local pending overlay
 
 Authority rejects B8
-  -> TxDecision.Rejected(B8, code=permission_denied)
+  -> BatchOutcome.Rejected(B8, code=permission_denied)
 
 Alice runtime:
   -> rolls back pending tx-private view
@@ -632,7 +649,7 @@ Alice runtime:
 
 After restart, a durable runtime should be able to reconstruct:
 
-- still-pending ordinary public batches
+- still-pending direct public batches
 - still-pending transactional batches
 - accepted public commits and their confirmed tiers
 - accepted transaction merge refs
@@ -647,7 +664,7 @@ What it should **not** need:
 This is why the MVP needs:
 
 - persisted `LocalBatchRecord`s
-- replayable `TxDecision`s
+- replayable `BatchOutcome`s
 - per-commit confirmed-tier state
 
 ## Rabbit Holes
@@ -655,7 +672,7 @@ This is why the MVP needs:
 - Exact naming and encoding of tx-private prefixes on top of the batch-branch substrate.
 - Efficiently computing `complete_for_current_local_scope` for joins, arrays, and recursive query shapes.
 - Re-triggering delivery when tier state changes without row bytes changing.
-- Deciding how much ordinary public-batch acceptance state needs a live event versus only replay/snapshot synthesis.
+- Deciding whether direct-batch accepted outcomes should always be emitted live or can sometimes be synthesized only from replay/snapshot state.
 - Garbage collection of rejected tx-private branches without losing debuggability too early.
 - Single durable owner semantics when a browser app has both a persistent worker runtime and a memory main-thread mirror.
 
@@ -672,26 +689,26 @@ This is why the MVP needs:
 
 Prefer RuntimeCore and SchemaManager integration tests with realistic actors and explicit flow sketches.
 
-- `alice` writes an ordinary public batch with `tier: "global"`, the live tier update is dropped, reconnect happens, and the write resolves from replay or snapshot rather than hanging.
+- `alice` writes a direct public batch with `tier: "global"`, the live tier update is dropped, reconnect happens, and the write resolves from replay or snapshot rather than hanging.
 - `alice` and `carol` subscribe with `tier: "global"` on different edges, `bob` writes on one edge, and neither sees the later update until the visible public commit reaches global.
-- `alice` starts transactional batch `B7` touching two objects, the authority accepts it, and a `confirmed_only` subscription only sees the accepted result after `complete_for_current_local_scope` is satisfied.
+- `alice` starts transactional batch `B7` touching two objects, the authority accepts it, and a strict transaction-visible subscription only sees the accepted result after `complete_for_current_local_scope` is satisfied.
 - `alice` starts transactional batch `B8`, the authority rejects it, the local pending view rolls back, and the rejected outcome survives restart until acknowledged.
-- a reconnect within the replay window replays missed `ObjectUpdated`, `QueryFrontierSettled`, `CommitConfirmedTier`, and `TxDecision` events without needing a full snapshot.
+- a reconnect within the replay window replays missed `ObjectUpdated`, `QueryFrontierSettled`, `CommitConfirmedTier`, and `BatchOutcome` events without needing a full snapshot.
 - a reconnect after the replay window expires falls back to a frontier snapshot plus pending-batch reconciliation and still converges.
-- `confirmed_plus_local_pending` shows Alice her own pending transactional edits locally, while Bob never sees those pending edits and still waits for accepted public merges.
+- the optional local pending overlay shows Alice her own pending transactional edits locally, while Bob never sees those pending edits and still waits for accepted public merges.
 
 ## Planning summary
 
 The MVP should be shaped as one design with two write modes over one shared batch-history substrate:
 
-1. **ordinary public batches remain the default**
+1. **direct public batches remain the default**
    - local-first
-   - replayable `Accepted | Missing | Rejected`
+   - replayable `BatchOutcome`
    - fixed per-commit tier gating
 
 2. **transactional batches are explicit opt-in**
    - `BatchId` also acts as tx id
-   - authority emits `TxDecision`
+   - authority emits `AcceptedTransaction` or `Rejected`
    - accepted public merges drive strict query visibility
    - rejected outcomes roll back and survive restart
 
