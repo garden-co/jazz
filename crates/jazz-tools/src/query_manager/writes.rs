@@ -121,10 +121,8 @@ impl QueryManager {
         table: &str,
         row_id: ObjectId,
         branch_name: &str,
-    ) {
-        let Some(version) = self.stored_row_version_for_tip(row_id, branch_name) else {
-            return;
-        };
+    ) -> Option<StoredRowVersion> {
+        let version = self.stored_row_version_for_tip(row_id, branch_name)?;
 
         if let Err(error) =
             storage.append_history_region_rows(table, std::slice::from_ref(&version))
@@ -149,6 +147,31 @@ impl QueryManager {
                 "failed to upsert row-region visible row"
             );
         }
+
+        Some(version)
+    }
+
+    fn persist_and_forward_row_region_tip_to_servers<H: Storage + ?Sized>(
+        &mut self,
+        storage: &mut H,
+        table: &str,
+        row_id: ObjectId,
+        branch_name: &str,
+    ) {
+        let Some(version) = self.persist_row_region_tip(storage, table, row_id, branch_name) else {
+            return;
+        };
+        let Some(metadata) = self
+            .sync_manager
+            .object_manager
+            .get(row_id)
+            .map(|object| object.metadata.clone())
+        else {
+            return;
+        };
+
+        self.sync_manager
+            .forward_row_version_to_servers(row_id, metadata, version);
     }
 
     fn load_row_tip_on_branch(
@@ -383,10 +406,12 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
-        self.persist_row_region_tip(storage, &prepared.table_name.0, id, branch);
-
-        self.sync_manager
-            .forward_update_to_servers_with_storage(storage, id, branch.into());
+        self.persist_and_forward_row_region_tip_to_servers(
+            storage,
+            &prepared.table_name.0,
+            id,
+            branch,
+        );
 
         Ok(commit_id)
     }
@@ -568,13 +593,12 @@ impl QueryManager {
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
 
         // Forward new row to all connected servers
-        self.persist_row_region_tip(storage, table, object_id, branch.as_str());
-
         tracing::trace!(%object_id, ?row_commit_id, "forward to servers");
-        self.sync_manager.forward_update_to_servers_with_storage(
+        self.persist_and_forward_row_region_tip_to_servers(
             storage,
+            table,
             object_id,
-            branch.clone().into(),
+            branch.as_str(),
         );
 
         // Update indices immediately and persist
@@ -725,11 +749,8 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
 
-        self.persist_row_region_tip(storage, table, object_id, branch);
-
         // Forward new row to all connected servers
-        self.sync_manager
-            .forward_update_to_servers_with_storage(storage, object_id, branch.into());
+        self.persist_and_forward_row_region_tip_to_servers(storage, table, object_id, branch);
 
         // Update indices on specified branch
         Self::update_indices_for_insert_on_branch(
@@ -1602,14 +1623,8 @@ impl QueryManager {
 
         // Forward delete to all connected servers
         let branch = self.current_branch();
-        self.persist_row_region_tip(storage, &table, id, branch.as_str());
-
         tracing::trace!(%id, ?delete_commit_id, "forward delete to servers");
-        self.sync_manager.forward_update_to_servers_with_storage(
-            storage,
-            id,
-            branch.clone().into(),
-        );
+        self.persist_and_forward_row_region_tip_to_servers(storage, &table, id, branch.as_str());
 
         // Update indices: remove from _id and column indices, add to _id_deleted
         self.update_indices_for_soft_delete(storage, &table, id, &old_data, &descriptor)?;
@@ -1758,10 +1773,7 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
-        self.persist_row_region_tip(storage, table, id, branch);
-
-        self.sync_manager
-            .forward_update_to_servers_with_storage(storage, id, branch.into());
+        self.persist_and_forward_row_region_tip_to_servers(storage, table, id, branch);
 
         Self::update_indices_for_soft_delete_on_branch(
             storage,

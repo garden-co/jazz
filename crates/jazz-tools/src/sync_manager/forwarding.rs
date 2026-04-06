@@ -102,7 +102,7 @@ impl SyncManager {
         }
     }
 
-    pub(super) fn forward_row_version_to_servers(
+    pub(crate) fn forward_row_version_to_servers(
         &mut self,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
