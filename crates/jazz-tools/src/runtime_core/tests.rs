@@ -2622,16 +2622,11 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
     // Check that the catalogue was sent
     let messages = core.sync_sender().take();
     let catalogue_msg = messages.iter().find(|m| {
-        if let SyncPayload::ObjectUpdated {
-            object_id,
-            metadata,
-            ..
-        } = &m.payload
-        {
-            *object_id == schema_obj_id
-                && metadata
-                    .as_ref()
-                    .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
+        if let SyncPayload::CatalogueEntryUpdated { entry } = &m.payload {
+            entry.object_id == schema_obj_id
+                && entry
+                    .metadata
+                    .get(crate::metadata::MetadataKey::Type.as_str())
                     .map(|t| t == crate::metadata::ObjectType::CatalogueSchema.as_str())
                     .unwrap_or(false)
         } else {
@@ -2639,10 +2634,10 @@ fn test_persist_schema_then_add_server_sends_catalogue() {
         }
     });
     let permissions_msg = messages.iter().find(|m| {
-        if let SyncPayload::ObjectUpdated { metadata, .. } = &m.payload {
-            metadata
-                .as_ref()
-                .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
+        if let SyncPayload::CatalogueEntryUpdated { entry } = &m.payload {
+            entry
+                .metadata
+                .get(crate::metadata::MetadataKey::Type.as_str())
                 .map(|t| {
                     t == crate::metadata::ObjectType::CataloguePermissions.as_str()
                         || t == crate::metadata::ObjectType::CataloguePermissionsBundle.as_str()
@@ -2701,10 +2696,10 @@ fn test_publish_permissions_bundle_then_add_server_sends_head_and_bundle() {
 
     let messages = core.sync_sender().take();
     let bundle_msg = messages.iter().find(|m| {
-        if let SyncPayload::ObjectUpdated { metadata, .. } = &m.payload {
-            metadata
-                .as_ref()
-                .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
+        if let SyncPayload::CatalogueEntryUpdated { entry } = &m.payload {
+            entry
+                .metadata
+                .get(crate::metadata::MetadataKey::Type.as_str())
                 .map(|t| t == crate::metadata::ObjectType::CataloguePermissionsBundle.as_str())
                 .unwrap_or(false)
         } else {
@@ -2712,10 +2707,10 @@ fn test_publish_permissions_bundle_then_add_server_sends_head_and_bundle() {
         }
     });
     let head_msg = messages.iter().find(|m| {
-        if let SyncPayload::ObjectUpdated { metadata, .. } = &m.payload {
-            metadata
-                .as_ref()
-                .and_then(|m| m.metadata.get(crate::metadata::MetadataKey::Type.as_str()))
+        if let SyncPayload::CatalogueEntryUpdated { entry } = &m.payload {
+            entry
+                .metadata
+                .get(crate::metadata::MetadataKey::Type.as_str())
                 .map(|t| t == crate::metadata::ObjectType::CataloguePermissionsHead.as_str())
                 .unwrap_or(false)
         } else {
@@ -2761,7 +2756,7 @@ fn test_matching_catalogue_hash_skips_catalogue_replay_on_add_server() {
     let catalogue_msg = messages.iter().find(|m| {
         matches!(
             &m.payload,
-            SyncPayload::ObjectUpdated { object_id, .. } if *object_id == schema_obj_id
+            SyncPayload::CatalogueEntryUpdated { entry } if entry.object_id == schema_obj_id
         )
     });
     let row_msg = messages.iter().find(|m| match &m.payload {

@@ -14,6 +14,7 @@ use rocksdb::{
     TransactionDBOptions,
 };
 
+use crate::catalogue::CatalogueEntry;
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
@@ -25,8 +26,9 @@ use super::{
         append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
         create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
         index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
-        store_ack_tier_core,
+        load_catalogue_entry_core, load_catalogue_manifest_core, load_object_metadata_core,
+        scan_catalogue_entries_core, set_branch_tails_core, store_ack_tier_core,
+        upsert_catalogue_entry_core,
     },
 };
 
@@ -374,6 +376,31 @@ impl Storage for RocksDBStorage {
             load_catalogue_manifest_core(app_id, |prefix| {
                 Self::scan_prefix_from_db(&inner.db, prefix)
             })
+        })
+    }
+
+    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let txn = RefCell::new(inner.db.transaction());
+            upsert_catalogue_entry_core(entry, |key, value| {
+                Self::put_on_txn_cell(&txn, key, value)
+            })?;
+            Self::commit_txn(txn.into_inner())
+        })
+    }
+
+    fn load_catalogue_entry(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Option<CatalogueEntry>, StorageError> {
+        self.with_inner(|inner| {
+            load_catalogue_entry_core(object_id, |key| Self::get_from_db(&inner.db, key))
+        })
+    }
+
+    fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, StorageError> {
+        self.with_inner(|inner| {
+            scan_catalogue_entries_core(|prefix| Self::scan_prefix_from_db(&inner.db, prefix))
         })
     }
 

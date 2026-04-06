@@ -11,6 +11,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use blake3::Hasher;
 
+use crate::catalogue::CatalogueEntry;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::encoding::decode_row;
 use crate::query_manager::manager::{DeleteHandle, InsertResult, QueryError, QueryManager};
@@ -617,7 +618,14 @@ impl SchemaManager {
         let metadata = self.schema_metadata(&schema_hash);
         self.query_manager
             .sync_manager_mut()
-            .create_object_with_content(storage, object_id, metadata, content);
+            .upsert_catalogue_entry(
+                storage,
+                CatalogueEntry {
+                    object_id,
+                    metadata,
+                    content,
+                },
+            );
 
         object_id
     }
@@ -638,7 +646,14 @@ impl SchemaManager {
         let metadata = self.schema_metadata(&schema_hash);
         self.query_manager
             .sync_manager_mut()
-            .create_object_with_content(storage, object_id, metadata, content);
+            .upsert_catalogue_entry(
+                storage,
+                CatalogueEntry {
+                    object_id,
+                    metadata,
+                    content,
+                },
+            );
 
         object_id
     }
@@ -657,7 +672,14 @@ impl SchemaManager {
         let metadata = self.lens_metadata(lens);
         self.query_manager
             .sync_manager_mut()
-            .create_object_with_content(storage, object_id, metadata, content);
+            .upsert_catalogue_entry(
+                storage,
+                CatalogueEntry {
+                    object_id,
+                    metadata,
+                    content,
+                },
+            );
 
         object_id
     }
@@ -677,11 +699,13 @@ impl SchemaManager {
         );
         self.query_manager
             .sync_manager_mut()
-            .create_object_with_content(
+            .upsert_catalogue_entry(
                 storage,
-                head.bundle_object_id,
-                bundle_metadata,
-                bundle_content,
+                CatalogueEntry {
+                    object_id: head.bundle_object_id,
+                    metadata: bundle_metadata,
+                    content: bundle_content,
+                },
             );
 
         let head_content = encode_permissions_head(
@@ -692,7 +716,14 @@ impl SchemaManager {
         );
         self.query_manager
             .sync_manager_mut()
-            .create_object_with_content(storage, head_object_id, head_metadata, head_content);
+            .upsert_catalogue_entry(
+                storage,
+                CatalogueEntry {
+                    object_id: head_object_id,
+                    metadata: head_metadata,
+                    content: head_content,
+                },
+            );
 
         Some(head_object_id)
     }
@@ -752,36 +783,6 @@ impl SchemaManager {
         self.register_lens(lens.clone())?;
         self.activate_pending_and_sync_to_query_manager();
         Ok(self.persist_lens(storage, lens))
-    }
-
-    /// Materialize known schema/lens catalogue objects into object storage for sync replay.
-    ///
-    /// Rehydration restores schema/lens knowledge into memory, but downstream sync replay
-    /// needs the corresponding catalogue objects present in ObjectManager.
-    pub fn materialize_catalogue_objects<H: Storage>(&mut self, storage: &mut H) {
-        let current_hash = self.context.current_hash;
-        let historical_schemas: Vec<Schema> = self
-            .known_schemas
-            .iter()
-            .filter_map(|(hash, schema)| {
-                if *hash == current_hash {
-                    None
-                } else {
-                    Some(schema.clone())
-                }
-            })
-            .collect();
-
-        for schema in historical_schemas {
-            self.persist_schema_object(storage, &schema);
-        }
-
-        let lenses: Vec<Lens> = self.context.lenses.values().cloned().collect();
-        for lens in lenses {
-            self.persist_lens(storage, &lens);
-        }
-
-        self.persist_current_permissions(storage);
     }
 
     /// Build metadata for a schema catalogue object.

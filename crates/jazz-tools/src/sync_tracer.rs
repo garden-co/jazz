@@ -910,6 +910,13 @@ impl<'a> Normalizer<'a> {
                     self.commit(version_id),
                 )
             }
+            SyncPayload::CatalogueEntryUpdated { entry } => {
+                format!(
+                    "catalogue obj:{} type:{}",
+                    self.object(&entry.object_id),
+                    entry.object_type().unwrap_or("unknown"),
+                )
+            }
             SyncPayload::ObjectTruncated {
                 object_id,
                 branch_name,
@@ -1038,6 +1045,13 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
                 names.object(&row.row_id),
                 row.branch,
                 names.commit(&row.version_id()),
+            )
+        }
+        SyncPayload::CatalogueEntryUpdated { entry } => {
+            format!(
+                "catalogue obj:{} type:{}",
+                names.object(&entry.object_id),
+                entry.object_type().unwrap_or("unknown"),
             )
         }
         SyncPayload::RowVersionStateChanged {

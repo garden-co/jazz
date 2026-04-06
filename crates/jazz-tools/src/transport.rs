@@ -193,6 +193,7 @@ fn normalize_route_prefix(path: &str) -> String {
 /// Check if a sync payload is for a catalogue object.
 fn is_catalogue_payload(payload: &SyncPayload) -> bool {
     match payload {
+        SyncPayload::CatalogueEntryUpdated { entry } => entry.is_catalogue(),
         SyncPayload::ObjectUpdated { metadata, .. } => {
             if let Some(meta) = metadata
                 && let Some(type_str) = meta

@@ -382,21 +382,22 @@ mod tests {
     /// Ingest a remote catalogue object on the `main` branch through sync path.
     fn ingest_remote_catalogue_object(
         qm: &mut QueryManager,
-        storage: &mut MemoryStorage,
+        _storage: &mut MemoryStorage,
         object_id: ObjectId,
         metadata: HashMap<String, String>,
         content: Vec<u8>,
-        timestamp: u64,
+        _timestamp: u64,
     ) {
-        qm.sync_manager_mut()
-            .object_manager
-            .receive_object(storage, object_id, metadata);
-
-        let commit = stored_row_commit(content, timestamp, object_id.to_string());
-        qm.sync_manager_mut()
-            .object_manager
-            .receive_commit(storage, object_id, "main", commit)
-            .unwrap();
+        qm.sync_manager_mut().push_inbox(InboxEntry {
+            source: Source::Server(ServerId::new()),
+            payload: SyncPayload::CatalogueEntryUpdated {
+                entry: crate::catalogue::CatalogueEntry {
+                    object_id,
+                    metadata,
+                    content,
+                },
+            },
+        });
     }
 
     /// Test QueryManager with schema context initialization.
@@ -1908,7 +1909,7 @@ mod tests {
             .find(|e| {
                 matches!(
                     &e.payload,
-                    SyncPayload::ObjectUpdated { object_id, .. } if *object_id == schema_object_id
+                    SyncPayload::CatalogueEntryUpdated { entry } if entry.object_id == schema_object_id
                 )
             })
             .expect("Client A should emit schema catalogue object");
@@ -1917,7 +1918,7 @@ mod tests {
             .find(|e| {
                 matches!(
                     &e.payload,
-                    SyncPayload::ObjectUpdated { object_id, .. } if *object_id == lens_object_id
+                    SyncPayload::CatalogueEntryUpdated { entry } if entry.object_id == lens_object_id
                 )
             })
             .expect("Client A should emit lens catalogue object");
@@ -2286,8 +2287,8 @@ mod tests {
         let schema_msg = outbox_a
             .iter()
             .find(|e| {
-                if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
-                    *object_id == schema_obj_id
+                if let SyncPayload::CatalogueEntryUpdated { entry } = &e.payload {
+                    entry.object_id == schema_obj_id
                 } else {
                     false
                 }

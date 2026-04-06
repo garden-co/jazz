@@ -33,6 +33,7 @@ use std::ops::Bound;
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalogue::CatalogueEntry;
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{SchemaHash, Value};
@@ -283,6 +284,27 @@ pub trait Storage {
         app_id: ObjectId,
     ) -> Result<Option<CatalogueManifest>, StorageError>;
 
+    fn upsert_catalogue_entry(&mut self, _entry: &CatalogueEntry) -> Result<(), StorageError> {
+        Err(StorageError::IoError(
+            "catalogue row upserts are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn load_catalogue_entry(
+        &self,
+        _object_id: ObjectId,
+    ) -> Result<Option<CatalogueEntry>, StorageError> {
+        Err(StorageError::IoError(
+            "catalogue row lookups are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, StorageError> {
+        Err(StorageError::IoError(
+            "catalogue row scans are not implemented for this backend yet".to_string(),
+        ))
+    }
+
     // ================================================================
     // Row-region storage
     // ================================================================
@@ -520,6 +542,21 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).load_catalogue_manifest(app_id)
     }
 
+    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
+        (**self).upsert_catalogue_entry(entry)
+    }
+
+    fn load_catalogue_entry(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Option<CatalogueEntry>, StorageError> {
+        (**self).load_catalogue_entry(object_id)
+    }
+
+    fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, StorageError> {
+        (**self).scan_catalogue_entries()
+    }
+
     fn append_history_region_rows(
         &mut self,
         table: &str,
@@ -683,6 +720,8 @@ pub struct MemoryStorage {
     ack_tiers: HashMap<CommitId, HashSet<DurabilityTier>>,
     /// Append-only manifest ops keyed by app_id then op object_id.
     catalogue_manifest_ops: HashMap<ObjectId, HashMap<ObjectId, CatalogueManifestOp>>,
+    /// Current catalogue entries keyed by logical object id.
+    catalogue_entries: BTreeMap<ObjectId, CatalogueEntry>,
     /// Row-region storage keyed by table.
     row_regions: HashMap<String, TableRowRegions>,
 }
@@ -986,6 +1025,23 @@ impl Storage for MemoryStorage {
             manifest.apply(op);
         }
         Ok(Some(manifest))
+    }
+
+    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
+        self.catalogue_entries
+            .insert(entry.object_id, entry.clone());
+        Ok(())
+    }
+
+    fn load_catalogue_entry(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Option<CatalogueEntry>, StorageError> {
+        Ok(self.catalogue_entries.get(&object_id).cloned())
+    }
+
+    fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, StorageError> {
+        Ok(self.catalogue_entries.values().cloned().collect())
     }
 
     fn append_history_region_rows(

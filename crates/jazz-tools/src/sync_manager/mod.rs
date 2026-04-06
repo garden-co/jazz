@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::catalogue::CatalogueEntry;
 use crate::commit::CommitId;
-use crate::metadata::SYSTEM_PRINCIPAL_ID;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::{ObjectManager, RowObjectUpdate};
 use crate::query_manager::query::Query;
@@ -33,7 +33,7 @@ pub use types::*;
 #[derive(Clone)]
 pub struct SyncManager {
     pub object_manager: ObjectManager,
-    pub(super) catalogue_objects: HashSet<ObjectId>,
+    pub(super) catalogue_entries: HashMap<ObjectId, CatalogueEntry>,
     pub(super) allow_unprivileged_schema_catalogue_writes: bool,
 
     pub(super) servers: HashMap<ServerId, ServerState>,
@@ -49,6 +49,8 @@ pub struct SyncManager {
     pub(super) pending_query_unsubscriptions: Vec<PendingQueryUnsubscription>,
     /// Row updates applied through row-region-native sync.
     pub(super) pending_row_updates: Vec<RowObjectUpdate>,
+    /// Catalogue/system entry updates awaiting SchemaManager processing.
+    pub(super) pending_catalogue_updates: Vec<CatalogueEntry>,
 
     pub(super) next_pending_id: u64,
 
@@ -72,7 +74,7 @@ impl std::fmt::Debug for SyncManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SyncManager")
             .field("object_manager", &self.object_manager)
-            .field("catalogue_objects", &self.catalogue_objects)
+            .field("catalogue_entries", &self.catalogue_entries)
             .field(
                 "allow_unprivileged_schema_catalogue_writes",
                 &self.allow_unprivileged_schema_catalogue_writes,
@@ -91,6 +93,7 @@ impl std::fmt::Debug for SyncManager {
                 &self.pending_query_unsubscriptions,
             )
             .field("pending_row_updates", &self.pending_row_updates)
+            .field("pending_catalogue_updates", &self.pending_catalogue_updates)
             .field("next_pending_id", &self.next_pending_id)
             .field("my_tiers", &self.my_tiers)
             .field("object_commit_interest", &self.object_commit_interest)
@@ -115,17 +118,9 @@ impl SyncManager {
 
     /// Create with an existing ObjectManager.
     pub fn with_object_manager(object_manager: ObjectManager) -> Self {
-        let catalogue_objects = object_manager
-            .objects
-            .iter()
-            .filter_map(|(object_id, object)| {
-                Self::is_catalogue_metadata(&object.metadata).then_some(*object_id)
-            })
-            .collect();
-
         Self {
             object_manager,
-            catalogue_objects,
+            catalogue_entries: HashMap::new(),
             allow_unprivileged_schema_catalogue_writes: false,
             servers: HashMap::new(),
             clients: HashMap::new(),
@@ -135,6 +130,7 @@ impl SyncManager {
             pending_query_subscriptions: Vec::new(),
             pending_query_unsubscriptions: Vec::new(),
             pending_row_updates: Vec::new(),
+            pending_catalogue_updates: Vec::new(),
             next_pending_id: 0,
             my_tiers: HashSet::new(),
             object_commit_interest: HashMap::new(),
@@ -203,10 +199,10 @@ impl SyncManager {
         skip_catalogue_sync: bool,
     ) {
         self.servers.insert(server_id, ServerState::default());
-        if skip_catalogue_sync {
-            self.mark_catalogue_sent_for_server(server_id);
-        }
         self.queue_full_sync_to_server(server_id);
+        if !skip_catalogue_sync {
+            self.queue_catalogue_sync_to_server(server_id);
+        }
     }
 
     /// Add a server connection using storage-backed current-state replay.
@@ -217,10 +213,10 @@ impl SyncManager {
         storage: &H,
     ) {
         self.servers.insert(server_id, ServerState::default());
-        if skip_catalogue_sync {
-            self.mark_catalogue_sent_for_server(server_id);
-        }
         self.queue_full_sync_to_server_from_storage(server_id, storage);
+        if !skip_catalogue_sync {
+            self.queue_catalogue_sync_to_server_from_storage(server_id, storage);
+        }
     }
 
     /// Remove a server connection.
@@ -336,43 +332,6 @@ impl SyncManager {
         for entry in entries {
             self.process_inbox_entry(storage, entry);
         }
-    }
-
-    // ========================================================================
-    // Catalogue Object Creation
-    // ========================================================================
-
-    /// Create an object with initial content for catalogue storage.
-    ///
-    /// Creates an object with the specified ID, metadata, and content.
-    /// The content is stored as a commit on the "main" branch.
-    ///
-    /// Used for storing schemas and lenses in the catalogue.
-    pub fn create_object_with_content<H: Storage>(
-        &mut self,
-        storage: &mut H,
-        object_id: ObjectId,
-        metadata: HashMap<String, String>,
-        content: Vec<u8>,
-    ) {
-        self.track_catalogue_object(object_id, &metadata);
-
-        // Create the object if it doesn't exist
-        if self.object_manager.get(object_id).is_none() {
-            self.object_manager
-                .create_with_id(storage, object_id, Some(metadata));
-        }
-
-        // Add content as a commit on the "main" branch
-        let _ = self.object_manager.add_commit(
-            storage,
-            object_id,
-            "main",
-            Vec::new(), // No parents - root commit
-            content,
-            SYSTEM_PRINCIPAL_ID.to_string(),
-            None,
-        );
     }
 
     // ========================================================================
@@ -646,6 +605,11 @@ impl SyncManager {
     /// and subscriptions.
     pub fn take_pending_row_updates(&mut self) -> Vec<RowObjectUpdate> {
         std::mem::take(&mut self.pending_row_updates)
+    }
+
+    /// Take pending catalogue/system entry updates for QueryManager/SchemaManager.
+    pub fn take_pending_catalogue_updates(&mut self) -> Vec<CatalogueEntry> {
+        std::mem::take(&mut self.pending_catalogue_updates)
     }
 
     /// Requeue row updates that could not be processed yet, typically because

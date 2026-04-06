@@ -1,5 +1,5 @@
 use super::*;
-use crate::commit::{Commit, StoredState};
+use crate::commit::Commit;
 use crate::query_manager::policy::Operation;
 use crate::storage::MemoryStorage;
 use smallvec::smallvec;
@@ -366,7 +366,14 @@ fn client_receives_existing_catalogue_on_connect() {
         crate::metadata::ObjectType::CatalogueSchema.to_string(),
     );
 
-    sm.create_object_with_content(&mut io, object_id, metadata, b"schema".to_vec());
+    sm.upsert_catalogue_entry(
+        &mut io,
+        crate::catalogue::CatalogueEntry {
+            object_id,
+            metadata,
+            content: b"schema".to_vec(),
+        },
+    );
 
     let client_id = ClientId::new();
     sm.add_client(client_id);
@@ -377,24 +384,19 @@ fn client_receives_existing_catalogue_on_connect() {
     match &outbox[0] {
         OutboxEntry {
             destination: Destination::Client(id),
-            payload:
-                SyncPayload::ObjectUpdated {
-                    object_id: synced_object_id,
-                    branch_name,
-                    metadata,
-                    commits,
-                },
+            payload: SyncPayload::CatalogueEntryUpdated { entry },
         } => {
             assert_eq!(*id, client_id);
-            assert_eq!(*synced_object_id, object_id);
-            assert_eq!(branch_name.as_str(), "main");
-            assert_eq!(commits.len(), 1);
+            assert_eq!(entry.object_id, object_id);
             assert!(
-                metadata.is_some(),
+                entry
+                    .metadata
+                    .get(crate::metadata::MetadataKey::Type.as_str())
+                    .is_some(),
                 "catalogue replay should include metadata"
             );
         }
-        _ => panic!("Expected catalogue ObjectUpdated to client"),
+        _ => panic!("Expected catalogue entry replay to client"),
     }
 }
 
@@ -415,9 +417,14 @@ fn live_catalogue_updates_broadcast_without_query_scope() {
         crate::metadata::MetadataKey::Type.to_string(),
         crate::metadata::ObjectType::CatalogueLens.to_string(),
     );
-    sm.create_object_with_content(&mut io, object_id, metadata, b"lens".to_vec());
-
-    sm.forward_update_to_clients(object_id, "main".into());
+    sm.upsert_catalogue_entry(
+        &mut io,
+        crate::catalogue::CatalogueEntry {
+            object_id,
+            metadata,
+            content: b"lens".to_vec(),
+        },
+    );
 
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 2);
@@ -425,8 +432,8 @@ fn live_catalogue_updates_broadcast_without_query_scope() {
         entry,
         OutboxEntry {
             destination: Destination::Client(_),
-            payload: SyncPayload::ObjectUpdated { object_id: synced_object_id, .. },
-        } if *synced_object_id == object_id
+            payload: SyncPayload::CatalogueEntryUpdated { entry },
+        } if entry.object_id == object_id
     )));
 }
 
@@ -444,22 +451,12 @@ fn remotely_received_catalogue_replays_to_later_clients() {
 
     sm.push_inbox(InboxEntry {
         source: Source::Server(ServerId::new()),
-        payload: SyncPayload::ObjectUpdated {
-            object_id,
-            metadata: Some(ObjectMetadata {
-                id: object_id,
+        payload: SyncPayload::CatalogueEntryUpdated {
+            entry: crate::catalogue::CatalogueEntry {
+                object_id,
                 metadata,
-            }),
-            branch_name: "main".into(),
-            commits: vec![Commit {
-                parents: smallvec![],
                 content: b"schema".to_vec(),
-                timestamp: 1000,
-                author: ObjectId::new().to_string(),
-                metadata: None,
-                stored_state: StoredState::Stored,
-                ack_state: Default::default(),
-            }],
+            },
         },
     });
     sm.process_inbox(&mut io);
@@ -474,13 +471,8 @@ fn remotely_received_catalogue_replays_to_later_clients() {
         &outbox[0],
         OutboxEntry {
             destination: Destination::Client(id),
-            payload:
-                SyncPayload::ObjectUpdated {
-                    object_id: synced_object_id,
-                    metadata: Some(_),
-                    ..
-                },
-        } if *id == client_id && *synced_object_id == object_id
+            payload: SyncPayload::CatalogueEntryUpdated { entry },
+        } if *id == client_id && entry.object_id == object_id
     ));
 }
 

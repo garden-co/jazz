@@ -305,6 +305,17 @@ impl SyncManager {
     ) {
         let _span = tracing::debug_span!("process_from_server", %server_id, payload = payload.variant_name()).entered();
         match payload {
+            SyncPayload::CatalogueEntryUpdated { entry } => {
+                tracing::debug!(
+                    object_id = %entry.object_id,
+                    object_type = ?entry.object_type(),
+                    "server→CatalogueEntryUpdated"
+                );
+                if self.persist_catalogue_entry(storage, entry.clone()) {
+                    self.pending_catalogue_updates.push(entry.clone());
+                    self.forward_catalogue_entry_to_clients(entry, None);
+                }
+            }
             SyncPayload::ObjectUpdated {
                 object_id,
                 metadata,
@@ -529,6 +540,49 @@ impl SyncManager {
         tracing::trace!(%client_id, role = ?client.role, payload = payload.variant_name(), "client→payload");
 
         match &payload {
+            SyncPayload::CatalogueEntryUpdated { entry } => {
+                let object_id = entry.object_id;
+                let branch_name = BranchName::new("main");
+                match client.role {
+                    ClientRole::Peer | ClientRole::Admin => {
+                        self.apply_payload_from_client(storage, client_id, payload, false);
+                    }
+                    ClientRole::Backend => {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Client(client_id),
+                            payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                                object_id,
+                                branch_name,
+                            }),
+                        });
+                    }
+                    ClientRole::User => {
+                        let Some(_session) = &client.session else {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::Error(SyncError::SessionRequired {
+                                    object_id,
+                                    branch_name,
+                                }),
+                            });
+                            return;
+                        };
+                        if self.allow_unprivileged_schema_catalogue_writes
+                            && entry.is_structural_schema_catalogue()
+                        {
+                            self.apply_payload_from_client(storage, client_id, payload, false);
+                            return;
+                        }
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Client(client_id),
+                            payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                                object_id,
+                                branch_name,
+                            }),
+                        });
+                    }
+                }
+            }
             SyncPayload::ObjectUpdated {
                 object_id,
                 metadata,
@@ -963,6 +1017,13 @@ impl SyncManager {
         _was_pending: bool,
     ) {
         match payload {
+            SyncPayload::CatalogueEntryUpdated { entry } => {
+                if self.persist_catalogue_entry(storage, entry.clone()) {
+                    self.pending_catalogue_updates.push(entry.clone());
+                    self.forward_catalogue_entry_to_servers(entry.clone());
+                    self.forward_catalogue_entry_to_clients(entry, Some(client_id));
+                }
+            }
             SyncPayload::ObjectUpdated {
                 object_id,
                 metadata,
@@ -1079,10 +1140,6 @@ impl SyncManager {
         branch_name: BranchName,
         commits: Vec<Commit>,
     ) -> HashSet<CommitId> {
-        if let Some(meta) = metadata.as_ref() {
-            self.track_catalogue_object(object_id, &meta.metadata);
-        }
-
         // If we don't have this object yet and metadata is provided, create it
         if self.object_manager.get(object_id).is_none() {
             if let Some(meta) = metadata {
