@@ -1,6 +1,7 @@
 use super::*;
 use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
+use crate::row_regions::StoredRowVersion;
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -74,6 +75,27 @@ impl SyncManager {
                 branch_name,
                 tips.clone(),
             );
+        }
+    }
+
+    pub(super) fn forward_row_version_to_servers(
+        &mut self,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        row: StoredRowVersion,
+    ) {
+        let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
+        if !server_ids.is_empty() {
+            tracing::trace!(
+                %object_id,
+                branch = row.branch,
+                servers = server_ids.len(),
+                "forwarding row version to servers"
+            );
+        }
+
+        for server_id in server_ids {
+            self.queue_row_to_server(server_id, object_id, metadata.clone(), row.clone());
         }
     }
 

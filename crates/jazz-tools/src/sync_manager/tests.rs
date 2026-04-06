@@ -2614,6 +2614,114 @@ fn row_version_created_emits_row_version_state_changed_to_source() {
 }
 
 #[test]
+fn stale_row_version_from_client_replays_upstream_without_regressing_visible_row() {
+    use std::collections::HashMap;
+
+    use crate::metadata::MetadataKey;
+    use crate::row_regions::{BatchId, RowState, StoredRowVersion};
+    use crate::storage::Storage;
+
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+    let row_id = ObjectId::new();
+    let branch_name: BranchName = "main".into();
+
+    sm.add_client(client_id);
+    sm.set_client_role(client_id, ClientRole::Peer);
+    sm.add_server(server_id);
+
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+
+    let newer = StoredRowVersion {
+        row_id,
+        branch: branch_name.as_str().to_string(),
+        parents: Vec::new(),
+        updated_at: 2000,
+        created_by: row_id.to_string(),
+        created_at: 1000,
+        updated_by: row_id.to_string(),
+        batch_id: BatchId::new(),
+        state: RowState::VisibleDirect,
+        confirmed_tier: None,
+        is_deleted: false,
+        data: b"newer".to_vec(),
+        metadata: HashMap::new(),
+    };
+    let older = StoredRowVersion {
+        row_id,
+        branch: branch_name.as_str().to_string(),
+        parents: Vec::new(),
+        updated_at: 1000,
+        created_by: row_id.to_string(),
+        created_at: 1000,
+        updated_by: row_id.to_string(),
+        batch_id: BatchId::new(),
+        state: RowState::VisibleDirect,
+        confirmed_tier: None,
+        is_deleted: false,
+        data: b"older".to_vec(),
+        metadata: HashMap::new(),
+    };
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowVersionCreated {
+            metadata: Some(ObjectMetadata {
+                id: row_id,
+                metadata: metadata.clone(),
+            }),
+            row: newer.clone(),
+        },
+    );
+    let _ = sm.take_outbox();
+    let _ = sm.take_pending_row_updates();
+
+    sm.process_from_client(
+        &mut io,
+        client_id,
+        SyncPayload::RowVersionCreated {
+            metadata: None,
+            row: older.clone(),
+        },
+    );
+
+    let visible = io
+        .load_visible_region_row("users", "main", row_id)
+        .unwrap()
+        .expect("visible row should still exist");
+    assert_eq!(visible.version_id(), newer.version_id());
+    assert_eq!(visible.data, b"newer".to_vec());
+
+    let pending_row_updates = sm.take_pending_row_updates();
+    assert!(
+        pending_row_updates.is_empty(),
+        "stale history replay should not trigger visible row updates"
+    );
+
+    let outbox = sm.take_outbox();
+    let upstream_rows: Vec<_> = outbox
+        .iter()
+        .filter_map(|entry| match entry {
+            OutboxEntry {
+                destination: Destination::Server(id),
+                payload: SyncPayload::RowVersionCreated { row, .. },
+            } if *id == server_id => Some(row.version_id()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        upstream_rows,
+        vec![older.version_id()],
+        "the learned stale version should still replicate upstream as history"
+    );
+}
+
+#[test]
 fn add_server_syncs_visible_row_after_legacy_commit_history_is_removed() {
     use std::collections::HashMap;
 

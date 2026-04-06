@@ -27,6 +27,14 @@ fn log_schema_warning(origin: &str, warning: &SchemaWarning) {
     );
 }
 
+struct AppliedRowVersion {
+    metadata: HashMap<String, String>,
+    row: StoredRowVersion,
+    previous_row: Option<StoredRowVersion>,
+    is_new_object: bool,
+    visible_changed: bool,
+}
+
 impl SyncManager {
     fn ensure_object_metadata<H: Storage>(
         &mut self,
@@ -78,12 +86,16 @@ impl SyncManager {
             .or_else(|| storage.load_object_metadata(row.row_id).ok().flatten())
     }
 
+    fn row_version_wins(incoming: &StoredRowVersion, current: &StoredRowVersion) -> bool {
+        (incoming.updated_at, incoming.version_id()) > (current.updated_at, current.version_id())
+    }
+
     fn apply_row_updated<H: Storage>(
         &mut self,
         storage: &mut H,
         metadata: Option<ObjectMetadata>,
         row: StoredRowVersion,
-    ) -> Option<RowUpdateEvent> {
+    ) -> Option<AppliedRowVersion> {
         let metadata = self.row_metadata_from_payload(storage, &row, metadata.as_ref())?;
         let table = metadata.get(MetadataKey::Table.as_str())?.clone();
         let branch_name = row.branch.clone();
@@ -110,7 +122,14 @@ impl SyncManager {
             );
         }
 
-        if let Err(error) = storage.upsert_visible_region_rows(&table, std::slice::from_ref(&row)) {
+        let visible_changed = previous_row
+            .as_ref()
+            .is_none_or(|current| Self::row_version_wins(&row, current));
+
+        if visible_changed
+            && let Err(error) =
+                storage.upsert_visible_region_rows(&table, std::slice::from_ref(&row))
+        {
             tracing::warn!(
                 table,
                 branch = branch_name,
@@ -120,12 +139,12 @@ impl SyncManager {
             );
         }
 
-        Some(RowUpdateEvent {
-            object_id: row.row_id,
+        Some(AppliedRowVersion {
             metadata,
             row,
             previous_row,
             is_new_object,
+            visible_changed,
         })
     }
 
@@ -260,31 +279,38 @@ impl SyncManager {
                     %branch_name,
                     "server→row-version payload"
                 );
-                let persisted = self
-                    .apply_row_updated(storage, metadata, row.clone())
-                    .into_iter()
-                    .inspect(|update| self.pending_row_updates.push(update.clone()))
-                    .map(|update| update.row.version_id())
-                    .collect::<HashSet<_>>();
+                if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone()) {
+                    let version_id = applied.row.version_id();
 
-                if !persisted.is_empty() {
-                    for version_id in persisted {
-                        for tier in self.my_tiers.iter().copied() {
-                            self.outbox.push(OutboxEntry {
-                                destination: Destination::Server(server_id),
-                                payload: SyncPayload::RowVersionStateChanged {
-                                    row_id: object_id,
-                                    branch_name,
-                                    version_id,
-                                    state: None,
-                                    confirmed_tier: Some(tier),
-                                },
-                            });
-                        }
+                    for tier in self.my_tiers.iter().copied() {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Server(server_id),
+                            payload: SyncPayload::RowVersionStateChanged {
+                                row_id: object_id,
+                                branch_name,
+                                version_id,
+                                state: None,
+                                confirmed_tier: Some(tier),
+                            },
+                        });
+                    }
+
+                    if applied.visible_changed {
+                        self.pending_row_updates.push(RowUpdateEvent {
+                            object_id: applied.row.row_id,
+                            metadata: applied.metadata,
+                            row: applied.row,
+                            previous_row: applied.previous_row,
+                            is_new_object: applied.is_new_object,
+                        });
+
+                        self.forward_update_to_clients_with_storage(
+                            storage,
+                            object_id,
+                            branch_name,
+                        );
                     }
                 }
-
-                self.forward_update_to_clients_with_storage(storage, object_id, branch_name);
             }
             SyncPayload::RowVersionStateChanged {
                 row_id,
@@ -943,37 +969,41 @@ impl SyncManager {
                     .or_default()
                     .insert(client_id);
 
-                let persisted = self
-                    .apply_row_updated(storage, metadata, row)
-                    .into_iter()
-                    .inspect(|update| self.pending_row_updates.push(update.clone()))
-                    .map(|update| update.row.version_id())
-                    .collect::<HashSet<_>>();
+                if let Some(applied) = self.apply_row_updated(storage, metadata, row.clone()) {
+                    let version_id = applied.row.version_id();
 
-                if !persisted.is_empty() {
-                    for version_id in persisted {
-                        for tier in self.my_tiers.iter().copied() {
-                            self.outbox.push(OutboxEntry {
-                                destination: Destination::Client(client_id),
-                                payload: SyncPayload::RowVersionStateChanged {
-                                    row_id: object_id,
-                                    branch_name,
-                                    version_id,
-                                    state: None,
-                                    confirmed_tier: Some(tier),
-                                },
-                            });
-                        }
+                    for tier in self.my_tiers.iter().copied() {
+                        self.outbox.push(OutboxEntry {
+                            destination: Destination::Client(client_id),
+                            payload: SyncPayload::RowVersionStateChanged {
+                                row_id: object_id,
+                                branch_name,
+                                version_id,
+                                state: None,
+                                confirmed_tier: Some(tier),
+                            },
+                        });
+                    }
+
+                    self.forward_row_version_to_servers(object_id, applied.metadata.clone(), row);
+
+                    if applied.visible_changed {
+                        self.pending_row_updates.push(RowUpdateEvent {
+                            object_id: applied.row.row_id,
+                            metadata: applied.metadata,
+                            row: applied.row,
+                            previous_row: applied.previous_row,
+                            is_new_object: applied.is_new_object,
+                        });
+
+                        self.forward_update_to_clients_except_with_storage(
+                            storage,
+                            object_id,
+                            branch_name,
+                            client_id,
+                        );
                     }
                 }
-
-                self.forward_update_to_servers_with_storage(storage, object_id, branch_name);
-                self.forward_update_to_clients_except_with_storage(
-                    storage,
-                    object_id,
-                    branch_name,
-                    client_id,
-                );
             }
             SyncPayload::ObjectTruncated {
                 object_id,

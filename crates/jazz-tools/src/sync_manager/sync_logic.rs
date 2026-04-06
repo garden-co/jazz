@@ -243,8 +243,7 @@ impl SyncManager {
             (include_metadata, already_sent)
         };
 
-        let new_frontier = HashSet::from([version_id]);
-        if already_sent == new_frontier && !include_metadata {
+        if already_sent.contains(&version_id) && !include_metadata {
             return;
         }
 
@@ -256,7 +255,9 @@ impl SyncManager {
         }
         server
             .sent_tips
-            .insert((object_id, branch_name), new_frontier);
+            .entry((object_id, branch_name))
+            .or_default()
+            .insert(version_id);
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Server(server_id),
@@ -489,8 +490,7 @@ impl SyncManager {
             return;
         }
 
-        let new_frontier = HashSet::from([version_id]);
-        if already_sent == new_frontier && !include_metadata {
+        if already_sent.contains(&version_id) && !include_metadata {
             return;
         }
 
@@ -502,7 +502,9 @@ impl SyncManager {
         }
         client
             .sent_tips
-            .insert((object_id, branch_name), new_frontier);
+            .entry((object_id, branch_name))
+            .or_default()
+            .insert(version_id);
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
