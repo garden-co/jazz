@@ -6,10 +6,12 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Bound;
 
+use crate::catalogue::CatalogueEntry;
 use crate::commit::{Commit, CommitId};
+use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::{SchemaHash, Value};
-use crate::storage::{CatalogueLensSeen, CatalogueManifestOp, Storage};
+use crate::query_manager::types::Value;
+use crate::storage::Storage;
 use crate::sync_manager::DurabilityTier;
 
 /// Factory type for persistence tests that reopen storage at a given path.
@@ -561,85 +563,110 @@ pub fn test_store_and_load_ack_tier(factory: &dyn Fn() -> Box<dyn Storage>) {
 }
 
 // ============================================================================
-// Catalogue manifest tests
+// Catalogue entry tests
 // ============================================================================
 
-pub fn test_catalogue_manifest_schema_seen(factory: &dyn Fn() -> Box<dyn Storage>) {
+pub fn test_catalogue_entry_round_trip(factory: &dyn Fn() -> Box<dyn Storage>) {
     let mut storage = factory();
     let app_id = ObjectId::new();
-    let obj_id = ObjectId::new();
-    let schema_hash = SchemaHash::from_bytes([0x11; 32]);
-
-    storage
-        .append_catalogue_manifest_op(
-            app_id,
-            CatalogueManifestOp::SchemaSeen {
-                object_id: obj_id,
-                schema_hash,
-            },
-        )
-        .unwrap();
-
-    let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
-    assert_eq!(manifest.schema_seen.get(&obj_id), Some(&schema_hash));
-}
-
-pub fn test_catalogue_manifest_lens_seen(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let app_id = ObjectId::new();
-    let obj_id = ObjectId::new();
-    let source = SchemaHash::from_bytes([0x22; 32]);
-    let target = SchemaHash::from_bytes([0x33; 32]);
-
-    storage
-        .append_catalogue_manifest_op(
-            app_id,
-            CatalogueManifestOp::LensSeen {
-                object_id: obj_id,
-                source_hash: source,
-                target_hash: target,
-            },
-        )
-        .unwrap();
-
-    let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
-    let lens = manifest.lens_seen.get(&obj_id).unwrap();
-    assert_eq!(
-        *lens,
-        CatalogueLensSeen {
-            source_hash: source,
-            target_hash: target,
-        }
-    );
-}
-
-pub fn test_catalogue_manifest_idempotent(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let mut storage = factory();
-    let app_id = ObjectId::new();
-    let obj_id = ObjectId::new();
-    let schema_hash = SchemaHash::from_bytes([0x44; 32]);
-
-    let op = CatalogueManifestOp::SchemaSeen {
-        object_id: obj_id,
-        schema_hash,
+    let object_id = ObjectId::new();
+    let entry = CatalogueEntry {
+        object_id,
+        metadata: HashMap::from([
+            (
+                MetadataKey::Type.to_string(),
+                ObjectType::CatalogueSchema.to_string(),
+            ),
+            ("app_id".to_string(), app_id.to_string()),
+            ("schema_hash".to_string(), "11".repeat(32)),
+        ]),
+        content: b"schema bytes".to_vec(),
     };
 
-    storage
-        .append_catalogue_manifest_op(app_id, op.clone())
-        .unwrap();
-    storage.append_catalogue_manifest_op(app_id, op).unwrap();
+    storage.upsert_catalogue_entry(&entry).unwrap();
 
-    let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
-    assert_eq!(manifest.schema_seen.len(), 1);
-    assert_eq!(manifest.schema_seen.get(&obj_id), Some(&schema_hash));
+    let loaded = storage.load_catalogue_entry(object_id).unwrap();
+    assert_eq!(loaded, Some(entry));
 }
 
-pub fn test_catalogue_manifest_nonexistent_returns_none(factory: &dyn Fn() -> Box<dyn Storage>) {
-    let storage = factory();
-    let unknown_app = ObjectId::new();
+pub fn test_catalogue_entry_scan_returns_sorted_entries(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let app_id = ObjectId::new();
+    let first_id = ObjectId::new();
+    let second_id = ObjectId::new();
+    let (low_id, high_id) = if first_id < second_id {
+        (first_id, second_id)
+    } else {
+        (second_id, first_id)
+    };
 
-    let result = storage.load_catalogue_manifest(unknown_app).unwrap();
-    assert!(result.is_none());
+    let make_entry = |object_id: ObjectId, kind: ObjectType, content: &[u8]| CatalogueEntry {
+        object_id,
+        metadata: HashMap::from([
+            (MetadataKey::Type.to_string(), kind.to_string()),
+            ("app_id".to_string(), app_id.to_string()),
+        ]),
+        content: content.to_vec(),
+    };
+
+    let high_entry = make_entry(high_id, ObjectType::CatalogueLens, b"lens");
+    let low_entry = make_entry(low_id, ObjectType::CatalogueSchema, b"schema");
+
+    storage.upsert_catalogue_entry(&high_entry).unwrap();
+    storage.upsert_catalogue_entry(&low_entry).unwrap();
+
+    let scanned = storage.scan_catalogue_entries().unwrap();
+    assert_eq!(scanned, vec![low_entry, high_entry]);
+}
+
+pub fn test_catalogue_entry_upsert_replaces_existing(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let mut storage = factory();
+    let app_id = ObjectId::new();
+    let object_id = ObjectId::new();
+    let initial = CatalogueEntry {
+        object_id,
+        metadata: HashMap::from([
+            (
+                MetadataKey::Type.to_string(),
+                ObjectType::CataloguePermissionsHead.to_string(),
+            ),
+            ("app_id".to_string(), app_id.to_string()),
+            ("version".to_string(), "1".to_string()),
+        ]),
+        content: b"v1".to_vec(),
+    };
+    let updated = CatalogueEntry {
+        object_id,
+        metadata: HashMap::from([
+            (
+                MetadataKey::Type.to_string(),
+                ObjectType::CataloguePermissionsHead.to_string(),
+            ),
+            ("app_id".to_string(), app_id.to_string()),
+            ("version".to_string(), "2".to_string()),
+        ]),
+        content: b"v2".to_vec(),
+    };
+
+    storage.upsert_catalogue_entry(&initial).unwrap();
+    storage.upsert_catalogue_entry(&updated).unwrap();
+
+    let loaded = storage.load_catalogue_entry(object_id).unwrap();
+    assert_eq!(loaded, Some(updated.clone()));
+
+    let scanned = storage.scan_catalogue_entries().unwrap();
+    assert_eq!(scanned, vec![updated]);
+}
+
+pub fn test_catalogue_entry_nonexistent_returns_none(factory: &dyn Fn() -> Box<dyn Storage>) {
+    let storage = factory();
+    let unknown = ObjectId::new();
+
+    let loaded = storage.load_catalogue_entry(unknown).unwrap();
+    assert!(loaded.is_none());
+
+    let scanned = storage.scan_catalogue_entries().unwrap();
+    assert!(scanned.is_empty());
 }
 
 // ============================================================================
@@ -913,23 +940,23 @@ macro_rules! storage_conformance_tests {
             }
 
             #[test]
-            fn catalogue_manifest_schema_seen() {
-                conformance::test_catalogue_manifest_schema_seen(&$factory);
+            fn catalogue_entry_round_trip() {
+                conformance::test_catalogue_entry_round_trip(&$factory);
             }
 
             #[test]
-            fn catalogue_manifest_lens_seen() {
-                conformance::test_catalogue_manifest_lens_seen(&$factory);
+            fn catalogue_entry_scan_returns_sorted_entries() {
+                conformance::test_catalogue_entry_scan_returns_sorted_entries(&$factory);
             }
 
             #[test]
-            fn catalogue_manifest_idempotent() {
-                conformance::test_catalogue_manifest_idempotent(&$factory);
+            fn catalogue_entry_upsert_replaces_existing() {
+                conformance::test_catalogue_entry_upsert_replaces_existing(&$factory);
             }
 
             #[test]
-            fn catalogue_manifest_nonexistent_returns_none() {
-                conformance::test_catalogue_manifest_nonexistent_returns_none(&$factory);
+            fn catalogue_entry_nonexistent_returns_none() {
+                conformance::test_catalogue_entry_nonexistent_returns_none(&$factory);
             }
 
             #[test]
