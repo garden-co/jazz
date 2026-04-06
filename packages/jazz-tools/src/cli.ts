@@ -107,9 +107,10 @@ export async function exportSchema(options: SchemaExportOptions): Promise<void> 
 }
 
 export interface MigrationCommandOptions {
-  serverUrl: string;
-  adminSecret: string;
+  serverUrl?: string;
+  adminSecret?: string;
   migrationsDir: string;
+  schemaDir?: string;
 }
 
 export interface PermissionsCommandOptions {
@@ -119,8 +120,9 @@ export interface PermissionsCommandOptions {
 }
 
 export interface CreateMigrationOptions extends MigrationCommandOptions {
-  fromHash: string;
-  toHash: string;
+  schemaDir: string;
+  fromHash?: string;
+  toHash?: string;
 }
 
 export interface PushMigrationOptions extends MigrationCommandOptions {
@@ -154,19 +156,13 @@ function resolveMigrationOptions(args: string[]): MigrationCommandOptions {
     process.cwd(),
     getFlagValue(args, "--migrations-dir") ?? join(process.cwd(), "migrations"),
   );
-
-  if (!serverUrl) {
-    throw new Error("Missing server URL. Pass --server-url <url> or set JAZZ_SERVER_URL.");
-  }
-
-  if (!adminSecret) {
-    throw new Error("Missing admin secret. Pass --admin-secret <secret> or set JAZZ_ADMIN_SECRET.");
-  }
+  const schemaDir = resolve(process.cwd(), getFlagValue(args, "--schema-dir") ?? process.cwd());
 
   return {
     serverUrl,
     adminSecret,
     migrationsDir,
+    schemaDir,
   };
 }
 
@@ -234,8 +230,16 @@ function resolveKnownSchemaHash(
   return matches[0]!;
 }
 
+function defaultMigrationsDir(schemaDir: string): string {
+  return join(schemaDir, "migrations");
+}
+
+function snapshotsDirForMigrations(migrationsDir: string): string {
+  return join(migrationsDir, "snapshots");
+}
+
 function snapshotsDir(schemaDir: string): string {
-  return join(schemaDir, "migrations", "snapshots");
+  return snapshotsDirForMigrations(defaultMigrationsDir(schemaDir));
 }
 
 function snapshotHashFromFileName(fileName: string): string | null {
@@ -263,6 +267,27 @@ async function listLocalSnapshotEntries(
       return hash ? { hash, filePath: join(dir, fileName) } : null;
     })
     .filter((entry): entry is { hash: string; filePath: string } => entry !== null);
+}
+
+interface SnapshotEntry {
+  hash: string;
+  fileName: string;
+  filePath: string;
+}
+
+async function listSnapshotEntriesForMigrations(migrationsDir: string): Promise<SnapshotEntry[]> {
+  const dir = snapshotsDirForMigrations(migrationsDir);
+  if (!(await pathExists(dir))) {
+    return [];
+  }
+
+  const files = await readdir(dir);
+  return files
+    .map((fileName) => {
+      const hash = snapshotHashFromFileName(fileName);
+      return hash ? { hash, fileName, filePath: join(dir, fileName) } : null;
+    })
+    .filter((entry): entry is SnapshotEntry => entry !== null);
 }
 
 async function resolveLocalSnapshotEntry(
@@ -323,6 +348,18 @@ async function writeSnapshotSchema(
   return filePath;
 }
 
+async function writeSnapshotSchemaForMigrations(
+  migrationsDir: string,
+  fileName: string,
+  schema: WasmSchema,
+): Promise<string> {
+  const dir = snapshotsDirForMigrations(migrationsDir);
+  await mkdir(dir, { recursive: true });
+  const filePath = join(dir, fileName);
+  await writeFile(filePath, `${JSON.stringify(schema, null, 2)}\n`);
+  return filePath;
+}
+
 function requireSchemaExportServerValue(
   value: string | undefined,
   kind: "serverUrl" | "adminSecret",
@@ -336,6 +373,16 @@ function requireSchemaExportServerValue(
   }
 
   throw new Error("Missing admin secret. Pass --admin-secret <secret> or set JAZZ_ADMIN_SECRET.");
+}
+
+function requireMigrationServerOptions(options: MigrationCommandOptions): {
+  serverUrl: string;
+  adminSecret: string;
+} {
+  return {
+    serverUrl: requireSchemaExportServerValue(options.serverUrl, "serverUrl"),
+    adminSecret: requireSchemaExportServerValue(options.adminSecret, "adminSecret"),
+  };
 }
 
 async function resolveExportedSchemaByHash(options: SchemaExportOptions): Promise<WasmSchema> {
@@ -370,6 +417,37 @@ async function resolveExportedSchemaByHash(options: SchemaExportOptions): Promis
   ).schema;
   await writeSnapshotSchema(options.schemaDir, resolvedHash, schema);
   return schema;
+}
+
+let wasmModulePromise: Promise<any> | null = null;
+
+async function loadCliWasmModule(): Promise<any> {
+  if (!wasmModulePromise) {
+    wasmModulePromise = import("./runtime/client.js").then(({ loadWasmModule }) =>
+      loadWasmModule(),
+    );
+  }
+  return wasmModulePromise;
+}
+
+async function computeSchemaHash(schema: WasmSchema): Promise<string> {
+  const wasmModule = await loadCliWasmModule();
+  const runtime = new wasmModule.WasmRuntime(
+    JSON.stringify(schema),
+    "jazz-tools-cli",
+    "dev",
+    "main",
+    null,
+    null,
+  );
+
+  try {
+    return runtime.getSchemaHash();
+  } finally {
+    if (typeof runtime.free === "function") {
+      runtime.free();
+    }
+  }
 }
 
 function columnTypeSignature(columnType: WasmColumnType): string {
@@ -794,18 +872,30 @@ async function packageVersion(): Promise<string> {
   return packageJson.version ?? "unknown";
 }
 
-function createDateStamp(now: Date = new Date()): string {
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${year}${month}${day}`;
+function createTimestamp(now: Date = new Date()): string {
+  const year = now.getUTCFullYear();
+  const month = String(now.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(now.getUTCDate()).padStart(2, "0");
+  const hours = String(now.getUTCHours()).padStart(2, "0");
+  const minutes = String(now.getUTCMinutes()).padStart(2, "0");
+  const seconds = String(now.getUTCSeconds()).padStart(2, "0");
+  return `${year}${month}${day}T${hours}${minutes}${seconds}`;
 }
 
-function migrationFilename(migrationsDir: string, fromHash: string, toHash: string): string {
+function migrationFilename(
+  migrationsDir: string,
+  fromHash: string,
+  toHash: string,
+  timestamp: string = createTimestamp(),
+): string {
   return join(
     migrationsDir,
-    `${createDateStamp()}-unnamed-${shortSchemaHash(fromHash)}-${shortSchemaHash(toHash)}.ts`,
+    `${timestamp}-unnamed-${shortSchemaHash(fromHash)}-${shortSchemaHash(toHash)}.ts`,
   );
+}
+
+function committedSnapshotFilename(hash: string, timestamp: string = createTimestamp()): string {
+  return `${timestamp}-${hash}.json`;
 }
 
 function renderMigrationStub(input: {
@@ -887,33 +977,223 @@ async function findMigrationFile(
   return join(migrationsDir, matches[0]!);
 }
 
-export async function createMigration(options: CreateMigrationOptions): Promise<string> {
-  const { hashes } = await fetchSchemaHashes(options.serverUrl, {
-    adminSecret: options.adminSecret,
-  });
-  const fromHash = resolveKnownSchemaHash(options.fromHash, "fromHash", hashes);
-  const toHash = resolveKnownSchemaHash(options.toHash, "toHash", hashes);
+interface ResolvedSchemaInput {
+  hash: string;
+  schema: WasmSchema;
+}
+
+function isCommittedSnapshotFileName(fileName: string): boolean {
+  return /^\d{8}T\d{9}Z-[0-9a-f]{64}\.json$/i.test(fileName);
+}
+
+async function loadLatestCommittedSnapshot(
+  migrationsDir: string,
+): Promise<ResolvedSchemaInput | null> {
+  const entries = await listSnapshotEntriesForMigrations(migrationsDir);
+  const latest = entries
+    .filter((entry) => isCommittedSnapshotFileName(entry.fileName))
+    .sort((left, right) => left.fileName.localeCompare(right.fileName))
+    .at(-1);
+  if (!latest) {
+    return null;
+  }
+
+  return {
+    hash: latest.hash,
+    schema: JSON.parse(await readFile(latest.filePath, "utf8")) as WasmSchema,
+  };
+}
+
+async function ensureCommittedSnapshot(
+  migrationsDir: string,
+  schema: ResolvedSchemaInput,
+  timestamp: string,
+): Promise<string | null> {
+  const entries = await listSnapshotEntriesForMigrations(migrationsDir);
+  if (
+    entries.some(
+      (entry) => entry.hash === schema.hash && isCommittedSnapshotFileName(entry.fileName),
+    )
+  ) {
+    return null;
+  }
+
+  return writeSnapshotSchemaForMigrations(
+    migrationsDir,
+    committedSnapshotFilename(schema.hash, timestamp),
+    schema.schema,
+  );
+}
+
+async function loadCurrentSchema(schemaDir: string): Promise<ResolvedSchemaInput> {
+  const compiled = await loadCompiledSchema(schemaDir);
+  return {
+    hash: await computeSchemaHash(compiled.wasmSchema),
+    schema: compiled.wasmSchema,
+  };
+}
+
+async function resolveHistoricalSchema(
+  migrationsDir: string,
+  hash: string,
+  label: string,
+  serverUrl: string | undefined,
+  adminSecret: string | undefined,
+): Promise<ResolvedSchemaInput> {
+  const localEntries = await listSnapshotEntriesForMigrations(migrationsDir);
+  const normalized = normalizeSchemaHashInput(hash, label);
+  const localFullHash =
+    normalized.length === 64
+      ? localEntries.find((entry) => entry.hash === normalized)?.hash
+      : (() => {
+          const matches = localEntries.filter((entry) => entry.hash.startsWith(normalized));
+          if (matches.length === 0) {
+            return null;
+          }
+          if (matches.length > 1) {
+            throw new Error(
+              `${label} prefix ${normalized} is ambiguous: ${matches
+                .map((entry) => shortSchemaHash(entry.hash))
+                .join(", ")}`,
+            );
+          }
+          return matches[0]!.hash;
+        })();
+
+  if (localFullHash) {
+    const contents = await readFile(
+      localEntries.find((entry) => entry.hash === localFullHash)!.filePath,
+      "utf8",
+    );
+    return {
+      hash: localFullHash,
+      schema: JSON.parse(contents) as WasmSchema,
+    };
+  }
+
+  const resolvedHash =
+    normalized.length === 64
+      ? normalized
+      : resolveKnownSchemaHash(
+          normalized,
+          label,
+          (
+            await fetchSchemaHashes(requireSchemaExportServerValue(serverUrl, "serverUrl"), {
+              adminSecret: requireSchemaExportServerValue(adminSecret, "adminSecret"),
+            })
+          ).hashes,
+        );
+
+  const resolvedServerUrl = requireSchemaExportServerValue(serverUrl, "serverUrl");
+  const resolvedAdminSecret = requireSchemaExportServerValue(adminSecret, "adminSecret");
+
+  try {
+    const schema = (
+      await fetchStoredWasmSchema(resolvedServerUrl, {
+        adminSecret: resolvedAdminSecret,
+        schemaHash: resolvedHash,
+      })
+    ).schema;
+    await writeSnapshotSchemaForMigrations(migrationsDir, `${resolvedHash}.json`, schema);
+    return { hash: resolvedHash, schema };
+  } catch (error) {
+    if (error instanceof Error && /Schema fetch failed: 404/i.test(error.message)) {
+      throw new Error(`No stored schema found for ${label} ${resolvedHash}.`);
+    }
+    throw error;
+  }
+}
+
+export async function createMigration(options: CreateMigrationOptions): Promise<string | null> {
+  const explicitHashFlow = Boolean(options.fromHash || options.toHash);
 
   await mkdir(options.migrationsDir, { recursive: true });
+  const currentSchema =
+    !explicitHashFlow || !options.toHash ? await loadCurrentSchema(options.schemaDir) : null;
 
-  const [{ schema: fromSchema }, { schema: toSchema }] = await Promise.all([
-    fetchStoredWasmSchema(options.serverUrl, {
-      adminSecret: options.adminSecret,
-      schemaHash: fromHash,
-    }),
-    fetchStoredWasmSchema(options.serverUrl, {
-      adminSecret: options.adminSecret,
-      schemaHash: toHash,
-    }),
-  ]);
+  let fromSchema: ResolvedSchemaInput;
+  let toSchema: ResolvedSchemaInput;
+  let shouldWriteCommittedSnapshot = false;
+  const timestamp = createTimestamp();
 
-  const filePath = migrationFilename(options.migrationsDir, fromHash, toHash);
+  if (explicitHashFlow) {
+    if (options.fromHash) {
+      fromSchema = await resolveHistoricalSchema(
+        options.migrationsDir,
+        options.fromHash,
+        "fromHash",
+        options.serverUrl,
+        options.adminSecret,
+      );
+    } else {
+      const latest = await loadLatestCommittedSnapshot(options.migrationsDir);
+      if (!latest) {
+        throw new Error(
+          "No committed snapshot found. Provide --fromHash or run `jazz-tools migrations create` once to create an initial snapshot.",
+        );
+      }
+      fromSchema = latest;
+    }
+
+    toSchema = options.toHash
+      ? await resolveHistoricalSchema(
+          options.migrationsDir,
+          options.toHash,
+          "toHash",
+          options.serverUrl,
+          options.adminSecret,
+        )
+      : currentSchema!;
+    shouldWriteCommittedSnapshot = !options.toHash;
+  } else {
+    const latest = await loadLatestCommittedSnapshot(options.migrationsDir);
+    if (!latest) {
+      const snapshotPath = await ensureCommittedSnapshot(
+        options.migrationsDir,
+        currentSchema!,
+        timestamp,
+      );
+      console.log(`Wrote initial schema snapshot: ${snapshotPath}`);
+      console.log("No migration created because there was no previous local schema baseline.");
+      return null;
+    }
+
+    if (latest.hash === currentSchema!.hash) {
+      console.log("No structural schema changes detected.");
+      return null;
+    }
+
+    fromSchema = latest;
+    toSchema = currentSchema!;
+    shouldWriteCommittedSnapshot = true;
+  }
+
+  if (fromSchema.hash === toSchema.hash) {
+    console.log("No structural schema changes detected.");
+    return null;
+  }
+
+  const filePath = migrationFilename(
+    options.migrationsDir,
+    fromSchema.hash,
+    toSchema.hash,
+    timestamp,
+  );
   if (await pathExists(filePath)) {
     throw new Error(`Migration stub already exists: ${filePath}`);
   }
 
-  const stub = renderMigrationStub({ fromHash, toHash, fromSchema, toSchema });
+  const stub = renderMigrationStub({
+    fromHash: fromSchema.hash,
+    toHash: toSchema.hash,
+    fromSchema: fromSchema.schema,
+    toSchema: toSchema.schema,
+  });
   await writeFile(filePath, stub);
+
+  if (shouldWriteCommittedSnapshot) {
+    await ensureCommittedSnapshot(options.migrationsDir, toSchema, timestamp);
+  }
 
   const version = await packageVersion();
   console.log(`Generated: ${filePath}`);
@@ -925,15 +1205,16 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
   console.log("1. Fill in migrate.");
   console.log("2. Rename the file by replacing 'unnamed'.");
   console.log(
-    `3. Run npx jazz-tools@${version} migrations push ${shortSchemaHash(fromHash)} ${shortSchemaHash(toHash)}`,
+    `3. Run npx jazz-tools@${version} migrations push ${shortSchemaHash(fromSchema.hash)} ${shortSchemaHash(toSchema.hash)}`,
   );
 
   return filePath;
 }
 
 export async function pushMigration(options: PushMigrationOptions): Promise<void> {
-  const { hashes } = await fetchSchemaHashes(options.serverUrl, {
-    adminSecret: options.adminSecret,
+  const { serverUrl, adminSecret } = requireMigrationServerOptions(options);
+  const { hashes } = await fetchSchemaHashes(serverUrl, {
+    adminSecret,
   });
   const fromHash = resolveKnownSchemaHash(options.fromHash, "fromHash", hashes);
   const toHash = resolveKnownSchemaHash(options.toHash, "toHash", hashes);
@@ -957,8 +1238,8 @@ export async function pushMigration(options: PushMigrationOptions): Promise<void
   }
 
   const forward = serializeForwardLenses(migration.forward);
-  await publishStoredMigration(options.serverUrl, {
-    adminSecret: options.adminSecret,
+  await publishStoredMigration(serverUrl, {
+    adminSecret,
     fromHash,
     toHash,
     forward,
@@ -1095,28 +1376,34 @@ if (isMainModule()) {
     });
   } else if (command === "migrations") {
     const subcommand = process.argv[3] ?? "";
-    const fromHash = process.argv[4];
-    const toHash = process.argv[5];
-    const sharedArgs = process.argv.slice(6);
+    let task: Promise<unknown>;
 
-    if (!fromHash || !toHash) {
-      console.error(
-        "Usage: node dist/cli.js migrations <create|push> <fromHash> <toHash> [options]",
+    if (subcommand === "create") {
+      const args = process.argv.slice(4);
+      const options = resolveMigrationOptions(args);
+      task = createMigration({
+        ...options,
+        schemaDir: options.schemaDir ?? process.cwd(),
+        fromHash: getFlagValue(args, "--fromHash"),
+        toHash: getFlagValue(args, "--toHash"),
+      });
+    } else if (subcommand === "push") {
+      const fromHash = process.argv[4];
+      const toHash = process.argv[5];
+      const sharedArgs = process.argv.slice(6);
+
+      if (!fromHash || !toHash) {
+        console.error("Usage: node dist/cli.js migrations push <fromHash> <toHash> [options]");
+        process.exit(1);
+      }
+
+      const options = resolveMigrationOptions(sharedArgs);
+      task = pushMigration({ ...options, fromHash, toHash });
+    } else {
+      task = Promise.reject(
+        new Error("Usage: node dist/cli.js migrations <create|push> [options]"),
       );
-      process.exit(1);
     }
-
-    const options = resolveMigrationOptions(sharedArgs);
-    const task =
-      subcommand === "create"
-        ? createMigration({ ...options, fromHash, toHash })
-        : subcommand === "push"
-          ? pushMigration({ ...options, fromHash, toHash })
-          : Promise.reject(
-              new Error(
-                "Usage: node dist/cli.js migrations <create|push> <fromHash> <toHash> [options]",
-              ),
-            );
 
     task.catch((err) => {
       console.error(err.message);
@@ -1148,7 +1435,7 @@ if (isMainModule()) {
       "  permissions push      Publish the current permissions.ts with head-parent checks",
     );
     console.log(
-      "  migrations create     Generate a typed structural migration stub from two known schema hashes",
+      "  migrations create     Generate a typed structural migration stub from snapshots or schema hashes",
     );
     console.log("  migrations push       Push a reviewed migration edge to the server");
     console.log("\nValidation options:");
@@ -1164,9 +1451,14 @@ if (isMainModule()) {
     console.log("  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL)");
     console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
     console.log("\nMigration options:");
+    console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
     console.log("  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL)");
     console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
     console.log("  --migrations-dir <p>  Path to migrations directory (default: ./migrations)");
+    console.log(
+      "  --fromHash <hash>     Optional source schema hash (defaults to latest snapshot)",
+    );
+    console.log("  --toHash <hash>       Optional target schema hash (defaults to current schema)");
     process.exit(command ? 1 : 0);
   }
 }
