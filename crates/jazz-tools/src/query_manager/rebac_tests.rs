@@ -400,6 +400,7 @@ fn seed_folder_on_branch(
         folders_descriptor,
     )
     .unwrap();
+    qm.persist_row_region_tip(storage, "folders", folder_id, branch);
     folder_id
 }
 
@@ -1005,16 +1006,81 @@ fn rebac_inherited_insert_uses_payload_branch_after_cold_start() {
         "Inherited insert should authorize on the payload branch even after a cold start"
     );
 
-    let cached_folder = qm
-        .sync_manager()
+    let tips = qm
+        .sync_manager_mut()
         .object_manager
-        .get(folder_id)
-        .expect("authorization should hydrate the parent folder");
+        .get_tip_ids(doc_id, &branch)
+        .unwrap();
     assert!(
-        cached_folder
-            .branches
-            .contains_key(&BranchName::new(&branch)),
-        "authorization should load the parent from the payload branch"
+        tips.contains(&commit.id()),
+        "Document insert should be applied after settlement reads the parent from the payload branch"
+    );
+}
+
+#[test]
+fn rebac_inherited_insert_uses_visible_row_region_after_legacy_branch_history_is_removed() {
+    let (schema, folders_descriptor, schema_hash) = inherited_insert_schema();
+    let branch = inherited_insert_branch(schema_hash);
+    let mut storage = MemoryStorage::new();
+
+    let mut seed_qm = create_server_mode_query_manager(schema.clone(), schema_hash);
+    let folder_id = seed_folder_on_branch(
+        &mut seed_qm,
+        &mut storage,
+        &branch,
+        "alice",
+        "Cold Folder",
+        &folders_descriptor,
+    );
+
+    let folder_commit_id = *seed_qm
+        .sync_manager_mut()
+        .object_manager
+        .get_tip_ids(folder_id, &branch)
+        .unwrap()
+        .iter()
+        .next()
+        .expect("seed folder should have one tip");
+    crate::storage::Storage::delete_commit(
+        &mut storage,
+        folder_id,
+        &BranchName::new(&branch),
+        folder_commit_id,
+    )
+    .unwrap();
+
+    let mut qm = create_server_mode_query_manager(schema, schema_hash);
+    let client_id = ClientId::new();
+    qm.sync_manager_mut().add_client(client_id);
+    qm.sync_manager_mut()
+        .set_client_session(client_id, Session::new("alice"));
+    qm.sync_manager_mut().take_outbox();
+
+    let doc_id = ObjectId::new();
+    let commit = enqueue_inherited_insert(
+        &mut qm,
+        client_id,
+        doc_id,
+        &branch,
+        folder_id,
+        "Cold-start branch lookup",
+    );
+
+    qm.process(&mut storage);
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let denied = outbox.iter().any(|entry| {
+        matches!(
+            (&entry.destination, &entry.payload),
+            (
+                Destination::Client(id),
+                SyncPayload::Error(SyncError::PermissionDenied { .. }),
+            ) if *id == client_id
+        )
+    });
+    assert!(
+        !denied,
+        "Inherited insert should authorize from the visible row region without legacy branch commits"
     );
 
     let tips = qm
@@ -1024,12 +1090,12 @@ fn rebac_inherited_insert_uses_payload_branch_after_cold_start() {
         .unwrap();
     assert!(
         tips.contains(&commit.id()),
-        "Document insert should be applied after settlement loads the parent from storage"
+        "Document insert should still be applied after permission settlement"
     );
 }
 
 #[test]
-fn rebac_inherited_insert_hydrates_requested_branch_instead_of_reusing_cached_branch() {
+fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch() {
     let (schema, folders_descriptor, schema_hash) = inherited_insert_schema();
     let branch = inherited_insert_branch(schema_hash);
     let mut storage = MemoryStorage::new();
@@ -1062,6 +1128,7 @@ fn rebac_inherited_insert_hydrates_requested_branch_instead_of_reusing_cached_br
         &folders_descriptor,
     )
     .unwrap();
+    seed_qm.persist_row_region_tip(&mut storage, "folders", folder_id, &branch);
 
     let mut qm = create_server_mode_query_manager(schema, schema_hash);
     let client_id = ClientId::new();
@@ -1118,19 +1185,7 @@ fn rebac_inherited_insert_hydrates_requested_branch_instead_of_reusing_cached_br
     });
     assert!(
         !denied,
-        "Inherited insert should hydrate the requested payload branch instead of reusing cached main"
-    );
-
-    let cached_folder = qm
-        .sync_manager()
-        .object_manager
-        .get(folder_id)
-        .expect("folder should remain cached");
-    assert!(
-        cached_folder
-            .branches
-            .contains_key(&BranchName::new(&branch)),
-        "authorization should hydrate the requested branch onto the cached object"
+        "Inherited insert should use the requested payload branch instead of reusing cached main"
     );
 
     let tips = qm
@@ -1140,7 +1195,7 @@ fn rebac_inherited_insert_hydrates_requested_branch_instead_of_reusing_cached_br
         .unwrap();
     assert!(
         tips.contains(&commit.id()),
-        "Document insert should apply once the requested parent branch is hydrated"
+        "Document insert should apply once the requested parent branch is consulted"
     );
 }
 

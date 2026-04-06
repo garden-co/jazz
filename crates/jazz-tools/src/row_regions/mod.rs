@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 
+use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::commit::CommitId;
+use crate::metadata::{DeleteKind, MetadataKey, RowProvenance};
 use crate::object::ObjectId;
 use crate::sync_manager::DurabilityTier;
 
@@ -61,4 +63,42 @@ pub struct StoredRowVersion {
     pub is_deleted: bool,
     pub data: Vec<u8>,
     pub metadata: HashMap<String, String>,
+}
+
+impl StoredRowVersion {
+    pub fn row_provenance(&self) -> RowProvenance {
+        RowProvenance {
+            created_by: self.created_by.clone(),
+            created_at: self.created_at,
+            updated_by: self.updated_by.clone(),
+            updated_at: self.updated_at,
+        }
+    }
+
+    pub fn version_id(&self) -> CommitId {
+        let mut hasher = Hasher::new();
+        hasher.update(b"jazz:row-region:v1");
+        hasher.update(self.row_id.uuid().as_bytes());
+        hasher.update(self.branch.as_bytes());
+        hasher.update(&self.updated_at.to_le_bytes());
+        hasher.update(self.batch_id.0.as_bytes());
+        hasher.update(&[self.state as u8]);
+        hasher.update(&[u8::from(self.is_deleted)]);
+        CommitId(*hasher.finalize().as_bytes())
+    }
+
+    pub fn is_soft_deleted(&self) -> bool {
+        self.metadata
+            .get(MetadataKey::Delete.as_str())
+            .map(|value| value == DeleteKind::Soft.as_str())
+            .unwrap_or(false)
+    }
+
+    pub fn is_hard_deleted(&self) -> bool {
+        self.metadata
+            .get(MetadataKey::Delete.as_str())
+            .map(|value| value == DeleteKind::Hard.as_str())
+            .unwrap_or(false)
+            || (self.is_deleted && self.data.is_empty())
+    }
 }

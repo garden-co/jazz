@@ -320,6 +320,17 @@ pub trait Storage {
         ))
     }
 
+    fn load_visible_region_row(
+        &self,
+        _table: &str,
+        _branch: &str,
+        _row_id: ObjectId,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        Err(StorageError::IoError(
+            "row-region visible lookups are not implemented for this backend yet".to_string(),
+        ))
+    }
+
     fn scan_history_region(
         &self,
         _table: &str,
@@ -508,6 +519,15 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         branch: &str,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
         (**self).scan_visible_region(table, branch)
+    }
+
+    fn load_visible_region_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        (**self).load_visible_region_row(table, branch, row_id)
     }
 
     fn scan_history_region(
@@ -989,6 +1009,18 @@ impl Storage for MemoryStorage {
             .filter(|((row_branch, _), _)| row_branch == branch)
             .map(|(_, row)| row.clone())
             .collect())
+    }
+
+    fn load_visible_region_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        Ok(self
+            .row_regions
+            .get(table)
+            .and_then(|regions| regions.visible.get(&(branch.to_string(), row_id)).cloned()))
     }
 
     fn scan_history_region(

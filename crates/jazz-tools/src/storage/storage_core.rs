@@ -308,6 +308,20 @@ pub(super) fn scan_visible_region_core(
 }
 
 #[allow(dead_code)]
+pub(super) fn load_visible_region_row_core(
+    table: &str,
+    branch: &str,
+    row_id: ObjectId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<StoredRowVersion>, StorageError> {
+    let key = visible_row_key(table, branch, row_id);
+    match get(&key)? {
+        Some(bytes) => Ok(Some(decode_json(&bytes, "stored row version")?)),
+        None => Ok(None),
+    }
+}
+
+#[allow(dead_code)]
 pub(super) fn scan_history_region_core(
     table: &str,
     branch: &str,
