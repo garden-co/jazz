@@ -343,7 +343,7 @@ async function writeSnapshotSchema(
 ): Promise<string> {
   const dir = snapshotsDir(schemaDir);
   await mkdir(dir, { recursive: true });
-  const filePath = join(dir, `${hash}.json`);
+  const filePath = join(dir, snapshotFilename(hash));
   await writeFile(filePath, `${JSON.stringify(schema, null, 2)}\n`);
   return filePath;
 }
@@ -894,7 +894,7 @@ function migrationFilename(
   );
 }
 
-function committedSnapshotFilename(hash: string, timestamp: string = createTimestamp()): string {
+function snapshotFilename(hash: string, timestamp: string = createTimestamp()): string {
   return `${timestamp}-${hash}.json`;
 }
 
@@ -1020,7 +1020,7 @@ async function ensureCommittedSnapshot(
 
   return writeSnapshotSchemaForMigrations(
     migrationsDir,
-    committedSnapshotFilename(schema.hash, timestamp),
+    snapshotFilename(schema.hash, timestamp),
     schema.schema,
   );
 }
@@ -1094,7 +1094,7 @@ async function resolveHistoricalSchema(
         schemaHash: resolvedHash,
       })
     ).schema;
-    await writeSnapshotSchemaForMigrations(migrationsDir, `${resolvedHash}.json`, schema);
+    await writeSnapshotSchemaForMigrations(migrationsDir, snapshotFilename(resolvedHash), schema);
     return { hash: resolvedHash, schema };
   } catch (error) {
     if (error instanceof Error && /Schema fetch failed: 404/i.test(error.message)) {
