@@ -243,59 +243,56 @@ function snapshotsDir(schemaDir: string): string {
   return snapshotsDirForMigrations(defaultMigrationsDir(schemaDir));
 }
 
-function snapshotHashFromFileName(fileName: string): string | null {
-  if (!fileName.endsWith(".json")) {
-    return null;
-  }
-
-  const stem = basename(fileName, ".json").toLowerCase();
-  const match = stem.match(/([0-9a-f]{64})$/);
-  return match?.[1] ?? null;
-}
-
-async function listLocalSnapshotEntries(
-  schemaDir: string,
-): Promise<Array<{ hash: string; filePath: string }>> {
-  const dir = snapshotsDir(schemaDir);
-  if (!(await pathExists(dir))) {
-    return [];
-  }
-
-  const files = await readdir(dir);
-  return files
-    .map((fileName) => {
-      const hash = snapshotHashFromFileName(fileName);
-      return hash ? { hash, filePath: join(dir, fileName) } : null;
-    })
-    .filter((entry): entry is { hash: string; filePath: string } => entry !== null);
-}
-
 interface SnapshotEntry {
   hash: string;
   fileName: string;
   filePath: string;
+  schema: WasmSchema;
 }
 
-async function listSnapshotEntriesForMigrations(migrationsDir: string): Promise<SnapshotEntry[]> {
-  const dir = snapshotsDirForMigrations(migrationsDir);
+function looksLikeSnapshotFileName(fileName: string): boolean {
+  return /^(?:\d{8}T\d{6}-)?[0-9a-f]{12}\.json$/i.test(fileName);
+}
+
+async function readSnapshotEntry(dir: string, fileName: string): Promise<SnapshotEntry | null> {
+  if (!looksLikeSnapshotFileName(fileName)) {
+    return null;
+  }
+
+  const filePath = join(dir, fileName);
+  const schema = JSON.parse(await readFile(filePath, "utf8")) as WasmSchema;
+  return {
+    hash: await computeSchemaHash(schema),
+    fileName,
+    filePath,
+    schema,
+  };
+}
+
+async function listSnapshotEntries(dir: string): Promise<SnapshotEntry[]> {
   if (!(await pathExists(dir))) {
     return [];
   }
 
   const files = await readdir(dir);
-  return files
-    .map((fileName) => {
-      const hash = snapshotHashFromFileName(fileName);
-      return hash ? { hash, fileName, filePath: join(dir, fileName) } : null;
-    })
-    .filter((entry): entry is SnapshotEntry => entry !== null);
+  return (await Promise.all(files.map((fileName) => readSnapshotEntry(dir, fileName)))).filter(
+    (entry): entry is SnapshotEntry => entry !== null,
+  );
+}
+
+async function listLocalSnapshotEntries(schemaDir: string): Promise<SnapshotEntry[]> {
+  return listSnapshotEntries(snapshotsDir(schemaDir));
+}
+
+async function listSnapshotEntriesForMigrations(migrationsDir: string): Promise<SnapshotEntry[]> {
+  return listSnapshotEntries(snapshotsDirForMigrations(migrationsDir));
 }
 
 async function resolveLocalSnapshotEntry(
   schemaDir: string,
   hash: string,
   label: string,
-): Promise<{ hash: string; filePath: string } | null> {
+): Promise<SnapshotEntry | null> {
   const entries = await listLocalSnapshotEntries(schemaDir);
   if (entries.length === 0) {
     return null;
@@ -330,10 +327,9 @@ async function loadLocalSnapshotSchema(
     return null;
   }
 
-  const contents = await readFile(entry.filePath, "utf8");
   return {
     hash: entry.hash,
-    schema: JSON.parse(contents) as WasmSchema,
+    schema: entry.schema,
   };
 }
 
@@ -908,7 +904,7 @@ function migrationFilename(
 }
 
 function snapshotFilename(hash: string, timestamp: string = createTimestamp()): string {
-  return `${timestamp}-${hash}.json`;
+  return `${timestamp}-${shortSchemaHash(hash)}.json`;
 }
 
 function renderMigrationStub(input: {
@@ -996,7 +992,7 @@ interface ResolvedSchemaInput {
 }
 
 function isCommittedSnapshotFileName(fileName: string): boolean {
-  return /^\d{8}T\d{6}-[0-9a-f]{64}\.json$/i.test(fileName);
+  return /^\d{8}T\d{6}-[0-9a-f]{12}\.json$/i.test(fileName);
 }
 
 async function loadLatestCommittedSnapshot(
@@ -1013,7 +1009,7 @@ async function loadLatestCommittedSnapshot(
 
   return {
     hash: latest.hash,
-    schema: JSON.parse(await readFile(latest.filePath, "utf8")) as WasmSchema,
+    schema: latest.schema,
   };
 }
 
@@ -1074,13 +1070,9 @@ async function resolveHistoricalSchema(
         })();
 
   if (localFullHash) {
-    const contents = await readFile(
-      localEntries.find((entry) => entry.hash === localFullHash)!.filePath,
-      "utf8",
-    );
     return {
       hash: localFullHash,
-      schema: JSON.parse(contents) as WasmSchema,
+      schema: localEntries.find((entry) => entry.hash === localFullHash)!.schema,
     };
   }
 
