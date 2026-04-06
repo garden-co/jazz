@@ -1465,8 +1465,8 @@ fn synced_update_updates_column_indices() {
     use crate::query_manager::encoding::encode_row;
     use std::collections::HashMap;
 
-    // This test verifies that updates received via sync (receive_commit)
-    // correctly update column indices using old_content from AllObjectUpdate.
+    // This test verifies that direct synced commits (receive_commit)
+    // update indices through the row-native update lane.
 
     let sync_manager = SyncManager::new();
     let schema = test_schema();
@@ -1483,9 +1483,6 @@ fn synced_update_updates_column_indices() {
     qm.sync_manager_mut()
         .object_manager
         .receive_object(&mut storage, row_id, metadata);
-
-    // Subscribe to all objects so we get AllObjectUpdate notifications
-    qm.sync_manager_mut().object_manager.subscribe_all();
 
     // Encode the initial row data (name="Alice", score=100)
     let descriptor = RowDescriptor::new(vec![
@@ -1506,7 +1503,7 @@ fn synced_update_updates_column_indices() {
         .receive_commit(&mut storage, row_id, &branch, commit1)
         .unwrap();
 
-    // Process to handle the AllObjectUpdate
+    // Process to handle the row-native update
     qm.process(&mut storage);
 
     // Query by name="Alice" → finds row
@@ -1552,7 +1549,7 @@ fn synced_update_updates_column_indices() {
         .receive_commit(&mut storage, row_id, &branch, commit2)
         .unwrap();
 
-    // Process to handle the AllObjectUpdate with old_content
+    // Process to handle the row-native update
     qm.process(&mut storage);
 
     // Query by name="Alice" → empty (old value removed from index)
@@ -1659,45 +1656,6 @@ fn synced_insert_materializes_visible_and_history_row_regions() {
 }
 
 #[test]
-#[should_panic(expected = "missing old_content for historical sync update")]
-fn synced_update_missing_old_content_panics_fail_fast() {
-    use crate::object::BranchName;
-    use crate::object_manager::AllObjectUpdate;
-
-    let sync_manager = SyncManager::new();
-    let schema = test_schema();
-    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-    let branch = get_branch(&qm);
-
-    let handle = qm
-        .insert(
-            &mut storage,
-            "users",
-            &[Value::Text("Alice".into()), Value::Integer(100)],
-        )
-        .unwrap();
-    qm.process(&mut storage);
-
-    let mut metadata = std::collections::HashMap::new();
-    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
-
-    // Simulate a historical sync update where ObjectManager couldn't provide
-    // old_content. We should fail-fast rather than accept index staleness.
-    qm.handle_object_update(
-        &mut storage,
-        AllObjectUpdate {
-            object_id: handle.row_id,
-            metadata,
-            branch_name: BranchName::new(&branch),
-            commit_ids: vec![],
-            is_new_object: false,
-            previous_commit_ids: vec![handle.row_commit_id],
-            old_content: None,
-        },
-    );
-}
-
-#[test]
 fn lens_transform_failure_drops_row_instead_of_fallback() {
     use crate::query_manager::encoding::encode_row;
     use std::collections::HashMap;
@@ -1795,10 +1753,7 @@ fn synced_insert_appears_in_subscription_delta() {
         .object_manager
         .receive_object(&mut storage, row_id, metadata);
 
-    // Subscribe to all objects so we get AllObjectUpdate notifications
-    qm.sync_manager_mut().object_manager.subscribe_all();
-
-    // NOW subscribe to query (after subscribe_all but before receive_commit)
+    // Subscribe before the synced row arrives.
     let query = qm.query("users").build();
     let sub_id = qm.subscribe(query).unwrap();
 
@@ -1820,7 +1775,7 @@ fn synced_insert_appears_in_subscription_delta() {
         .receive_commit(&mut storage, row_id, &branch, commit)
         .unwrap();
 
-    // Process to handle the AllObjectUpdate
+    // Process to handle the row-native update
     qm.process(&mut storage);
 
     // Verify subscription delta contains the added row
@@ -1852,9 +1807,6 @@ fn synced_update_is_visible_in_query() {
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
     let branch = get_branch(&qm);
-
-    // Subscribe to all objects for sync updates
-    qm.sync_manager_mut().object_manager.subscribe_all();
 
     // Insert a row locally first
     let insert_handle = qm
@@ -1945,9 +1897,6 @@ fn synced_row_visible_in_filtered_subscription() {
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
     let branch = get_branch(&qm);
-
-    // Subscribe to all objects for sync updates
-    qm.sync_manager_mut().object_manager.subscribe_all();
 
     // Subscribe to filtered query: users with score > 25
     let query = qm
@@ -2172,9 +2121,6 @@ fn synced_update_emits_subscription_delta() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
     let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
-
-    // Subscribe to all objects for sync updates
-    qm.sync_manager_mut().object_manager.subscribe_all();
 
     // Insert a row locally first
     let handle = qm

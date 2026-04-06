@@ -2,6 +2,7 @@ use super::*;
 use crate::commit::{Commit, CommitId};
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, Object, ObjectId};
+use crate::object_manager::RowObjectUpdate;
 use crate::query_manager::policy::Operation;
 use crate::row_regions::{BatchId, RowState, StoredRowVersion};
 use crate::storage::Storage;
@@ -297,7 +298,7 @@ impl SyncManager {
                     }
 
                     if applied.visible_changed {
-                        self.pending_row_updates.push(RowUpdateEvent {
+                        self.pending_row_updates.push(RowObjectUpdate {
                             object_id: applied.row.row_id,
                             metadata: applied.metadata,
                             row: applied.row,
@@ -987,7 +988,7 @@ impl SyncManager {
                     self.forward_row_version_to_servers(object_id, applied.metadata.clone(), row);
 
                     if applied.visible_changed {
-                        self.pending_row_updates.push(RowUpdateEvent {
+                        self.pending_row_updates.push(RowObjectUpdate {
                             object_id: applied.row.row_id,
                             metadata: applied.metadata,
                             row: applied.row,

@@ -129,25 +129,6 @@ impl QueryManager {
         Ok(())
     }
 
-    /// Update indices when a row is inserted (on the default branch).
-    pub(super) fn update_indices_for_insert(
-        &self,
-        storage: &mut dyn Storage,
-        table: &str,
-        object_id: ObjectId,
-        data: &[u8],
-        descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
-        Self::update_indices_for_insert_on_branch(
-            storage,
-            table,
-            &self.current_branch(),
-            object_id,
-            data,
-            descriptor,
-        )
-    }
-
     /// Update indices when a row is updated on a specific branch.
     pub(super) fn update_indices_for_update_on_branch(
         storage: &mut dyn Storage,
@@ -181,27 +162,6 @@ impl QueryManager {
         }
 
         Ok(())
-    }
-
-    /// Update indices when a row is updated (on the default branch).
-    pub(super) fn update_indices_for_update(
-        &self,
-        storage: &mut dyn Storage,
-        table: &str,
-        object_id: ObjectId,
-        old_data: &[u8],
-        new_data: &[u8],
-        descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
-        Self::update_indices_for_update_on_branch(
-            storage,
-            table,
-            &self.current_branch(),
-            object_id,
-            old_data,
-            new_data,
-            descriptor,
-        )
     }
 
     /// Update indices for soft delete on a specific branch.
@@ -239,25 +199,6 @@ impl QueryManager {
             .map_err(Self::map_index_storage_error)?;
 
         Ok(())
-    }
-
-    /// Update indices for soft delete (on the default branch).
-    pub(super) fn update_indices_for_soft_delete(
-        &self,
-        storage: &mut dyn Storage,
-        table: &str,
-        object_id: ObjectId,
-        old_data: &[u8],
-        descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
-        Self::update_indices_for_soft_delete_on_branch(
-            storage,
-            table,
-            &self.current_branch(),
-            object_id,
-            old_data,
-            descriptor,
-        )
     }
 
     /// Update indices for hard delete on a specific branch.
@@ -301,25 +242,6 @@ impl QueryManager {
         Ok(())
     }
 
-    /// Update indices for hard delete (on the default branch).
-    pub(super) fn update_indices_for_hard_delete(
-        &self,
-        storage: &mut dyn Storage,
-        table: &str,
-        object_id: ObjectId,
-        old_data: Option<&[u8]>,
-        descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
-        Self::update_indices_for_hard_delete_on_branch(
-            storage,
-            table,
-            &self.current_branch(),
-            object_id,
-            old_data,
-            descriptor,
-        )
-    }
-
     /// Update indices for undelete on a specific branch.
     pub(super) fn update_indices_for_undelete_on_branch(
         storage: &mut dyn Storage,
@@ -355,24 +277,5 @@ impl QueryManager {
         }
 
         Ok(())
-    }
-
-    /// Update indices for undelete (on the default branch).
-    pub(super) fn update_indices_for_undelete(
-        &self,
-        storage: &mut dyn Storage,
-        table: &str,
-        object_id: ObjectId,
-        new_data: &[u8],
-        descriptor: &RowDescriptor,
-    ) -> Result<(), QueryError> {
-        Self::update_indices_for_undelete_on_branch(
-            storage,
-            table,
-            &self.current_branch(),
-            object_id,
-            new_data,
-            descriptor,
-        )
     }
 }
