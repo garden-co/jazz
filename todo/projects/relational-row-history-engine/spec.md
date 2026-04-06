@@ -107,7 +107,8 @@ Notes:
 - `BatchId` remains the single logical write id.
 - We do not overload `$created_at` to carry UUIDv7 identity. Instead, row identity is explicit in `$row_id`, which may itself be UUIDv7-backed.
 - Batch-wide settlement is deliberately denormalized onto row versions and visible rows. That makes write-time fate/tier propagation more expensive, but keeps ordinary reads and ordinary queries one-table only.
-- History rows are append-first, but narrow metadata fields such as `$settlement` and `$confirmed_tier` may be updated in place when fate or durability advances if appending new copies would be too expensive.
+- History is append-only for user columns: each history row is one concrete row version and should not be rewritten to change user data.
+- System metadata attached to that row version may still be updated in place. In particular, fields such as `$settlement`, `$confirmed_tier`, and selected `$metadata` entries are "about" the row version rather than part of the user payload.
 
 ### Breadboards
 
@@ -324,13 +325,15 @@ If that is not possible, this design will produce visible/history drift and will
 
 ### History and time-travel path
 
-This design should support user-facing history from the beginning.
+This design should support user-facing history and branch views from the beginning.
 
 The intended shape is:
 
 - ordinary queries compile against `table__visible`
 - `query.history()` compiles against `table__history` with the same user-column shape plus reserved system columns
 - `query.as_of(ts)` is implemented as a specialized history execution mode that finds the latest visible row version at or before `ts`
+- `query.branch_view(branch_scope)` is implemented as an explicit mode that reads the visible state for a specific branch scope rather than only the default current branch view
+- `query.history().branch_view(branch_scope)` and `query.as_of(ts).branch_view(branch_scope)` are valid combinations
 
 The reason this stays manageable is structural similarity:
 
@@ -378,6 +381,8 @@ Use integration-first tests and benchmark gates. This is not a unit-test-sized c
 - Add history-query tests from the beginning:
   - `query.history()` returns chronologically ordered row versions with system columns
   - `query.as_of(ts)` returns the expected past visible state
+  - `query.branch_view(branch_scope)` returns the expected visible state for a non-default branch scope
+  - `query.as_of(ts).branch_view(branch_scope)` returns the expected past visible state for that branch scope
 - Add benchmark suites comparing `main`, `#415`, and this model for:
   - point read of current row
   - table scan of current visible rows
