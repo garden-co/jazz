@@ -687,7 +687,6 @@ mod tests {
     use crate::query_manager::types::{SchemaHash, TablePolicies};
     use crate::runtime_core::{NoopScheduler, RuntimeCore, VecSyncSender};
     use crate::schema_manager::AppId;
-    use crate::storage::CatalogueManifestOp;
     #[cfg(all(feature = "fjall", not(feature = "rocksdb")))]
     use crate::storage::FjallStorage;
     #[cfg(feature = "rocksdb")]
@@ -792,13 +791,13 @@ mod tests {
         .expect("seed schema manager");
         let mut runtime =
             RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
-        let learned_schema_object_id = runtime.persist_schema();
-        let bundled_schema_object_id = runtime.publish_schema(bundled_schema.clone());
+        runtime.persist_schema();
+        runtime.publish_schema(bundled_schema.clone());
         let lens = runtime
             .schema_manager()
             .generate_lens(&bundled_schema, &learned_schema);
         assert!(!lens.is_draft(), "seed lens should be publishable");
-        let lens_object_id = runtime.publish_lens(&lens).expect("persist learned lens");
+        runtime.publish_lens(&lens).expect("persist learned lens");
 
         if publish_permissions {
             runtime
@@ -813,27 +812,7 @@ mod tests {
                 .expect("seed permissions bundle");
         }
 
-        let mut storage = runtime.into_storage();
-        storage
-            .append_catalogue_manifest_ops(
-                app_id.as_object_id(),
-                &[
-                    CatalogueManifestOp::SchemaSeen {
-                        object_id: learned_schema_object_id,
-                        schema_hash: learned_hash,
-                    },
-                    CatalogueManifestOp::SchemaSeen {
-                        object_id: bundled_schema_object_id,
-                        schema_hash: bundled_hash,
-                    },
-                    CatalogueManifestOp::LensSeen {
-                        object_id: lens_object_id,
-                        source_hash: bundled_hash,
-                        target_hash: learned_hash,
-                    },
-                ],
-            )
-            .expect("append seeded client catalogue manifest ops");
+        let storage = runtime.into_storage();
         storage.flush();
         storage.close().expect("close seeded client storage");
 
