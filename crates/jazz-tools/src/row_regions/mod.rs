@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::commit::CommitId;
+use crate::commit::{Commit, CommitAckState, CommitId, StoredState};
 use crate::metadata::{DeleteKind, MetadataKey, RowProvenance};
 use crate::object::ObjectId;
 use crate::sync_manager::DurabilityTier;
@@ -100,5 +100,27 @@ impl StoredRowVersion {
             .map(|value| value == DeleteKind::Hard.as_str())
             .unwrap_or(false)
             || (self.is_deleted && self.data.is_empty())
+    }
+
+    pub fn to_commit(&self) -> Commit {
+        let mut ack_state = CommitAckState::default();
+        if let Some(tier) = self.confirmed_tier {
+            ack_state.confirmed_tiers.insert(tier);
+        }
+
+        Commit {
+            parents: smallvec::smallvec![],
+            content: self.data.clone(),
+            timestamp: self.updated_at,
+            author: self.updated_by.clone(),
+            metadata: Some(
+                self.metadata
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<BTreeMap<_, _>>(),
+            ),
+            stored_state: StoredState::Stored,
+            ack_state,
+        }
     }
 }
