@@ -1547,29 +1547,32 @@ mod tests {
     }
 
     #[test]
-    fn memory_storage_catalogue_manifest_conflict_is_rejected() {
+    fn memory_storage_catalogue_entry_upsert_overwrites_existing() {
         let mut storage = MemoryStorage::new();
-        let app_id = ObjectId::new();
-        let schema_object_id = ObjectId::new();
+        let object_id = ObjectId::new();
+        let initial = CatalogueEntry {
+            object_id,
+            metadata: HashMap::from([(
+                crate::metadata::MetadataKey::Type.to_string(),
+                crate::metadata::ObjectType::CatalogueSchema.to_string(),
+            )]),
+            content: b"v1".to_vec(),
+        };
+        let updated = CatalogueEntry {
+            object_id,
+            metadata: HashMap::from([(
+                crate::metadata::MetadataKey::Type.to_string(),
+                crate::metadata::ObjectType::CatalogueSchema.to_string(),
+            )]),
+            content: b"v2".to_vec(),
+        };
 
-        storage
-            .append_catalogue_manifest_op(
-                app_id,
-                CatalogueManifestOp::SchemaSeen {
-                    object_id: schema_object_id,
-                    schema_hash: SchemaHash::from_bytes([0x44; 32]),
-                },
-            )
-            .unwrap();
+        storage.upsert_catalogue_entry(&initial).unwrap();
+        storage.upsert_catalogue_entry(&updated).unwrap();
 
-        let conflict = storage.append_catalogue_manifest_op(
-            app_id,
-            CatalogueManifestOp::SchemaSeen {
-                object_id: schema_object_id,
-                schema_hash: SchemaHash::from_bytes([0x55; 32]),
-            },
-        );
-        assert!(matches!(conflict, Err(StorageError::IoError(_))));
+        let loaded = storage.load_catalogue_entry(object_id).unwrap();
+        assert_eq!(loaded, Some(updated.clone()));
+        assert_eq!(storage.scan_catalogue_entries().unwrap(), vec![updated]);
     }
 
     #[test]

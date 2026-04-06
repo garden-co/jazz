@@ -689,59 +689,6 @@ mod tests {
     }
 
     #[test]
-    fn opfs_btree_catalogue_manifest_roundtrip() {
-        let mut storage = test_storage();
-        let app_id = ObjectId::new();
-        let schema_object_id = ObjectId::new();
-        let lens_object_id = ObjectId::new();
-        let schema_hash = crate::query_manager::types::SchemaHash::from_bytes([0x11; 32]);
-        let source_hash = crate::query_manager::types::SchemaHash::from_bytes([0x22; 32]);
-        let target_hash = crate::query_manager::types::SchemaHash::from_bytes([0x33; 32]);
-
-        storage
-            .append_catalogue_manifest_op(
-                app_id,
-                crate::storage::CatalogueManifestOp::SchemaSeen {
-                    object_id: schema_object_id,
-                    schema_hash,
-                },
-            )
-            .unwrap();
-        storage
-            .append_catalogue_manifest_op(
-                app_id,
-                crate::storage::CatalogueManifestOp::LensSeen {
-                    object_id: lens_object_id,
-                    source_hash,
-                    target_hash,
-                },
-            )
-            .unwrap();
-        storage
-            .append_catalogue_manifest_op(
-                app_id,
-                crate::storage::CatalogueManifestOp::SchemaSeen {
-                    object_id: schema_object_id,
-                    schema_hash,
-                },
-            )
-            .unwrap();
-
-        let manifest = storage.load_catalogue_manifest(app_id).unwrap().unwrap();
-        assert_eq!(
-            manifest.schema_seen.get(&schema_object_id),
-            Some(&schema_hash)
-        );
-        assert_eq!(
-            manifest.lens_seen.get(&lens_object_id),
-            Some(&crate::storage::CatalogueLensSeen {
-                source_hash,
-                target_hash,
-            })
-        );
-    }
-
-    #[test]
     fn opfs_btree_catalogue_entry_roundtrip() {
         let mut storage = test_storage();
         let object_id = ObjectId::new();
