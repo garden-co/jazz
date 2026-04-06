@@ -174,6 +174,8 @@ impl CatalogueManifest {
     }
 }
 
+pub type ObjectMetadataRows = Vec<(ObjectId, HashMap<String, String>)>;
+
 // ============================================================================
 // Storage Trait
 // ============================================================================
@@ -205,6 +207,13 @@ pub trait Storage {
         &self,
         id: ObjectId,
     ) -> Result<Option<HashMap<String, String>>, StorageError>;
+
+    /// Enumerate all persisted object metadata rows.
+    fn scan_object_metadata(&self) -> Result<ObjectMetadataRows, StorageError> {
+        Err(StorageError::IoError(
+            "object metadata scans are not implemented for this backend yet".to_string(),
+        ))
+    }
 
     /// Load a branch's commits and tails. Returns None if branch doesn't exist.
     fn load_branch(
@@ -429,6 +438,10 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         id: ObjectId,
     ) -> Result<Option<HashMap<String, String>>, StorageError> {
         (**self).load_object_metadata(id)
+    }
+
+    fn scan_object_metadata(&self) -> Result<ObjectMetadataRows, StorageError> {
+        (**self).scan_object_metadata()
     }
 
     fn load_branch(
@@ -803,6 +816,16 @@ impl Storage for MemoryStorage {
         id: ObjectId,
     ) -> Result<Option<HashMap<String, String>>, StorageError> {
         Ok(self.objects.get(&id).map(|obj| obj.metadata.clone()))
+    }
+
+    fn scan_object_metadata(&self) -> Result<ObjectMetadataRows, StorageError> {
+        let mut objects: Vec<_> = self
+            .objects
+            .iter()
+            .map(|(object_id, obj)| (*object_id, obj.metadata.clone()))
+            .collect();
+        objects.sort_by_key(|(object_id, _)| *object_id);
+        Ok(objects)
     }
 
     fn load_branch(

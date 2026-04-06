@@ -132,6 +132,10 @@ pub(super) fn obj_meta_key(id: ObjectId) -> String {
     format!("obj:{}:meta", format_uuid(id))
 }
 
+pub(super) fn obj_meta_prefix() -> &'static str {
+    "obj:"
+}
+
 pub(super) fn branch_tips_key(object_id: ObjectId, branch: &BranchName) -> String {
     format!("obj:{}:br:{}:tips", format_uuid(object_id), branch)
 }
