@@ -1435,6 +1435,7 @@ impl QueryManager {
                 old_data,
                 &descriptor,
             );
+            self.persist_row_region_tip(storage, &table, update.object_id, branch);
             self.mark_subscriptions_dirty(&table);
             self.mark_row_deleted_in_subscriptions(&table, update.object_id);
             return;
@@ -1492,6 +1493,7 @@ impl QueryManager {
                     );
                 }
             }
+            self.persist_row_region_tip(storage, &table, update.object_id, branch);
             self.mark_subscriptions_dirty(&table);
             self.mark_row_deleted_in_subscriptions(&table, update.object_id);
             return;
@@ -1525,6 +1527,7 @@ impl QueryManager {
                     "failed to update indices for synced undelete"
                 );
             }
+            self.persist_row_region_tip(storage, &table, update.object_id, branch);
             self.mark_subscriptions_dirty(&table);
             return;
         }
@@ -1579,6 +1582,7 @@ impl QueryManager {
             );
         }
 
+        self.persist_row_region_tip(storage, &table, update.object_id, branch);
         self.mark_subscriptions_dirty(&table);
         self.mark_row_updated_in_subscriptions(&table, update.object_id);
     }

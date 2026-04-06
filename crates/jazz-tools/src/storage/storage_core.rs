@@ -5,22 +5,28 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
+use crate::row_regions::{BatchId, HistoryScan, RowState, StoredRowVersion};
 use crate::sync_manager::DurabilityTier;
 
 use crate::query_manager::types::Value;
 
 use super::key_codec::{
     ack_key, branch_tips_key, catalogue_manifest_op_key, catalogue_manifest_op_prefix, commit_key,
-    commit_prefix, index_entry_key, index_prefix, index_range_scan_bounds, index_value_prefix,
-    obj_meta_key, parse_uuid_from_index_key,
+    commit_prefix, history_row_key, history_row_prefix, history_row_versions_prefix,
+    history_table_prefix, index_entry_key, index_prefix, index_range_scan_bounds,
+    index_value_prefix, obj_meta_key, parse_uuid_from_index_key, visible_row_key,
+    visible_row_prefix, visible_table_prefix,
 };
 use super::{CatalogueManifest, CatalogueManifestOp, LoadedBranch, StorageError};
 
-fn encode_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, StorageError> {
+pub(super) fn encode_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, StorageError> {
     serde_json::to_vec(value).map_err(|e| StorageError::IoError(format!("serialize {label}: {e}")))
 }
 
-fn decode_json<T: DeserializeOwned>(bytes: &[u8], label: &str) -> Result<T, StorageError> {
+pub(super) fn decode_json<T: DeserializeOwned>(
+    bytes: &[u8],
+    label: &str,
+) -> Result<T, StorageError> {
     serde_json::from_slice(bytes)
         .map_err(|e| StorageError::IoError(format!("deserialize {label}: {e}")))
 }
@@ -224,6 +230,118 @@ pub(super) fn load_catalogue_manifest_core(
     }
 
     Ok(Some(manifest))
+}
+
+#[allow(dead_code)]
+pub(super) fn append_history_region_rows_core(
+    table: &str,
+    rows: &[StoredRowVersion],
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    for row in rows {
+        let key = history_row_key(table, &row.branch, row.row_id, row.updated_at);
+        let json = encode_json(row, "stored row version")?;
+        set(&key, &json)?;
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub(super) fn upsert_visible_region_rows_core(
+    table: &str,
+    rows: &[StoredRowVersion],
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    for row in rows {
+        let key = visible_row_key(table, &row.branch, row.row_id);
+        let json = encode_json(row, "stored row version")?;
+        set(&key, &json)?;
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub(super) fn patch_row_region_rows_by_batch_core(
+    table: &str,
+    batch_id: BatchId,
+    state: RowState,
+    confirmed_tier: Option<DurabilityTier>,
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    for prefix in [history_table_prefix(table), visible_table_prefix(table)] {
+        let entries = scan_prefix(&prefix)?;
+        for (key, bytes) in entries {
+            let mut row: StoredRowVersion = decode_json(&bytes, "stored row version")?;
+            if row.batch_id != batch_id {
+                continue;
+            }
+
+            row.state = state;
+            row.confirmed_tier = confirmed_tier;
+
+            let json = encode_json(&row, "stored row version")?;
+            set(&key, &json)?;
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub(super) fn scan_visible_region_core(
+    table: &str,
+    branch: &str,
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<Vec<StoredRowVersion>, StorageError> {
+    let prefix = visible_row_prefix(table, branch);
+    let mut rows: Vec<StoredRowVersion> = scan_prefix(&prefix)?
+        .into_iter()
+        .map(|(_, bytes)| decode_json(&bytes, "stored row version"))
+        .collect::<Result<_, _>>()?;
+    rows.sort_by_key(|row| (row.branch.clone(), row.row_id));
+    Ok(rows)
+}
+
+#[allow(dead_code)]
+pub(super) fn scan_history_region_core(
+    table: &str,
+    branch: &str,
+    scan: HistoryScan,
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<Vec<StoredRowVersion>, StorageError> {
+    let prefix = match scan {
+        HistoryScan::Branch | HistoryScan::AsOf { .. } => history_row_prefix(table, branch),
+        HistoryScan::Row { row_id } => history_row_versions_prefix(table, branch, row_id),
+    };
+
+    let scanned: Vec<StoredRowVersion> = scan_prefix(&prefix)?
+        .into_iter()
+        .map(|(_, bytes)| decode_json(&bytes, "stored row version"))
+        .collect::<Result<_, _>>()?;
+
+    let mut rows = match scan {
+        HistoryScan::Branch | HistoryScan::Row { .. } => scanned,
+        HistoryScan::AsOf { ts } => {
+            let mut latest_per_row = HashMap::<ObjectId, StoredRowVersion>::new();
+            for row in scanned {
+                if row.updated_at > ts || !row.state.is_visible() {
+                    continue;
+                }
+
+                match latest_per_row.get(&row.row_id) {
+                    Some(existing) if existing.updated_at >= row.updated_at => {}
+                    _ => {
+                        latest_per_row.insert(row.row_id, row);
+                    }
+                }
+            }
+            latest_per_row.into_values().collect()
+        }
+    };
+
+    rows.sort_by_key(|row| (row.branch.clone(), row.row_id, row.updated_at));
+    Ok(rows)
 }
 
 pub(super) fn index_insert_core(

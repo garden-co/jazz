@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::sync_manager::DurabilityTier;
 
@@ -12,6 +13,10 @@ pub struct BatchId(pub Uuid);
 impl BatchId {
     pub fn new() -> Self {
         Self(Uuid::now_v7())
+    }
+
+    pub fn from_commit_id(commit_id: CommitId) -> Self {
+        Self(Uuid::new_v5(&Uuid::NAMESPACE_OID, &commit_id.0))
     }
 }
 
