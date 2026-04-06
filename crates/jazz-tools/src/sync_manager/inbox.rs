@@ -216,7 +216,7 @@ impl SyncManager {
             {
                 commit.ack_state.confirmed_tiers.insert(tier);
             }
-            self.received_acks.push((version_id, tier));
+            self.received_row_version_acks.push((version_id, tier));
         }
     }
 
@@ -387,7 +387,7 @@ impl SyncManager {
                         commit.ack_state.confirmed_tiers.insert(tier);
                     }
                     // Notify RuntimeCore of received ack
-                    self.received_acks.push((commit_id, tier));
+                    self.received_object_commit_acks.push((commit_id, tier));
                 }
                 // Relay to interested clients
                 let mut interested = HashSet::new();
@@ -837,7 +837,7 @@ impl SyncManager {
                         commit.ack_state.confirmed_tiers.insert(tier);
                     }
                     // Notify RuntimeCore of received ack
-                    self.received_acks.push((commit_id, tier));
+                    self.received_object_commit_acks.push((commit_id, tier));
                 }
                 // Relay to interested clients (excluding the sender)
                 let mut interested = HashSet::new();

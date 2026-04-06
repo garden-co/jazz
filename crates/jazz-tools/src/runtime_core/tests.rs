@@ -1466,6 +1466,48 @@ fn rc_insert_persisted_resolves_on_worker_ack() {
 }
 
 #[test]
+fn rc_insert_persisted_ignores_legacy_object_ack_with_same_id() {
+    let mut s = create_3tier_rc();
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let branch_name = s.a.schema_manager().branch_name();
+    let row_commit_id =
+        *s.a.schema_manager()
+            .query_manager()
+            .sync_manager()
+            .object_manager
+            .get_tip_ids(row_id, branch_name)
+            .unwrap()
+            .iter()
+            .next()
+            .expect("insert should create one visible tip");
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::PersistenceAck {
+            object_id: ObjectId::new(),
+            branch_name,
+            confirmed_commits: std::iter::once(row_commit_id).collect(),
+            tier: DurabilityTier::Worker,
+        },
+    });
+    s.a.immediate_tick();
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(None),
+        "row persisted receivers should ignore legacy object acks, even if the raw id matches"
+    );
+}
+
+#[test]
 fn rc_insert_persisted_holds_until_correct_tier() {
     let mut s = create_3tier_rc();
     let (_id, mut receiver) =
