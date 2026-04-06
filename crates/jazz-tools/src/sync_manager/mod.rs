@@ -64,8 +64,6 @@ pub struct SyncManager {
     /// Pending QuerySettled notifications for QueryManager to process.
     pub(super) pending_query_settled: Vec<(QueryId, DurabilityTier)>,
 
-    /// Legacy object commit acks received during inbox processing.
-    pub(super) received_object_commit_acks: Vec<(CommitId, DurabilityTier)>,
     /// Row-version state acks received during inbox processing.
     pub(super) received_row_version_acks: Vec<(CommitId, DurabilityTier)>,
 }
@@ -99,10 +97,6 @@ impl std::fmt::Debug for SyncManager {
             .field("row_version_interest", &self.row_version_interest)
             .field("query_origin", &self.query_origin)
             .field("pending_query_settled", &self.pending_query_settled)
-            .field(
-                "received_object_commit_acks",
-                &self.received_object_commit_acks,
-            )
             .field("received_row_version_acks", &self.received_row_version_acks)
             .finish()
     }
@@ -147,7 +141,6 @@ impl SyncManager {
             row_version_interest: HashMap::new(),
             query_origin: HashMap::new(),
             pending_query_settled: Vec::new(),
-            received_object_commit_acks: Vec::new(),
             received_row_version_acks: Vec::new(),
         }
     }

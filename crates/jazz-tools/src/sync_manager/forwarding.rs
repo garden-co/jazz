@@ -62,6 +62,7 @@ impl SyncManager {
         }
     }
 
+    #[cfg(test)]
     pub fn forward_update_to_servers_with_storage<H: crate::storage::Storage>(
         &mut self,
         storage: &H,
