@@ -1,0 +1,75 @@
+# Scopes
+
+```text
+┌──────────────────────────────────────────────────────┐
+│ Scope 1: Row-Region Engine Replacement              │
+│ replace today's object/commit substrate end to end  │
+└────────────────────────┬─────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────┐
+│ Scope 2: Transactions, Authorities, and Fate        │
+│ add staging, acceptance/rejection, and tx semantics │
+└────────────────────────┬─────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────┐
+│ Scope 3: Public History, As-Of, and Branch Views    │
+│ expose the historical query surface                 │
+└──────────────────────────────────────────────────────┘
+
+Each scope is a standalone PR.
+Scope 2 assumes Scope 1 has already replaced the runtime path.
+Scope 3 assumes the storage model and transaction semantics are both stable.
+```
+
+## Row-Region Engine Replacement — replace today's engine with row regions
+
+- [ ] Add row-region storage primitives and key layout to `Storage`, with one physical keyed table space per user table and separate visible/history regions
+- [ ] Reuse the existing row encoding and fast reproject machinery so system columns and user columns share one canonical encoded row format
+- [ ] Define the reserved system columns for encoded row versions:
+      `$row_id`, `$branch`, `$updated_at`, `$created_by`, `$updated_by`, `$batch_id`, `$state`, `$confirmed_tier`, `$is_deleted`, `$metadata`
+- [ ] Implement the new row-region storage path in `MemoryStorage`
+- [ ] Implement the same row-region storage path in `FjallStorage`
+- [ ] Get the full `MemoryStorage` and `FjallStorage` test surface green on the new engine before touching the other durable backends
+- [ ] Run the first serious benchmark comparisons on the new engine using `MemoryStorage` and `FjallStorage`; treat this as the main de-risking checkpoint for the architecture
+- [ ] After those tests and benchmarks validate the direction, adapt the remaining storage backends to the same row-region model
+- [ ] Replace direct visible writes so they append encoded row versions to history and upsert encoded current rows to visible
+- [ ] Replace direct-write durability bookkeeping so reconnect/restart recovers from persisted row metadata rather than commit-id reconstruction
+- [ ] Replace ordinary query execution so current reads and subscriptions target the visible region rather than reconstructing rows from object graphs
+- [ ] Replace current sync payloads and replay semantics so user-row replication is row-version and row-metadata based instead of object/commit based
+- [ ] Preserve the current external direct-write product semantics while the substrate underneath is replaced
+- [ ] Preserve the current supported query shapes for ordinary current-state reads
+- [ ] Remove the old object-manager hot path for user rows instead of keeping a hybrid forever architecture
+- [ ] Add SchemaManager and RuntimeCore integration tests covering current reads, writes, restart, multi-tier sync, and deletion semantics on the new engine
+- [ ] Add benchmark comparisons against `main` for point reads, visible scans, direct writes, restart cost, sync payload size, and on-disk size
+
+## Transactions, Authorities, and Fate — add staging and accepted/rejected batch semantics
+
+- [ ] Introduce logical batches as the write unit across multiple rows while keeping the row-region storage model unchanged
+- [ ] Add opt-in transactional writes that append staging row versions into history without touching visible state
+- [ ] Introduce authority handling for transaction validation and exactly-one terminal fate per batch, assuming one global authority identity for now
+- [ ] Treat the central server as both the global durability tier owner and the global transaction authority in this scope
+- [ ] Add accepted/rejected fate as row-metadata state transitions rather than as a second bespoke mechanism
+- [ ] Patch accepted transactional history rows in place and publish the corresponding visible rows
+- [ ] Patch rejected transactional history rows in place while leaving visible state unchanged
+- [ ] Add replayable reconnect semantics for pending and settled transactional work
+- [ ] Add transaction-aware durability semantics on top of batch-level confirmed tier
+- [ ] Expose transaction outcomes through runtime/subscription semantics without yet introducing the public historical query APIs
+- [ ] Keep Slice 1 direct-write behavior working cleanly beside the new transactional path
+- [ ] Add SchemaManager and RuntimeCore integration tests for accepted/rejected multi-row writes, replay, restart, and durability/fate behavior
+- [ ] Add benchmarks for wide-batch acceptance/rejection fan-out and tier advancement costs
+
+## Public History, As-Of, and Branch Views — expose the historical query surface
+
+- [ ] Add `query.history()` as a public query mode targeting the history region
+- [ ] Add `query.as_of(ts)` as a public query mode that reconstructs the latest visible row versions at or before a timestamp
+- [ ] Add `query.branch_view(branch)` as a public query mode for non-default branch images
+- [ ] Support combinations such as `query.history().branch_view(branch)` and `query.as_of(ts).branch_view(branch)`
+- [ ] Expose a curated first public surface for system-column-derived information rather than making every reserved system column directly queryable at once
+- [ ] Decide which curated metadata becomes first-class in the public API, and how users opt into selecting/filtering on it
+- [ ] Extend query planning and execution so historical modes operate over the same encoded row format as ordinary current reads
+- [ ] Ensure accepted/rejected/staged transactional states are represented coherently in historical query results
+- [ ] Add query-planning tests for region selection, branch selection, and as-of reconstruction
+- [ ] Add SchemaManager and RuntimeCore integration tests for history, as-of, and branch-view queries over realistic row histories
+- [ ] Add performance tests for history scans, as-of reconstruction, and branch-view queries on realistic histories
