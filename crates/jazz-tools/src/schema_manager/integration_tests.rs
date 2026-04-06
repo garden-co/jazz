@@ -1979,10 +1979,10 @@ mod tests {
             .find(|e| {
                 matches!(
                     &e.payload,
-                    SyncPayload::ObjectUpdated { object_id, .. } if *object_id == row_handle.row_id
+                    SyncPayload::RowVersionCreated { row, .. } if row.row_id == row_handle.row_id
                 )
             })
-            .expect("Client A should emit row ObjectUpdated");
+            .expect("Client A should emit RowVersionCreated for the row");
 
         client_b
             .query_manager_mut()
@@ -2335,13 +2335,13 @@ mod tests {
         let row_msg = outbox_a
             .iter()
             .find(|e| {
-                if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
-                    *object_id == doc_id
+                if let SyncPayload::RowVersionCreated { row, .. } = &e.payload {
+                    row.row_id == doc_id
                 } else {
                     false
                 }
             })
-            .expect("Should have row object in outbox");
+            .expect("Should have RowVersionCreated for the row in outbox");
 
         // Push to server inbox
         server
@@ -2393,7 +2393,7 @@ mod tests {
         let server_outbox = server.query_manager_mut().sync_manager_mut().take_outbox();
         let doc_update_for_b = server_outbox.iter().find(|e| {
             matches!(e.destination, Destination::Client(cid) if cid == client_b_id)
-                && matches!(&e.payload, SyncPayload::ObjectUpdated { object_id, .. } if *object_id == doc_id)
+                && matches!(&e.payload, SyncPayload::RowVersionNeeded { row, .. } if row.row_id == doc_id)
         });
         assert!(
             doc_update_for_b.is_some(),
@@ -2404,10 +2404,11 @@ mod tests {
             matches!(e.destination, Destination::Client(cid) if cid == client_b_id)
                 && matches!(
                     &e.payload,
-                    SyncPayload::ObjectUpdated { commits, .. }
-                        if commits
-                            .iter()
-                            .any(|c| c.content.windows("Test Document".len()).any(|w| w == b"Test Document"))
+                    SyncPayload::RowVersionNeeded { row, .. }
+                        if row
+                            .data
+                            .windows("Test Document".len())
+                            .any(|w| w == b"Test Document")
                 )
         });
         assert!(
@@ -2596,12 +2597,12 @@ mod tests {
         // === Server should send Alice's doc to Client A ===
         let server_outbox = server.query_manager_mut().sync_manager_mut().take_outbox();
 
-        // Find ObjectUpdated messages destined for client A
+        // Find row-version messages destined for client A
         let alice_updates: Vec<_> = server_outbox
             .iter()
             .filter(|e| {
                 matches!(e.destination, Destination::Client(cid) if cid == client_a_id)
-                    && matches!(e.payload, SyncPayload::ObjectUpdated { .. })
+                    && matches!(e.payload, SyncPayload::RowVersionNeeded { .. })
             })
             .collect();
 
@@ -2610,8 +2611,8 @@ mod tests {
         let received_ids: Vec<ObjectId> = alice_updates
             .iter()
             .filter_map(|e| {
-                if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
-                    Some(*object_id)
+                if let SyncPayload::RowVersionNeeded { row, .. } = &e.payload {
+                    Some(row.row_id)
                 } else {
                     None
                 }
@@ -2666,15 +2667,15 @@ mod tests {
             .iter()
             .filter(|e| {
                 matches!(e.destination, Destination::Client(cid) if cid == client_b_id)
-                    && matches!(e.payload, SyncPayload::ObjectUpdated { .. })
+                    && matches!(e.payload, SyncPayload::RowVersionNeeded { .. })
             })
             .collect();
 
         let bob_received_ids: Vec<ObjectId> = bob_updates
             .iter()
             .filter_map(|e| {
-                if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
-                    Some(*object_id)
+                if let SyncPayload::RowVersionNeeded { row, .. } = &e.payload {
+                    Some(row.row_id)
                 } else {
                     None
                 }
@@ -2842,8 +2843,8 @@ mod tests {
         let server_outbox = server.query_manager_mut().sync_manager_mut().take_outbox();
 
         let note_sent = server_outbox.iter().any(|e| {
-            if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
-                *object_id == note_id
+            if let SyncPayload::RowVersionNeeded { row, .. } = &e.payload {
+                row.row_id == note_id
             } else {
                 false
             }

@@ -33,6 +33,7 @@ use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, ComposedBranchName, RowDescriptor, Schema, SchemaHash, TableName,
     TablePolicies, TableSchema, Value,
 };
+use crate::row_regions::{RowState, StoredRowVersion};
 
 /// Helper to create QueryManager with schema on default branch.
 fn create_query_manager(sync_manager: SyncManager, schema: Schema) -> QueryManager {
@@ -65,6 +66,24 @@ fn stored_row_commit(
         author,
         stored_state: crate::commit::StoredState::Stored,
         ack_state: Default::default(),
+    }
+}
+
+fn row_version_created_payload(
+    object_id: ObjectId,
+    branch: &str,
+    metadata: Option<ObjectMetadata>,
+    commit: &Commit,
+) -> SyncPayload {
+    SyncPayload::RowVersionCreated {
+        metadata,
+        row: StoredRowVersion::from_commit(
+            object_id,
+            branch,
+            commit.id(),
+            commit,
+            RowState::VisibleDirect,
+        ),
     }
 }
 
@@ -422,15 +441,15 @@ fn enqueue_inherited_insert(
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: doc_id,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            doc_id,
+            branch,
+            Some(ObjectMetadata {
                 id: doc_id,
                 metadata: document_metadata(),
             }),
-            branch_name: branch.into(),
-            commits: vec![commit.clone()],
-        },
+            &commit,
+        ),
     });
 
     commit
@@ -525,15 +544,15 @@ fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: grand_id,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            grand_id,
+            &branch,
+            Some(ObjectMetadata {
                 id: grand_id,
                 metadata: object_metadata,
             }),
-            branch_name: branch.clone().into(),
-            commits: vec![update_commit.clone()],
-        },
+            &update_commit,
+        ),
     });
 
     for _ in 0..10 {
@@ -600,15 +619,15 @@ fn rebac_insert_allowed_by_simple_policy() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj_id,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            obj_id,
+            "main",
+            Some(ObjectMetadata {
                 id: obj_id,
                 metadata: document_metadata(),
             }),
-            branch_name: "main".into(),
-            commits: vec![commit.clone()],
-        },
+            &commit,
+        ),
     });
 
     // Process - should evaluate policy and approve
@@ -667,15 +686,15 @@ fn rebac_insert_denied_by_simple_policy() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj_id,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            obj_id,
+            "main",
+            Some(ObjectMetadata {
                 id: obj_id,
                 metadata: document_metadata(),
             }),
-            branch_name: "main".into(),
-            commits: vec![commit.clone()],
-        },
+            &commit,
+        ),
     });
 
     // Process - should evaluate policy and reject
@@ -764,15 +783,15 @@ fn rebac_insert_denied_by_current_permissions_in_server_mode_known_schema() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj_id,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            obj_id,
+            &branch,
+            Some(ObjectMetadata {
                 id: obj_id,
                 metadata,
             }),
-            branch_name: branch.clone().into(),
-            commits: vec![commit.clone()],
-        },
+            &commit,
+        ),
     });
 
     qm.process(&mut storage);
@@ -838,15 +857,15 @@ fn rebac_insert_denied_for_new_object_uses_payload_metadata_in_server_mode() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj_id,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            obj_id,
+            &branch,
+            Some(ObjectMetadata {
                 id: obj_id,
                 metadata,
             }),
-            branch_name: branch.clone().into(),
-            commits: vec![commit.clone()],
-        },
+            &commit,
+        ),
     });
 
     qm.process(&mut storage);
@@ -1227,15 +1246,15 @@ fn rebac_insert_waits_for_schema_then_denies_for_composed_branch() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj_id,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            obj_id,
+            &branch,
+            Some(ObjectMetadata {
                 id: obj_id,
                 metadata: metadata.clone(),
             }),
-            branch_name: branch.clone().into(),
-            commits: vec![commit.clone()],
-        },
+            &commit,
+        ),
     });
 
     // First pass should defer until the schema becomes available instead of allowing or denying.
@@ -1316,15 +1335,15 @@ fn rebac_insert_denied_when_schema_never_arrives_before_timeout() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj_id,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            obj_id,
+            &branch,
+            Some(ObjectMetadata {
                 id: obj_id,
                 metadata: metadata.clone(),
             }),
-            branch_name: branch.clone().into(),
-            commits: vec![commit.clone()],
-        },
+            &commit,
+        ),
     });
 
     qm.process(&mut storage);
@@ -1400,15 +1419,15 @@ fn rebac_insert_denied_when_schema_unresolved_for_branch() {
     // Plain "main" branch without schema hash context can fail schema resolution.
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj_id,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            obj_id,
+            "main",
+            Some(ObjectMetadata {
                 id: obj_id,
                 metadata,
             }),
-            branch_name: "main".into(),
-            commits: vec![commit.clone()],
-        },
+            &commit,
+        ),
     });
 
     qm.process(&mut storage);
@@ -1483,15 +1502,15 @@ fn rebac_insert_denied_when_stale_self_schema_would_otherwise_allow() {
     // self.schema (permissive) and incorrectly allow this insert.
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj_id,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            obj_id,
+            "main",
+            Some(ObjectMetadata {
                 id: obj_id,
                 metadata,
             }),
-            branch_name: "main".into(),
-            commits: vec![commit.clone()],
-        },
+            &commit,
+        ),
     });
 
     qm.process(&mut storage);
@@ -1570,15 +1589,15 @@ fn rebac_table_without_policy_allows_all_writes() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj_id,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            obj_id,
+            "main",
+            Some(ObjectMetadata {
                 id: obj_id,
                 metadata,
             }),
-            branch_name: "main".into(),
-            commits: vec![commit.clone()],
-        },
+            &commit,
+        ),
     });
 
     // Process - table without policy should allow
@@ -1793,28 +1812,28 @@ fn rebac_two_clients_different_sessions() {
     // Both clients send their documents
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client1),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj1,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            obj1,
+            "main",
+            Some(ObjectMetadata {
                 id: obj1,
                 metadata: document_metadata(),
             }),
-            branch_name: "main".into(),
-            commits: vec![commit1.clone()],
-        },
+            &commit1,
+        ),
     });
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client2),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj2,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            obj2,
+            "main",
+            Some(ObjectMetadata {
                 id: obj2,
                 metadata: document_metadata(),
             }),
-            branch_name: "main".into(),
-            commits: vec![commit2.clone()],
-        },
+            &commit2,
+        ),
     });
 
     // Process
@@ -1913,15 +1932,15 @@ fn rebac_exists_clause_denies_non_matching_insert() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(client_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj_id,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            obj_id,
+            "main",
+            Some(ObjectMetadata {
                 id: obj_id,
                 metadata,
             }),
-            branch_name: "main".into(),
-            commits: vec![commit.clone()],
-        },
+            &commit,
+        ),
     });
 
     // Process
@@ -2058,15 +2077,15 @@ fn rebac_update_denied_by_using_policy() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(bob_client),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj_id,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            obj_id,
+            "main",
+            Some(ObjectMetadata {
                 id: obj_id,
                 metadata,
             }),
-            branch_name: "main".into(),
-            commits: vec![update_commit.clone()],
-        },
+            &update_commit,
+        ),
     });
 
     // Process
@@ -2587,15 +2606,15 @@ fn rebac_update_denied_by_using_exists_policy() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(bob_client),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: protected_obj,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            protected_obj,
+            &branch,
+            Some(ObjectMetadata {
                 id: protected_obj,
                 metadata: protected_metadata.clone(),
             }),
-            branch_name: branch.clone().into(),
-            commits: vec![bob_commit.clone()],
-        },
+            &bob_commit,
+        ),
     });
 
     // Process - may need multiple iterations for EXISTS to settle
@@ -2660,15 +2679,15 @@ fn rebac_update_denied_by_using_exists_policy() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(alice_client),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: protected_obj,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            protected_obj,
+            &branch,
+            Some(ObjectMetadata {
                 id: protected_obj,
                 metadata: protected_metadata.clone(),
             }),
-            branch_name: branch.clone().into(),
-            commits: vec![alice_commit.clone()],
-        },
+            &alice_commit,
+        ),
     });
 
     // Process - may need multiple iterations for EXISTS to settle
@@ -3363,15 +3382,15 @@ fn synced_soft_delete_should_use_delete_policy() {
 
     qm.sync_manager_mut().push_inbox(InboxEntry {
         source: Source::Client(bob_client),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: protected.row_id,
-            metadata: Some(ObjectMetadata {
+        payload: row_version_created_payload(
+            protected.row_id,
+            &branch,
+            Some(ObjectMetadata {
                 id: protected.row_id,
                 metadata: protected_metadata,
             }),
-            branch_name: branch.clone().into(),
-            commits: vec![delete_commit.clone()],
-        },
+            &delete_commit,
+        ),
     });
 
     for _ in 0..10 {
