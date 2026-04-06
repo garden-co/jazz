@@ -29,7 +29,6 @@ pub(super) struct ResolvedSchemaRow {
     pub branch_name: BranchName,
     pub commit_id: CommitId,
     pub content: Vec<u8>,
-    pub is_soft_deleted: bool,
 }
 
 const SCHEMA_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -558,7 +557,7 @@ impl QueryManager {
         branches: &[String],
         context: &mut RowTransformContext<'_>,
     ) -> Option<ResolvedSchemaRow> {
-        let mut best: Option<(u64, CommitId, Vec<u8>, BranchName, bool)> = None;
+        let mut best: Option<(u64, CommitId, Vec<u8>, BranchName)> = None;
 
         for branch_name in branches {
             let branch_name = BranchName::new(branch_name);
@@ -569,7 +568,6 @@ impl QueryManager {
                 let Some(commit) = branch.commits.get(&tip_id) else {
                     continue;
                 };
-                let is_soft_deleted = commit.is_soft_deleted();
                 match &best {
                     None => {
                         best = Some((
@@ -577,10 +575,9 @@ impl QueryManager {
                             tip_id,
                             commit.content.clone(),
                             branch_name,
-                            is_soft_deleted,
                         ));
                     }
-                    Some((best_ts, best_id, _, _, _))
+                    Some((best_ts, best_id, _, _))
                         if (commit.timestamp, tip_id) > (*best_ts, *best_id) =>
                     {
                         best = Some((
@@ -588,7 +585,6 @@ impl QueryManager {
                             tip_id,
                             commit.content.clone(),
                             branch_name,
-                            is_soft_deleted,
                         ));
                     }
                     _ => {}
@@ -596,18 +592,11 @@ impl QueryManager {
             }
         }
 
-        let (_, commit_id, content, branch_name, is_soft_deleted) = best?;
+        let (_, commit_id, content, branch_name) = best?;
         if content.is_empty() {
             return None;
         }
-        Self::transform_row_with_schema(
-            id,
-            content,
-            commit_id,
-            branch_name,
-            is_soft_deleted,
-            context,
-        )
+        Self::transform_row_with_schema(id, content, commit_id, branch_name, context)
     }
 
     pub(super) fn transform_row_with_schema(
@@ -615,7 +604,6 @@ impl QueryManager {
         content: Vec<u8>,
         commit_id: CommitId,
         branch_name: BranchName,
-        is_soft_deleted: bool,
         context: &mut RowTransformContext<'_>,
     ) -> Option<ResolvedSchemaRow> {
         let source_hash = context.branch_schema_map.get(branch_name.as_str()).copied();
@@ -630,7 +618,6 @@ impl QueryManager {
                         branch_name,
                         commit_id,
                         content: result.data,
-                        is_soft_deleted,
                     });
                 }
                 Err(err) => {
@@ -657,7 +644,6 @@ impl QueryManager {
             branch_name,
             commit_id,
             content,
-            is_soft_deleted,
         })
     }
 
@@ -810,35 +796,19 @@ impl QueryManager {
             let table = sub.query.table.as_str().to_string();
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let include_deleted = sub.query.include_deleted;
-            let mut transform_context = RowTransformContext {
-                table: &table,
-                branch_schema_map: &branch_schema_map,
-                schema_context: &subscription_context,
-                schema_warnings: &mut schema_warnings,
-            };
             {
-                let om = &mut self.sync_manager.object_manager;
                 let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                    let obj = om.get_or_load(id, storage_ref, &branches)?;
-                    let resolved = Self::resolve_latest_row_with_schema_transform(
+                    Self::load_visible_row_for_query(
+                        storage_ref,
                         id,
-                        obj,
                         &branches,
-                        &mut transform_context,
-                    )?;
-                    if resolved.is_soft_deleted && !include_deleted {
-                        return None;
-                    }
-                    let commit = obj
-                        .branches
-                        .get(&resolved.branch_name)
-                        .and_then(|branch| branch.commits.get(&resolved.commit_id))?;
-                    Some(LoadedRow::new(
-                        resolved.content,
-                        resolved.commit_id,
-                        commit.row_provenance()?,
-                        [(id, resolved.branch_name)].into_iter().collect(),
-                    ))
+                        include_deleted,
+                        &subscription_context,
+                        &branch_schema_map,
+                        &table,
+                        super::graph_nodes::output::QuerySubscriptionId(sub.query_id.0),
+                        &mut schema_warnings,
+                    )
                 };
 
                 let _delta = graph.settle(storage_ref, row_loader);
@@ -879,6 +849,14 @@ impl QueryManager {
             } else {
                 result_scope
             };
+
+            for (object_id, branch_name) in &scope {
+                let _ = self.sync_manager.object_manager.get_or_load(
+                    *object_id,
+                    storage_ref,
+                    &[branch_name.as_str().to_string()],
+                );
+            }
 
             // Set scope in SyncManager (triggers initial sync)
             self.sync_manager.set_client_query_scope(
@@ -979,38 +957,22 @@ impl QueryManager {
             let include_deleted = sub.query.include_deleted;
             let branch_schema_map = Self::branch_schema_map_for_context(&sub.schema_context);
             let mut schema_warnings = SchemaWarningAccumulator::default();
-            let mut transform_context = RowTransformContext {
-                table: &table,
-                branch_schema_map: &branch_schema_map,
-                schema_context: &sub.schema_context,
-                schema_warnings: &mut schema_warnings,
-            };
 
             // Row loader for this subscription
             let new_scope = {
                 {
-                    let om = &mut self.sync_manager.object_manager;
                     let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                        let obj = om.get_or_load(id, storage, branches)?;
-                        let resolved = Self::resolve_latest_row_with_schema_transform(
+                        Self::load_visible_row_for_query(
+                            storage,
                             id,
-                            obj,
                             branches,
-                            &mut transform_context,
-                        )?;
-                        if resolved.is_soft_deleted && !include_deleted {
-                            return None;
-                        }
-                        let commit = obj
-                            .branches
-                            .get(&resolved.branch_name)
-                            .and_then(|branch| branch.commits.get(&resolved.commit_id))?;
-                        Some(LoadedRow::new(
-                            resolved.content,
-                            resolved.commit_id,
-                            commit.row_provenance()?,
-                            [(id, resolved.branch_name)].into_iter().collect(),
-                        ))
+                            include_deleted,
+                            &sub.schema_context,
+                            &branch_schema_map,
+                            &table,
+                            super::graph_nodes::output::QuerySubscriptionId(query_id.0),
+                            &mut schema_warnings,
+                        )
                     };
 
                     let _delta = sub.graph.settle(storage, row_loader);
@@ -1056,6 +1018,13 @@ impl QueryManager {
                 }
             };
             if new_scope != sub.last_scope {
+                for (object_id, branch_name) in &new_scope {
+                    let _ = self.sync_manager.object_manager.get_or_load(
+                        *object_id,
+                        storage,
+                        &[branch_name.as_str().to_string()],
+                    );
+                }
                 scope_updates.push((client_id, query_id, new_scope.clone(), sub.session.clone()));
                 sub.last_scope = new_scope;
             }

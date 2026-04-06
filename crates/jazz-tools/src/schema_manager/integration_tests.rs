@@ -16,7 +16,7 @@ mod tests {
     use crate::schema_manager::{
         AppId, Lens, LensOp, LensTransform, SchemaContext, SchemaManager, generate_lens,
     };
-    use crate::storage::MemoryStorage;
+    use crate::storage::{MemoryStorage, Storage};
 
     fn make_commit_id(n: u8) -> CommitId {
         CommitId([n; 32])
@@ -652,6 +652,99 @@ mod tests {
         assert_eq!(bob_row.1[0], Value::Uuid(new_user_id));
         assert_eq!(bob_row.1[1], Value::Text("Bob".to_string()));
         assert_eq!(bob_row.1[2], Value::Text("bob@example.com".to_string()));
+    }
+
+    #[test]
+    fn schema_manager_update_uses_visible_row_after_legacy_commit_history_is_removed() {
+        let v1 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+
+        let v2 = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text)
+                    .nullable_column("email", ColumnType::Text),
+            )
+            .build();
+
+        let v1_hash = SchemaHash::compute(&v1);
+        let v1_branch = format!("dev-{}-main", v1_hash.short());
+
+        let mut writer =
+            SchemaManager::new(SyncManager::new(), v2.clone(), test_app_id(), "dev", "main")
+                .unwrap();
+        writer.add_live_schema(v1.clone()).unwrap();
+
+        let mut storage = MemoryStorage::new();
+        let row_id = ObjectId::new();
+        let v1_table = v1.get(&TableName::new("users")).unwrap();
+        let original_content = encode_row(
+            &v1_table.columns,
+            &[Value::Uuid(row_id), Value::Text("Alice".to_string())],
+        )
+        .unwrap();
+        let original_commit =
+            stored_row_commit(original_content.clone(), 1_000, row_id.to_string());
+
+        ingest_remote_row(
+            writer.query_manager_mut(),
+            &mut storage,
+            "users",
+            row_id,
+            &v1_branch,
+            original_content,
+            1_000,
+        );
+        writer.process(&mut storage);
+
+        storage
+            .delete_commit(
+                row_id,
+                &crate::object::BranchName::new(&v1_branch),
+                original_commit.id(),
+            )
+            .unwrap();
+
+        let mut reader =
+            SchemaManager::new(SyncManager::new(), v2, test_app_id(), "dev", "main").unwrap();
+        reader.add_live_schema(v1).unwrap();
+
+        reader
+            .update_with_write_context(
+                &mut storage,
+                row_id,
+                &[
+                    ("name".to_string(), Value::Text("Alice Updated".to_string())),
+                    (
+                        "email".to_string(),
+                        Value::Text("alice@example.com".to_string()),
+                    ),
+                ],
+                None,
+            )
+            .expect("schema update should succeed from visible row state without legacy commits");
+
+        let query = reader
+            .query("users")
+            .select(&["id", "name", "email"])
+            .build();
+        let results = execute_query(&mut reader, &mut storage, query);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, row_id);
+        assert_eq!(
+            results[0].1,
+            vec![
+                Value::Uuid(row_id),
+                Value::Text("Alice Updated".to_string()),
+                Value::Text("alice@example.com".to_string()),
+            ]
+        );
     }
 
     // ========================================================================

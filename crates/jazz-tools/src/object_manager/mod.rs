@@ -5,7 +5,9 @@ use smallvec::smallvec;
 use smolset::SmolSet;
 
 use crate::commit::{Commit, CommitId, StoredState};
+use crate::metadata::MetadataKey;
 use crate::object::{Branch, BranchLoadedState, BranchName, Object, ObjectId};
+use crate::row_regions::StoredRowVersion;
 use crate::storage::{LoadedBranch, Storage, StorageError};
 
 /// Unique identifier for a subscription.
@@ -206,6 +208,22 @@ impl ObjectManager {
         }
     }
 
+    fn branch_from_visible_row(row: StoredRowVersion) -> Branch {
+        let commit = row.to_commit();
+        let commit_id = commit.id();
+        let mut commits = HashMap::new();
+        commits.insert(commit_id, commit);
+        let mut tips = SmolSet::new();
+        tips.insert(commit_id);
+
+        Branch {
+            commits,
+            tips,
+            tails: None,
+            loaded_state: BranchLoadedState::AllCommits,
+        }
+    }
+
     /// Get an object by id.
     pub fn get(&self, id: ObjectId) -> Option<&Object> {
         self.objects.get(&id)
@@ -247,11 +265,41 @@ impl ObjectManager {
                 if object.branches.contains_key(&bn) {
                     continue;
                 }
+                let fallback_visible_branch = |object: &Object, branch_name: &BranchName| {
+                    let table = object.metadata.get(MetadataKey::Table.as_str())?;
+                    match storage.load_visible_region_row(table, branch_name.as_str(), id) {
+                        Ok(Some(row)) if row.state.is_visible() => {
+                            Some(Self::branch_from_visible_row(row))
+                        }
+                        Ok(Some(_)) | Ok(None) => None,
+                        Err(err) => {
+                            tracing::warn!(
+                                %id,
+                                branch = %branch_name,
+                                error = ?err,
+                                "get_or_load: failed to hydrate visible-row fallback"
+                            );
+                            None
+                        }
+                    }
+                };
                 match storage.load_branch(id, &bn) {
                     Ok(Some(loaded)) => {
-                        object.branches.insert(bn, Self::branch_from_loaded(loaded));
+                        if loaded.commits.is_empty() {
+                            if let Some(branch) = fallback_visible_branch(object, &bn) {
+                                object.branches.insert(bn, branch);
+                            } else {
+                                object.branches.insert(bn, Self::branch_from_loaded(loaded));
+                            }
+                        } else {
+                            object.branches.insert(bn, Self::branch_from_loaded(loaded));
+                        }
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        if let Some(branch) = fallback_visible_branch(object, &bn) {
+                            object.branches.insert(bn, branch);
+                        }
+                    }
                     Err(err) => {
                         tracing::warn!(
                             %id,

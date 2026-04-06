@@ -8113,6 +8113,71 @@ fn server_builds_query_graph_on_subscription() {
 }
 
 #[test]
+fn server_subscription_reads_visible_region_after_legacy_commit_history_is_removed() {
+    use crate::sync_manager::{ClientId, Destination, InboxEntry, QueryId, Source, SyncPayload};
+    use uuid::Uuid;
+
+    let schema = test_schema();
+    let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
+    let branch = get_branch(&writer_qm);
+
+    let handle = writer_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(75)],
+        )
+        .unwrap();
+    writer_qm.process(&mut storage);
+
+    storage
+        .delete_commit(
+            handle.row_id,
+            &crate::object::BranchName::new(&branch),
+            handle.row_commit_id,
+        )
+        .unwrap();
+
+    let (mut server_qm, _) = create_query_manager(SyncManager::new(), schema);
+    let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
+    server_qm.sync_manager_mut().add_client(client_id);
+
+    let query = server_qm
+        .query("users")
+        .filter_gt("score", Value::Integer(50))
+        .build();
+
+    server_qm.sync_manager_mut().push_inbox(InboxEntry {
+        source: Source::Client(client_id),
+        payload: SyncPayload::QuerySubscription {
+            query_id: QueryId(1),
+            query: Box::new(query),
+            session: None,
+            propagation: crate::sync_manager::QueryPropagation::Full,
+        },
+    });
+
+    server_qm.process(&mut storage);
+
+    let outbox = server_qm.sync_manager_mut().take_outbox();
+    let object_updates: Vec<_> = outbox
+        .iter()
+        .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == client_id))
+        .filter(|entry| matches!(entry.payload, SyncPayload::ObjectUpdated { .. }))
+        .collect();
+
+    assert_eq!(
+        object_updates.len(),
+        1,
+        "server subscription should settle from visible row regions without legacy commits"
+    );
+    match &object_updates[0].payload {
+        SyncPayload::ObjectUpdated { object_id, .. } => assert_eq!(*object_id, handle.row_id),
+        payload => panic!("expected ObjectUpdated, got {payload:?}"),
+    }
+}
+
+#[test]
 fn local_stale_recompile_failure_drops_subscription_and_reports_failure() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
