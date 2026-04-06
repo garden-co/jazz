@@ -1,27 +1,19 @@
 use std::collections::{HashMap, HashSet};
-use std::ops::Bound;
 
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::catalogue::CatalogueEntry;
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::row_regions::{BatchId, HistoryScan, RowState, StoredRowVersion};
 use crate::sync_manager::DurabilityTier;
 
-use crate::query_manager::types::Value;
-
 use super::key_codec::{
-    ack_key, branch_tips_key, catalogue_entry_key, catalogue_entry_prefix,
-    catalogue_manifest_op_key, catalogue_manifest_op_prefix, commit_key, commit_prefix,
-    history_row_key, history_row_prefix, history_row_versions_prefix, history_table_prefix,
-    index_entry_key, index_prefix, index_range_scan_bounds, index_value_prefix, obj_meta_key,
-    obj_meta_prefix, parse_uuid_from_index_key, visible_row_key, visible_row_prefix,
-    visible_table_prefix,
+    ack_key, branch_tips_key, commit_key, commit_prefix, history_row_key, history_row_prefix,
+    history_row_versions_prefix, history_table_prefix, increment_string, obj_meta_key,
+    obj_meta_prefix, raw_table_entry_key, raw_table_prefix, raw_table_scan_prefix,
+    strip_raw_table_key, visible_row_key, visible_row_prefix, visible_table_prefix,
 };
-use super::{
-    CatalogueManifest, CatalogueManifestOp, LoadedBranch, ObjectMetadataRows, StorageError,
-};
+use super::{LoadedBranch, ObjectMetadataRows, RawTableRows, StorageError};
 
 pub(super) fn encode_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, StorageError> {
     serde_json::to_vec(value).map_err(|e| StorageError::IoError(format!("serialize {label}: {e}")))
@@ -208,105 +200,66 @@ pub(super) fn store_ack_tier_core(
     set(&key, &json)
 }
 
-pub(super) fn append_catalogue_manifest_op_core(
-    app_id: ObjectId,
-    op: CatalogueManifestOp,
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+pub(super) fn raw_table_put_core(
+    table: &str,
+    key: &str,
+    value: &[u8],
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
-    let key = catalogue_manifest_op_key(app_id, op.object_id());
-
-    if let Some(existing) = get(&key)? {
-        let existing_op: CatalogueManifestOp = decode_json(&existing, "catalogue manifest op")?;
-        if existing_op == op {
-            return Ok(());
-        }
-        return Err(StorageError::IoError(format!(
-            "conflicting catalogue manifest op for object {}",
-            op.object_id()
-        )));
-    }
-
-    let json = encode_json(&op, "catalogue manifest op")?;
-    set(&key, &json)
+    set(&raw_table_entry_key(table, key), value)
 }
 
-pub(super) fn append_catalogue_manifest_ops_core(
-    app_id: ObjectId,
-    ops: &[CatalogueManifestOp],
-    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+pub(super) fn raw_table_delete_core(
+    table: &str,
+    key: &str,
+    mut delete: impl FnMut(&str) -> Result<(), StorageError>,
 ) -> Result<(), StorageError> {
-    for op in ops {
-        append_catalogue_manifest_op_core(app_id, op.clone(), &mut get, &mut set)?;
-    }
-    Ok(())
+    delete(&raw_table_entry_key(table, key))
 }
 
-pub(super) fn load_catalogue_manifest_core(
-    app_id: ObjectId,
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
-) -> Result<Option<CatalogueManifest>, StorageError> {
-    let prefix = catalogue_manifest_op_prefix(app_id);
-    let entries = scan_prefix(&prefix)?;
-    if entries.is_empty() {
-        return Ok(None);
-    }
-
-    let mut manifest = CatalogueManifest::default();
-    for (_key, data) in entries {
-        let op: CatalogueManifestOp = decode_json(&data, "catalogue manifest op")?;
-        manifest.apply(&op);
-    }
-
-    Ok(Some(manifest))
-}
-
-pub(super) fn upsert_catalogue_entry_core(
-    entry: &CatalogueEntry,
-    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
-) -> Result<(), StorageError> {
-    let key = catalogue_entry_key(entry.object_id);
-    let bytes = entry
-        .encode_storage_row()
-        .map_err(|err| StorageError::IoError(format!("encode catalogue entry: {err}")))?;
-    set(&key, &bytes)
-}
-
-pub(super) fn load_catalogue_entry_core(
-    object_id: ObjectId,
+pub(super) fn raw_table_get_core(
+    table: &str,
+    key: &str,
     mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
-) -> Result<Option<CatalogueEntry>, StorageError> {
-    let key = catalogue_entry_key(object_id);
-    match get(&key)? {
-        Some(bytes) => CatalogueEntry::decode_storage_row(object_id, &bytes)
-            .map(Some)
-            .map_err(|err| StorageError::IoError(format!("decode catalogue entry: {err}"))),
-        None => Ok(None),
-    }
+) -> Result<Option<Vec<u8>>, StorageError> {
+    get(&raw_table_entry_key(table, key))
 }
 
-pub(super) fn scan_catalogue_entries_core(
-    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
-) -> Result<Vec<CatalogueEntry>, StorageError> {
-    let mut entries = Vec::new();
-    for (key, bytes) in scan_prefix(catalogue_entry_prefix())? {
-        let Some(hex_id) = key.strip_prefix("catrow:") else {
-            continue;
-        };
-        let bytes_id = hex::decode(hex_id).map_err(|err| {
-            StorageError::IoError(format!("invalid catalogue entry key '{key}': {err}"))
-        })?;
-        let uuid = uuid::Uuid::from_slice(&bytes_id).map_err(|err| {
-            StorageError::IoError(format!("invalid catalogue entry uuid '{key}': {err}"))
-        })?;
-        let object_id = ObjectId::from_uuid(uuid);
-        let entry = CatalogueEntry::decode_storage_row(object_id, &bytes)
-            .map_err(|err| StorageError::IoError(format!("decode catalogue entry: {err}")))?;
-        entries.push(entry);
-    }
-    entries.sort_by_key(|entry| entry.object_id);
-    Ok(entries)
+pub(super) fn raw_table_scan_prefix_core(
+    table: &str,
+    prefix: &str,
+    mut scan_prefix_entries: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<RawTableRows, StorageError> {
+    let storage_prefix = raw_table_scan_prefix(table, prefix);
+    Ok(scan_prefix_entries(&storage_prefix)?
+        .into_iter()
+        .filter_map(|(key, value)| {
+            strip_raw_table_key(table, &key).map(|local_key| (local_key.to_string(), value))
+        })
+        .collect())
+}
+
+pub(super) fn raw_table_scan_range_core(
+    table: &str,
+    start: Option<&str>,
+    end: Option<&str>,
+    mut scan_range_entries: impl FnMut(&str, &str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<RawTableRows, StorageError> {
+    let start_key = raw_table_entry_key(table, start.unwrap_or(""));
+    let end_key = if let Some(end) = end {
+        raw_table_entry_key(table, end)
+    } else {
+        let mut table_end = raw_table_prefix(table);
+        increment_string(&mut table_end);
+        table_end
+    };
+
+    Ok(scan_range_entries(&start_key, &end_key)?
+        .into_iter()
+        .filter_map(|(key, value)| {
+            strip_raw_table_key(table, &key).map(|local_key| (local_key.to_string(), value))
+        })
+        .collect())
 }
 
 #[allow(dead_code)]
@@ -475,107 +428,4 @@ pub(super) fn scan_history_region_core(
 
     rows.sort_by_key(|row| (row.branch.clone(), row.row_id, row.updated_at));
     Ok(rows)
-}
-
-pub(super) fn index_insert_core(
-    table: &str,
-    column: &str,
-    branch: &str,
-    value: &Value,
-    row_id: ObjectId,
-    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
-) -> Result<(), StorageError> {
-    let key = index_entry_key(table, column, branch, value, row_id)?;
-    set(&key, &[0x01])
-}
-
-pub(super) fn index_remove_core(
-    table: &str,
-    column: &str,
-    branch: &str,
-    value: &Value,
-    row_id: ObjectId,
-    mut delete: impl FnMut(&str) -> Result<(), StorageError>,
-) -> Result<(), StorageError> {
-    let key = match index_entry_key(table, column, branch, value, row_id) {
-        Ok(key) => key,
-        Err(StorageError::IndexKeyTooLarge { .. }) => return Ok(()),
-        Err(error) => return Err(error),
-    };
-    delete(&key)
-}
-
-pub(super) fn index_lookup_core(
-    table: &str,
-    column: &str,
-    branch: &str,
-    value: &Value,
-    mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
-) -> Vec<ObjectId> {
-    // IEEE 754: -0.0 == 0.0, so scan both prefixes and merge.
-    if super::is_double_zero(value) {
-        let mut result = HashSet::new();
-        for zero in &[Value::Double(0.0), Value::Double(-0.0)] {
-            let Ok(prefix) = index_value_prefix(table, column, branch, zero) else {
-                continue;
-            };
-            if let Ok(keys) = scan_prefix_keys(&prefix) {
-                for key in &keys {
-                    if let Some(id) = parse_uuid_from_index_key(key) {
-                        result.insert(id);
-                    }
-                }
-            }
-        }
-        return result.into_iter().collect();
-    }
-
-    let Ok(prefix) = index_value_prefix(table, column, branch, value) else {
-        return Vec::new();
-    };
-    scan_prefix_keys(&prefix)
-        .map(|keys| {
-            keys.iter()
-                .filter_map(|key| parse_uuid_from_index_key(key))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-pub(super) fn index_scan_all_core(
-    table: &str,
-    column: &str,
-    branch: &str,
-    mut scan_prefix_keys: impl FnMut(&str) -> Result<Vec<String>, StorageError>,
-) -> Vec<ObjectId> {
-    let prefix = index_prefix(table, column, branch);
-    scan_prefix_keys(&prefix)
-        .map(|keys| {
-            keys.iter()
-                .filter_map(|key| parse_uuid_from_index_key(key))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-pub(super) fn index_range_core(
-    table: &str,
-    column: &str,
-    branch: &str,
-    start: Bound<&Value>,
-    end: Bound<&Value>,
-    mut scan_key_range: impl FnMut(&str, &str) -> Result<Vec<String>, StorageError>,
-) -> Vec<ObjectId> {
-    let Some((start_key, end_key)) = index_range_scan_bounds(table, column, branch, start, end)
-    else {
-        return Vec::new();
-    };
-
-    scan_key_range(&start_key, &end_key)
-        .map(|keys| {
-            keys.iter()
-                .filter_map(|key| parse_uuid_from_index_key(key))
-                .collect()
-        })
-        .unwrap_or_default()
 }

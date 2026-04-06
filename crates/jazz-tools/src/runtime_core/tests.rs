@@ -7,8 +7,7 @@ use crate::query_manager::types::{
 };
 use crate::schema_manager::AppId;
 use crate::storage::{
-    CatalogueManifest, CatalogueManifestOp, LoadedBranch, MemoryStorage, ObjectMetadataRows,
-    Storage, StorageError,
+    LoadedBranch, MemoryStorage, ObjectMetadataRows, RawTableRows, Storage, StorageError,
 };
 use crate::sync_manager::{
     ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
@@ -95,27 +94,33 @@ impl Storage for RowRegionReadFailingStorage {
         self.inner.store_ack_tier(commit_id, tier)
     }
 
-    fn append_catalogue_manifest_op(
-        &mut self,
-        app_id: ObjectId,
-        op: CatalogueManifestOp,
-    ) -> Result<(), StorageError> {
-        self.inner.append_catalogue_manifest_op(app_id, op)
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        self.inner.raw_table_put(table, key, value)
     }
 
-    fn append_catalogue_manifest_ops(
-        &mut self,
-        app_id: ObjectId,
-        ops: &[CatalogueManifestOp],
-    ) -> Result<(), StorageError> {
-        self.inner.append_catalogue_manifest_ops(app_id, ops)
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        self.inner.raw_table_delete(table, key)
     }
 
-    fn load_catalogue_manifest(
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.raw_table_get(table, key)
+    }
+
+    fn raw_table_scan_prefix(
         &self,
-        app_id: ObjectId,
-    ) -> Result<Option<CatalogueManifest>, StorageError> {
-        self.inner.load_catalogue_manifest(app_id)
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_prefix(table, prefix)
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_range(table, start, end)
     }
 
     fn append_history_region_rows(

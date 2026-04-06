@@ -6,7 +6,6 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::ops::Bound;
 use std::path::Path;
 
 use rocksdb::{
@@ -14,21 +13,17 @@ use rocksdb::{
     TransactionDBOptions,
 };
 
-use crate::catalogue::CatalogueEntry;
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::Value;
 use crate::sync_manager::DurabilityTier;
 
 use super::{
-    CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
+    LoadedBranch, Storage, StorageError,
     storage_core::{
-        append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
-        create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
-        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_entry_core, load_catalogue_manifest_core, load_object_metadata_core,
-        scan_catalogue_entries_core, set_branch_tails_core, store_ack_tier_core,
-        upsert_catalogue_entry_core,
+        append_commit_core, create_object_core, delete_commit_core, load_branch_core,
+        load_object_metadata_core, raw_table_delete_core, raw_table_get_core, raw_table_put_core,
+        raw_table_scan_prefix_core, raw_table_scan_range_core, set_branch_tails_core,
+        store_ack_tier_core,
     },
 };
 
@@ -120,34 +115,11 @@ impl RocksDBStorage {
         Ok(out)
     }
 
-    fn scan_prefix_keys_from_db(
-        db: &TransactionDB,
-        prefix: &str,
-    ) -> Result<Vec<String>, StorageError> {
-        let prefix_bytes = prefix.as_bytes();
-        let mut read_opts = ReadOptions::default();
-        if let Some(ub) = Self::prefix_upper_bound(prefix_bytes) {
-            read_opts.set_iterate_upper_bound(ub);
-        }
-        let mut out = Vec::new();
-        let iter = db.iterator_opt(
-            IteratorMode::From(prefix_bytes, rocksdb::Direction::Forward),
-            read_opts,
-        );
-        for item in iter {
-            let (key, _) = item.map_err(|e| StorageError::IoError(format!("rocksdb iter: {e}")))?;
-            let key_str = String::from_utf8(key.to_vec())
-                .map_err(|e| StorageError::IoError(format!("rocksdb invalid key utf8: {e}")))?;
-            out.push(key_str);
-        }
-        Ok(out)
-    }
-
-    fn scan_key_range_from_db(
+    fn scan_range_from_db(
         db: &TransactionDB,
         start: &str,
         end: &str,
-    ) -> Result<Vec<String>, StorageError> {
+    ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
         let start_bytes = start.as_bytes();
         let mut read_opts = ReadOptions::default();
         read_opts.set_iterate_upper_bound(end.as_bytes().to_vec());
@@ -157,10 +129,11 @@ impl RocksDBStorage {
             read_opts,
         );
         for item in iter {
-            let (key, _) = item.map_err(|e| StorageError::IoError(format!("rocksdb iter: {e}")))?;
+            let (key, value) =
+                item.map_err(|e| StorageError::IoError(format!("rocksdb iter: {e}")))?;
             let key_str = String::from_utf8(key.to_vec())
                 .map_err(|e| StorageError::IoError(format!("rocksdb invalid key utf8: {e}")))?;
-            out.push(key_str);
+            out.push((key_str, value.to_vec()));
         }
         Ok(out)
     }
@@ -334,153 +307,57 @@ impl Storage for RocksDBStorage {
         })
     }
 
-    fn append_catalogue_manifest_op(
-        &mut self,
-        app_id: ObjectId,
-        op: CatalogueManifestOp,
-    ) -> Result<(), StorageError> {
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let txn = RefCell::new(inner.db.transaction());
-            append_catalogue_manifest_op_core(
-                app_id,
-                op,
-                |key| Self::get_from_txn_cell(&txn, key),
-                |key, value| Self::put_on_txn_cell(&txn, key, value),
-            )?;
+            raw_table_put_core(table, key, value, |storage_key, bytes| {
+                Self::put_on_txn_cell(&txn, storage_key, bytes)
+            })?;
             Self::commit_txn(txn.into_inner())
         })
     }
 
-    fn append_catalogue_manifest_ops(
-        &mut self,
-        app_id: ObjectId,
-        ops: &[CatalogueManifestOp],
-    ) -> Result<(), StorageError> {
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let txn = RefCell::new(inner.db.transaction());
-            append_catalogue_manifest_ops_core(
-                app_id,
-                ops,
-                |key| Self::get_from_txn_cell(&txn, key),
-                |key, value| Self::put_on_txn_cell(&txn, key, value),
-            )?;
+            raw_table_delete_core(table, key, |storage_key| {
+                Self::delete_on_txn_cell(&txn, storage_key)
+            })?;
             Self::commit_txn(txn.into_inner())
         })
     }
 
-    fn load_catalogue_manifest(
-        &self,
-        app_id: ObjectId,
-    ) -> Result<Option<CatalogueManifest>, StorageError> {
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
         self.with_inner(|inner| {
-            load_catalogue_manifest_core(app_id, |prefix| {
-                Self::scan_prefix_from_db(&inner.db, prefix)
+            raw_table_get_core(table, key, |storage_key| {
+                Self::get_from_db(&inner.db, storage_key)
             })
         })
     }
 
-    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = RefCell::new(inner.db.transaction());
-            upsert_catalogue_entry_core(entry, |key, value| {
-                Self::put_on_txn_cell(&txn, key, value)
-            })?;
-            Self::commit_txn(txn.into_inner())
-        })
-    }
-
-    fn load_catalogue_entry(
-        &self,
-        object_id: ObjectId,
-    ) -> Result<Option<CatalogueEntry>, StorageError> {
-        self.with_inner(|inner| {
-            load_catalogue_entry_core(object_id, |key| Self::get_from_db(&inner.db, key))
-        })
-    }
-
-    fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, StorageError> {
-        self.with_inner(|inner| {
-            scan_catalogue_entries_core(|prefix| Self::scan_prefix_from_db(&inner.db, prefix))
-        })
-    }
-
-    fn index_insert(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = inner.db.transaction();
-            index_insert_core(table, column, branch, value, row_id, |key, bytes| {
-                Self::put_on_txn(&txn, key, bytes)
-            })?;
-            Self::commit_txn(txn)
-        })
-    }
-
-    fn index_remove(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let txn = inner.db.transaction();
-            index_remove_core(table, column, branch, value, row_id, |key| {
-                Self::delete_on_txn(&txn, key)
-            })?;
-            Self::commit_txn(txn)
-        })
-    }
-
-    fn index_lookup(
+    fn raw_table_scan_prefix(
         &self,
         table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-    ) -> Vec<ObjectId> {
+        prefix: &str,
+    ) -> Result<super::RawTableRows, StorageError> {
         self.with_inner(|inner| {
-            Ok(index_lookup_core(table, column, branch, value, |prefix| {
-                Self::scan_prefix_keys_from_db(&inner.db, prefix)
-            }))
+            raw_table_scan_prefix_core(table, prefix, |storage_prefix| {
+                Self::scan_prefix_from_db(&inner.db, storage_prefix)
+            })
         })
-        .unwrap_or_default()
     }
 
-    fn index_range(
+    fn raw_table_scan_range(
         &self,
         table: &str,
-        column: &str,
-        branch: &str,
-        start: Bound<&Value>,
-        end: Bound<&Value>,
-    ) -> Vec<ObjectId> {
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<super::RawTableRows, StorageError> {
         self.with_inner(|inner| {
-            Ok(index_range_core(
-                table,
-                column,
-                branch,
-                start,
-                end,
-                |start_key, end_key| Self::scan_key_range_from_db(&inner.db, start_key, end_key),
-            ))
+            raw_table_scan_range_core(table, start, end, |start_key, end_key| {
+                Self::scan_range_from_db(&inner.db, start_key, end_key)
+            })
         })
-        .unwrap_or_default()
-    }
-
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
-        self.with_inner(|inner| {
-            Ok(index_scan_all_core(table, column, branch, |prefix| {
-                Self::scan_prefix_keys_from_db(&inner.db, prefix)
-            }))
-        })
-        .unwrap_or_default()
     }
 
     fn flush(&self) {

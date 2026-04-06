@@ -1,7 +1,7 @@
 //! opfs-btree-backed Storage implementation.
 //!
 //! Uses a single opfs-btree instance with key-encoded namespaces for all data:
-//! objects, commits, ack tiers, catalogue rows, catalogue manifest ops, and indices.
+//! objects, commits, ack tiers, raw tables, row regions, and derived indices.
 //!
 //! Key encoding scheme (all keys are UTF-8 strings with hex-encoded binary parts):
 //!
@@ -10,14 +10,13 @@
 //! "obj:{uuid}:br:{branch}:tips"                           → JSON HashSet<CommitId>
 //! "obj:{uuid}:br:{branch}:c:{commit_uuid}"                → JSON Commit
 //! "ack:{commit_hex}"                                      → JSON HashSet<DurabilityTier>
-//! "catrow:{object_uuid}"                                  → encoded CatalogueEntry
-//! "catman:{app_uuid}:op:{object_uuid}"                    → JSON CatalogueManifestOp
-//! "idx:{table}:{col}:{branch}:{hex_encoded_value}:{uuid}" → empty (existence is the signal)
+//! "raw:{table}:{local_key}"                               → raw table entry
+//! "row:{table}:0:{branch}:{row_uuid}"                     → JSON StoredRowVersion
+//! "row:{table}:1:{branch}:{row_uuid}:{updated_at}"        → JSON StoredRowVersion
 //! ```
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::ops::Bound;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
@@ -27,22 +26,18 @@ use opfs_btree::OpfsFile;
 use opfs_btree::StdFile;
 use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
 
-use crate::catalogue::CatalogueEntry;
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::Value;
 use crate::sync_manager::DurabilityTier;
 
 use super::{
-    CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
+    LoadedBranch, Storage, StorageError,
     key_codec::increment_bytes,
     storage_core::{
-        append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
-        create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
-        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_entry_core, load_catalogue_manifest_core, load_object_metadata_core,
-        scan_catalogue_entries_core, set_branch_tails_core, store_ack_tier_core,
-        upsert_catalogue_entry_core,
+        append_commit_core, create_object_core, delete_commit_core, load_branch_core,
+        load_object_metadata_core, raw_table_delete_core, raw_table_get_core, raw_table_put_core,
+        raw_table_scan_prefix_core, raw_table_scan_range_core, set_branch_tails_core,
+        store_ack_tier_core,
     },
 };
 
@@ -188,20 +183,12 @@ impl OpfsBTreeStorage {
         self.tree_scan_range_bytes(start, &end)
     }
 
-    fn tree_scan_keys(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
-        Ok(self
-            .tree_scan_prefix(prefix)?
-            .into_iter()
-            .map(|(key, _)| key)
-            .collect())
-    }
-
-    fn tree_scan_key_range(&self, start: &str, end: &str) -> Result<Vec<String>, StorageError> {
-        Ok(self
-            .tree_scan_range_bytes(start.as_bytes(), end.as_bytes())?
-            .into_iter()
-            .map(|(key, _)| key)
-            .collect())
+    fn tree_scan_range(
+        &self,
+        start: &str,
+        end: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        self.tree_scan_range_bytes(start.as_bytes(), end.as_bytes())
     }
 
     fn tree_scan_range_bytes(
@@ -318,110 +305,39 @@ impl Storage for OpfsBTreeStorage {
         )
     }
 
-    fn append_catalogue_manifest_op(
-        &mut self,
-        app_id: ObjectId,
-        op: CatalogueManifestOp,
-    ) -> Result<(), StorageError> {
-        append_catalogue_manifest_op_core(
-            app_id,
-            op,
-            |key| self.tree_read(key),
-            |key, value| self.tree_insert(key, value),
-        )
-    }
-
-    fn append_catalogue_manifest_ops(
-        &mut self,
-        app_id: ObjectId,
-        ops: &[CatalogueManifestOp],
-    ) -> Result<(), StorageError> {
-        append_catalogue_manifest_ops_core(
-            app_id,
-            ops,
-            |key| self.tree_read(key),
-            |key, value| self.tree_insert(key, value),
-        )
-    }
-
-    fn load_catalogue_manifest(
-        &self,
-        app_id: ObjectId,
-    ) -> Result<Option<CatalogueManifest>, StorageError> {
-        load_catalogue_manifest_core(app_id, |prefix| self.tree_scan_prefix(prefix))
-    }
-
-    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
-        upsert_catalogue_entry_core(entry, |key, value| self.tree_insert(key, value))
-    }
-
-    fn load_catalogue_entry(
-        &self,
-        object_id: ObjectId,
-    ) -> Result<Option<CatalogueEntry>, StorageError> {
-        load_catalogue_entry_core(object_id, |key| self.tree_read(key))
-    }
-
-    fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, StorageError> {
-        scan_catalogue_entries_core(|prefix| self.tree_scan_prefix(prefix))
-    }
-
-    fn index_insert(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        tracing::trace!(table, column, branch, ?row_id, "index_insert");
-        index_insert_core(table, column, branch, value, row_id, |key, bytes| {
-            self.tree_insert(key, bytes)
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        raw_table_put_core(table, key, value, |storage_key, bytes| {
+            self.tree_insert(storage_key, bytes)
         })
     }
 
-    fn index_remove(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        tracing::trace!(table, column, branch, ?row_id, "index_remove");
-        index_remove_core(table, column, branch, value, row_id, |key| {
-            self.tree_delete(key)
-        })
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        raw_table_delete_core(table, key, |storage_key| self.tree_delete(storage_key))
     }
 
-    fn index_lookup(
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        raw_table_get_core(table, key, |storage_key| self.tree_read(storage_key))
+    }
+
+    fn raw_table_scan_prefix(
         &self,
         table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-    ) -> Vec<ObjectId> {
-        tracing::trace!(table, column, branch, "index_lookup");
-        index_lookup_core(table, column, branch, value, |prefix| {
-            self.tree_scan_keys(prefix)
+        prefix: &str,
+    ) -> Result<super::RawTableRows, StorageError> {
+        raw_table_scan_prefix_core(table, prefix, |storage_prefix| {
+            self.tree_scan_prefix(storage_prefix)
         })
     }
 
-    fn index_range(
+    fn raw_table_scan_range(
         &self,
         table: &str,
-        column: &str,
-        branch: &str,
-        start: Bound<&Value>,
-        end: Bound<&Value>,
-    ) -> Vec<ObjectId> {
-        index_range_core(table, column, branch, start, end, |start_key, end_key| {
-            self.tree_scan_key_range(start_key, end_key)
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<super::RawTableRows, StorageError> {
+        raw_table_scan_range_core(table, start, end, |start_key, end_key| {
+            self.tree_scan_range(start_key, end_key)
         })
-    }
-
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
-        index_scan_all_core(table, column, branch, |prefix| self.tree_scan_keys(prefix))
     }
 
     fn flush(&self) {
@@ -444,7 +360,11 @@ fn map_storage_err(error: BTreeError) -> StorageError {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Bound;
+
     use super::*;
+    use crate::catalogue::CatalogueEntry;
+    use crate::query_manager::types::Value;
     use smallvec::smallvec;
 
     fn make_commit(content: &[u8]) -> Commit {

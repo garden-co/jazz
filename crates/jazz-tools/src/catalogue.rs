@@ -32,12 +32,9 @@ impl CatalogueEntry {
 
     pub fn encode_storage_row(&self) -> Result<Vec<u8>, String> {
         let descriptor = storage_descriptor();
+        let metadata_json = serde_json::to_vec(&self.metadata).map_err(|err| err.to_string())?;
         let values = vec![
-            Value::Text(self.object_type().unwrap_or_default().to_string()),
-            nullable_text(MetadataKey::AppId.as_str(), &self.metadata),
-            nullable_text(MetadataKey::SchemaHash.as_str(), &self.metadata),
-            nullable_text(MetadataKey::SourceHash.as_str(), &self.metadata),
-            nullable_text(MetadataKey::TargetHash.as_str(), &self.metadata),
+            Value::Bytea(metadata_json),
             Value::Bytea(self.content.clone()),
         ];
         encode_row(&descriptor, &values).map_err(|err| err.to_string())
@@ -46,24 +43,11 @@ impl CatalogueEntry {
     pub fn decode_storage_row(object_id: ObjectId, bytes: &[u8]) -> Result<Self, String> {
         let descriptor = storage_descriptor();
         let values = decode_row(&descriptor, bytes).map_err(|err| err.to_string())?;
-        let [
-            Value::Text(type_str),
-            app_id,
-            schema_hash,
-            source_hash,
-            target_hash,
-            Value::Bytea(content),
-        ] = values.as_slice()
-        else {
+        let [Value::Bytea(metadata_json), Value::Bytea(content)] = values.as_slice() else {
             return Err("unexpected catalogue row shape".to_string());
         };
-
-        let mut metadata = HashMap::new();
-        metadata.insert(MetadataKey::Type.to_string(), type_str.clone());
-        insert_nullable_text(&mut metadata, MetadataKey::AppId, app_id);
-        insert_nullable_text(&mut metadata, MetadataKey::SchemaHash, schema_hash);
-        insert_nullable_text(&mut metadata, MetadataKey::SourceHash, source_hash);
-        insert_nullable_text(&mut metadata, MetadataKey::TargetHash, target_hash);
+        let metadata: HashMap<String, String> =
+            serde_json::from_slice(metadata_json).map_err(|err| err.to_string())?;
 
         Ok(Self {
             object_id,
@@ -75,25 +59,7 @@ impl CatalogueEntry {
 
 fn storage_descriptor() -> RowDescriptor {
     RowDescriptor::new(vec![
-        ColumnDescriptor::new(MetadataKey::Type.as_str(), ColumnType::Text),
-        ColumnDescriptor::new(MetadataKey::AppId.as_str(), ColumnType::Text).nullable(),
-        ColumnDescriptor::new(MetadataKey::SchemaHash.as_str(), ColumnType::Text).nullable(),
-        ColumnDescriptor::new(MetadataKey::SourceHash.as_str(), ColumnType::Text).nullable(),
-        ColumnDescriptor::new(MetadataKey::TargetHash.as_str(), ColumnType::Text).nullable(),
+        ColumnDescriptor::new("metadata", ColumnType::Bytea),
         ColumnDescriptor::new("content", ColumnType::Bytea),
     ])
-}
-
-fn nullable_text(key: &str, metadata: &HashMap<String, String>) -> Value {
-    metadata
-        .get(key)
-        .cloned()
-        .map(Value::Text)
-        .unwrap_or(Value::Null)
-}
-
-fn insert_nullable_text(metadata: &mut HashMap<String, String>, key: MetadataKey, value: &Value) {
-    if let Value::Text(text) = value {
-        metadata.insert(key.to_string(), text.clone());
-    }
 }
