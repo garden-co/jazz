@@ -36,4 +36,5 @@
 
 - [**client-state-lifecycle**](todo/projects/client-state-lifecycle/)
 - [**ordered-index-topk-query-path**](todo/projects/ordered-index-topk-query-path/)
+- [**relational-row-history-engine**](todo/projects/relational-row-history-engine/)
 - [**storage-backend-alternatives**](todo/projects/storage-backend-alternatives/)
