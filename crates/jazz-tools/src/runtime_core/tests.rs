@@ -6,7 +6,10 @@ use crate::query_manager::types::{
     ColumnType, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
 };
 use crate::schema_manager::AppId;
-use crate::storage::MemoryStorage;
+use crate::storage::{
+    CatalogueManifest, CatalogueManifestOp, LoadedBranch, MemoryStorage, ObjectMetadataRows,
+    Storage, StorageError,
+};
 use crate::sync_manager::{
     ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
     SyncManager, SyncPayload,
@@ -15,6 +18,240 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 type TestCore = RuntimeCore<MemoryStorage, NoopScheduler, VecSyncSender>;
+type BoxedStorageTestCore = RuntimeCore<Box<dyn Storage>, NoopScheduler, VecSyncSender>;
+
+struct RowRegionReadFailingStorage {
+    inner: MemoryStorage,
+}
+
+impl RowRegionReadFailingStorage {
+    fn new() -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+        }
+    }
+}
+
+impl Storage for RowRegionReadFailingStorage {
+    fn create_object(
+        &mut self,
+        id: ObjectId,
+        metadata: HashMap<String, String>,
+    ) -> Result<(), StorageError> {
+        self.inner.create_object(id, metadata)
+    }
+
+    fn load_object_metadata(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<HashMap<String, String>>, StorageError> {
+        self.inner.load_object_metadata(id)
+    }
+
+    fn scan_object_metadata(&self) -> Result<ObjectMetadataRows, StorageError> {
+        self.inner.scan_object_metadata()
+    }
+
+    fn load_branch(
+        &self,
+        object_id: ObjectId,
+        branch: &crate::object::BranchName,
+    ) -> Result<Option<LoadedBranch>, StorageError> {
+        self.inner.load_branch(object_id, branch)
+    }
+
+    fn append_commit(
+        &mut self,
+        object_id: ObjectId,
+        branch: &crate::object::BranchName,
+        commit: crate::commit::Commit,
+    ) -> Result<(), StorageError> {
+        self.inner.append_commit(object_id, branch, commit)
+    }
+
+    fn delete_commit(
+        &mut self,
+        object_id: ObjectId,
+        branch: &crate::object::BranchName,
+        commit_id: crate::commit::CommitId,
+    ) -> Result<(), StorageError> {
+        self.inner.delete_commit(object_id, branch, commit_id)
+    }
+
+    fn set_branch_tails(
+        &mut self,
+        object_id: ObjectId,
+        branch: &crate::object::BranchName,
+        tails: Option<std::collections::HashSet<crate::commit::CommitId>>,
+    ) -> Result<(), StorageError> {
+        self.inner.set_branch_tails(object_id, branch, tails)
+    }
+
+    fn store_ack_tier(
+        &mut self,
+        commit_id: crate::commit::CommitId,
+        tier: DurabilityTier,
+    ) -> Result<(), StorageError> {
+        self.inner.store_ack_tier(commit_id, tier)
+    }
+
+    fn append_catalogue_manifest_op(
+        &mut self,
+        app_id: ObjectId,
+        op: CatalogueManifestOp,
+    ) -> Result<(), StorageError> {
+        self.inner.append_catalogue_manifest_op(app_id, op)
+    }
+
+    fn append_catalogue_manifest_ops(
+        &mut self,
+        app_id: ObjectId,
+        ops: &[CatalogueManifestOp],
+    ) -> Result<(), StorageError> {
+        self.inner.append_catalogue_manifest_ops(app_id, ops)
+    }
+
+    fn load_catalogue_manifest(
+        &self,
+        app_id: ObjectId,
+    ) -> Result<Option<CatalogueManifest>, StorageError> {
+        self.inner.load_catalogue_manifest(app_id)
+    }
+
+    fn append_history_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[crate::row_regions::StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_rows(table, rows)
+    }
+
+    fn upsert_visible_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[crate::row_regions::StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        self.inner.upsert_visible_region_rows(table, rows)
+    }
+
+    fn patch_row_region_rows_by_batch(
+        &mut self,
+        table: &str,
+        batch_id: crate::row_regions::BatchId,
+        state: Option<crate::row_regions::RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .patch_row_region_rows_by_batch(table, batch_id, state, confirmed_tier)
+    }
+
+    fn scan_visible_region(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+        self.inner.scan_visible_region(table, branch)
+    }
+
+    fn load_visible_region_row(
+        &self,
+        _table: &str,
+        _branch: &str,
+        _row_id: ObjectId,
+    ) -> Result<Option<crate::row_regions::StoredRowVersion>, StorageError> {
+        Err(StorageError::IoError(
+            "row-region reads deliberately disabled in this test".to_string(),
+        ))
+    }
+
+    fn scan_visible_region_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+        self.inner.scan_visible_region_row_versions(table, row_id)
+    }
+
+    fn scan_history_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+        self.inner.scan_history_row_versions(table, row_id)
+    }
+
+    fn scan_history_region(
+        &self,
+        _table: &str,
+        _branch: &str,
+        _scan: crate::row_regions::HistoryScan,
+    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+        Err(StorageError::IoError(
+            "row-region reads deliberately disabled in this test".to_string(),
+        ))
+    }
+
+    fn index_insert(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .index_insert(table, column, branch, value, row_id)
+    }
+
+    fn index_remove(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .index_remove(table, column, branch, value, row_id)
+    }
+
+    fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+    ) -> Vec<ObjectId> {
+        self.inner.index_lookup(table, column, branch, value)
+    }
+
+    fn index_range(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: std::ops::Bound<&Value>,
+        end: std::ops::Bound<&Value>,
+    ) -> Vec<ObjectId> {
+        self.inner.index_range(table, column, branch, start, end)
+    }
+
+    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+        self.inner.index_scan_all(table, column, branch)
+    }
+
+    fn flush(&self) {
+        self.inner.flush();
+    }
+
+    fn flush_wal(&self) {
+        self.inner.flush_wal();
+    }
+
+    fn close(&self) -> Result<(), StorageError> {
+        self.inner.close()
+    }
+}
 
 fn test_schema() -> Schema {
     SchemaBuilder::new()
@@ -129,6 +366,19 @@ fn create_runtime_with_schema(schema: Schema, app_name: &str) -> TestCore {
 }
 
 fn create_runtime_with_storage(schema: Schema, app_name: &str, storage: MemoryStorage) -> TestCore {
+    let app_id = AppId::from_name(app_name);
+    let schema_manager =
+        SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
+    let mut core = RuntimeCore::new(schema_manager, storage, NoopScheduler, VecSyncSender::new());
+    core.immediate_tick();
+    core
+}
+
+fn create_runtime_with_boxed_storage(
+    schema: Schema,
+    app_name: &str,
+    storage: Box<dyn Storage>,
+) -> BoxedStorageTestCore {
     let app_id = AppId::from_name(app_name);
     let schema_manager =
         SchemaManager::new(SyncManager::new(), schema, app_id, "dev", "main").unwrap();
@@ -1398,6 +1648,43 @@ fn rc_insert_data_syncs_to_server() {
     let results = execute_query(&mut s.b, query);
     assert_eq!(results.len(), 1, "Server B should have the synced row");
     assert_eq!(results[0].0, id);
+}
+
+#[test]
+fn rc_insert_syncs_exact_row_version_without_row_region_reads() {
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "row-version-direct-sync-test",
+        Box::new(RowRegionReadFailingStorage::new()),
+    );
+    let server_id = ServerId::new();
+    core.add_server(server_id);
+    core.batched_tick();
+    core.sync_sender().take();
+
+    let (row_id, _row_values) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+    core.batched_tick();
+
+    let messages = core.sync_sender().take();
+    let row_sync = messages
+        .iter()
+        .find(|entry| match &entry.payload {
+            SyncPayload::RowVersionCreated { row, .. } => row.row_id == row_id,
+            SyncPayload::ObjectUpdated { object_id, .. } => *object_id == row_id,
+            _ => false,
+        })
+        .expect("insert should still sync the row upstream");
+
+    match &row_sync.payload {
+        SyncPayload::RowVersionCreated { row, .. } => {
+            assert_eq!(row.row_id, row_id);
+        }
+        other => {
+            panic!("local row writes should sync using the authored row version, got {other:?}")
+        }
+    }
 }
 
 #[test]
