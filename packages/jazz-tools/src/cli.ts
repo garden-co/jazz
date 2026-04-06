@@ -659,7 +659,7 @@ function serializeForwardLenses(forward: readonly Lens[]): PublishedTableLens[] 
       return {
         type: op.type,
         column: op.column,
-        columnType,
+        column_type: columnType,
         value,
       };
     }),
