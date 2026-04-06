@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { loadWasmModule } from "./runtime/client.js";
 import {
   createMigration,
   exportSchema,
@@ -72,6 +73,24 @@ async function captureConsoleLogs<T>(
     return { result, logs };
   } finally {
     spy.mockRestore();
+  }
+}
+
+async function computeTestSchemaHash(schema: object): Promise<string> {
+  const wasmModule = await loadWasmModule();
+  const runtime = new wasmModule.WasmRuntime(
+    JSON.stringify(schema),
+    "jazz-tools-cli-test",
+    "dev",
+    "main",
+    undefined,
+    undefined,
+  );
+
+  try {
+    return runtime.getSchemaHash();
+  } finally {
+    (runtime as { free?: () => void }).free?.();
   }
 }
 
@@ -365,7 +384,7 @@ describe("cli schema export", () => {
     ]);
     expect(exported.todos.policies).toBeUndefined();
     expect(snapshotFiles).toHaveLength(1);
-    expect(snapshotFiles[0]).toMatch(/^\d{8}T\d{6}-[0-9a-f]{64}\.json$/i);
+    expect(snapshotFiles[0]).toMatch(/^\d{8}T\d{6}-[0-9a-f]{12}\.json$/i);
   });
 
   it("does not write a duplicate snapshot when exporting the current schema twice", async () => {
@@ -442,7 +461,7 @@ describe("cli migrations", () => {
     expect(result).toBeNull();
     const snapshotFiles = (await readdir(snapshotsDir)).filter((name) => name.endsWith(".json"));
     expect(snapshotFiles).toHaveLength(1);
-    expect(snapshotFiles[0]).toMatch(/^\d{8}T\d{6}-[0-9a-f]{64}\.json$/i);
+    expect(snapshotFiles[0]).toMatch(/^\d{8}T\d{6}-[0-9a-f]{12}\.json$/i);
     expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(0);
     expect(logs.some((line) => line.startsWith("Wrote initial schema snapshot:"))).toBe(true);
     expect(logs).toContain(
@@ -551,7 +570,7 @@ describe("cli migrations", () => {
     expect(snapshotFiles).toHaveLength(2);
     expect(
       snapshotFiles.some(
-        (name) => /^\d{8}T\d{6}-/.test(name) && name.endsWith(`-${fromHash}.json`),
+        (name) => /^\d{8}T\d{6}-/.test(name) && name.endsWith(`-${fromShortHash}.json`),
       ),
     ).toBe(true);
     expect(logs).toContain("Migration stubs are only for structural schema changes.");
@@ -1097,12 +1116,13 @@ describe("bin integration", () => {
 
   it("loads schema export --schema-hash from a local snapshot without hitting the server", async () => {
     const { root } = await createWorkspace();
-    const schemaHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const schema = storedRootSchema();
+    const schemaHash = await computeTestSchemaHash(schema);
     const snapshotsDir = join(root, "migrations", "snapshots");
     await mkdir(snapshotsDir, { recursive: true });
     await writeFile(
-      join(snapshotsDir, `20260406T120000-${schemaHash}.json`),
-      JSON.stringify(storedRootSchema(), null, 2),
+      join(snapshotsDir, `20260406T120000-${schemaHash.slice(0, 12)}.json`),
+      JSON.stringify(schema, null, 2),
       "utf8",
     );
 
@@ -1111,12 +1131,13 @@ describe("bin integration", () => {
     });
 
     expect(result.status).toBe(0);
-    expect(JSON.parse(String(result.stdout))).toEqual(storedRootSchema());
+    expect(JSON.parse(String(result.stdout))).toEqual(schema);
   });
 
   it("fetches schema export --schema-hash from the server and persists the snapshot on miss", async () => {
     const { root } = await createWorkspace();
-    const schemaHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const schema = storedRootSchema();
+    const schemaHash = await computeTestSchemaHash(schema);
     const writes: string[] = [];
     const originalWrite = process.stdout.write.bind(process.stdout);
     const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
@@ -1130,7 +1151,7 @@ describe("bin integration", () => {
       expect(input).toContain(`/schema/${schemaHash}`);
       expect(init?.method).toBe("GET");
       expect(init?.headers).toMatchObject({ "X-Jazz-Admin-Secret": "admin-secret" });
-      return new Response(JSON.stringify(storedRootSchema()), { status: 200 });
+      return new Response(JSON.stringify(schema), { status: 200 });
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -1147,15 +1168,16 @@ describe("bin integration", () => {
       process.stdout.write = originalWrite;
     }
 
-    expect(JSON.parse(writes.join(""))).toEqual(storedRootSchema());
+    expect(JSON.parse(writes.join(""))).toEqual(schema);
+    const shortSchemaHash = schemaHash.slice(0, 12);
     const snapshotFiles = (await readdir(join(root, "migrations", "snapshots"))).filter((name) =>
-      name.endsWith(`-${schemaHash}.json`),
+      name.endsWith(`-${shortSchemaHash}.json`),
     );
     expect(snapshotFiles).toHaveLength(1);
-    expect(snapshotFiles[0]).toMatch(/^\d{8}T\d{6}-[0-9a-f]{64}\.json$/i);
+    expect(snapshotFiles[0]).toMatch(/^\d{8}T\d{6}-[0-9a-f]{12}\.json$/i);
     expect(
       JSON.parse(await readFile(join(root, "migrations", "snapshots", snapshotFiles[0]!), "utf8")),
-    ).toEqual(storedRootSchema());
+    ).toEqual(schema);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
