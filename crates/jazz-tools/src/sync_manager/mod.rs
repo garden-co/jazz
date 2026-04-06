@@ -47,6 +47,8 @@ pub struct SyncManager {
     pub(super) pending_query_subscriptions: Vec<PendingQuerySubscription>,
     /// Pending query unsubscriptions awaiting cleanup by QueryManager.
     pub(super) pending_query_unsubscriptions: Vec<PendingQueryUnsubscription>,
+    /// Row updates applied through row-region-native sync.
+    pub(super) pending_row_updates: Vec<RowUpdateEvent>,
 
     pub(super) next_pending_id: u64,
 
@@ -86,6 +88,7 @@ impl std::fmt::Debug for SyncManager {
                 "pending_query_unsubscriptions",
                 &self.pending_query_unsubscriptions,
             )
+            .field("pending_row_updates", &self.pending_row_updates)
             .field("next_pending_id", &self.next_pending_id)
             .field("my_tiers", &self.my_tiers)
             .field("commit_interest", &self.commit_interest)
@@ -128,6 +131,7 @@ impl SyncManager {
             pending_permission_checks: Vec::new(),
             pending_query_subscriptions: Vec::new(),
             pending_query_unsubscriptions: Vec::new(),
+            pending_row_updates: Vec::new(),
             next_pending_id: 0,
             my_tiers: HashSet::new(),
             commit_interest: HashMap::new(),
@@ -436,6 +440,53 @@ impl SyncManager {
         }
     }
 
+    /// Storage-backed version of `set_client_query_scope` that can replay row
+    /// objects directly from visible row regions.
+    pub fn set_client_query_scope_with_storage<H: Storage + ?Sized>(
+        &mut self,
+        storage: &H,
+        client_id: ClientId,
+        query_id: QueryId,
+        scope: HashSet<(ObjectId, BranchName)>,
+        session: Option<Session>,
+    ) {
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return;
+        };
+
+        let old_scope: HashSet<(ObjectId, BranchName)> = client
+            .queries
+            .values()
+            .flat_map(|q| q.scope.iter().cloned())
+            .collect();
+
+        client.queries.insert(
+            query_id,
+            QueryScope {
+                scope: scope.clone(),
+                session,
+            },
+        );
+
+        let new_scope: HashSet<(ObjectId, BranchName)> = client
+            .queries
+            .values()
+            .flat_map(|q| q.scope.iter().cloned())
+            .collect();
+
+        let newly_visible: Vec<(ObjectId, BranchName)> =
+            new_scope.difference(&old_scope).cloned().collect();
+
+        for (object_id, branch_name) in newly_visible {
+            self.queue_initial_sync_to_client_with_storage(
+                storage,
+                client_id,
+                object_id,
+                branch_name,
+            );
+        }
+    }
+
     /// Drop a client's query subscription state.
     ///
     /// Removes per-query scope and origin tracking.
@@ -522,6 +573,18 @@ impl SyncManager {
     /// Used by RuntimeCore to resolve `_persisted` mutation receivers.
     pub fn take_received_acks(&mut self) -> Vec<(CommitId, DurabilityTier)> {
         std::mem::take(&mut self.received_acks)
+    }
+
+    /// Take pending row updates for QueryManager to materialize into indices
+    /// and subscriptions.
+    pub fn take_pending_row_updates(&mut self) -> Vec<RowUpdateEvent> {
+        std::mem::take(&mut self.pending_row_updates)
+    }
+
+    /// Requeue row updates that could not be processed yet, typically because
+    /// the corresponding schema has not been activated yet.
+    pub fn requeue_pending_row_updates(&mut self, updates: Vec<RowUpdateEvent>) {
+        self.pending_row_updates.extend(updates);
     }
 
     /// Emit a QuerySettled notification to a client.

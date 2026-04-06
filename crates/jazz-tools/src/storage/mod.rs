@@ -307,11 +307,11 @@ pub trait Storage {
         ))
     }
 
-    fn patch_history_region_rows_by_batch(
+    fn patch_row_region_rows_by_batch(
         &mut self,
         _table: &str,
         _batch_id: crate::row_regions::BatchId,
-        _state: RowState,
+        _state: Option<RowState>,
         _confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
         Err(StorageError::IoError(
@@ -347,6 +347,16 @@ pub trait Storage {
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
         Err(StorageError::IoError(
             "row-region visible row scans are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn scan_history_row_versions(
+        &self,
+        _table: &str,
+        _row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        Err(StorageError::IoError(
+            "row-region history row scans are not implemented for this backend yet".to_string(),
         ))
     }
 
@@ -526,14 +536,14 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).upsert_visible_region_rows(table, rows)
     }
 
-    fn patch_history_region_rows_by_batch(
+    fn patch_row_region_rows_by_batch(
         &mut self,
         table: &str,
         batch_id: crate::row_regions::BatchId,
-        state: RowState,
+        state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
-        (**self).patch_history_region_rows_by_batch(table, batch_id, state, confirmed_tier)
+        (**self).patch_row_region_rows_by_batch(table, batch_id, state, confirmed_tier)
     }
 
     fn scan_visible_region(
@@ -559,6 +569,14 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         row_id: ObjectId,
     ) -> Result<Vec<StoredRowVersion>, StorageError> {
         (**self).scan_visible_region_row_versions(table, row_id)
+    }
+
+    fn scan_history_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        (**self).scan_history_row_versions(table, row_id)
     }
 
     fn scan_history_region(
@@ -999,11 +1017,11 @@ impl Storage for MemoryStorage {
         Ok(())
     }
 
-    fn patch_history_region_rows_by_batch(
+    fn patch_row_region_rows_by_batch(
         &mut self,
         table: &str,
         batch_id: crate::row_regions::BatchId,
-        state: RowState,
+        state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
         let Some(regions) = self.row_regions.get_mut(table) else {
@@ -1012,7 +1030,9 @@ impl Storage for MemoryStorage {
 
         for row in regions.history.values_mut() {
             if row.batch_id == batch_id {
-                row.state = state;
+                if let Some(state) = state {
+                    row.state = state;
+                }
                 row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
                     (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
                     (Some(existing), None) => Some(existing),
@@ -1023,7 +1043,9 @@ impl Storage for MemoryStorage {
 
         for row in regions.visible.values_mut() {
             if row.batch_id == batch_id {
-                row.state = state;
+                if let Some(state) = state {
+                    row.state = state;
+                }
                 row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
                     (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
                     (Some(existing), None) => Some(existing),
@@ -1080,6 +1102,25 @@ impl Storage for MemoryStorage {
             .map(|(_, row)| row.clone())
             .collect();
         rows.sort_by_key(|row| row.branch.clone());
+        Ok(rows)
+    }
+
+    fn scan_history_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        let Some(regions) = self.row_regions.get(table) else {
+            return Ok(Vec::new());
+        };
+
+        let mut rows: Vec<_> = regions
+            .history
+            .iter()
+            .filter(|((_, history_row_id, _), _)| *history_row_id == row_id)
+            .map(|(_, row)| row.clone())
+            .collect();
+        rows.sort_by_key(|row| (row.branch.clone(), row.updated_at));
         Ok(rows)
     }
 
@@ -1507,11 +1548,13 @@ mod tests {
             .unwrap();
 
         let visible = storage.scan_visible_region("users", "dev/main").unwrap();
+        let history_by_row = storage.scan_history_row_versions("users", row_id).unwrap();
         let history = storage
             .scan_history_region("users", "dev/main", HistoryScan::Row { row_id })
             .unwrap();
 
         assert_eq!(visible, vec![version.clone()]);
+        assert_eq!(history_by_row, vec![version.clone()]);
         assert_eq!(history, vec![version]);
     }
 

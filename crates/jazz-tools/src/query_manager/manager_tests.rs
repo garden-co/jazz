@@ -8087,7 +8087,12 @@ fn server_builds_query_graph_on_subscription() {
     let object_updates: Vec<_> = outbox
         .iter()
         .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
-        .filter(|e| matches!(e.payload, SyncPayload::ObjectUpdated { .. }))
+        .filter(|e| {
+            matches!(
+                e.payload,
+                SyncPayload::ObjectUpdated { .. } | SyncPayload::RowVersionNeeded { .. }
+            )
+        })
         .collect();
 
     assert_eq!(
@@ -8099,12 +8104,10 @@ fn server_builds_query_graph_on_subscription() {
     // Verify the correct ObjectIds were sent
     let sent_ids: std::collections::HashSet<_> = object_updates
         .iter()
-        .filter_map(|e| {
-            if let SyncPayload::ObjectUpdated { object_id, .. } = &e.payload {
-                Some(object_id)
-            } else {
-                None
-            }
+        .filter_map(|e| match &e.payload {
+            SyncPayload::ObjectUpdated { object_id, .. } => Some(object_id),
+            SyncPayload::RowVersionNeeded { row, .. } => Some(&row.row_id),
+            _ => None,
         })
         .collect();
 
@@ -8163,7 +8166,12 @@ fn server_subscription_reads_visible_region_after_legacy_commit_history_is_remov
     let object_updates: Vec<_> = outbox
         .iter()
         .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == client_id))
-        .filter(|entry| matches!(entry.payload, SyncPayload::ObjectUpdated { .. }))
+        .filter(|entry| {
+            matches!(
+                entry.payload,
+                SyncPayload::ObjectUpdated { .. } | SyncPayload::RowVersionNeeded { .. }
+            )
+        })
         .collect();
 
     assert_eq!(
@@ -8173,7 +8181,8 @@ fn server_subscription_reads_visible_region_after_legacy_commit_history_is_remov
     );
     match &object_updates[0].payload {
         SyncPayload::ObjectUpdated { object_id, .. } => assert_eq!(*object_id, handle.row_id),
-        payload => panic!("expected ObjectUpdated, got {payload:?}"),
+        SyncPayload::RowVersionNeeded { row, .. } => assert_eq!(row.row_id, handle.row_id),
+        payload => panic!("expected row update, got {payload:?}"),
     }
 }
 
@@ -8416,7 +8425,12 @@ fn server_pushes_new_matches() {
     let object_updates: Vec<_> = outbox
         .iter()
         .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
-        .filter(|e| matches!(e.payload, SyncPayload::ObjectUpdated { .. }))
+        .filter(|e| {
+            matches!(
+                e.payload,
+                SyncPayload::ObjectUpdated { .. } | SyncPayload::RowVersionNeeded { .. }
+            )
+        })
         .collect();
 
     assert_eq!(
@@ -8426,8 +8440,14 @@ fn server_pushes_new_matches() {
     );
 
     // Verify it's Charlie
-    if let SyncPayload::ObjectUpdated { object_id, .. } = &object_updates[0].payload {
-        assert_eq!(*object_id, handle2.row_id, "Should send Charlie's ObjectId");
+    match &object_updates[0].payload {
+        SyncPayload::ObjectUpdated { object_id, .. } => {
+            assert_eq!(*object_id, handle2.row_id, "Should send Charlie's ObjectId");
+        }
+        SyncPayload::RowVersionNeeded { row, .. } => {
+            assert_eq!(row.row_id, handle2.row_id, "Should send Charlie's ObjectId");
+        }
+        payload => panic!("expected row update, got {payload:?}"),
     }
 }
 
@@ -9143,7 +9163,11 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     let relayed: Vec<_> = outbox
         .iter()
         .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
-        .filter(|e| matches!(&e.payload, SyncPayload::ObjectUpdated { object_id, .. } if *object_id == handle.row_id))
+        .filter(|e| match &e.payload {
+            SyncPayload::ObjectUpdated { object_id, .. } => *object_id == handle.row_id,
+            SyncPayload::RowVersionNeeded { row, .. } => row.row_id == handle.row_id,
+            _ => false,
+        })
         .collect();
 
     assert_eq!(

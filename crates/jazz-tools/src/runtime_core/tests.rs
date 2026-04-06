@@ -364,13 +364,15 @@ fn outbox_has_object_update_for_client(
         matches!(
             &entry.destination,
             Destination::Client(dest_client_id) if *dest_client_id == client_id
-        ) && matches!(
-            &entry.payload,
+        ) && match &entry.payload {
             SyncPayload::ObjectUpdated {
                 object_id: payload_object_id,
                 ..
-            } if *payload_object_id == object_id
-        )
+            } => *payload_object_id == object_id,
+            SyncPayload::RowVersionNeeded { row, .. }
+            | SyncPayload::RowVersionCreated { row, .. } => row.row_id == object_id,
+            _ => false,
+        }
     })
 }
 
@@ -419,11 +421,10 @@ fn add_server_rehydrates_visible_rows_from_storage_after_restart() {
     restarted.batched_tick();
 
     let messages = restarted.sync_sender().take();
-    let synced_row = messages.iter().find(|message| {
-        matches!(
-            &message.payload,
-            SyncPayload::ObjectUpdated { object_id, .. } if *object_id == row_object_id
-        )
+    let synced_row = messages.iter().find(|message| match &message.payload {
+        SyncPayload::ObjectUpdated { object_id, .. } => *object_id == row_object_id,
+        SyncPayload::RowVersionCreated { row, .. } => row.row_id == row_object_id,
+        _ => false,
     });
 
     assert!(
@@ -1756,6 +1757,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
         match entry.payload {
             payload @ SyncPayload::QuerySettled { .. } => settled_to_a.push(payload),
             payload @ SyncPayload::ObjectUpdated { .. } => updates_to_a.push(payload),
+            payload @ SyncPayload::RowVersionNeeded { .. } => updates_to_a.push(payload),
             _ => {}
         }
     }
@@ -2395,11 +2397,10 @@ fn test_matching_catalogue_hash_skips_catalogue_replay_on_add_server() {
             SyncPayload::ObjectUpdated { object_id, .. } if *object_id == schema_obj_id
         )
     });
-    let row_msg = messages.iter().find(|m| {
-        matches!(
-            &m.payload,
-            SyncPayload::ObjectUpdated { object_id, .. } if *object_id == row_object_id
-        )
+    let row_msg = messages.iter().find(|m| match &m.payload {
+        SyncPayload::ObjectUpdated { object_id, .. } => *object_id == row_object_id,
+        SyncPayload::RowVersionCreated { row, .. } => row.row_id == row_object_id,
+        _ => false,
     });
 
     assert!(
