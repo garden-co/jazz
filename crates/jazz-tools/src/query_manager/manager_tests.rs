@@ -14,6 +14,7 @@ use crate::query_manager::types::{
     ColumnDescriptor, ColumnType, PolicyExpr, RowDescriptor, Schema, TableName, TablePolicies,
     TableSchema, Value,
 };
+use crate::row_regions::{HistoryScan, RowState};
 #[cfg(all(feature = "fjall", not(target_arch = "wasm32")))]
 use crate::storage::FjallStorage;
 use crate::storage::{MemoryStorage, Storage};
@@ -976,6 +977,51 @@ fn insert_returns_handle_with_commit_id() {
 }
 
 #[test]
+fn insert_materializes_visible_and_history_row_regions() {
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let descriptor = schema
+        .get(&TableName::new("users"))
+        .unwrap()
+        .columns
+        .clone();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let branch = get_branch(&qm);
+    let visible = storage.scan_visible_region("users", &branch).unwrap();
+    let history = storage
+        .scan_history_region(
+            "users",
+            &branch,
+            HistoryScan::Row {
+                row_id: handle.row_id,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(visible.len(), 1);
+    assert_eq!(history, visible);
+
+    let stored = &history[0];
+    assert_eq!(stored.row_id, handle.row_id);
+    assert_eq!(stored.branch, branch);
+    assert_eq!(stored.state, RowState::VisibleDirect);
+    assert!(!stored.is_deleted);
+    assert_eq!(
+        decode_row(&descriptor, &stored.data).unwrap(),
+        vec![Value::Text("Alice".into()), Value::Integer(100)]
+    );
+}
+
+#[test]
 fn row_is_indexed_after_insert() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
@@ -1518,6 +1564,60 @@ fn synced_update_updates_column_indices() {
         results.len(),
         1,
         "New score value should be in index after sync update"
+    );
+}
+
+#[test]
+fn synced_insert_materializes_visible_and_history_row_regions() {
+    use crate::query_manager::encoding::encode_row;
+    use std::collections::HashMap;
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let descriptor = schema
+        .get(&TableName::new("users"))
+        .unwrap()
+        .columns
+        .clone();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let branch = get_branch(&qm);
+    let row_id = crate::object::ObjectId::new();
+
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_object(&mut storage, row_id, metadata);
+
+    let row_data = encode_row(
+        &descriptor,
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    )
+    .unwrap();
+    let commit = stored_row_commit(smallvec![], row_data, 1000, row_id.to_string());
+    qm.sync_manager_mut()
+        .object_manager
+        .receive_commit(&mut storage, row_id, &branch, commit)
+        .unwrap();
+
+    qm.process(&mut storage);
+
+    let visible = storage.scan_visible_region("users", &branch).unwrap();
+    let history = storage
+        .scan_history_region("users", &branch, HistoryScan::Row { row_id })
+        .unwrap();
+
+    assert_eq!(visible.len(), 1);
+    assert_eq!(history, visible);
+
+    let stored = &history[0];
+    assert_eq!(stored.row_id, row_id);
+    assert_eq!(stored.branch, branch);
+    assert_eq!(stored.state, RowState::VisibleDirect);
+    assert!(!stored.is_deleted);
+    assert_eq!(
+        decode_row(&descriptor, &stored.data).unwrap(),
+        vec![Value::Text("Alice".into()), Value::Integer(100)]
     );
 }
 

@@ -5,6 +5,7 @@ use crate::metadata::{
     DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
 };
 use crate::object::{BranchName, ObjectId};
+use crate::row_regions::{BatchId, RowState, StoredRowVersion};
 use crate::storage::Storage;
 
 use super::encoding::{decode_column, decode_row, encode_row};
@@ -76,6 +77,77 @@ impl QueryManager {
         delete_kind: Option<DeleteKind>,
     ) -> std::collections::BTreeMap<String, String> {
         row_provenance_metadata(provenance, delete_kind)
+    }
+
+    fn stored_row_version_for_tip(
+        &self,
+        row_id: ObjectId,
+        branch_name: &str,
+    ) -> Option<StoredRowVersion> {
+        let (commit, commit_id) = self.load_row_tip_on_branch(row_id, branch_name)?;
+        let provenance = commit
+            .row_provenance()
+            .unwrap_or_else(|| RowProvenance::for_insert(commit.author.clone(), commit.timestamp));
+
+        Some(StoredRowVersion {
+            row_id,
+            branch: branch_name.to_string(),
+            updated_at: provenance.updated_at,
+            created_by: provenance.created_by,
+            created_at: provenance.created_at,
+            updated_by: provenance.updated_by,
+            batch_id: BatchId::from_commit_id(commit_id),
+            state: RowState::VisibleDirect,
+            confirmed_tier: commit.ack_state.confirmed_tiers.iter().copied().max(),
+            is_deleted: commit.is_soft_deleted() || commit.is_hard_deleted(),
+            data: commit.content.clone(),
+            metadata: commit
+                .metadata
+                .as_ref()
+                .map(|metadata| {
+                    metadata
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
+
+    pub(super) fn persist_row_region_tip<H: Storage + ?Sized>(
+        &self,
+        storage: &mut H,
+        table: &str,
+        row_id: ObjectId,
+        branch_name: &str,
+    ) {
+        let Some(version) = self.stored_row_version_for_tip(row_id, branch_name) else {
+            return;
+        };
+
+        if let Err(error) =
+            storage.append_history_region_rows(table, std::slice::from_ref(&version))
+        {
+            tracing::warn!(
+                table,
+                branch = branch_name,
+                row_id = %row_id,
+                %error,
+                "failed to append row-region history row"
+            );
+        }
+
+        if let Err(error) =
+            storage.upsert_visible_region_rows(table, std::slice::from_ref(&version))
+        {
+            tracing::warn!(
+                table,
+                branch = branch_name,
+                row_id = %row_id,
+                %error,
+                "failed to upsert row-region visible row"
+            );
+        }
     }
 
     fn load_row_tip_on_branch(
@@ -260,7 +332,7 @@ impl QueryManager {
         storage: &mut H,
         branch: &str,
         id: ObjectId,
-        new_data: &[u8],
+        prepared: &PreparedUpdateWrite,
         timestamp: u64,
         provenance: &RowProvenance,
     ) -> Result<CommitId, QueryError> {
@@ -279,7 +351,7 @@ impl QueryManager {
                 id,
                 branch,
                 parents,
-                new_data.to_vec(),
+                prepared.new_data.clone(),
                 timestamp,
                 provenance.updated_by.clone(),
                 Some(Self::row_commit_metadata(provenance, None)),
@@ -288,6 +360,8 @@ impl QueryManager {
 
         self.sync_manager
             .forward_update_to_servers(id, branch.into());
+
+        self.persist_row_region_tip(storage, &prepared.table_name.0, id, branch);
 
         Ok(commit_id)
     }
@@ -466,7 +540,9 @@ impl QueryManager {
         // Forward new row to all connected servers
         tracing::trace!(%object_id, ?row_commit_id, "forward to servers");
         self.sync_manager
-            .forward_update_to_servers(object_id, branch.into());
+            .forward_update_to_servers(object_id, branch.clone().into());
+
+        self.persist_row_region_tip(storage, table, object_id, branch.as_str());
 
         // Update indices immediately and persist
         self.update_indices_for_insert(storage, table, object_id, &data, &descriptor)?;
@@ -619,6 +695,8 @@ impl QueryManager {
         // Forward new row to all connected servers
         self.sync_manager
             .forward_update_to_servers(object_id, branch.into());
+
+        self.persist_row_region_tip(storage, table, object_id, branch);
 
         // Update indices on specified branch
         Self::update_indices_for_insert_on_branch(
@@ -1223,7 +1301,7 @@ impl QueryManager {
             storage,
             branch.as_str(),
             id,
-            &prepared.new_data,
+            &prepared,
             timestamp,
             &new_provenance,
         )?;
@@ -1291,7 +1369,7 @@ impl QueryManager {
             storage,
             branch,
             id,
-            &prepared.new_data,
+            &prepared,
             timestamp,
             &new_provenance,
         )?;
@@ -1506,7 +1584,9 @@ impl QueryManager {
         let branch = self.current_branch();
         tracing::trace!(%id, ?delete_commit_id, "forward delete to servers");
         self.sync_manager
-            .forward_update_to_servers(id, branch.into());
+            .forward_update_to_servers(id, branch.clone().into());
+
+        self.persist_row_region_tip(storage, &table, id, branch.as_str());
 
         // Update indices: remove from _id and column indices, add to _id_deleted
         self.update_indices_for_soft_delete(storage, &table, id, &old_data, &descriptor)?;
@@ -1658,6 +1738,8 @@ impl QueryManager {
         self.sync_manager
             .forward_update_to_servers(id, branch.into());
 
+        self.persist_row_region_tip(storage, table, id, branch);
+
         Self::update_indices_for_soft_delete_on_branch(
             storage,
             table,
@@ -1774,6 +1856,8 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
+        self.persist_row_region_tip(storage, &table, id, self.current_branch().as_str());
+
         // Update indices: remove from _id_deleted, add to _id and column indices
         self.update_indices_for_undelete(storage, &table, id, &new_data, &descriptor)?;
 
@@ -1875,6 +1959,8 @@ impl QueryManager {
             self.current_branch(),
             tail_ids,
         );
+
+        self.persist_row_region_tip(storage, &table, id, self.current_branch().as_str());
 
         // Mark subscriptions dirty and mark row as deleted
         self.mark_subscriptions_dirty_local(&table);

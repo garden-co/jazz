@@ -16,16 +16,18 @@ use fjall::{
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
+use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
 use crate::sync_manager::DurabilityTier;
 
 use super::{
     CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
     storage_core::{
         append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
-        create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
-        index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
-        store_ack_tier_core,
+        append_history_region_rows_core, create_object_core, delete_commit_core, index_insert_core,
+        index_lookup_core, index_range_core, index_remove_core, index_scan_all_core,
+        load_branch_core, load_catalogue_manifest_core, load_object_metadata_core,
+        patch_row_region_rows_by_batch_core, scan_history_region_core, scan_visible_region_core,
+        set_branch_tails_core, store_ack_tier_core, upsert_visible_region_rows_core,
     },
 };
 
@@ -344,6 +346,82 @@ impl Storage for FjallStorage {
         })
     }
 
+    fn append_history_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let mut tx = inner.db.write_tx();
+            append_history_region_rows_core(table, rows, |key, bytes| {
+                Self::set_on_tx(&mut tx, &inner.keyspace, key, bytes)
+            })?;
+            Self::commit_tx(tx)
+        })
+    }
+
+    fn upsert_visible_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let mut tx = inner.db.write_tx();
+            upsert_visible_region_rows_core(table, rows, |key, bytes| {
+                Self::set_on_tx(&mut tx, &inner.keyspace, key, bytes)
+            })?;
+            Self::commit_tx(tx)
+        })
+    }
+
+    fn patch_history_region_rows_by_batch(
+        &mut self,
+        table: &str,
+        batch_id: crate::row_regions::BatchId,
+        state: RowState,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        self.with_inner(|inner| {
+            let tx = RefCell::new(inner.db.write_tx());
+            patch_row_region_rows_by_batch_core(
+                table,
+                batch_id,
+                state,
+                confirmed_tier,
+                |prefix| Self::scan_prefix(&*tx.borrow(), &inner.keyspace, prefix),
+                |key, bytes| Self::set_on_cell(&tx, &inner.keyspace, key, bytes),
+            )?;
+            Self::commit_tx(tx.into_inner())
+        })
+    }
+
+    fn scan_visible_region(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            scan_visible_region_core(table, branch, |prefix| {
+                Self::scan_prefix(&tx, &inner.keyspace, prefix)
+            })
+        })
+    }
+
+    fn scan_history_region(
+        &self,
+        table: &str,
+        branch: &str,
+        scan: HistoryScan,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            scan_history_region_core(table, branch, scan, |prefix| {
+                Self::scan_prefix(&tx, &inner.keyspace, prefix)
+            })
+        })
+    }
+
     fn index_insert(
         &mut self,
         table: &str,
@@ -463,6 +541,47 @@ mod tests {
 
         let reopened = FjallStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
         reopened.close().unwrap();
+    }
+
+    #[test]
+    fn fjall_storage_row_regions_visible_and_history_round_trip() {
+        use crate::row_regions::{BatchId, HistoryScan, RowState, StoredRowVersion};
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.fjall");
+        let mut storage = FjallStorage::open(&db_path, 8 * 1024 * 1024).unwrap();
+        let row_id = ObjectId::new();
+        let batch_id = BatchId::new();
+
+        let version = StoredRowVersion {
+            row_id,
+            branch: "dev/main".to_string(),
+            updated_at: 10,
+            created_by: "alice".to_string(),
+            created_at: 10,
+            updated_by: "alice".to_string(),
+            batch_id,
+            state: RowState::VisibleDirect,
+            confirmed_tier: Some(DurabilityTier::Worker),
+            is_deleted: false,
+            data: b"alice".to_vec(),
+            metadata: HashMap::new(),
+        };
+
+        storage
+            .append_history_region_rows("users", &[version.clone()])
+            .unwrap();
+        storage
+            .upsert_visible_region_rows("users", &[version.clone()])
+            .unwrap();
+
+        let visible = storage.scan_visible_region("users", "dev/main").unwrap();
+        let history = storage
+            .scan_history_region("users", "dev/main", HistoryScan::Row { row_id })
+            .unwrap();
+
+        assert_eq!(visible, vec![version.clone()]);
+        assert_eq!(history, vec![version]);
     }
 
     mod fjall_conformance {

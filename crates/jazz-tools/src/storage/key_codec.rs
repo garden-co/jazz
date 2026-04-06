@@ -153,6 +153,49 @@ pub(super) fn ack_key(commit_id: CommitId) -> String {
     format!("ack:{}", hex::encode(commit_id.0))
 }
 
+#[allow(dead_code)]
+pub(super) fn visible_row_key(table: &str, branch: &str, row_id: ObjectId) -> String {
+    format!("row:{table}:0:{branch}:{}", format_uuid(row_id))
+}
+
+#[allow(dead_code)]
+pub(super) fn visible_row_prefix(table: &str, branch: &str) -> String {
+    format!("row:{table}:0:{branch}:")
+}
+
+#[allow(dead_code)]
+pub(super) fn visible_table_prefix(table: &str) -> String {
+    format!("row:{table}:0:")
+}
+
+#[allow(dead_code)]
+pub(super) fn history_row_key(
+    table: &str,
+    branch: &str,
+    row_id: ObjectId,
+    updated_at: u64,
+) -> String {
+    format!(
+        "row:{table}:1:{branch}:{}:{updated_at:016x}",
+        format_uuid(row_id)
+    )
+}
+
+#[allow(dead_code)]
+pub(super) fn history_row_prefix(table: &str, branch: &str) -> String {
+    format!("row:{table}:1:{branch}:")
+}
+
+#[allow(dead_code)]
+pub(super) fn history_row_versions_prefix(table: &str, branch: &str, row_id: ObjectId) -> String {
+    format!("row:{table}:1:{branch}:{}:", format_uuid(row_id))
+}
+
+#[allow(dead_code)]
+pub(super) fn history_table_prefix(table: &str) -> String {
+    format!("row:{table}:1:")
+}
+
 pub(super) fn catalogue_manifest_op_key(app_id: ObjectId, object_id: ObjectId) -> String {
     format!(
         "catman:{}:op:{}",
