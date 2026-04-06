@@ -210,7 +210,7 @@
   user-select: none;
 }
 
-.gridHeaderCell[aria-selected='true'] {
+.gridHeaderCell[aria-selected="true"] {
   outline: none;
 }
 
