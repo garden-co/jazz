@@ -66,6 +66,43 @@ pub struct StoredRowVersion {
 }
 
 impl StoredRowVersion {
+    pub fn from_commit(
+        row_id: ObjectId,
+        branch: impl Into<String>,
+        commit_id: CommitId,
+        commit: &Commit,
+        state: RowState,
+    ) -> Self {
+        let provenance = commit
+            .row_provenance()
+            .unwrap_or_else(|| RowProvenance::for_insert(commit.author.clone(), commit.timestamp));
+
+        Self {
+            row_id,
+            branch: branch.into(),
+            parents: commit.parents.iter().copied().collect(),
+            updated_at: provenance.updated_at,
+            created_by: provenance.created_by,
+            created_at: provenance.created_at,
+            updated_by: provenance.updated_by,
+            batch_id: BatchId::from_commit_id(commit_id),
+            state,
+            confirmed_tier: commit.ack_state.confirmed_tiers.iter().copied().max(),
+            is_deleted: commit.is_soft_deleted() || commit.is_hard_deleted(),
+            data: commit.content.clone(),
+            metadata: commit
+                .metadata
+                .as_ref()
+                .map(|metadata| {
+                    metadata
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
     pub fn row_provenance(&self) -> RowProvenance {
         RowProvenance {
             created_by: self.created_by.clone(),

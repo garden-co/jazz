@@ -7,7 +7,7 @@ use smolset::SmolSet;
 use crate::commit::{Commit, CommitId, StoredState};
 use crate::metadata::MetadataKey;
 use crate::object::{Branch, BranchLoadedState, BranchName, Object, ObjectId};
-use crate::row_regions::StoredRowVersion;
+use crate::row_regions::{RowState, StoredRowVersion};
 use crate::storage::{LoadedBranch, Storage, StorageError};
 
 /// Unique identifier for a subscription.
@@ -58,6 +58,16 @@ pub struct AllObjectUpdate {
     pub old_content: Option<Vec<u8>>,
 }
 
+/// Visible row change emitted when a row object's winning version changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowObjectUpdate {
+    pub object_id: ObjectId,
+    pub metadata: HashMap<String, String>,
+    pub row: StoredRowVersion,
+    pub previous_row: Option<StoredRowVersion>,
+    pub is_new_object: bool,
+}
+
 /// Errors that can occur when managing objects and commits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -102,6 +112,8 @@ pub struct ObjectManager {
     next_all_objects_subscription_id: u64,
     /// Outbox for global subscription updates.
     pub all_objects_outbox: Vec<AllObjectUpdate>,
+    /// Outbox for visible row changes.
+    pub row_objects_outbox: Vec<RowObjectUpdate>,
     /// Last timestamp used, for monotonic ordering.
     last_timestamp: u64,
 }
@@ -222,6 +234,91 @@ impl ObjectManager {
             tails: None,
             loaded_state: BranchLoadedState::AllCommits,
         }
+    }
+
+    fn winning_tip_for_branch(branch: &Branch) -> Option<(CommitId, &Commit)> {
+        let mut tips = Self::tips_by_timestamp(&branch.commits, &branch.tips);
+        let tip_id = tips.pop()?;
+        let commit = branch.commits.get(&tip_id)?;
+        Some((tip_id, commit))
+    }
+
+    fn row_version_from_commit(
+        object_id: ObjectId,
+        branch_name: &BranchName,
+        commit_id: CommitId,
+        commit: &Commit,
+    ) -> StoredRowVersion {
+        StoredRowVersion::from_commit(
+            object_id,
+            branch_name.as_str().to_string(),
+            commit_id,
+            commit,
+            RowState::VisibleDirect,
+        )
+    }
+
+    fn persist_row_version<H: Storage>(
+        io: &mut H,
+        table: &str,
+        row: &StoredRowVersion,
+        visible_changed: bool,
+    ) {
+        if let Err(error) = io.append_history_region_rows(table, std::slice::from_ref(row)) {
+            tracing::warn!(
+                table,
+                branch = row.branch,
+                row_id = %row.row_id,
+                %error,
+                "failed to append row-region history row"
+            );
+        }
+
+        if visible_changed
+            && let Err(error) = io.upsert_visible_region_rows(table, std::slice::from_ref(row))
+        {
+            tracing::warn!(
+                table,
+                branch = row.branch,
+                row_id = %row.row_id,
+                %error,
+                "failed to upsert row-region visible row"
+            );
+        }
+    }
+
+    fn notify_row_object_update<H: Storage>(
+        &mut self,
+        io: &mut H,
+        object_id: ObjectId,
+        metadata: &HashMap<String, String>,
+        previous_row: Option<StoredRowVersion>,
+        current_row: StoredRowVersion,
+    ) {
+        let Some(table) = metadata.get(MetadataKey::Table.as_str()).cloned() else {
+            return;
+        };
+
+        let visible_changed = previous_row
+            .as_ref()
+            .map(|previous| previous.version_id() != current_row.version_id())
+            .unwrap_or(true);
+
+        Self::persist_row_version(io, &table, &current_row, visible_changed);
+
+        if !visible_changed {
+            return;
+        }
+
+        let is_new_object = previous_row.is_none();
+
+        self.row_objects_outbox.push(RowObjectUpdate {
+            object_id,
+            metadata: metadata.clone(),
+            row: current_row,
+            previous_row,
+            is_new_object,
+        });
     }
 
     /// Get an object by id.
@@ -388,7 +485,7 @@ impl ObjectManager {
 
         // Capture previous state BEFORE mutation for AllObjectUpdate
         // (previous_commit_ids, old_content)
-        let (previous_commit_ids, old_content) = {
+        let (previous_commit_ids, old_content, previous_row) = {
             let object = self
                 .get(object_id)
                 .ok_or(Error::ObjectNotFound(object_id))?;
@@ -424,10 +521,14 @@ impl ObjectManager {
                     .last()
                     .and_then(|tip_id| branch.commits.get(tip_id))
                     .map(|commit| commit.content.clone());
-                (prev_tips, old_content)
+                let previous_row =
+                    Self::winning_tip_for_branch(branch).map(|(commit_id, commit)| {
+                        Self::row_version_from_commit(object_id, &branch_name, commit_id, commit)
+                    });
+                (prev_tips, old_content, previous_row)
             } else {
                 // New branch - no previous state
-                (vec![], None)
+                (vec![], None, None)
             }
         };
 
@@ -480,13 +581,31 @@ impl ObjectManager {
 
         // Notify global subscribers - with sync storage, objects are never "new/creating"
         // for the purpose of this notification (they're immediately persisted)
-        self.notify_all_object_subscribers(
-            object_id,
-            branch_name,
-            false, // is_new - always false with sync storage
-            previous_commit_ids,
-            old_content,
-        );
+        let metadata = self
+            .get(object_id)
+            .map(|object| object.metadata.clone())
+            .unwrap_or_default();
+        let current_row = self
+            .get(object_id)
+            .and_then(|object| object.branches.get(&branch_name))
+            .and_then(Self::winning_tip_for_branch)
+            .map(|(commit_id, commit)| {
+                Self::row_version_from_commit(object_id, &branch_name, commit_id, commit)
+            });
+
+        if let Some(current_row) = current_row
+            && metadata.contains_key(MetadataKey::Table.as_str())
+        {
+            self.notify_row_object_update(io, object_id, &metadata, previous_row, current_row);
+        } else {
+            self.notify_all_object_subscribers(
+                object_id,
+                branch_name,
+                false, // is_new - always false with sync storage
+                previous_commit_ids,
+                old_content,
+            );
+        }
 
         Ok(commit_id)
     }
@@ -648,7 +767,7 @@ impl ObjectManager {
         let commit_id = commit.id();
 
         // Capture previous state BEFORE mutation for AllObjectUpdate
-        let (previous_commit_ids, old_content, already_exists) = {
+        let (previous_commit_ids, old_content, previous_row, already_exists) = {
             let object = self
                 .get(object_id)
                 .ok_or(Error::ObjectNotFound(object_id))?;
@@ -656,7 +775,7 @@ impl ObjectManager {
             if let Some(branch) = object.branches.get(&branch_name) {
                 // Check if commit already exists (idempotent)
                 if branch.commits.contains_key(&commit_id) {
-                    (vec![], None, true)
+                    (vec![], None, None, true)
                 } else {
                     let prev_tips = Self::tips_by_timestamp(&branch.commits, &branch.tips);
                     // Last tip in sorted order is the "winner" (newest by timestamp)
@@ -664,11 +783,15 @@ impl ObjectManager {
                         .last()
                         .and_then(|tip_id| branch.commits.get(tip_id))
                         .map(|commit| commit.content.clone());
-                    (prev_tips, old_content, false)
+                    let previous_row =
+                        Self::winning_tip_for_branch(branch).map(|(tip_id, commit)| {
+                            Self::row_version_from_commit(object_id, &branch_name, tip_id, commit)
+                        });
+                    (prev_tips, old_content, previous_row, false)
                 }
             } else {
                 // New branch - no previous state
-                (vec![], None, false)
+                (vec![], None, None, false)
             }
         };
 
@@ -710,13 +833,31 @@ impl ObjectManager {
         self.notify_subscribers_of_commit(object_id, branch_name);
 
         // Notify global subscribers (received objects are never "new" from our perspective)
-        self.notify_all_object_subscribers(
-            object_id,
-            branch_name,
-            false,
-            previous_commit_ids,
-            old_content,
-        );
+        let metadata = self
+            .get(object_id)
+            .map(|object| object.metadata.clone())
+            .unwrap_or_default();
+        let current_row = self
+            .get(object_id)
+            .and_then(|object| object.branches.get(&branch_name))
+            .and_then(Self::winning_tip_for_branch)
+            .map(|(tip_id, commit)| {
+                Self::row_version_from_commit(object_id, &branch_name, tip_id, commit)
+            });
+
+        if let Some(current_row) = current_row
+            && metadata.contains_key(MetadataKey::Table.as_str())
+        {
+            self.notify_row_object_update(io, object_id, &metadata, previous_row, current_row);
+        } else {
+            self.notify_all_object_subscribers(
+                object_id,
+                branch_name,
+                false,
+                previous_commit_ids,
+                old_content,
+            );
+        }
 
         Ok(commit_id)
     }
@@ -801,6 +942,26 @@ impl ObjectManager {
     /// Take all pending global object updates.
     pub fn take_all_object_updates(&mut self) -> Vec<AllObjectUpdate> {
         std::mem::take(&mut self.all_objects_outbox)
+    }
+
+    /// Take all pending visible row updates.
+    pub fn take_row_object_updates(&mut self) -> Vec<RowObjectUpdate> {
+        std::mem::take(&mut self.row_objects_outbox)
+    }
+
+    /// Take one pending visible row update for the given concrete row version.
+    pub fn take_row_object_update_for(
+        &mut self,
+        object_id: ObjectId,
+        branch_name: &BranchName,
+        version_id: CommitId,
+    ) -> Option<RowObjectUpdate> {
+        let index = self.row_objects_outbox.iter().position(|update| {
+            update.object_id == object_id
+                && update.row.branch == branch_name.as_str()
+                && update.row.version_id() == version_id
+        })?;
+        Some(self.row_objects_outbox.remove(index))
     }
 
     /// Emit an update to all global subscribers.

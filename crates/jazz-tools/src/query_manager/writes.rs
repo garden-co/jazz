@@ -5,7 +5,9 @@ use crate::metadata::{
     DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
 };
 use crate::object::{BranchName, ObjectId};
-use crate::row_regions::{BatchId, RowState, StoredRowVersion};
+use crate::row_regions::StoredRowVersion;
+#[cfg(test)]
+use crate::row_regions::{BatchId, RowState};
 use crate::storage::Storage;
 
 use super::encoding::{decode_column, decode_row, encode_row};
@@ -27,8 +29,6 @@ pub struct RowBranchWrite<'a> {
 }
 
 struct PreparedUpdateWrite {
-    table_name: TableName,
-    descriptor: RowDescriptor,
     new_data: Vec<u8>,
 }
 
@@ -79,6 +79,7 @@ impl QueryManager {
         row_provenance_metadata(provenance, delete_kind)
     }
 
+    #[cfg(test)]
     fn stored_row_version_for_tip(
         &self,
         row_id: ObjectId,
@@ -115,6 +116,7 @@ impl QueryManager {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn persist_row_region_tip<H: Storage + ?Sized>(
         &self,
         storage: &mut H,
@@ -151,29 +153,34 @@ impl QueryManager {
         Some(version)
     }
 
-    fn persist_and_forward_row_region_tip_to_servers<H: Storage + ?Sized>(
+    fn apply_local_row_commit<H: Storage>(
         &mut self,
         storage: &mut H,
-        table: &str,
         row_id: ObjectId,
         branch_name: &str,
-    ) {
-        let Some(version) = self.persist_row_region_tip(storage, table, row_id, branch_name) else {
-            return;
-        };
-        let Some(metadata) = self
-            .sync_manager
-            .object_manager
-            .get(row_id)
-            .map(|object| object.metadata.clone())
-        else {
-            return;
+        commit_id: CommitId,
+    ) -> Result<StoredRowVersion, QueryError> {
+        let branch_name = BranchName::new(branch_name);
+        let Some(update) = self.sync_manager.object_manager.take_row_object_update_for(
+            row_id,
+            &branch_name,
+            commit_id,
+        ) else {
+            return Err(QueryError::EncodingError(format!(
+                "missing row update for committed row version {:?} on {}",
+                commit_id, row_id
+            )));
         };
 
+        let row = update.row.clone();
+        let metadata = update.metadata.clone();
+        self.handle_row_update_with_origin(storage, update, true);
         self.sync_manager
-            .forward_row_version_to_servers(row_id, metadata, version);
+            .forward_row_version_to_servers(row_id, metadata, row.clone());
+        Ok(row)
     }
 
+    #[cfg(test)]
     fn load_row_tip_on_branch(
         &self,
         row_id: ObjectId,
@@ -368,11 +375,9 @@ impl QueryManager {
             }
         }
 
-        Ok(PreparedUpdateWrite {
-            table_name,
-            descriptor,
-            new_data,
-        })
+        let _ = table_name;
+        let _ = descriptor;
+        Ok(PreparedUpdateWrite { new_data })
     }
 
     fn commit_prepared_update_write<H: Storage>(
@@ -406,12 +411,7 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
-        self.persist_and_forward_row_region_tip_to_servers(
-            storage,
-            &prepared.table_name.0,
-            id,
-            branch,
-        );
+        let _ = self.apply_local_row_commit(storage, id, branch, commit_id)?;
 
         Ok(commit_id)
     }
@@ -592,22 +592,8 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
 
-        // Forward new row to all connected servers
-        tracing::trace!(%object_id, ?row_commit_id, "forward to servers");
-        self.persist_and_forward_row_region_tip_to_servers(
-            storage,
-            table,
-            object_id,
-            branch.as_str(),
-        );
-
-        // Update indices immediately and persist
-        self.update_indices_for_insert(storage, table, object_id, &data, &descriptor)?;
-        tracing::trace!(%object_id, table, "index_insert complete");
-
-        // Mark subscriptions dirty
-        self.mark_subscriptions_dirty_local(table);
-        tracing::trace!(table, "mark_subscriptions_dirty");
+        tracing::trace!(%object_id, ?row_commit_id, "apply local row insert");
+        let _ = self.apply_local_row_commit(storage, object_id, branch.as_str(), row_commit_id)?;
 
         tracing::debug!(%object_id, ?row_commit_id, branch = self.current_branch(), "row created");
         Ok(InsertResult {
@@ -749,21 +735,7 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
 
-        // Forward new row to all connected servers
-        self.persist_and_forward_row_region_tip_to_servers(storage, table, object_id, branch);
-
-        // Update indices on specified branch
-        Self::update_indices_for_insert_on_branch(
-            storage,
-            table,
-            branch,
-            object_id,
-            &data,
-            &descriptor,
-        )?;
-
-        // Mark subscriptions dirty
-        self.mark_subscriptions_dirty_local(table);
+        let _ = self.apply_local_row_commit(storage, object_id, branch, row_commit_id)?;
 
         Ok(InsertResult {
             row_id: object_id,
@@ -1353,22 +1325,6 @@ impl QueryManager {
             &new_provenance,
         )?;
 
-        // Update indices and persist modified nodes
-        self.update_indices_for_update(
-            storage,
-            &prepared.table_name.0,
-            id,
-            &old_data,
-            &prepared.new_data,
-            &prepared.descriptor,
-        )?;
-        tracing::trace!(%id, table = %prepared.table_name.0, "index_update complete");
-
-        // Mark subscriptions dirty and notify about content update
-        self.mark_subscriptions_dirty_local(&prepared.table_name.0);
-        self.mark_row_updated_in_subscriptions(&prepared.table_name.0, id);
-        tracing::trace!(table = %prepared.table_name.0, "mark_subscriptions_dirty");
-
         Ok(commit_id)
     }
 
@@ -1421,36 +1377,8 @@ impl QueryManager {
             &new_provenance,
         )?;
 
-        match existing_branch_data {
-            Some(old_data) => Self::update_indices_for_update_on_branch(
-                storage,
-                table,
-                branch,
-                id,
-                &old_data,
-                &prepared.new_data,
-                &prepared.descriptor,
-            )?,
-            None if was_soft_deleted => Self::update_indices_for_undelete_on_branch(
-                storage,
-                table,
-                branch,
-                id,
-                &prepared.new_data,
-                &prepared.descriptor,
-            )?,
-            None => Self::update_indices_for_insert_on_branch(
-                storage,
-                table,
-                branch,
-                id,
-                &prepared.new_data,
-                &prepared.descriptor,
-            )?,
-        }
-
-        self.mark_subscriptions_dirty_local(table);
-        self.mark_row_updated_in_subscriptions(table, id);
+        let _ = existing_branch_data;
+        let _ = was_soft_deleted;
 
         Ok(commit_id)
     }
@@ -1621,19 +1549,9 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
-        // Forward delete to all connected servers
         let branch = self.current_branch();
-        tracing::trace!(%id, ?delete_commit_id, "forward delete to servers");
-        self.persist_and_forward_row_region_tip_to_servers(storage, &table, id, branch.as_str());
-
-        // Update indices: remove from _id and column indices, add to _id_deleted
-        self.update_indices_for_soft_delete(storage, &table, id, &old_data, &descriptor)?;
-        tracing::trace!(%id, table = %table, "index_remove complete (soft delete)");
-
-        // Mark subscriptions dirty and mark row as deleted
-        self.mark_subscriptions_dirty_local(&table);
-        self.mark_row_deleted_in_subscriptions(&table, id);
-        tracing::trace!(table = %table, "mark_subscriptions_dirty (delete)");
+        tracing::trace!(%id, ?delete_commit_id, "apply local soft delete");
+        let _ = self.apply_local_row_commit(storage, id, branch.as_str(), delete_commit_id)?;
 
         Ok(DeleteHandle {
             row_id: id,
@@ -1773,19 +1691,9 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
-        self.persist_and_forward_row_region_tip_to_servers(storage, table, id, branch);
-
-        Self::update_indices_for_soft_delete_on_branch(
-            storage,
-            table,
-            branch,
-            id,
-            old_branch_data.as_deref().unwrap_or(old_data_for_policy),
-            &descriptor,
-        )?;
-
-        self.mark_subscriptions_dirty_local(table);
-        self.mark_row_deleted_in_subscriptions(table, id);
+        let _ = old_branch_data;
+        let _ = descriptor;
+        let _ = self.apply_local_row_commit(storage, id, branch, delete_commit_id)?;
 
         Ok(DeleteHandle {
             row_id: id,
@@ -1888,18 +1796,12 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
-        self.persist_and_forward_row_region_tip_to_servers(
+        let _ = self.apply_local_row_commit(
             storage,
-            &table,
             id,
             self.current_branch().as_str(),
-        );
-
-        // Update indices: remove from _id_deleted, add to _id and column indices
-        self.update_indices_for_undelete(storage, &table, id, &new_data, &descriptor)?;
-
-        // Mark subscriptions dirty
-        self.mark_subscriptions_dirty_local(&table);
+            row_commit_id,
+        )?;
 
         Ok(InsertResult {
             row_id: id,
@@ -1979,9 +1881,6 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
-        // Update indices: remove from ALL indices including _id_deleted
-        self.update_indices_for_hard_delete(storage, &table, id, old_data.as_deref(), &descriptor)?;
-
         // Truncate branch: set tails = [delete_commit_id], removing all history
         // (In ObjectManager, this would be done via set_tails or similar)
         // For now, we just record the hard delete tombstone
@@ -1994,16 +1893,14 @@ impl QueryManager {
             tail_ids,
         );
 
-        self.persist_and_forward_row_region_tip_to_servers(
+        let _ = old_data;
+        let _ = descriptor;
+        let _ = self.apply_local_row_commit(
             storage,
-            &table,
             id,
             self.current_branch().as_str(),
-        );
-
-        // Mark subscriptions dirty and mark row as deleted
-        self.mark_subscriptions_dirty_local(&table);
-        self.mark_row_deleted_in_subscriptions(&table, id);
+            delete_commit_id,
+        )?;
 
         Ok(DeleteHandle {
             row_id: id,
@@ -2100,42 +1997,6 @@ impl QueryManager {
 
     /// Check if a row has a hard delete tombstone (empty content + delete: hard metadata).
     pub(super) fn is_hard_deleted(&self, id: ObjectId) -> bool {
-        let Some(obj) = self.sync_manager.object_manager.get(id) else {
-            return false;
-        };
-        let Some(branch) = obj.branches.get(&BranchName::new(self.current_branch())) else {
-            return false;
-        };
-        let Some(tip_id) = branch.tips.iter().next() else {
-            return false;
-        };
-        let Some(commit) = branch.commits.get(tip_id) else {
-            return false;
-        };
-        // Hard delete: empty content + delete: hard metadata
-        commit.content.is_empty() && commit.is_hard_deleted()
-    }
-
-    /// Check if the current tip has `delete: soft` metadata.
-    pub(super) fn is_soft_delete_commit(&self, id: ObjectId) -> bool {
-        let Some(obj) = self.sync_manager.object_manager.get(id) else {
-            return false;
-        };
-        let Some(branch) = obj.branches.get(&BranchName::new(self.current_branch())) else {
-            return false;
-        };
-        let Some(tip_id) = branch.tips.iter().next() else {
-            return false;
-        };
-        let Some(commit) = branch.commits.get(tip_id) else {
-            return false;
-        };
-        // Soft delete: has delete: soft metadata (content is preserved)
-        commit.is_soft_deleted()
-    }
-
-    /// Check if an incoming update has hard delete metadata.
-    pub(super) fn is_incoming_hard_delete(&self, id: ObjectId) -> bool {
         let Some(obj) = self.sync_manager.object_manager.get(id) else {
             return false;
         };

@@ -3,9 +3,10 @@ use std::{
     sync::Arc,
 };
 
+use crate::object_manager::RowObjectUpdate;
 use crate::storage::Storage;
 use crate::sync_manager::QueryPropagation;
-use crate::sync_manager::{DurabilityTier, QueryId, RowUpdateEvent, ServerId};
+use crate::sync_manager::{DurabilityTier, QueryId, ServerId};
 
 #[cfg(test)]
 use super::encoding::decode_row;
@@ -459,12 +460,12 @@ impl QueryManager {
     }
 
     /// Take all pending row updates (used by sync_context to preserve across rebuild).
-    pub fn take_pending_row_updates(&mut self) -> Vec<RowUpdateEvent> {
+    pub fn take_pending_row_updates(&mut self) -> Vec<RowObjectUpdate> {
         std::mem::take(&mut self.pending_row_updates)
     }
 
     /// Restore pending row updates (used by sync_context after rebuild).
-    pub fn restore_pending_row_updates(&mut self, updates: Vec<RowUpdateEvent>) {
+    pub fn restore_pending_row_updates(&mut self, updates: Vec<RowObjectUpdate>) {
         self.pending_row_updates = updates;
     }
 

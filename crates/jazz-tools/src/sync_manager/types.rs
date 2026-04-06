@@ -247,16 +247,6 @@ pub struct ObjectMetadata {
     pub metadata: HashMap<String, String>,
 }
 
-/// Internal row update handed from SyncManager to QueryManager.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RowUpdateEvent {
-    pub object_id: ObjectId,
-    pub metadata: HashMap<String, String>,
-    pub row: StoredRowVersion,
-    pub previous_row: Option<StoredRowVersion>,
-    pub is_new_object: bool,
-}
-
 /// Payload for sync messages between peers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncPayload {

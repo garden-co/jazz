@@ -7,13 +7,13 @@ use sha2::{Digest, Sha256};
 use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
-use crate::object_manager::AllObjectUpdate;
+use crate::object_manager::{AllObjectUpdate, RowObjectUpdate};
 use crate::row_regions::StoredRowVersion;
 use crate::schema_manager::{LensTransformer, SchemaContext};
 use crate::storage::{CatalogueManifestOp, Storage};
 use crate::sync_manager::{
     ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
-    RowUpdateEvent, SchemaWarning, SyncManager,
+    SchemaWarning, SyncManager,
 };
 
 use super::graph::{QueryCompileError, QueryGraph};
@@ -377,7 +377,7 @@ pub struct QueryManager {
 
     /// Buffered row updates for unknown schema branches.
     /// These are retried when new schemas activate via try_activate_pending().
-    pub(super) pending_row_updates: Vec<RowUpdateEvent>,
+    pub(super) pending_row_updates: Vec<RowObjectUpdate>,
 
     /// Known schemas (for server-mode operation).
     /// Synced from SchemaManager's known_schemas to enable lazy branch activation.
@@ -849,7 +849,9 @@ impl QueryManager {
 
         // 2. Process row updates from SyncManager FIRST so indices are current
         // before subscriptions are processed.
-        let row_updates = self.sync_manager.take_pending_row_updates();
+        let mut row_updates = std::mem::take(&mut self.pending_row_updates);
+        row_updates.extend(self.sync_manager.object_manager.take_row_object_updates());
+        row_updates.extend(self.sync_manager.take_pending_row_updates());
         if !row_updates.is_empty() {
             tracing::debug!(count = row_updates.len(), "processing row updates");
         }
@@ -1202,7 +1204,12 @@ impl QueryManager {
         Some((app_id, op))
     }
 
-    pub(super) fn handle_row_update(&mut self, storage: &mut dyn Storage, update: RowUpdateEvent) {
+    pub(super) fn handle_row_update_with_origin(
+        &mut self,
+        storage: &mut dyn Storage,
+        update: RowObjectUpdate,
+        local_update: bool,
+    ) {
         let table = match update.metadata.get(MetadataKey::Table.as_str()) {
             Some(table) => table.clone(),
             None => return,
@@ -1214,29 +1221,38 @@ impl QueryManager {
         let schema_hash = match self.branch_schema_map.get(branch) {
             Some(&hash) => hash,
             None => {
-                let branch_name = BranchName::new(branch);
-                if let Some(composed) = ComposedBranchName::parse(&branch_name) {
-                    if let Some(full_hash) = self.find_schema_by_short_hash(&composed.schema_hash) {
-                        self.branch_schema_map.insert(branch.to_string(), full_hash);
-                        full_hash
+                if local_update && self.schema_context.is_initialized() {
+                    let current_hash = self.schema_context.current_hash;
+                    self.branch_schema_map
+                        .insert(branch.to_string(), current_hash);
+                    current_hash
+                } else {
+                    let branch_name = BranchName::new(branch);
+                    if let Some(composed) = ComposedBranchName::parse(&branch_name) {
+                        if let Some(full_hash) =
+                            self.find_schema_by_short_hash(&composed.schema_hash)
+                        {
+                            self.branch_schema_map.insert(branch.to_string(), full_hash);
+                            full_hash
+                        } else {
+                            tracing::error!(
+                                object_id = %update.object_id,
+                                branch = %branch,
+                                schema_hash = %composed.schema_hash.short(),
+                                "buffering row update for unknown schema hash; schema not yet known"
+                            );
+                            self.pending_row_updates.push(update);
+                            return;
+                        }
                     } else {
                         tracing::error!(
                             object_id = %update.object_id,
                             branch = %branch,
-                            schema_hash = %composed.schema_hash.short(),
-                            "buffering row update for unknown schema hash; schema not yet known"
+                            "buffering row update for unknown branch; cannot parse schema hash"
                         );
                         self.pending_row_updates.push(update);
                         return;
                     }
-                } else {
-                    tracing::error!(
-                        object_id = %update.object_id,
-                        branch = %branch,
-                        "buffering row update for unknown branch; cannot parse schema hash"
-                    );
-                    self.pending_row_updates.push(update);
-                    return;
                 }
             }
         };
@@ -1270,7 +1286,7 @@ impl QueryManager {
         let descriptor = table_schema.columns.clone();
         let old_row = update.previous_row.as_ref();
 
-        if self.is_hard_deleted(update.object_id) {
+        if self.is_hard_deleted(update.object_id) && !update.row.is_hard_deleted() {
             return;
         }
 
@@ -1284,7 +1300,11 @@ impl QueryManager {
                 old_data,
                 &descriptor,
             );
-            self.mark_subscriptions_dirty(&table);
+            if local_update {
+                self.mark_subscriptions_dirty_local(&table);
+            } else {
+                self.mark_subscriptions_dirty(&table);
+            }
             self.mark_row_deleted_in_subscriptions(&table, update.object_id);
             return;
         }
@@ -1323,7 +1343,11 @@ impl QueryManager {
                     );
                 }
             }
-            self.mark_subscriptions_dirty(&table);
+            if local_update {
+                self.mark_subscriptions_dirty_local(&table);
+            } else {
+                self.mark_subscriptions_dirty(&table);
+            }
             self.mark_row_deleted_in_subscriptions(&table, update.object_id);
             return;
         }
@@ -1348,7 +1372,11 @@ impl QueryManager {
                     "failed to update indices for synced undelete"
                 );
             }
-            self.mark_subscriptions_dirty(&table);
+            if local_update {
+                self.mark_subscriptions_dirty_local(&table);
+            } else {
+                self.mark_subscriptions_dirty(&table);
+            }
             return;
         }
 
@@ -1389,8 +1417,16 @@ impl QueryManager {
             );
         }
 
-        self.mark_subscriptions_dirty(&table);
+        if local_update {
+            self.mark_subscriptions_dirty_local(&table);
+        } else {
+            self.mark_subscriptions_dirty(&table);
+        }
         self.mark_row_updated_in_subscriptions(&table, update.object_id);
+    }
+
+    pub(super) fn handle_row_update(&mut self, storage: &mut dyn Storage, update: RowObjectUpdate) {
+        self.handle_row_update_with_origin(storage, update, false);
     }
 
     /// Handle an object update from the global subscription.
@@ -1427,276 +1463,14 @@ impl QueryManager {
             return;
         }
 
-        // Check if this is a row object
-        let table = match update.metadata.get(MetadataKey::Table.as_str()) {
-            Some(t) => t.clone(),
-            None => return,
-        };
-
-        let table_name = TableName::new(&table);
-        let branch = update.branch_name.as_str();
-
-        // Look up the correct schema for this branch
-        let schema_hash = match self.branch_schema_map.get(branch) {
-            Some(&hash) => hash,
-            None => {
-                // Unknown branch - try lazy activation from known_schemas
-                let branch_name = BranchName::new(branch);
-                if let Some(composed) = ComposedBranchName::parse(&branch_name) {
-                    // Search known_schemas for matching short hash
-                    if let Some(full_hash) = self.find_schema_by_short_hash(&composed.schema_hash) {
-                        // Activate this branch/schema combination
-                        self.branch_schema_map.insert(branch.to_string(), full_hash);
-                        full_hash
-                    } else {
-                        let schema_short = composed.schema_hash.short();
-                        tracing::error!(
-                            object_id = %update.object_id,
-                            branch = %branch,
-                            schema_hash = %schema_short,
-                            "buffering row update for unknown schema hash; schema not yet known"
-                        );
-                        tracing::warn!(
-                            object_id = %update.object_id,
-                            branch = %branch,
-                            "dropping legacy object-shaped row update while schema is unavailable"
-                        );
-                        return;
-                    }
-                } else {
-                    tracing::error!(
-                        object_id = %update.object_id,
-                        branch = %branch,
-                        "buffering row update for unknown branch; cannot parse schema hash"
-                    );
-                    tracing::warn!(
-                        object_id = %update.object_id,
-                        branch = %branch,
-                        "dropping legacy object-shaped row update for unparsable branch"
-                    );
-                    return;
-                }
-            }
-        };
-
-        // Get the correct schema for this branch
-        let table_schema = if schema_hash == self.schema_context.current_hash {
-            // Current schema - use self.schema
-            match self.schema.get(&table_name) {
-                Some(schema) => schema.clone(),
-                None => return,
-            }
-        } else if let Some(schema) = self.schema_context.get_schema(&schema_hash) {
-            // Live schema from context
-            match schema.get(&table_name) {
-                Some(table_schema) => table_schema.clone(),
-                None => return,
-            }
-        } else if let Some(schema) = self.known_schemas.get(&schema_hash) {
-            // Known schema (server mode) - not in context but available
-            match schema.get(&table_name) {
-                Some(table_schema) => table_schema.clone(),
-                None => return,
-            }
-        } else {
-            tracing::error!(
-                object_id = %update.object_id,
-                branch = %branch,
-                schema_hash = %schema_hash.short(),
-                "buffering row update because schema for branch is not available yet"
-            );
+        // Row objects now flow through ObjectManager's row-native update lane.
+        if update.metadata.contains_key(MetadataKey::Table.as_str()) {
             tracing::warn!(
                 object_id = %update.object_id,
-                branch = %branch,
-                "dropping legacy object-shaped row update because schema is unavailable"
-            );
-            return;
-        };
-
-        let descriptor = table_schema.columns.clone();
-        let has_prior_history = !update.previous_commit_ids.is_empty();
-
-        // Check if we have a local hard delete tombstone - if so, ignore incoming updates
-        if self.is_hard_deleted(update.object_id) {
-            // Hard delete is authoritative - ignore incoming updates
-            return;
-        }
-
-        // Check if incoming update is a hard delete
-        if self.is_incoming_hard_delete(update.object_id) {
-            let old_data = if has_prior_history {
-                Some(update.old_content.as_deref().unwrap_or_else(|| {
-                    panic!(
-                        "missing old_content for historical sync update (hard delete): object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
-                        update.object_id,
-                        table,
-                        branch,
-                        update.previous_commit_ids.len(),
-                        update.commit_ids.len(),
-                    )
-                }))
-            } else {
-                update.old_content.as_deref()
-            };
-            // Apply hard delete unconditionally
-            let _ = Self::update_indices_for_hard_delete_on_branch(
-                storage,
-                &table,
-                branch,
-                update.object_id,
-                old_data,
-                &descriptor,
-            );
-            self.persist_row_region_tip(storage, &table, update.object_id, branch);
-            self.mark_subscriptions_dirty(&table);
-            self.mark_row_deleted_in_subscriptions(&table, update.object_id);
-            return;
-        }
-
-        // Check if incoming update is a soft delete
-        if self.is_soft_delete_commit(update.object_id) {
-            let old_data = if has_prior_history {
-                Some(update.old_content.as_deref().unwrap_or_else(|| {
-                    panic!(
-                        "missing old_content for historical sync update (soft delete): object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
-                        update.object_id,
-                        table,
-                        branch,
-                        update.previous_commit_ids.len(),
-                        update.commit_ids.len(),
-                    )
-                }))
-            } else {
-                update.old_content.as_deref()
-            };
-
-            // Apply soft delete - remove from _id and column indices, add to _id_deleted
-            if let Some(old_data) = old_data {
-                let _ = Self::update_indices_for_soft_delete_on_branch(
-                    storage,
-                    &table,
-                    branch,
-                    update.object_id,
-                    old_data,
-                    &descriptor,
-                );
-            } else {
-                // No old content - just remove from _id and add to _id_deleted
-                let _ = storage.index_remove(
-                    &table,
-                    "_id",
-                    branch,
-                    &Value::Uuid(update.object_id),
-                    update.object_id,
-                );
-                if let Err(error) = storage.index_insert(
-                    &table,
-                    "_id_deleted",
-                    branch,
-                    &Value::Uuid(update.object_id),
-                    update.object_id,
-                ) {
-                    tracing::error!(
-                        table,
-                        branch,
-                        object_id = %update.object_id,
-                        %error,
-                        "failed to insert synced _id_deleted index entry"
-                    );
-                }
-            }
-            self.persist_row_region_tip(storage, &table, update.object_id, branch);
-            self.mark_subscriptions_dirty(&table);
-            self.mark_row_deleted_in_subscriptions(&table, update.object_id);
-            return;
-        }
-
-        // Check if this is an undelete (non-empty content for previously soft-deleted row)
-        let was_soft_deleted =
-            self.row_is_deleted_on_branch(storage, &table, branch, update.object_id);
-
-        // Extract current (new) data from the object on this branch
-        let new_data = match self.load_row_from_object_on_branch(update.object_id, branch) {
-            Some((data, _)) => data,
-            None => return,
-        };
-
-        if was_soft_deleted {
-            // This is an undelete - remove from _id_deleted, add to _id and column indices
-            if let Err(error) = Self::update_indices_for_undelete_on_branch(
-                storage,
-                &table,
-                branch,
-                update.object_id,
-                &new_data,
-                &descriptor,
-            ) {
-                tracing::error!(
-                    table,
-                    branch,
-                    object_id = %update.object_id,
-                    %error,
-                    "failed to update indices for synced undelete"
-                );
-            }
-            self.persist_row_region_tip(storage, &table, update.object_id, branch);
-            self.mark_subscriptions_dirty(&table);
-            return;
-        }
-
-        // Normal update handling
-        if update.is_new_object || update.previous_commit_ids.is_empty() {
-            // First commit on branch (new object or synced first commit) - insert into all indices
-            if let Err(error) = Self::update_indices_for_insert_on_branch(
-                storage,
-                &table,
-                branch,
-                update.object_id,
-                &new_data,
-                &descriptor,
-            ) {
-                tracing::error!(
-                    table,
-                    branch,
-                    object_id = %update.object_id,
-                    %error,
-                    "failed to update indices for synced insert"
-                );
-            }
-        } else if let Some(old_data) = update.old_content {
-            // Synced update - compute index delta using old_content
-            // TODO: Future merge strategies - currently last-writer-wins by timestamp
-            if let Err(error) = Self::update_indices_for_update_on_branch(
-                storage,
-                &table,
-                branch,
-                update.object_id,
-                &old_data,
-                &new_data,
-                &descriptor,
-            ) {
-                tracing::error!(
-                    table,
-                    branch,
-                    object_id = %update.object_id,
-                    %error,
-                    "failed to update indices for synced update"
-                );
-            }
-        } else {
-            panic!(
-                "missing old_content for historical sync update: object_id={}, table={}, branch={}, prev_tips={}, commit_ids={}",
-                update.object_id,
-                table,
-                branch,
-                update.previous_commit_ids.len(),
-                update.commit_ids.len(),
+                branch = %update.branch_name,
+                "dropping legacy object-shaped row update"
             );
         }
-
-        self.persist_row_region_tip(storage, &table, update.object_id, branch);
-        self.mark_subscriptions_dirty(&table);
-        self.mark_row_updated_in_subscriptions(&table, update.object_id);
     }
     /// Mark subscriptions dirty for a table based on update origin.
     fn mark_subscriptions_dirty_with_origin(&mut self, table: &str, local_update: bool) {
