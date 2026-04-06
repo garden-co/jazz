@@ -102,8 +102,9 @@ export async function exportSchema(options: SchemaExportOptions): Promise<void> 
     return;
   }
 
-  const compiled = await loadCompiledSchema(options.schemaDir);
-  process.stdout.write(`${JSON.stringify(compiled.wasmSchema, null, 2)}\n`);
+  const currentSchema = await loadCurrentSchema(options.schemaDir);
+  await ensureLocalSnapshot(options.schemaDir, currentSchema);
+  process.stdout.write(`${JSON.stringify(currentSchema.schema, null, 2)}\n`);
 }
 
 export interface MigrationCommandOptions {
@@ -346,6 +347,18 @@ async function writeSnapshotSchema(
   const filePath = join(dir, snapshotFilename(hash));
   await writeFile(filePath, `${JSON.stringify(schema, null, 2)}\n`);
   return filePath;
+}
+
+async function ensureLocalSnapshot(
+  schemaDir: string,
+  schema: { hash: string; schema: WasmSchema },
+): Promise<string | null> {
+  const entries = await listLocalSnapshotEntries(schemaDir);
+  if (entries.some((entry) => entry.hash === schema.hash)) {
+    return null;
+  }
+
+  return writeSnapshotSchema(schemaDir, schema.hash, schema.schema);
 }
 
 async function writeSnapshotSchemaForMigrations(
