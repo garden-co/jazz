@@ -1,9 +1,10 @@
 use super::*;
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
+use crate::row_regions::{RowState, StoredRowVersion};
 use std::collections::{HashMap, HashSet};
 
-type RowCommitSyncData = (ObjectId, HashMap<String, String>, BranchName, Vec<Commit>);
+type RowSyncData = (ObjectId, HashMap<String, String>, StoredRowVersion);
 
 struct ServerCommitSyncData {
     object_id: ObjectId,
@@ -101,7 +102,7 @@ impl SyncManager {
     }
 
     /// Queue all existing objects to sync to a new server using storage as the
-    /// source of truth for row current state.
+    /// source of truth for row history and current state.
     pub(super) fn queue_full_sync_to_server_from_storage<H: Storage>(
         &mut self,
         server_id: ServerId,
@@ -113,24 +114,22 @@ impl SyncManager {
             return;
         };
 
-        let mut row_sync: Vec<RowCommitSyncData> = Vec::new();
+        let mut row_sync: Vec<RowSyncData> = Vec::new();
         let mut object_sync: Vec<BranchSyncData> = Vec::new();
 
         for (object_id, metadata) in objects {
             self.track_catalogue_object(object_id, &metadata);
 
             if let Some(table) = metadata.get(crate::metadata::MetadataKey::Table.as_str()) {
-                let Ok(rows) = storage.scan_visible_region_row_versions(table, object_id) else {
+                let Ok(rows) = storage.scan_history_row_versions(table, object_id) else {
                     continue;
                 };
 
-                for row in rows.into_iter().filter(|row| row.state.is_visible()) {
-                    row_sync.push((
-                        object_id,
-                        metadata.clone(),
-                        BranchName::new(&row.branch),
-                        vec![row.to_commit()],
-                    ));
+                for row in rows
+                    .into_iter()
+                    .filter(|row| !matches!(row.state, RowState::StagingPending))
+                {
+                    row_sync.push((object_id, metadata.clone(), row));
                 }
                 continue;
             }
@@ -148,24 +147,8 @@ impl SyncManager {
             }
         }
 
-        for (object_id, metadata, branch_name, commits) in row_sync {
-            let tips = commits.iter().map(Commit::id).collect();
-            let include_metadata = self
-                .servers
-                .get(&server_id)
-                .map(|server| !server.sent_metadata.contains(&object_id))
-                .unwrap_or(false);
-            self.queue_commits_to_server(
-                server_id,
-                ServerCommitSyncData {
-                    object_id,
-                    metadata,
-                    branch_name,
-                    tips,
-                    commits,
-                    include_metadata,
-                },
-            );
+        for (object_id, metadata, row) in row_sync {
+            self.queue_row_to_server(server_id, object_id, metadata, row);
         }
         for (object_id, metadata, branch_name, tips) in object_sync {
             self.queue_tips_to_server(server_id, object_id, metadata, branch_name, tips);
@@ -227,6 +210,64 @@ impl SyncManager {
         for (object_id, metadata, branch_name, tips) in to_sync {
             self.queue_tips_to_client_unscoped(client_id, object_id, metadata, branch_name, tips);
         }
+    }
+
+    pub(super) fn queue_row_to_server(
+        &mut self,
+        server_id: ServerId,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        row: StoredRowVersion,
+    ) {
+        if metadata
+            .get(crate::metadata::MetadataKey::NoSync.as_str())
+            .map(|v| v == "true")
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        let branch_name = BranchName::new(&row.branch);
+        let version_id = row.version_id();
+
+        let (include_metadata, already_sent) = {
+            let Some(server) = self.servers.get(&server_id) else {
+                return;
+            };
+            let include_metadata = !server.sent_metadata.contains(&object_id);
+            let already_sent = server
+                .sent_tips
+                .get(&(object_id, branch_name))
+                .cloned()
+                .unwrap_or_default();
+            (include_metadata, already_sent)
+        };
+
+        let new_frontier = HashSet::from([version_id]);
+        if already_sent == new_frontier && !include_metadata {
+            return;
+        }
+
+        let Some(server) = self.servers.get_mut(&server_id) else {
+            return;
+        };
+        if include_metadata {
+            server.sent_metadata.insert(object_id);
+        }
+        server
+            .sent_tips
+            .insert((object_id, branch_name), new_frontier);
+
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::RowVersionCreated {
+                metadata: include_metadata.then_some(ObjectMetadata {
+                    id: object_id,
+                    metadata,
+                }),
+                row,
+            },
+        });
     }
 
     /// Queue tips to a server, including metadata if first time.
@@ -349,6 +390,28 @@ impl SyncManager {
         });
     }
 
+    pub(super) fn queue_initial_sync_to_client_with_storage<H: Storage + ?Sized>(
+        &mut self,
+        storage: &H,
+        client_id: ClientId,
+        object_id: ObjectId,
+        branch_name: BranchName,
+    ) {
+        let Some(object) = self.object_manager.get(object_id) else {
+            return;
+        };
+        let metadata = object.metadata.clone();
+        if let Some(table) = metadata.get(crate::metadata::MetadataKey::Table.as_str())
+            && let Ok(Some(row)) =
+                storage.load_visible_region_row(table, branch_name.as_str(), object_id)
+        {
+            self.queue_row_to_client(client_id, object_id, metadata, row);
+            return;
+        }
+
+        self.queue_initial_sync_to_client(client_id, object_id, branch_name);
+    }
+
     /// Queue initial sync to a client for a newly visible object/branch.
     pub(super) fn queue_initial_sync_to_client(
         &mut self,
@@ -367,6 +430,90 @@ impl SyncManager {
         let metadata = object.metadata.clone();
 
         self.queue_tips_to_client(client_id, object_id, metadata, branch_name, tips);
+    }
+
+    pub(super) fn queue_row_to_client(
+        &mut self,
+        client_id: ClientId,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        row: StoredRowVersion,
+    ) {
+        self.queue_row_to_client_inner(client_id, object_id, metadata, row, true);
+    }
+
+    pub(super) fn queue_row_to_client_unscoped(
+        &mut self,
+        client_id: ClientId,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        row: StoredRowVersion,
+    ) {
+        self.queue_row_to_client_inner(client_id, object_id, metadata, row, false);
+    }
+
+    fn queue_row_to_client_inner(
+        &mut self,
+        client_id: ClientId,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+        row: StoredRowVersion,
+        require_scope: bool,
+    ) {
+        if metadata
+            .get(crate::metadata::MetadataKey::NoSync.as_str())
+            .map(|v| v == "true")
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        let branch_name = BranchName::new(&row.branch);
+        let version_id = row.version_id();
+
+        let (in_scope, include_metadata, already_sent) = {
+            let Some(client) = self.clients.get(&client_id) else {
+                return;
+            };
+            let in_scope = !require_scope || client.is_in_scope(object_id, &branch_name);
+            let include_metadata = !client.sent_metadata.contains(&object_id);
+            let already_sent = client
+                .sent_tips
+                .get(&(object_id, branch_name))
+                .cloned()
+                .unwrap_or_default();
+            (in_scope, include_metadata, already_sent)
+        };
+
+        if !in_scope {
+            return;
+        }
+
+        let new_frontier = HashSet::from([version_id]);
+        if already_sent == new_frontier && !include_metadata {
+            return;
+        }
+
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return;
+        };
+        if include_metadata {
+            client.sent_metadata.insert(object_id);
+        }
+        client
+            .sent_tips
+            .insert((object_id, branch_name), new_frontier);
+
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(client_id),
+            payload: SyncPayload::RowVersionNeeded {
+                metadata: include_metadata.then_some(ObjectMetadata {
+                    id: object_id,
+                    metadata,
+                }),
+                row,
+            },
+        });
     }
 
     /// Queue tips to a client, including metadata if first time.

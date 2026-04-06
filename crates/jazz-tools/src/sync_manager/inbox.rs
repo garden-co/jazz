@@ -1,11 +1,11 @@
 use super::*;
 use crate::commit::{Commit, CommitId};
 use crate::metadata::MetadataKey;
-use crate::object::{BranchName, ObjectId};
+use crate::object::{BranchName, Object, ObjectId};
 use crate::query_manager::policy::Operation;
-use crate::row_regions::{BatchId, RowState};
+use crate::row_regions::{BatchId, RowState, StoredRowVersion};
 use crate::storage::Storage;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 fn short_hash(hash: &impl ToString) -> String {
     hash.to_string().chars().take(12).collect()
@@ -28,35 +28,176 @@ fn log_schema_warning(origin: &str, warning: &SchemaWarning) {
 }
 
 impl SyncManager {
-    fn patch_row_region_ack<H: Storage>(
-        &self,
+    fn ensure_object_metadata<H: Storage>(
+        &mut self,
         storage: &mut H,
         object_id: ObjectId,
-        commit_id: CommitId,
-        tier: DurabilityTier,
+        metadata: HashMap<String, String>,
     ) {
-        let Some(table) = self
-            .object_manager
+        if self.object_manager.get(object_id).is_none() {
+            if storage
+                .load_object_metadata(object_id)
+                .ok()
+                .flatten()
+                .is_none()
+            {
+                let _ = storage.create_object(object_id, metadata.clone());
+            }
+
+            self.object_manager.objects.insert(
+                object_id,
+                Object {
+                    id: object_id,
+                    metadata,
+                    branches: HashMap::new(),
+                },
+            );
+            return;
+        }
+
+        if let Some(object) = self.object_manager.objects.get_mut(&object_id)
+            && !metadata.is_empty()
+        {
+            object.metadata = metadata;
+        }
+    }
+
+    fn row_metadata_from_payload<H: Storage>(
+        &self,
+        storage: &H,
+        row: &StoredRowVersion,
+        metadata: Option<&ObjectMetadata>,
+    ) -> Option<HashMap<String, String>> {
+        if let Some(metadata) = metadata {
+            return Some(metadata.metadata.clone());
+        }
+
+        self.object_manager
+            .get(row.row_id)
+            .map(|object| object.metadata.clone())
+            .or_else(|| storage.load_object_metadata(row.row_id).ok().flatten())
+    }
+
+    fn apply_row_updated<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        metadata: Option<ObjectMetadata>,
+        row: StoredRowVersion,
+    ) -> Option<RowUpdateEvent> {
+        let metadata = self.row_metadata_from_payload(storage, &row, metadata.as_ref())?;
+        let table = metadata.get(MetadataKey::Table.as_str())?.clone();
+        let branch_name = row.branch.clone();
+        let previous_row = storage
+            .load_visible_region_row(&table, &branch_name, row.row_id)
+            .ok()
+            .flatten();
+        let is_new_object = self.object_manager.get(row.row_id).is_none()
+            && storage
+                .load_object_metadata(row.row_id)
+                .ok()
+                .flatten()
+                .is_none();
+
+        self.ensure_object_metadata(storage, row.row_id, metadata.clone());
+
+        if let Err(error) = storage.append_history_region_rows(&table, std::slice::from_ref(&row)) {
+            tracing::warn!(
+                table,
+                branch = branch_name,
+                row_id = %row.row_id,
+                %error,
+                "failed to append synced history row"
+            );
+        }
+
+        if let Err(error) = storage.upsert_visible_region_rows(&table, std::slice::from_ref(&row)) {
+            tracing::warn!(
+                table,
+                branch = branch_name,
+                row_id = %row.row_id,
+                %error,
+                "failed to upsert synced visible row"
+            );
+        }
+
+        Some(RowUpdateEvent {
+            object_id: row.row_id,
+            metadata,
+            row,
+            previous_row,
+            is_new_object,
+        })
+    }
+
+    fn table_for_object_id<H: Storage>(&self, storage: &H, object_id: ObjectId) -> Option<String> {
+        self.object_manager
             .get(object_id)
             .and_then(|object| object.metadata.get(MetadataKey::Table.as_str()).cloned())
-        else {
+            .or_else(|| {
+                storage
+                    .load_object_metadata(object_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|metadata| metadata.get(MetadataKey::Table.as_str()).cloned())
+            })
+    }
+
+    fn patch_row_region_state<H: Storage>(
+        &self,
+        storage: &mut H,
+        row_id: ObjectId,
+        version_id: CommitId,
+        state: Option<RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) {
+        let Some(table) = self.table_for_object_id(storage, row_id) else {
             return;
         };
 
-        if let Err(error) = storage.patch_history_region_rows_by_batch(
+        if let Err(error) = storage.patch_row_region_rows_by_batch(
             &table,
-            BatchId::from_commit_id(commit_id),
-            RowState::VisibleDirect,
-            Some(tier),
+            BatchId::from_commit_id(version_id),
+            state,
+            confirmed_tier,
         ) {
             tracing::warn!(
-                %object_id,
-                ?commit_id,
+                %row_id,
+                ?version_id,
                 table,
-                ?tier,
+                ?state,
+                ?confirmed_tier,
                 %error,
-                "failed to patch row-region durability state"
+                "failed to patch row-region system state"
             );
+        }
+    }
+
+    fn apply_row_version_state_changed<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        row_id: ObjectId,
+        branch_name: BranchName,
+        version_id: CommitId,
+        state: Option<RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) {
+        if confirmed_tier.is_none() && state.is_none() {
+            return;
+        }
+
+        if let Some(tier) = confirmed_tier {
+            let _ = storage.store_ack_tier(version_id, tier);
+        }
+        self.patch_row_region_state(storage, row_id, version_id, state, confirmed_tier);
+
+        if let Some(tier) = confirmed_tier {
+            if let Some(commit) =
+                self.object_manager
+                    .get_commit_mut(row_id, &branch_name, version_id)
+            {
+                commit.ack_state.confirmed_tiers.insert(tier);
+            }
+            self.received_acks.push((version_id, tier));
         }
     }
 
@@ -110,6 +251,82 @@ impl SyncManager {
                 // Forward to clients whose scope includes this object/branch
                 self.forward_update_to_clients(object_id, branch_name);
             }
+            SyncPayload::RowVersionCreated { metadata, row }
+            | SyncPayload::RowVersionNeeded { metadata, row } => {
+                let object_id = row.row_id;
+                let branch_name = BranchName::new(&row.branch);
+                tracing::debug!(
+                    %object_id,
+                    %branch_name,
+                    "server→row-version payload"
+                );
+                let persisted = self
+                    .apply_row_updated(storage, metadata, row.clone())
+                    .into_iter()
+                    .inspect(|update| self.pending_row_updates.push(update.clone()))
+                    .map(|update| update.row.version_id())
+                    .collect::<HashSet<_>>();
+
+                if !persisted.is_empty() {
+                    for version_id in persisted {
+                        for tier in self.my_tiers.iter().copied() {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Server(server_id),
+                                payload: SyncPayload::RowVersionStateChanged {
+                                    row_id: object_id,
+                                    branch_name,
+                                    version_id,
+                                    state: None,
+                                    confirmed_tier: Some(tier),
+                                },
+                            });
+                        }
+                    }
+                }
+
+                self.forward_update_to_clients_with_storage(storage, object_id, branch_name);
+            }
+            SyncPayload::RowVersionStateChanged {
+                row_id,
+                branch_name,
+                version_id,
+                state,
+                confirmed_tier,
+            } => {
+                tracing::debug!(
+                    %row_id,
+                    %branch_name,
+                    ?version_id,
+                    ?state,
+                    ?confirmed_tier,
+                    "server→RowVersionStateChanged"
+                );
+                self.apply_row_version_state_changed(
+                    storage,
+                    row_id,
+                    branch_name,
+                    version_id,
+                    state,
+                    confirmed_tier,
+                );
+
+                let mut interested = HashSet::new();
+                if let Some(clients) = self.commit_interest.get(&version_id) {
+                    interested.extend(clients);
+                }
+                for cid in interested {
+                    self.outbox.push(OutboxEntry {
+                        destination: Destination::Client(cid),
+                        payload: SyncPayload::RowVersionStateChanged {
+                            row_id,
+                            branch_name,
+                            version_id,
+                            state,
+                            confirmed_tier,
+                        },
+                    });
+                }
+            }
             SyncPayload::ObjectTruncated {
                 object_id,
                 branch_name,
@@ -136,7 +353,7 @@ impl SyncManager {
                 // Persist ack state and update in-memory
                 for &commit_id in &confirmed_commits {
                     let _ = storage.store_ack_tier(commit_id, tier);
-                    self.patch_row_region_ack(storage, object_id, commit_id, tier);
+                    self.patch_row_region_state(storage, object_id, commit_id, None, Some(tier));
                     if let Some(commit) =
                         self.object_manager
                             .get_commit_mut(object_id, &branch_name, commit_id)
@@ -336,6 +553,97 @@ impl SyncManager {
                     }
                 }
             }
+            SyncPayload::RowVersionCreated { metadata, row }
+            | SyncPayload::RowVersionNeeded { metadata, row } => {
+                let object_id = row.row_id;
+                let branch_name = BranchName::new(&row.branch);
+                match client.role {
+                    ClientRole::Peer | ClientRole::Admin => {
+                        self.apply_payload_from_client(storage, client_id, payload, false);
+                    }
+                    ClientRole::Backend => {
+                        if payload.is_catalogue() {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                                    object_id,
+                                    branch_name,
+                                }),
+                            });
+                            return;
+                        }
+                        self.apply_payload_from_client(storage, client_id, payload, false);
+                    }
+                    ClientRole::User => {
+                        let Some(session) = &client.session else {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::Error(SyncError::SessionRequired {
+                                    object_id,
+                                    branch_name,
+                                }),
+                            });
+                            return;
+                        };
+                        if payload.is_catalogue() {
+                            if self.allow_unprivileged_schema_catalogue_writes
+                                && payload.is_structural_schema_catalogue()
+                            {
+                                self.apply_payload_from_client(storage, client_id, payload, false);
+                                return;
+                            }
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::Error(SyncError::CatalogueWriteDenied {
+                                    object_id,
+                                    branch_name,
+                                }),
+                            });
+                            return;
+                        }
+
+                        let payload_metadata = metadata
+                            .as_ref()
+                            .map(|meta| meta.metadata.clone())
+                            .unwrap_or_default();
+                        let (stored_metadata, old_content) = self
+                            .row_metadata_from_payload(storage, row, metadata.as_ref())
+                            .and_then(|stored_metadata| {
+                                let table =
+                                    stored_metadata.get(MetadataKey::Table.as_str())?.clone();
+                                let old_content = storage
+                                    .load_visible_region_row(&table, &row.branch, row.row_id)
+                                    .ok()
+                                    .flatten()
+                                    .map(|previous| previous.data);
+                                Some((stored_metadata, old_content))
+                            })
+                            .unwrap_or_else(|| (HashMap::new(), None));
+                        let metadata = if old_content.is_none() && stored_metadata.is_empty() {
+                            payload_metadata
+                        } else {
+                            stored_metadata
+                        };
+                        let new_content = (!row.is_deleted).then_some(row.data.clone());
+                        let operation = if row.is_deleted {
+                            Operation::Delete
+                        } else if old_content.is_some() {
+                            Operation::Update
+                        } else {
+                            Operation::Insert
+                        };
+                        self.queue_for_permission_check(
+                            client_id,
+                            payload,
+                            session.clone(),
+                            metadata,
+                            old_content,
+                            new_content,
+                            operation,
+                        );
+                    }
+                }
+            }
             SyncPayload::ObjectTruncated {
                 object_id,
                 branch_name,
@@ -495,7 +803,7 @@ impl SyncManager {
                 // Persist ack state and update in-memory
                 for &commit_id in &confirmed_commits {
                     let _ = storage.store_ack_tier(commit_id, tier);
-                    self.patch_row_region_ack(storage, object_id, commit_id, tier);
+                    self.patch_row_region_state(storage, object_id, commit_id, None, Some(tier));
                     if let Some(commit) =
                         self.object_manager
                             .get_commit_mut(object_id, &branch_name, commit_id)
@@ -521,6 +829,39 @@ impl SyncManager {
                             branch_name,
                             confirmed_commits: confirmed_commits.clone(),
                             tier,
+                        },
+                    });
+                }
+            }
+            SyncPayload::RowVersionStateChanged {
+                row_id,
+                branch_name,
+                version_id,
+                state,
+                confirmed_tier,
+            } => {
+                self.apply_row_version_state_changed(
+                    storage,
+                    *row_id,
+                    *branch_name,
+                    *version_id,
+                    *state,
+                    *confirmed_tier,
+                );
+                let mut interested = HashSet::new();
+                if let Some(clients) = self.commit_interest.get(version_id) {
+                    interested.extend(clients);
+                }
+                interested.remove(&client_id);
+                for cid in interested {
+                    self.outbox.push(OutboxEntry {
+                        destination: Destination::Client(cid),
+                        payload: SyncPayload::RowVersionStateChanged {
+                            row_id: *row_id,
+                            branch_name: *branch_name,
+                            version_id: *version_id,
+                            state: *state,
+                            confirmed_tier: *confirmed_tier,
                         },
                     });
                 }
@@ -591,6 +932,48 @@ impl SyncManager {
 
                 // Forward to other clients (not the sender)
                 self.forward_update_to_clients_except(object_id, branch_name, client_id);
+            }
+            SyncPayload::RowVersionCreated { metadata, row }
+            | SyncPayload::RowVersionNeeded { metadata, row } => {
+                let object_id = row.row_id;
+                let branch_name = BranchName::new(&row.branch);
+                let version_id = row.version_id();
+                self.commit_interest
+                    .entry(version_id)
+                    .or_default()
+                    .insert(client_id);
+
+                let persisted = self
+                    .apply_row_updated(storage, metadata, row)
+                    .into_iter()
+                    .inspect(|update| self.pending_row_updates.push(update.clone()))
+                    .map(|update| update.row.version_id())
+                    .collect::<HashSet<_>>();
+
+                if !persisted.is_empty() {
+                    for version_id in persisted {
+                        for tier in self.my_tiers.iter().copied() {
+                            self.outbox.push(OutboxEntry {
+                                destination: Destination::Client(client_id),
+                                payload: SyncPayload::RowVersionStateChanged {
+                                    row_id: object_id,
+                                    branch_name,
+                                    version_id,
+                                    state: None,
+                                    confirmed_tier: Some(tier),
+                                },
+                            });
+                        }
+                    }
+                }
+
+                self.forward_update_to_servers_with_storage(storage, object_id, branch_name);
+                self.forward_update_to_clients_except_with_storage(
+                    storage,
+                    object_id,
+                    branch_name,
+                    client_id,
+                );
             }
             SyncPayload::ObjectTruncated {
                 object_id,

@@ -292,7 +292,7 @@ pub(super) fn upsert_visible_region_rows_core(
 pub(super) fn patch_row_region_rows_by_batch_core(
     table: &str,
     batch_id: BatchId,
-    state: RowState,
+    state: Option<RowState>,
     confirmed_tier: Option<DurabilityTier>,
     mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
     mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
@@ -305,7 +305,9 @@ pub(super) fn patch_row_region_rows_by_batch_core(
                 continue;
             }
 
-            row.state = state;
+            if let Some(state) = state {
+                row.state = state;
+            }
             row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
                 (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
                 (Some(existing), None) => Some(existing),
@@ -364,6 +366,24 @@ pub(super) fn scan_visible_region_row_versions_core(
         .filter(|row| row.row_id == row_id)
         .collect();
     rows.sort_by_key(|row| row.branch.clone());
+    Ok(rows)
+}
+
+#[allow(dead_code)]
+pub(super) fn scan_history_row_versions_core(
+    table: &str,
+    row_id: ObjectId,
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<Vec<StoredRowVersion>, StorageError> {
+    let prefix = history_table_prefix(table);
+    let mut rows: Vec<StoredRowVersion> = scan_prefix(&prefix)?
+        .into_iter()
+        .map(|(_, bytes)| decode_json::<StoredRowVersion>(&bytes, "stored row version"))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|row| row.row_id == row_id)
+        .collect();
+    rows.sort_by_key(|row| (row.branch.clone(), row.updated_at));
     Ok(rows)
 }
 

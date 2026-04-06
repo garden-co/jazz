@@ -383,10 +383,10 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
-        self.sync_manager
-            .forward_update_to_servers(id, branch.into());
-
         self.persist_row_region_tip(storage, &prepared.table_name.0, id, branch);
+
+        self.sync_manager
+            .forward_update_to_servers_with_storage(storage, id, branch.into());
 
         Ok(commit_id)
     }
@@ -568,11 +568,14 @@ impl QueryManager {
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
 
         // Forward new row to all connected servers
-        tracing::trace!(%object_id, ?row_commit_id, "forward to servers");
-        self.sync_manager
-            .forward_update_to_servers(object_id, branch.clone().into());
-
         self.persist_row_region_tip(storage, table, object_id, branch.as_str());
+
+        tracing::trace!(%object_id, ?row_commit_id, "forward to servers");
+        self.sync_manager.forward_update_to_servers_with_storage(
+            storage,
+            object_id,
+            branch.clone().into(),
+        );
 
         // Update indices immediately and persist
         self.update_indices_for_insert(storage, table, object_id, &data, &descriptor)?;
@@ -722,11 +725,11 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
 
+        self.persist_row_region_tip(storage, table, object_id, branch);
+
         // Forward new row to all connected servers
         self.sync_manager
-            .forward_update_to_servers(object_id, branch.into());
-
-        self.persist_row_region_tip(storage, table, object_id, branch);
+            .forward_update_to_servers_with_storage(storage, object_id, branch.into());
 
         // Update indices on specified branch
         Self::update_indices_for_insert_on_branch(
@@ -1599,11 +1602,14 @@ impl QueryManager {
 
         // Forward delete to all connected servers
         let branch = self.current_branch();
-        tracing::trace!(%id, ?delete_commit_id, "forward delete to servers");
-        self.sync_manager
-            .forward_update_to_servers(id, branch.clone().into());
-
         self.persist_row_region_tip(storage, &table, id, branch.as_str());
+
+        tracing::trace!(%id, ?delete_commit_id, "forward delete to servers");
+        self.sync_manager.forward_update_to_servers_with_storage(
+            storage,
+            id,
+            branch.clone().into(),
+        );
 
         // Update indices: remove from _id and column indices, add to _id_deleted
         self.update_indices_for_soft_delete(storage, &table, id, &old_data, &descriptor)?;
@@ -1752,10 +1758,10 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
-        self.sync_manager
-            .forward_update_to_servers(id, branch.into());
-
         self.persist_row_region_tip(storage, table, id, branch);
+
+        self.sync_manager
+            .forward_update_to_servers_with_storage(storage, id, branch.into());
 
         Self::update_indices_for_soft_delete_on_branch(
             storage,

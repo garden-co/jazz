@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::commit::CommitId;
-use crate::object::ObjectId;
+use crate::object::{BranchName, ObjectId};
 use crate::sync_manager::{ClientId, Destination, QueryId, Source, SyncPayload};
 
 // ============================================================================
@@ -98,9 +98,14 @@ pub struct SyncMessage {
 }
 
 impl SyncMessage {
-    /// True if this is an `ObjectUpdated` payload.
+    /// True if this is an update payload.
     pub fn is_object_updated(&self) -> bool {
-        matches!(self.payload, SyncPayload::ObjectUpdated { .. })
+        matches!(
+            self.payload,
+            SyncPayload::ObjectUpdated { .. }
+                | SyncPayload::RowVersionCreated { .. }
+                | SyncPayload::RowVersionNeeded { .. }
+        )
     }
 
     /// True if this is a `PersistenceAck` payload.
@@ -127,6 +132,9 @@ impl SyncMessage {
     pub fn object_id(&self) -> Option<ObjectId> {
         match &self.payload {
             SyncPayload::ObjectUpdated { object_id, .. } => Some(*object_id),
+            SyncPayload::RowVersionCreated { row, .. }
+            | SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
+            SyncPayload::RowVersionStateChanged { row_id, .. } => Some(*row_id),
             SyncPayload::ObjectTruncated { object_id, .. } => Some(*object_id),
             SyncPayload::PersistenceAck { object_id, .. } => Some(*object_id),
             _ => None,
@@ -143,10 +151,13 @@ impl SyncMessage {
         }
     }
 
-    /// Extract commit IDs from ObjectUpdated or PersistenceAck.
+    /// Extract commit IDs from update or durability payloads.
     pub fn commit_ids(&self) -> Vec<CommitId> {
         match &self.payload {
             SyncPayload::ObjectUpdated { commits, .. } => commits.iter().map(|c| c.id()).collect(),
+            SyncPayload::RowVersionCreated { row, .. }
+            | SyncPayload::RowVersionNeeded { row, .. } => vec![row.version_id()],
+            SyncPayload::RowVersionStateChanged { version_id, .. } => vec![*version_id],
             SyncPayload::PersistenceAck {
                 confirmed_commits, ..
             } => {
@@ -869,6 +880,36 @@ impl<'a> Normalizer<'a> {
                     commit_ids.join(","),
                 )
             }
+            SyncPayload::RowVersionCreated { row, .. } => {
+                format!(
+                    "created row:{} branch:{} version:{}",
+                    self.object(&row.row_id),
+                    self.branch(&BranchName::new(&row.branch)),
+                    self.commit(&row.version_id()),
+                )
+            }
+            SyncPayload::RowVersionNeeded { row, .. } => {
+                format!(
+                    "needed row:{} branch:{} version:{}",
+                    self.object(&row.row_id),
+                    self.branch(&BranchName::new(&row.branch)),
+                    self.commit(&row.version_id()),
+                )
+            }
+            SyncPayload::RowVersionStateChanged {
+                row_id,
+                branch_name,
+                version_id,
+                state,
+                confirmed_tier,
+            } => {
+                format!(
+                    "state row:{} branch:{} version:{} state:{state:?} tier:{confirmed_tier:?}",
+                    self.object(row_id),
+                    self.branch(branch_name),
+                    self.commit(version_id),
+                )
+            }
             SyncPayload::ObjectTruncated {
                 object_id,
                 branch_name,
@@ -981,6 +1022,36 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
                 names.object(object_id),
                 branch_name,
                 commit_ids.join(","),
+            )
+        }
+        SyncPayload::RowVersionCreated { row, .. } => {
+            format!(
+                "created row:{} branch:{} version:{}",
+                names.object(&row.row_id),
+                row.branch,
+                names.commit(&row.version_id()),
+            )
+        }
+        SyncPayload::RowVersionNeeded { row, .. } => {
+            format!(
+                "needed row:{} branch:{} version:{}",
+                names.object(&row.row_id),
+                row.branch,
+                names.commit(&row.version_id()),
+            )
+        }
+        SyncPayload::RowVersionStateChanged {
+            row_id,
+            branch_name,
+            version_id,
+            state,
+            confirmed_tier,
+        } => {
+            format!(
+                "state row:{} branch:{} version:{} state:{state:?} tier:{confirmed_tier:?}",
+                names.object(row_id),
+                branch_name,
+                names.commit(version_id),
             )
         }
         SyncPayload::ObjectTruncated {

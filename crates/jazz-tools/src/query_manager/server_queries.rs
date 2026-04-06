@@ -82,6 +82,8 @@ impl QueryManager {
                 .iter()
                 .max_by_key(|commit| commit.timestamp)
                 .and_then(|commit| commit.row_provenance()),
+            SyncPayload::RowVersionCreated { row, .. }
+            | SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_provenance()),
             _ => None,
         }
     }
@@ -599,16 +601,6 @@ impl QueryManager {
         })
     }
 
-    fn branch_has_live_tip(branch: &crate::object::Branch) -> bool {
-        branch.tips.iter().any(|tip_id| {
-            branch
-                .commits
-                .get(tip_id)
-                .map(|commit| !commit.content.is_empty())
-                .unwrap_or(false)
-        })
-    }
-
     fn should_sync_policy_context_rows(&self, client_id: ClientId) -> bool {
         self.client_bypasses_authorization_filtering(client_id)
     }
@@ -625,11 +617,12 @@ impl QueryManager {
             .unwrap_or(false)
     }
 
-    fn scope_with_policy_context_rows_from_object_manager(
+    fn scope_with_policy_context_rows<H: Storage + ?Sized>(
         base_scope: &HashSet<(ObjectId, BranchName)>,
         graph: &super::graph::QueryGraph,
         branches: &[String],
         object_manager: &crate::object_manager::ObjectManager,
+        storage: &H,
     ) -> HashSet<(ObjectId, BranchName)> {
         let mut scope = base_scope.clone();
 
@@ -655,10 +648,14 @@ impl QueryManager {
             }
 
             for branch_name in &branch_names {
-                let Some(branch) = object.branches.get(branch_name) else {
+                let Some(row) = storage
+                    .load_visible_region_row(table_name, branch_name.as_str(), *object_id)
+                    .ok()
+                    .flatten()
+                else {
                     continue;
                 };
-                if Self::branch_has_live_tip(branch) {
+                if !row.is_hard_deleted() {
                     scope.insert((*object_id, *branch_name));
                 }
             }
@@ -792,11 +789,12 @@ impl QueryManager {
             // Trusted clients (Peer/Admin) also need policy context rows.
             let scope = if sync_policy_context_rows {
                 let om = &self.sync_manager.object_manager;
-                Self::scope_with_policy_context_rows_from_object_manager(
+                Self::scope_with_policy_context_rows(
                     &result_scope,
                     &graph,
                     &branches,
                     om,
+                    storage_ref,
                 )
             } else {
                 result_scope
@@ -811,7 +809,8 @@ impl QueryManager {
             }
 
             // Set scope in SyncManager (triggers initial sync)
-            self.sync_manager.set_client_query_scope(
+            self.sync_manager.set_client_query_scope_with_storage(
+                storage_ref,
                 sub.client_id,
                 sub.query_id,
                 scope.clone(),
@@ -959,11 +958,12 @@ impl QueryManager {
                 };
                 if self.should_sync_policy_context_rows(client_id) {
                     let om = &self.sync_manager.object_manager;
-                    Self::scope_with_policy_context_rows_from_object_manager(
+                    Self::scope_with_policy_context_rows(
                         &result_scope,
                         &sub.graph,
                         branches,
                         om,
+                        storage,
                     )
                 } else {
                     result_scope
@@ -986,8 +986,9 @@ impl QueryManager {
 
         // Apply scope updates
         for (client_id, query_id, new_scope, session) in scope_updates {
-            self.sync_manager
-                .set_client_query_scope(client_id, query_id, new_scope, session);
+            self.sync_manager.set_client_query_scope_with_storage(
+                storage, client_id, query_id, new_scope, session,
+            );
         }
 
         for (client_id, warning) in schema_warning_notifications {
@@ -1102,16 +1103,11 @@ impl QueryManager {
             }
         };
 
-        let branch_name = match &check.payload {
-            SyncPayload::ObjectUpdated { branch_name, .. } => *branch_name,
-            SyncPayload::ObjectTruncated { branch_name, .. } => *branch_name,
-            _ => BranchName::new(self.current_branch()),
-        };
-        let object_id = match &check.payload {
-            SyncPayload::ObjectUpdated { object_id, .. } => *object_id,
-            SyncPayload::ObjectTruncated { object_id, .. } => *object_id,
-            _ => ObjectId::new(),
-        };
+        let branch_name = check
+            .payload
+            .branch_name()
+            .unwrap_or_else(|| BranchName::new(self.current_branch()));
+        let object_id = check.payload.object_id().unwrap_or_default();
 
         let branch_table_schema = match self.resolve_write_table_schema(table_name, branch_name) {
             WriteSchemaResolution::Resolved(schema) => *schema,

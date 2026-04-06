@@ -13,7 +13,7 @@ use crate::schema_manager::{LensTransformer, SchemaContext};
 use crate::storage::{CatalogueManifestOp, Storage};
 use crate::sync_manager::{
     ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
-    SchemaWarning, SyncManager,
+    RowUpdateEvent, SchemaWarning, SyncManager,
 };
 
 use super::graph::{QueryCompileError, QueryGraph};
@@ -377,7 +377,7 @@ pub struct QueryManager {
 
     /// Buffered row updates for unknown schema branches.
     /// These are retried when new schemas activate via try_activate_pending().
-    pub(super) pending_row_updates: Vec<AllObjectUpdate>,
+    pub(super) pending_row_updates: Vec<RowUpdateEvent>,
 
     /// Known schemas (for server-mode operation).
     /// Synced from SchemaManager's known_schemas to enable lazy branch activation.
@@ -847,9 +847,17 @@ impl QueryManager {
         // 1. Process SyncManager inbox (receives client writes)
         self.sync_manager.process_inbox(storage);
 
-        // 2. Process object updates from SyncManager FIRST
-        // This ensures indices are updated before query subscriptions are processed,
-        // so new subscriptions can find data that arrived in the same batch.
+        // 2. Process row updates from SyncManager FIRST so indices are current
+        // before subscriptions are processed.
+        let row_updates = self.sync_manager.take_pending_row_updates();
+        if !row_updates.is_empty() {
+            tracing::debug!(count = row_updates.len(), "processing row updates");
+        }
+        for update in row_updates {
+            self.handle_row_update(storage, update);
+        }
+
+        // 2b. Process legacy object updates (currently catalogue and non-row objects).
         let updates = self.sync_manager.object_manager.take_all_object_updates();
         if !updates.is_empty() {
             tracing::debug!(count = updates.len(), "processing object updates");
@@ -1194,6 +1202,197 @@ impl QueryManager {
         Some((app_id, op))
     }
 
+    pub(super) fn handle_row_update(&mut self, storage: &mut dyn Storage, update: RowUpdateEvent) {
+        let table = match update.metadata.get(MetadataKey::Table.as_str()) {
+            Some(table) => table.clone(),
+            None => return,
+        };
+
+        let table_name = TableName::new(&table);
+        let branch = update.row.branch.as_str();
+
+        let schema_hash = match self.branch_schema_map.get(branch) {
+            Some(&hash) => hash,
+            None => {
+                let branch_name = BranchName::new(branch);
+                if let Some(composed) = ComposedBranchName::parse(&branch_name) {
+                    if let Some(full_hash) = self.find_schema_by_short_hash(&composed.schema_hash) {
+                        self.branch_schema_map.insert(branch.to_string(), full_hash);
+                        full_hash
+                    } else {
+                        tracing::error!(
+                            object_id = %update.object_id,
+                            branch = %branch,
+                            schema_hash = %composed.schema_hash.short(),
+                            "buffering row update for unknown schema hash; schema not yet known"
+                        );
+                        self.pending_row_updates.push(update);
+                        return;
+                    }
+                } else {
+                    tracing::error!(
+                        object_id = %update.object_id,
+                        branch = %branch,
+                        "buffering row update for unknown branch; cannot parse schema hash"
+                    );
+                    self.pending_row_updates.push(update);
+                    return;
+                }
+            }
+        };
+
+        let table_schema = if schema_hash == self.schema_context.current_hash {
+            match self.schema.get(&table_name) {
+                Some(schema) => schema.clone(),
+                None => return,
+            }
+        } else if let Some(schema) = self.schema_context.get_schema(&schema_hash) {
+            match schema.get(&table_name) {
+                Some(table_schema) => table_schema.clone(),
+                None => return,
+            }
+        } else if let Some(schema) = self.known_schemas.get(&schema_hash) {
+            match schema.get(&table_name) {
+                Some(table_schema) => table_schema.clone(),
+                None => return,
+            }
+        } else {
+            tracing::error!(
+                object_id = %update.object_id,
+                branch = %branch,
+                schema_hash = %schema_hash.short(),
+                "buffering row update because schema for branch is not available yet"
+            );
+            self.pending_row_updates.push(update);
+            return;
+        };
+
+        let descriptor = table_schema.columns.clone();
+        let old_row = update.previous_row.as_ref();
+
+        if self.is_hard_deleted(update.object_id) {
+            return;
+        }
+
+        if update.row.is_hard_deleted() {
+            let old_data = old_row.map(|row| row.data.as_slice());
+            let _ = Self::update_indices_for_hard_delete_on_branch(
+                storage,
+                &table,
+                branch,
+                update.object_id,
+                old_data,
+                &descriptor,
+            );
+            self.mark_subscriptions_dirty(&table);
+            self.mark_row_deleted_in_subscriptions(&table, update.object_id);
+            return;
+        }
+
+        if update.row.is_soft_deleted() {
+            if let Some(old_row) = old_row {
+                let _ = Self::update_indices_for_soft_delete_on_branch(
+                    storage,
+                    &table,
+                    branch,
+                    update.object_id,
+                    &old_row.data,
+                    &descriptor,
+                );
+            } else {
+                let _ = storage.index_remove(
+                    &table,
+                    "_id",
+                    branch,
+                    &Value::Uuid(update.object_id),
+                    update.object_id,
+                );
+                if let Err(error) = storage.index_insert(
+                    &table,
+                    "_id_deleted",
+                    branch,
+                    &Value::Uuid(update.object_id),
+                    update.object_id,
+                ) {
+                    tracing::error!(
+                        table,
+                        branch,
+                        object_id = %update.object_id,
+                        %error,
+                        "failed to insert synced _id_deleted index entry"
+                    );
+                }
+            }
+            self.mark_subscriptions_dirty(&table);
+            self.mark_row_deleted_in_subscriptions(&table, update.object_id);
+            return;
+        }
+
+        let was_soft_deleted = old_row.is_some_and(StoredRowVersion::is_soft_deleted);
+        let new_data = &update.row.data;
+
+        if was_soft_deleted {
+            if let Err(error) = Self::update_indices_for_undelete_on_branch(
+                storage,
+                &table,
+                branch,
+                update.object_id,
+                new_data,
+                &descriptor,
+            ) {
+                tracing::error!(
+                    table,
+                    branch,
+                    object_id = %update.object_id,
+                    %error,
+                    "failed to update indices for synced undelete"
+                );
+            }
+            self.mark_subscriptions_dirty(&table);
+            return;
+        }
+
+        if old_row.is_none() || update.is_new_object {
+            if let Err(error) = Self::update_indices_for_insert_on_branch(
+                storage,
+                &table,
+                branch,
+                update.object_id,
+                new_data,
+                &descriptor,
+            ) {
+                tracing::error!(
+                    table,
+                    branch,
+                    object_id = %update.object_id,
+                    %error,
+                    "failed to update indices for synced insert"
+                );
+            }
+        } else if let Some(old_row) = old_row
+            && let Err(error) = Self::update_indices_for_update_on_branch(
+                storage,
+                &table,
+                branch,
+                update.object_id,
+                &old_row.data,
+                new_data,
+                &descriptor,
+            )
+        {
+            tracing::error!(
+                table,
+                branch,
+                object_id = %update.object_id,
+                %error,
+                "failed to update indices for synced update"
+            );
+        }
+
+        self.mark_subscriptions_dirty(&table);
+        self.mark_row_updated_in_subscriptions(&table, update.object_id);
+    }
+
     /// Handle an object update from the global subscription.
     pub(super) fn handle_object_update(
         &mut self,
@@ -1257,8 +1456,11 @@ impl QueryManager {
                             schema_hash = %schema_short,
                             "buffering row update for unknown schema hash; schema not yet known"
                         );
-                        // Schema not known yet - buffer for retry
-                        self.pending_row_updates.push(update);
+                        tracing::warn!(
+                            object_id = %update.object_id,
+                            branch = %branch,
+                            "dropping legacy object-shaped row update while schema is unavailable"
+                        );
                         return;
                     }
                 } else {
@@ -1267,8 +1469,11 @@ impl QueryManager {
                         branch = %branch,
                         "buffering row update for unknown branch; cannot parse schema hash"
                     );
-                    // Can't parse branch - buffer for retry
-                    self.pending_row_updates.push(update);
+                    tracing::warn!(
+                        object_id = %update.object_id,
+                        branch = %branch,
+                        "dropping legacy object-shaped row update for unparsable branch"
+                    );
                     return;
                 }
             }
@@ -1300,8 +1505,11 @@ impl QueryManager {
                 schema_hash = %schema_hash.short(),
                 "buffering row update because schema for branch is not available yet"
             );
-            // Schema not available - buffer for retry
-            self.pending_row_updates.push(update);
+            tracing::warn!(
+                object_id = %update.object_id,
+                branch = %branch,
+                "dropping legacy object-shaped row update because schema is unavailable"
+            );
             return;
         };
 

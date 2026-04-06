@@ -2463,8 +2463,8 @@ fn persistence_ack_direct() {
 }
 
 #[test]
-fn persistence_ack_updates_row_region_confirmed_tier_monotonically() {
-    use std::collections::{HashMap, HashSet};
+fn row_version_state_changed_updates_row_region_confirmed_tier_monotonically() {
+    use std::collections::HashMap;
 
     use crate::metadata::MetadataKey;
     use crate::row_regions::{BatchId, HistoryScan, RowState, StoredRowVersion};
@@ -2509,22 +2509,24 @@ fn persistence_ack_updates_row_region_confirmed_tier_monotonically() {
     sm.process_from_server(
         &mut io,
         ServerId::new(),
-        SyncPayload::PersistenceAck {
-            object_id,
+        SyncPayload::RowVersionStateChanged {
+            row_id: object_id,
             branch_name,
-            confirmed_commits: HashSet::from([commit_id]),
-            tier: DurabilityTier::EdgeServer,
+            version_id: commit_id,
+            state: None,
+            confirmed_tier: Some(DurabilityTier::EdgeServer),
         },
     );
 
     sm.process_from_server(
         &mut io,
         ServerId::new(),
-        SyncPayload::PersistenceAck {
-            object_id,
+        SyncPayload::RowVersionStateChanged {
+            row_id: object_id,
             branch_name,
-            confirmed_commits: HashSet::from([commit_id]),
-            tier: DurabilityTier::Worker,
+            version_id: commit_id,
+            state: None,
+            confirmed_tier: Some(DurabilityTier::Worker),
         },
     );
 
@@ -2535,8 +2537,80 @@ fn persistence_ack_updates_row_region_confirmed_tier_monotonically() {
 
     assert_eq!(history.len(), 1);
     assert_eq!(visible.len(), 1);
+    assert_eq!(history[0].state, RowState::VisibleDirect);
+    assert_eq!(visible[0].state, RowState::VisibleDirect);
     assert_eq!(history[0].confirmed_tier, Some(DurabilityTier::EdgeServer));
     assert_eq!(visible[0].confirmed_tier, Some(DurabilityTier::EdgeServer));
+}
+
+#[test]
+fn row_version_created_emits_row_version_state_changed_to_source() {
+    use std::collections::HashMap;
+
+    use crate::metadata::MetadataKey;
+    use crate::row_regions::{BatchId, RowState, StoredRowVersion};
+
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::Worker);
+    let mut io = MemoryStorage::new();
+    let server_id = ServerId::new();
+    let row_id = ObjectId::new();
+    let branch_name: BranchName = "main".into();
+
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+
+    let version = StoredRowVersion {
+        row_id,
+        branch: branch_name.as_str().to_string(),
+        parents: Vec::new(),
+        updated_at: 1000,
+        created_by: row_id.to_string(),
+        created_at: 1000,
+        updated_by: row_id.to_string(),
+        batch_id: BatchId::new(),
+        state: RowState::VisibleDirect,
+        confirmed_tier: None,
+        is_deleted: false,
+        data: b"hello".to_vec(),
+        metadata: HashMap::new(),
+    };
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::RowVersionCreated {
+            metadata: Some(ObjectMetadata {
+                id: row_id,
+                metadata,
+            }),
+            row: version.clone(),
+        },
+    );
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload:
+                SyncPayload::RowVersionStateChanged {
+                    row_id: ack_row_id,
+                    branch_name: ack_branch,
+                    version_id,
+                    state,
+                    confirmed_tier,
+                },
+        } => {
+            assert_eq!(*id, server_id);
+            assert_eq!(*ack_row_id, row_id);
+            assert_eq!(*ack_branch, branch_name);
+            assert_eq!(*version_id, version.version_id());
+            assert_eq!(*state, None);
+            assert_eq!(*confirmed_tier, Some(DurabilityTier::Worker));
+        }
+        other => panic!("expected RowVersionStateChanged to server, got {other:?}"),
+    }
 }
 
 #[test]
@@ -2604,7 +2678,7 @@ fn add_server_syncs_visible_row_after_legacy_commit_history_is_removed() {
         .receive_object(&mut io, object_id, fresh_metadata);
 
     let server_id = ServerId::new();
-    sm.add_server(server_id);
+    sm.add_server_with_storage(server_id, false, &io);
 
     let outbox = sm.take_outbox();
     assert_eq!(outbox.len(), 1);
@@ -2612,30 +2686,113 @@ fn add_server_syncs_visible_row_after_legacy_commit_history_is_removed() {
     match &outbox[0] {
         OutboxEntry {
             destination: Destination::Server(id),
-            payload:
-                SyncPayload::ObjectUpdated {
-                    object_id: synced_object_id,
-                    metadata,
-                    branch_name: synced_branch,
-                    commits,
-                },
+            payload: SyncPayload::RowVersionCreated { metadata, row },
         } => {
             assert_eq!(*id, server_id);
-            assert_eq!(*synced_object_id, object_id);
-            assert_eq!(synced_branch.as_str(), "main");
+            assert_eq!(row.row_id, object_id);
+            assert_eq!(row.branch, "main");
             let metadata = metadata
                 .as_ref()
                 .expect("first sync should still include metadata");
             assert_eq!(metadata.id, object_id);
-            assert_eq!(commits.len(), 1, "current visible row should still sync");
             assert_eq!(
-                commits[0].id(),
+                row.version_id(),
                 commit_id,
                 "visible-row sync should preserve the original commit identity"
             );
-            assert_eq!(commits[0].content, b"hello".to_vec());
+            assert_eq!(row.data, b"hello".to_vec());
         }
-        other => panic!("expected ObjectUpdated to server, got {other:?}"),
+        other => panic!("expected RowVersionCreated to server, got {other:?}"),
+    }
+}
+
+#[test]
+fn add_server_with_storage_syncs_full_row_history_to_server() {
+    use std::collections::HashMap;
+
+    use crate::metadata::MetadataKey;
+    use crate::row_regions::{BatchId, RowState, StoredRowVersion};
+    use crate::storage::Storage;
+
+    let mut io = MemoryStorage::new();
+    let object_id = ObjectId::new();
+    let branch_name: BranchName = "main".into();
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    io.create_object(object_id, metadata.clone()).unwrap();
+
+    let older = StoredRowVersion {
+        row_id: object_id,
+        branch: branch_name.as_str().to_string(),
+        parents: Vec::new(),
+        updated_at: 1000,
+        created_by: object_id.to_string(),
+        created_at: 1000,
+        updated_by: object_id.to_string(),
+        batch_id: BatchId::new(),
+        state: RowState::VisibleDirect,
+        confirmed_tier: None,
+        is_deleted: false,
+        data: b"older".to_vec(),
+        metadata: HashMap::new(),
+    };
+    let newer = StoredRowVersion {
+        row_id: object_id,
+        branch: branch_name.as_str().to_string(),
+        parents: vec![older.version_id()],
+        updated_at: 2000,
+        created_by: object_id.to_string(),
+        created_at: 1000,
+        updated_by: object_id.to_string(),
+        batch_id: BatchId::new(),
+        state: RowState::VisibleDirect,
+        confirmed_tier: None,
+        is_deleted: false,
+        data: b"newer".to_vec(),
+        metadata: HashMap::new(),
+    };
+    io.append_history_region_rows("users", &[older.clone(), newer.clone()])
+        .unwrap();
+    io.upsert_visible_region_rows("users", std::slice::from_ref(&newer))
+        .unwrap();
+
+    let mut sm = SyncManager::new();
+    let server_id = ServerId::new();
+    sm.add_server_with_storage(server_id, false, &io);
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 2);
+
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload: SyncPayload::RowVersionCreated { metadata, row },
+        } => {
+            assert_eq!(*id, server_id);
+            assert_eq!(row.version_id(), older.version_id());
+            assert_eq!(row.data, b"older".to_vec());
+            assert!(
+                metadata.is_some(),
+                "first replayed history version should include metadata"
+            );
+        }
+        other => panic!("expected first RowVersionCreated to server, got {other:?}"),
+    }
+
+    match &outbox[1] {
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload: SyncPayload::RowVersionCreated { metadata, row },
+        } => {
+            assert_eq!(*id, server_id);
+            assert_eq!(row.version_id(), newer.version_id());
+            assert_eq!(row.data, b"newer".to_vec());
+            assert!(
+                metadata.is_none(),
+                "follow-up replayed versions should reuse prior metadata"
+            );
+        }
+        other => panic!("expected second RowVersionCreated to server, got {other:?}"),
     }
 }
 

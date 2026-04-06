@@ -10,6 +10,7 @@ use crate::query_manager::policy::Operation;
 use crate::query_manager::query::Query;
 use crate::query_manager::session::Session;
 use crate::query_manager::types::SchemaHash;
+use crate::row_regions::StoredRowVersion;
 
 /// Error returned when a policy denies an operation.
 #[derive(Debug, Clone)]
@@ -216,6 +217,16 @@ pub struct ObjectMetadata {
     pub metadata: HashMap<String, String>,
 }
 
+/// Internal row update handed from SyncManager to QueryManager.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowUpdateEvent {
+    pub object_id: ObjectId,
+    pub metadata: HashMap<String, String>,
+    pub row: StoredRowVersion,
+    pub previous_row: Option<StoredRowVersion>,
+    pub is_new_object: bool,
+}
+
 /// Payload for sync messages between peers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncPayload {
@@ -225,6 +236,27 @@ pub enum SyncPayload {
         metadata: Option<ObjectMetadata>,
         branch_name: BranchName,
         commits: Vec<Commit>,
+    },
+
+    /// Upstream replication of a newly created or newly learned row version.
+    RowVersionCreated {
+        metadata: Option<ObjectMetadata>,
+        row: StoredRowVersion,
+    },
+
+    /// Downstream delivery of a row version that is needed for a subscriber's scope.
+    RowVersionNeeded {
+        metadata: Option<ObjectMetadata>,
+        row: StoredRowVersion,
+    },
+
+    /// System-column update for a previously sent row version.
+    RowVersionStateChanged {
+        row_id: ObjectId,
+        branch_name: BranchName,
+        version_id: CommitId,
+        state: Option<crate::row_regions::RowState>,
+        confirmed_tier: Option<DurabilityTier>,
     },
 
     /// Branch truncated - new tail boundary.
@@ -341,11 +373,40 @@ mod query_subscription_session_serde {
 }
 
 impl SyncPayload {
+    pub fn object_id(&self) -> Option<ObjectId> {
+        match self {
+            SyncPayload::ObjectUpdated { object_id, .. } => Some(*object_id),
+            SyncPayload::RowVersionCreated { row, .. }
+            | SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
+            SyncPayload::RowVersionStateChanged { row_id, .. } => Some(*row_id),
+            SyncPayload::ObjectTruncated { object_id, .. } => Some(*object_id),
+            _ => None,
+        }
+    }
+
+    pub fn branch_name(&self) -> Option<BranchName> {
+        match self {
+            SyncPayload::ObjectUpdated { branch_name, .. } => Some(*branch_name),
+            SyncPayload::RowVersionCreated { row, .. }
+            | SyncPayload::RowVersionNeeded { row, .. } => Some(BranchName::new(&row.branch)),
+            SyncPayload::RowVersionStateChanged { branch_name, .. } => Some(*branch_name),
+            SyncPayload::ObjectTruncated { branch_name, .. } => Some(*branch_name),
+            _ => None,
+        }
+    }
+
     fn catalogue_object_type(&self) -> Option<&str> {
         let metadata = match self {
             SyncPayload::ObjectUpdated {
                 metadata: Some(m), ..
             } => &m.metadata,
+            SyncPayload::RowVersionCreated {
+                metadata: Some(m), ..
+            } => &m.metadata,
+            SyncPayload::RowVersionNeeded {
+                metadata: Some(m), ..
+            } => &m.metadata,
+            SyncPayload::RowVersionStateChanged { .. } => return None,
             SyncPayload::ObjectTruncated { .. } => return None,
             _ => return None,
         };
@@ -393,6 +454,9 @@ impl SyncPayload {
     pub fn variant_name(&self) -> &'static str {
         match self {
             SyncPayload::ObjectUpdated { .. } => "ObjectUpdated",
+            SyncPayload::RowVersionCreated { .. } => "RowVersionCreated",
+            SyncPayload::RowVersionNeeded { .. } => "RowVersionNeeded",
+            SyncPayload::RowVersionStateChanged { .. } => "RowVersionStateChanged",
             SyncPayload::ObjectTruncated { .. } => "ObjectTruncated",
             SyncPayload::QuerySubscription { .. } => "QuerySubscription",
             SyncPayload::QueryUnsubscription { .. } => "QueryUnsubscription",

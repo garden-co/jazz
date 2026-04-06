@@ -34,6 +34,49 @@ impl SyncManager {
         }
     }
 
+    pub fn forward_update_to_servers_with_storage<H: crate::storage::Storage>(
+        &mut self,
+        storage: &H,
+        object_id: ObjectId,
+        branch_name: BranchName,
+    ) {
+        let server_ids: Vec<ServerId> = self.servers.keys().copied().collect();
+        if !server_ids.is_empty() {
+            tracing::trace!(%object_id, %branch_name, servers = server_ids.len(), "forwarding to servers");
+        }
+
+        let Some(object) = self.object_manager.get(object_id) else {
+            return;
+        };
+        if let Some(table) = object
+            .metadata
+            .get(crate::metadata::MetadataKey::Table.as_str())
+            && let Ok(Some(row)) =
+                storage.load_visible_region_row(table, branch_name.as_str(), object_id)
+        {
+            let metadata = object.metadata.clone();
+            for server_id in server_ids {
+                self.queue_row_to_server(server_id, object_id, metadata.clone(), row.clone());
+            }
+            return;
+        }
+        let Some(branch) = object.branches.get(&branch_name) else {
+            return;
+        };
+        let tips: HashSet<CommitId> = branch.tips.iter().copied().collect();
+        let metadata = object.metadata.clone();
+
+        for server_id in server_ids {
+            self.queue_tips_to_server(
+                server_id,
+                object_id,
+                metadata.clone(),
+                branch_name,
+                tips.clone(),
+            );
+        }
+    }
+
     /// Forward an update to clients whose scope includes this object/branch.
     pub(super) fn forward_update_to_clients(
         &mut self,
@@ -41,6 +84,20 @@ impl SyncManager {
         branch_name: BranchName,
     ) {
         self.forward_update_to_clients_except(object_id, branch_name, ClientId(Uuid::nil()));
+    }
+
+    pub(super) fn forward_update_to_clients_with_storage(
+        &mut self,
+        storage: &impl crate::storage::Storage,
+        object_id: ObjectId,
+        branch_name: BranchName,
+    ) {
+        self.forward_update_to_clients_except_with_storage(
+            storage,
+            object_id,
+            branch_name,
+            ClientId(Uuid::nil()),
+        );
     }
 
     /// Forward an update to clients except the specified one.
@@ -65,6 +122,78 @@ impl SyncManager {
         let Some(object) = self.object_manager.get(object_id) else {
             return;
         };
+        let Some(branch) = object.branches.get(&branch_name) else {
+            return;
+        };
+        let tips: HashSet<CommitId> = branch.tips.iter().copied().collect();
+        let metadata = object.metadata.clone();
+
+        for client_id in &client_ids {
+            tracing::trace!(%client_id, "queuing tips to client");
+            if is_catalogue {
+                self.queue_tips_to_client_unscoped(
+                    *client_id,
+                    object_id,
+                    metadata.clone(),
+                    branch_name,
+                    tips.clone(),
+                );
+            } else {
+                self.queue_tips_to_client(
+                    *client_id,
+                    object_id,
+                    metadata.clone(),
+                    branch_name,
+                    tips.clone(),
+                );
+            }
+        }
+    }
+
+    pub(super) fn forward_update_to_clients_except_with_storage<H: crate::storage::Storage>(
+        &mut self,
+        storage: &H,
+        object_id: ObjectId,
+        branch_name: BranchName,
+        except: ClientId,
+    ) {
+        let is_catalogue = self.object_is_catalogue(object_id);
+        let client_ids: Vec<ClientId> = self
+            .clients
+            .iter()
+            .filter(|(id, client)| {
+                **id != except && (is_catalogue || client.is_in_scope(object_id, &branch_name))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+
+        let _span = tracing::debug_span!("forward_update_to_clients", %object_id, %branch_name, client_count = client_ids.len()).entered();
+
+        let Some(object) = self.object_manager.get(object_id) else {
+            return;
+        };
+        if let Some(table) = object
+            .metadata
+            .get(crate::metadata::MetadataKey::Table.as_str())
+            && let Ok(Some(row)) =
+                storage.load_visible_region_row(table, branch_name.as_str(), object_id)
+        {
+            let metadata = object.metadata.clone();
+            for client_id in &client_ids {
+                tracing::trace!(%client_id, "queuing row update to client");
+                if is_catalogue {
+                    self.queue_row_to_client_unscoped(
+                        *client_id,
+                        object_id,
+                        metadata.clone(),
+                        row.clone(),
+                    );
+                } else {
+                    self.queue_row_to_client(*client_id, object_id, metadata.clone(), row.clone());
+                }
+            }
+            return;
+        }
         let Some(branch) = object.branches.get(&branch_name) else {
             return;
         };

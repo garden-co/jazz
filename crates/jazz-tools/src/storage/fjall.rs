@@ -27,9 +27,9 @@ use super::{
         index_lookup_core, index_range_core, index_remove_core, index_scan_all_core,
         load_branch_core, load_catalogue_manifest_core, load_object_metadata_core,
         load_visible_region_row_core, patch_row_region_rows_by_batch_core,
-        scan_history_region_core, scan_object_metadata_core, scan_visible_region_core,
-        scan_visible_region_row_versions_core, set_branch_tails_core, store_ack_tier_core,
-        upsert_visible_region_rows_core,
+        scan_history_region_core, scan_history_row_versions_core, scan_object_metadata_core,
+        scan_visible_region_core, scan_visible_region_row_versions_core, set_branch_tails_core,
+        store_ack_tier_core, upsert_visible_region_rows_core,
     },
 };
 
@@ -385,11 +385,11 @@ impl Storage for FjallStorage {
         })
     }
 
-    fn patch_history_region_rows_by_batch(
+    fn patch_row_region_rows_by_batch(
         &mut self,
         table: &str,
         batch_id: crate::row_regions::BatchId,
-        state: RowState,
+        state: Option<RowState>,
         confirmed_tier: Option<DurabilityTier>,
     ) -> Result<(), StorageError> {
         self.with_inner(|inner| {
@@ -441,6 +441,19 @@ impl Storage for FjallStorage {
         self.with_inner(|inner| {
             let tx = inner.db.read_tx();
             scan_visible_region_row_versions_core(table, row_id, |prefix| {
+                Self::scan_prefix(&tx, &inner.keyspace, prefix)
+            })
+        })
+    }
+
+    fn scan_history_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            scan_history_row_versions_core(table, row_id, |prefix| {
                 Self::scan_prefix(&tx, &inner.keyspace, prefix)
             })
         })
@@ -615,11 +628,13 @@ mod tests {
             .unwrap();
 
         let visible = storage.scan_visible_region("users", "dev/main").unwrap();
+        let history_by_row = storage.scan_history_row_versions("users", row_id).unwrap();
         let history = storage
             .scan_history_region("users", "dev/main", HistoryScan::Row { row_id })
             .unwrap();
 
         assert_eq!(visible, vec![version.clone()]);
+        assert_eq!(history_by_row, vec![version.clone()]);
         assert_eq!(history, vec![version]);
     }
 
