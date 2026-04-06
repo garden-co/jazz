@@ -877,6 +877,24 @@ impl QueryManager {
         // 4b. Settle policy graphs and finalize completed checks
         self.settle_policy_checks(storage);
 
+        // 4c. Apply QuerySettled messages that do not depend on any earlier
+        // sequenced sync updates. Watermarked settlements stay queued for
+        // RuntimeCore, which tracks per-server stream progress.
+        let pending_query_settled = self.sync_manager.take_pending_query_settled();
+        if !pending_query_settled.is_empty() {
+            let mut blocked = Vec::new();
+            for pending_settled in pending_query_settled {
+                if pending_settled.through_seq == 0 {
+                    self.apply_query_settled(pending_settled.query_id, pending_settled.tier);
+                } else {
+                    blocked.push(pending_settled);
+                }
+            }
+            if !blocked.is_empty() {
+                self.sync_manager.requeue_pending_query_settled(blocked);
+            }
+        }
+
         // 5. Index storage is handled by Storage via batched_tick() - not here.
         // Tests/benchmarks that don't need real storage use NullStorage.
 
