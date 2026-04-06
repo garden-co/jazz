@@ -143,17 +143,6 @@ impl SyncManager {
         self
     }
 
-    pub(crate) fn rehydrate_object_from_storage<H: Storage>(
-        &mut self,
-        storage: &H,
-        object_id: ObjectId,
-        metadata: HashMap<String, String>,
-    ) {
-        self.track_catalogue_object(object_id, &metadata);
-        self.object_manager
-            .hydrate_object_from_storage(storage, object_id, metadata);
-    }
-
     /// Allow authenticated user clients to publish structural schema catalogue
     /// objects directly. Intended for development servers only.
     pub fn with_unprivileged_schema_catalogue_writes(mut self) -> Self {
@@ -212,6 +201,20 @@ impl SyncManager {
         self.queue_full_sync_to_server(server_id);
     }
 
+    /// Add a server connection using storage-backed current-state replay.
+    pub fn add_server_with_storage<H: Storage>(
+        &mut self,
+        server_id: ServerId,
+        skip_catalogue_sync: bool,
+        storage: &H,
+    ) {
+        self.servers.insert(server_id, ServerState::default());
+        if skip_catalogue_sync {
+            self.mark_catalogue_sent_for_server(server_id);
+        }
+        self.queue_full_sync_to_server_from_storage(server_id, storage);
+    }
+
     /// Remove a server connection.
     pub fn remove_server(&mut self, server_id: ServerId) {
         self.servers.remove(&server_id);
@@ -221,6 +224,12 @@ impl SyncManager {
     pub fn add_client(&mut self, client_id: ClientId) {
         self.clients.insert(client_id, ClientState::default());
         self.queue_catalogue_sync_to_client(client_id);
+    }
+
+    /// Add a client connection using storage-backed catalogue replay.
+    pub fn add_client_with_storage<H: Storage>(&mut self, storage: &H, client_id: ClientId) {
+        self.clients.insert(client_id, ClientState::default());
+        self.queue_catalogue_sync_to_client_from_storage(client_id, storage);
     }
 
     /// Remove a client connection and all associated state.

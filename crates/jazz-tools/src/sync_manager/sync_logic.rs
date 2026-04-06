@@ -3,6 +3,17 @@ use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use std::collections::{HashMap, HashSet};
 
+type RowCommitSyncData = (ObjectId, HashMap<String, String>, BranchName, Vec<Commit>);
+
+struct ServerCommitSyncData {
+    object_id: ObjectId,
+    metadata: HashMap<String, String>,
+    branch_name: BranchName,
+    tips: HashSet<CommitId>,
+    commits: Vec<Commit>,
+    include_metadata: bool,
+}
+
 impl SyncManager {
     pub(super) fn is_catalogue_metadata(metadata: &HashMap<String, String>) -> bool {
         matches!(
@@ -89,12 +100,118 @@ impl SyncManager {
         }
     }
 
+    /// Queue all existing objects to sync to a new server using storage as the
+    /// source of truth for row current state.
+    pub(super) fn queue_full_sync_to_server_from_storage<H: Storage>(
+        &mut self,
+        server_id: ServerId,
+        storage: &H,
+    ) {
+        let _span =
+            tracing::debug_span!("queue_full_sync_to_server_from_storage", %server_id).entered();
+        let Ok(objects) = storage.scan_object_metadata() else {
+            return;
+        };
+
+        let mut row_sync: Vec<RowCommitSyncData> = Vec::new();
+        let mut object_sync: Vec<BranchSyncData> = Vec::new();
+
+        for (object_id, metadata) in objects {
+            self.track_catalogue_object(object_id, &metadata);
+
+            if let Some(table) = metadata.get(crate::metadata::MetadataKey::Table.as_str()) {
+                let Ok(rows) = storage.scan_visible_region_row_versions(table, object_id) else {
+                    continue;
+                };
+
+                for row in rows.into_iter().filter(|row| row.state.is_visible()) {
+                    row_sync.push((
+                        object_id,
+                        metadata.clone(),
+                        BranchName::new(&row.branch),
+                        vec![row.to_commit()],
+                    ));
+                }
+                continue;
+            }
+
+            let Some(object) = self.object_manager.get_or_load(object_id, storage, &[]) else {
+                continue;
+            };
+            for (branch_name, branch) in &object.branches {
+                object_sync.push((
+                    object_id,
+                    object.metadata.clone(),
+                    *branch_name,
+                    branch.tips.iter().copied().collect(),
+                ));
+            }
+        }
+
+        for (object_id, metadata, branch_name, commits) in row_sync {
+            let tips = commits.iter().map(Commit::id).collect();
+            let include_metadata = self
+                .servers
+                .get(&server_id)
+                .map(|server| !server.sent_metadata.contains(&object_id))
+                .unwrap_or(false);
+            self.queue_commits_to_server(
+                server_id,
+                ServerCommitSyncData {
+                    object_id,
+                    metadata,
+                    branch_name,
+                    tips,
+                    commits,
+                    include_metadata,
+                },
+            );
+        }
+        for (object_id, metadata, branch_name, tips) in object_sync {
+            self.queue_tips_to_server(server_id, object_id, metadata, branch_name, tips);
+        }
+    }
+
     /// Queue all existing catalogue objects to sync to a new client.
     pub(super) fn queue_catalogue_sync_to_client(&mut self, client_id: ClientId) {
         let mut to_sync: Vec<BranchSyncData> = Vec::new();
 
         for object_id in self.catalogue_objects.iter().copied() {
             let Some(object) = self.object_manager.objects.get(&object_id) else {
+                continue;
+            };
+            for (branch_name, branch) in &object.branches {
+                to_sync.push((
+                    object_id,
+                    object.metadata.clone(),
+                    *branch_name,
+                    branch.tips.iter().copied().collect(),
+                ));
+            }
+        }
+
+        for (object_id, metadata, branch_name, tips) in to_sync {
+            self.queue_tips_to_client_unscoped(client_id, object_id, metadata, branch_name, tips);
+        }
+    }
+
+    pub(super) fn queue_catalogue_sync_to_client_from_storage<H: Storage>(
+        &mut self,
+        client_id: ClientId,
+        storage: &H,
+    ) {
+        let Ok(objects) = storage.scan_object_metadata() else {
+            return;
+        };
+
+        let mut to_sync: Vec<BranchSyncData> = Vec::new();
+        for (object_id, metadata) in objects {
+            if !Self::is_catalogue_metadata(&metadata) {
+                continue;
+            }
+            self.track_catalogue_object(object_id, &metadata);
+
+            let Some(object) = self.object_manager.get_or_load(object_id, storage, &[]) else {
                 continue;
             };
             for (branch_name, branch) in &object.branches {
@@ -147,6 +264,61 @@ impl SyncManager {
 
         // Collect commits we need to send
         let commits = self.collect_commits_to_send(object_id, &branch_name, &already_sent, &tips);
+
+        self.queue_commits_to_server(
+            server_id,
+            ServerCommitSyncData {
+                object_id,
+                metadata,
+                branch_name,
+                tips,
+                commits,
+                include_metadata,
+            },
+        );
+    }
+
+    fn queue_commits_to_server(&mut self, server_id: ServerId, sync: ServerCommitSyncData) {
+        let ServerCommitSyncData {
+            object_id,
+            metadata,
+            branch_name,
+            tips,
+            commits,
+            include_metadata,
+        } = sync;
+
+        let already_sent = {
+            let Some(server) = self.servers.get(&server_id) else {
+                return;
+            };
+            server
+                .sent_tips
+                .get(&(object_id, branch_name))
+                .cloned()
+                .unwrap_or_default()
+        };
+
+        if tips == already_sent && !include_metadata {
+            return;
+        }
+
+        let _span = tracing::debug_span!(
+            "queue_commits_to_server",
+            %server_id,
+            %object_id,
+            %branch_name,
+            commits = commits.len()
+        )
+        .entered();
+
+        if metadata
+            .get(crate::metadata::MetadataKey::NoSync.as_str())
+            .map(|v| v == "true")
+            .unwrap_or(false)
+        {
+            return;
+        }
 
         if commits.is_empty() && !include_metadata {
             return; // Nothing new to send

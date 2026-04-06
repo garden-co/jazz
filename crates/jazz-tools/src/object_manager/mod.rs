@@ -224,42 +224,6 @@ impl ObjectManager {
         }
     }
 
-    fn hydrate_visible_row_branches<H: Storage>(
-        object: &mut Object,
-        io: &H,
-        table: &str,
-        object_id: ObjectId,
-    ) {
-        let Ok(rows) = io.scan_visible_region_row_versions(table, object_id) else {
-            return;
-        };
-
-        for row in rows {
-            object
-                .branches
-                .entry(BranchName::new(&row.branch))
-                .or_insert_with(|| Self::branch_from_visible_row(row));
-        }
-    }
-
-    fn insert_loaded_object<H: Storage>(
-        &mut self,
-        io: &H,
-        object_id: ObjectId,
-        metadata: HashMap<String, String>,
-    ) {
-        let object = Object {
-            id: object_id,
-            metadata,
-            branches: HashMap::new(),
-        };
-
-        let object = self.objects.entry(object_id).or_insert(object);
-        if let Some(table) = object.metadata.get(MetadataKey::Table.as_str()).cloned() {
-            Self::hydrate_visible_row_branches(object, io, &table, object_id);
-        }
-    }
-
     /// Get an object by id.
     pub fn get(&self, id: ObjectId) -> Option<&Object> {
         self.objects.get(&id)
@@ -661,16 +625,11 @@ impl ObjectManager {
     ) {
         // Sync storage - returns immediately
         let _ = io.create_object(object_id, metadata.clone());
-        self.insert_loaded_object(io, object_id, metadata);
-    }
-
-    pub fn hydrate_object_from_storage<H: Storage>(
-        &mut self,
-        io: &H,
-        object_id: ObjectId,
-        metadata: HashMap<String, String>,
-    ) {
-        self.insert_loaded_object(io, object_id, metadata);
+        self.objects.entry(object_id).or_insert(Object {
+            id: object_id,
+            metadata,
+            branches: HashMap::new(),
+        });
     }
 
     /// Receive a commit from a remote source.
