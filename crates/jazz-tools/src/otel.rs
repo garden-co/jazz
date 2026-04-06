@@ -33,11 +33,12 @@ fn uuid_instance_id() -> String {
 }
 
 /// Parse the metric export interval from env, defaulting to 60 seconds.
+/// `OTEL_METRIC_EXPORT_INTERVAL` is in milliseconds per the OTel spec.
 fn metric_export_interval() -> std::time::Duration {
     std::env::var("OTEL_METRIC_EXPORT_INTERVAL")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .map(std::time::Duration::from_secs)
+        .map(std::time::Duration::from_millis)
         .unwrap_or(std::time::Duration::from_secs(60))
 }
 

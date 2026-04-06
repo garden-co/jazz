@@ -40,13 +40,13 @@ cargo run -p jazz-cloud-server --features otel -- \
 
 ## Environment variables
 
-| Variable                      | Purpose                               | Default         |
-| ----------------------------- | ------------------------------------- | --------------- |
-| `JAZZ_OTEL`                   | Enable the OTel layer (`1` to enable) | off             |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector endpoint (gRPC)        | stdout fallback |
-| `OTEL_SERVICE_NAME`           | Service name in traces and metrics    | `jazz-server`   |
-| `OTEL_SERVICE_INSTANCE_ID`    | Unique instance identifier            | random UUID     |
-| `OTEL_METRIC_EXPORT_INTERVAL` | Metric export interval in seconds     | `60`            |
+| Variable                      | Purpose                                | Default         |
+| ----------------------------- | -------------------------------------- | --------------- |
+| `JAZZ_OTEL`                   | Enable the OTel layer (`1` to enable)  | off             |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector endpoint (gRPC)         | stdout fallback |
+| `OTEL_SERVICE_NAME`           | Service name in traces and metrics     | `jazz-server`   |
+| `OTEL_SERVICE_INSTANCE_ID`    | Unique instance identifier             | random UUID     |
+| `OTEL_METRIC_EXPORT_INTERVAL` | Metric export interval in milliseconds | `60000`         |
 
 ## Metric catalog
 

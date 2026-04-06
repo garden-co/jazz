@@ -28,7 +28,7 @@ The Grafana dashboard "Jazz Cloud Server" is auto-provisioned from `grafana/jazz
 ```sh
 JAZZ_OTEL=1 \
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
-OTEL_METRIC_EXPORT_INTERVAL=10 \
+OTEL_METRIC_EXPORT_INTERVAL=10000 \
 cargo run -p jazz-cloud-server --features otel -- \
   --internal-api-secret test-secret \
   --secret-hash-key test-hash-key \
@@ -59,14 +59,14 @@ docker compose down -v   # stop + wipe data
 
 ## Environment variables
 
-| Variable                      | Purpose                               | Default         |
-| ----------------------------- | ------------------------------------- | --------------- |
-| `JAZZ_OTEL`                   | Enable the OTel layer (`1` to enable) | off             |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector endpoint                    | stdout fallback |
-| `OTEL_SERVICE_NAME`           | Service name in traces/metrics        | `jazz-server`   |
-| `OTEL_SERVICE_INSTANCE_ID`    | Unique instance identifier            | random UUID     |
-| `OTEL_METRIC_EXPORT_INTERVAL` | Metric export interval in seconds     | `60`            |
-| `RUST_LOG`                    | Log filter for `tracing` subscriber   | —               |
+| Variable                      | Purpose                                | Default         |
+| ----------------------------- | -------------------------------------- | --------------- |
+| `JAZZ_OTEL`                   | Enable the OTel layer (`1` to enable)  | off             |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector endpoint                     | stdout fallback |
+| `OTEL_SERVICE_NAME`           | Service name in traces/metrics         | `jazz-server`   |
+| `OTEL_SERVICE_INSTANCE_ID`    | Unique instance identifier             | random UUID     |
+| `OTEL_METRIC_EXPORT_INTERVAL` | Metric export interval in milliseconds | `60000`         |
+| `RUST_LOG`                    | Log filter for `tracing` subscriber    | —               |
 
 ## Metric catalog
 
