@@ -406,9 +406,8 @@ impl SyncManager {
             return;
         };
         let metadata = object.metadata.clone();
-        if let Some(table) = metadata.get(crate::metadata::MetadataKey::Table.as_str())
-            && let Ok(Some(row)) =
-                storage.load_visible_region_row(table, branch_name.as_str(), object_id)
+        if let Some(row) =
+            self.load_current_row_from_storage(storage, object_id, &branch_name, &metadata)
         {
             self.queue_row_to_client(client_id, object_id, metadata, row);
             return;
