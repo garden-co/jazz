@@ -1,4 +1,4 @@
-# Relational Row History and Visible Projection
+# Relational Row History with Visible and History Regions
 
 ## Problem
 
@@ -11,16 +11,16 @@ That seam is expensive. On `main`, we pay for a git-like object model and then r
 
 The concern behind this spec is not just "can we make `#415` faster?" It is "are we optimizing the wrong boundary?" If the system's real semantic unit is a versioned row in a branch-scoped table, then object DAGs, branch-tip sets, and commit-specific hot paths may be the wrong primitive to optimize around. We may be paying complexity twice: once in the storage/object layer, and again in the query layer that has to turn that back into rows.
 
-This spec explores a radical replacement: make the base substrate of Jazz a lower-level database of tables that contain both user columns and system columns. Branching, staging, durability, and visibility become data expressed directly in row versions, and the hot read path becomes an explicitly maintained "latest visible" projection rather than a reconstruction from object history.
+This spec explores a radical replacement: make the base substrate of Jazz a lower-level database of tables that contain both user columns and system columns. Branching, staging, durability, and visibility become data expressed directly in row versions, and the hot read path becomes an explicitly maintained visible region rather than a reconstruction from object history.
 
 ## Solution
 
 ### Chosen approach
 
-This spec recommends replacing the "row = object with branch DAG history" model with a relational version-storage model built from two first-class storage relations for user data:
+This spec recommends replacing the "row = object with branch DAG history" model with a relational version-storage model built from one keyed storage space per user table, split into two table regions:
 
-1. per-user-table **history tables**
-2. per-user-table **visible tables**
+1. a per-user-table **history region**
+2. a per-user-table **visible region**
 
 The engine still has version history, staging, transactions, and durability tiers. The difference is where those concepts live:
 
@@ -38,17 +38,17 @@ The engine still has version history, staging, transactions, and durability tier
 
    This is better than `main`, but it still keeps two hot-path mental models: object/batch history below, relational rows above.
 
-3. Replace the substrate with relational row history plus a visible projection.
+3. Replace the substrate with relational row history plus visible/history regions.
 
    This is the most radical option, but it is the only one that collapses the storage, visibility, and query models into one consistent data shape. This spec chooses that option.
 
 ### Design principles
 
-- The hot path for ordinary reads must be **visible-table first**.
-- `__visible` must be authoritative for current reads.
+- The hot path for ordinary reads must be **visible-region first**.
+- The visible region must be authoritative for current reads.
 - History must be **append-friendly** and compress well.
-- `__history` and `__visible` should stay structurally parallel so history/time-travel features can be real product features from the beginning.
-- Visibility and settlement rules should be expressible in table terms, even if the engine materializes optimized projections for speed.
+- The history and visible regions should stay structurally parallel so history/time-travel features can be real product features from the beginning.
+- Visibility and settlement rules should be expressible in table terms, even if the engine materializes optimized keyed regions for speed.
 - We should have one primary data management system to optimize on disk, in memory, and on the wire.
 - Prefer write-time fan-out over read-time joins on the hot path.
 
@@ -59,45 +59,54 @@ The system distinguishes four concepts:
 - **logical row**: the stable application row identity
 - **row version**: one concrete version of a logical row
 - **logical batch**: one write unit identified by one `BatchId`
-- **visible batch member**: one row version published into the visible state as part of a logical batch
+- **visible-region row**: the current visible copy of a row version used by ordinary reads
 
 The old object boundary disappears for user rows. A row version is not wrapped in a commit object. It is already a row in a lower-level storage table.
 
 ### Physical layout
 
-For each user table `todos`, the engine stores:
+For each user table `todos`, the engine stores one physical keyed table space with two table regions:
 
-- `todos__history`
-- `todos__visible`
+- a `visible` region
+- a `history` region
 
-The two physical tables use the same logical column layout:
+The two regions use the same logical column layout:
 
 - user-defined columns
 - reserved system columns
 
-The difference is purpose and clustering:
+The difference is purpose and key shape:
 
-- `todos__visible` is the hot read projection: one current visible row version per logical row per branch scope
-- `todos__history` is the append-heavy history log: all staged and visible row versions over time
+- the `visible` region is the hot read region: one current visible row version per logical row per branch
+- the `history` region is the append-heavy history log: all staged, rejected, and visible row versions over time
+
+Suggested primary key layout:
+
+```text
+0 / $branch / $row_id
+1 / $branch / $row_id / $updated_at
+```
+
+This gives us both locality goals:
+
+- all current visible rows for a branch sort first and stay tightly packed
+- all historical versions of one logical row stay tightly grouped in the history region
 
 The engine may still have shared metadata tables for schema, catalog, and index management, but batch settlement for user rows is not modeled as a required third hot-path relation.
 
 ### Reserved system columns
 
-Every user table's history and visible projections reserve a set of engine columns. The exact names can change, but the model needs at least:
+Every user table's visible and history regions reserve a set of engine columns. The exact names can change, but the model needs at least:
 
 ```text
-$row_id           stable logical row id
-$branch_scope     encoded visible/staging branch scope
-$version_at       actual timestamp for this row version
-$created_at       logical row creation timestamp
+$row_id           stable logical row id, engine-generated as UUIDv7
+$branch           user-meaningful branch view
+$updated_at       timestamp for this row version
 $created_by       actor that created the logical row
 $updated_by       actor that produced this row version
 $batch_id         logical batch id
-$batch_mode       direct | transactional
-$settlement       pending | rejected | durable_direct | accepted_transaction
+$state            staging_pending | rejected | visible_direct | visible_transactional
 $confirmed_tier   worker | edge | global
-$visibility       visible | staging
 $is_deleted       tombstone marker
 $metadata         engine/user metadata blob
 ```
@@ -105,10 +114,11 @@ $metadata         engine/user metadata blob
 Notes:
 
 - `BatchId` remains the single logical write id.
-- We do not overload `$created_at` to carry UUIDv7 identity. Instead, row identity is explicit in `$row_id`, which may itself be UUIDv7-backed.
-- Batch-wide settlement is deliberately denormalized onto row versions and visible rows. That makes write-time fate/tier propagation more expensive, but keeps ordinary reads and ordinary queries one-table only.
+- `$row_id` encodes creation time. If an application wants a semantically meaningful "created at" field, it should declare an ordinary user column for that purpose.
+- `$branch` is important enough to be explicit data. It identifies which user-meaningful branch view this row version belongs to and is used by `query.branch_view(...)`.
+- Batch-wide settlement is deliberately denormalized onto row versions and visible rows. That makes write-time fate/tier propagation more expensive, but keeps ordinary reads and ordinary queries one-region only.
 - History is append-only for user columns: each history row is one concrete row version and should not be rewritten to change user data.
-- System metadata attached to that row version may still be updated in place. In particular, fields such as `$settlement`, `$confirmed_tier`, and selected `$metadata` entries are "about" the row version rather than part of the user payload.
+- System metadata attached to that row version may still be updated in place. In particular, fields such as `$state`, `$confirmed_tier`, and selected `$metadata` entries are "about" the row version rather than part of the user payload.
 
 ### Breadboards
 
@@ -116,41 +126,37 @@ Notes:
 
 ```text
 alice updates todo/1
-  -> append new row version to todos__history
-     with $visibility = visible, $batch_id = B1,
-          $settlement = durable_direct
-  -> upsert same row version into todos__visible
-  -> update visible-table indices
+  -> append new row version to todos.history
+     with $state = visible_direct, $batch_id = B1
+  -> upsert same row version into todos.visible
+  -> update visible-region indices
 ```
 
 #### Transactional write
 
 ```text
 alice starts batch B7 touching todo/1 and project/9
-  -> append staging row versions to todos__history and projects__history
-     with $visibility = staging, $batch_id = B7,
-          $settlement = pending
-  -> no change to todos__visible or projects__visible yet
+  -> append staging row versions to todos.history and projects.history
+     with $state = staging_pending, $batch_id = B7
+  -> no change to todos.visible or projects.visible yet
 ```
 
 #### Transaction accepted
 
 ```text
 authority accepts B7
-  -> fan out fate/tier updates to the affected history rows
-  -> append corresponding accepted visible row versions to history
-       with $visibility = visible,
-            $settlement = accepted_transaction
-  -> upsert those same row versions into todos__visible and projects__visible
-  -> update visible-table indices
+  -> patch $state and $confirmed_tier on the affected history rows in place
+       from staging_pending -> visible_transactional
+  -> upsert those same row versions into todos.visible and projects.visible
+  -> update visible-region indices
 ```
 
 #### Transaction rejected
 
 ```text
 authority rejects B7
-  -> fan out $settlement = rejected to the affected history rows
-  -> visible tables unchanged
+  -> patch $state = rejected on the affected history rows
+  -> visible regions unchanged
   -> staged history remains available for local rollback/debug/restart
 ```
 
@@ -158,69 +164,70 @@ authority rejects B7
 
 ```text
 Application query
-  -> QueryManager compiles against visible tables by default
-  -> visible-table indices serve hot scans and lookups
+  -> QueryManager compiles against visible regions by default
+  -> visible-region indices serve hot scans and lookups
   -> visible rows already include system columns needed for ordinary policy/filtering
 
 History / debug / time-travel query
-  -> QueryManager reads history tables with the same row shape
+  -> QueryManager reads history regions with the same row shape
   -> can inspect staged rows, accepted rows, rejected rows, and older visible states
 ```
 
 ```text
-+--------------------+                   +--------------------+
-| todos__history     |                   | todos__visible     |
-| all row versions   |                   | current visible    |
-| same row shape     |                   | same row shape     |
-| append/compression |                   | hot reads/indices  |
-+--------------------+                   +--------------------+
++------------------------------------------------------------+
+| todos keyed table space                                    |
+|                                                            |
+|  visible region: current visible rows, hot scans/indices   |
+|  history region: all row versions, append/compression      |
+|  same row shape in both regions                            |
++------------------------------------------------------------+
 ```
 
 ### Query semantics
 
-Ordinary user queries should not solve version-selection themselves. They compile against `table__visible`.
+Ordinary user queries should not solve version-selection themselves. They compile against the visible region.
 
 That is the central optimization rule of this design:
 
 - **do not** make every user query compute "latest visible version per row"
-- **do** maintain a visible projection that already answers that question
+- **do** maintain a visible region that already answers that question
 
 This means:
 
 - table scans operate over current visible rows only
-- ordinary secondary indices index `__visible`, not `__history`
-- joins, filters, sorting, and subscriptions all work over the visible projection by default
+- ordinary secondary indices index the visible region, not the history region
+- joins, filters, sorting, and subscriptions all work over the visible region by default
 
-History-aware and time-travel paths may query `__history`, but those are not the default UI path.
+History-aware and time-travel paths may query the history region, but those are not the default UI path.
 
 ### Visibility and settlement semantics
 
-The visible projection is defined by two rules:
+The visible region is defined by two rules:
 
-1. only row versions with `$visibility = visible` may appear in `table__visible`
-2. only row versions whose own `$settlement` is `durable_direct` or `accepted_transaction` may appear in `table__visible`
+1. only row versions with `$state = visible_direct` or `$state = visible_transactional` may appear in the visible region
+2. row versions with `$state = staging_pending` or `$state = rejected` stay history-only
 
-Visible settlements are:
+Visible states are:
 
-- `DurableDirect`
-- `AcceptedTransaction`
+- `visible_direct`
+- `visible_transactional`
 
-Non-visible settlements are:
+History-only states are:
 
-- `pending`
+- `staging_pending`
 - `rejected`
 
 `confirmed_tier` is batch-wide. If a logical batch touches many rows, its effective tier is the minimum confirmed tier across all visible batch members in that batch.
 
 This is intentionally batch-wide. If an app wants two updates to become independently visible or independently durable, it should emit two batches.
 
-`table__visible` is authoritative for "what is the current visible state now?" Reads should not have to consult history to answer that question.
+The visible region is authoritative for "what is the current visible state now?" Reads should not have to consult history to answer that question.
 
 ### Storage and locality strategy
 
-The two-table design is how we answer the read-locality concern.
+The two-region layout is how we answer the read-locality concern.
 
-`table__visible` is optimized for:
+The visible region is optimized for:
 
 - contiguous scans of current visible rows
 - point lookups and secondary-index probes
@@ -228,9 +235,9 @@ The two-table design is how we answer the read-locality concern.
 
 Suggested clustering:
 
-- primary locality by `(branch_scope, row_id)`
+- primary locality by `($branch, $row_id)`
 
-`table__history` is optimized for:
+The history region is optimized for:
 
 - append-heavy writes
 - grouped versions of the same logical row
@@ -238,10 +245,10 @@ Suggested clustering:
 
 Suggested clustering:
 
-- primary locality by `(branch_scope, row_id, version_at)`
+- primary locality by `($branch, $row_id, $updated_at)`
 - secondary access path by `(batch_id, row_id)` when publish/replay needs it
 
-Because both tables share the same row codec and almost the same row shape, any columnar, dictionary, delta, page, or wire compression work benefits both:
+Because both regions share the same row codec and the same row shape, any columnar, dictionary, delta, page, or wire compression work benefits both:
 
 - user columns
 - system columns
@@ -263,7 +270,7 @@ Compression opportunities:
 
 - repeated column names and type layouts
 - repeated unchanged user values across row versions
-- repeated batch ids / branch scopes / authors
+- repeated batch ids / branches / authors
 - compressed pages in memory for cold rows
 - stream compression over sync payloads that repeat the same system columns
 
@@ -273,9 +280,9 @@ Sync stops shipping commit DAG structure for user rows.
 
 Instead, it ships row-version rows and row-metadata changes:
 
-- history rows for `__history`
-- visible-row upserts/removals for `__visible`
-- settlement/tier fan-out changes for affected rows when batch fate advances
+- history-row appends for the history region
+- visible-row upserts/removals for the visible region
+- state/tier fan-out changes for affected rows when batch fate advances
 
 Downstream correctness comes from the same relational state the local engine uses. Reconnect and restart no longer need to reconstruct write fate from commit IDs and object frontiers; they can recover it from persisted history/visible rows directly.
 
@@ -287,7 +294,7 @@ Major consequences:
 
 - MaterializeNode no longer lazy-loads row objects from ObjectManager for ordinary user tables.
 - Table indices point to visible row ids / physical row locations, not ObjectIds.
-- Branch awareness becomes branch-scope columns and indices, not object-branch lookups.
+- Branch awareness becomes `$branch` columns and indices, not object-branch lookups.
 - Query/sync scope becomes row/table oriented rather than object oriented for user data.
 
 This is a rewrite of the substrate, not a compatibility layer over the existing object manager.
@@ -300,11 +307,11 @@ The new lowest layer needs table-oriented operations such as:
 
 ```rust
 trait Storage {
-    fn append_history_rows(&mut self, table: TableId, rows: &[EncodedRow]) -> Result<()>;
-    fn upsert_visible_rows(&mut self, table: TableId, rows: &[EncodedRow]) -> Result<()>;
+    fn append_history_region_rows(&mut self, table: TableId, rows: &[EncodedRow]) -> Result<()>;
+    fn upsert_visible_region_rows(&mut self, table: TableId, rows: &[EncodedRow]) -> Result<()>;
     fn patch_rows_by_batch(&mut self, table: TableId, batch_id: BatchId, patch: RowPatch) -> Result<()>;
-    fn scan_visible_index(&self, table: TableId, index: IndexId, cond: ScanCond) -> Result<RowCursor>;
-    fn scan_history(&self, table: TableId, cond: HistoryScanCond) -> Result<RowCursor>;
+    fn scan_visible_region_index(&self, table: TableId, index: IndexId, cond: ScanCond) -> Result<RowCursor>;
+    fn scan_history_region(&self, table: TableId, cond: HistoryScanCond) -> Result<RowCursor>;
 }
 ```
 
@@ -316,7 +323,7 @@ One write transaction inside one node must be able to update:
 
 - history rows
 - visible rows
-- visible-table indices
+- visible-region indices
 - row metadata for affected rows when fate/tier advances
 
 as one atomic storage operation.
@@ -329,34 +336,34 @@ This design should support user-facing history and branch views from the beginni
 
 The intended shape is:
 
-- ordinary queries compile against `table__visible`
-- `query.history()` compiles against `table__history` with the same user-column shape plus reserved system columns
+- ordinary queries compile against the visible region
+- `query.history()` compiles against the history region with the same user-column shape plus reserved system columns
 - `query.as_of(ts)` is implemented as a specialized history execution mode that finds the latest visible row version at or before `ts`
-- `query.branch_view(branch_scope)` is implemented as an explicit mode that reads the visible state for a specific branch scope rather than only the default current branch view
-- `query.history().branch_view(branch_scope)` and `query.as_of(ts).branch_view(branch_scope)` are valid combinations
+- `query.branch_view(branch)` is implemented as an explicit mode that reads the visible state for a specific branch rather than only the default current branch view
+- `query.history().branch_view(branch)` and `query.as_of(ts).branch_view(branch)` are valid combinations
 
 The reason this stays manageable is structural similarity:
 
 - the same table schema
 - the same user columns
 - the same reserved system columns
-- different clustering and default query target
+- different key regions and default query target
 
 That gives us one critical invariant:
 
-- `table__visible` is authoritative for current state
-- `table__history` is authoritative for chronological row history
+- the visible region is authoritative for current state
+- the history region is authoritative for chronological row history
 - they should be similar enough that time-travel and history features do not require a second query language
 
 ## Rabbit Holes
 
-- Making `__visible` authoritative means we are choosing not to rely on "just rebuild it from history" as the normal escape hatch. If visible/history drift occurs, that is a serious correctness bug.
+- Making the visible region authoritative means we are choosing not to rely on "just rebuild it from history" as the normal escape hatch. If visible/history drift occurs, that is a serious correctness bug.
 - Row-version duplication may still be too expensive if our compression strategy is weaker in practice than expected.
 - Rewriting the substrate means query compilation, sync scope tracking, schema activation, and policy evaluation all need to lose their `Row = Object` assumptions cleanly rather than through shims.
 - Denormalizing batch-wide settlement and tier onto many rows may make fate reception and tier advancement too expensive for wide batches.
 - User-facing `as_of(...)` queries sound structurally simple here, but they still need a fast "latest visible row version before timestamp" execution path or they will be too slow.
 - Deletes, undeletes, and historical tombstone semantics need to stay simple; otherwise we will just rebuild commit semantics under new names.
-- Existing branch semantics include env/schemaHash/userBranch concerns. We need a clean `branch_scope` model that preserves schema/lens behavior without dragging the old branch-name machinery through every hot path.
+- Existing branch semantics include env/schemaHash/userBranch concerns. We need a clean `$branch` model that preserves schema/lens behavior without dragging the old branch-name machinery through every hot path.
 - Multi-tier sync currently relies on commit IDs, object metadata, and topological ordering. The replacement protocol needs equally crisp invariants for idempotence, replay, and row-metadata fan-out.
 - The browser worker/main-thread split may react differently to this model: visible scans should get cheaper, but write amplification into visible + history + indices may get worse.
 
@@ -373,16 +380,16 @@ That gives us one critical invariant:
 
 Use integration-first tests and benchmark gates. This is not a unit-test-sized change.
 
-- Add SchemaManager / RuntimeCore integration tests where `alice` writes direct visible batches and `bob` subscribes, verifying ordinary queries read only `__visible` semantics.
-- Add transaction acceptance/rejection flows where `alice` stages rows, the authority accepts or rejects the batch, and `bob` only sees accepted visible batch members.
-- Add fate/tier fan-out tests where one batch touches many rows and settlement advancement updates both `__history` and `__visible` metadata correctly.
-- Add restart tests where a runtime reconstructs current reads directly from persisted `__visible`, and history/time-travel queries directly from persisted `__history`.
+- Add SchemaManager / RuntimeCore integration tests where `alice` writes direct visible batches and `bob` subscribes, verifying ordinary queries read only visible-region semantics.
+- Add transaction acceptance/rejection flows where `alice` stages rows, the authority accepts or rejects the batch, and `bob` only sees accepted visible-region rows.
+- Add fate/tier fan-out tests where one batch touches many rows and settlement advancement updates both the history and visible regions correctly.
+- Add restart tests where a runtime reconstructs current reads directly from the persisted visible region, and history/time-travel queries directly from the persisted history region.
 - Add deletion tests with realistic actors showing that tombstones do not leak back into ordinary visible queries but remain reconstructible from history.
 - Add history-query tests from the beginning:
   - `query.history()` returns chronologically ordered row versions with system columns
   - `query.as_of(ts)` returns the expected past visible state
-  - `query.branch_view(branch_scope)` returns the expected visible state for a non-default branch scope
-  - `query.as_of(ts).branch_view(branch_scope)` returns the expected past visible state for that branch scope
+  - `query.branch_view(branch)` returns the expected visible state for a non-default branch
+  - `query.as_of(ts).branch_view(branch)` returns the expected past visible state for that branch
 - Add benchmark suites comparing `main`, `#415`, and this model for:
   - point read of current row
   - table scan of current visible rows
@@ -399,4 +406,4 @@ Use integration-first tests and benchmark gates. This is not a unit-test-sized c
 
 6/10
 
-The conceptual simplification is strong, and the two-table split still feels like the right answer. The remaining uncertainty is practical: whether denormalized fate/tier fan-out and authoritative visible-state maintenance are cheap enough that the rewrite buys real performance instead of just cleaner boundaries.
+The conceptual simplification is strong, and the two-region keyed layout still feels like the right answer. The remaining uncertainty is practical: whether denormalized fate/tier fan-out and authoritative visible-state maintenance are cheap enough that the rewrite buys real performance instead of just cleaner boundaries.
