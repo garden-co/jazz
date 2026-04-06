@@ -35,6 +35,9 @@ export interface BuildOptions {
 export interface SchemaExportOptions {
   schemaDir: string;
   format: "json";
+  schemaHash?: string;
+  serverUrl?: string;
+  adminSecret?: string;
 }
 
 const PERMISSIONS_LIFECYCLE_NOTE =
@@ -91,6 +94,12 @@ export async function validate(options: BuildOptions): Promise<void> {
 export async function exportSchema(options: SchemaExportOptions): Promise<void> {
   if (options.format !== "json") {
     throw new Error(`Unsupported schema export format: ${options.format}`);
+  }
+
+  if (options.schemaHash) {
+    const schema = await resolveExportedSchemaByHash(options);
+    process.stdout.write(`${JSON.stringify(schema, null, 2)}\n`);
+    return;
   }
 
   const compiled = await loadCompiledSchema(options.schemaDir);
@@ -223,6 +232,144 @@ function resolveKnownSchemaHash(
     );
   }
   return matches[0]!;
+}
+
+function snapshotsDir(schemaDir: string): string {
+  return join(schemaDir, "migrations", "snapshots");
+}
+
+function snapshotHashFromFileName(fileName: string): string | null {
+  if (!fileName.endsWith(".json")) {
+    return null;
+  }
+
+  const stem = basename(fileName, ".json").toLowerCase();
+  const match = stem.match(/([0-9a-f]{64})$/);
+  return match?.[1] ?? null;
+}
+
+async function listLocalSnapshotEntries(
+  schemaDir: string,
+): Promise<Array<{ hash: string; filePath: string }>> {
+  const dir = snapshotsDir(schemaDir);
+  if (!(await pathExists(dir))) {
+    return [];
+  }
+
+  const files = await readdir(dir);
+  return files
+    .map((fileName) => {
+      const hash = snapshotHashFromFileName(fileName);
+      return hash ? { hash, filePath: join(dir, fileName) } : null;
+    })
+    .filter((entry): entry is { hash: string; filePath: string } => entry !== null);
+}
+
+async function resolveLocalSnapshotEntry(
+  schemaDir: string,
+  hash: string,
+  label: string,
+): Promise<{ hash: string; filePath: string } | null> {
+  const entries = await listLocalSnapshotEntries(schemaDir);
+  if (entries.length === 0) {
+    return null;
+  }
+
+  const fullHash = normalizeSchemaHashInput(hash, label);
+  if (fullHash.length === 64) {
+    return entries.find((entry) => entry.hash === fullHash) ?? null;
+  }
+
+  const matches = entries.filter((entry) => hashMatchesFullSchema(fullHash, entry.hash));
+  if (matches.length === 0) {
+    return null;
+  }
+  if (matches.length > 1) {
+    throw new Error(
+      `${label} prefix ${fullHash} is ambiguous: ${matches
+        .map((entry) => shortSchemaHash(entry.hash))
+        .join(", ")}`,
+    );
+  }
+  return matches[0]!;
+}
+
+async function loadLocalSnapshotSchema(
+  schemaDir: string,
+  hash: string,
+  label: string,
+): Promise<{ hash: string; schema: WasmSchema } | null> {
+  const entry = await resolveLocalSnapshotEntry(schemaDir, hash, label);
+  if (!entry) {
+    return null;
+  }
+
+  const contents = await readFile(entry.filePath, "utf8");
+  return {
+    hash: entry.hash,
+    schema: JSON.parse(contents) as WasmSchema,
+  };
+}
+
+async function writeSnapshotSchema(
+  schemaDir: string,
+  hash: string,
+  schema: WasmSchema,
+): Promise<string> {
+  const dir = snapshotsDir(schemaDir);
+  await mkdir(dir, { recursive: true });
+  const filePath = join(dir, `${hash}.json`);
+  await writeFile(filePath, `${JSON.stringify(schema, null, 2)}\n`);
+  return filePath;
+}
+
+function requireSchemaExportServerValue(
+  value: string | undefined,
+  kind: "serverUrl" | "adminSecret",
+): string {
+  if (value) {
+    return value;
+  }
+
+  if (kind === "serverUrl") {
+    throw new Error("Missing server URL. Pass --server-url <url> or set JAZZ_SERVER_URL.");
+  }
+
+  throw new Error("Missing admin secret. Pass --admin-secret <secret> or set JAZZ_ADMIN_SECRET.");
+}
+
+async function resolveExportedSchemaByHash(options: SchemaExportOptions): Promise<WasmSchema> {
+  const schemaHash = normalizeSchemaHashInput(options.schemaHash!, "schema hash");
+  const local = await loadLocalSnapshotSchema(options.schemaDir, schemaHash, "schema hash");
+  if (local) {
+    return local.schema;
+  }
+
+  const serverUrl = requireSchemaExportServerValue(
+    options.serverUrl ?? process.env.JAZZ_SERVER_URL,
+    "serverUrl",
+  );
+  const adminSecret = requireSchemaExportServerValue(
+    options.adminSecret ?? process.env.JAZZ_ADMIN_SECRET,
+    "adminSecret",
+  );
+
+  const resolvedHash =
+    schemaHash.length === 64
+      ? schemaHash
+      : resolveKnownSchemaHash(
+          schemaHash,
+          "schema hash",
+          (await fetchSchemaHashes(serverUrl, { adminSecret })).hashes,
+        );
+  const schema = (
+    await fetchStoredWasmSchema(serverUrl, {
+      adminSecret,
+      schemaHash: resolvedHash,
+    })
+  ).schema;
+  await writeSnapshotSchema(options.schemaDir, resolvedHash, schema);
+  return schema;
 }
 
 function columnTypeSignature(columnType: WasmColumnType): string {
@@ -915,19 +1062,34 @@ if (isMainModule()) {
   } else if (command === "schema") {
     const subcommand = process.argv[3] ?? "";
     if (subcommand !== "export") {
-      console.error("Usage: node dist/cli.js schema export [--schema-dir <path>] [--format json]");
+      console.error(
+        "Usage: node dist/cli.js schema export [--schema-dir <path> | --schema-hash <hash>] [--server-url <url>] [--admin-secret <secret>] [--format json]",
+      );
       process.exit(1);
     }
 
     const args = process.argv.slice(4);
-    const schemaDir = getFlagValue(args, "--schema-dir") ?? process.cwd();
+    const schemaDirFlag = getFlagValue(args, "--schema-dir");
+    const schemaHash = getFlagValue(args, "--schema-hash");
+    if (schemaDirFlag && schemaHash) {
+      console.error("--schema-dir and --schema-hash are mutually exclusive.");
+      process.exit(1);
+    }
+
+    const schemaDir = resolve(process.cwd(), schemaDirFlag ?? process.cwd());
     const formatValue = getFlagValue(args, "--format") ?? "json";
     if (formatValue !== "json") {
       console.error(`Unsupported schema export format: ${formatValue}`);
       process.exit(1);
     }
 
-    exportSchema({ schemaDir, format: "json" }).catch((err) => {
+    exportSchema({
+      schemaDir,
+      schemaHash,
+      serverUrl: getFlagValue(args, "--server-url") ?? process.env.JAZZ_SERVER_URL,
+      adminSecret: getFlagValue(args, "--admin-secret") ?? process.env.JAZZ_ADMIN_SECRET,
+      format: "json",
+    }).catch((err) => {
       console.error(err.message);
       process.exit(1);
     });
@@ -993,6 +1155,9 @@ if (isMainModule()) {
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
     console.log("\nSchema export options:");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
+    console.log("  --schema-hash <hash>  Export a stored structural schema by hash");
+    console.log("  --server-url <url>    Jazz server URL (or set JAZZ_SERVER_URL)");
+    console.log("  --admin-secret <sec>  Admin secret (or set JAZZ_ADMIN_SECRET)");
     console.log("  --format json         Output the compiled schema as JSON");
     console.log("\nPermissions options:");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
