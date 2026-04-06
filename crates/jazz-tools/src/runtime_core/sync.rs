@@ -5,17 +5,6 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     // Sync Operations
     // =========================================================================
 
-    fn rehydrate_objects_from_storage(&mut self) {
-        let Ok(objects) = self.storage.scan_object_metadata() else {
-            return;
-        };
-
-        let sm = self.schema_manager.query_manager_mut().sync_manager_mut();
-        for (object_id, metadata) in objects {
-            sm.rehydrate_object_from_storage(&self.storage, object_id, metadata);
-        }
-    }
-
     /// Push a sync message to the inbox (from network).
     pub fn push_sync_inbox(&mut self, entry: InboxEntry) {
         self.schema_manager
@@ -37,13 +26,12 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         remote_catalogue_state_hash: Option<&str>,
     ) {
         info!(%server_id, "adding server");
-        self.rehydrate_objects_from_storage();
         let local_catalogue_state_hash = self.schema_manager.catalogue_state_hash();
         let skip_catalogue_sync = remote_catalogue_state_hash
             .is_some_and(|remote_hash| remote_hash == local_catalogue_state_hash);
         self.schema_manager
             .query_manager_mut()
-            .add_server_with_catalogue_match(server_id, skip_catalogue_sync);
+            .add_server_with_storage(&self.storage, server_id, skip_catalogue_sync);
         self.immediate_tick();
     }
 
@@ -58,9 +46,8 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
     /// Add a client connection.
     pub fn add_client(&mut self, client_id: ClientId, session: Option<Session>) {
         info!(%client_id, has_session = session.is_some(), "adding client");
-        self.rehydrate_objects_from_storage();
         let sm = self.schema_manager.query_manager_mut().sync_manager_mut();
-        sm.add_client(client_id);
+        sm.add_client_with_storage(&self.storage, client_id);
         if let Some(s) = session {
             sm.set_client_session(client_id, s);
         }
@@ -80,7 +67,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         if sm.get_client(client_id).is_some() {
             sm.set_client_session(client_id, session);
         } else {
-            sm.add_client(client_id);
+            sm.add_client_with_storage(&self.storage, client_id);
             sm.set_client_session(client_id, session);
             self.immediate_tick();
         }
@@ -127,7 +114,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         if sm.get_client(client_id).is_some() {
             sm.set_client_role(client_id, ClientRole::Admin);
         } else {
-            sm.add_client(client_id);
+            sm.add_client_with_storage(&self.storage, client_id);
             sm.set_client_role(client_id, ClientRole::Admin);
             self.immediate_tick();
         }
@@ -149,7 +136,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
         if sm.get_client(client_id).is_some() {
             sm.set_client_role(client_id, ClientRole::Backend);
         } else {
-            sm.add_client(client_id);
+            sm.add_client_with_storage(&self.storage, client_id);
             sm.set_client_role(client_id, ClientRole::Backend);
             self.immediate_tick();
         }

@@ -333,6 +333,17 @@ impl QueryManager {
         self.replay_active_query_subscriptions_to_server(server_id);
     }
 
+    pub fn add_server_with_storage<H: Storage>(
+        &mut self,
+        storage: &H,
+        server_id: ServerId,
+        skip_catalogue_sync: bool,
+    ) {
+        self.sync_manager
+            .add_server_with_storage(server_id, skip_catalogue_sync, storage);
+        self.replay_active_query_subscriptions_to_server(server_id);
+    }
+
     /// Unsubscribe from a synced query.
     ///
     /// This method:
