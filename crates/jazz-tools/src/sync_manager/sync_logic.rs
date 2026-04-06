@@ -52,7 +52,7 @@ impl SyncManager {
         };
 
         let mut sent_metadata = HashSet::new();
-        let mut sent_tips = Vec::new();
+        let mut sent_branch_frontiers = Vec::new();
 
         for object_id in self.catalogue_objects.iter().copied() {
             let Some(object) = self.object_manager.objects.get(&object_id) else {
@@ -61,7 +61,7 @@ impl SyncManager {
 
             sent_metadata.insert(object_id);
             for (branch_name, branch) in &object.branches {
-                sent_tips.push((
+                sent_branch_frontiers.push((
                     object_id,
                     *branch_name,
                     branch.tips.iter().copied().collect::<HashSet<_>>(),
@@ -73,8 +73,10 @@ impl SyncManager {
             return;
         };
         server.sent_metadata.extend(sent_metadata);
-        for (object_id, branch_name, tips) in sent_tips {
-            server.sent_tips.insert((object_id, branch_name), tips);
+        for (object_id, branch_name, tips) in sent_branch_frontiers {
+            server
+                .sent_branch_frontiers
+                .insert((object_id, branch_name), tips);
         }
     }
 
@@ -236,7 +238,7 @@ impl SyncManager {
             };
             let include_metadata = !server.sent_metadata.contains(&object_id);
             let already_sent = server
-                .sent_tips
+                .sent_row_versions
                 .get(&(object_id, branch_name))
                 .cloned()
                 .unwrap_or_default();
@@ -254,7 +256,7 @@ impl SyncManager {
             server.sent_metadata.insert(object_id);
         }
         server
-            .sent_tips
+            .sent_row_versions
             .entry((object_id, branch_name))
             .or_default()
             .insert(version_id);
@@ -297,7 +299,7 @@ impl SyncManager {
             };
             let include_metadata = !server.sent_metadata.contains(&object_id);
             let already_sent = server
-                .sent_tips
+                .sent_branch_frontiers
                 .get(&(object_id, branch_name))
                 .cloned()
                 .unwrap_or_default();
@@ -335,7 +337,7 @@ impl SyncManager {
                 return;
             };
             server
-                .sent_tips
+                .sent_branch_frontiers
                 .get(&(object_id, branch_name))
                 .cloned()
                 .unwrap_or_default()
@@ -371,7 +373,9 @@ impl SyncManager {
         if include_metadata {
             server.sent_metadata.insert(object_id);
         }
-        server.sent_tips.insert((object_id, branch_name), tips);
+        server
+            .sent_branch_frontiers
+            .insert((object_id, branch_name), tips);
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Server(server_id),
@@ -479,7 +483,7 @@ impl SyncManager {
             let in_scope = !require_scope || client.is_in_scope(object_id, &branch_name);
             let include_metadata = !client.sent_metadata.contains(&object_id);
             let already_sent = client
-                .sent_tips
+                .sent_row_versions
                 .get(&(object_id, branch_name))
                 .cloned()
                 .unwrap_or_default();
@@ -501,7 +505,7 @@ impl SyncManager {
             client.sent_metadata.insert(object_id);
         }
         client
-            .sent_tips
+            .sent_row_versions
             .entry((object_id, branch_name))
             .or_default()
             .insert(version_id);
@@ -571,7 +575,7 @@ impl SyncManager {
             let include_metadata = !client.sent_metadata.contains(&object_id);
 
             let already_sent = client
-                .sent_tips
+                .sent_branch_frontiers
                 .get(&(object_id, branch_name))
                 .cloned()
                 .unwrap_or_default();
@@ -595,7 +599,9 @@ impl SyncManager {
         if include_metadata {
             client.sent_metadata.insert(object_id);
         }
-        client.sent_tips.insert((object_id, branch_name), tips);
+        client
+            .sent_branch_frontiers
+            .insert((object_id, branch_name), tips);
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
