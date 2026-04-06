@@ -57,7 +57,7 @@ pub struct SyncManager {
     /// Tracks which clients are interested in legacy commit durability acks.
     pub(super) object_commit_interest: HashMap<CommitId, HashSet<ClientId>>,
     /// Tracks which clients are interested in row-version state updates.
-    pub(super) row_version_interest: HashMap<CommitId, HashSet<ClientId>>,
+    pub(super) row_version_interest: HashMap<RowVersionKey, HashSet<ClientId>>,
 
     /// Tracks which clients originated each query (for relaying QuerySettled).
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
@@ -65,7 +65,7 @@ pub struct SyncManager {
     pub(super) pending_query_settled: Vec<(QueryId, DurabilityTier)>,
 
     /// Row-version state acks received during inbox processing.
-    pub(super) received_row_version_acks: Vec<(CommitId, DurabilityTier)>,
+    pub(super) received_row_version_acks: Vec<(RowVersionKey, DurabilityTier)>,
 }
 
 impl std::fmt::Debug for SyncManager {
@@ -438,9 +438,13 @@ impl SyncManager {
             .flat_map(|q| q.scope.iter().cloned())
             .collect();
 
+        let no_longer_visible: HashSet<(ObjectId, BranchName)> =
+            old_scope.difference(&new_scope).cloned().collect();
         // Find newly visible (object, branch) pairs
         let newly_visible: Vec<(ObjectId, BranchName)> =
             new_scope.difference(&old_scope).cloned().collect();
+
+        self.prune_client_scope_tracking(client_id, &no_longer_visible);
 
         // Queue initial syncs for newly visible objects
         for (object_id, branch_name) in newly_visible {
@@ -482,8 +486,12 @@ impl SyncManager {
             .flat_map(|q| q.scope.iter().cloned())
             .collect();
 
+        let no_longer_visible: HashSet<(ObjectId, BranchName)> =
+            old_scope.difference(&new_scope).cloned().collect();
         let newly_visible: Vec<(ObjectId, BranchName)> =
             new_scope.difference(&old_scope).cloned().collect();
+
+        self.prune_client_scope_tracking(client_id, &no_longer_visible);
 
         for (object_id, branch_name) in newly_visible {
             self.queue_initial_sync_to_client_with_storage(
@@ -500,13 +508,64 @@ impl SyncManager {
     /// Removes per-query scope and origin tracking.
     pub fn drop_client_query_subscription(&mut self, client_id: ClientId, query_id: QueryId) {
         if let Some(client) = self.clients.get_mut(&client_id) {
+            let old_scope: HashSet<(ObjectId, BranchName)> = client
+                .queries
+                .values()
+                .flat_map(|q| q.scope.iter().cloned())
+                .collect();
             client.queries.remove(&query_id);
+            let new_scope: HashSet<(ObjectId, BranchName)> = client
+                .queries
+                .values()
+                .flat_map(|q| q.scope.iter().cloned())
+                .collect();
+            let no_longer_visible: HashSet<(ObjectId, BranchName)> =
+                old_scope.difference(&new_scope).cloned().collect();
+            self.prune_client_scope_tracking(client_id, &no_longer_visible);
         }
 
         if let Some(clients) = self.query_origin.get_mut(&query_id) {
             clients.remove(&client_id);
             if clients.is_empty() {
                 self.query_origin.remove(&query_id);
+            }
+        }
+    }
+
+    fn prune_client_scope_tracking(
+        &mut self,
+        client_id: ClientId,
+        removed_scope: &HashSet<(ObjectId, BranchName)>,
+    ) {
+        if removed_scope.is_empty() {
+            return;
+        }
+
+        let mut removed_row_versions = Vec::new();
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return;
+        };
+
+        for &(object_id, branch_name) in removed_scope {
+            client
+                .sent_branch_frontiers
+                .remove(&(object_id, branch_name));
+
+            if let Some(version_ids) = client.sent_row_versions.remove(&(object_id, branch_name)) {
+                removed_row_versions.extend(
+                    version_ids
+                        .into_iter()
+                        .map(|version_id| RowVersionKey::new(object_id, branch_name, version_id)),
+                );
+            }
+        }
+
+        for key in removed_row_versions {
+            if let Some(clients) = self.row_version_interest.get_mut(&key) {
+                clients.remove(&client_id);
+                if clients.is_empty() {
+                    self.row_version_interest.remove(&key);
+                }
             }
         }
     }
@@ -579,7 +638,7 @@ impl SyncManager {
 
     /// Take received row-version persistence state since last call.
     /// Used by RuntimeCore to resolve row `_persisted` mutation receivers.
-    pub fn take_received_row_version_acks(&mut self) -> Vec<(CommitId, DurabilityTier)> {
+    pub fn take_received_row_version_acks(&mut self) -> Vec<(RowVersionKey, DurabilityTier)> {
         std::mem::take(&mut self.received_row_version_acks)
     }
 

@@ -2732,6 +2732,192 @@ fn row_version_state_changed_only_relays_to_row_version_interested_clients() {
 }
 
 #[test]
+fn row_version_state_changed_relays_to_clients_that_received_row_version_needed() {
+    use std::collections::{HashMap, HashSet};
+
+    use crate::metadata::MetadataKey;
+    use crate::row_regions::{BatchId, RowState, StoredRowVersion};
+    use crate::storage::Storage;
+
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+    let row_id = ObjectId::new();
+    let branch_name: BranchName = "main".into();
+
+    sm.add_client(client_id);
+    sm.take_outbox();
+
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    io.create_object(row_id, metadata.clone()).unwrap();
+    sm.object_manager
+        .receive_object(&mut io, row_id, metadata.clone());
+
+    let row = StoredRowVersion {
+        row_id,
+        branch: branch_name.as_str().to_string(),
+        parents: Vec::new(),
+        updated_at: 1000,
+        created_by: row_id.to_string(),
+        created_at: 1000,
+        updated_by: row_id.to_string(),
+        batch_id: BatchId::new(),
+        state: RowState::VisibleDirect,
+        confirmed_tier: None,
+        is_deleted: false,
+        data: b"alice".to_vec(),
+        metadata: HashMap::new(),
+    };
+    io.append_history_region_rows("users", std::slice::from_ref(&row))
+        .unwrap();
+    io.upsert_visible_region_rows("users", std::slice::from_ref(&row))
+        .unwrap();
+
+    sm.set_client_query_scope_with_storage(
+        &io,
+        client_id,
+        QueryId(1),
+        HashSet::from([(row_id, branch_name)]),
+        None,
+    );
+
+    let initial = sm.take_outbox();
+    assert!(
+        initial.iter().any(|entry| matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::RowVersionNeeded { row: needed, .. },
+            } if *id == client_id && needed.row_id == row_id
+        )),
+        "initial scoped sync should send RowVersionNeeded to the client"
+    );
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::RowVersionStateChanged {
+            row_id,
+            branch_name,
+            version_id: row.version_id(),
+            state: None,
+            confirmed_tier: Some(DurabilityTier::Worker),
+        },
+    );
+
+    let relayed: Vec<_> = sm
+        .take_outbox()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload:
+                    SyncPayload::RowVersionStateChanged {
+                        row_id: changed_row_id,
+                        version_id,
+                        confirmed_tier,
+                        ..
+                    },
+            } if id == client_id
+                && changed_row_id == row_id
+                && version_id == row.version_id()
+                && confirmed_tier == Some(DurabilityTier::Worker) =>
+            {
+                Some(id)
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        relayed,
+        vec![client_id],
+        "clients that received a row version in scope should also receive later row-version state updates"
+    );
+}
+
+#[test]
+fn row_version_state_changed_stops_relaying_after_scope_removal() {
+    use std::collections::{HashMap, HashSet};
+
+    use crate::metadata::MetadataKey;
+    use crate::row_regions::{BatchId, RowState, StoredRowVersion};
+    use crate::storage::Storage;
+
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let client_id = ClientId::new();
+    let server_id = ServerId::new();
+    let row_id = ObjectId::new();
+    let branch_name: BranchName = "main".into();
+
+    sm.add_client(client_id);
+    sm.take_outbox();
+
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    io.create_object(row_id, metadata.clone()).unwrap();
+    sm.object_manager
+        .receive_object(&mut io, row_id, metadata.clone());
+
+    let row = StoredRowVersion {
+        row_id,
+        branch: branch_name.as_str().to_string(),
+        parents: Vec::new(),
+        updated_at: 1000,
+        created_by: row_id.to_string(),
+        created_at: 1000,
+        updated_by: row_id.to_string(),
+        batch_id: BatchId::new(),
+        state: RowState::VisibleDirect,
+        confirmed_tier: None,
+        is_deleted: false,
+        data: b"alice".to_vec(),
+        metadata: HashMap::new(),
+    };
+    io.append_history_region_rows("users", std::slice::from_ref(&row))
+        .unwrap();
+    io.upsert_visible_region_rows("users", std::slice::from_ref(&row))
+        .unwrap();
+
+    sm.set_client_query_scope_with_storage(
+        &io,
+        client_id,
+        QueryId(1),
+        HashSet::from([(row_id, branch_name)]),
+        None,
+    );
+    let _ = sm.take_outbox();
+
+    sm.set_client_query_scope_with_storage(&io, client_id, QueryId(1), HashSet::new(), None);
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::RowVersionStateChanged {
+            row_id,
+            branch_name,
+            version_id: row.version_id(),
+            state: None,
+            confirmed_tier: Some(DurabilityTier::Worker),
+        },
+    );
+
+    assert!(
+        sm.take_outbox().into_iter().all(|entry| !matches!(
+            entry,
+            OutboxEntry {
+                destination: Destination::Client(id),
+                payload: SyncPayload::RowVersionStateChanged { row_id: changed_row_id, .. },
+            } if id == client_id && changed_row_id == row_id
+        )),
+        "row-version state updates should stop relaying once the row leaves the client's scope"
+    );
+}
+
+#[test]
 fn stale_row_version_from_client_replays_upstream_without_regressing_visible_row() {
     use std::collections::HashMap;
 

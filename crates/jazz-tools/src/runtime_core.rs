@@ -35,7 +35,6 @@ use std::task::{Context, Poll};
 use futures::channel::oneshot;
 use tracing::{debug, debug_span, info, trace, trace_span};
 
-use crate::commit::CommitId;
 use crate::object::ObjectId;
 use crate::query_manager::QuerySubscriptionId;
 use crate::query_manager::encoding::decode_row;
@@ -47,7 +46,9 @@ use crate::query_manager::types::{
 };
 use crate::schema_manager::{Lens, SchemaManager};
 use crate::storage::Storage;
-use crate::sync_manager::{ClientId, DurabilityTier, InboxEntry, OutboxEntry, ServerId};
+use crate::sync_manager::{
+    ClientId, DurabilityTier, InboxEntry, OutboxEntry, RowVersionKey, ServerId,
+};
 
 // ============================================================================
 // Scheduler and SyncSender traits
@@ -249,9 +250,9 @@ pub struct RuntimeCore<S: Storage, Sch: Scheduler, Sy: SyncSender> {
     /// Pending one-shot queries (query() calls waiting for first callback).
     pending_one_shot_queries: HashMap<SubscriptionHandle, PendingOneShotQuery>,
 
-    /// Watchers for persistence acks: (commit_id, requested_tier) → senders.
+    /// Watchers for persistence acks: (row version, requested_tier) → senders.
     /// A tier >= requested tier satisfies the watcher (e.g., EdgeServer ack satisfies Worker).
-    ack_watchers: HashMap<CommitId, Vec<(DurabilityTier, oneshot::Sender<()>)>>,
+    ack_watchers: HashMap<RowVersionKey, Vec<(DurabilityTier, oneshot::Sender<()>)>>,
 
     /// Label for tracing (e.g. "worker", "edge", "client").
     tier_label: &'static str,

@@ -3410,6 +3410,55 @@ fn undelete_hard_deleted_row_fails_after_legacy_commit_history_is_removed() {
     }
 }
 
+#[test]
+fn undelete_syncs_row_version_created_to_server() {
+    use crate::sync_manager::{Destination, ServerId, SyncPayload};
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let server_id = ServerId::new();
+    qm.sync_manager_mut().add_server(server_id);
+    let _ = qm.sync_manager_mut().take_outbox();
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let _ = qm.sync_manager_mut().take_outbox();
+
+    qm.delete(&mut storage, handle.row_id).unwrap();
+    let _ = qm.sync_manager_mut().take_outbox();
+
+    let undeleted = qm
+        .undelete(
+            &mut storage,
+            handle.row_id,
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let forwarded = outbox
+        .iter()
+        .find(|entry| matches!(entry.destination, Destination::Server(id) if id == server_id))
+        .expect("undelete should forward the restored row upstream");
+
+    match &forwarded.payload {
+        SyncPayload::RowVersionCreated { row, .. } => {
+            assert_eq!(row.row_id, handle.row_id);
+            assert_eq!(row.version_id(), undeleted.row_commit_id);
+            assert!(!row.is_deleted);
+            assert!(!row.is_soft_deleted());
+            assert!(!row.is_hard_deleted());
+        }
+        other => panic!("undelete should sync as RowVersionCreated, got {other:?}"),
+    }
+}
+
 // ========================================================================
 // Truncate Tests
 // ========================================================================
@@ -3439,6 +3488,46 @@ fn truncate_soft_deleted_row() {
     // Verify row is completely gone
     assert!(!qm.row_is_indexed(&storage, "users", handle.row_id));
     assert!(!qm.row_is_deleted(&storage, "users", handle.row_id));
+}
+
+#[test]
+fn hard_delete_syncs_row_version_created_to_server() {
+    use crate::sync_manager::{Destination, ServerId, SyncPayload};
+
+    let sync_manager = SyncManager::new();
+    let schema = test_schema();
+    let (mut qm, mut storage) = create_query_manager(sync_manager, schema);
+    let server_id = ServerId::new();
+    qm.sync_manager_mut().add_server(server_id);
+    let _ = qm.sync_manager_mut().take_outbox();
+
+    let handle = qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let _ = qm.sync_manager_mut().take_outbox();
+
+    let hard_delete = qm.hard_delete(&mut storage, handle.row_id).unwrap();
+
+    let outbox = qm.sync_manager_mut().take_outbox();
+    let forwarded = outbox
+        .iter()
+        .find(|entry| matches!(entry.destination, Destination::Server(id) if id == server_id))
+        .expect("hard delete should forward the tombstone upstream");
+
+    match &forwarded.payload {
+        SyncPayload::RowVersionCreated { row, .. } => {
+            assert_eq!(row.row_id, handle.row_id);
+            assert_eq!(row.version_id(), hard_delete.delete_commit_id);
+            assert!(row.is_deleted);
+            assert!(row.is_hard_deleted());
+            assert_eq!(row.data, Vec::<u8>::new());
+        }
+        other => panic!("hard delete should sync as RowVersionCreated, got {other:?}"),
+    }
 }
 
 #[test]

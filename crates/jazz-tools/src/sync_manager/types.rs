@@ -104,6 +104,28 @@ pub(super) type BranchSyncData = (
     HashSet<CommitId>,
 );
 
+/// Stable identity for one concrete row version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RowVersionKey {
+    pub row_id: ObjectId,
+    pub branch_name: BranchName,
+    pub version_id: CommitId,
+}
+
+impl RowVersionKey {
+    pub fn new(row_id: ObjectId, branch_name: BranchName, version_id: CommitId) -> Self {
+        Self {
+            row_id,
+            branch_name,
+            version_id,
+        }
+    }
+
+    pub fn from_row(row: &StoredRowVersion) -> Self {
+        Self::new(row.row_id, BranchName::new(&row.branch), row.version_id())
+    }
+}
+
 // ============================================================================
 // Client Roles
 // ============================================================================
