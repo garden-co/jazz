@@ -1028,23 +1028,21 @@ impl QueryManager {
             return true;
         }
 
-        let branches = vec![branch.to_string()];
         let storage_ref: &dyn Storage = storage;
-        let om = &mut self.sync_manager.object_manager;
-        let branch_name = BranchName::new(branch);
         let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-            let obj = om.get_or_load(id, storage_ref, &branches)?;
-            let branch_state = obj.branches.get(&branch_name)?;
-            let tip_id = branch_state.tips.iter().next()?;
-            let commit = branch_state.commits.get(tip_id)?;
-            if commit.content.is_empty() {
+            let (_, row) =
+                Self::load_best_visible_row_version(storage_ref, id, &[branch.to_string()])?;
+            if row.is_hard_deleted() {
                 return None;
             }
+            let version_id = row.version_id();
+            let provenance = row.row_provenance();
+            let source_branch = BranchName::new(&row.branch);
             Some(LoadedRow::new(
-                commit.content.clone(),
-                *tip_id,
-                commit.row_provenance()?,
-                [(id, branch_name)].into_iter().collect(),
+                row.data,
+                version_id,
+                provenance,
+                [(id, source_branch)].into_iter().collect(),
             ))
         };
 
