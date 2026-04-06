@@ -414,7 +414,7 @@ describe("cli migrations", () => {
     expect(result).toBeNull();
     const snapshotFiles = (await readdir(snapshotsDir)).filter((name) => name.endsWith(".json"));
     expect(snapshotFiles).toHaveLength(1);
-    expect(snapshotFiles[0]).toMatch(/^\d{8}T\d{6}Z-[0-9a-f]{64}\.json$/i);
+    expect(snapshotFiles[0]).toMatch(/^\d{8}T\d{6}-[0-9a-f]{64}\.json$/i);
     expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(0);
     expect(logs.some((line) => line.startsWith("Wrote initial schema snapshot:"))).toBe(true);
     expect(logs).toContain(
@@ -521,7 +521,11 @@ describe("cli migrations", () => {
     expect(generated).toContain('"notes": s.add.string({ default: null }),');
     const snapshotFiles = (await readdir(snapshotsDir)).filter((name) => name.endsWith(".json"));
     expect(snapshotFiles).toHaveLength(2);
-    expect(await fileExists(join(snapshotsDir, `${fromHash}.json`))).toBe(true);
+    expect(
+      snapshotFiles.some(
+        (name) => /^\d{8}T\d{6}-/.test(name) && name.endsWith(`-${fromHash}.json`),
+      ),
+    ).toBe(true);
     expect(logs).toContain("Migration stubs are only for structural schema changes.");
     expect(logs).toContain(
       "Permission-only changes do not create schema hashes or require migrations.",
@@ -1069,7 +1073,7 @@ describe("bin integration", () => {
     const snapshotsDir = join(root, "migrations", "snapshots");
     await mkdir(snapshotsDir, { recursive: true });
     await writeFile(
-      join(snapshotsDir, `${schemaHash}.json`),
+      join(snapshotsDir, `20260406T120000-${schemaHash}.json`),
       JSON.stringify(storedRootSchema(), null, 2),
       "utf8",
     );
@@ -1116,10 +1120,13 @@ describe("bin integration", () => {
     }
 
     expect(JSON.parse(writes.join(""))).toEqual(storedRootSchema());
+    const snapshotFiles = (await readdir(join(root, "migrations", "snapshots"))).filter((name) =>
+      name.endsWith(`-${schemaHash}.json`),
+    );
+    expect(snapshotFiles).toHaveLength(1);
+    expect(snapshotFiles[0]).toMatch(/^\d{8}T\d{6}-[0-9a-f]{64}\.json$/i);
     expect(
-      JSON.parse(
-        await readFile(join(root, "migrations", "snapshots", `${schemaHash}.json`), "utf8"),
-      ),
+      JSON.parse(await readFile(join(root, "migrations", "snapshots", snapshotFiles[0]!), "utf8")),
     ).toEqual(storedRootSchema());
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
