@@ -2463,6 +2463,82 @@ fn persistence_ack_direct() {
 }
 
 #[test]
+fn persistence_ack_updates_row_region_confirmed_tier_monotonically() {
+    use std::collections::{HashMap, HashSet};
+
+    use crate::metadata::MetadataKey;
+    use crate::row_regions::{BatchId, HistoryScan, RowState, StoredRowVersion};
+    use crate::storage::Storage;
+
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let object_id = ObjectId::new();
+    let branch_name: BranchName = "main".into();
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+
+    sm.object_manager
+        .create_with_id(&mut io, object_id, Some(metadata));
+
+    let commit = make_test_commit(b"hello", vec![]);
+    let commit_id = commit.id();
+    sm.object_manager
+        .receive_commit(&mut io, object_id, branch_name, commit)
+        .unwrap();
+
+    let version = StoredRowVersion {
+        row_id: object_id,
+        branch: branch_name.as_str().to_string(),
+        updated_at: 1000,
+        created_by: object_id.to_string(),
+        created_at: 1000,
+        updated_by: object_id.to_string(),
+        batch_id: BatchId::from_commit_id(commit_id),
+        state: RowState::VisibleDirect,
+        confirmed_tier: None,
+        is_deleted: false,
+        data: b"hello".to_vec(),
+        metadata: HashMap::new(),
+    };
+    io.append_history_region_rows("users", std::slice::from_ref(&version))
+        .unwrap();
+    io.upsert_visible_region_rows("users", std::slice::from_ref(&version))
+        .unwrap();
+
+    sm.process_from_server(
+        &mut io,
+        ServerId::new(),
+        SyncPayload::PersistenceAck {
+            object_id,
+            branch_name,
+            confirmed_commits: HashSet::from([commit_id]),
+            tier: DurabilityTier::EdgeServer,
+        },
+    );
+
+    sm.process_from_server(
+        &mut io,
+        ServerId::new(),
+        SyncPayload::PersistenceAck {
+            object_id,
+            branch_name,
+            confirmed_commits: HashSet::from([commit_id]),
+            tier: DurabilityTier::Worker,
+        },
+    );
+
+    let history = io
+        .scan_history_region("users", "main", HistoryScan::Row { row_id: object_id })
+        .unwrap();
+    let visible = io.scan_visible_region("users", "main").unwrap();
+
+    assert_eq!(history.len(), 1);
+    assert_eq!(visible.len(), 1);
+    assert_eq!(history[0].confirmed_tier, Some(DurabilityTier::EdgeServer));
+    assert_eq!(visible[0].confirmed_tier, Some(DurabilityTier::EdgeServer));
+}
+
+#[test]
 fn persistence_ack_relay() {
     let mut s = setup_3tier();
 

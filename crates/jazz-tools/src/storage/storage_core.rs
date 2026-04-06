@@ -278,7 +278,11 @@ pub(super) fn patch_row_region_rows_by_batch_core(
             }
 
             row.state = state;
-            row.confirmed_tier = confirmed_tier;
+            row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
+                (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
+                (Some(existing), None) => Some(existing),
+                (None, incoming) => incoming,
+            };
 
             let json = encode_json(&row, "stored row version")?;
             set(&key, &json)?;

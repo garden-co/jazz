@@ -3,6 +3,7 @@ use crate::commit::{Commit, CommitId};
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
+use crate::row_regions::{BatchId, RowState};
 use crate::storage::Storage;
 use std::collections::HashSet;
 
@@ -27,6 +28,38 @@ fn log_schema_warning(origin: &str, warning: &SchemaWarning) {
 }
 
 impl SyncManager {
+    fn patch_row_region_ack<H: Storage>(
+        &self,
+        storage: &mut H,
+        object_id: ObjectId,
+        commit_id: CommitId,
+        tier: DurabilityTier,
+    ) {
+        let Some(table) = self
+            .object_manager
+            .get(object_id)
+            .and_then(|object| object.metadata.get(MetadataKey::Table.as_str()).cloned())
+        else {
+            return;
+        };
+
+        if let Err(error) = storage.patch_history_region_rows_by_batch(
+            &table,
+            BatchId::from_commit_id(commit_id),
+            RowState::VisibleDirect,
+            Some(tier),
+        ) {
+            tracing::warn!(
+                %object_id,
+                ?commit_id,
+                table,
+                ?tier,
+                %error,
+                "failed to patch row-region durability state"
+            );
+        }
+    }
+
     /// Process a single inbox entry.
     pub(super) fn process_inbox_entry<H: Storage>(&mut self, storage: &mut H, entry: InboxEntry) {
         tracing::trace!(source = ?entry.source, payload = entry.payload.variant_name(), "processing inbox entry");
@@ -103,6 +136,7 @@ impl SyncManager {
                 // Persist ack state and update in-memory
                 for &commit_id in &confirmed_commits {
                     let _ = storage.store_ack_tier(commit_id, tier);
+                    self.patch_row_region_ack(storage, object_id, commit_id, tier);
                     if let Some(commit) =
                         self.object_manager
                             .get_commit_mut(object_id, &branch_name, commit_id)
@@ -461,6 +495,7 @@ impl SyncManager {
                 // Persist ack state and update in-memory
                 for &commit_id in &confirmed_commits {
                     let _ = storage.store_ack_tier(commit_id, tier);
+                    self.patch_row_region_ack(storage, object_id, commit_id, tier);
                     if let Some(commit) =
                         self.object_manager
                             .get_commit_mut(object_id, &branch_name, commit_id)

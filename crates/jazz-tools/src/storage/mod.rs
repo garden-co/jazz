@@ -952,14 +952,22 @@ impl Storage for MemoryStorage {
         for row in regions.history.values_mut() {
             if row.batch_id == batch_id {
                 row.state = state;
-                row.confirmed_tier = confirmed_tier;
+                row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
+                    (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
+                    (Some(existing), None) => Some(existing),
+                    (None, incoming) => incoming,
+                };
             }
         }
 
         for row in regions.visible.values_mut() {
             if row.batch_id == batch_id {
                 row.state = state;
-                row.confirmed_tier = confirmed_tier;
+                row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
+                    (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
+                    (Some(existing), None) => Some(existing),
+                    (None, incoming) => incoming,
+                };
             }
         }
 
