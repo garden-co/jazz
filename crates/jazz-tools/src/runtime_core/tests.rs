@@ -672,7 +672,6 @@ fn add_server_rehydrates_visible_rows_from_storage_after_restart() {
 
     let messages = restarted.sync_sender().take();
     let synced_row = messages.iter().find(|message| match &message.payload {
-        SyncPayload::ObjectUpdated { object_id, .. } => *object_id == row_object_id,
         SyncPayload::RowVersionCreated { row, .. } => row.row_id == row_object_id,
         _ => false,
     });
@@ -1670,11 +1669,7 @@ fn rc_insert_syncs_exact_row_version_without_row_region_reads() {
     let messages = core.sync_sender().take();
     let row_sync = messages
         .iter()
-        .find(|entry| match &entry.payload {
-            SyncPayload::RowVersionCreated { row, .. } => row.row_id == row_id,
-            SyncPayload::ObjectUpdated { object_id, .. } => *object_id == row_id,
-            _ => false,
-        })
+        .find(|entry| matches!(&entry.payload, SyncPayload::RowVersionCreated { row, .. } if row.row_id == row_id))
         .expect("insert should still sync the row upstream");
 
     match &row_sync.payload {
@@ -2770,7 +2765,6 @@ fn test_matching_catalogue_hash_skips_catalogue_replay_on_add_server() {
         )
     });
     let row_msg = messages.iter().find(|m| match &m.payload {
-        SyncPayload::ObjectUpdated { object_id, .. } => *object_id == row_object_id,
         SyncPayload::RowVersionCreated { row, .. } => row.row_id == row_object_id,
         _ => false,
     });
