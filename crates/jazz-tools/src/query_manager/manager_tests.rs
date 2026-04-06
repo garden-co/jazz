@@ -2121,6 +2121,49 @@ fn local_update_emits_subscription_delta() {
 }
 
 #[test]
+fn update_reads_visible_region_after_legacy_commit_history_is_removed() {
+    let schema = test_schema();
+    let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
+    let branch = get_branch(&writer_qm);
+
+    let handle = writer_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    storage
+        .delete_commit(
+            handle.row_id,
+            &crate::object::BranchName::new(&branch),
+            handle.row_commit_id,
+        )
+        .unwrap();
+
+    let mut reader_qm = QueryManager::new(SyncManager::new());
+    reader_qm.set_current_schema(schema, "dev", "main");
+
+    reader_qm
+        .update(
+            &mut storage,
+            handle.row_id,
+            &[Value::Text("Alice Updated".into()), Value::Integer(200)],
+        )
+        .expect("update should succeed from visible-row state without legacy commits");
+
+    let query = reader_qm.query("users").build();
+    let rows = execute_query(&mut reader_qm, &mut storage, query).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, handle.row_id);
+    assert_eq!(
+        rows[0].1,
+        vec![Value::Text("Alice Updated".into()), Value::Integer(200)]
+    );
+}
+
+#[test]
 fn synced_update_emits_subscription_delta() {
     use crate::query_manager::encoding::encode_row;
 
@@ -3330,6 +3373,43 @@ fn undelete_hard_deleted_row_fails() {
     }
 }
 
+#[test]
+fn undelete_hard_deleted_row_fails_after_legacy_commit_history_is_removed() {
+    let schema = test_schema();
+    let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
+    let branch = get_branch(&writer_qm);
+
+    let handle = writer_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+    let hard_delete = writer_qm.hard_delete(&mut storage, handle.row_id).unwrap();
+
+    storage
+        .delete_commit(
+            handle.row_id,
+            &crate::object::BranchName::new(&branch),
+            hard_delete.delete_commit_id,
+        )
+        .unwrap();
+
+    let mut reader_qm = QueryManager::new(SyncManager::new());
+    reader_qm.set_current_schema(schema, "dev", "main");
+
+    let result = reader_qm.undelete(
+        &mut storage,
+        handle.row_id,
+        &[Value::Text("Alice".into()), Value::Integer(100)],
+    );
+    match result {
+        Err(QueryError::RowHardDeleted(row_id)) => assert_eq!(row_id, handle.row_id),
+        other => panic!("Expected RowHardDeleted for visible-only hard delete, got {other:?}"),
+    }
+}
+
 // ========================================================================
 // Truncate Tests
 // ========================================================================
@@ -3552,6 +3632,44 @@ fn hard_delete_emits_removal_delta() {
     assert_eq!(updates[0].delta.removed[0].id, handle.row_id);
     assert!(updates[0].delta.added.is_empty());
     assert!(updates[0].delta.updated.is_empty());
+}
+
+#[test]
+fn delete_reads_visible_region_after_legacy_commit_history_is_removed() {
+    let schema = test_schema();
+    let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
+    let branch = get_branch(&writer_qm);
+
+    let handle = writer_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    storage
+        .delete_commit(
+            handle.row_id,
+            &crate::object::BranchName::new(&branch),
+            handle.row_commit_id,
+        )
+        .unwrap();
+
+    let mut reader_qm = QueryManager::new(SyncManager::new());
+    reader_qm.set_current_schema(schema, "dev", "main");
+
+    reader_qm
+        .delete(&mut storage, handle.row_id)
+        .expect("delete should succeed from visible-row state without legacy commits");
+
+    let query = reader_qm.query("users").build();
+    let rows = execute_query(&mut reader_qm, &mut storage, query).unwrap();
+    assert!(
+        rows.is_empty(),
+        "soft-deleted row should disappear from normal current-state queries"
+    );
+    assert!(reader_qm.row_is_deleted(&storage, "users", handle.row_id));
 }
 
 #[test]

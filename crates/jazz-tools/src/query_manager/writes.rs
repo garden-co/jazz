@@ -169,13 +169,37 @@ impl QueryManager {
         Some((commit, tip_id))
     }
 
-    fn load_row_provenance_on_branch(
+    fn load_row_table_name<H: Storage>(&self, storage: &H, row_id: ObjectId) -> Option<String> {
+        self.sync_manager
+            .object_manager
+            .get(row_id)
+            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .or_else(|| {
+                storage
+                    .load_object_metadata(row_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|metadata| metadata.get(MetadataKey::Table.as_str()).cloned())
+            })
+    }
+
+    fn load_visible_row_on_branch<H: Storage>(
         &self,
+        storage: &H,
+        row_id: ObjectId,
+        branch_name: &str,
+    ) -> Option<(String, StoredRowVersion)> {
+        Self::load_best_visible_row_version(storage, row_id, &[branch_name.to_string()])
+    }
+
+    fn load_row_provenance_on_branch<H: Storage>(
+        &self,
+        storage: &H,
         row_id: ObjectId,
         branch_name: &str,
     ) -> Option<RowProvenance> {
-        let (commit, _) = self.load_row_tip_on_branch(row_id, branch_name)?;
-        commit.row_provenance()
+        let (_, row) = self.load_visible_row_on_branch(storage, row_id, branch_name)?;
+        Some(row.row_provenance())
     }
 
     fn prepare_update_write<H: Storage>(
@@ -1174,7 +1198,7 @@ impl QueryManager {
             visited.remove(&(table_name, row_id, operation));
             return false;
         };
-        let Some(provenance) = self.load_row_provenance_on_branch(row_id, branch) else {
+        let Some(provenance) = self.load_row_provenance_on_branch(storage, row_id, branch) else {
             visited.remove(&(table_name, row_id, operation));
             return false;
         };
@@ -1220,18 +1244,22 @@ impl QueryManager {
         row_id: ObjectId,
         branch: &str,
     ) -> Option<Vec<u8>> {
-        let branches = vec![branch.to_string()];
-        let obj = self
-            .sync_manager
-            .object_manager
-            .get_or_load(row_id, storage, &branches)?;
-        let branch_state = obj.branches.get(&BranchName::new(branch))?;
-        let tip_id = branch_state.tips.iter().next()?;
-        let commit = branch_state.commits.get(tip_id)?;
-        if commit.content.is_empty() {
+        let (_, row) = self.load_visible_row_on_branch(storage, row_id, branch)?;
+        if row.is_hard_deleted() {
             return None;
         }
-        Some(commit.content.clone())
+        Some(row.data)
+    }
+
+    fn visible_row_is_hard_deleted<H: Storage>(
+        &self,
+        storage: &H,
+        row_id: ObjectId,
+        branch: &str,
+    ) -> bool {
+        self.load_visible_row_on_branch(storage, row_id, branch)
+            .map(|(_, row)| row.is_hard_deleted())
+            .unwrap_or(false)
     }
 
     /// Update a row.
@@ -1263,23 +1291,14 @@ impl QueryManager {
             .object_manager
             .get_or_load(id, storage, &[branch]);
 
-        // Get table name from object metadata
         let table = self
-            .sync_manager
-            .object_manager
-            .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
-
-        // Get old data from ObjectManager
-        let (old_data, _commit_id) = self
-            .load_row_from_object(id)
+        let (_, current_row) = self
+            .load_visible_row_on_branch(storage, id, self.current_branch().as_str())
             .ok_or(QueryError::ObjectNotFound(id))?;
-        let old_provenance = self
-            .load_row_provenance_on_branch(id, self.current_branch().as_str())
-            .ok_or_else(|| {
-                QueryError::EncodingError("missing row provenance on current tip".to_string())
-            })?;
+        let old_data = current_row.data.clone();
+        let old_provenance = current_row.row_provenance();
         let branch = self.current_branch();
         let timestamp = self.reserve_write_timestamp();
         let new_provenance =
@@ -1361,8 +1380,8 @@ impl QueryManager {
         let prepared = self.prepare_update_write(storage, write, write_context, &new_provenance)?;
 
         let existing_branch_data = self
-            .load_row_from_object_on_branch(id, branch)
-            .map(|(data, _)| data)
+            .load_visible_row_on_branch(storage, id, branch)
+            .map(|(_, row)| row.data)
             .filter(|data| !data.is_empty());
         let was_soft_deleted = self.row_is_deleted_on_branch(storage, table, branch, id);
         let commit_id = self.commit_prepared_update_write(
@@ -1449,16 +1468,13 @@ impl QueryManager {
             .get_or_load(id, storage, &[branch]);
 
         // Check for hard delete first
-        if self.is_hard_deleted(id) {
+        if self.visible_row_is_hard_deleted(storage, id, self.current_branch().as_str()) {
             return Err(QueryError::RowHardDeleted(id));
         }
 
         // Get table name from object metadata
         let table = self
-            .sync_manager
-            .object_manager
-            .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
@@ -1469,14 +1485,11 @@ impl QueryManager {
         }
 
         // Get old data from ObjectManager (for index removal and content preservation)
-        let (old_data, _commit_id) = self
-            .load_row_from_object(id)
+        let (_, current_row) = self
+            .load_visible_row_on_branch(storage, id, self.current_branch().as_str())
             .ok_or(QueryError::ObjectNotFound(id))?;
-        let old_provenance = self
-            .load_row_provenance_on_branch(id, self.current_branch().as_str())
-            .ok_or_else(|| {
-                QueryError::EncodingError("missing row provenance on current tip".to_string())
-            })?;
+        let old_data = current_row.data.clone();
+        let old_provenance = current_row.row_provenance();
 
         let (descriptor, using_policy) = {
             let table_schema = self
@@ -1552,10 +1565,10 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get_tip_ids(id, self.current_branch())
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
+            .map(|tips| tips.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
 
-        let parents: Vec<_> = tips.into_iter().collect();
+        let parents = tips;
         let timestamp = self.reserve_write_timestamp();
         let delete_provenance =
             self.row_provenance_for_update(&old_provenance, write_context, timestamp);
@@ -1627,7 +1640,7 @@ impl QueryManager {
             old_provenance_for_policy,
         } = delete;
         // Check for hard delete first (checks default branch)
-        if self.is_hard_deleted(id) {
+        if self.visible_row_is_hard_deleted(storage, id, branch) {
             return Err(QueryError::RowHardDeleted(id));
         }
 
@@ -1704,8 +1717,8 @@ impl QueryManager {
 
         // Get old data from ObjectManager on this branch
         let old_branch_data = self
-            .load_row_from_object_on_branch(id, branch)
-            .map(|(data, _)| data)
+            .load_visible_row_on_branch(storage, id, branch)
+            .map(|(_, row)| row.data)
             .filter(|data| !data.is_empty());
         let parents = self
             .sync_manager
@@ -1779,16 +1792,13 @@ impl QueryManager {
         values: &[Value],
     ) -> Result<InsertResult, QueryError> {
         // Check for hard delete first
-        if self.is_hard_deleted(id) {
+        if self.visible_row_is_hard_deleted(storage, id, self.current_branch().as_str()) {
             return Err(QueryError::RowHardDeleted(id));
         }
 
         // Get table name from object metadata
         let table = self
-            .sync_manager
-            .object_manager
-            .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
@@ -1828,12 +1838,12 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get_tip_ids(id, self.current_branch())
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
+            .map(|tips| tips.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
 
-        let parents: Vec<_> = tips.into_iter().collect();
+        let parents = tips;
         let old_provenance = self
-            .load_row_provenance_on_branch(id, self.current_branch().as_str())
+            .load_row_provenance_on_branch(storage, id, self.current_branch().as_str())
             .ok_or_else(|| {
                 QueryError::EncodingError("missing row provenance on current tip".to_string())
             })?;
@@ -1883,16 +1893,13 @@ impl QueryManager {
         id: ObjectId,
     ) -> Result<DeleteHandle, QueryError> {
         // Check if already hard-deleted
-        if self.is_hard_deleted(id) {
+        if self.visible_row_is_hard_deleted(storage, id, self.current_branch().as_str()) {
             return Err(QueryError::RowHardDeleted(id));
         }
 
         // Get table name from object metadata
         let table = self
-            .sync_manager
-            .object_manager
-            .get(id)
-            .and_then(|obj| obj.metadata.get(MetadataKey::Table.as_str()).cloned())
+            .load_row_table_name(storage, id)
             .ok_or(QueryError::ObjectNotFound(id))?;
 
         let table_name = TableName::new(&table);
@@ -1900,8 +1907,8 @@ impl QueryManager {
         // Try to get old data (may be empty if already soft-deleted)
         // Treat empty content as no data (tombstone)
         let old_data = self
-            .load_row_from_object(id)
-            .map(|(data, _)| data)
+            .load_visible_row_on_branch(storage, id, self.current_branch().as_str())
+            .map(|(_, row)| row.data)
             .filter(|data| !data.is_empty());
 
         let table_schema = self
@@ -1914,12 +1921,12 @@ impl QueryManager {
             .sync_manager
             .object_manager
             .get_tip_ids(id, self.current_branch())
-            .map_err(|_| QueryError::ObjectNotFound(id))?
-            .clone();
+            .map(|tips| tips.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
 
-        let parents: Vec<_> = tips.into_iter().collect();
+        let parents = tips;
         let old_provenance = self
-            .load_row_provenance_on_branch(id, self.current_branch().as_str())
+            .load_row_provenance_on_branch(storage, id, self.current_branch().as_str())
             .ok_or_else(|| {
                 QueryError::EncodingError("missing row provenance on current tip".to_string())
             })?;
@@ -1982,7 +1989,7 @@ impl QueryManager {
         id: ObjectId,
     ) -> Result<DeleteHandle, QueryError> {
         // Check for hard delete first
-        if self.is_hard_deleted(id) {
+        if self.visible_row_is_hard_deleted(storage, id, self.current_branch().as_str()) {
             return Err(QueryError::RowHardDeleted(id));
         }
 
