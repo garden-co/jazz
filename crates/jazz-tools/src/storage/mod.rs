@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use crate::catalogue::CatalogueEntry;
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::{SchemaHash, Value};
+use crate::query_manager::types::Value;
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
 use crate::sync_manager::DurabilityTier;
 
@@ -99,83 +99,8 @@ pub struct LoadedBranch {
     pub tails: HashSet<CommitId>,
 }
 
-/// Lens edge stored in the catalogue manifest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CatalogueLensSeen {
-    pub source_hash: SchemaHash,
-    pub target_hash: SchemaHash,
-}
-
-/// Append-only catalogue manifest operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum CatalogueManifestOp {
-    SchemaSeen {
-        object_id: ObjectId,
-        schema_hash: SchemaHash,
-    },
-    PermissionsSeen {
-        object_id: ObjectId,
-        schema_hash: SchemaHash,
-    },
-    LensSeen {
-        object_id: ObjectId,
-        source_hash: SchemaHash,
-        target_hash: SchemaHash,
-    },
-}
-
-impl CatalogueManifestOp {
-    pub fn object_id(&self) -> ObjectId {
-        match self {
-            Self::SchemaSeen { object_id, .. }
-            | Self::PermissionsSeen { object_id, .. }
-            | Self::LensSeen { object_id, .. } => *object_id,
-        }
-    }
-}
-
-/// Materialized view of catalogue objects known for an app.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CatalogueManifest {
-    pub schema_seen: HashMap<ObjectId, SchemaHash>,
-    pub permissions_seen: HashMap<ObjectId, SchemaHash>,
-    pub lens_seen: HashMap<ObjectId, CatalogueLensSeen>,
-}
-
-impl CatalogueManifest {
-    pub fn apply(&mut self, op: &CatalogueManifestOp) {
-        match op {
-            CatalogueManifestOp::SchemaSeen {
-                object_id,
-                schema_hash,
-            } => {
-                self.schema_seen.insert(*object_id, *schema_hash);
-            }
-            CatalogueManifestOp::PermissionsSeen {
-                object_id,
-                schema_hash,
-            } => {
-                self.permissions_seen.insert(*object_id, *schema_hash);
-            }
-            CatalogueManifestOp::LensSeen {
-                object_id,
-                source_hash,
-                target_hash,
-            } => {
-                self.lens_seen.insert(
-                    *object_id,
-                    CatalogueLensSeen {
-                        source_hash: *source_hash,
-                        target_hash: *target_hash,
-                    },
-                );
-            }
-        }
-    }
-}
-
 pub type ObjectMetadataRows = Vec<(ObjectId, HashMap<String, String>)>;
+pub type RawTableRows = Vec<(String, Vec<u8>)>;
 
 // ============================================================================
 // Storage Trait
@@ -259,50 +184,97 @@ pub trait Storage {
     ) -> Result<(), StorageError>;
 
     // ================================================================
-    // Catalogue manifest storage
+    // Ordered raw-table storage
     // ================================================================
 
-    /// Append one catalogue manifest operation for an app.
-    ///
-    /// Implementations must be idempotent by operation `object_id`.
-    fn append_catalogue_manifest_op(
+    fn raw_table_put(
         &mut self,
-        app_id: ObjectId,
-        op: CatalogueManifestOp,
-    ) -> Result<(), StorageError>;
-
-    /// Append multiple catalogue manifest operations for an app.
-    fn append_catalogue_manifest_ops(
-        &mut self,
-        app_id: ObjectId,
-        ops: &[CatalogueManifestOp],
-    ) -> Result<(), StorageError>;
-
-    /// Load the materialized catalogue manifest for an app.
-    fn load_catalogue_manifest(
-        &self,
-        app_id: ObjectId,
-    ) -> Result<Option<CatalogueManifest>, StorageError>;
-
-    fn upsert_catalogue_entry(&mut self, _entry: &CatalogueEntry) -> Result<(), StorageError> {
+        _table: &str,
+        _key: &str,
+        _value: &[u8],
+    ) -> Result<(), StorageError> {
         Err(StorageError::IoError(
-            "catalogue row upserts are not implemented for this backend yet".to_string(),
+            "raw table puts are not implemented for this backend yet".to_string(),
         ))
+    }
+
+    fn raw_table_delete(&mut self, _table: &str, _key: &str) -> Result<(), StorageError> {
+        Err(StorageError::IoError(
+            "raw table deletes are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn raw_table_get(&self, _table: &str, _key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        Err(StorageError::IoError(
+            "raw table lookups are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn raw_table_scan_prefix(
+        &self,
+        _table: &str,
+        _prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        Err(StorageError::IoError(
+            "raw table prefix scans are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        _table: &str,
+        _start: Option<&str>,
+        _end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        Err(StorageError::IoError(
+            "raw table range scans are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
+        let bytes = entry
+            .encode_storage_row()
+            .map_err(|err| StorageError::IoError(format!("encode catalogue entry: {err}")))?;
+        self.raw_table_put(
+            "catalogue",
+            &key_codec::catalogue_entry_key(entry.object_id),
+            &bytes,
+        )
     }
 
     fn load_catalogue_entry(
         &self,
-        _object_id: ObjectId,
+        object_id: ObjectId,
     ) -> Result<Option<CatalogueEntry>, StorageError> {
-        Err(StorageError::IoError(
-            "catalogue row lookups are not implemented for this backend yet".to_string(),
-        ))
+        match self.raw_table_get("catalogue", &key_codec::catalogue_entry_key(object_id))? {
+            Some(bytes) => CatalogueEntry::decode_storage_row(object_id, &bytes)
+                .map(Some)
+                .map_err(|err| StorageError::IoError(format!("decode catalogue entry: {err}"))),
+            None => Ok(None),
+        }
     }
 
     fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, StorageError> {
-        Err(StorageError::IoError(
-            "catalogue row scans are not implemented for this backend yet".to_string(),
-        ))
+        let mut entries = Vec::new();
+        for (key, bytes) in
+            self.raw_table_scan_prefix("catalogue", key_codec::catalogue_entry_prefix())?
+        {
+            let Some(hex_id) = key.strip_prefix(key_codec::catalogue_entry_prefix()) else {
+                continue;
+            };
+            let bytes_id = hex::decode(hex_id).map_err(|err| {
+                StorageError::IoError(format!("invalid catalogue entry key '{key}': {err}"))
+            })?;
+            let uuid = uuid::Uuid::from_slice(&bytes_id).map_err(|err| {
+                StorageError::IoError(format!("invalid catalogue entry uuid '{key}': {err}"))
+            })?;
+            let object_id = ObjectId::from_uuid(uuid);
+            let entry = CatalogueEntry::decode_storage_row(object_id, &bytes)
+                .map_err(|err| StorageError::IoError(format!("decode catalogue entry: {err}")))?;
+            entries.push(entry);
+        }
+        entries.sort_by_key(|entry| entry.object_id);
+        Ok(entries)
     }
 
     // ================================================================
@@ -394,19 +366,9 @@ pub trait Storage {
     }
 
     // ================================================================
-    // Index operations (sync)
+    // Index operations (built on ordered raw tables)
     // ================================================================
-    //
-    // These replace our entire BTreeIndex implementation.
-    // MemoryStorage uses BTreeMaps. OpfsBTreeStorage uses opfs-btree.
-    //
-    // NOTE: Branch is included in all index methods to support multi-branch
-    // scenarios (e.g., user branch vs main branch).
-    //
-    // NOTE: Methods take `Value` not raw bytes - each implementation handles
-    // encoding internally. This keeps encoding concerns inside Storage.
 
-    /// Insert an index entry.
     fn index_insert(
         &mut self,
         table: &str,
@@ -414,9 +376,13 @@ pub trait Storage {
         branch: &str,
         value: &Value,
         row_id: ObjectId,
-    ) -> Result<(), StorageError>;
+    ) -> Result<(), StorageError> {
+        validate_index_value_size(table, column, branch, value)?;
+        let raw_table = key_codec::index_raw_table(table, column, branch);
+        let key = key_codec::index_entry_key(table, column, branch, value, row_id)?;
+        self.raw_table_put(&raw_table, &key, &[0x01])
+    }
 
-    /// Remove an index entry.
     fn index_remove(
         &mut self,
         table: &str,
@@ -424,13 +390,53 @@ pub trait Storage {
         branch: &str,
         value: &Value,
         row_id: ObjectId,
-    ) -> Result<(), StorageError>;
+    ) -> Result<(), StorageError> {
+        let key = match key_codec::index_entry_key(table, column, branch, value, row_id) {
+            Ok(key) => key,
+            Err(StorageError::IndexKeyTooLarge { .. }) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let raw_table = key_codec::index_raw_table(table, column, branch);
+        self.raw_table_delete(&raw_table, &key)
+    }
 
-    /// Lookup exact value - returns all row IDs with this value.
-    fn index_lookup(&self, table: &str, column: &str, branch: &str, value: &Value)
-    -> Vec<ObjectId>;
+    fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+    ) -> Vec<ObjectId> {
+        let raw_table = key_codec::index_raw_table(table, column, branch);
+        if is_double_zero(value) {
+            let mut result = HashSet::new();
+            for zero in &[Value::Double(0.0), Value::Double(-0.0)] {
+                let Ok(prefix) = key_codec::index_value_prefix(table, column, branch, zero) else {
+                    continue;
+                };
+                if let Ok(keys) = self.raw_table_scan_prefix(&raw_table, &prefix) {
+                    for (key, _) in keys {
+                        if let Some(id) = key_codec::parse_uuid_from_index_key(&key) {
+                            result.insert(id);
+                        }
+                    }
+                }
+            }
+            return result.into_iter().collect();
+        }
 
-    /// Range scan - returns row IDs matching the range bounds.
+        let Ok(prefix) = key_codec::index_value_prefix(table, column, branch, value) else {
+            return Vec::new();
+        };
+        self.raw_table_scan_prefix(&raw_table, &prefix)
+            .map(|keys| {
+                keys.into_iter()
+                    .filter_map(|(key, _)| key_codec::parse_uuid_from_index_key(&key))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn index_range(
         &self,
         table: &str,
@@ -438,10 +444,33 @@ pub trait Storage {
         branch: &str,
         start: Bound<&Value>,
         end: Bound<&Value>,
-    ) -> Vec<ObjectId>;
+    ) -> Vec<ObjectId> {
+        let raw_table = key_codec::index_raw_table(table, column, branch);
+        let Some((start_key, end_key)) =
+            key_codec::index_range_scan_bounds(table, column, branch, start, end)
+        else {
+            return Vec::new();
+        };
 
-    /// Full scan - returns all row IDs in this index.
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId>;
+        self.raw_table_scan_range(&raw_table, start_key.as_deref(), end_key.as_deref())
+            .map(|keys| {
+                keys.into_iter()
+                    .filter_map(|(key, _)| key_codec::parse_uuid_from_index_key(&key))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+        let raw_table = key_codec::index_raw_table(table, column, branch);
+        self.raw_table_scan_prefix(&raw_table, "")
+            .map(|keys| {
+                keys.into_iter()
+                    .filter_map(|(key, _)| key_codec::parse_uuid_from_index_key(&key))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 
     /// Flush buffered data to persistent storage. No-op for in-memory storage.
     fn flush(&self) {}
@@ -519,27 +548,33 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).store_ack_tier(commit_id, tier)
     }
 
-    fn append_catalogue_manifest_op(
-        &mut self,
-        app_id: ObjectId,
-        op: CatalogueManifestOp,
-    ) -> Result<(), StorageError> {
-        (**self).append_catalogue_manifest_op(app_id, op)
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        (**self).raw_table_put(table, key, value)
     }
 
-    fn append_catalogue_manifest_ops(
-        &mut self,
-        app_id: ObjectId,
-        ops: &[CatalogueManifestOp],
-    ) -> Result<(), StorageError> {
-        (**self).append_catalogue_manifest_ops(app_id, ops)
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        (**self).raw_table_delete(table, key)
     }
 
-    fn load_catalogue_manifest(
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        (**self).raw_table_get(table, key)
+    }
+
+    fn raw_table_scan_prefix(
         &self,
-        app_id: ObjectId,
-    ) -> Result<Option<CatalogueManifest>, StorageError> {
-        (**self).load_catalogue_manifest(app_id)
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        (**self).raw_table_scan_prefix(table, prefix)
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        (**self).raw_table_scan_range(table, start, end)
     }
 
     fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
@@ -689,11 +724,8 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
 // MemoryStorage - In-memory implementation for testing and main thread
 // ============================================================================
 
-/// Index key: (table, column, branch).
-type IndexKey = (String, String, String);
-
-/// Index storage: encoded_value -> row_ids. BTreeMap for correct range query ordering.
-type IndexEntries = BTreeMap<Vec<u8>, HashSet<ObjectId>>;
+/// Ordered raw-table rows keyed by their local storage key.
+type RawTableEntries = BTreeMap<String, Vec<u8>>;
 
 #[derive(Debug, Clone, Default)]
 struct TableRowRegions {
@@ -703,7 +735,7 @@ struct TableRowRegions {
 
 /// In-memory Storage for testing and main-thread use.
 ///
-/// Stores objects and indices in HashMaps/BTreeMaps. No persistence.
+/// Stores objects and raw tables in HashMaps/BTreeMaps. No persistence.
 /// This is sufficient for:
 /// - All jazz unit tests
 /// - All jazz integration tests
@@ -713,15 +745,11 @@ pub struct MemoryStorage {
     /// Object storage: object_id -> ObjectData
     objects: HashMap<ObjectId, ObjectData>,
 
-    /// Index storage: key -> (encoded_value -> row_ids)
-    indices: HashMap<IndexKey, IndexEntries>,
+    /// Ordered raw-table storage.
+    raw_tables: HashMap<String, RawTableEntries>,
 
     /// Persistence ack tiers per commit.
     ack_tiers: HashMap<CommitId, HashSet<DurabilityTier>>,
-    /// Append-only manifest ops keyed by app_id then op object_id.
-    catalogue_manifest_ops: HashMap<ObjectId, HashMap<ObjectId, CatalogueManifestOp>>,
-    /// Current catalogue entries keyed by logical object id.
-    catalogue_entries: BTreeMap<ObjectId, CatalogueEntry>,
     /// Row-region storage keyed by table.
     row_regions: HashMap<String, TableRowRegions>,
 }
@@ -977,71 +1005,75 @@ impl Storage for MemoryStorage {
         Ok(())
     }
 
-    fn append_catalogue_manifest_op(
-        &mut self,
-        app_id: ObjectId,
-        op: CatalogueManifestOp,
-    ) -> Result<(), StorageError> {
-        let object_id = op.object_id();
-        let app_ops = self.catalogue_manifest_ops.entry(app_id).or_default();
-
-        match app_ops.get(&object_id) {
-            Some(existing) if existing == &op => Ok(()),
-            Some(existing) => Err(StorageError::IoError(format!(
-                "conflicting catalogue manifest op for object {object_id}: existing={existing:?} new={op:?}"
-            ))),
-            None => {
-                app_ops.insert(object_id, op);
-                Ok(())
-            }
-        }
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        self.raw_tables
+            .entry(table.to_string())
+            .or_default()
+            .insert(key.to_string(), value.to_vec());
+        Ok(())
     }
 
-    fn append_catalogue_manifest_ops(
-        &mut self,
-        app_id: ObjectId,
-        ops: &[CatalogueManifestOp],
-    ) -> Result<(), StorageError> {
-        for op in ops {
-            self.append_catalogue_manifest_op(app_id, op.clone())?;
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        if let Some(rows) = self.raw_tables.get_mut(table) {
+            rows.remove(key);
         }
         Ok(())
     }
 
-    fn load_catalogue_manifest(
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self
+            .raw_tables
+            .get(table)
+            .and_then(|rows| rows.get(key))
+            .cloned())
+    }
+
+    fn raw_table_scan_prefix(
         &self,
-        app_id: ObjectId,
-    ) -> Result<Option<CatalogueManifest>, StorageError> {
-        let Some(ops) = self.catalogue_manifest_ops.get(&app_id) else {
-            return Ok(None);
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        let Some(rows) = self.raw_tables.get(table) else {
+            return Ok(Vec::new());
+        };
+        Ok(rows
+            .range(prefix.to_string()..)
+            .take_while(|(key, _)| key.starts_with(prefix))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect())
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        let Some(rows) = self.raw_tables.get(table) else {
+            return Ok(Vec::new());
         };
 
-        if ops.is_empty() {
-            return Ok(None);
-        }
+        let start = start.map(str::to_string);
+        let end = end.map(str::to_string);
 
-        let mut manifest = CatalogueManifest::default();
-        for op in ops.values() {
-            manifest.apply(op);
-        }
-        Ok(Some(manifest))
-    }
-
-    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
-        self.catalogue_entries
-            .insert(entry.object_id, entry.clone());
-        Ok(())
-    }
-
-    fn load_catalogue_entry(
-        &self,
-        object_id: ObjectId,
-    ) -> Result<Option<CatalogueEntry>, StorageError> {
-        Ok(self.catalogue_entries.get(&object_id).cloned())
-    }
-
-    fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, StorageError> {
-        Ok(self.catalogue_entries.values().cloned().collect())
+        Ok(match (start.as_ref(), end.as_ref()) {
+            (Some(start), Some(end)) => rows
+                .range(start.clone()..end.clone())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            (Some(start), None) => rows
+                .range(start.clone()..)
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            (None, Some(end)) => rows
+                .range(..end.clone())
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            (None, None) => rows
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        })
     }
 
     fn append_history_region_rows(
@@ -1219,140 +1251,6 @@ impl Storage for MemoryStorage {
 
         rows.sort_by_key(|row| (row.branch.clone(), row.row_id, row.updated_at));
         Ok(rows)
-    }
-
-    // ================================================================
-    // Index operations
-    // ================================================================
-
-    fn index_insert(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        validate_index_value_size(table, column, branch, value)?;
-        let key = (table.to_string(), column.to_string(), branch.to_string());
-        let index = self.indices.entry(key).or_default();
-        let encoded = encode_value(value);
-        index.entry(encoded).or_default().insert(row_id);
-        Ok(())
-    }
-
-    fn index_remove(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        if matches!(
-            validate_index_value_size(table, column, branch, value),
-            Err(StorageError::IndexKeyTooLarge { .. })
-        ) {
-            return Ok(());
-        }
-        let key = (table.to_string(), column.to_string(), branch.to_string());
-        if let Some(index) = self.indices.get_mut(&key) {
-            let encoded = encode_value(value);
-            if let Some(row_ids) = index.get_mut(&encoded) {
-                row_ids.remove(&row_id);
-                if row_ids.is_empty() {
-                    index.remove(&encoded);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn index_lookup(
-        &self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-    ) -> Vec<ObjectId> {
-        let key = (table.to_string(), column.to_string(), branch.to_string());
-        let Some(index) = self.indices.get(&key) else {
-            return Vec::new();
-        };
-
-        // IEEE 754: -0.0 == 0.0, so look up both encodings and merge.
-        if is_double_zero(value) {
-            let mut result = HashSet::new();
-            for zero in &[Value::Double(0.0), Value::Double(-0.0)] {
-                if let Some(ids) = index.get(&encode_value(zero)) {
-                    result.extend(ids.iter().copied());
-                }
-            }
-            return result.into_iter().collect();
-        }
-
-        let encoded = encode_value(value);
-        index
-            .get(&encoded)
-            .map(|ids| ids.iter().copied().collect())
-            .unwrap_or_default()
-    }
-
-    fn index_range(
-        &self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        start: Bound<&Value>,
-        end: Bound<&Value>,
-    ) -> Vec<ObjectId> {
-        let key = (table.to_string(), column.to_string(), branch.to_string());
-        let Some(index) = self.indices.get(&key) else {
-            return Vec::new();
-        };
-
-        // IEEE 754: -0.0 == 0.0 but they have distinct encodings where
-        // encoded(-0.0) < encoded(+0.0). Adjust bounds so that both zeros
-        // are treated as the same point:
-        //   Start Included(zero) → use -0.0 (widen to include the lesser encoding)
-        //   Start Excluded(zero) → use +0.0 (skip past both encodings)
-        //   End Included(zero)   → use +0.0 (widen to include the greater encoding)
-        //   End Excluded(zero)   → use -0.0 (stop before both encodings)
-        let start_bound = match start {
-            Bound::Included(v) if is_double_zero(v) => {
-                Bound::Included(encode_value(&Value::Double(-0.0)))
-            }
-            Bound::Excluded(v) if is_double_zero(v) => {
-                Bound::Excluded(encode_value(&Value::Double(0.0)))
-            }
-            Bound::Included(v) => Bound::Included(encode_value(v)),
-            Bound::Excluded(v) => Bound::Excluded(encode_value(v)),
-            Bound::Unbounded => Bound::Unbounded,
-        };
-        let end_bound = match end {
-            Bound::Included(v) if is_double_zero(v) => {
-                Bound::Included(encode_value(&Value::Double(0.0)))
-            }
-            Bound::Excluded(v) if is_double_zero(v) => {
-                Bound::Excluded(encode_value(&Value::Double(-0.0)))
-            }
-            Bound::Included(v) => Bound::Included(encode_value(v)),
-            Bound::Excluded(v) => Bound::Excluded(encode_value(v)),
-            Bound::Unbounded => Bound::Unbounded,
-        };
-
-        index
-            .range((start_bound, end_bound))
-            .flat_map(|(_, ids)| ids.iter().copied())
-            .collect()
-    }
-
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
-        let key = (table.to_string(), column.to_string(), branch.to_string());
-        let Some(index) = self.indices.get(&key) else {
-            return Vec::new();
-        };
-        index.values().flat_map(|ids| ids.iter().copied()).collect()
     }
 }
 

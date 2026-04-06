@@ -5,7 +5,6 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::ops::Bound;
 use std::path::Path;
 
 use fjall::{
@@ -13,25 +12,21 @@ use fjall::{
     SingleWriterWriteTx,
 };
 
-use crate::catalogue::CatalogueEntry;
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
-use crate::query_manager::types::Value;
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
 use crate::sync_manager::DurabilityTier;
 
 use super::{
-    CatalogueManifest, CatalogueManifestOp, LoadedBranch, Storage, StorageError,
+    LoadedBranch, Storage, StorageError,
     storage_core::{
-        append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
-        append_history_region_rows_core, create_object_core, delete_commit_core, index_insert_core,
-        index_lookup_core, index_range_core, index_remove_core, index_scan_all_core,
-        load_branch_core, load_catalogue_entry_core, load_catalogue_manifest_core,
-        load_object_metadata_core, load_visible_region_row_core,
-        patch_row_region_rows_by_batch_core, scan_catalogue_entries_core, scan_history_region_core,
-        scan_history_row_versions_core, scan_object_metadata_core, scan_visible_region_core,
-        scan_visible_region_row_versions_core, set_branch_tails_core, store_ack_tier_core,
-        upsert_catalogue_entry_core, upsert_visible_region_rows_core,
+        append_commit_core, append_history_region_rows_core, create_object_core,
+        delete_commit_core, load_branch_core, load_object_metadata_core,
+        load_visible_region_row_core, patch_row_region_rows_by_batch_core, raw_table_delete_core,
+        raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
+        raw_table_scan_range_core, scan_history_region_core, scan_history_row_versions_core,
+        scan_object_metadata_core, scan_visible_region_core, scan_visible_region_row_versions_core,
+        set_branch_tails_core, store_ack_tier_core, upsert_visible_region_rows_core,
     },
 };
 
@@ -105,37 +100,20 @@ impl FjallStorage {
         Ok(out)
     }
 
-    fn scan_prefix_keys(
-        txn: &impl Readable,
-        keyspace: &SingleWriterTxKeyspace,
-        prefix: &str,
-    ) -> Result<Vec<String>, StorageError> {
-        let mut out = Vec::new();
-        for item in txn.prefix(keyspace, prefix.as_bytes()) {
-            let key = item
-                .key()
-                .map_err(|e| StorageError::IoError(format!("fjall prefix key: {e}")))?;
-            let key = String::from_utf8(key.to_vec())
-                .map_err(|e| StorageError::IoError(format!("fjall invalid key utf8: {e}")))?;
-            out.push(key);
-        }
-        Ok(out)
-    }
-
-    fn scan_key_range(
+    fn scan_range(
         txn: &impl Readable,
         keyspace: &SingleWriterTxKeyspace,
         start: &str,
         end: &str,
-    ) -> Result<Vec<String>, StorageError> {
+    ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
         let mut out = Vec::new();
         for item in txn.range(keyspace, start.as_bytes()..end.as_bytes()) {
-            let key = item
-                .key()
-                .map_err(|e| StorageError::IoError(format!("fjall range key: {e}")))?;
+            let (key, value) = item
+                .into_inner()
+                .map_err(|e| StorageError::IoError(format!("fjall range item: {e}")))?;
             let key = String::from_utf8(key.to_vec())
                 .map_err(|e| StorageError::IoError(format!("fjall invalid key utf8: {e}")))?;
-            out.push(key);
+            out.push((key, value.to_vec()));
         }
         Ok(out)
     }
@@ -313,76 +291,59 @@ impl Storage for FjallStorage {
         })
     }
 
-    fn append_catalogue_manifest_op(
-        &mut self,
-        app_id: ObjectId,
-        op: CatalogueManifestOp,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let tx = RefCell::new(inner.db.write_tx());
-            append_catalogue_manifest_op_core(
-                app_id,
-                op,
-                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
-                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
-            )?;
-            Self::commit_tx(tx.into_inner())
-        })
-    }
-
-    fn append_catalogue_manifest_ops(
-        &mut self,
-        app_id: ObjectId,
-        ops: &[CatalogueManifestOp],
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let tx = RefCell::new(inner.db.write_tx());
-            append_catalogue_manifest_ops_core(
-                app_id,
-                ops,
-                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
-                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
-            )?;
-            Self::commit_tx(tx.into_inner())
-        })
-    }
-
-    fn load_catalogue_manifest(
-        &self,
-        app_id: ObjectId,
-    ) -> Result<Option<CatalogueManifest>, StorageError> {
-        self.with_inner(|inner| {
-            let tx = inner.db.read_tx();
-            load_catalogue_manifest_core(app_id, |prefix| {
-                Self::scan_prefix(&tx, &inner.keyspace, prefix)
-            })
-        })
-    }
-
-    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.with_inner(|inner| {
             let mut tx = inner.db.write_tx();
-            upsert_catalogue_entry_core(entry, |key, value| {
-                Self::set_on_tx(&mut tx, &inner.keyspace, key, value)
+            raw_table_put_core(table, key, value, |storage_key, bytes| {
+                Self::set_on_tx(&mut tx, &inner.keyspace, storage_key, bytes)
             })?;
             Self::commit_tx(tx)
         })
     }
 
-    fn load_catalogue_entry(
-        &self,
-        object_id: ObjectId,
-    ) -> Result<Option<CatalogueEntry>, StorageError> {
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
         self.with_inner(|inner| {
-            let tx = inner.db.read_tx();
-            load_catalogue_entry_core(object_id, |key| Self::read_get(&tx, &inner.keyspace, key))
+            let mut tx = inner.db.write_tx();
+            raw_table_delete_core(table, key, |storage_key| {
+                Self::delete_on_tx(&mut tx, &inner.keyspace, storage_key)
+            })?;
+            Self::commit_tx(tx)
         })
     }
 
-    fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, StorageError> {
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
         self.with_inner(|inner| {
             let tx = inner.db.read_tx();
-            scan_catalogue_entries_core(|prefix| Self::scan_prefix(&tx, &inner.keyspace, prefix))
+            raw_table_get_core(table, key, |storage_key| {
+                Self::read_get(&tx, &inner.keyspace, storage_key)
+            })
+        })
+    }
+
+    fn raw_table_scan_prefix(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<super::RawTableRows, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            raw_table_scan_prefix_core(table, prefix, |storage_prefix| {
+                Self::scan_prefix(&tx, &inner.keyspace, storage_prefix)
+            })
+        })
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<super::RawTableRows, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            raw_table_scan_range_core(table, start, end, |start_key, end_key| {
+                Self::scan_range(&tx, &inner.keyspace, start_key, end_key)
+            })
         })
     }
 
@@ -500,88 +461,6 @@ impl Storage for FjallStorage {
                 Self::scan_prefix(&tx, &inner.keyspace, prefix)
             })
         })
-    }
-
-    fn index_insert(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let mut tx = inner.db.write_tx();
-            index_insert_core(table, column, branch, value, row_id, |key, bytes| {
-                Self::set_on_tx(&mut tx, &inner.keyspace, key, bytes)
-            })?;
-            Self::commit_tx(tx)
-        })
-    }
-
-    fn index_remove(
-        &mut self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-        row_id: ObjectId,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let mut tx = inner.db.write_tx();
-            index_remove_core(table, column, branch, value, row_id, |key| {
-                Self::delete_on_tx(&mut tx, &inner.keyspace, key)
-            })?;
-            Self::commit_tx(tx)
-        })
-    }
-
-    fn index_lookup(
-        &self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        value: &Value,
-    ) -> Vec<ObjectId> {
-        self.with_inner(|inner| {
-            let tx = inner.db.read_tx();
-            Ok(index_lookup_core(table, column, branch, value, |prefix| {
-                Self::scan_prefix_keys(&tx, &inner.keyspace, prefix)
-            }))
-        })
-        .unwrap_or_default()
-    }
-
-    fn index_range(
-        &self,
-        table: &str,
-        column: &str,
-        branch: &str,
-        start: Bound<&Value>,
-        end: Bound<&Value>,
-    ) -> Vec<ObjectId> {
-        self.with_inner(|inner| {
-            let tx = inner.db.read_tx();
-            Ok(index_range_core(
-                table,
-                column,
-                branch,
-                start,
-                end,
-                |start_key, end_key| Self::scan_key_range(&tx, &inner.keyspace, start_key, end_key),
-            ))
-        })
-        .unwrap_or_default()
-    }
-
-    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
-        self.with_inner(|inner| {
-            let tx = inner.db.read_tx();
-            Ok(index_scan_all_core(table, column, branch, |prefix| {
-                Self::scan_prefix_keys(&tx, &inner.keyspace, prefix)
-            }))
-        })
-        .unwrap_or_default()
     }
 
     fn flush(&self) {

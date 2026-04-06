@@ -13,6 +13,31 @@ const OVERFLOW_INDEX_VALUE_LEN_HEX_BYTES: usize = 16;
 const OVERFLOW_INDEX_VALUE_HASH_HEX_BYTES: usize = blake3::OUT_LEN * 2;
 const OVERFLOW_INDEX_VALUE_TRAILER_BYTES: usize =
     1 + OVERFLOW_INDEX_VALUE_LEN_HEX_BYTES + OVERFLOW_INDEX_VALUE_HASH_HEX_BYTES;
+const RAW_TABLE_KEY_PREFIX: &str = "raw:";
+
+fn raw_table_key_bytes(table: &str, key_len: usize) -> usize {
+    RAW_TABLE_KEY_PREFIX.len() + table.len() + 1 + key_len
+}
+
+pub(super) fn raw_table_entry_key(table: &str, key: &str) -> String {
+    format!("{RAW_TABLE_KEY_PREFIX}{table}:{key}")
+}
+
+pub(super) fn raw_table_prefix(table: &str) -> String {
+    format!("{RAW_TABLE_KEY_PREFIX}{table}:")
+}
+
+pub(super) fn raw_table_scan_prefix(table: &str, prefix: &str) -> String {
+    format!("{}{prefix}", raw_table_prefix(table))
+}
+
+pub(super) fn strip_raw_table_key<'a>(table: &str, storage_key: &'a str) -> Option<&'a str> {
+    storage_key.strip_prefix(&raw_table_prefix(table))
+}
+
+pub(super) fn index_raw_table(table: &str, column: &str, branch: &str) -> String {
+    format!("idx:{table}:{column}:{branch}")
+}
 
 fn index_entry_key_bytes(
     table: &str,
@@ -20,16 +45,11 @@ fn index_entry_key_bytes(
     branch: &str,
     value_segment_len: usize,
 ) -> usize {
-    "idx:".len()
-        + table.len()
-        + 1
-        + column.len()
-        + 1
-        + branch.len()
-        + 1
-        + value_segment_len
-        + 1
-        + INDEX_ENTRY_UUID_HEX_BYTES
+    let raw_table = index_raw_table(table, column, branch);
+    raw_table_key_bytes(
+        &raw_table,
+        value_segment_len + 1 + INDEX_ENTRY_UUID_HEX_BYTES,
+    )
 }
 
 fn index_value_prefix_bytes(
@@ -38,7 +58,8 @@ fn index_value_prefix_bytes(
     branch: &str,
     value_segment_len: usize,
 ) -> usize {
-    "idx:".len() + table.len() + 1 + column.len() + 1 + branch.len() + 1 + value_segment_len + 1
+    let raw_table = index_raw_table(table, column, branch);
+    raw_table_key_bytes(&raw_table, value_segment_len + 1)
 }
 
 fn index_key_too_large_error(
@@ -200,18 +221,6 @@ pub(super) fn history_table_prefix(table: &str) -> String {
     format!("row:{table}:1:")
 }
 
-pub(super) fn catalogue_manifest_op_key(app_id: ObjectId, object_id: ObjectId) -> String {
-    format!(
-        "catman:{}:op:{}",
-        format_uuid(app_id),
-        format_uuid(object_id)
-    )
-}
-
-pub(super) fn catalogue_manifest_op_prefix(app_id: ObjectId) -> String {
-    format!("catman:{}:op:", format_uuid(app_id))
-}
-
 pub(super) fn catalogue_entry_key(object_id: ObjectId) -> String {
     format!("catrow:{}", format_uuid(object_id))
 }
@@ -228,10 +237,7 @@ pub(super) fn index_entry_key(
     row_id: ObjectId,
 ) -> Result<String, StorageError> {
     Ok(format!(
-        "idx:{}:{}:{}:{}:{}",
-        table,
-        column,
-        branch,
+        "{}:{}",
         encode_index_value_segment(table, column, branch, value)?,
         format_uuid(row_id)
     ))
@@ -248,14 +254,7 @@ pub(super) fn index_value_prefix(
     if key_bytes > INDEX_KEY_MAX_BYTES {
         return Err(index_key_too_large_error(table, column, branch, key_bytes));
     }
-    Ok(format!(
-        "idx:{}:{}:{}:{}:",
-        table, column, branch, value_segment
-    ))
-}
-
-pub(super) fn index_prefix(table: &str, column: &str, branch: &str) -> String {
-    format!("idx:{}:{}:{}:", table, column, branch)
+    Ok(format!("{value_segment}:"))
 }
 
 /// Compute lexicographic scan bounds for index range queries.
@@ -265,9 +264,7 @@ pub(super) fn index_range_scan_bounds(
     branch: &str,
     start: Bound<&Value>,
     end: Bound<&Value>,
-) -> Option<(String, String)> {
-    let base_prefix = index_prefix(table, column, branch);
-
+) -> Option<(Option<String>, Option<String>)> {
     // IEEE 754: -0.0 == 0.0 but they encode differently. Adjust bounds
     // so both zeros are treated as the same point.
     let neg_zero = Value::Double(-0.0);
@@ -276,54 +273,49 @@ pub(super) fn index_range_scan_bounds(
     let pos_zero_segment = encode_index_value_segment(table, column, branch, &pos_zero).ok()?;
 
     let start_key = match start {
-        Bound::Included(v) if super::is_double_zero(v) => {
-            format!("{}{}", base_prefix, neg_zero_segment)
-        }
+        Bound::Included(v) if super::is_double_zero(v) => Some(neg_zero_segment.clone()),
         Bound::Excluded(v) if super::is_double_zero(v) => {
-            let mut key = format!("{}{}:", base_prefix, pos_zero_segment);
+            let mut key = format!("{pos_zero_segment}:");
             increment_string(&mut key);
-            key
+            Some(key)
         }
         Bound::Included(v) => {
             let segment = encode_index_value_segment(table, column, branch, v).ok()?;
-            format!("{}{}", base_prefix, segment)
+            Some(segment)
         }
         Bound::Excluded(v) => {
             let segment = encode_index_value_segment(table, column, branch, v).ok()?;
-            let mut key = format!("{}{}:", base_prefix, segment);
+            let mut key = format!("{segment}:");
             increment_string(&mut key);
-            key
+            Some(key)
         }
-        Bound::Unbounded => base_prefix.clone(),
+        Bound::Unbounded => None,
     };
 
     let end_key = match end {
         Bound::Included(v) if super::is_double_zero(v) => {
-            let mut key = format!("{}{}:", base_prefix, pos_zero_segment);
+            let mut key = format!("{pos_zero_segment}:");
             increment_string(&mut key);
-            key
+            Some(key)
         }
-        Bound::Excluded(v) if super::is_double_zero(v) => {
-            format!("{}{}", base_prefix, neg_zero_segment)
-        }
+        Bound::Excluded(v) if super::is_double_zero(v) => Some(neg_zero_segment.clone()),
         Bound::Included(v) => {
             let segment = encode_index_value_segment(table, column, branch, v).ok()?;
-            let mut key = format!("{}{}:", base_prefix, segment);
+            let mut key = format!("{segment}:");
             increment_string(&mut key);
-            key
+            Some(key)
         }
         Bound::Excluded(v) => {
             let segment = encode_index_value_segment(table, column, branch, v).ok()?;
-            format!("{}{}", base_prefix, segment)
+            Some(segment)
         }
-        Bound::Unbounded => {
-            let mut end = base_prefix.clone();
-            increment_string(&mut end);
-            end
-        }
+        Bound::Unbounded => None,
     };
 
-    (start_key < end_key).then_some((start_key, end_key))
+    match (&start_key, &end_key) {
+        (Some(start_key), Some(end_key)) if start_key >= end_key => None,
+        _ => Some((start_key, end_key)),
+    }
 }
 
 /// Parse a UUID from the last segment of an index key.
