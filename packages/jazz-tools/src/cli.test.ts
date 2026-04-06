@@ -412,7 +412,9 @@ describe("cli migrations", () => {
     );
 
     expect(result).toBeNull();
-    expect((await readdir(snapshotsDir)).filter((name) => name.endsWith(".json"))).toHaveLength(1);
+    const snapshotFiles = (await readdir(snapshotsDir)).filter((name) => name.endsWith(".json"));
+    expect(snapshotFiles).toHaveLength(1);
+    expect(snapshotFiles[0]).toMatch(/^\d{8}T\d{6}Z-[0-9a-f]{64}\.json$/i);
     expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toHaveLength(0);
     expect(logs.some((line) => line.startsWith("Wrote initial schema snapshot:"))).toBe(true);
     expect(logs).toContain(
@@ -434,6 +436,8 @@ describe("cli migrations", () => {
     });
 
     await writeFile(join(root, "schema.ts"), rootSchemaWithTodoNotes());
+    // Wait for 1s to avoid migration timestamp collisions
+    await new Promise((resolve) => setTimeout(resolve, 1100));
 
     const { result: filePath, logs } = await captureConsoleLogs(() =>
       createMigration({

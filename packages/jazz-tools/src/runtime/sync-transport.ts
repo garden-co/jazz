@@ -106,14 +106,15 @@ function logSchemaWarningPayload(payload: any, logPrefix = ""): void {
   const rowCount = warning.rowCount ?? warning.row_count ?? 0;
   const tableName = warning.tableName ?? warning.table_name ?? "unknown";
   const fromHash = warning.fromHash ?? warning.from_hash ?? "unknown";
-  const toHash = warning.toHash ?? warning.to_hash ?? "unknown";
   const shortHash = (hash: string) =>
     typeof hash === "string" && /^[0-9a-f]{12,}$/i.test(hash) ? hash.slice(0, 12) : hash;
 
   console.warn(
-    `${logPrefix}Detected ${rowCount} rows of ${tableName} with differing schema versions. ` +
-      `To ensure data visibility and forward/backward compatibility please create a new migration with ` +
-      `\`npx jazz-tools@alpha migrations create ${shortHash(fromHash)} ${shortHash(toHash)}\``,
+    `${logPrefix}Detected ${rowCount} rows of ${tableName} with schema versions not reachable from the current schema. ` +
+      `To materialize the missing schema locally, run ` +
+      `\`npx jazz-tools schema export --schema-hash ${shortHash(fromHash)}\`. ` +
+      `Then generate a migration with ` +
+      `\`npx jazz-tools migrations create --fromHash ${shortHash(fromHash)}\``,
   );
 }
 
