@@ -1,9 +1,11 @@
 #![cfg(feature = "otel")]
 
-use jazz_tools::otel_test::TestMeterProvider;
+#[path = "support/otel_test.rs"]
+mod otel_test;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+use otel_test::TestMeterProvider;
 
 #[test]
 fn counter_with_attributes_is_exported() {
