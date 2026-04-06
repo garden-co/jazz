@@ -162,13 +162,10 @@ impl SyncManager {
         branch_name: BranchName,
         except: ClientId,
     ) {
-        let is_catalogue = self.object_is_catalogue(object_id);
         let client_ids: Vec<ClientId> = self
             .clients
             .iter()
-            .filter(|(id, client)| {
-                **id != except && (is_catalogue || client.is_in_scope(object_id, &branch_name))
-            })
+            .filter(|(id, client)| **id != except && client.is_in_scope(object_id, &branch_name))
             .map(|(id, _)| *id)
             .collect();
 
@@ -182,16 +179,7 @@ impl SyncManager {
         if let Some(row) = self.object_manager.visible_row(object_id, branch_name) {
             for client_id in &client_ids {
                 tracing::trace!(%client_id, "queuing row update to client");
-                if is_catalogue {
-                    self.queue_row_to_client_unscoped(
-                        *client_id,
-                        object_id,
-                        metadata.clone(),
-                        row.clone(),
-                    );
-                } else {
-                    self.queue_row_to_client(*client_id, object_id, metadata.clone(), row.clone());
-                }
+                self.queue_row_to_client(*client_id, object_id, metadata.clone(), row.clone());
             }
             return;
         }
@@ -203,23 +191,13 @@ impl SyncManager {
 
         for client_id in &client_ids {
             tracing::trace!(%client_id, "queuing tips to client");
-            if is_catalogue {
-                self.queue_tips_to_client_unscoped(
-                    *client_id,
-                    object_id,
-                    metadata.clone(),
-                    branch_name,
-                    tips.clone(),
-                );
-            } else {
-                self.queue_tips_to_client(
-                    *client_id,
-                    object_id,
-                    metadata.clone(),
-                    branch_name,
-                    tips.clone(),
-                );
-            }
+            self.queue_tips_to_client(
+                *client_id,
+                object_id,
+                metadata.clone(),
+                branch_name,
+                tips.clone(),
+            );
         }
     }
 
@@ -230,13 +208,10 @@ impl SyncManager {
         branch_name: BranchName,
         except: ClientId,
     ) {
-        let is_catalogue = self.object_is_catalogue(object_id);
         let client_ids: Vec<ClientId> = self
             .clients
             .iter()
-            .filter(|(id, client)| {
-                **id != except && (is_catalogue || client.is_in_scope(object_id, &branch_name))
-            })
+            .filter(|(id, client)| **id != except && client.is_in_scope(object_id, &branch_name))
             .map(|(id, _)| *id)
             .collect();
 
@@ -251,16 +226,7 @@ impl SyncManager {
             let metadata = object.metadata.clone();
             for client_id in &client_ids {
                 tracing::trace!(%client_id, "queuing row update to client");
-                if is_catalogue {
-                    self.queue_row_to_client_unscoped(
-                        *client_id,
-                        object_id,
-                        metadata.clone(),
-                        row.clone(),
-                    );
-                } else {
-                    self.queue_row_to_client(*client_id, object_id, metadata.clone(), row.clone());
-                }
+                self.queue_row_to_client(*client_id, object_id, metadata.clone(), row.clone());
             }
             return;
         }
@@ -272,23 +238,13 @@ impl SyncManager {
 
         for client_id in &client_ids {
             tracing::trace!(%client_id, "queuing tips to client");
-            if is_catalogue {
-                self.queue_tips_to_client_unscoped(
-                    *client_id,
-                    object_id,
-                    metadata.clone(),
-                    branch_name,
-                    tips.clone(),
-                );
-            } else {
-                self.queue_tips_to_client(
-                    *client_id,
-                    object_id,
-                    metadata.clone(),
-                    branch_name,
-                    tips.clone(),
-                );
-            }
+            self.queue_tips_to_client(
+                *client_id,
+                object_id,
+                metadata.clone(),
+                branch_name,
+                tips.clone(),
+            );
         }
     }
 
@@ -362,13 +318,10 @@ impl SyncManager {
             return;
         }
 
-        let is_catalogue = Self::is_catalogue_metadata(&object.metadata);
         let client_ids: Vec<ClientId> = self
             .clients
             .iter()
-            .filter(|(id, client)| {
-                **id != except && (is_catalogue || client.is_in_scope(object_id, &branch_name))
-            })
+            .filter(|(id, client)| **id != except && client.is_in_scope(object_id, &branch_name))
             .map(|(id, _)| *id)
             .collect();
 

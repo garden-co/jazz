@@ -4,6 +4,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::catalogue::CatalogueEntry;
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::policy::Operation;
@@ -258,6 +259,9 @@ pub enum SyncPayload {
         commits: Vec<Commit>,
     },
 
+    /// Semantic update for one catalogue/system entry.
+    CatalogueEntryUpdated { entry: CatalogueEntry },
+
     /// Upstream replication of a newly created or newly learned row version.
     RowVersionCreated {
         metadata: Option<ObjectMetadata>,
@@ -396,6 +400,7 @@ impl SyncPayload {
     pub fn object_id(&self) -> Option<ObjectId> {
         match self {
             SyncPayload::ObjectUpdated { object_id, .. } => Some(*object_id),
+            SyncPayload::CatalogueEntryUpdated { entry } => Some(entry.object_id),
             SyncPayload::RowVersionCreated { row, .. }
             | SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
             SyncPayload::RowVersionStateChanged { row_id, .. } => Some(*row_id),
@@ -407,6 +412,7 @@ impl SyncPayload {
     pub fn branch_name(&self) -> Option<BranchName> {
         match self {
             SyncPayload::ObjectUpdated { branch_name, .. } => Some(*branch_name),
+            SyncPayload::CatalogueEntryUpdated { .. } => None,
             SyncPayload::RowVersionCreated { row, .. }
             | SyncPayload::RowVersionNeeded { row, .. } => Some(BranchName::new(&row.branch)),
             SyncPayload::RowVersionStateChanged { branch_name, .. } => Some(*branch_name),
@@ -420,6 +426,7 @@ impl SyncPayload {
             SyncPayload::ObjectUpdated {
                 metadata: Some(m), ..
             } => &m.metadata,
+            SyncPayload::CatalogueEntryUpdated { entry } => &entry.metadata,
             SyncPayload::RowVersionCreated {
                 metadata: Some(m), ..
             } => &m.metadata,
@@ -474,6 +481,7 @@ impl SyncPayload {
     pub fn variant_name(&self) -> &'static str {
         match self {
             SyncPayload::ObjectUpdated { .. } => "ObjectUpdated",
+            SyncPayload::CatalogueEntryUpdated { .. } => "CatalogueEntryUpdated",
             SyncPayload::RowVersionCreated { .. } => "RowVersionCreated",
             SyncPayload::RowVersionNeeded { .. } => "RowVersionNeeded",
             SyncPayload::RowVersionStateChanged { .. } => "RowVersionStateChanged",

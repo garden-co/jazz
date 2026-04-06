@@ -1,4 +1,5 @@
 pub mod binding_support;
+pub mod catalogue;
 pub mod commit;
 pub mod metadata;
 #[cfg(feature = "cli")]

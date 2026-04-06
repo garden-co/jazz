@@ -1,4 +1,5 @@
 use super::*;
+use crate::catalogue::CatalogueEntry;
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::row_regions::{RowState, StoredRowVersion};
@@ -16,67 +17,30 @@ struct ServerCommitSyncData {
 }
 
 impl SyncManager {
-    pub(super) fn is_catalogue_metadata(metadata: &HashMap<String, String>) -> bool {
-        matches!(
-            metadata
-                .get(crate::metadata::MetadataKey::Type.as_str())
-                .map(|value| value.as_str()),
-            Some(kind) if crate::metadata::ObjectType::is_catalogue_type_str(kind)
-        )
+    fn sorted_catalogue_entries(&self) -> Vec<CatalogueEntry> {
+        let mut entries: Vec<_> = self.catalogue_entries.values().cloned().collect();
+        entries.sort_by_key(|entry| entry.object_id);
+        entries
     }
 
-    pub(super) fn track_catalogue_object(
+    pub(super) fn queue_catalogue_sync_to_server(&mut self, server_id: ServerId) {
+        for entry in self.sorted_catalogue_entries() {
+            self.queue_catalogue_entry_to_server(server_id, entry);
+        }
+    }
+
+    pub(super) fn queue_catalogue_sync_to_server_from_storage<H: Storage>(
         &mut self,
-        object_id: ObjectId,
-        metadata: &HashMap<String, String>,
+        server_id: ServerId,
+        storage: &H,
     ) {
-        if Self::is_catalogue_metadata(metadata) {
-            self.catalogue_objects.insert(object_id);
-        } else {
-            self.catalogue_objects.remove(&object_id);
-        }
-    }
-
-    pub(super) fn object_is_catalogue(&self, object_id: ObjectId) -> bool {
-        self.catalogue_objects.contains(&object_id)
-    }
-
-    /// Mark all existing catalogue objects as already sent for this server.
-    ///
-    /// This is used when the upstream server reports the same catalogue digest
-    /// during the connect handshake, allowing us to skip replaying schema/lens
-    /// objects while still performing the normal full sync for row data.
-    pub(super) fn mark_catalogue_sent_for_server(&mut self, server_id: ServerId) {
-        let Some(_server) = self.servers.get(&server_id) else {
+        let Ok(entries) = storage.scan_catalogue_entries() else {
             return;
         };
-
-        let mut sent_metadata = HashSet::new();
-        let mut sent_branch_frontiers = Vec::new();
-
-        for object_id in self.catalogue_objects.iter().copied() {
-            let Some(object) = self.object_manager.objects.get(&object_id) else {
-                continue;
-            };
-
-            sent_metadata.insert(object_id);
-            for (branch_name, branch) in &object.branches {
-                sent_branch_frontiers.push((
-                    object_id,
-                    *branch_name,
-                    branch.tips.iter().copied().collect::<HashSet<_>>(),
-                ));
-            }
-        }
-
-        let Some(server) = self.servers.get_mut(&server_id) else {
-            return;
-        };
-        server.sent_metadata.extend(sent_metadata);
-        for (object_id, branch_name, tips) in sent_branch_frontiers {
-            server
-                .sent_branch_frontiers
-                .insert((object_id, branch_name), tips);
+        for entry in entries {
+            self.catalogue_entries
+                .insert(entry.object_id, entry.clone());
+            self.queue_catalogue_entry_to_server(server_id, entry);
         }
     }
 
@@ -120,8 +84,6 @@ impl SyncManager {
         let mut object_sync: Vec<BranchSyncData> = Vec::new();
 
         for (object_id, metadata) in objects {
-            self.track_catalogue_object(object_id, &metadata);
-
             if let Some(table) = metadata.get(crate::metadata::MetadataKey::Table.as_str()) {
                 let Ok(rows) = storage.scan_history_row_versions(table, object_id) else {
                     continue;
@@ -159,24 +121,8 @@ impl SyncManager {
 
     /// Queue all existing catalogue objects to sync to a new client.
     pub(super) fn queue_catalogue_sync_to_client(&mut self, client_id: ClientId) {
-        let mut to_sync: Vec<BranchSyncData> = Vec::new();
-
-        for object_id in self.catalogue_objects.iter().copied() {
-            let Some(object) = self.object_manager.objects.get(&object_id) else {
-                continue;
-            };
-            for (branch_name, branch) in &object.branches {
-                to_sync.push((
-                    object_id,
-                    object.metadata.clone(),
-                    *branch_name,
-                    branch.tips.iter().copied().collect(),
-                ));
-            }
-        }
-
-        for (object_id, metadata, branch_name, tips) in to_sync {
-            self.queue_tips_to_client_unscoped(client_id, object_id, metadata, branch_name, tips);
+        for entry in self.sorted_catalogue_entries() {
+            self.queue_catalogue_entry_to_client(client_id, entry);
         }
     }
 
@@ -185,32 +131,89 @@ impl SyncManager {
         client_id: ClientId,
         storage: &H,
     ) {
-        let Ok(objects) = storage.scan_object_metadata() else {
+        let Ok(entries) = storage.scan_catalogue_entries() else {
             return;
         };
 
-        let mut to_sync: Vec<BranchSyncData> = Vec::new();
-        for (object_id, metadata) in objects {
-            if !Self::is_catalogue_metadata(&metadata) {
-                continue;
-            }
-            self.track_catalogue_object(object_id, &metadata);
+        for entry in entries {
+            self.catalogue_entries
+                .insert(entry.object_id, entry.clone());
+            self.queue_catalogue_entry_to_client(client_id, entry);
+        }
+    }
 
-            let Some(object) = self.object_manager.get_or_load(object_id, storage, &[]) else {
-                continue;
-            };
-            for (branch_name, branch) in &object.branches {
-                to_sync.push((
-                    object_id,
-                    object.metadata.clone(),
-                    *branch_name,
-                    branch.tips.iter().copied().collect(),
-                ));
-            }
+    pub fn upsert_catalogue_entry<H: Storage>(&mut self, storage: &mut H, entry: CatalogueEntry) {
+        let changed = self.persist_catalogue_entry(storage, entry.clone());
+        if !changed {
+            return;
         }
 
-        for (object_id, metadata, branch_name, tips) in to_sync {
-            self.queue_tips_to_client_unscoped(client_id, object_id, metadata, branch_name, tips);
+        self.forward_catalogue_entry_to_servers(entry.clone());
+        self.forward_catalogue_entry_to_clients(entry, None);
+    }
+
+    pub(super) fn persist_catalogue_entry<H: Storage>(
+        &mut self,
+        storage: &mut H,
+        entry: CatalogueEntry,
+    ) -> bool {
+        let existing = self
+            .catalogue_entries
+            .get(&entry.object_id)
+            .cloned()
+            .or_else(|| storage.load_catalogue_entry(entry.object_id).ok().flatten());
+
+        if existing.as_ref() == Some(&entry) {
+            self.catalogue_entries.insert(entry.object_id, entry);
+            return false;
+        }
+
+        if let Err(error) = storage.upsert_catalogue_entry(&entry) {
+            tracing::warn!(
+                object_id = %entry.object_id,
+                %error,
+                "failed to persist catalogue entry"
+            );
+        }
+
+        self.catalogue_entries.insert(entry.object_id, entry);
+        true
+    }
+
+    fn queue_catalogue_entry_to_server(&mut self, server_id: ServerId, entry: CatalogueEntry) {
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Server(server_id),
+            payload: SyncPayload::CatalogueEntryUpdated { entry },
+        });
+    }
+
+    fn queue_catalogue_entry_to_client(&mut self, client_id: ClientId, entry: CatalogueEntry) {
+        self.outbox.push(OutboxEntry {
+            destination: Destination::Client(client_id),
+            payload: SyncPayload::CatalogueEntryUpdated { entry },
+        });
+    }
+
+    pub(super) fn forward_catalogue_entry_to_servers(&mut self, entry: CatalogueEntry) {
+        let server_ids: Vec<_> = self.servers.keys().copied().collect();
+        for server_id in server_ids {
+            self.queue_catalogue_entry_to_server(server_id, entry.clone());
+        }
+    }
+
+    pub(super) fn forward_catalogue_entry_to_clients(
+        &mut self,
+        entry: CatalogueEntry,
+        except: Option<ClientId>,
+    ) {
+        let client_ids: Vec<_> = self
+            .clients
+            .keys()
+            .copied()
+            .filter(|client_id| except != Some(*client_id))
+            .collect();
+        for client_id in client_ids {
+            self.queue_catalogue_entry_to_client(client_id, entry.clone());
         }
     }
 
@@ -447,27 +450,6 @@ impl SyncManager {
         metadata: HashMap<String, String>,
         row: StoredRowVersion,
     ) {
-        self.queue_row_to_client_inner(client_id, object_id, metadata, row, true);
-    }
-
-    pub(super) fn queue_row_to_client_unscoped(
-        &mut self,
-        client_id: ClientId,
-        object_id: ObjectId,
-        metadata: HashMap<String, String>,
-        row: StoredRowVersion,
-    ) {
-        self.queue_row_to_client_inner(client_id, object_id, metadata, row, false);
-    }
-
-    fn queue_row_to_client_inner(
-        &mut self,
-        client_id: ClientId,
-        object_id: ObjectId,
-        metadata: HashMap<String, String>,
-        row: StoredRowVersion,
-        require_scope: bool,
-    ) {
         if metadata
             .get(crate::metadata::MetadataKey::NoSync.as_str())
             .map(|v| v == "true")
@@ -483,7 +465,7 @@ impl SyncManager {
             let Some(client) = self.clients.get(&client_id) else {
                 return;
             };
-            let in_scope = !require_scope || client.is_in_scope(object_id, &branch_name);
+            let in_scope = client.is_in_scope(object_id, &branch_name);
             let include_metadata = !client.sent_metadata.contains(&object_id);
             let already_sent = client
                 .sent_row_versions
@@ -538,29 +520,6 @@ impl SyncManager {
         branch_name: BranchName,
         tips: HashSet<CommitId>,
     ) {
-        self.queue_tips_to_client_inner(client_id, object_id, metadata, branch_name, tips, true);
-    }
-
-    pub(super) fn queue_tips_to_client_unscoped(
-        &mut self,
-        client_id: ClientId,
-        object_id: ObjectId,
-        metadata: HashMap<String, String>,
-        branch_name: BranchName,
-        tips: HashSet<CommitId>,
-    ) {
-        self.queue_tips_to_client_inner(client_id, object_id, metadata, branch_name, tips, false);
-    }
-
-    fn queue_tips_to_client_inner(
-        &mut self,
-        client_id: ClientId,
-        object_id: ObjectId,
-        metadata: HashMap<String, String>,
-        branch_name: BranchName,
-        tips: HashSet<CommitId>,
-        require_scope: bool,
-    ) {
         // Skip objects marked as nosync (local-only, e.g., index nodes)
         if metadata
             .get(crate::metadata::MetadataKey::NoSync.as_str())
@@ -576,8 +535,7 @@ impl SyncManager {
                 return;
             };
 
-            // Check if in scope
-            let in_scope = !require_scope || client.is_in_scope(object_id, &branch_name);
+            let in_scope = client.is_in_scope(object_id, &branch_name);
 
             let include_metadata = !client.sent_metadata.contains(&object_id);
 

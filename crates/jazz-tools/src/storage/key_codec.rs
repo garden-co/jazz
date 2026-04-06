@@ -212,6 +212,14 @@ pub(super) fn catalogue_manifest_op_prefix(app_id: ObjectId) -> String {
     format!("catman:{}:op:", format_uuid(app_id))
 }
 
+pub(super) fn catalogue_entry_key(object_id: ObjectId) -> String {
+    format!("catrow:{}", format_uuid(object_id))
+}
+
+pub(super) fn catalogue_entry_prefix() -> &'static str {
+    "catrow:"
+}
+
 pub(super) fn index_entry_key(
     table: &str,
     column: &str,

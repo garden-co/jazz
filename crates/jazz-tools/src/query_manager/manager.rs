@@ -5,12 +5,12 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::commit::CommitId;
-use crate::metadata::{MetadataKey, ObjectType};
+use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::{AllObjectUpdate, RowObjectUpdate};
 use crate::row_regions::StoredRowVersion;
 use crate::schema_manager::{LensTransformer, SchemaContext};
-use crate::storage::{CatalogueManifestOp, Storage};
+use crate::storage::Storage;
 use crate::sync_manager::{
     ClientId, DurabilityTier, PendingPermissionCheck, PendingUpdateId, QueryId, QueryPropagation,
     SchemaWarning, SyncManager,
@@ -846,6 +846,16 @@ impl QueryManager {
 
         // 1. Process SyncManager inbox (receives client writes)
         self.sync_manager.process_inbox(storage);
+        self.pending_catalogue_updates.extend(
+            self.sync_manager
+                .take_pending_catalogue_updates()
+                .into_iter()
+                .map(|entry| CatalogueUpdate {
+                    object_id: entry.object_id,
+                    metadata: entry.metadata,
+                    content: entry.content,
+                }),
+        );
 
         // 2. Process row updates from SyncManager FIRST so indices are current
         // before subscriptions are processed.
@@ -1135,78 +1145,6 @@ impl QueryManager {
         self.load_row_from_object_on_branch(row_id, &self.current_branch())
     }
 
-    /// Load content from a catalogue object's "main" branch.
-    ///
-    /// Used for loading schema/lens data from catalogue objects.
-    pub(super) fn load_object_content(&self, object_id: ObjectId) -> Option<Vec<u8>> {
-        if let Some((content, _)) = self.load_row_from_object_on_branch(object_id, "main") {
-            return Some(content);
-        }
-
-        let object = self.sync_manager.object_manager.get(object_id)?;
-        let branch = object.branches.get(&BranchName::new("main"))?;
-
-        branch
-            .tips
-            .iter()
-            .filter_map(|tip_id| branch.commits.get(tip_id).map(|commit| (*tip_id, commit)))
-            .max_by_key(|(tip_id, commit)| (commit.timestamp, *tip_id))
-            .map(|(_, commit)| commit.content.clone())
-    }
-
-    fn parse_schema_hash_hex(hex_str: &str) -> Option<SchemaHash> {
-        let bytes = hex::decode(hex_str).ok()?;
-        if bytes.len() != 32 {
-            return None;
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        Some(SchemaHash::from_bytes(arr))
-    }
-
-    fn catalogue_manifest_append(
-        metadata: &HashMap<String, String>,
-        object_id: ObjectId,
-    ) -> Option<(ObjectId, CatalogueManifestOp)> {
-        let app_id_str = metadata.get(MetadataKey::AppId.as_str())?;
-        let app_uuid = uuid::Uuid::parse_str(app_id_str).ok()?;
-        let app_id = ObjectId::from_uuid(app_uuid);
-
-        let type_str = metadata.get(MetadataKey::Type.as_str())?;
-        let op = match type_str.as_str() {
-            t if t == ObjectType::CatalogueSchema.as_str() => {
-                let schema_hash_hex = metadata.get(MetadataKey::SchemaHash.as_str())?;
-                let schema_hash = Self::parse_schema_hash_hex(schema_hash_hex)?;
-                CatalogueManifestOp::SchemaSeen {
-                    object_id,
-                    schema_hash,
-                }
-            }
-            t if t == ObjectType::CataloguePermissions.as_str() => {
-                let schema_hash_hex = metadata.get(MetadataKey::SchemaHash.as_str())?;
-                let schema_hash = Self::parse_schema_hash_hex(schema_hash_hex)?;
-                CatalogueManifestOp::PermissionsSeen {
-                    object_id,
-                    schema_hash,
-                }
-            }
-            t if t == ObjectType::CatalogueLens.as_str() => {
-                let source_hex = metadata.get(MetadataKey::SourceHash.as_str())?;
-                let target_hex = metadata.get(MetadataKey::TargetHash.as_str())?;
-                let source_hash = Self::parse_schema_hash_hex(source_hex)?;
-                let target_hash = Self::parse_schema_hash_hex(target_hex)?;
-                CatalogueManifestOp::LensSeen {
-                    object_id,
-                    source_hash,
-                    target_hash,
-                }
-            }
-            _ => return None,
-        };
-
-        Some((app_id, op))
-    }
-
     pub(super) fn handle_row_update_with_origin(
         &mut self,
         storage: &mut dyn Storage,
@@ -1428,37 +1366,9 @@ impl QueryManager {
     /// Handle an object update from the global subscription.
     pub(super) fn handle_object_update(
         &mut self,
-        storage: &mut dyn Storage,
+        _storage: &mut dyn Storage,
         update: AllObjectUpdate,
     ) {
-        // Check if this is a catalogue object (schema or lens)
-        if let Some(type_str) = update.metadata.get(MetadataKey::Type.as_str())
-            && ObjectType::is_catalogue_type_str(type_str)
-        {
-            if let Some((app_id, op)) =
-                Self::catalogue_manifest_append(&update.metadata, update.object_id)
-                && let Err(error) = storage.append_catalogue_manifest_op(app_id, op)
-            {
-                tracing::warn!(
-                    object_id = %update.object_id,
-                    app_id = %app_id,
-                    ?error,
-                    "failed to persist catalogue manifest op"
-                );
-            }
-
-            // Queue for SchemaManager processing
-            // Load content from the object's latest commit
-            if let Some(content) = self.load_object_content(update.object_id) {
-                self.pending_catalogue_updates.push(CatalogueUpdate {
-                    object_id: update.object_id,
-                    metadata: update.metadata.clone(),
-                    content,
-                });
-            }
-            return;
-        }
-
         // Row objects now flow through ObjectManager's row-native update lane.
         if update.metadata.contains_key(MetadataKey::Table.as_str()) {
             tracing::warn!(

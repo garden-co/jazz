@@ -3,6 +3,7 @@ use std::ops::Bound;
 
 use serde::{Serialize, de::DeserializeOwned};
 
+use crate::catalogue::CatalogueEntry;
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::row_regions::{BatchId, HistoryScan, RowState, StoredRowVersion};
@@ -11,11 +12,12 @@ use crate::sync_manager::DurabilityTier;
 use crate::query_manager::types::Value;
 
 use super::key_codec::{
-    ack_key, branch_tips_key, catalogue_manifest_op_key, catalogue_manifest_op_prefix, commit_key,
-    commit_prefix, history_row_key, history_row_prefix, history_row_versions_prefix,
-    history_table_prefix, index_entry_key, index_prefix, index_range_scan_bounds,
-    index_value_prefix, obj_meta_key, obj_meta_prefix, parse_uuid_from_index_key, visible_row_key,
-    visible_row_prefix, visible_table_prefix,
+    ack_key, branch_tips_key, catalogue_entry_key, catalogue_entry_prefix,
+    catalogue_manifest_op_key, catalogue_manifest_op_prefix, commit_key, commit_prefix,
+    history_row_key, history_row_prefix, history_row_versions_prefix, history_table_prefix,
+    index_entry_key, index_prefix, index_range_scan_bounds, index_value_prefix, obj_meta_key,
+    obj_meta_prefix, parse_uuid_from_index_key, visible_row_key, visible_row_prefix,
+    visible_table_prefix,
 };
 use super::{
     CatalogueManifest, CatalogueManifestOp, LoadedBranch, ObjectMetadataRows, StorageError,
@@ -258,6 +260,53 @@ pub(super) fn load_catalogue_manifest_core(
     }
 
     Ok(Some(manifest))
+}
+
+pub(super) fn upsert_catalogue_entry_core(
+    entry: &CatalogueEntry,
+    mut set: impl FnMut(&str, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
+    let key = catalogue_entry_key(entry.object_id);
+    let bytes = entry
+        .encode_storage_row()
+        .map_err(|err| StorageError::IoError(format!("encode catalogue entry: {err}")))?;
+    set(&key, &bytes)
+}
+
+pub(super) fn load_catalogue_entry_core(
+    object_id: ObjectId,
+    mut get: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
+) -> Result<Option<CatalogueEntry>, StorageError> {
+    let key = catalogue_entry_key(object_id);
+    match get(&key)? {
+        Some(bytes) => CatalogueEntry::decode_storage_row(object_id, &bytes)
+            .map(Some)
+            .map_err(|err| StorageError::IoError(format!("decode catalogue entry: {err}"))),
+        None => Ok(None),
+    }
+}
+
+pub(super) fn scan_catalogue_entries_core(
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<Vec<CatalogueEntry>, StorageError> {
+    let mut entries = Vec::new();
+    for (key, bytes) in scan_prefix(catalogue_entry_prefix())? {
+        let Some(hex_id) = key.strip_prefix("catrow:") else {
+            continue;
+        };
+        let bytes_id = hex::decode(hex_id).map_err(|err| {
+            StorageError::IoError(format!("invalid catalogue entry key '{key}': {err}"))
+        })?;
+        let uuid = uuid::Uuid::from_slice(&bytes_id).map_err(|err| {
+            StorageError::IoError(format!("invalid catalogue entry uuid '{key}': {err}"))
+        })?;
+        let object_id = ObjectId::from_uuid(uuid);
+        let entry = CatalogueEntry::decode_storage_row(object_id, &bytes)
+            .map_err(|err| StorageError::IoError(format!("decode catalogue entry: {err}")))?;
+        entries.push(entry);
+    }
+    entries.sort_by_key(|entry| entry.object_id);
+    Ok(entries)
 }
 
 #[allow(dead_code)]

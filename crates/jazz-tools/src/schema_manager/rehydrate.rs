@@ -1,138 +1,48 @@
-use std::collections::HashMap;
-
 use tracing::{info, warn};
 
 use crate::metadata::{MetadataKey, ObjectType};
-use crate::object::{BranchName, ObjectId};
-use crate::storage::{CatalogueManifest, Storage};
+use crate::storage::Storage;
 
 use super::encoding::decode_permissions_head;
 use super::{AppId, SchemaManager};
 
-fn latest_catalogue_content<S: Storage + ?Sized>(
-    storage: &S,
-    object_id: ObjectId,
-) -> Result<Option<Vec<u8>>, String> {
-    let branch = BranchName::new("main");
-    let loaded = storage
-        .load_branch(object_id, &branch)
-        .map_err(|err| format!("failed to load catalogue object branch {object_id}: {err:?}"))?;
-
-    Ok(loaded.and_then(|branch_data| {
-        branch_data
-            .commits
-            .into_iter()
-            .max_by_key(|commit| (commit.timestamp, commit.id()))
-            .map(|commit| commit.content)
-            .filter(|content| !content.is_empty())
-    }))
+fn entry_matches_app(entry: &crate::catalogue::CatalogueEntry, app_id: AppId) -> bool {
+    entry.metadata.get(MetadataKey::AppId.as_str()) == Some(&app_id.uuid().to_string())
 }
 
-fn schema_metadata_for_rehydrate(app_id: AppId, schema_hash: &str) -> HashMap<String, String> {
-    let mut metadata = HashMap::new();
-    metadata.insert(
-        MetadataKey::Type.to_string(),
-        ObjectType::CatalogueSchema.to_string(),
-    );
-    metadata.insert(MetadataKey::AppId.to_string(), app_id.uuid().to_string());
-    metadata.insert(MetadataKey::SchemaHash.to_string(), schema_hash.to_string());
-    metadata
-}
-
-fn lens_metadata_for_rehydrate(
-    app_id: AppId,
-    source_hash: &str,
-    target_hash: &str,
-) -> HashMap<String, String> {
-    let mut metadata = HashMap::new();
-    metadata.insert(
-        MetadataKey::Type.to_string(),
-        ObjectType::CatalogueLens.to_string(),
-    );
-    metadata.insert(MetadataKey::AppId.to_string(), app_id.uuid().to_string());
-    metadata.insert(MetadataKey::SourceHash.to_string(), source_hash.to_string());
-    metadata.insert(MetadataKey::TargetHash.to_string(), target_hash.to_string());
-    metadata
-}
-
-fn permissions_metadata_for_rehydrate(app_id: AppId, schema_hash: &str) -> HashMap<String, String> {
-    let mut metadata = HashMap::new();
-    metadata.insert(
-        MetadataKey::Type.to_string(),
-        ObjectType::CataloguePermissions.to_string(),
-    );
-    metadata.insert(MetadataKey::AppId.to_string(), app_id.uuid().to_string());
-    metadata.insert(MetadataKey::SchemaHash.to_string(), schema_hash.to_string());
-    metadata
-}
-
-fn permissions_bundle_metadata_for_rehydrate(app_id: AppId) -> HashMap<String, String> {
-    let mut metadata = HashMap::new();
-    metadata.insert(
-        MetadataKey::Type.to_string(),
-        ObjectType::CataloguePermissionsBundle.to_string(),
-    );
-    metadata.insert(MetadataKey::AppId.to_string(), app_id.uuid().to_string());
-    metadata
-}
-
-fn permissions_head_metadata_for_rehydrate(app_id: AppId) -> HashMap<String, String> {
-    let mut metadata = HashMap::new();
-    metadata.insert(
-        MetadataKey::Type.to_string(),
-        ObjectType::CataloguePermissionsHead.to_string(),
-    );
-    metadata.insert(MetadataKey::AppId.to_string(), app_id.uuid().to_string());
-    metadata
-}
-
-/// Rehydrate server schema state from persisted catalogue manifest operations.
-///
-/// This lets a restarted server recover known schemas/lenses before any client
-/// re-syncs catalogue objects.
+/// Rehydrate server schema state from persisted catalogue rows.
 pub fn rehydrate_schema_manager_from_manifest<S: Storage + ?Sized>(
     schema_manager: &mut SchemaManager,
     storage: &S,
     app_id: AppId,
 ) -> Result<(), String> {
-    let manifest = match storage.load_catalogue_manifest(app_id.as_object_id()) {
-        Ok(Some(manifest)) => manifest,
-        Ok(None) => return Ok(()),
-        Err(err) => {
-            return Err(format!(
-                "failed to load catalogue manifest for app {app_id}: {err:?}"
-            ));
-        }
-    };
+    let entries = storage
+        .scan_catalogue_entries()
+        .map_err(|err| format!("failed to scan catalogue entries for app {app_id}: {err:?}"))?;
 
-    let CatalogueManifest {
-        schema_seen,
-        permissions_seen,
-        lens_seen,
-    } = manifest;
+    let entries: Vec<_> = entries
+        .into_iter()
+        .filter(|entry| entry_matches_app(entry, app_id))
+        .collect();
 
     let mut schema_count = 0usize;
     let mut permissions_count = 0usize;
     let mut lens_count = 0usize;
 
-    for (object_id, schema_hash) in schema_seen {
-        let Some(content) = latest_catalogue_content(storage, object_id)? else {
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.object_type() == Some(ObjectType::CatalogueSchema.as_str()))
+    {
+        if let Err(error) = schema_manager.process_catalogue_update(
+            entry.object_id,
+            &entry.metadata,
+            &entry.content,
+        ) {
             warn!(
                 app_id = %app_id,
-                object_id = %object_id,
-                "catalogue schema in manifest missing main branch content"
-            );
-            continue;
-        };
-
-        let metadata = schema_metadata_for_rehydrate(app_id, &schema_hash.to_string());
-        if let Err(error) = schema_manager.process_catalogue_update(object_id, &metadata, &content)
-        {
-            warn!(
-                app_id = %app_id,
-                object_id = %object_id,
+                object_id = %entry.object_id,
                 ?error,
-                "failed to process schema catalogue entry from manifest"
+                "failed to process schema catalogue entry from storage"
             );
         } else {
             schema_count += 1;
@@ -140,90 +50,73 @@ pub fn rehydrate_schema_manager_from_manifest<S: Storage + ?Sized>(
     }
 
     let permissions_head_object_id = SchemaManager::permissions_head_object_id_for(app_id);
-    let rehydrated_permissions_head = if let Some(head_content) =
-        latest_catalogue_content(storage, permissions_head_object_id)?
-    {
-        match decode_permissions_head(&head_content) {
-            Ok((_schema_hash, _version, _parent_bundle_object_id, bundle_object_id)) => {
-                match latest_catalogue_content(storage, bundle_object_id)? {
-                    Some(bundle_content) => {
-                        let bundle_metadata = permissions_bundle_metadata_for_rehydrate(app_id);
-                        if let Err(error) = schema_manager.process_catalogue_update(
-                            bundle_object_id,
-                            &bundle_metadata,
-                            &bundle_content,
-                        ) {
-                            warn!(
-                                app_id = %app_id,
-                                object_id = %bundle_object_id,
-                                ?error,
-                                "failed to process permissions bundle from rehydrated head"
-                            );
-                            false
-                        } else {
-                            let head_metadata = permissions_head_metadata_for_rehydrate(app_id);
-                            if let Err(error) = schema_manager.process_catalogue_update(
-                                permissions_head_object_id,
-                                &head_metadata,
-                                &head_content,
-                            ) {
-                                warn!(
-                                    app_id = %app_id,
-                                    object_id = %permissions_head_object_id,
-                                    ?error,
-                                    "failed to process permissions head during rehydrate"
-                                );
-                                false
-                            } else {
-                                permissions_count += 1;
-                                true
-                            }
-                        }
-                    }
-                    None => {
+    let rehydrated_permissions_head = entries
+        .iter()
+        .find(|entry| entry.object_id == permissions_head_object_id)
+        .and_then(
+            |head_entry| match decode_permissions_head(&head_entry.content) {
+                Ok((_schema_hash, _version, _parent_bundle_object_id, bundle_object_id)) => {
+                    let bundle_entry = entries
+                        .iter()
+                        .find(|entry| entry.object_id == bundle_object_id)?;
+                    if let Err(error) = schema_manager.process_catalogue_update(
+                        bundle_entry.object_id,
+                        &bundle_entry.metadata,
+                        &bundle_entry.content,
+                    ) {
                         warn!(
                             app_id = %app_id,
-                            object_id = %bundle_object_id,
-                            "catalogue permissions bundle referenced by head missing main branch content"
+                            object_id = %bundle_entry.object_id,
+                            ?error,
+                            "failed to process permissions bundle from rehydrated head"
                         );
-                        false
+                        return None;
                     }
+                    if let Err(error) = schema_manager.process_catalogue_update(
+                        head_entry.object_id,
+                        &head_entry.metadata,
+                        &head_entry.content,
+                    ) {
+                        warn!(
+                            app_id = %app_id,
+                            object_id = %head_entry.object_id,
+                            ?error,
+                            "failed to process permissions head during rehydrate"
+                        );
+                        return None;
+                    }
+                    Some(())
                 }
-            }
-            Err(error) => {
-                warn!(
-                    app_id = %app_id,
-                    object_id = %permissions_head_object_id,
-                    ?error,
-                    "failed to decode permissions head during rehydrate"
-                );
-                false
-            }
-        }
+                Err(error) => {
+                    warn!(
+                        app_id = %app_id,
+                        object_id = %head_entry.object_id,
+                        ?error,
+                        "failed to decode permissions head during rehydrate"
+                    );
+                    None
+                }
+            },
+        )
+        .is_some();
+
+    if rehydrated_permissions_head {
+        permissions_count += 1;
     } else {
-        false
-    };
-
-    if !rehydrated_permissions_head {
-        for (object_id, schema_hash) in permissions_seen {
-            let Some(content) = latest_catalogue_content(storage, object_id)? else {
+        for entry in entries
+            .iter()
+            .filter(|entry| entry.object_type() == Some(ObjectType::CataloguePermissions.as_str()))
+        {
+            if let Err(error) = schema_manager.process_catalogue_update(
+                entry.object_id,
+                &entry.metadata,
+                &entry.content,
+            ) {
                 warn!(
                     app_id = %app_id,
-                    object_id = %object_id,
-                    "legacy catalogue permissions in manifest missing main branch content"
-                );
-                continue;
-            };
-
-            let metadata = permissions_metadata_for_rehydrate(app_id, &schema_hash.to_string());
-            if let Err(error) =
-                schema_manager.process_catalogue_update(object_id, &metadata, &content)
-            {
-                warn!(
-                    app_id = %app_id,
-                    object_id = %object_id,
+                    object_id = %entry.object_id,
                     ?error,
-                    "failed to process legacy permissions catalogue entry from manifest"
+                    "failed to process legacy permissions catalogue entry from storage"
                 );
             } else {
                 permissions_count += 1;
@@ -231,28 +124,20 @@ pub fn rehydrate_schema_manager_from_manifest<S: Storage + ?Sized>(
         }
     }
 
-    for (object_id, lens) in lens_seen {
-        let Some(content) = latest_catalogue_content(storage, object_id)? else {
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.object_type() == Some(ObjectType::CatalogueLens.as_str()))
+    {
+        if let Err(error) = schema_manager.process_catalogue_update(
+            entry.object_id,
+            &entry.metadata,
+            &entry.content,
+        ) {
             warn!(
                 app_id = %app_id,
-                object_id = %object_id,
-                "catalogue lens in manifest missing main branch content"
-            );
-            continue;
-        };
-
-        let metadata = lens_metadata_for_rehydrate(
-            app_id,
-            &lens.source_hash.to_string(),
-            &lens.target_hash.to_string(),
-        );
-        if let Err(error) = schema_manager.process_catalogue_update(object_id, &metadata, &content)
-        {
-            warn!(
-                app_id = %app_id,
-                object_id = %object_id,
+                object_id = %entry.object_id,
                 ?error,
-                "failed to process lens catalogue entry from manifest"
+                "failed to process lens catalogue entry from storage"
             );
         } else {
             lens_count += 1;
@@ -264,7 +149,7 @@ pub fn rehydrate_schema_manager_from_manifest<S: Storage + ?Sized>(
         schema_count,
         permissions_count,
         lens_count,
-        "rehydrated schema manager from catalogue manifest"
+        "rehydrated schema manager from catalogue storage"
     );
 
     Ok(())

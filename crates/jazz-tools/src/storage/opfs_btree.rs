@@ -1,7 +1,7 @@
 //! opfs-btree-backed Storage implementation.
 //!
 //! Uses a single opfs-btree instance with key-encoded namespaces for all data:
-//! objects, commits, ack tiers, catalogue manifest ops, and indices.
+//! objects, commits, ack tiers, catalogue rows, catalogue manifest ops, and indices.
 //!
 //! Key encoding scheme (all keys are UTF-8 strings with hex-encoded binary parts):
 //!
@@ -10,6 +10,7 @@
 //! "obj:{uuid}:br:{branch}:tips"                           → JSON HashSet<CommitId>
 //! "obj:{uuid}:br:{branch}:c:{commit_uuid}"                → JSON Commit
 //! "ack:{commit_hex}"                                      → JSON HashSet<DurabilityTier>
+//! "catrow:{object_uuid}"                                  → encoded CatalogueEntry
 //! "catman:{app_uuid}:op:{object_uuid}"                    → JSON CatalogueManifestOp
 //! "idx:{table}:{col}:{branch}:{hex_encoded_value}:{uuid}" → empty (existence is the signal)
 //! ```
@@ -26,6 +27,7 @@ use opfs_btree::OpfsFile;
 use opfs_btree::StdFile;
 use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
 
+use crate::catalogue::CatalogueEntry;
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::Value;
@@ -38,8 +40,9 @@ use super::{
         append_catalogue_manifest_op_core, append_catalogue_manifest_ops_core, append_commit_core,
         create_object_core, delete_commit_core, index_insert_core, index_lookup_core,
         index_range_core, index_remove_core, index_scan_all_core, load_branch_core,
-        load_catalogue_manifest_core, load_object_metadata_core, set_branch_tails_core,
-        store_ack_tier_core,
+        load_catalogue_entry_core, load_catalogue_manifest_core, load_object_metadata_core,
+        scan_catalogue_entries_core, set_branch_tails_core, store_ack_tier_core,
+        upsert_catalogue_entry_core,
     },
 };
 
@@ -346,6 +349,21 @@ impl Storage for OpfsBTreeStorage {
         app_id: ObjectId,
     ) -> Result<Option<CatalogueManifest>, StorageError> {
         load_catalogue_manifest_core(app_id, |prefix| self.tree_scan_prefix(prefix))
+    }
+
+    fn upsert_catalogue_entry(&mut self, entry: &CatalogueEntry) -> Result<(), StorageError> {
+        upsert_catalogue_entry_core(entry, |key, value| self.tree_insert(key, value))
+    }
+
+    fn load_catalogue_entry(
+        &self,
+        object_id: ObjectId,
+    ) -> Result<Option<CatalogueEntry>, StorageError> {
+        load_catalogue_entry_core(object_id, |key| self.tree_read(key))
+    }
+
+    fn scan_catalogue_entries(&self) -> Result<Vec<CatalogueEntry>, StorageError> {
+        scan_catalogue_entries_core(|prefix| self.tree_scan_prefix(prefix))
     }
 
     fn index_insert(
@@ -721,5 +739,31 @@ mod tests {
                 target_hash,
             })
         );
+    }
+
+    #[test]
+    fn opfs_btree_catalogue_entry_roundtrip() {
+        let mut storage = test_storage();
+        let object_id = ObjectId::new();
+        let metadata = HashMap::from([
+            (
+                crate::metadata::MetadataKey::Type.to_string(),
+                crate::metadata::ObjectType::CatalogueSchema.to_string(),
+            ),
+            ("app_id".to_string(), ObjectId::new().to_string()),
+        ]);
+        let entry = CatalogueEntry {
+            object_id,
+            metadata: metadata.clone(),
+            content: b"schema bytes".to_vec(),
+        };
+
+        storage.upsert_catalogue_entry(&entry).unwrap();
+
+        let loaded = storage.load_catalogue_entry(object_id).unwrap();
+        assert_eq!(loaded, Some(entry.clone()));
+
+        let scanned = storage.scan_catalogue_entries().unwrap();
+        assert_eq!(scanned, vec![entry]);
     }
 }
