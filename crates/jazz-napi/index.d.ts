@@ -24,11 +24,11 @@ export declare class NapiRuntime {
   updateDurableWithSession(objectId: string, values: any, writeContextJson: string | undefined | null, tier: string): Promise<void>
   deleteDurable(objectId: string, tier: string): Promise<void>
   deleteDurableWithSession(objectId: string, writeContextJson: string | undefined | null, tier: string): Promise<void>
-  onSyncMessageReceived(messageJson: string): void
+  onSyncMessageReceived(messageJson: string, sequence?: number | undefined | null): void
   /** Called by JS when a sync message arrives from a client (not a server). */
   onSyncMessageReceivedFromClient(clientId: string, messageJson: string): void
   onSyncMessageToSend(callback: (...args: any[]) => any): void
-  addServer(serverCatalogueStateHash?: string | undefined | null): void
+  addServer(serverCatalogueStateHash?: string | undefined | null, nextSyncSeq?: number | undefined | null): void
   removeServer(): void
   addClient(): string
   /** Set a client's role ("user", "admin", or "peer"). */

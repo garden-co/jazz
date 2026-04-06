@@ -273,7 +273,7 @@ async function startCloudServer(config: CloudServerConfig): Promise<CloudServerH
       String(config.workerThreads ?? 1),
     ],
     {
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: ["ignore", "ignore", "ignore"],
       env: process.env,
     },
   );
@@ -419,6 +419,9 @@ async function seedTodosViaSyncBatch(context: AppContext, rowCount: number): Pro
 
   if (payloads.length !== rowCount) {
     throw new Error(`expected ${rowCount} seed payloads, got ${payloads.length}`);
+  }
+  if (!context.serverUrl) {
+    throw new Error("seed helper requires a serverUrl");
   }
 
   await sendSyncPayloadBatch(
@@ -1481,6 +1484,98 @@ describe("cloud-server integration (Jazz TS)", () => {
 
       const rows = await subscribeUntilQuiet(reader, queryAllTodos, "global");
       expect(rows).toHaveLength(rowCount);
+    } finally {
+      if (reader) await reader.shutdown();
+      await stopProcess(server.child);
+      await jwks.stop();
+    }
+  }, 120000);
+
+  it("returns exactly the requested limit for first global snapshots from large tables", async () => {
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-cloud-server-limited-query-");
+    const server = await startCloudServer({ dataRoot, workerThreads: 4 });
+    const rowCount = 320;
+    const requestedLimit = 123;
+    const freshReaderAttempts = 2;
+    const queryLimitedTodos = translateQuery(
+      JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+        offset: 0,
+        limit: requestedLimit,
+      }),
+      TEST_SCHEMA,
+    );
+
+    try {
+      const app = await createApp(server.baseUrl, jwks.url);
+      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, TEST_SCHEMA);
+      await seedTodosViaSyncBatch(
+        makeContext(app.app_id, server.baseUrl, signJwt("limited-query-writer", JWT_SECRET)),
+        rowCount,
+      );
+
+      for (let attempt = 0; attempt < freshReaderAttempts; attempt += 1) {
+        const reader = await connectClient(
+          makeContext(
+            app.app_id,
+            server.baseUrl,
+            signJwt(`limited-query-reader-${attempt}`, JWT_SECRET),
+          ),
+        );
+        try {
+          const rows = await withTimeout(
+            reader.query(queryLimitedTodos, { tier: "global" }),
+            30000,
+            `global limited-table query attempt ${attempt} timed out`,
+          );
+          expect(rows).toHaveLength(requestedLimit);
+        } finally {
+          await reader.shutdown();
+        }
+      }
+    } finally {
+      await stopProcess(server.child);
+      await jwks.stop();
+    }
+  }, 120000);
+
+  it("returns exactly the requested limit for first global subscription snapshots from large tables", async () => {
+    const jwks = await JwksServer.start(JWT_SECRET);
+    const dataRoot = allocTempDir("jazz-ts-cloud-server-limited-subscription-");
+    const server = await startCloudServer({ dataRoot, workerThreads: 4 });
+    const rowCount = 320;
+    const requestedLimit = 123;
+    const queryLimitedTodos = translateQuery(
+      JSON.stringify({
+        table: "todos",
+        conditions: [],
+        includes: {},
+        orderBy: [],
+        offset: 0,
+        limit: requestedLimit,
+      }),
+      TEST_SCHEMA,
+    );
+
+    let reader: JazzClient | null = null;
+    try {
+      const app = await createApp(server.baseUrl, jwks.url);
+      await publishInlineSchemaAndPermissions(server.baseUrl, `/apps/${app.app_id}`, TEST_SCHEMA);
+      await seedTodosViaSyncBatch(
+        makeContext(app.app_id, server.baseUrl, signJwt("limited-subscription-writer", JWT_SECRET)),
+        rowCount,
+      );
+
+      reader = await connectClient(
+        makeContext(app.app_id, server.baseUrl, signJwt("limited-subscription-reader", JWT_SECRET)),
+      );
+
+      const rows = await subscribeUntilQuiet(reader, queryLimitedTodos, "global");
+      expect(rows).toHaveLength(requestedLimit);
     } finally {
       if (reader) await reader.shutdown();
       await stopProcess(server.child);

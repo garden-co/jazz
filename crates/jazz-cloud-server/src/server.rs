@@ -658,8 +658,97 @@ pub enum CatalogueAuthorityMode {
     Local,
     Forward,
 }
-type ClientSyncUpdate = (ClientId, u64, SyncPayload);
-type ClientSendSeqMap = Arc<Mutex<HashMap<ClientId, u64>>>;
+
+#[derive(Debug, Clone)]
+struct SequencedSyncUpdate {
+    seq: u64,
+    payload: SyncPayload,
+}
+
+struct ConnectionStreamState {
+    client_id: ClientId,
+    next_sync_seq: u64,
+    sender: tokio::sync::mpsc::UnboundedSender<SequencedSyncUpdate>,
+}
+
+#[derive(Default)]
+struct ConnectionEventHub {
+    streams: Mutex<HashMap<u64, ConnectionStreamState>>,
+}
+
+type AppConnectionEventHub = Arc<ConnectionEventHub>;
+
+impl ConnectionEventHub {
+    fn register_connection(
+        &self,
+        connection_id: u64,
+        client_id: ClientId,
+    ) -> (
+        u64,
+        tokio::sync::mpsc::UnboundedReceiver<SequencedSyncUpdate>,
+    ) {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut streams = self
+            .streams
+            .lock()
+            .expect("connection event hub mutex poisoned");
+        streams.insert(
+            connection_id,
+            ConnectionStreamState {
+                client_id,
+                next_sync_seq: 1,
+                sender,
+            },
+        );
+        (1, receiver)
+    }
+
+    fn unregister_connection(&self, connection_id: u64) {
+        self.streams
+            .lock()
+            .expect("connection event hub mutex poisoned")
+            .remove(&connection_id);
+    }
+
+    fn dispatch_payload(&self, client_id: ClientId, payload: SyncPayload) {
+        let mut stale_connection_ids = Vec::new();
+        let mut streams = self
+            .streams
+            .lock()
+            .expect("connection event hub mutex poisoned");
+
+        for (&connection_id, state) in streams.iter_mut() {
+            if state.client_id != client_id {
+                continue;
+            }
+
+            let seq = state.next_sync_seq;
+            let through_seq = seq.saturating_sub(1);
+            let payload = match &payload {
+                SyncPayload::QuerySettled { query_id, tier, .. } => SyncPayload::QuerySettled {
+                    query_id: *query_id,
+                    tier: *tier,
+                    through_seq,
+                },
+                _ => payload.clone(),
+            };
+
+            if state
+                .sender
+                .send(SequencedSyncUpdate { seq, payload })
+                .is_ok()
+            {
+                state.next_sync_seq += 1;
+            } else {
+                stale_connection_ids.push(connection_id);
+            }
+        }
+
+        for connection_id in stale_connection_ids {
+            streams.remove(&connection_id);
+        }
+    }
+}
 
 fn parse_test_delay_ms(raw: &str) -> Option<Duration> {
     let trimmed = raw.trim();
@@ -732,8 +821,7 @@ enum WorkerCommand {
     CreateRuntime {
         app_id: AppId,
         data_dir: PathBuf,
-        sync_broadcast: tokio::sync::broadcast::Sender<ClientSyncUpdate>,
-        send_seq_by_client: ClientSendSeqMap,
+        connection_event_hub: AppConnectionEventHub,
         response: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
     EnsureClientWithSession {
@@ -944,15 +1032,13 @@ impl WorkerPool {
         &self,
         app_id: AppId,
         data_dir: PathBuf,
-        sync_broadcast: tokio::sync::broadcast::Sender<ClientSyncUpdate>,
-        send_seq_by_client: ClientSendSeqMap,
+        connection_event_hub: AppConnectionEventHub,
     ) -> Result<(), WorkerDispatchError> {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         let command = WorkerCommand::CreateRuntime {
             app_id,
             data_dir,
-            sync_broadcast,
-            send_seq_by_client,
+            connection_event_hub,
             response: response_tx,
         };
         let worker = self.send_command(command)?;
@@ -1835,8 +1921,7 @@ impl AppRuntime {
     fn new(
         app_id: AppId,
         data_dir: &Path,
-        sync_broadcast: tokio::sync::broadcast::Sender<ClientSyncUpdate>,
-        send_seq_by_client: ClientSendSeqMap,
+        connection_event_hub: AppConnectionEventHub,
     ) -> Result<Self, String> {
         std::fs::create_dir_all(data_dir).map_err(|e| {
             format!(
@@ -1857,34 +1942,18 @@ impl AppRuntime {
 
         rehydrate_schema_manager_from_manifest(&mut schema_manager, &storage, app_id)?;
 
-        let sync_tx_clone = sync_broadcast.clone();
-        let send_seq_by_client_clone = send_seq_by_client.clone();
+        let connection_event_hub_clone = connection_event_hub.clone();
         let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
             if let Destination::Client(client_id) = entry.destination {
-                let mut payload = entry.payload;
-
-                let (last_seq, seq) = {
-                    let mut counters = send_seq_by_client_clone
-                        .lock()
-                        .expect("send sequence mutex poisoned");
-                    let last = counters.entry(client_id).or_insert(0);
-                    let last_seq = *last;
-                    *last += 1;
-                    (last_seq, *last)
-                };
-
-                if let SyncPayload::QuerySettled { through_seq, .. } = &mut payload {
-                    *through_seq = last_seq;
-                }
-
+                let payload = entry.payload;
                 if let Some(delay) = test_delay_server_send_object_updated(&payload) {
-                    let tx = sync_tx_clone.clone();
+                    let connection_event_hub = connection_event_hub_clone.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(delay).await;
-                        let _ = tx.send((client_id, seq, payload));
+                        connection_event_hub.dispatch_payload(client_id, payload);
                     });
                 } else {
-                    let _ = sync_tx_clone.send((client_id, seq, payload));
+                    connection_event_hub_clone.dispatch_payload(client_id, payload);
                 }
             }
         });
@@ -1899,8 +1968,7 @@ struct AppEntry {
     config: tokio::sync::RwLock<AppConfig>,
     connections: tokio::sync::RwLock<HashMap<u64, ConnectionState>>,
     next_connection_id: AtomicU64,
-    sync_broadcast: tokio::sync::broadcast::Sender<ClientSyncUpdate>,
-    send_seq_by_client: ClientSendSeqMap,
+    connection_event_hub: AppConnectionEventHub,
 }
 
 impl AppEntry {
@@ -1908,8 +1976,7 @@ impl AppEntry {
         app_id: AppId,
         meta_object_id: ObjectId,
         config: AppConfig,
-        sync_broadcast: tokio::sync::broadcast::Sender<ClientSyncUpdate>,
-        send_seq_by_client: ClientSendSeqMap,
+        connection_event_hub: AppConnectionEventHub,
     ) -> Arc<Self> {
         Arc::new(Self {
             app_id,
@@ -1917,8 +1984,7 @@ impl AppEntry {
             config: tokio::sync::RwLock::new(config),
             connections: tokio::sync::RwLock::new(HashMap::new()),
             next_connection_id: AtomicU64::new(1),
-            sync_broadcast,
-            send_seq_by_client,
+            connection_event_hub,
         })
     }
 }
@@ -1954,18 +2020,15 @@ async fn run_worker_loop(
                 WorkerCommand::CreateRuntime {
                     app_id,
                     data_dir,
-                    sync_broadcast,
-                    send_seq_by_client,
+                    connection_event_hub,
                     response,
                 } => {
                     let result = if let std::collections::hash_map::Entry::Vacant(entry) =
                         app_runtimes.entry(app_id)
                     {
-                        AppRuntime::new(app_id, &data_dir, sync_broadcast, send_seq_by_client).map(
-                            |runtime| {
-                                entry.insert(runtime);
-                            },
-                        )
+                        AppRuntime::new(app_id, &data_dir, connection_event_hub).map(|runtime| {
+                            entry.insert(runtime);
+                        })
                     } else {
                         Err(format!("app runtime already exists for {app_id}"))
                     };
@@ -2444,23 +2507,16 @@ pub async fn run(config: ServerConfig) -> Result<(), Box<dyn std::error::Error>>
         let app_id = row.app_id;
         let app_config = app_config_from_row(&row);
         let app_dir = data_root.join("apps").join(app_id.to_string());
-        let (sync_tx, _) = tokio::sync::broadcast::channel::<ClientSyncUpdate>(256);
-        let send_seq_by_client: ClientSendSeqMap = Arc::new(Mutex::new(HashMap::new()));
+        let connection_event_hub: AppConnectionEventHub = Arc::new(ConnectionEventHub::default());
 
         match workers
-            .create_runtime(app_id, app_dir, sync_tx.clone(), send_seq_by_client.clone())
+            .create_runtime(app_id, app_dir, connection_event_hub.clone())
             .await
         {
             Ok(()) => {
                 app_map.insert(
                     app_id,
-                    AppEntry::new(
-                        app_id,
-                        row.object_id,
-                        app_config,
-                        sync_tx,
-                        send_seq_by_client,
-                    ),
+                    AppEntry::new(app_id, row.object_id, app_config, connection_event_hub),
                 );
             }
             Err(err) => {
@@ -3641,15 +3697,9 @@ async fn events_handler(
             },
         );
     }
-
-    // New stream connection defines a fresh sequencing epoch for this client.
-    {
-        let mut seqs = app
-            .send_seq_by_client
-            .lock()
-            .expect("send sequence mutex poisoned");
-        seqs.insert(client_id, 0);
-    }
+    let (next_sync_seq, mut sync_rx) = app
+        .connection_event_hub
+        .register_connection(connection_id, client_id);
 
     info!(
         app_id = %app_id,
@@ -3659,11 +3709,9 @@ async fn events_handler(
         "events stream connected"
     );
 
-    let mut sync_rx = app.sync_broadcast.subscribe();
     let mut shutdown_rx = state.shutdown_tx.subscribe();
     let app_cleanup = app.clone();
     let client_id_str = client_id.to_string();
-    let next_sync_seq = 1u64;
 
     let stream = async_stream::stream! {
         let connected = ServerEvent::Connected {
@@ -3680,21 +3728,14 @@ async fn events_handler(
             tokio::select! {
                 result = sync_rx.recv() => {
                     match result {
-                        Ok((target_client_id, seq, payload)) => {
-                            if target_client_id == client_id {
-                                let event = ServerEvent::SyncUpdate {
-                                    seq: Some(seq),
-                                    payload: Box::new(payload),
-                                };
-                                yield Ok(encode_frame(&event));
-                            }
+                        Some(update) => {
+                            let event = ServerEvent::SyncUpdate {
+                                seq: Some(update.seq),
+                                payload: Box::new(update.payload),
+                            };
+                            yield Ok(encode_frame(&event));
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            warn!(app_id = %app_id, connection_id, "events stream lagged");
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            break;
-                        }
+                        None => break,
                     }
                 }
                 _ = heartbeat_interval.tick() => {
@@ -3710,6 +3751,9 @@ async fn events_handler(
 
         let mut connections = app_cleanup.connections.write().await;
         connections.remove(&connection_id);
+        app_cleanup
+            .connection_event_hub
+            .unregister_connection(connection_id);
     };
 
     Ok(axum::response::Response::builder()
@@ -4259,17 +4303,11 @@ async fn create_app_handler(
 
     let app_config = app_config_from_row(&meta_row);
     let data_dir = state.app_data_dir(app_id);
-    let (sync_tx, _) = tokio::sync::broadcast::channel::<ClientSyncUpdate>(256);
-    let send_seq_by_client: ClientSendSeqMap = Arc::new(Mutex::new(HashMap::new()));
+    let connection_event_hub: AppConnectionEventHub = Arc::new(ConnectionEventHub::default());
 
     if let Err(err) = state
         .workers
-        .create_runtime(
-            app_id,
-            data_dir,
-            sync_tx.clone(),
-            send_seq_by_client.clone(),
-        )
+        .create_runtime(app_id, data_dir, connection_event_hub.clone())
         .await
     {
         let _ = state.meta_store.delete_app(meta_row.object_id).await;
@@ -4277,13 +4315,7 @@ async fn create_app_handler(
         return (status, Json(ErrorResponse::internal(message))).into_response();
     }
 
-    let app_entry = AppEntry::new(
-        app_id,
-        meta_row.object_id,
-        app_config,
-        sync_tx,
-        send_seq_by_client,
-    );
+    let app_entry = AppEntry::new(app_id, meta_row.object_id, app_config, connection_event_hub);
 
     if state.apps.write().await.insert(app_id, app_entry).is_some() {
         let _ = state.meta_store.delete_app(meta_row.object_id).await;
