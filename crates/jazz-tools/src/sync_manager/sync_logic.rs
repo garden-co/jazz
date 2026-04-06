@@ -508,6 +508,10 @@ impl SyncManager {
             .entry((object_id, branch_name))
             .or_default()
             .insert(version_id);
+        self.row_version_interest
+            .entry(RowVersionKey::new(object_id, branch_name, version_id))
+            .or_default()
+            .insert(client_id);
 
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),

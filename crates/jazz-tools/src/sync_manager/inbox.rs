@@ -216,7 +216,8 @@ impl SyncManager {
             {
                 commit.ack_state.confirmed_tiers.insert(tier);
             }
-            self.received_row_version_acks.push((version_id, tier));
+            self.received_row_version_acks
+                .push((RowVersionKey::new(row_id, branch_name, version_id), tier));
         }
     }
 
@@ -336,8 +337,9 @@ impl SyncManager {
                     confirmed_tier,
                 );
 
+                let key = RowVersionKey::new(row_id, branch_name, version_id);
                 let mut interested = HashSet::new();
-                if let Some(clients) = self.row_version_interest.get(&version_id) {
+                if let Some(clients) = self.row_version_interest.get(&key) {
                     interested.extend(clients);
                 }
                 for cid in interested {
@@ -870,8 +872,9 @@ impl SyncManager {
                     *state,
                     *confirmed_tier,
                 );
+                let key = RowVersionKey::new(*row_id, *branch_name, *version_id);
                 let mut interested = HashSet::new();
-                if let Some(clients) = self.row_version_interest.get(version_id) {
+                if let Some(clients) = self.row_version_interest.get(&key) {
                     interested.extend(clients);
                 }
                 interested.remove(&client_id);
@@ -961,7 +964,7 @@ impl SyncManager {
                 let branch_name = BranchName::new(&row.branch);
                 let version_id = row.version_id();
                 self.row_version_interest
-                    .entry(version_id)
+                    .entry(RowVersionKey::new(object_id, branch_name, version_id))
                     .or_default()
                     .insert(client_id);
 

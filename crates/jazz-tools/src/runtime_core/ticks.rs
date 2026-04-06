@@ -123,13 +123,13 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .query_manager_mut()
             .sync_manager_mut()
             .take_received_row_version_acks();
-        for (commit_id, acked_tier) in received_acks {
-            if let Some(watchers) = self.ack_watchers.remove(&commit_id) {
+        for (row_version_key, acked_tier) in received_acks {
+            if let Some(watchers) = self.ack_watchers.remove(&row_version_key) {
                 let mut remaining = Vec::new();
                 for (requested_tier, sender) in watchers {
                     if acked_tier >= requested_tier {
                         tracing::debug!(
-                            ?commit_id,
+                            ?row_version_key,
                             ?acked_tier,
                             ?requested_tier,
                             "ack watcher resolved"
@@ -140,7 +140,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
                     }
                 }
                 if !remaining.is_empty() {
-                    self.ack_watchers.insert(commit_id, remaining);
+                    self.ack_watchers.insert(row_version_key, remaining);
                 }
             }
         }

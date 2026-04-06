@@ -1888,7 +1888,12 @@ impl QueryManager {
             )
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
-        self.persist_row_region_tip(storage, &table, id, self.current_branch().as_str());
+        self.persist_and_forward_row_region_tip_to_servers(
+            storage,
+            &table,
+            id,
+            self.current_branch().as_str(),
+        );
 
         // Update indices: remove from _id_deleted, add to _id and column indices
         self.update_indices_for_undelete(storage, &table, id, &new_data, &descriptor)?;
@@ -1989,7 +1994,12 @@ impl QueryManager {
             tail_ids,
         );
 
-        self.persist_row_region_tip(storage, &table, id, self.current_branch().as_str());
+        self.persist_and_forward_row_region_tip_to_servers(
+            storage,
+            &table,
+            id,
+            self.current_branch().as_str(),
+        );
 
         // Mark subscriptions dirty and mark row as deleted
         self.mark_subscriptions_dirty_local(&table);

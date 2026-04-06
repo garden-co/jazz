@@ -1795,6 +1795,49 @@ fn rc_insert_persisted_ignores_legacy_object_ack_with_same_id() {
 }
 
 #[test]
+fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_version_id() {
+    let mut s = create_3tier_rc();
+    let ((row_id, _row_values), mut receiver) =
+        s.a.insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let branch_name = s.a.schema_manager().branch_name();
+    let row_commit_id =
+        *s.a.schema_manager()
+            .query_manager()
+            .sync_manager()
+            .object_manager
+            .get_tip_ids(row_id, branch_name)
+            .unwrap()
+            .iter()
+            .next()
+            .expect("insert should create one visible tip");
+
+    s.a.push_sync_inbox(InboxEntry {
+        source: Source::Server(s.b_server_for_a),
+        payload: SyncPayload::RowVersionStateChanged {
+            row_id: ObjectId::new(),
+            branch_name,
+            version_id: row_commit_id,
+            state: None,
+            confirmed_tier: Some(DurabilityTier::Worker),
+        },
+    });
+    s.a.immediate_tick();
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(None),
+        "row persisted receivers should ignore row-version acks for a different row, even if the raw version id matches"
+    );
+}
+
+#[test]
 fn rc_insert_persisted_holds_until_correct_tier() {
     let mut s = create_3tier_rc();
     let (_id, mut receiver) =
