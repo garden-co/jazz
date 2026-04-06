@@ -19,22 +19,19 @@ export function DataExplorer() {
     <Group className={styles.layout} orientation="horizontal">
       <Panel className={styles.sidebarPanel} defaultSize="20%" minSize="14%" maxSize="30%">
         <aside className={styles.sidebar}>
-          <div className={styles.sidebarHeader}>
-            <h2 className={styles.sidebarTitle}>Tables</h2>
-            {runtime === "extension" ? (
-              <label className={styles.propagationSwitch}>
-                <span className={styles.propagationLabel}>Local-only</span>
-                <input
-                  type="checkbox"
-                  checked={queryPropagation === "local-only"}
-                  onChange={(event) => {
-                    setQueryPropagation(event.target.checked ? "local-only" : "full");
-                  }}
-                  aria-label="Toggle query propagation between local-only and full"
-                />
-              </label>
-            ) : null}
-          </div>
+          {runtime === "extension" ? (
+            <label className={styles.propagationSwitch}>
+              <span className={styles.propagationLabel}>Local-only</span>
+              <input
+                type="checkbox"
+                checked={queryPropagation === "local-only"}
+                onChange={(event) => {
+                  setQueryPropagation(event.target.checked ? "local-only" : "full");
+                }}
+                aria-label="Toggle query propagation between local-only and full"
+              />
+            </label>
+          ) : null}
           <ul className={styles.tableList}>
             {tableNames.map((tableName) => (
               <li key={tableName}>

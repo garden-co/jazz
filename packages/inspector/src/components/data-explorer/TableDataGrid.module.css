@@ -200,9 +200,18 @@
   --rdg-cell-frozen-box-shadow: 2px 0 10px -6px rgba(0, 0, 0, 0.55);
 }
 
+.dataGrid :global(.rdg-cell:last-child) {
+  border-inline-end: none;
+}
+
 .gridHeaderCell {
   color: #8f9bad;
   font-weight: 600;
+  user-select: none;
+}
+
+.gridHeaderCell[aria-selected='true'] {
+  outline: none;
 }
 
 .sortableHeaderCell {
