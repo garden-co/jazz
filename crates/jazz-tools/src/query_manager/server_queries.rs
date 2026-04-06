@@ -551,54 +551,6 @@ impl QueryManager {
         normalized
     }
 
-    pub(super) fn resolve_latest_row_with_schema_transform(
-        id: ObjectId,
-        obj: &crate::object::Object,
-        branches: &[String],
-        context: &mut RowTransformContext<'_>,
-    ) -> Option<ResolvedSchemaRow> {
-        let mut best: Option<(u64, CommitId, Vec<u8>, BranchName)> = None;
-
-        for branch_name in branches {
-            let branch_name = BranchName::new(branch_name);
-            let Some(branch) = obj.branches.get(&branch_name) else {
-                continue;
-            };
-            for &tip_id in &branch.tips {
-                let Some(commit) = branch.commits.get(&tip_id) else {
-                    continue;
-                };
-                match &best {
-                    None => {
-                        best = Some((
-                            commit.timestamp,
-                            tip_id,
-                            commit.content.clone(),
-                            branch_name,
-                        ));
-                    }
-                    Some((best_ts, best_id, _, _))
-                        if (commit.timestamp, tip_id) > (*best_ts, *best_id) =>
-                    {
-                        best = Some((
-                            commit.timestamp,
-                            tip_id,
-                            commit.content.clone(),
-                            branch_name,
-                        ));
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        let (_, commit_id, content, branch_name) = best?;
-        if content.is_empty() {
-            return None;
-        }
-        Self::transform_row_with_schema(id, content, commit_id, branch_name, context)
-    }
-
     pub(super) fn transform_row_with_schema(
         id: ObjectId,
         content: Vec<u8>,

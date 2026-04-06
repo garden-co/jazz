@@ -92,6 +92,7 @@ impl QueryManager {
         Some(StoredRowVersion {
             row_id,
             branch: branch_name.to_string(),
+            parents: commit.parents.iter().copied().collect(),
             updated_at: provenance.updated_at,
             created_by: provenance.created_by,
             created_at: provenance.created_at,
@@ -401,12 +402,11 @@ impl QueryManager {
         id: ObjectId,
         branches: &[String],
     ) -> Option<(String, String, Vec<u8>, CommitId, RowProvenance)> {
-        let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
-        let obj = self
-            .sync_manager
+        self.sync_manager
             .object_manager
             .get_or_load(id, storage, branches)?;
-        let table = obj.metadata.get(MetadataKey::Table.as_str())?.clone();
+        let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
+        let (table, row) = Self::load_best_visible_row_version(storage, id, branches)?;
         let mut schema_warnings = SchemaWarningAccumulator::default();
         let mut transform_context = RowTransformContext {
             table: &table,
@@ -414,20 +414,26 @@ impl QueryManager {
             schema_context: &self.schema_context,
             schema_warnings: &mut schema_warnings,
         };
-        Self::resolve_latest_row_with_schema_transform(id, obj, branches, &mut transform_context)
-            .and_then(|resolved| {
-                let commit = obj
-                    .branches
-                    .get(&resolved.branch_name)
-                    .and_then(|branch| branch.commits.get(&resolved.commit_id))?;
-                Some((
-                    table,
-                    resolved.branch_name.as_str().to_string(),
-                    resolved.content,
-                    resolved.commit_id,
-                    commit.row_provenance()?,
-                ))
-            })
+        if row.data.is_empty() {
+            return None;
+        }
+
+        Self::transform_row_with_schema(
+            id,
+            row.data.clone(),
+            row.version_id(),
+            BranchName::new(&row.branch),
+            &mut transform_context,
+        )
+        .map(|resolved| {
+            (
+                table,
+                resolved.branch_name.as_str().to_string(),
+                resolved.content,
+                resolved.commit_id,
+                row.row_provenance(),
+            )
+        })
     }
 
     /// Insert a new row into a table.

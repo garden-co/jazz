@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
 
-use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -53,6 +52,7 @@ pub enum HistoryScan {
 pub struct StoredRowVersion {
     pub row_id: ObjectId,
     pub branch: String,
+    pub parents: Vec<crate::commit::CommitId>,
     pub updated_at: u64,
     pub created_by: String,
     pub created_at: u64,
@@ -76,15 +76,7 @@ impl StoredRowVersion {
     }
 
     pub fn version_id(&self) -> CommitId {
-        let mut hasher = Hasher::new();
-        hasher.update(b"jazz:row-region:v1");
-        hasher.update(self.row_id.uuid().as_bytes());
-        hasher.update(self.branch.as_bytes());
-        hasher.update(&self.updated_at.to_le_bytes());
-        hasher.update(self.batch_id.0.as_bytes());
-        hasher.update(&[self.state as u8]);
-        hasher.update(&[u8::from(self.is_deleted)]);
-        CommitId(*hasher.finalize().as_bytes())
+        self.to_commit().id()
     }
 
     pub fn is_soft_deleted(&self) -> bool {
@@ -109,16 +101,16 @@ impl StoredRowVersion {
         }
 
         Commit {
-            parents: smallvec::smallvec![],
+            parents: self.parents.iter().copied().collect(),
             content: self.data.clone(),
             timestamp: self.updated_at,
             author: self.updated_by.clone(),
-            metadata: Some(
+            metadata: (!self.metadata.is_empty()).then(|| {
                 self.metadata
                     .iter()
                     .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect::<BTreeMap<_, _>>(),
-            ),
+                    .collect::<BTreeMap<_, _>>()
+            }),
             stored_state: StoredState::Stored,
             ack_state,
         }

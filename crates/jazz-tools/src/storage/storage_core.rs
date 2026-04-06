@@ -322,6 +322,24 @@ pub(super) fn load_visible_region_row_core(
 }
 
 #[allow(dead_code)]
+pub(super) fn scan_visible_region_row_versions_core(
+    table: &str,
+    row_id: ObjectId,
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<Vec<StoredRowVersion>, StorageError> {
+    let prefix = visible_table_prefix(table);
+    let mut rows: Vec<StoredRowVersion> = scan_prefix(&prefix)?
+        .into_iter()
+        .map(|(_, bytes)| decode_json::<StoredRowVersion>(&bytes, "stored row version"))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|row| row.row_id == row_id)
+        .collect();
+    rows.sort_by_key(|row| row.branch.clone());
+    Ok(rows)
+}
+
+#[allow(dead_code)]
 pub(super) fn scan_history_region_core(
     table: &str,
     branch: &str,

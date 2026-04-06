@@ -27,8 +27,8 @@ use super::{
         index_lookup_core, index_range_core, index_remove_core, index_scan_all_core,
         load_branch_core, load_catalogue_manifest_core, load_object_metadata_core,
         load_visible_region_row_core, patch_row_region_rows_by_batch_core,
-        scan_history_region_core, scan_visible_region_core, set_branch_tails_core,
-        store_ack_tier_core, upsert_visible_region_rows_core,
+        scan_history_region_core, scan_visible_region_core, scan_visible_region_row_versions_core,
+        set_branch_tails_core, store_ack_tier_core, upsert_visible_region_rows_core,
     },
 };
 
@@ -423,6 +423,19 @@ impl Storage for FjallStorage {
         })
     }
 
+    fn scan_visible_region_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            scan_visible_region_row_versions_core(table, row_id, |prefix| {
+                Self::scan_prefix(&tx, &inner.keyspace, prefix)
+            })
+        })
+    }
+
     fn scan_history_region(
         &self,
         table: &str,
@@ -571,6 +584,7 @@ mod tests {
         let version = StoredRowVersion {
             row_id,
             branch: "dev/main".to_string(),
+            parents: Vec::new(),
             updated_at: 10,
             created_by: "alice".to_string(),
             created_at: 10,

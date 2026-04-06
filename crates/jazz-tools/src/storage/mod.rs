@@ -331,6 +331,16 @@ pub trait Storage {
         ))
     }
 
+    fn scan_visible_region_row_versions(
+        &self,
+        _table: &str,
+        _row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        Err(StorageError::IoError(
+            "row-region visible row scans are not implemented for this backend yet".to_string(),
+        ))
+    }
+
     fn scan_history_region(
         &self,
         _table: &str,
@@ -528,6 +538,14 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         row_id: ObjectId,
     ) -> Result<Option<StoredRowVersion>, StorageError> {
         (**self).load_visible_region_row(table, branch, row_id)
+    }
+
+    fn scan_visible_region_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        (**self).scan_visible_region_row_versions(table, row_id)
     }
 
     fn scan_history_region(
@@ -1023,6 +1041,25 @@ impl Storage for MemoryStorage {
             .and_then(|regions| regions.visible.get(&(branch.to_string(), row_id)).cloned()))
     }
 
+    fn scan_visible_region_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        let Some(regions) = self.row_regions.get(table) else {
+            return Ok(Vec::new());
+        };
+
+        let mut rows: Vec<_> = regions
+            .visible
+            .iter()
+            .filter(|((_, visible_row_id), _)| *visible_row_id == row_id)
+            .map(|(_, row)| row.clone())
+            .collect();
+        rows.sort_by_key(|row| row.branch.clone());
+        Ok(rows)
+    }
+
     fn scan_history_region(
         &self,
         table: &str,
@@ -1426,6 +1463,7 @@ mod tests {
         let version = StoredRowVersion {
             row_id,
             branch: "dev/main".to_string(),
+            parents: Vec::new(),
             updated_at: 10,
             created_by: "alice".to_string(),
             created_at: 10,
