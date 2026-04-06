@@ -61,6 +61,15 @@ impl fmt::Display for QueryCompileError {
 
 impl std::error::Error for QueryCompileError {}
 
+fn resolve_branch_schema_hash(schema_context: &SchemaContext, branch: &str) -> Option<SchemaHash> {
+    let branch_name = BranchName::new(branch);
+    let composed = ComposedBranchName::parse(&branch_name)?;
+    schema_context
+        .all_live_hashes()
+        .into_iter()
+        .find(|hash| hash.short() == composed.schema_hash.short())
+}
+
 /// A node in the query graph (type-erased).
 #[derive(Debug)]
 pub enum GraphNode {
@@ -602,7 +611,10 @@ impl QueryGraph {
 
         for branch in &branches {
             // Get schema hash for this branch to determine if column translation is needed
-            let branch_schema_hash = branch_schema_map.get(branch).copied();
+            let branch_schema_hash = branch_schema_map
+                .get(branch)
+                .copied()
+                .or_else(|| resolve_branch_schema_hash(schema_context, branch));
 
             for disjunct in &plan.disjuncts {
                 // Find best index condition for this disjunct

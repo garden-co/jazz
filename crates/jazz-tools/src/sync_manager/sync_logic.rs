@@ -427,11 +427,15 @@ impl SyncManager {
         let Some(object) = self.object_manager.get(object_id) else {
             return;
         };
+        let metadata = object.metadata.clone();
+        if let Some(row) = self.object_manager.visible_row(object_id, branch_name) {
+            self.queue_row_to_client(client_id, object_id, metadata, row);
+            return;
+        }
         let Some(branch) = object.branches.get(&branch_name) else {
             return;
         };
         let tips: HashSet<CommitId> = branch.tips.iter().copied().collect();
-        let metadata = object.metadata.clone();
 
         self.queue_tips_to_client(client_id, object_id, metadata, branch_name, tips);
     }

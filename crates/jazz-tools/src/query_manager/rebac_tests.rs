@@ -1140,20 +1140,17 @@ fn rebac_inherited_insert_uses_requested_branch_instead_of_reusing_cached_branch
     qm.sync_manager_mut()
         .object_manager
         .get_or_load(folder_id, &storage, &["main".to_string()]);
-    let cached_folder = qm
-        .sync_manager()
-        .object_manager
-        .get(folder_id)
-        .expect("folder should be cached on main");
     assert!(
-        cached_folder
-            .branches
-            .contains_key(&BranchName::new("main"))
+        qm.sync_manager()
+            .object_manager
+            .visible_row(folder_id, BranchName::new("main"))
+            .is_some()
     );
     assert!(
-        !cached_folder
-            .branches
-            .contains_key(&BranchName::new(&branch)),
+        qm.sync_manager()
+            .object_manager
+            .visible_row(folder_id, BranchName::new(&branch))
+            .is_none(),
         "setup should start with only the unrelated branch cached"
     );
 

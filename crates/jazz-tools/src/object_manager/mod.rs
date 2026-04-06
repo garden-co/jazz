@@ -7,8 +7,9 @@ use smolset::SmolSet;
 use crate::commit::{Commit, CommitId, StoredState};
 use crate::metadata::MetadataKey;
 use crate::object::{Branch, BranchLoadedState, BranchName, Object, ObjectId};
-use crate::row_regions::{RowState, StoredRowVersion};
+use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
 use crate::storage::{LoadedBranch, Storage, StorageError};
+use crate::sync_manager::DurabilityTier;
 
 /// Unique identifier for a subscription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -95,6 +96,127 @@ pub enum TruncateError {
     TipBeforeTail(CommitId),
 }
 
+#[derive(Debug, Clone, Default)]
+struct RowBranch {
+    versions: HashMap<CommitId, StoredRowVersion>,
+    tips: SmolSet<[CommitId; 2]>,
+    current_visible: Option<CommitId>,
+}
+
+#[derive(Debug, Clone)]
+struct RowBranchApply {
+    previous_visible: Option<StoredRowVersion>,
+    current_visible: Option<StoredRowVersion>,
+    visible_changed: bool,
+}
+
+impl RowBranch {
+    fn visible_row_wins(incoming: &StoredRowVersion, current: &StoredRowVersion) -> bool {
+        (incoming.updated_at, incoming.version_id()) > (current.updated_at, current.version_id())
+    }
+
+    fn current_visible_row(&self) -> Option<StoredRowVersion> {
+        let version_id = self.current_visible?;
+        self.versions.get(&version_id).cloned()
+    }
+
+    fn contains(&self, version_id: CommitId) -> bool {
+        self.versions.contains_key(&version_id)
+    }
+
+    fn tip_ids_by_timestamp(&self) -> Vec<CommitId> {
+        let mut tip_vec: Vec<_> = self.tips.iter().copied().collect();
+        tip_vec.sort_by_key(|id| {
+            self.versions
+                .get(id)
+                .map(|row| (row.updated_at, *id))
+                .unwrap_or((0, *id))
+        });
+        tip_vec
+    }
+
+    fn recompute_current_visible(&mut self) -> Option<CommitId> {
+        let current = self
+            .versions
+            .values()
+            .filter(|row| row.state.is_visible())
+            .max_by_key(|row| (row.updated_at, row.version_id()))
+            .map(StoredRowVersion::version_id);
+        self.current_visible = current;
+        current
+    }
+
+    fn remember(&mut self, row: StoredRowVersion) -> RowBranchApply {
+        let previous_visible = self.current_visible_row();
+        let version_id = row.version_id();
+
+        if self.versions.contains_key(&version_id) {
+            let current_visible = self.current_visible_row();
+            return RowBranchApply {
+                visible_changed: previous_visible != current_visible,
+                previous_visible,
+                current_visible,
+            };
+        }
+
+        for parent in &row.parents {
+            self.tips.remove(parent);
+        }
+        self.tips.insert(version_id);
+        self.versions.insert(version_id, row);
+
+        let current_visible_id = match previous_visible.as_ref() {
+            Some(current) => {
+                let incoming = self
+                    .versions
+                    .get(&version_id)
+                    .expect("just inserted row version");
+                if incoming.state.is_visible() && Self::visible_row_wins(incoming, current) {
+                    Some(version_id)
+                } else {
+                    self.current_visible
+                }
+            }
+            None => self.recompute_current_visible(),
+        };
+        self.current_visible = current_visible_id;
+
+        let current_visible = self.current_visible_row();
+        RowBranchApply {
+            visible_changed: previous_visible != current_visible,
+            previous_visible,
+            current_visible,
+        }
+    }
+
+    fn patch_state(
+        &mut self,
+        version_id: CommitId,
+        state: Option<RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Option<RowBranchApply> {
+        let previous_visible = self.current_visible_row();
+        let row = self.versions.get_mut(&version_id)?;
+
+        if let Some(state) = state {
+            row.state = state;
+        }
+        row.confirmed_tier = match (row.confirmed_tier, confirmed_tier) {
+            (Some(existing), Some(incoming)) => Some(existing.max(incoming)),
+            (Some(existing), None) => Some(existing),
+            (None, incoming) => incoming,
+        };
+
+        self.recompute_current_visible();
+        let current_visible = self.current_visible_row();
+        Some(RowBranchApply {
+            visible_changed: previous_visible != current_visible,
+            previous_visible,
+            current_visible,
+        })
+    }
+}
+
 /// Manages a collection of objects.
 ///
 /// With sync storage (Phase 2), objects are stored directly in the HashMap -
@@ -102,6 +224,7 @@ pub enum TruncateError {
 #[derive(Debug, Clone, Default)]
 pub struct ObjectManager {
     pub objects: HashMap<ObjectId, Object>,
+    row_branches: HashMap<(ObjectId, BranchName), RowBranch>,
     next_subscription_id: u64,
     subscriptions: HashMap<SubscriptionId, Subscription>,
     /// Index: (ObjectId, BranchName) → set of SubscriptionIds
@@ -220,27 +343,27 @@ impl ObjectManager {
         }
     }
 
-    fn branch_from_visible_row(row: StoredRowVersion) -> Branch {
-        let commit = row.to_commit();
-        let commit_id = commit.id();
-        let mut commits = HashMap::new();
-        commits.insert(commit_id, commit);
-        let mut tips = SmolSet::new();
-        tips.insert(commit_id);
-
-        Branch {
-            commits,
-            tips,
-            tails: None,
-            loaded_state: BranchLoadedState::AllCommits,
-        }
-    }
-
     fn winning_tip_for_branch(branch: &Branch) -> Option<(CommitId, &Commit)> {
         let mut tips = Self::tips_by_timestamp(&branch.commits, &branch.tips);
         let tip_id = tips.pop()?;
         let commit = branch.commits.get(&tip_id)?;
         Some((tip_id, commit))
+    }
+
+    fn is_row_metadata(metadata: &HashMap<String, String>) -> bool {
+        metadata.contains_key(MetadataKey::Table.as_str())
+    }
+
+    fn row_branch(&self, object_id: ObjectId, branch_name: &BranchName) -> Option<&RowBranch> {
+        self.row_branches.get(&(object_id, *branch_name))
+    }
+
+    fn row_branch_mut(
+        &mut self,
+        object_id: ObjectId,
+        branch_name: &BranchName,
+    ) -> Option<&mut RowBranch> {
+        self.row_branches.get_mut(&(object_id, *branch_name))
     }
 
     fn row_version_from_commit(
@@ -258,12 +381,7 @@ impl ObjectManager {
         )
     }
 
-    fn persist_row_version<H: Storage>(
-        io: &mut H,
-        table: &str,
-        row: &StoredRowVersion,
-        visible_changed: bool,
-    ) {
+    fn persist_row_version<H: Storage>(io: &mut H, table: &str, row: &StoredRowVersion) {
         if let Err(error) = io.append_history_region_rows(table, std::slice::from_ref(row)) {
             tracing::warn!(
                 table,
@@ -273,10 +391,10 @@ impl ObjectManager {
                 "failed to append row-region history row"
             );
         }
+    }
 
-        if visible_changed
-            && let Err(error) = io.upsert_visible_region_rows(table, std::slice::from_ref(row))
-        {
+    fn upsert_visible_row<H: Storage>(io: &mut H, table: &str, row: &StoredRowVersion) {
+        if let Err(error) = io.upsert_visible_region_rows(table, std::slice::from_ref(row)) {
             tracing::warn!(
                 table,
                 branch = row.branch,
@@ -290,35 +408,107 @@ impl ObjectManager {
     fn notify_row_object_update<H: Storage>(
         &mut self,
         io: &mut H,
-        object_id: ObjectId,
         metadata: &HashMap<String, String>,
         previous_row: Option<StoredRowVersion>,
-        current_row: StoredRowVersion,
+        current_row: Option<StoredRowVersion>,
+        history_row: StoredRowVersion,
+        visible_changed: bool,
     ) {
         let Some(table) = metadata.get(MetadataKey::Table.as_str()).cloned() else {
             return;
         };
 
-        let visible_changed = previous_row
-            .as_ref()
-            .map(|previous| previous.version_id() != current_row.version_id())
-            .unwrap_or(true);
+        Self::persist_row_version(io, &table, &history_row);
 
-        Self::persist_row_version(io, &table, &current_row, visible_changed);
+        let Some(current_row) = current_row else {
+            return;
+        };
 
-        if !visible_changed {
+        if visible_changed {
+            Self::upsert_visible_row(io, &table, &current_row);
+        } else {
             return;
         }
 
         let is_new_object = previous_row.is_none();
-
         self.row_objects_outbox.push(RowObjectUpdate {
-            object_id,
+            object_id: current_row.row_id,
             metadata: metadata.clone(),
             row: current_row,
             previous_row,
             is_new_object,
         });
+    }
+
+    fn remember_row_version(
+        &mut self,
+        object_id: ObjectId,
+        branch_name: BranchName,
+        row: StoredRowVersion,
+    ) -> RowBranchApply {
+        self.row_branches
+            .entry((object_id, branch_name))
+            .or_default()
+            .remember(row)
+    }
+
+    pub fn remember_remote_row_version(
+        &mut self,
+        object_id: ObjectId,
+        branch_name: BranchName,
+        row: StoredRowVersion,
+    ) {
+        let _ = self.remember_row_version(object_id, branch_name, row);
+    }
+
+    pub fn visible_row(
+        &self,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+    ) -> Option<StoredRowVersion> {
+        let branch_name = branch_name.into();
+        self.row_branch(object_id, &branch_name)
+            .and_then(RowBranch::current_visible_row)
+    }
+
+    pub fn row_version_exists(
+        &self,
+        object_id: ObjectId,
+        branch_name: &BranchName,
+        version_id: CommitId,
+    ) -> bool {
+        self.row_branch(object_id, branch_name)
+            .is_some_and(|branch| branch.contains(version_id))
+    }
+
+    pub fn patch_row_version_state(
+        &mut self,
+        object_id: ObjectId,
+        branch_name: &BranchName,
+        version_id: CommitId,
+        state: Option<RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Option<RowObjectUpdate> {
+        let metadata = self.get(object_id)?.metadata.clone();
+        let applied = self.row_branch_mut(object_id, branch_name)?.patch_state(
+            version_id,
+            state,
+            confirmed_tier,
+        )?;
+
+        if !applied.visible_changed {
+            return None;
+        }
+
+        let row = applied.current_visible?;
+        let is_new_object = applied.previous_visible.is_none();
+        Some(RowObjectUpdate {
+            object_id,
+            metadata,
+            row,
+            previous_row: applied.previous_visible,
+            is_new_object,
+        })
     }
 
     /// Get an object by id.
@@ -355,48 +545,60 @@ impl ObjectManager {
             });
         }
 
-        {
+        let (metadata, loaded_branch_count, loaded_row_versions) = {
+            let object = self.objects.get(&id)?;
+            (
+                object.metadata.clone(),
+                object.branches.len(),
+                self.row_branches.len(),
+            )
+        };
+
+        if Self::is_row_metadata(&metadata) {
+            let Some(table) = metadata.get(MetadataKey::Table.as_str()).cloned() else {
+                return self.objects.get(&id);
+            };
+
+            for branch_name in branches {
+                let bn = BranchName::new(branch_name);
+                if self.row_branches.contains_key(&(id, bn)) {
+                    continue;
+                }
+
+                let history_rows =
+                    match storage.scan_history_region(&table, bn.as_str(), HistoryScan::Branch) {
+                        Ok(rows) => rows,
+                        Err(err) => {
+                            tracing::warn!(
+                                %id,
+                                branch = %bn,
+                                error = ?err,
+                                "get_or_load: failed to hydrate row history"
+                            );
+                            Vec::new()
+                        }
+                    };
+
+                for row in history_rows {
+                    self.remember_remote_row_version(id, bn, row);
+                }
+
+                if let Ok(Some(row)) = storage.load_visible_region_row(&table, bn.as_str(), id) {
+                    self.remember_remote_row_version(id, bn, row);
+                }
+            }
+        } else {
             let object = self.objects.get_mut(&id)?;
             for branch_name in branches {
                 let bn = BranchName::new(branch_name);
                 if object.branches.contains_key(&bn) {
                     continue;
                 }
-                let fallback_visible_branch = |object: &Object, branch_name: &BranchName| {
-                    let table = object.metadata.get(MetadataKey::Table.as_str())?;
-                    match storage.load_visible_region_row(table, branch_name.as_str(), id) {
-                        Ok(Some(row)) if row.state.is_visible() => {
-                            Some(Self::branch_from_visible_row(row))
-                        }
-                        Ok(Some(_)) | Ok(None) => None,
-                        Err(err) => {
-                            tracing::warn!(
-                                %id,
-                                branch = %branch_name,
-                                error = ?err,
-                                "get_or_load: failed to hydrate visible-row fallback"
-                            );
-                            None
-                        }
-                    }
-                };
                 match storage.load_branch(id, &bn) {
                     Ok(Some(loaded)) => {
-                        if loaded.commits.is_empty() {
-                            if let Some(branch) = fallback_visible_branch(object, &bn) {
-                                object.branches.insert(bn, branch);
-                            } else {
-                                object.branches.insert(bn, Self::branch_from_loaded(loaded));
-                            }
-                        } else {
-                            object.branches.insert(bn, Self::branch_from_loaded(loaded));
-                        }
+                        object.branches.insert(bn, Self::branch_from_loaded(loaded));
                     }
-                    Ok(None) => {
-                        if let Some(branch) = fallback_visible_branch(object, &bn) {
-                            object.branches.insert(bn, branch);
-                        }
-                    }
+                    Ok(None) => {}
                     Err(err) => {
                         tracing::warn!(
                             %id,
@@ -411,8 +613,28 @@ impl ObjectManager {
 
         let object = self.objects.get(&id)?;
         let branch_count = object.branches.len();
+        let row_branch_count = self
+            .row_branches
+            .keys()
+            .filter(|(object_id, _)| *object_id == id)
+            .count();
+        let row_version_count: usize = self
+            .row_branches
+            .iter()
+            .filter(|((object_id, _), _)| *object_id == id)
+            .map(|(_, branch)| branch.versions.len())
+            .sum();
         let commit_count: usize = object.branches.values().map(|b| b.commits.len()).sum();
-        tracing::trace!(%id, branch_count, commit_count, "get_or_load: loaded from storage");
+        tracing::trace!(
+            %id,
+            branch_count,
+            commit_count,
+            row_branch_count,
+            row_version_count,
+            previous_branch_count = loaded_branch_count,
+            previous_row_branch_count = loaded_row_versions,
+            "get_or_load: loaded from storage"
+        );
         Some(object)
     }
 
@@ -482,53 +704,86 @@ impl ObjectManager {
     ) -> Result<CommitId, Error> {
         let branch_name = branch_name.into();
         let _span = tracing::debug_span!("OM::add_commit", %object_id, %branch_name).entered();
+        let author = author.to_string();
+        let commit_metadata = metadata.clone();
 
         // Capture previous state BEFORE mutation for AllObjectUpdate
         // (previous_commit_ids, old_content)
-        let (previous_commit_ids, old_content, previous_row) = {
+        let (object_metadata, previous_commit_ids, old_content, previous_row, is_row_object) = {
             let object = self
                 .get(object_id)
                 .ok_or(Error::ObjectNotFound(object_id))?;
+            let object_metadata = object.metadata.clone();
+            let is_row_object = Self::is_row_metadata(&object_metadata);
 
-            // If parents is non-empty, branch must exist and contain all parents
-            if !parents.is_empty() {
-                let branch = object
-                    .branches
-                    .get(&branch_name)
-                    .ok_or(Error::BranchNotFound(branch_name))?;
-
-                for parent in &parents {
-                    if !branch.commits.contains_key(parent) {
-                        return Err(Error::ParentNotFound(*parent));
-                    }
-                }
-
-                // After truncation, reject commits whose parents are before tails
-                if let Some(tails) = &branch.tails {
+            if is_row_object {
+                if !parents.is_empty() {
+                    let branch = self
+                        .row_branch(object_id, &branch_name)
+                        .ok_or(Error::BranchNotFound(branch_name))?;
                     for parent in &parents {
-                        if !Self::is_descendant_of_any(&branch.commits, *parent, tails) {
+                        if !branch.contains(*parent) {
                             return Err(Error::ParentNotFound(*parent));
                         }
                     }
                 }
-            }
-
-            // Capture previous tips and "winning" tip content before mutation
-            if let Some(branch) = object.branches.get(&branch_name) {
-                let prev_tips = Self::tips_by_timestamp(&branch.commits, &branch.tips);
-                // Last tip in sorted order is the "winner" (newest by timestamp)
-                let old_content = prev_tips
-                    .last()
-                    .and_then(|tip_id| branch.commits.get(tip_id))
-                    .map(|commit| commit.content.clone());
-                let previous_row =
-                    Self::winning_tip_for_branch(branch).map(|(commit_id, commit)| {
-                        Self::row_version_from_commit(object_id, &branch_name, commit_id, commit)
-                    });
-                (prev_tips, old_content, previous_row)
+                let previous_row = self.visible_row(object_id, branch_name);
+                let previous_commit_ids = self
+                    .row_branch(object_id, &branch_name)
+                    .map(RowBranch::tip_ids_by_timestamp)
+                    .unwrap_or_default();
+                let old_content = previous_row.as_ref().map(|row| row.data.clone());
+                (
+                    object_metadata,
+                    previous_commit_ids,
+                    old_content,
+                    previous_row,
+                    true,
+                )
             } else {
-                // New branch - no previous state
-                (vec![], None, None)
+                // If parents is non-empty, branch must exist and contain all parents
+                if !parents.is_empty() {
+                    let branch = object
+                        .branches
+                        .get(&branch_name)
+                        .ok_or(Error::BranchNotFound(branch_name))?;
+
+                    for parent in &parents {
+                        if !branch.commits.contains_key(parent) {
+                            return Err(Error::ParentNotFound(*parent));
+                        }
+                    }
+
+                    // After truncation, reject commits whose parents are before tails
+                    if let Some(tails) = &branch.tails {
+                        for parent in &parents {
+                            if !Self::is_descendant_of_any(&branch.commits, *parent, tails) {
+                                return Err(Error::ParentNotFound(*parent));
+                            }
+                        }
+                    }
+                }
+
+                // Capture previous tips and "winning" tip content before mutation
+                if let Some(branch) = object.branches.get(&branch_name) {
+                    let prev_tips = Self::tips_by_timestamp(&branch.commits, &branch.tips);
+                    let old_content = prev_tips
+                        .last()
+                        .and_then(|tip_id| branch.commits.get(tip_id))
+                        .map(|commit| commit.content.clone());
+                    let previous_row =
+                        Self::winning_tip_for_branch(branch).map(|(commit_id, commit)| {
+                            Self::row_version_from_commit(
+                                object_id,
+                                &branch_name,
+                                commit_id,
+                                commit,
+                            )
+                        });
+                    (object_metadata, prev_tips, old_content, previous_row, false)
+                } else {
+                    (object_metadata, vec![], None, None, false)
+                }
             }
         };
 
@@ -536,8 +791,8 @@ impl ObjectManager {
             parents: parents.clone().into(),
             content,
             timestamp,
-            author: author.to_string(),
-            metadata,
+            author: author.clone(),
+            metadata: commit_metadata,
             stored_state: StoredState::Pending,
             ack_state: Default::default(),
         };
@@ -552,56 +807,48 @@ impl ObjectManager {
             commit.stored_state = StoredState::Stored;
         }
 
-        // Now mutably borrow and update
-        let object = self
-            .get_mut(object_id)
-            .expect("object existence already validated");
-
-        // Create branch if it doesn't exist (only valid for parentless commits)
-        let branch = object
-            .branches
-            .entry(branch_name)
-            .or_insert_with(|| Branch {
-                loaded_state: BranchLoadedState::AllCommits,
-                ..Default::default()
-            });
-
-        // Update tips: remove parents, add new commit
-        for parent in &parents {
-            branch.tips.remove(parent);
-        }
-        branch.tips.insert(commit_id);
-
-        branch.commits.insert(commit_id, commit);
-
-        tracing::trace!(?commit_id, "commit applied");
-
-        // Notify subscribers of updated frontier
-        self.notify_subscribers_of_commit(object_id, branch_name);
-
-        // Notify global subscribers - with sync storage, objects are never "new/creating"
-        // for the purpose of this notification (they're immediately persisted)
-        let metadata = self
-            .get(object_id)
-            .map(|object| object.metadata.clone())
-            .unwrap_or_default();
-        let current_row = self
-            .get(object_id)
-            .and_then(|object| object.branches.get(&branch_name))
-            .and_then(Self::winning_tip_for_branch)
-            .map(|(commit_id, commit)| {
-                Self::row_version_from_commit(object_id, &branch_name, commit_id, commit)
-            });
-
-        if let Some(current_row) = current_row
-            && metadata.contains_key(MetadataKey::Table.as_str())
-        {
-            self.notify_row_object_update(io, object_id, &metadata, previous_row, current_row);
+        if is_row_object {
+            let history_row =
+                Self::row_version_from_commit(object_id, &branch_name, commit_id, &commit);
+            let applied = self.remember_row_version(object_id, branch_name, history_row.clone());
+            tracing::trace!(?commit_id, "row version applied");
+            self.notify_subscribers_of_commit(object_id, branch_name);
+            self.notify_row_object_update(
+                io,
+                &object_metadata,
+                previous_row,
+                applied.current_visible,
+                history_row,
+                applied.visible_changed,
+            );
         } else {
+            // Now mutably borrow and update
+            let object = self
+                .get_mut(object_id)
+                .expect("object existence already validated");
+
+            let branch = object
+                .branches
+                .entry(branch_name)
+                .or_insert_with(|| Branch {
+                    loaded_state: BranchLoadedState::AllCommits,
+                    ..Default::default()
+                });
+
+            for parent in &parents {
+                branch.tips.remove(parent);
+            }
+            branch.tips.insert(commit_id);
+
+            branch.commits.insert(commit_id, commit);
+
+            tracing::trace!(?commit_id, "commit applied");
+
+            self.notify_subscribers_of_commit(object_id, branch_name);
             self.notify_all_object_subscribers(
                 object_id,
                 branch_name,
-                false, // is_new - always false with sync storage
+                false,
                 previous_commit_ids,
                 old_content,
             );
@@ -672,6 +919,10 @@ impl ObjectManager {
         branch_name: impl Into<BranchName>,
     ) -> Result<&SmolSet<[CommitId; 2]>, Error> {
         let branch_name = branch_name.into();
+
+        if let Some(branch) = self.row_branch(object_id, &branch_name) {
+            return Ok(&branch.tips);
+        }
 
         let object = self
             .get(object_id)
@@ -765,33 +1016,55 @@ impl ObjectManager {
     ) -> Result<CommitId, Error> {
         let branch_name = branch_name.into();
         let commit_id = commit.id();
+        let metadata = self
+            .get(object_id)
+            .ok_or(Error::ObjectNotFound(object_id))?
+            .metadata
+            .clone();
+        let is_row_object = Self::is_row_metadata(&metadata);
 
         // Capture previous state BEFORE mutation for AllObjectUpdate
         let (previous_commit_ids, old_content, previous_row, already_exists) = {
-            let object = self
-                .get(object_id)
-                .ok_or(Error::ObjectNotFound(object_id))?;
-
-            if let Some(branch) = object.branches.get(&branch_name) {
-                // Check if commit already exists (idempotent)
-                if branch.commits.contains_key(&commit_id) {
+            if is_row_object {
+                if self.row_version_exists(object_id, &branch_name, commit_id) {
                     (vec![], None, None, true)
                 } else {
-                    let prev_tips = Self::tips_by_timestamp(&branch.commits, &branch.tips);
-                    // Last tip in sorted order is the "winner" (newest by timestamp)
-                    let old_content = prev_tips
-                        .last()
-                        .and_then(|tip_id| branch.commits.get(tip_id))
-                        .map(|commit| commit.content.clone());
-                    let previous_row =
-                        Self::winning_tip_for_branch(branch).map(|(tip_id, commit)| {
-                            Self::row_version_from_commit(object_id, &branch_name, tip_id, commit)
-                        });
-                    (prev_tips, old_content, previous_row, false)
+                    let previous_row = self.visible_row(object_id, branch_name);
+                    let previous_commit_ids = self
+                        .row_branch(object_id, &branch_name)
+                        .map(RowBranch::tip_ids_by_timestamp)
+                        .unwrap_or_default();
+                    let old_content = previous_row.as_ref().map(|row| row.data.clone());
+                    (previous_commit_ids, old_content, previous_row, false)
                 }
             } else {
-                // New branch - no previous state
-                (vec![], None, None, false)
+                let object = self
+                    .get(object_id)
+                    .ok_or(Error::ObjectNotFound(object_id))?;
+
+                if let Some(branch) = object.branches.get(&branch_name) {
+                    if branch.commits.contains_key(&commit_id) {
+                        (vec![], None, None, true)
+                    } else {
+                        let prev_tips = Self::tips_by_timestamp(&branch.commits, &branch.tips);
+                        let old_content = prev_tips
+                            .last()
+                            .and_then(|tip_id| branch.commits.get(tip_id))
+                            .map(|commit| commit.content.clone());
+                        let previous_row =
+                            Self::winning_tip_for_branch(branch).map(|(tip_id, commit)| {
+                                Self::row_version_from_commit(
+                                    object_id,
+                                    &branch_name,
+                                    tip_id,
+                                    commit,
+                                )
+                            });
+                        (prev_tips, old_content, previous_row, false)
+                    }
+                } else {
+                    (vec![], None, None, false)
+                }
             }
         };
 
@@ -809,47 +1082,38 @@ impl ObjectManager {
             commit.stored_state = StoredState::Stored;
         }
 
-        // Get mutable reference to update
-        let object = self.get_mut(object_id).expect("validated above");
-
-        // Create branch if needed
-        let branch = object
-            .branches
-            .entry(branch_name)
-            .or_insert_with(|| Branch {
-                loaded_state: BranchLoadedState::AllCommits,
-                ..Default::default()
-            });
-
-        // Update tips: remove any parents that are tips, add this commit as tip
-        for parent in &commit.parents {
-            branch.tips.remove(parent);
-        }
-        branch.tips.insert(commit_id);
-
-        branch.commits.insert(commit_id, commit);
-
-        // Notify subscribers
-        self.notify_subscribers_of_commit(object_id, branch_name);
-
-        // Notify global subscribers (received objects are never "new" from our perspective)
-        let metadata = self
-            .get(object_id)
-            .map(|object| object.metadata.clone())
-            .unwrap_or_default();
-        let current_row = self
-            .get(object_id)
-            .and_then(|object| object.branches.get(&branch_name))
-            .and_then(Self::winning_tip_for_branch)
-            .map(|(tip_id, commit)| {
-                Self::row_version_from_commit(object_id, &branch_name, tip_id, commit)
-            });
-
-        if let Some(current_row) = current_row
-            && metadata.contains_key(MetadataKey::Table.as_str())
-        {
-            self.notify_row_object_update(io, object_id, &metadata, previous_row, current_row);
+        if is_row_object {
+            let history_row =
+                Self::row_version_from_commit(object_id, &branch_name, commit_id, &commit);
+            let applied = self.remember_row_version(object_id, branch_name, history_row.clone());
+            self.notify_subscribers_of_commit(object_id, branch_name);
+            self.notify_row_object_update(
+                io,
+                &metadata,
+                previous_row,
+                applied.current_visible,
+                history_row,
+                applied.visible_changed,
+            );
         } else {
+            let object = self.get_mut(object_id).expect("validated above");
+
+            let branch = object
+                .branches
+                .entry(branch_name)
+                .or_insert_with(|| Branch {
+                    loaded_state: BranchLoadedState::AllCommits,
+                    ..Default::default()
+                });
+
+            for parent in &commit.parents {
+                branch.tips.remove(parent);
+            }
+            branch.tips.insert(commit_id);
+
+            branch.commits.insert(commit_id, commit);
+
+            self.notify_subscribers_of_commit(object_id, branch_name);
             self.notify_all_object_subscribers(
                 object_id,
                 branch_name,
@@ -887,7 +1151,14 @@ impl ObjectManager {
             .insert(id);
 
         // With sync storage, branch is immediately available if object exists
-        if let Some(object) = self.get(object_id)
+        if let Some(branch) = self.row_branch(object_id, &branch_name) {
+            self.subscription_outbox.push(SubscriptionUpdate {
+                subscription_id: id,
+                object_id,
+                branch_name,
+                commit_ids: branch.tip_ids_by_timestamp(),
+            });
+        } else if let Some(object) = self.get(object_id)
             && let Some(branch) = object.branches.get(&branch_name)
         {
             let commit_ids = Self::tips_by_timestamp(&branch.commits, &branch.tips);
@@ -978,7 +1249,9 @@ impl ObjectManager {
         }
 
         let (metadata, commit_ids) = if let Some(object) = self.get(object_id) {
-            let commit_ids = if let Some(branch) = object.branches.get(&branch_name) {
+            let commit_ids = if let Some(branch) = self.row_branch(object_id, &branch_name) {
+                branch.tip_ids_by_timestamp()
+            } else if let Some(branch) = object.branches.get(&branch_name) {
                 Self::tips_by_timestamp(&branch.commits, &branch.tips)
             } else {
                 vec![]
@@ -1014,7 +1287,9 @@ impl ObjectManager {
         let key = (object_id, branch_name);
         if let Some(subscriber_ids) = self.branch_subscribers.get(&key).cloned() {
             // Get current tips from the branch
-            let commit_ids = if let Some(object) = self.get(object_id) {
+            let commit_ids = if let Some(branch) = self.row_branch(object_id, &branch_name) {
+                branch.tip_ids_by_timestamp()
+            } else if let Some(object) = self.get(object_id) {
                 if let Some(branch) = object.branches.get(&branch_name) {
                     Self::tips_by_timestamp(&branch.commits, &branch.tips)
                 } else {

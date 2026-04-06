@@ -487,14 +487,24 @@ impl QueryManager {
 
     /// Find a schema in known_schemas by its short hash prefix.
     ///
-    /// Returns the full SchemaHash if found. The partial hash has the first 4 bytes
+    /// Returns the full SchemaHash if found. The partial hash has the first 6 bytes
     /// filled with the short hash, and the rest zeroed (as produced by ComposedBranchName::parse).
     pub(super) fn find_schema_by_short_hash(&self, partial: &SchemaHash) -> Option<SchemaHash> {
-        let target_short = &partial.0[..4];
+        let target_short = &partial.0[..6];
+
+        if &self.schema_context.current_hash.0[..6] == target_short {
+            return Some(self.schema_context.current_hash);
+        }
+
+        for &full_hash in self.schema_context.live_schemas.keys() {
+            if &full_hash.0[..6] == target_short {
+                return Some(full_hash);
+            }
+        }
 
         // Search known_schemas for matching short hash
         for full_hash in self.known_schemas.keys() {
-            if &full_hash.0[..4] == target_short {
+            if &full_hash.0[..6] == target_short {
                 return Some(*full_hash);
             }
         }

@@ -45,11 +45,19 @@ impl SyncManager {
         let Some(object) = self.object_manager.get(object_id) else {
             return;
         };
+        let metadata = object.metadata.clone();
+
+        if let Some(row) = self.object_manager.visible_row(object_id, branch_name) {
+            for server_id in server_ids {
+                self.queue_row_to_server(server_id, object_id, metadata.clone(), row.clone());
+            }
+            return;
+        }
+
         let Some(branch) = object.branches.get(&branch_name) else {
             return;
         };
         let tips: HashSet<CommitId> = branch.tips.iter().copied().collect();
-        let metadata = object.metadata.clone();
 
         for server_id in server_ids {
             self.queue_tips_to_server(
@@ -169,11 +177,29 @@ impl SyncManager {
         let Some(object) = self.object_manager.get(object_id) else {
             return;
         };
+        let metadata = object.metadata.clone();
+
+        if let Some(row) = self.object_manager.visible_row(object_id, branch_name) {
+            for client_id in &client_ids {
+                tracing::trace!(%client_id, "queuing row update to client");
+                if is_catalogue {
+                    self.queue_row_to_client_unscoped(
+                        *client_id,
+                        object_id,
+                        metadata.clone(),
+                        row.clone(),
+                    );
+                } else {
+                    self.queue_row_to_client(*client_id, object_id, metadata.clone(), row.clone());
+                }
+            }
+            return;
+        }
+
         let Some(branch) = object.branches.get(&branch_name) else {
             return;
         };
         let tips: HashSet<CommitId> = branch.tips.iter().copied().collect();
-        let metadata = object.metadata.clone();
 
         for client_id in &client_ids {
             tracing::trace!(%client_id, "queuing tips to client");

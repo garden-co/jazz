@@ -1,5 +1,6 @@
 use super::*;
 use crate::commit::CommitAckState;
+use crate::metadata::MetadataKey;
 use crate::storage::MemoryStorage;
 
 #[test]
@@ -1760,4 +1761,39 @@ fn lww_different_fields_same_object_whole_commit_wins() {
         branch.commits[&winner].content, b"title=task,completed=true",
         "whole-object LWW: bob's full snapshot wins, alice's title change lost"
     );
+}
+
+#[test]
+fn row_objects_use_row_native_memory_not_legacy_branches() {
+    let mut io = MemoryStorage::new();
+    let mut manager = ObjectManager::new();
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.as_str().to_string(), "users".to_string());
+    let object_id = manager.create(&mut io, Some(metadata));
+
+    let commit_id = manager
+        .add_commit(
+            &mut io,
+            object_id,
+            "main",
+            vec![],
+            b"alice".to_vec(),
+            "alice",
+            None,
+        )
+        .unwrap();
+
+    let object = manager.get(object_id).unwrap();
+    assert!(
+        object.branches.is_empty(),
+        "row objects should not materialize legacy branch/commit state in memory"
+    );
+
+    let row = manager.visible_row(object_id, "main").unwrap();
+    assert_eq!(row.data, b"alice".to_vec());
+    assert_eq!(row.version_id(), commit_id);
+
+    let tips = manager.get_tip_ids(object_id, "main").unwrap();
+    assert_eq!(tips.len(), 1);
+    assert!(tips.contains(&commit_id));
 }
