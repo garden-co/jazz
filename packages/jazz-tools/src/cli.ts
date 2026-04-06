@@ -983,7 +983,7 @@ interface ResolvedSchemaInput {
 }
 
 function isCommittedSnapshotFileName(fileName: string): boolean {
-  return /^\d{8}T\d{9}Z-[0-9a-f]{64}\.json$/i.test(fileName);
+  return /^\d{8}T\d{6}-[0-9a-f]{64}\.json$/i.test(fileName);
 }
 
 async function loadLatestCommittedSnapshot(
@@ -1435,7 +1435,7 @@ if (isMainModule()) {
       "  permissions push      Publish the current permissions.ts with head-parent checks",
     );
     console.log(
-      "  migrations create     Generate a typed structural migration stub from snapshots or schema hashes",
+      "  migrations create     Generate a typed structural migration stub between two schema versions",
     );
     console.log("  migrations push       Push a reviewed migration edge to the server");
     console.log("\nValidation options:");

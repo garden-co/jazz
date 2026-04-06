@@ -181,7 +181,7 @@ Expected guidance:
 ```text
 Detected rows with schema versions not reachable from the current schema.
 To materialize a missing schema locally, run `jazz-tools schema export --schema-hash <schemaHash>`.
-Then generate a recovery migration with `jazz-tools migrations create --fromHash <schemaHash>`.
+Then generate a migration with `jazz-tools migrations create --fromHash <sourceHash> --toHash <targetHash>`.
 ```
 
 ### Developer Experience
