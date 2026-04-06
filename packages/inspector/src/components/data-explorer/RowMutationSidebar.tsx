@@ -1,11 +1,13 @@
 import type { ColumnDescriptor } from "jazz-tools";
 import { useMemo, useState } from "react";
+import { Link } from "react-router";
 import {
   buildMutationFormFields,
   formatMutationFieldValue,
   type MutationFormMode,
   parseMutationFieldValue,
 } from "./row-mutation-form.js";
+import { buildRelationFilterHref } from "./relation-navigation.js";
 import styles from "./RowMutationSidebar.module.css";
 
 interface FieldState {
@@ -19,7 +21,7 @@ interface RowMutationSidebarProps {
   schemaColumns: ColumnDescriptor[];
   targetRowId: string | null;
   rowValues: Record<string, unknown> | null;
-  onCancel: () => void;
+  onCancel?: () => void;
   onSave: (updates: Record<string, unknown>) => void | Promise<void>;
   onDelete?: () => void | Promise<void>;
 }
@@ -75,6 +77,15 @@ function createInitialFields(
   return nextFields;
 }
 
+function getRelationTarget(fieldState: FieldState, column: ColumnDescriptor): string | null {
+  if (!column.references || fieldState.isNull) {
+    return null;
+  }
+
+  const value = fieldState.text.trim();
+  return value.length > 0 ? value : null;
+}
+
 export function RowMutationSidebar({
   mode,
   tableName,
@@ -97,6 +108,22 @@ export function RowMutationSidebar({
   const formFields = useMemo(() => buildMutationFormFields(schemaColumns), [schemaColumns]);
 
   if (!rowValues) {
+    if (mode === "edit") {
+      return (
+        <aside className={styles.sidebar} aria-label={`${modeLabel(mode)} panel`}>
+          <div className={styles.form}>
+            <header className={styles.header}>
+              <h3 className={styles.title}>{modeLabel(mode)}</h3>
+              <p className={styles.meta}>{tableName} · no row selected</p>
+            </header>
+            <div className={styles.emptyState}>
+              <p>Select a row from the table to edit it.</p>
+            </div>
+          </div>
+        </aside>
+      );
+    }
+
     return null;
   }
 
@@ -183,11 +210,27 @@ export function RowMutationSidebar({
             const fieldError = errors[column.name];
             const isReadOnly = readOnlyReason !== null;
             const value = fieldState.text;
+            const relationTarget = getRelationTarget(fieldState, column);
 
             return (
-              <div key={column.name} className={styles.fieldWrap}>
+              <div
+                key={column.name}
+                className={styles.fieldWrap}
+                aria-label={`${column.name} field`}
+              >
                 <label className={styles.field}>
-                  <span className={styles.label}>{column.name}</span>
+                  <span className={styles.fieldHeader}>
+                    <span className={styles.label}>{column.name}</span>
+                    {relationTarget && column.references ? (
+                      <Link
+                        to={buildRelationFilterHref(column.references, relationTarget)}
+                        className={styles.showLink}
+                        aria-label={`Show ${column.name} in ${column.references}`}
+                      >
+                        Show
+                      </Link>
+                    ) : null}
+                  </span>
                   {column.column_type.type === "Enum" && !isReadOnly ? (
                     <select
                       className={styles.select}
@@ -334,14 +377,16 @@ export function RowMutationSidebar({
             <button type="submit" className={styles.primaryButton} disabled={isSaving}>
               {isSaving ? "Saving..." : saveLabel(mode)}
             </button>
-            <button
-              type="button"
-              className={styles.secondaryButton}
-              onClick={onCancel}
-              disabled={isSaving}
-            >
-              Cancel
-            </button>
+            {onCancel ? (
+              <button
+                type="button"
+                className={styles.secondaryButton}
+                onClick={onCancel}
+                disabled={isSaving}
+              >
+                Cancel
+              </button>
+            ) : null}
           </div>
         </footer>
       </form>

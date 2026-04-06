@@ -35,6 +35,7 @@ import {
   getFieldReadOnlyReason,
   parseMutationFieldValue,
 } from "./row-mutation-form.js";
+import { buildRelationFilterHref } from "./relation-navigation.js";
 import styles from "./TableDataGrid.module.css";
 
 function formatCellValue(value: unknown): string {
@@ -44,6 +45,18 @@ function formatCellValue(value: unknown): string {
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
 }
+
+const RELATION_LABEL_COLUMN_PRIORITY = [
+  "name",
+  "title",
+  "label",
+  "displayName",
+  "display_name",
+  "username",
+  "handle",
+  "slug",
+  "email",
+] as const;
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50] as const;
 const DEFAULT_PAGE_SIZE = 25;
@@ -200,6 +213,50 @@ function getChangedCellIds(
 
 function createAnimatedGridRow(row: DynamicTableRow): AnimatedGridRow {
   return { row };
+}
+
+function isDisplayFriendlyColumn(column: ColumnDescriptor): boolean {
+  if (column.name === "id" || column.references) {
+    return false;
+  }
+
+  switch (column.column_type.type) {
+    case "Text":
+    case "Enum":
+    case "Timestamp":
+    case "Integer":
+    case "BigInt":
+    case "Double":
+    case "Boolean":
+      return true;
+    default:
+      return false;
+  }
+}
+
+function getRelationDisplayColumn(
+  schema: Record<string, { columns: ColumnDescriptor[] }>,
+  table: string,
+) {
+  const tableColumns = schema[table]?.columns ?? [];
+
+  for (const columnName of RELATION_LABEL_COLUMN_PRIORITY) {
+    const matchingColumn = tableColumns.find(
+      (column) => column.name === columnName && isDisplayFriendlyColumn(column),
+    );
+    if (matchingColumn) {
+      return matchingColumn;
+    }
+  }
+
+  const firstTextColumn = tableColumns.find(
+    (column) => column.column_type.type === "Text" && isDisplayFriendlyColumn(column),
+  );
+  if (firstTextColumn) {
+    return firstTextColumn;
+  }
+
+  return tableColumns.find(isDisplayFriendlyColumn);
 }
 
 function getQueuedEditText(value: unknown): string {
@@ -516,24 +573,6 @@ export function TableDataGrid() {
     }
     return [];
   }, [searchParams]);
-
-  const setSorting = (next: readonly SortColumn[]) => {
-    setSearchParams(
-      (prev) => {
-        const p = new URLSearchParams(prev);
-        const col = next[0];
-        if (col && (col.columnKey !== "id" || col.direction !== "ASC")) {
-          p.set("sort", col.columnKey);
-          p.set("dir", col.direction);
-        } else {
-          p.delete("sort");
-          p.delete("dir");
-        }
-        return p;
-      },
-      { replace: true },
-    );
-  };
 
   const setPageSize = (next: number) => {
     setSearchParams(
@@ -922,66 +961,49 @@ export function TableDataGrid() {
           }}
         />
         <div className={styles.contentArea}>
-          {!mutationState && selectedRowValues ? (
-            <Group className={styles.contentPanels} orientation="horizontal">
-              <Panel className={styles.gridPanel} defaultSize="68%" minSize="35%">
-                <div className={styles.gridFrame}>
-                  <PlainTableView
-                    rows={visibleRows}
-                    gridColumns={gridColumns}
-                    sorting={sorting}
-                    schemaColumnById={schemaColumnById}
-                    queuedEdits={queuedEdits}
-                    queuedDeletes={queuedDeletes}
-                    animationScopeKey={gridAnimationScopeKey}
-                    onSortColumnsChange={handleSortColumnsChange}
-                    onQueuedEditsChange={setQueuedEdits}
-                    onQueuedSaveErrorChange={setQueuedSaveError}
-                    onSelectedRowIdChange={setSelectedRowId}
-                    onQueuedDeletesChange={setQueuedDeletes}
-                  />
-                </div>
-              </Panel>
-              <Separator className={styles.resizeHandle} />
-              <Panel className={styles.detailsPanel} defaultSize="32%" minSize="22%" maxSize="45%">
-                <RowMutationSidebar
-                  key={`edit:${selectedRowId}`}
-                  mode="edit"
-                  tableName={table}
-                  schemaColumns={schemaColumns}
-                  targetRowId={selectedRowId}
-                  rowValues={selectedRowValues}
-                  onCancel={() => {
-                    setSelectedRowId(null);
-                  }}
-                  onSave={handleSaveSelectedRow}
-                  onDelete={async () => {
-                    await db.deleteDurable(tableProxy, selectedRowId, {
-                      tier: mutationDurabilityTier,
-                    });
-                    setSelectedRowId(null);
-                  }}
+          <Group className={styles.contentPanels} orientation="horizontal">
+            <Panel className={styles.gridPanel} defaultSize="68%" minSize="35%">
+              <div className={styles.gridFrame}>
+                <PlainTableView
+                  rows={visibleRows}
+                  gridColumns={gridColumns}
+                  sorting={sorting}
+                  schema={schema}
+                  queryOptions={queryOptions}
+                  schemaColumnById={schemaColumnById}
+                  queuedEdits={queuedEdits}
+                  queuedDeletes={queuedDeletes}
+                  animationScopeKey={gridAnimationScopeKey}
+                  onSortColumnsChange={handleSortColumnsChange}
+                  onQueuedEditsChange={setQueuedEdits}
+                  onQueuedSaveErrorChange={setQueuedSaveError}
+                  onSelectedRowIdChange={setSelectedRowId}
+                  onQueuedDeletesChange={setQueuedDeletes}
                 />
-              </Panel>
-            </Group>
-          ) : (
-            <div className={styles.gridFrame}>
-              <PlainTableView
-                rows={visibleRows}
-                gridColumns={gridColumns}
-                sorting={sorting}
-                schemaColumnById={schemaColumnById}
-                queuedEdits={queuedEdits}
-                queuedDeletes={queuedDeletes}
-                animationScopeKey={gridAnimationScopeKey}
-                onSortColumnsChange={handleSortColumnsChange}
-                onQueuedEditsChange={setQueuedEdits}
-                onQueuedSaveErrorChange={setQueuedSaveError}
-                onSelectedRowIdChange={setSelectedRowId}
-                onQueuedDeletesChange={setQueuedDeletes}
+              </div>
+            </Panel>
+            <Separator className={styles.resizeHandle} />
+            <Panel className={styles.detailsPanel} defaultSize="32%" minSize="22%" maxSize="45%">
+              <RowMutationSidebar
+                key={`edit:${selectedRowId ?? "empty"}`}
+                mode="edit"
+                tableName={table}
+                schemaColumns={schemaColumns}
+                targetRowId={selectedRowId}
+                rowValues={selectedRowValues}
+                onSave={handleSaveSelectedRow}
+                onDelete={async () => {
+                  if (!selectedRowId) {
+                    return;
+                  }
+                  await db.deleteDurable(tableProxy, selectedRowId, {
+                    tier: mutationDurabilityTier,
+                  });
+                  setSelectedRowId(null);
+                }}
               />
-            </div>
-          )}
+            </Panel>
+          </Group>
         </div>
         <div className={styles.bottomRail}>
           {hasQueuedChanges || queuedSaveError ? (
@@ -1181,30 +1203,6 @@ function QueuedCellEditor({
     );
   }
 
-  if (schemaColumn.column_type.type === "Boolean") {
-    return (
-      <select
-        aria-label={`Edit ${schemaColumn.name}`}
-        className={styles.inlineEditorSelect}
-        autoFocus
-        value={value}
-        onChange={(event) => {
-          updateValue(event.target.value);
-        }}
-        onBlur={commit}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") {
-            onClose(false, false);
-          }
-        }}
-      >
-        {schemaColumn.nullable ? <option value="">null</option> : null}
-        <option value="true">true</option>
-        <option value="false">false</option>
-      </select>
-    );
-  }
-
   if (
     schemaColumn.column_type.type === "Json" ||
     schemaColumn.column_type.type === "Array" ||
@@ -1254,10 +1252,114 @@ function QueuedCellEditor({
   );
 }
 
+function BooleanCellCheckbox({
+  checked,
+  indeterminate,
+  label,
+  onToggle,
+}: {
+  checked: boolean;
+  indeterminate: boolean;
+  label: string;
+  onToggle: (checked: boolean) => void;
+}) {
+  const checkboxRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!checkboxRef.current) {
+      return;
+    }
+
+    checkboxRef.current.indeterminate = indeterminate;
+  }, [indeterminate]);
+
+  return (
+    <input
+      ref={checkboxRef}
+      type="checkbox"
+      className={styles.booleanCellCheckbox}
+      aria-label={label}
+      checked={checked}
+      onMouseDown={(event) => {
+        event.stopPropagation();
+      }}
+      onClick={(event) => {
+        event.stopPropagation();
+      }}
+      onDoubleClick={(event) => {
+        event.stopPropagation();
+      }}
+      onChange={(event) => {
+        event.stopPropagation();
+        onToggle(event.target.checked);
+      }}
+    />
+  );
+}
+
+function RelationCell({
+  schema,
+  relationTable,
+  relationId,
+  queryOptions,
+}: {
+  schema: Record<string, { columns: ColumnDescriptor[] }>;
+  relationTable: string;
+  relationId: string;
+  queryOptions: { propagation: "full" | "local-only"; visibility: "hidden_from_live_query_list" };
+}) {
+  const queryBuilder = useMemo(
+    () => new GenericQueryBuilder(relationTable, schema).where({ id: relationId }).limit(1),
+    [relationId, relationTable, schema],
+  );
+  const relationRows = useAll<DynamicTableRow>(queryBuilder, queryOptions) ?? EMPTY_ROWS;
+  const relationRow = relationRows[0];
+  const displayColumn = useMemo(
+    () => getRelationDisplayColumn(schema, relationTable),
+    [relationTable, schema],
+  );
+  const displayValue =
+    relationRow && displayColumn
+      ? formatCellValue(relationRow[displayColumn.name])
+      : formatCellValue(relationId);
+  const href = buildRelationFilterHref(relationTable, relationId);
+
+  return (
+    <div className={styles.relationCell} title={`${relationTable}.${relationId}`}>
+      <span className={styles.cellContent}>{displayValue}</span>
+      <Link
+        to={href}
+        className={styles.relationLink}
+        aria-label={`Open ${displayValue} in ${relationTable}`}
+        onClick={(event) => {
+          event.stopPropagation();
+        }}
+        onMouseDown={(event) => {
+          event.stopPropagation();
+        }}
+      >
+        <svg
+          className={styles.relationLinkIcon}
+          viewBox="0 0 16 16"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <path
+            d="M6 3h7v7h-1.5V5.56l-6.97 6.97-1.06-1.06 6.97-6.97H6V3zm-2 2H2.5v8h8V12H4V5z"
+            fill="currentColor"
+          />
+        </svg>
+      </Link>
+    </div>
+  );
+}
+
 function PlainTableView({
   rows,
   gridColumns,
   sorting,
+  schema,
+  queryOptions,
   schemaColumnById,
   queuedEdits,
   queuedDeletes,
@@ -1271,6 +1373,8 @@ function PlainTableView({
   rows: DynamicTableRow[];
   gridColumns: GridColumn[];
   sorting: readonly SortColumn[];
+  schema: Record<string, { columns: ColumnDescriptor[] }>;
+  queryOptions: { propagation: "full" | "local-only"; visibility: "hidden_from_live_query_list" };
   schemaColumnById: Map<string, ColumnDescriptor>;
   queuedEdits: Record<string, QueuedRowEdits>;
   queuedDeletes: Set<string>;
@@ -1349,7 +1453,10 @@ function PlainTableView({
     const dataColumns = gridColumns.map((column): Column<EditableGridRow> => {
       const isIdColumn = column.id === "id";
       const schemaColumn = schemaColumnById.get(column.id);
-      const isEditable = schemaColumn ? getFieldReadOnlyReason(schemaColumn) === null : false;
+      const isEditable =
+        schemaColumn &&
+        getFieldReadOnlyReason(schemaColumn) === null &&
+        schemaColumn.column_type.type !== "Boolean";
 
       return {
         key: column.id,
@@ -1366,7 +1473,55 @@ function PlainTableView({
             ? `${styles.dataGridCell} ${styles.cellUpdated}`
             : styles.dataGridCell,
         renderCell: ({ row }) => {
-          const value = formatCellValue(row.row[column.accessorKey]);
+          const rawValue = row.row[column.accessorKey];
+          const value = formatCellValue(rawValue);
+
+          if (schemaColumn?.column_type.type === "Boolean") {
+            const rowId = getGridRowId(row.sourceRow);
+            return (
+              <div className={styles.booleanCell}>
+                <BooleanCellCheckbox
+                  label={`Toggle ${column.accessorKey} for ${rowId}`}
+                  checked={rawValue === true || rawValue === "true"}
+                  indeterminate={schemaColumn.nullable && value.length === 0}
+                  onToggle={(checked) => {
+                    onQueuedSaveErrorChange(null);
+                    onQueuedEditsChange((currentQueuedEdits) => {
+                      const nextValueText = checked ? "true" : "false";
+                      const sourceValueText = getQueuedEditText(row.sourceRow[column.accessorKey]);
+
+                      if (nextValueText === sourceValueText) {
+                        return removeQueuedCellEdit(currentQueuedEdits, rowId, column.accessorKey);
+                      }
+
+                      return {
+                        ...currentQueuedEdits,
+                        [rowId]: {
+                          ...currentQueuedEdits[rowId],
+                          [column.accessorKey]: { text: nextValueText },
+                        },
+                      };
+                    });
+                  }}
+                />
+              </div>
+            );
+          }
+
+          if (
+            schemaColumn?.references &&
+            typeof rawValue === "string" &&
+            rawValue.trim().length > 0
+          ) {
+            return (
+              <RelationCell
+                schema={schema}
+                relationTable={schemaColumn.references}
+                relationId={rawValue}
+                queryOptions={queryOptions}
+              />
+            );
+          }
 
           return (
             <div className={styles.cellContent} title={value}>
@@ -1374,14 +1529,22 @@ function PlainTableView({
             </div>
           );
         },
-        renderEditCell: schemaColumn
-          ? (props) => <QueuedCellEditor {...props} schemaColumn={schemaColumn} />
-          : undefined,
+        renderEditCell:
+          schemaColumn && isEditable
+            ? (props) => <QueuedCellEditor {...props} schemaColumn={schemaColumn} />
+            : undefined,
       };
     });
 
     return dataColumns;
-  }, [gridColumns, schemaColumnById]);
+  }, [
+    gridColumns,
+    onQueuedEditsChange,
+    onQueuedSaveErrorChange,
+    queryOptions,
+    schema,
+    schemaColumnById,
+  ]);
   const handleRowsChange = (
     nextRows: EditableGridRow[],
     data: RowsChangeData<EditableGridRow>,
@@ -1434,6 +1597,10 @@ function PlainTableView({
         clearPendingSidebarOpen();
       }}
       onCellKeyDown={(args, event) => {
+        if (args.mode === "EDIT") {
+          return;
+        }
+
         if (event.key === "Backspace" || event.key === "Delete") {
           const rowId = args.row ? getGridRowId(args.row.sourceRow) : null;
           if (rowId) {

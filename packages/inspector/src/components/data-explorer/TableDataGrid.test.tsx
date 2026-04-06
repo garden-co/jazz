@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TableDataGrid } from "./TableDataGrid";
 
@@ -7,6 +8,7 @@ const mockUpdateDurable = vi.fn();
 const mockInsertDurable = vi.fn();
 const mockDeleteDurable = vi.fn();
 let currentRows: Array<Record<string, unknown>>;
+let currentReferenceRowsByTable: Record<string, Array<Record<string, unknown>>>;
 
 function getContainingCell(element: HTMLElement | null): HTMLElement | null {
   return element?.closest('[role="gridcell"], td') ?? null;
@@ -14,6 +16,18 @@ function getContainingCell(element: HTMLElement | null): HTMLElement | null {
 
 function getContainingRow(element: HTMLElement | null): HTMLElement | null {
   return element?.closest('[role="row"], tr') ?? null;
+}
+
+function renderGridUi() {
+  return (
+    <MemoryRouter initialEntries={["/data-explorer/todos/data"]}>
+      <TableDataGrid />
+    </MemoryRouter>
+  );
+}
+
+function renderGrid() {
+  return render(renderGridUi());
 }
 
 const mockWasmSchema = {
@@ -24,6 +38,12 @@ const mockWasmSchema = {
       { name: "meta", column_type: { type: "Row", columns: [] }, nullable: true },
       { name: "owner_id", column_type: { type: "Uuid" }, nullable: true, references: "users" },
       { name: "blob", column_type: { type: "Bytea" }, nullable: true },
+    ],
+  },
+  users: {
+    columns: [
+      { name: "displayName", column_type: { type: "Text" }, nullable: false },
+      { name: "email", column_type: { type: "Text" }, nullable: false },
     ],
   },
 };
@@ -78,6 +98,12 @@ describe("TableDataGrid", () => {
         blob: new Uint8Array([5, 6]),
       },
     ];
+    currentReferenceRowsByTable = {
+      users: [
+        { id: "owner-a", displayName: "Alice", email: "alice@example.test" },
+        { id: "owner-b", displayName: "Bob", email: "bob@example.test" },
+      ],
+    };
 
     mockUpdateDurable.mockReset();
     mockInsertDurable.mockReset();
@@ -86,11 +112,33 @@ describe("TableDataGrid", () => {
     mockInsertDurable.mockResolvedValue({ id: "new-row" });
     mockDeleteDurable.mockResolvedValue(undefined);
     mockUseAll.mockReset();
-    mockUseAll.mockImplementation(() => currentRows);
+    mockUseAll.mockImplementation((query) => {
+      const builtQuery =
+        query &&
+        typeof query === "object" &&
+        "_build" in query &&
+        typeof query._build === "function"
+          ? JSON.parse(query._build())
+          : null;
+
+      if (!builtQuery || builtQuery.table === "todos") {
+        return currentRows;
+      }
+
+      const tableRows = currentReferenceRowsByTable[builtQuery.table] ?? [];
+      return tableRows.filter((row) =>
+        builtQuery.conditions.every((condition: { column: string; op: string; value: unknown }) => {
+          if (condition.op !== "eq") {
+            return true;
+          }
+          return row[condition.column] === condition.value;
+        }),
+      );
+    });
   });
 
   it("renders schema-derived columns and reactive rows", () => {
-    render(<TableDataGrid />);
+    renderGrid();
 
     expect(screen.getByRole("heading", { name: "todos" })).not.toBeNull();
     expect(screen.queryByText("6 columns · 2 rows on page · 0 filters")).toBeNull();
@@ -109,8 +157,35 @@ describe("TableDataGrid", () => {
     expect((screen.getByLabelText("Rows per page") as HTMLSelectElement).value).toBe("25");
   });
 
+  it("renders reference cells as links to the related table filtered by id", () => {
+    renderGrid();
+
+    expect(screen.getByText("Alice")).not.toBeNull();
+    const relationLink = screen.getByRole("link", { name: "Open Alice in users" });
+    const href = relationLink.getAttribute("href");
+    expect(href).not.toBeNull();
+
+    const url = new URL(href!, "https://inspector.test");
+    expect(url.pathname).toBe("/data-explorer/users/data");
+    expect(JSON.parse(url.searchParams.get("filters") ?? "[]")).toMatchObject([
+      {
+        column: "id",
+        operator: "eq",
+        value: "owner-a",
+      },
+    ]);
+  });
+
+  it("keeps the edit sidebar visible even when no row is selected", () => {
+    renderGrid();
+
+    expect(screen.getByRole("heading", { name: "Edit row" })).not.toBeNull();
+    expect(screen.getByText("Select a row from the table to edit it.")).not.toBeNull();
+    expect(screen.getAllByRole("separator")).toHaveLength(1);
+  });
+
   it("updates query sorting when a sortable column header is clicked", () => {
-    render(<TableDataGrid />);
+    renderGrid();
 
     const firstQuery = mockUseAll.mock.calls[0]?.[0] as { _build: () => string };
     expect(JSON.parse(firstQuery._build())).toMatchObject({
@@ -131,7 +206,7 @@ describe("TableDataGrid", () => {
   });
 
   it("subscribes with local-only propagation in extension mode", () => {
-    render(<TableDataGrid />);
+    renderGrid();
 
     expect(mockUseAll).toHaveBeenCalledWith(
       expect.any(Object),
@@ -143,7 +218,7 @@ describe("TableDataGrid", () => {
   });
 
   it("adds a where clause and compiles it into query conditions", () => {
-    render(<TableDataGrid />);
+    renderGrid();
 
     fireEvent.click(screen.getByRole("button", { name: /Filter/ }));
     fireEvent.change(screen.getByLabelText("Column"), { target: { value: "title" } });
@@ -161,7 +236,7 @@ describe("TableDataGrid", () => {
   });
 
   it("opens row edit sidebar and updates editable fields", () => {
-    render(<TableDataGrid />);
+    renderGrid();
 
     fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0] as Element);
 
@@ -169,7 +244,7 @@ describe("TableDataGrid", () => {
     expect(screen.getByText("Read-only: binary field")).not.toBeNull();
 
     fireEvent.change(screen.getByLabelText("title"), { target: { value: "zeta updated" } });
-    fireEvent.change(screen.getByLabelText("done"), { target: { value: "true" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "done" }));
     fireEvent.change(screen.getByLabelText("owner_id"), { target: { value: "owner-c" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
@@ -186,19 +261,19 @@ describe("TableDataGrid", () => {
   });
 
   it("preserves unsaved edits when the current row live-updates", () => {
-    const { rerender } = render(<TableDataGrid />);
+    const { rerender } = renderGrid();
 
     fireEvent.click(screen.getAllByRole("button", { name: "Edit" })[0] as Element);
     fireEvent.change(screen.getByLabelText("title"), { target: { value: "local draft" } });
 
     currentRows = [{ ...currentRows[0], title: "server pushed update" }, currentRows[1]!];
-    rerender(<TableDataGrid />);
+    rerender(renderGridUi());
 
     expect((screen.getByLabelText("title") as HTMLInputElement).value).toBe("local draft");
   });
 
   it("uses the same editable sidebar for selected rows and saves changes from it", async () => {
-    render(<TableDataGrid />);
+    renderGrid();
 
     fireEvent.click(screen.getByRole("gridcell", { name: "zeta" }));
 
@@ -208,7 +283,9 @@ describe("TableDataGrid", () => {
     expect(screen.getAllByRole("separator")).toHaveLength(1);
     expect(screen.getByDisplayValue("row-2")).not.toBeNull();
     expect(screen.getByDisplayValue("zeta")).not.toBeNull();
-    expect(screen.getByDisplayValue("false")).not.toBeNull();
+    expect((screen.getByRole("checkbox", { name: "done" }) as HTMLInputElement).checked).toBe(
+      false,
+    );
 
     fireEvent.change(screen.getByLabelText("title"), { target: { value: "selected row edit" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -226,6 +303,22 @@ describe("TableDataGrid", () => {
         { tier: "worker" },
       );
     });
+  });
+
+  it("clears the selected row on escape while keeping the edit sidebar visible", async () => {
+    renderGrid();
+
+    fireEvent.click(screen.getByRole("gridcell", { name: "zeta" }));
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("row-2")).not.toBeNull();
+    });
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(screen.getByRole("heading", { name: "Edit row" })).not.toBeNull();
+    expect(screen.queryByDisplayValue("row-2")).toBeNull();
+    expect(screen.getByText("Select a row from the table to edit it.")).not.toBeNull();
   });
 
   it("queues inline cell edits on double click and saves them from the banner", async () => {
@@ -257,8 +350,50 @@ describe("TableDataGrid", () => {
     expect(screen.queryByText(/queued change across/i)).toBeNull();
   });
 
+  it("renders boolean table cells as always-on checkboxes and saves queued toggles", async () => {
+    renderGrid();
+
+    const checkbox = screen.getByRole("checkbox", { name: "Toggle done for row-2" });
+    expect((checkbox as HTMLInputElement).checked).toBe(false);
+
+    fireEvent.click(checkbox);
+
+    expect(screen.getByText("Queued")).not.toBeNull();
+    expect(screen.getByText("1 edit across 1 row")).not.toBeNull();
+    expect(mockUpdateDurable).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+    await waitFor(() => {
+      expect(mockUpdateDurable).toHaveBeenCalledWith(
+        expect.objectContaining({ _table: "todos" }),
+        "row-2",
+        expect.objectContaining({
+          done: true,
+        }),
+        { tier: "worker" },
+      );
+    });
+  });
+
+  it("does not queue row deletion when backspace is pressed inside an active cell editor", () => {
+    render(
+      <MemoryRouter initialEntries={["/data-explorer/todos/data"]}>
+        <TableDataGrid />
+      </MemoryRouter>,
+    );
+
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+
+    const editor = screen.getByLabelText("Edit title");
+    fireEvent.keyDown(editor, { key: "Backspace" });
+
+    expect(screen.queryByText(/row will be deleted/i)).toBeNull();
+    expect(screen.getByLabelText("Edit title")).not.toBeNull();
+  });
+
   it("caps data column width so long cell values do not stretch the whole grid", () => {
-    render(<TableDataGrid />);
+    renderGrid();
 
     const titleMeasuringCell = document.querySelector(
       '[data-measuring-cell-key="title"]',
@@ -268,17 +403,17 @@ describe("TableDataGrid", () => {
   });
 
   it("renders without frozen columns so actions stay last and id scrolls normally", () => {
-    render(<TableDataGrid />);
+    renderGrid();
 
     expect(document.querySelector(".rdg-cell-frozen")).toBeNull();
   });
 
   it("marks changed cells so live updates can pulse", () => {
     vi.useFakeTimers();
-    const { rerender } = render(<TableDataGrid />);
+    const { rerender } = renderGrid();
 
     currentRows = [{ ...currentRows[0], title: "zeta updated live" }, currentRows[1]!];
-    rerender(<TableDataGrid />);
+    rerender(renderGridUi());
 
     const changedCell = getContainingCell(screen.getByText("zeta updated live"));
     expect(changedCell?.getAttribute("data-cell-change-state")).toBe("updated");
@@ -294,7 +429,7 @@ describe("TableDataGrid", () => {
 
   it("highlights rows that were inserted by a live update", () => {
     vi.useFakeTimers();
-    const { rerender } = render(<TableDataGrid />);
+    const { rerender } = renderGrid();
 
     currentRows = [
       {
@@ -307,7 +442,7 @@ describe("TableDataGrid", () => {
       },
       ...currentRows,
     ];
-    rerender(<TableDataGrid />);
+    rerender(renderGridUi());
 
     expect(getContainingRow(screen.getByText("row-3"))?.getAttribute("data-row-change-state")).toBe(
       "added",
@@ -322,7 +457,7 @@ describe("TableDataGrid", () => {
 
   it("does not highlight rows when the first result set loads", () => {
     currentRows = [];
-    const { rerender } = render(<TableDataGrid />);
+    const { rerender } = renderGrid();
 
     currentRows = [
       {
@@ -350,7 +485,7 @@ describe("TableDataGrid", () => {
         blob: new Uint8Array([5, 6]),
       },
     ];
-    rerender(<TableDataGrid />);
+    rerender(renderGridUi());
 
     expect(getContainingRow(screen.getByText("row-3"))?.dataset.rowChangeState).toBe(undefined);
     expect(getContainingRow(screen.getByText("row-2"))?.dataset.rowChangeState).toBe(undefined);
@@ -359,13 +494,13 @@ describe("TableDataGrid", () => {
 
   it("keeps removed rows around briefly so they can animate out", () => {
     vi.useFakeTimers();
-    const { rerender } = render(<TableDataGrid />);
+    const { rerender } = renderGrid();
 
     // before: row-2, row-1
     // after:  row-1
     // row-2 should stay rendered long enough to fade out.
     currentRows = [currentRows[1]!];
-    rerender(<TableDataGrid />);
+    rerender(renderGridUi());
 
     expect(getContainingRow(screen.getByText("row-2"))?.getAttribute("data-row-change-state")).toBe(
       "removed",
@@ -379,7 +514,7 @@ describe("TableDataGrid", () => {
   });
 
   it("opens insert sidebar and inserts a new row", () => {
-    render(<TableDataGrid />);
+    renderGrid();
 
     fireEvent.click(screen.getByRole("button", { name: "Insert" }));
 
@@ -387,7 +522,7 @@ describe("TableDataGrid", () => {
     expect(screen.getByDisplayValue("auto-generated")).not.toBeNull();
 
     fireEvent.change(screen.getByLabelText("title"), { target: { value: "new todo" } });
-    fireEvent.change(screen.getByLabelText("done"), { target: { value: "true" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "done" }));
     fireEvent.click(screen.getAllByRole("button", { name: "Insert" })[1] as Element);
 
     expect(mockInsertDurable).toHaveBeenCalledWith(
@@ -402,7 +537,7 @@ describe("TableDataGrid", () => {
   });
 
   it("closes sidebar when clicking outside", () => {
-    render(<TableDataGrid />);
+    renderGrid();
 
     fireEvent.click(screen.getByRole("button", { name: "Insert" }));
     expect(screen.getByRole("heading", { name: "Insert row" })).not.toBeNull();
@@ -413,7 +548,7 @@ describe("TableDataGrid", () => {
 
   it("deletes a row when delete is confirmed", () => {
     const confirmSpy = vi.spyOn(globalThis, "confirm").mockReturnValue(true);
-    render(<TableDataGrid />);
+    renderGrid();
 
     fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0] as Element);
 
@@ -428,7 +563,7 @@ describe("TableDataGrid", () => {
 
   it("does not delete when delete is canceled", () => {
     const confirmSpy = vi.spyOn(globalThis, "confirm").mockReturnValue(false);
-    render(<TableDataGrid />);
+    renderGrid();
 
     fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0] as Element);
 

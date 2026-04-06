@@ -38,6 +38,19 @@
   padding: 12px 14px;
 }
 
+.emptyState {
+  display: grid;
+  align-content: start;
+  min-height: 0;
+  padding: 16px 14px;
+  color: #93a1b4;
+  font-size: 13px;
+}
+
+.emptyState p {
+  margin: 0;
+}
+
 .fieldWrap {
   display: grid;
   gap: 4px;
@@ -48,10 +61,29 @@
   gap: 6px;
 }
 
+.fieldHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .label {
   font-size: 12px;
   font-weight: 700;
   color: #95a4b7;
+}
+
+.showLink {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: #9aa8bb;
+  text-decoration: none;
+}
+
+.showLink:hover {
+  color: #d3dceb;
+  text-decoration: underline;
 }
 
 .input,

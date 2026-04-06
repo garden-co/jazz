@@ -219,10 +219,46 @@
 }
 
 .cellContent {
+  display: block;
   inline-size: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.booleanCell {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  inline-size: 100%;
+  block-size: 100%;
+  padding-inline-start: 8px;
+}
+
+.relationCell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  inline-size: 100%;
+  min-inline-size: 0;
+}
+
+.relationLink {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: #9aa8bb;
+  text-decoration: none;
+}
+
+.relationLink:hover {
+  color: #d3dceb;
+}
+
+.relationLinkIcon {
+  inline-size: 13px;
+  block-size: 13px;
 }
 
 .inlineEditorInput,
@@ -254,6 +290,14 @@
 .inlineEditorTextarea:focus {
   outline: 1px solid #55b5bf;
   border-color: #55b5bf;
+}
+
+.booleanCellCheckbox {
+  inline-size: 16px;
+  block-size: 16px;
+  margin: 0;
+  cursor: pointer;
+  transform: translateY(1px);
 }
 
 .rowAdded :global(.rdg-cell) {
