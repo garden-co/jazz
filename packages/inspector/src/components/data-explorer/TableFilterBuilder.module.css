@@ -54,20 +54,44 @@
 }
 
 .summaryBox {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
   padding: 0 12px 8px;
 }
 
-.summary {
-  margin: 0;
-  display: block;
+.filterTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px 3px 8px;
+  border: 1px solid #232c3a;
+  border-radius: 4px;
+  background: #151d27;
+}
+
+.filterTagText {
   color: #9fb0c8;
   font-size: 12px;
-  line-height: 1.45;
-  font-family:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
-    monospace;
-  white-space: normal;
-  word-break: break-word;
+}
+
+.filterTagRemove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  color: #6b7a8d;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.filterTagRemove:hover {
+  color: #d3dceb;
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .modal {

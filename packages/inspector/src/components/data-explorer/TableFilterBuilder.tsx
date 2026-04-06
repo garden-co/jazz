@@ -213,9 +213,6 @@ export const TableFilterBuilder = forwardRef<TableFilterBuilderHandle, TableFilt
       : [];
 
     const shouldHideValueInput = draft.operator === "isNull" && selectedColumn !== null;
-    const activeFiltersSummary = clauses
-      .map((clause) => `${clause.column} ${clause.operator} ${formatClauseValue(clause.value)}`)
-      .join(" AND ");
     const filterButtonLabel = clauses.length > 0 ? `Filter (${clauses.length})` : "Filter";
 
     const openDialog = () => {
@@ -310,7 +307,21 @@ export const TableFilterBuilder = forwardRef<TableFilterBuilderHandle, TableFilt
           ) : null}
           {clauses.length > 0 ? (
             <div className={styles.summaryBox}>
-              <code className={styles.summary}>{activeFiltersSummary}</code>
+              {clauses.map((clause) => (
+                <span key={clause.id} className={styles.filterTag}>
+                  <code className={styles.filterTagText}>
+                    {clause.column} {clause.operator} {formatClauseValue(clause.value)}
+                  </code>
+                  <button
+                    type="button"
+                    className={styles.filterTagRemove}
+                    onClick={() => handleRemoveClause(clause.id)}
+                    aria-label={`Remove filter on ${clause.column}`}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
             </div>
           ) : null}
         </section>

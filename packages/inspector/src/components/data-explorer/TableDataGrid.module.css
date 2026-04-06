@@ -200,6 +200,10 @@
   --rdg-cell-frozen-box-shadow: 2px 0 10px -6px rgba(0, 0, 0, 0.55);
 }
 
+.dataGrid:focus-visible {
+  outline: none;
+}
+
 .dataGrid :global(.rdg-cell:last-child) {
   border-inline-end: none;
 }
