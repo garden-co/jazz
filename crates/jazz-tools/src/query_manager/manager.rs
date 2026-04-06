@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::commit::CommitId;
 use crate::metadata::MetadataKey;
 use crate::object::{BranchName, ObjectId};
-use crate::object_manager::{AllObjectUpdate, RowObjectUpdate};
+use crate::object_manager::RowObjectUpdate;
 use crate::row_regions::StoredRowVersion;
 use crate::schema_manager::{LensTransformer, SchemaContext};
 use crate::storage::Storage;
@@ -458,10 +458,7 @@ impl QueryManager {
     ///
     /// Row-level security is evaluated via `process()` which handles pending
     /// permission checks from SyncManager.
-    pub fn new(mut sync_manager: SyncManager) -> Self {
-        // Subscribe to all object updates so we receive sync'd data
-        sync_manager.object_manager.subscribe_all();
-
+    pub fn new(sync_manager: SyncManager) -> Self {
         Self {
             sync_manager,
             schema: Arc::new(Schema::new()),
@@ -867,15 +864,6 @@ impl QueryManager {
         }
         for update in row_updates {
             self.handle_row_update(storage, update);
-        }
-
-        // 2b. Process legacy object updates (currently catalogue and non-row objects).
-        let updates = self.sync_manager.object_manager.take_all_object_updates();
-        if !updates.is_empty() {
-            tracing::debug!(count = updates.len(), "processing object updates");
-        }
-        for update in updates {
-            self.handle_object_update(storage, update);
         }
 
         // 3. Process pending query subscriptions from downstream clients
@@ -1361,22 +1349,6 @@ impl QueryManager {
 
     pub(super) fn handle_row_update(&mut self, storage: &mut dyn Storage, update: RowObjectUpdate) {
         self.handle_row_update_with_origin(storage, update, false);
-    }
-
-    /// Handle an object update from the global subscription.
-    pub(super) fn handle_object_update(
-        &mut self,
-        _storage: &mut dyn Storage,
-        update: AllObjectUpdate,
-    ) {
-        // Row objects now flow through ObjectManager's row-native update lane.
-        if update.metadata.contains_key(MetadataKey::Table.as_str()) {
-            tracing::warn!(
-                object_id = %update.object_id,
-                branch = %update.branch_name,
-                "dropping legacy object-shaped row update"
-            );
-        }
     }
     /// Mark subscriptions dirty for a table based on update origin.
     fn mark_subscriptions_dirty_with_origin(&mut self, table: &str, local_update: bool) {

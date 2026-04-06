@@ -23,11 +23,40 @@ struct RowRegionReadFailingStorage {
     inner: MemoryStorage,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct LegacyStorageCallCounts {
+    load_branch: usize,
+    append_commit: usize,
+    store_ack_tier: usize,
+}
+
+struct LegacyPersistenceObservingStorage {
+    inner: MemoryStorage,
+    calls: Arc<Mutex<LegacyStorageCallCounts>>,
+}
+
 impl RowRegionReadFailingStorage {
     fn new() -> Self {
         Self {
             inner: MemoryStorage::new(),
         }
+    }
+}
+
+impl LegacyPersistenceObservingStorage {
+    fn new(calls: Arc<Mutex<LegacyStorageCallCounts>>) -> Self {
+        Self {
+            inner: MemoryStorage::new(),
+            calls,
+        }
+    }
+
+    fn record<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut LegacyStorageCallCounts) -> R,
+    {
+        let mut calls = self.calls.lock().expect("storage call counts should lock");
+        f(&mut calls)
     }
 }
 
@@ -194,6 +223,232 @@ impl Storage for RowRegionReadFailingStorage {
         Err(StorageError::IoError(
             "row-region reads deliberately disabled in this test".to_string(),
         ))
+    }
+
+    fn index_insert(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .index_insert(table, column, branch, value, row_id)
+    }
+
+    fn index_remove(
+        &mut self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+        row_id: ObjectId,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .index_remove(table, column, branch, value, row_id)
+    }
+
+    fn index_lookup(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        value: &Value,
+    ) -> Vec<ObjectId> {
+        self.inner.index_lookup(table, column, branch, value)
+    }
+
+    fn index_range(
+        &self,
+        table: &str,
+        column: &str,
+        branch: &str,
+        start: std::ops::Bound<&Value>,
+        end: std::ops::Bound<&Value>,
+    ) -> Vec<ObjectId> {
+        self.inner.index_range(table, column, branch, start, end)
+    }
+
+    fn index_scan_all(&self, table: &str, column: &str, branch: &str) -> Vec<ObjectId> {
+        self.inner.index_scan_all(table, column, branch)
+    }
+
+    fn flush(&self) {
+        self.inner.flush();
+    }
+
+    fn flush_wal(&self) {
+        self.inner.flush_wal();
+    }
+
+    fn close(&self) -> Result<(), StorageError> {
+        self.inner.close()
+    }
+}
+
+impl Storage for LegacyPersistenceObservingStorage {
+    fn create_object(
+        &mut self,
+        id: ObjectId,
+        metadata: HashMap<String, String>,
+    ) -> Result<(), StorageError> {
+        self.inner.create_object(id, metadata)
+    }
+
+    fn load_object_metadata(
+        &self,
+        id: ObjectId,
+    ) -> Result<Option<HashMap<String, String>>, StorageError> {
+        self.inner.load_object_metadata(id)
+    }
+
+    fn scan_object_metadata(&self) -> Result<ObjectMetadataRows, StorageError> {
+        self.inner.scan_object_metadata()
+    }
+
+    fn load_branch(
+        &self,
+        object_id: ObjectId,
+        branch: &crate::object::BranchName,
+    ) -> Result<Option<LoadedBranch>, StorageError> {
+        self.record(|calls| calls.load_branch += 1);
+        self.inner.load_branch(object_id, branch)
+    }
+
+    fn append_commit(
+        &mut self,
+        object_id: ObjectId,
+        branch: &crate::object::BranchName,
+        commit: crate::commit::Commit,
+    ) -> Result<(), StorageError> {
+        self.record(|calls| calls.append_commit += 1);
+        self.inner.append_commit(object_id, branch, commit)
+    }
+
+    fn delete_commit(
+        &mut self,
+        object_id: ObjectId,
+        branch: &crate::object::BranchName,
+        commit_id: crate::commit::CommitId,
+    ) -> Result<(), StorageError> {
+        self.inner.delete_commit(object_id, branch, commit_id)
+    }
+
+    fn set_branch_tails(
+        &mut self,
+        object_id: ObjectId,
+        branch: &crate::object::BranchName,
+        tails: Option<std::collections::HashSet<crate::commit::CommitId>>,
+    ) -> Result<(), StorageError> {
+        self.inner.set_branch_tails(object_id, branch, tails)
+    }
+
+    fn store_ack_tier(
+        &mut self,
+        commit_id: crate::commit::CommitId,
+        tier: DurabilityTier,
+    ) -> Result<(), StorageError> {
+        self.record(|calls| calls.store_ack_tier += 1);
+        self.inner.store_ack_tier(commit_id, tier)
+    }
+
+    fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
+        self.inner.raw_table_put(table, key, value)
+    }
+
+    fn raw_table_delete(&mut self, table: &str, key: &str) -> Result<(), StorageError> {
+        self.inner.raw_table_delete(table, key)
+    }
+
+    fn raw_table_get(&self, table: &str, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.raw_table_get(table, key)
+    }
+
+    fn raw_table_scan_prefix(
+        &self,
+        table: &str,
+        prefix: &str,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_prefix(table, prefix)
+    }
+
+    fn raw_table_scan_range(
+        &self,
+        table: &str,
+        start: Option<&str>,
+        end: Option<&str>,
+    ) -> Result<RawTableRows, StorageError> {
+        self.inner.raw_table_scan_range(table, start, end)
+    }
+
+    fn append_history_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[crate::row_regions::StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        self.inner.append_history_region_rows(table, rows)
+    }
+
+    fn upsert_visible_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[crate::row_regions::StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        self.inner.upsert_visible_region_rows(table, rows)
+    }
+
+    fn patch_row_region_rows_by_batch(
+        &mut self,
+        table: &str,
+        batch_id: crate::row_regions::BatchId,
+        state: Option<crate::row_regions::RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .patch_row_region_rows_by_batch(table, batch_id, state, confirmed_tier)
+    }
+
+    fn scan_visible_region(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+        self.inner.scan_visible_region(table, branch)
+    }
+
+    fn load_visible_region_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<crate::row_regions::StoredRowVersion>, StorageError> {
+        self.inner.load_visible_region_row(table, branch, row_id)
+    }
+
+    fn scan_visible_region_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+        self.inner.scan_visible_region_row_versions(table, row_id)
+    }
+
+    fn scan_history_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+        self.inner.scan_history_row_versions(table, row_id)
+    }
+
+    fn scan_history_region(
+        &self,
+        table: &str,
+        branch: &str,
+        scan: crate::row_regions::HistoryScan,
+    ) -> Result<Vec<crate::row_regions::StoredRowVersion>, StorageError> {
+        self.inner.scan_history_region(table, branch, scan)
     }
 
     fn index_insert(
@@ -1688,6 +1943,34 @@ fn rc_insert_syncs_exact_row_version_without_row_region_reads() {
 }
 
 #[test]
+fn rc_row_writes_do_not_touch_legacy_commit_storage() {
+    let calls = Arc::new(Mutex::new(LegacyStorageCallCounts::default()));
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "row-no-legacy-commit-storage",
+        Box::new(LegacyPersistenceObservingStorage::new(Arc::clone(&calls))),
+    );
+
+    let (row_id, _row_values) = core
+        .insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+        .unwrap();
+
+    core.update(
+        row_id,
+        vec![("name".into(), Value::Text("Bob".into()))],
+        None,
+    )
+    .unwrap();
+    core.delete(row_id, None).unwrap();
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        LegacyStorageCallCounts::default(),
+        "row writes should persist only via row regions, not legacy branch commit storage"
+    );
+}
+
+#[test]
 fn rc_update_sync() {
     let mut s = create_3tier_rc();
     let (id, _row_values) =
@@ -1750,6 +2033,58 @@ fn rc_insert_persisted_resolves_on_worker_ack() {
         Ok(None) => panic!("Receiver should be resolved after Worker ack"),
         Err(_) => panic!("Receiver was cancelled"),
     }
+}
+
+#[test]
+fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
+    let calls = Arc::new(Mutex::new(LegacyStorageCallCounts::default()));
+    let mut core = create_runtime_with_boxed_storage(
+        test_schema(),
+        "row-no-legacy-ack-storage",
+        Box::new(LegacyPersistenceObservingStorage::new(Arc::clone(&calls))),
+    );
+
+    let ((row_id, _row_values), mut receiver) = core
+        .insert_persisted(
+            "users",
+            user_insert_values(ObjectId::new(), "Alice"),
+            None,
+            DurabilityTier::Worker,
+        )
+        .unwrap();
+
+    let branch_name = core.schema_manager().branch_name();
+    let version_id = core
+        .schema_manager()
+        .query_manager()
+        .sync_manager()
+        .object_manager
+        .visible_row(row_id, branch_name)
+        .expect("persisted insert should materialize a visible row")
+        .version_id();
+
+    core.push_sync_inbox(InboxEntry {
+        source: Source::Server(ServerId::new()),
+        payload: SyncPayload::RowVersionStateChanged {
+            row_id,
+            branch_name,
+            version_id,
+            state: None,
+            confirmed_tier: Some(DurabilityTier::Worker),
+        },
+    });
+    core.immediate_tick();
+
+    assert_eq!(
+        receiver.try_recv(),
+        Ok(Some(())),
+        "row persisted receiver should resolve from row-version state changes alone"
+    );
+    assert_eq!(
+        *calls.lock().unwrap(),
+        LegacyStorageCallCounts::default(),
+        "row durability updates should not touch legacy commit ack storage"
+    );
 }
 
 #[test]
