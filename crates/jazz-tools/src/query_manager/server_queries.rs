@@ -76,12 +76,8 @@ impl QueryManager {
         Some(row.row_provenance())
     }
 
-    fn payload_tip_provenance(payload: &SyncPayload) -> Option<RowProvenance> {
+    fn payload_row_provenance(payload: &SyncPayload) -> Option<RowProvenance> {
         match payload {
-            SyncPayload::ObjectUpdated { commits, .. } => commits
-                .iter()
-                .max_by_key(|commit| commit.timestamp)
-                .and_then(|commit| commit.row_provenance()),
             SyncPayload::RowVersionCreated { row, .. }
             | SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_provenance()),
             _ => None,
@@ -1266,7 +1262,7 @@ impl QueryManager {
             }
         };
         let provenance = match check.operation {
-            Operation::Insert => Self::payload_tip_provenance(&check.payload),
+            Operation::Insert => Self::payload_row_provenance(&check.payload),
             Operation::Delete => self.current_row_provenance(storage, object_id, branch_name),
             Operation::Update | Operation::Select => None,
         };
@@ -1352,7 +1348,7 @@ impl QueryManager {
         let check_policy = table_schema.policies.update.with_check.as_ref();
         let source_branch_schema_map = self.branch_schema_map.clone();
         let old_provenance = self.current_row_provenance(storage, object_id, branch_name);
-        let new_provenance = Self::payload_tip_provenance(&check.payload);
+        let new_provenance = Self::payload_row_provenance(&check.payload);
 
         if using_policy.is_none() && check_policy.is_none() {
             self.sync_manager.approve_permission_check(storage, check);

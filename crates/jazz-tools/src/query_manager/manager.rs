@@ -1139,8 +1139,19 @@ impl QueryManager {
     ///
     /// Used for loading schema/lens data from catalogue objects.
     pub(super) fn load_object_content(&self, object_id: ObjectId) -> Option<Vec<u8>> {
-        self.load_row_from_object_on_branch(object_id, "main")
-            .map(|(content, _)| content)
+        if let Some((content, _)) = self.load_row_from_object_on_branch(object_id, "main") {
+            return Some(content);
+        }
+
+        let object = self.sync_manager.object_manager.get(object_id)?;
+        let branch = object.branches.get(&BranchName::new("main"))?;
+
+        branch
+            .tips
+            .iter()
+            .filter_map(|tip_id| branch.commits.get(tip_id).map(|commit| (*tip_id, commit)))
+            .max_by_key(|(tip_id, commit)| (commit.timestamp, *tip_id))
+            .map(|(_, commit)| commit.content.clone())
     }
 
     fn parse_schema_hash_hex(hex_str: &str) -> Option<SchemaHash> {
