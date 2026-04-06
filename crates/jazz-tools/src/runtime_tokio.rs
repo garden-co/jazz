@@ -521,6 +521,12 @@ impl<S: Storage + Send + 'static> TokioRuntime<S> {
         Ok(core.schema_manager().get_known_schema(schema_hash).cloned())
     }
 
+    /// Return all registered migration lenses from catalogue state.
+    pub fn known_lenses(&self) -> Result<Vec<Lens>, RuntimeError> {
+        let core = self.core.lock().map_err(|_| RuntimeError::LockError)?;
+        Ok(core.schema_manager().lenses())
+    }
+
     /// Seed an additional known schema into the in-memory schema manager.
     pub fn add_known_schema(&self, schema: Schema) -> Result<(), RuntimeError> {
         let mut core = self.core.lock().map_err(|_| RuntimeError::LockError)?;

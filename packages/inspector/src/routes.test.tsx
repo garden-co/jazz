@@ -30,6 +30,27 @@ vi.mock("./components/data-explorer/TableSchemaDefinition", () => ({
   TableSchemaDefinition: () => <div>schema definition</div>,
 }));
 
+vi.mock("./pages/schema-explorer", () => ({
+  SchemaExplorer: () => (
+    <div>
+      schema explorer
+      <Outlet />
+    </div>
+  ),
+}));
+
+vi.mock("./pages/schema-explorer/SchemaCompatibilityView", () => ({
+  SchemaCompatibilityView: () => <div>compatibility view</div>,
+}));
+
+vi.mock("./pages/schema-explorer/SchemaComparisonView", () => ({
+  SchemaComparisonView: () => <div>comparison view</div>,
+}));
+
+vi.mock("./pages/schema-explorer/SingleSchemaView", () => ({
+  SingleSchemaView: () => <div>single schema view</div>,
+}));
+
 vi.mock("./pages/live-query", () => ({
   LiveQuery: () => <div>live query page</div>,
 }));
@@ -53,5 +74,18 @@ describe("InspectorRoutes", () => {
     );
 
     expect(screen.getByText("live query page")).not.toBeNull();
+  });
+
+  it("exposes schema compatibility and comparison routes", () => {
+    mockUseDevtoolsContext.mockReturnValue({ runtime: "standalone" });
+
+    render(
+      <MemoryRouter initialEntries={["/schemas/compatibility"]}>
+        <InspectorRoutes />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("schema explorer")).not.toBeNull();
+    expect(screen.getByText("compatibility view")).not.toBeNull();
   });
 });

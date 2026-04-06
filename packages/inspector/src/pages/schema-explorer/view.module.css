@@ -1,0 +1,88 @@
+.view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.copyBlock {
+  border: 1px solid #273344;
+  border-radius: 12px;
+  background: #131a24;
+  padding: 14px 16px;
+}
+
+.heading {
+  margin: 0;
+  color: #ecf3fb;
+  font-size: 16px;
+}
+
+.copy {
+  margin: 8px 0 0;
+  color: #93a4ba;
+  font-size: 13px;
+}
+
+.notice {
+  border: 1px dashed #33465b;
+  border-radius: 12px;
+  background: #131b25;
+  color: #95a7bd;
+  padding: 18px;
+}
+
+.inlineList {
+  display: grid;
+  gap: 8px;
+}
+
+.inlineListItem {
+  border: 1px solid #2a394a;
+  border-radius: 10px;
+  background: #141d29;
+  color: #b0bfd2;
+  font-size: 12px;
+  padding: 10px 12px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #9eabbd;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.field select {
+  border: 1px solid #36465d;
+  background: #202937;
+  color: #d6dde7;
+  border-radius: 8px;
+  padding: 8px 10px;
+  min-width: 180px;
+}
+
+.pathBadge {
+  border-radius: 999px;
+  padding: 9px 12px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.pathBadgeOk {
+  background: rgb(45 87 63 / 0.8);
+  color: #97e0b4;
+}
+
+.pathBadgeMissing {
+  background: rgb(73 56 27 / 0.82);
+  color: #ffdf8e;
+}
