@@ -74,19 +74,17 @@ All metrics are behind the `otel` feature flag. Dots in metric names become unde
 
 ### Connection metrics
 
-| Metric                         | Type          | Description                                                                                             | Dimensions                             |
-| ------------------------------ | ------------- | ------------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| `jazz.sync.connections.active` | UpDownCounter | Currently open event streams. Incremented on stream open, decremented on stream close (via Drop guard). | `app_id`, `env`, `worker`, `auth_type` |
-| `jazz.sync.connections.total`  | Counter       | Cumulative connections opened.                                                                          | `app_id`, `env`, `worker`, `auth_type` |
-
-`auth_type` values: `backend`, `backend_impersonation`, `jwt`, `anonymous`, `demo`, `unknown`.
+| Metric                         | Type          | Description                                                                                             | Dimensions                |
+| ------------------------------ | ------------- | ------------------------------------------------------------------------------------------------------- | ------------------------- |
+| `jazz.sync.connections.active` | UpDownCounter | Currently open event streams. Incremented on stream open, decremented on stream close (via Drop guard). | `app_id`, `env`, `worker` |
+| `jazz.sync.connections.total`  | Counter       | Cumulative connections opened.                                                                          | `app_id`, `env`, `worker` |
 
 ### Message throughput
 
-| Metric                        | Type    | Description                                                                              | Dimensions                                                        |
-| ----------------------------- | ------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `jazz.sync.messages.received` | Counter | Inbound sync payloads received via `POST /sync`. One increment per payload in the batch. | `app_id`, `env`, `payload_type`, `auth_type`, `direction=inbound` |
-| `jazz.sync.messages.sent`     | Counter | Outbound frames sent on event streams.                                                   | `app_id`, `env`, `payload_type`, `direction=outbound`             |
+| Metric                        | Type    | Description                                                                              | Dimensions                                            |
+| ----------------------------- | ------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `jazz.sync.messages.received` | Counter | Inbound sync payloads received via `POST /sync`. One increment per payload in the batch. | `app_id`, `env`, `payload_type`, `direction=inbound`  |
+| `jazz.sync.messages.sent`     | Counter | Outbound frames sent on event streams.                                                   | `app_id`, `env`, `payload_type`, `direction=outbound` |
 
 `payload_type` values: `ObjectUpdated`, `ObjectTruncated`, `QuerySubscription`, `QueryUnsubscription`, `PersistenceAck`, `QuerySettled`, `SchemaWarning`, `Error`.
 
@@ -98,9 +96,9 @@ All metrics are behind the `otel` feature flag. Dots in metric names become unde
 
 ### Sync handler latency
 
-| Metric                          | Type      | Description                                                                                  | Dimensions                   |
-| ------------------------------- | --------- | -------------------------------------------------------------------------------------------- | ---------------------------- |
-| `jazz.sync.handler.duration_ms` | Histogram | End-to-end time for a `POST /sync` batch, including worker dispatch and response collection. | `app_id`, `env`, `auth_type` |
+| Metric                          | Type      | Description                                                                                  | Dimensions      |
+| ------------------------------- | --------- | -------------------------------------------------------------------------------------------- | --------------- |
+| `jazz.sync.handler.duration_ms` | Histogram | End-to-end time for a `POST /sync` batch, including worker dispatch and response collection. | `app_id`, `env` |
 
 ### Worker command latency
 

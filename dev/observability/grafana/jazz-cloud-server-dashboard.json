@@ -168,7 +168,7 @@
       "targets": [
         {
           "expr": "jazz_sync_connections_active{app_id=~\"$app_id\", env=~\"$env\", worker=~\"$worker\"}",
-          "legendFormat": "{{app_id}} / {{auth_type}} / worker-{{worker}}"
+          "legendFormat": "{{app_id}} / worker-{{worker}}"
         }
       ]
     },
@@ -183,8 +183,8 @@
       "type": "timeseries",
       "targets": [
         {
-          "expr": "sum by (app_id, auth_type) (rate(jazz_sync_connections_total{app_id=~\"$app_id\", env=~\"$env\"}[$__rate_interval]))",
-          "legendFormat": "{{app_id}} / {{auth_type}}"
+          "expr": "sum by (app_id) (rate(jazz_sync_connections_total{app_id=~\"$app_id\", env=~\"$env\"}[$__rate_interval]))",
+          "legendFormat": "{{app_id}}"
         }
       ]
     },

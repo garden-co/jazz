@@ -3758,10 +3758,6 @@ async fn events_handler(
         }
     }
 
-    #[cfg(feature = "otel")]
-    let auth_type =
-        crate::metrics::resolve_auth_type(&headers, false, is_backend, has_session_header);
-
     let catalogue_state_hash = match state.workers.get_catalogue_state_hash(app_id).await {
         Ok(hash) => Some(hash),
         Err(err) => {
@@ -3810,7 +3806,6 @@ async fn events_handler(
             opentelemetry::KeyValue::new("app_id", app_id.to_string()),
             opentelemetry::KeyValue::new("env", "prod".to_string()),
             opentelemetry::KeyValue::new("worker", worker as i64),
-            opentelemetry::KeyValue::new("auth_type", auth_type),
         ];
         state.metrics.connections_active.add(1, &attrs);
         state.metrics.connections_total.add(1, &attrs);
@@ -3821,7 +3816,6 @@ async fn events_handler(
         opentelemetry::KeyValue::new("app_id", app_id.to_string()),
         opentelemetry::KeyValue::new("env", "prod".to_string()),
         opentelemetry::KeyValue::new("worker", worker as i64),
-        opentelemetry::KeyValue::new("auth_type", auth_type),
     ];
 
     #[cfg(feature = "otel")]
@@ -4043,10 +4037,6 @@ async fn sync_handler(
     let mut results = Vec::with_capacity(request.payloads.len());
 
     #[cfg(feature = "otel")]
-    let sync_auth_type =
-        crate::metrics::resolve_auth_type(&headers, is_admin, is_backend, has_session_header);
-
-    #[cfg(feature = "otel")]
     let handler_start = std::time::Instant::now();
     #[cfg(feature = "otel")]
     let otel_app_id = app_id.to_string();
@@ -4110,7 +4100,6 @@ async fn sync_handler(
                 opentelemetry::KeyValue::new("app_id", otel_app_id.clone()),
                 opentelemetry::KeyValue::new("env", "prod"),
                 opentelemetry::KeyValue::new("payload_type", pt),
-                opentelemetry::KeyValue::new("auth_type", sync_auth_type),
                 opentelemetry::KeyValue::new("direction", "inbound"),
             ];
             state.metrics.messages_received.add(1, &attrs);
@@ -4161,7 +4150,6 @@ async fn sync_handler(
             &[
                 opentelemetry::KeyValue::new("app_id", otel_app_id),
                 opentelemetry::KeyValue::new("env", "prod"),
-                opentelemetry::KeyValue::new("auth_type", sync_auth_type),
             ],
         );
     }
