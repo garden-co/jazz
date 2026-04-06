@@ -832,10 +832,14 @@ describe("cli permissions", () => {
   });
 });
 
-function runBin(args: string[]): SpawnSyncReturns<string> {
+function runBin(
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+): SpawnSyncReturns<string> {
   return spawnSync(process.execPath, [binPath, ...args], {
     encoding: "utf8",
-    env: process.env,
+    cwd: options.cwd,
+    env: options.env ?? process.env,
   });
 }
 
@@ -943,6 +947,80 @@ describe("bin integration", () => {
     expect(
       exported.todos.columns.some((column: { name: string }) => column.name === "ownerId"),
     ).toBe(true);
+  });
+
+  it("rejects schema export when both --schema-dir and --schema-hash are provided", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions(distIndexPath));
+
+    const result = runBin(
+      ["schema", "export", "--schema-dir", root, "--schema-hash", "a".repeat(64)],
+      { cwd: root },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("mutually exclusive");
+  });
+
+  it("loads schema export --schema-hash from a local snapshot without hitting the server", async () => {
+    const { root } = await createWorkspace();
+    const schemaHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const snapshotsDir = join(root, "migrations", "snapshots");
+    await mkdir(snapshotsDir, { recursive: true });
+    await writeFile(
+      join(snapshotsDir, `${schemaHash}.json`),
+      JSON.stringify(storedRootSchema(), null, 2),
+      "utf8",
+    );
+
+    const result = runBin(["schema", "export", "--schema-hash", schemaHash, "--format", "json"], {
+      cwd: root,
+    });
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(String(result.stdout))).toEqual(storedRootSchema());
+  });
+
+  it("fetches schema export --schema-hash from the server and persists the snapshot on miss", async () => {
+    const { root } = await createWorkspace();
+    const schemaHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const writes: string[] = [];
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+      chunk: string | Uint8Array,
+    ) => {
+      writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    }) as typeof process.stdout.write);
+
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      expect(input).toContain(`/schema/${schemaHash}`);
+      expect(init?.method).toBe("GET");
+      expect(init?.headers).toMatchObject({ "X-Jazz-Admin-Secret": "admin-secret" });
+      return new Response(JSON.stringify(storedRootSchema()), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await exportSchema({
+        format: "json",
+        schemaHash,
+        schemaDir: root,
+        serverUrl: "http://localhost:1625",
+        adminSecret: "admin-secret",
+      } as any);
+    } finally {
+      writeSpy.mockRestore();
+      process.stdout.write = originalWrite;
+    }
+
+    expect(JSON.parse(writes.join(""))).toEqual(storedRootSchema());
+    expect(
+      JSON.parse(
+        await readFile(join(root, "migrations", "snapshots", `${schemaHash}.json`), "utf8"),
+      ),
+    ).toEqual(storedRootSchema());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("verifies packed runtime bootstrap with a native-only help probe", async () => {
