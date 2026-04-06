@@ -1123,19 +1123,11 @@ impl QueryManager {
         row_id: ObjectId,
         branch_name: &str,
     ) -> Option<(Vec<u8>, CommitId)> {
-        let obj = self.sync_manager.object_manager.get(row_id)?;
-        let branch = obj.branches.get(&BranchName::new(branch_name))?;
-        // Sort tips by (timestamp, CommitId) ascending, take last (newest = LWW winner)
-        let mut tips: Vec<_> = branch.tips.iter().copied().collect();
-        tips.sort_by_key(|id| {
-            (
-                branch.commits.get(id).map(|c| c.timestamp).unwrap_or(0),
-                *id,
-            )
-        });
-        let tip_id = tips.last()?;
-        let commit = branch.commits.get(tip_id)?;
-        Some((commit.content.clone(), *tip_id))
+        let row = self
+            .sync_manager
+            .object_manager
+            .visible_row(row_id, BranchName::new(branch_name))?;
+        Some((row.data.clone(), row.version_id()))
     }
 
     /// Load a row's data from ObjectManager using the default branch.
@@ -1221,38 +1213,31 @@ impl QueryManager {
         let schema_hash = match self.branch_schema_map.get(branch) {
             Some(&hash) => hash,
             None => {
-                if local_update && self.schema_context.is_initialized() {
-                    let current_hash = self.schema_context.current_hash;
-                    self.branch_schema_map
-                        .insert(branch.to_string(), current_hash);
-                    current_hash
-                } else {
-                    let branch_name = BranchName::new(branch);
-                    if let Some(composed) = ComposedBranchName::parse(&branch_name) {
-                        if let Some(full_hash) =
-                            self.find_schema_by_short_hash(&composed.schema_hash)
-                        {
-                            self.branch_schema_map.insert(branch.to_string(), full_hash);
-                            full_hash
-                        } else {
-                            tracing::error!(
-                                object_id = %update.object_id,
-                                branch = %branch,
-                                schema_hash = %composed.schema_hash.short(),
-                                "buffering row update for unknown schema hash; schema not yet known"
-                            );
-                            self.pending_row_updates.push(update);
-                            return;
-                        }
+                let branch_name = BranchName::new(branch);
+                if let Some(composed) = ComposedBranchName::parse(&branch_name) {
+                    if let Some(full_hash) = self.find_schema_by_short_hash(&composed.schema_hash) {
+                        self.branch_schema_map.insert(branch.to_string(), full_hash);
+                        full_hash
                     } else {
                         tracing::error!(
                             object_id = %update.object_id,
                             branch = %branch,
-                            "buffering row update for unknown branch; cannot parse schema hash"
+                            schema_hash = %composed.schema_hash.short(),
+                            local_update,
+                            "buffering row update for unknown schema hash; schema not yet known"
                         );
                         self.pending_row_updates.push(update);
                         return;
                     }
+                } else {
+                    tracing::error!(
+                        object_id = %update.object_id,
+                        branch = %branch,
+                        local_update,
+                        "buffering row update for unknown branch; cannot parse schema hash"
+                    );
+                    self.pending_row_updates.push(update);
+                    return;
                 }
             }
         };

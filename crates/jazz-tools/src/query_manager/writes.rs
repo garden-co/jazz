@@ -6,8 +6,6 @@ use crate::metadata::{
 };
 use crate::object::{BranchName, ObjectId};
 use crate::row_regions::StoredRowVersion;
-#[cfg(test)]
-use crate::row_regions::{BatchId, RowState};
 use crate::storage::Storage;
 
 use super::encoding::{decode_column, decode_row, encode_row};
@@ -85,35 +83,9 @@ impl QueryManager {
         row_id: ObjectId,
         branch_name: &str,
     ) -> Option<StoredRowVersion> {
-        let (commit, commit_id) = self.load_row_tip_on_branch(row_id, branch_name)?;
-        let provenance = commit
-            .row_provenance()
-            .unwrap_or_else(|| RowProvenance::for_insert(commit.author.clone(), commit.timestamp));
-
-        Some(StoredRowVersion {
-            row_id,
-            branch: branch_name.to_string(),
-            parents: commit.parents.iter().copied().collect(),
-            updated_at: provenance.updated_at,
-            created_by: provenance.created_by,
-            created_at: provenance.created_at,
-            updated_by: provenance.updated_by,
-            batch_id: BatchId::from_commit_id(commit_id),
-            state: RowState::VisibleDirect,
-            confirmed_tier: commit.ack_state.confirmed_tiers.iter().copied().max(),
-            is_deleted: commit.is_soft_deleted() || commit.is_hard_deleted(),
-            data: commit.content.clone(),
-            metadata: commit
-                .metadata
-                .as_ref()
-                .map(|metadata| {
-                    metadata
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect()
-                })
-                .unwrap_or_default(),
-        })
+        self.sync_manager
+            .object_manager
+            .visible_row(row_id, BranchName::new(branch_name))
     }
 
     #[cfg(test)]
@@ -178,26 +150,6 @@ impl QueryManager {
         self.sync_manager
             .forward_row_version_to_servers(row_id, metadata, row.clone());
         Ok(row)
-    }
-
-    #[cfg(test)]
-    fn load_row_tip_on_branch(
-        &self,
-        row_id: ObjectId,
-        branch_name: &str,
-    ) -> Option<(&crate::commit::Commit, CommitId)> {
-        let obj = self.sync_manager.object_manager.get(row_id)?;
-        let branch = obj.branches.get(&BranchName::new(branch_name))?;
-        let mut tips: Vec<_> = branch.tips.iter().copied().collect();
-        tips.sort_by_key(|id| {
-            (
-                branch.commits.get(id).map(|c| c.timestamp).unwrap_or(0),
-                *id,
-            )
-        });
-        let tip_id = *tips.last()?;
-        let commit = branch.commits.get(&tip_id)?;
-        Some((commit, tip_id))
     }
 
     fn load_row_table_name<H: Storage>(&self, storage: &H, row_id: ObjectId) -> Option<String> {
@@ -1997,20 +1949,10 @@ impl QueryManager {
 
     /// Check if a row has a hard delete tombstone (empty content + delete: hard metadata).
     pub(super) fn is_hard_deleted(&self, id: ObjectId) -> bool {
-        let Some(obj) = self.sync_manager.object_manager.get(id) else {
-            return false;
-        };
-        let Some(branch) = obj.branches.get(&BranchName::new(self.current_branch())) else {
-            return false;
-        };
-        let Some(tip_id) = branch.tips.iter().next() else {
-            return false;
-        };
-        let Some(commit) = branch.commits.get(tip_id) else {
-            return false;
-        };
-        // Hard delete: empty content + delete: hard metadata
-        commit.content.is_empty() && commit.is_hard_deleted()
+        self.sync_manager
+            .object_manager
+            .visible_row(id, BranchName::new(self.current_branch()))
+            .is_some_and(|row| row.data.is_empty() && row.is_hard_deleted())
     }
 
     /// Check if a commit has been stored to disk.

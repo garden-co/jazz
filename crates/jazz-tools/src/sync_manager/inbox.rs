@@ -37,6 +37,55 @@ struct AppliedRowVersion {
 }
 
 impl SyncManager {
+    fn object_updated_metadata_and_old_content<H: Storage>(
+        &self,
+        storage: &H,
+        object_id: ObjectId,
+        branch_name: BranchName,
+        payload_metadata: HashMap<String, String>,
+    ) -> (HashMap<String, String>, Option<Vec<u8>>) {
+        let stored_metadata = self
+            .object_manager
+            .get(object_id)
+            .map(|obj| obj.metadata.clone())
+            .or_else(|| storage.load_object_metadata(object_id).ok().flatten())
+            .unwrap_or_default();
+
+        let metadata = if stored_metadata.is_empty() {
+            payload_metadata
+        } else {
+            stored_metadata
+        };
+
+        let old_content = if let Some(table) = metadata.get(MetadataKey::Table.as_str()) {
+            self.object_manager
+                .visible_row(object_id, branch_name)
+                .map(|row| row.data)
+                .or_else(|| {
+                    storage
+                        .load_visible_region_row(table, branch_name.as_str(), object_id)
+                        .ok()
+                        .flatten()
+                        .map(|row| row.data)
+                })
+        } else {
+            self.object_manager.get(object_id).and_then(|obj| {
+                obj.branches
+                    .get(&branch_name)
+                    .and_then(|branch| {
+                        branch
+                            .tips
+                            .iter()
+                            .next()
+                            .and_then(|tip_id| branch.commits.get(tip_id))
+                    })
+                    .map(|commit| commit.content.clone())
+            })
+        };
+
+        (metadata, old_content)
+    }
+
     fn ensure_object_metadata<H: Storage>(
         &mut self,
         storage: &mut H,
@@ -140,6 +189,12 @@ impl SyncManager {
             );
         }
 
+        self.object_manager.remember_remote_row_version(
+            row.row_id,
+            BranchName::new(&row.branch),
+            row.clone(),
+        );
+
         Some(AppliedRowVersion {
             metadata,
             row,
@@ -210,15 +265,21 @@ impl SyncManager {
         }
         self.patch_row_region_state(storage, row_id, version_id, state, confirmed_tier);
 
+        let row_update = self.object_manager.patch_row_version_state(
+            row_id,
+            &branch_name,
+            version_id,
+            state,
+            confirmed_tier,
+        );
+
         if let Some(tier) = confirmed_tier {
-            if let Some(commit) =
-                self.object_manager
-                    .get_commit_mut(row_id, &branch_name, version_id)
-            {
-                commit.ack_state.confirmed_tiers.insert(tier);
-            }
             self.received_row_version_acks
                 .push((RowVersionKey::new(row_id, branch_name, version_id), tier));
+        }
+
+        if let Some(update) = row_update {
+            self.pending_row_updates.push(update);
         }
     }
 
@@ -530,31 +591,12 @@ impl SyncManager {
                             .as_ref()
                             .map(|meta| meta.metadata.clone())
                             .unwrap_or_default();
-                        let (stored_metadata, old_content) = self
-                            .object_manager
-                            .get(object_id)
-                            .map(|obj| {
-                                let old = obj
-                                    .branches
-                                    .get(&branch_name)
-                                    .and_then(|branch| {
-                                        branch
-                                            .tips
-                                            .iter()
-                                            .next()
-                                            .and_then(|tip_id| branch.commits.get(tip_id))
-                                    })
-                                    .map(|commit| commit.content.clone());
-                                (obj.metadata.clone(), old)
-                            })
-                            .unwrap_or_default();
-                        // For brand-new rows, metadata may only be present in the inbound payload
-                        // because the object has not been applied to ObjectManager yet.
-                        let metadata = if old_content.is_none() && stored_metadata.is_empty() {
-                            payload_metadata
-                        } else {
-                            stored_metadata
-                        };
+                        let (metadata, old_content) = self.object_updated_metadata_and_old_content(
+                            storage,
+                            object_id,
+                            branch_name,
+                            payload_metadata,
+                        );
                         let is_delete = Self::is_deleted_update(commits);
                         let new_content = if is_delete {
                             None
