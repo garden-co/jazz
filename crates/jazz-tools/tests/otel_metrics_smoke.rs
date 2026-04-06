@@ -7,6 +7,8 @@ use opentelemetry::metrics::MeterProvider as _;
 use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
 use otel_test::TestMeterProvider;
 
+/// A u64 counter aggregates increments by unique attribute set.
+/// Two adds to app-abc and one to app-xyz should produce two data points.
 #[test]
 fn counter_with_attributes_is_exported() {
     let test_provider = TestMeterProvider::new();
@@ -53,6 +55,8 @@ fn counter_with_attributes_is_exported() {
     test_provider.shutdown();
 }
 
+/// An f64 histogram partitions observations by unique attribute set.
+/// Three records across two app_ids should produce two data points.
 #[test]
 fn histogram_records_observations() {
     let test_provider = TestMeterProvider::new();
@@ -99,6 +103,8 @@ fn histogram_records_observations() {
     test_provider.shutdown();
 }
 
+/// An i64 up_down_counter nets positive and negative adds.
+/// +1, +1, -1 for the same attribute set should yield a final value of 1.
 #[test]
 fn up_down_counter_tracks_active_value() {
     let test_provider = TestMeterProvider::new();
