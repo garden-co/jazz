@@ -2614,6 +2614,124 @@ fn row_version_created_emits_row_version_state_changed_to_source() {
 }
 
 #[test]
+fn row_version_state_changed_only_relays_to_row_version_interested_clients() {
+    use std::collections::HashMap;
+
+    use crate::metadata::MetadataKey;
+    use crate::row_regions::{BatchId, RowState, StoredRowVersion};
+
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let object_client = ClientId::new();
+    let row_client = ClientId::new();
+    let server_id = ServerId::new();
+    let object_id = ObjectId::new();
+    let row_id = ObjectId::new();
+    let branch_name: BranchName = "main".into();
+
+    sm.add_client(object_client);
+    sm.set_client_role(object_client, ClientRole::Peer);
+    sm.add_client(row_client);
+    sm.set_client_role(row_client, ClientRole::Peer);
+    sm.take_outbox();
+
+    let shared_commit = make_test_commit(b"shared-version-id", vec![]);
+    let shared_version_id = shared_commit.id();
+
+    sm.process_from_client(
+        &mut io,
+        object_client,
+        SyncPayload::ObjectUpdated {
+            object_id,
+            metadata: Some(ObjectMetadata {
+                id: object_id,
+                metadata: HashMap::new(),
+            }),
+            branch_name,
+            commits: vec![shared_commit],
+        },
+    );
+
+    let mut row_metadata = HashMap::new();
+    row_metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    let row = StoredRowVersion {
+        row_id,
+        branch: branch_name.as_str().to_string(),
+        parents: Vec::new(),
+        updated_at: 1000,
+        created_by: ObjectId::from_uuid(uuid::Uuid::nil()).to_string(),
+        created_at: 1000,
+        updated_by: ObjectId::from_uuid(uuid::Uuid::nil()).to_string(),
+        batch_id: BatchId::new(),
+        state: RowState::VisibleDirect,
+        confirmed_tier: None,
+        is_deleted: false,
+        data: b"shared-version-id".to_vec(),
+        metadata: HashMap::new(),
+    };
+    assert_eq!(
+        row.version_id(),
+        shared_version_id,
+        "test setup should force the same id into both legacy and row-version paths"
+    );
+
+    sm.process_from_client(
+        &mut io,
+        row_client,
+        SyncPayload::RowVersionCreated {
+            metadata: Some(ObjectMetadata {
+                id: row_id,
+                metadata: row_metadata,
+            }),
+            row: row.clone(),
+        },
+    );
+
+    sm.take_outbox();
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::RowVersionStateChanged {
+            row_id,
+            branch_name,
+            version_id: shared_version_id,
+            state: None,
+            confirmed_tier: Some(DurabilityTier::Worker),
+        },
+    );
+
+    let interested_clients: Vec<_> = sm
+        .take_outbox()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            OutboxEntry {
+                destination: Destination::Client(client_id),
+                payload:
+                    SyncPayload::RowVersionStateChanged {
+                        row_id: changed_row_id,
+                        version_id,
+                        confirmed_tier,
+                        ..
+                    },
+            } if changed_row_id == row_id
+                && version_id == shared_version_id
+                && confirmed_tier == Some(DurabilityTier::Worker) =>
+            {
+                Some(client_id)
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        interested_clients,
+        vec![row_client],
+        "row-version state relays should not leak to clients that only wrote a legacy object commit with the same id"
+    );
+}
+
+#[test]
 fn stale_row_version_from_client_replays_upstream_without_regressing_visible_row() {
     use std::collections::HashMap;
 

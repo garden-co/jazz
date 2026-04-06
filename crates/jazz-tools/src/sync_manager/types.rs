@@ -132,8 +132,12 @@ pub enum ClientRole {
 /// Tracking state for a connected server.
 #[derive(Debug, Clone, Default)]
 pub struct ServerState {
-    /// What we've pushed to this server: (object, branch) → set of commit tips.
-    pub sent_tips: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
+    /// What we've pushed to this server for legacy object/branch sync:
+    /// (object, branch) -> current branch frontier.
+    pub sent_branch_frontiers: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
+    /// What we've pushed to this server for row-region sync:
+    /// (row object, branch) -> set of known row-version ids.
+    pub sent_row_versions: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
     /// Object IDs for which we've sent metadata.
     pub sent_metadata: HashSet<ObjectId>,
 }
@@ -156,8 +160,12 @@ pub struct ClientState {
     pub session: Option<Session>,
     /// Active queries from this client.
     pub queries: HashMap<QueryId, QueryScope>,
-    /// What we've sent to this client.
-    pub sent_tips: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
+    /// What we've sent to this client for legacy object/branch sync:
+    /// (object, branch) -> current branch frontier.
+    pub sent_branch_frontiers: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
+    /// What we've sent to this client for row-region sync:
+    /// (row object, branch) -> set of known row-version ids.
+    pub sent_row_versions: HashMap<(ObjectId, BranchName), HashSet<CommitId>>,
     /// Object IDs for which we've sent metadata.
     pub sent_metadata: HashSet<ObjectId>,
 }

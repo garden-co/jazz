@@ -54,8 +54,10 @@ pub struct SyncManager {
 
     /// This node's durability identities (empty = don't emit durability notifications).
     pub(super) my_tiers: HashSet<DurabilityTier>,
-    /// Tracks which clients are interested in acks for each commit.
-    pub(super) commit_interest: HashMap<CommitId, HashSet<ClientId>>,
+    /// Tracks which clients are interested in legacy commit durability acks.
+    pub(super) object_commit_interest: HashMap<CommitId, HashSet<ClientId>>,
+    /// Tracks which clients are interested in row-version state updates.
+    pub(super) row_version_interest: HashMap<CommitId, HashSet<ClientId>>,
 
     /// Tracks which clients originated each query (for relaying QuerySettled).
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
@@ -91,7 +93,8 @@ impl std::fmt::Debug for SyncManager {
             .field("pending_row_updates", &self.pending_row_updates)
             .field("next_pending_id", &self.next_pending_id)
             .field("my_tiers", &self.my_tiers)
-            .field("commit_interest", &self.commit_interest)
+            .field("object_commit_interest", &self.object_commit_interest)
+            .field("row_version_interest", &self.row_version_interest)
             .field("query_origin", &self.query_origin)
             .field("pending_query_settled", &self.pending_query_settled)
             .field("received_acks", &self.received_acks)
@@ -134,7 +137,8 @@ impl SyncManager {
             pending_row_updates: Vec::new(),
             next_pending_id: 0,
             my_tiers: HashSet::new(),
-            commit_interest: HashMap::new(),
+            object_commit_interest: HashMap::new(),
+            row_version_interest: HashMap::new(),
             query_origin: HashMap::new(),
             pending_query_settled: Vec::new(),
             received_acks: Vec::new(),
@@ -257,7 +261,11 @@ impl SyncManager {
 
         self.clients.remove(&client_id);
         // Clean up interest map
-        self.commit_interest.retain(|_, clients| {
+        self.object_commit_interest.retain(|_, clients| {
+            clients.remove(&client_id);
+            !clients.is_empty()
+        });
+        self.row_version_interest.retain(|_, clients| {
             clients.remove(&client_id);
             !clients.is_empty()
         });

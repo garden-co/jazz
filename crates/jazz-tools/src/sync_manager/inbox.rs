@@ -337,7 +337,7 @@ impl SyncManager {
                 );
 
                 let mut interested = HashSet::new();
-                if let Some(clients) = self.commit_interest.get(&version_id) {
+                if let Some(clients) = self.row_version_interest.get(&version_id) {
                     interested.extend(clients);
                 }
                 for cid in interested {
@@ -392,7 +392,7 @@ impl SyncManager {
                 // Relay to interested clients
                 let mut interested = HashSet::new();
                 for &commit_id in &confirmed_commits {
-                    if let Some(clients) = self.commit_interest.get(&commit_id) {
+                    if let Some(clients) = self.object_commit_interest.get(&commit_id) {
                         interested.extend(clients);
                     }
                 }
@@ -842,7 +842,7 @@ impl SyncManager {
                 // Relay to interested clients (excluding the sender)
                 let mut interested = HashSet::new();
                 for &commit_id in &confirmed_commits {
-                    if let Some(clients) = self.commit_interest.get(&commit_id) {
+                    if let Some(clients) = self.object_commit_interest.get(&commit_id) {
                         interested.extend(clients);
                     }
                 }
@@ -875,7 +875,7 @@ impl SyncManager {
                     *confirmed_tier,
                 );
                 let mut interested = HashSet::new();
-                if let Some(clients) = self.commit_interest.get(version_id) {
+                if let Some(clients) = self.row_version_interest.get(version_id) {
                     interested.extend(clients);
                 }
                 interested.remove(&client_id);
@@ -929,7 +929,7 @@ impl SyncManager {
             } => {
                 // Track client interest for ack relay
                 for commit in &commits {
-                    self.commit_interest
+                    self.object_commit_interest
                         .entry(commit.id())
                         .or_default()
                         .insert(client_id);
@@ -964,7 +964,7 @@ impl SyncManager {
                 let object_id = row.row_id;
                 let branch_name = BranchName::new(&row.branch);
                 let version_id = row.version_id();
-                self.commit_interest
+                self.row_version_interest
                     .entry(version_id)
                     .or_default()
                     .insert(client_id);
