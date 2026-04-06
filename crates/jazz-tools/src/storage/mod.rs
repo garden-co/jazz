@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use crate::commit::{Commit, CommitId};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::types::{SchemaHash, Value};
+use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
 use crate::sync_manager::DurabilityTier;
 
 // ============================================================================
@@ -274,6 +275,63 @@ pub trait Storage {
     ) -> Result<Option<CatalogueManifest>, StorageError>;
 
     // ================================================================
+    // Row-region storage
+    // ================================================================
+
+    fn append_history_region_rows(
+        &mut self,
+        _table: &str,
+        _rows: &[StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        Err(StorageError::IoError(
+            "row-region history appends are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn upsert_visible_region_rows(
+        &mut self,
+        _table: &str,
+        _rows: &[StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        Err(StorageError::IoError(
+            "row-region visible upserts are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn patch_history_region_rows_by_batch(
+        &mut self,
+        _table: &str,
+        _batch_id: crate::row_regions::BatchId,
+        _state: RowState,
+        _confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::IoError(
+            "row-region history patching is not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn scan_visible_region(
+        &self,
+        _table: &str,
+        _branch: &str,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        Err(StorageError::IoError(
+            "row-region visible scans are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    fn scan_history_region(
+        &self,
+        _table: &str,
+        _branch: &str,
+        _scan: HistoryScan,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        Err(StorageError::IoError(
+            "row-region history scans are not implemented for this backend yet".to_string(),
+        ))
+    }
+
+    // ================================================================
     // Index operations (sync)
     // ================================================================
     //
@@ -418,6 +476,49 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
         (**self).load_catalogue_manifest(app_id)
     }
 
+    fn append_history_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        (**self).append_history_region_rows(table, rows)
+    }
+
+    fn upsert_visible_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        (**self).upsert_visible_region_rows(table, rows)
+    }
+
+    fn patch_history_region_rows_by_batch(
+        &mut self,
+        table: &str,
+        batch_id: crate::row_regions::BatchId,
+        state: RowState,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        (**self).patch_history_region_rows_by_batch(table, batch_id, state, confirmed_tier)
+    }
+
+    fn scan_visible_region(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        (**self).scan_visible_region(table, branch)
+    }
+
+    fn scan_history_region(
+        &self,
+        table: &str,
+        branch: &str,
+        scan: HistoryScan,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        (**self).scan_history_region(table, branch, scan)
+    }
+
     fn index_insert(
         &mut self,
         table: &str,
@@ -488,6 +589,12 @@ type IndexKey = (String, String, String);
 /// Index storage: encoded_value -> row_ids. BTreeMap for correct range query ordering.
 type IndexEntries = BTreeMap<Vec<u8>, HashSet<ObjectId>>;
 
+#[derive(Debug, Clone, Default)]
+struct TableRowRegions {
+    visible: BTreeMap<(String, ObjectId), StoredRowVersion>,
+    history: BTreeMap<(String, ObjectId, u64), StoredRowVersion>,
+}
+
 /// In-memory Storage for testing and main-thread use.
 ///
 /// Stores objects and indices in HashMaps/BTreeMaps. No persistence.
@@ -507,6 +614,8 @@ pub struct MemoryStorage {
     ack_tiers: HashMap<CommitId, HashSet<DurabilityTier>>,
     /// Append-only manifest ops keyed by app_id then op object_id.
     catalogue_manifest_ops: HashMap<ObjectId, HashMap<ObjectId, CatalogueManifestOp>>,
+    /// Row-region storage keyed by table.
+    row_regions: HashMap<String, TableRowRegions>,
 }
 
 /// Internal object storage structure.
@@ -798,6 +907,121 @@ impl Storage for MemoryStorage {
             manifest.apply(op);
         }
         Ok(Some(manifest))
+    }
+
+    fn append_history_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        let regions = self.row_regions.entry(table.to_string()).or_default();
+        for row in rows {
+            regions.history.insert(
+                (row.branch.clone(), row.row_id, row.updated_at),
+                row.clone(),
+            );
+        }
+        Ok(())
+    }
+
+    fn upsert_visible_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        let regions = self.row_regions.entry(table.to_string()).or_default();
+        for row in rows {
+            regions
+                .visible
+                .insert((row.branch.clone(), row.row_id), row.clone());
+        }
+        Ok(())
+    }
+
+    fn patch_history_region_rows_by_batch(
+        &mut self,
+        table: &str,
+        batch_id: crate::row_regions::BatchId,
+        state: RowState,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        let Some(regions) = self.row_regions.get_mut(table) else {
+            return Ok(());
+        };
+
+        for row in regions.history.values_mut() {
+            if row.batch_id == batch_id {
+                row.state = state;
+                row.confirmed_tier = confirmed_tier;
+            }
+        }
+
+        for row in regions.visible.values_mut() {
+            if row.batch_id == batch_id {
+                row.state = state;
+                row.confirmed_tier = confirmed_tier;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn scan_visible_region(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        let Some(regions) = self.row_regions.get(table) else {
+            return Ok(Vec::new());
+        };
+
+        Ok(regions
+            .visible
+            .iter()
+            .filter(|((row_branch, _), _)| row_branch == branch)
+            .map(|(_, row)| row.clone())
+            .collect())
+    }
+
+    fn scan_history_region(
+        &self,
+        table: &str,
+        branch: &str,
+        scan: HistoryScan,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        let Some(regions) = self.row_regions.get(table) else {
+            return Ok(Vec::new());
+        };
+
+        let mut rows: Vec<StoredRowVersion> = match scan {
+            HistoryScan::Branch => regions
+                .history
+                .iter()
+                .filter(|((row_branch, _, _), _)| row_branch == branch)
+                .map(|(_, row)| row.clone())
+                .collect(),
+            HistoryScan::Row { row_id } => regions
+                .history
+                .iter()
+                .filter(|((row_branch, history_row_id, _), _)| {
+                    row_branch == branch && *history_row_id == row_id
+                })
+                .map(|(_, row)| row.clone())
+                .collect(),
+            HistoryScan::AsOf { ts } => {
+                let mut latest_per_row: BTreeMap<ObjectId, StoredRowVersion> = BTreeMap::new();
+                for ((row_branch, row_id, updated_at), row) in &regions.history {
+                    if row_branch != branch || *updated_at > ts || !row.state.is_visible() {
+                        continue;
+                    }
+                    latest_per_row.insert(*row_id, row.clone());
+                }
+                latest_per_row.into_values().collect()
+            }
+        };
+
+        rows.sort_by_key(|row| (row.branch.clone(), row.row_id, row.updated_at));
+        Ok(rows)
     }
 
     // ================================================================
@@ -1149,6 +1373,45 @@ mod tests {
             },
         );
         assert!(matches!(conflict, Err(StorageError::IoError(_))));
+    }
+
+    #[test]
+    fn memory_storage_row_regions_visible_and_history_round_trip() {
+        use crate::row_regions::{BatchId, HistoryScan, RowState, StoredRowVersion};
+
+        let mut storage = MemoryStorage::new();
+        let row_id = ObjectId::new();
+        let batch_id = BatchId::new();
+
+        let version = StoredRowVersion {
+            row_id,
+            branch: "dev/main".to_string(),
+            updated_at: 10,
+            created_by: "alice".to_string(),
+            created_at: 10,
+            updated_by: "alice".to_string(),
+            batch_id,
+            state: RowState::VisibleDirect,
+            confirmed_tier: Some(DurabilityTier::Worker),
+            is_deleted: false,
+            data: b"alice".to_vec(),
+            metadata: HashMap::new(),
+        };
+
+        storage
+            .append_history_region_rows("users", &[version.clone()])
+            .unwrap();
+        storage
+            .upsert_visible_region_rows("users", &[version.clone()])
+            .unwrap();
+
+        let visible = storage.scan_visible_region("users", "dev/main").unwrap();
+        let history = storage
+            .scan_history_region("users", "dev/main", HistoryScan::Row { row_id })
+            .unwrap();
+
+        assert_eq!(visible, vec![version.clone()]);
+        assert_eq!(history, vec![version]);
     }
 
     mod memory_conformance {
