@@ -14,10 +14,12 @@ use super::key_codec::{
     ack_key, branch_tips_key, catalogue_manifest_op_key, catalogue_manifest_op_prefix, commit_key,
     commit_prefix, history_row_key, history_row_prefix, history_row_versions_prefix,
     history_table_prefix, index_entry_key, index_prefix, index_range_scan_bounds,
-    index_value_prefix, obj_meta_key, parse_uuid_from_index_key, visible_row_key,
+    index_value_prefix, obj_meta_key, obj_meta_prefix, parse_uuid_from_index_key, visible_row_key,
     visible_row_prefix, visible_table_prefix,
 };
-use super::{CatalogueManifest, CatalogueManifestOp, LoadedBranch, StorageError};
+use super::{
+    CatalogueManifest, CatalogueManifestOp, LoadedBranch, ObjectMetadataRows, StorageError,
+};
 
 pub(super) fn encode_json<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>, StorageError> {
     serde_json::to_vec(value).map_err(|e| StorageError::IoError(format!("serialize {label}: {e}")))
@@ -50,6 +52,32 @@ pub(super) fn load_object_metadata_core(
         Some(data) => Ok(Some(decode_json(&data, "metadata")?)),
         None => Ok(None),
     }
+}
+
+#[allow(dead_code)]
+pub(super) fn scan_object_metadata_core(
+    mut scan_prefix: impl FnMut(&str) -> Result<Vec<(String, Vec<u8>)>, StorageError>,
+) -> Result<ObjectMetadataRows, StorageError> {
+    let mut objects = Vec::new();
+    for (key, data) in scan_prefix(obj_meta_prefix())? {
+        let Some(hex_id) = key
+            .strip_prefix("obj:")
+            .and_then(|rest| rest.strip_suffix(":meta"))
+        else {
+            continue;
+        };
+
+        let bytes = hex::decode(hex_id).map_err(|err| {
+            StorageError::IoError(format!("invalid object metadata key '{key}': {err}"))
+        })?;
+        let uuid = uuid::Uuid::from_slice(&bytes).map_err(|err| {
+            StorageError::IoError(format!("invalid object metadata uuid '{key}': {err}"))
+        })?;
+        let metadata = decode_json::<HashMap<String, String>>(&data, "object metadata")?;
+        objects.push((ObjectId::from_uuid(uuid), metadata));
+    }
+    objects.sort_by_key(|(object_id, _)| *object_id);
+    Ok(objects)
 }
 
 pub(super) fn load_branch_core(

@@ -404,6 +404,40 @@ fn test_runtime_core_insert_query() {
 }
 
 #[test]
+fn add_server_rehydrates_visible_rows_from_storage_after_restart() {
+    let mut old_runtime = create_runtime_with_schema(test_schema(), "restart-sync-test");
+    let user_id = ObjectId::new();
+    let (row_object_id, _) = old_runtime
+        .insert("users", user_insert_values(user_id, "Alice"), None)
+        .expect("insert should succeed before restart");
+
+    let storage = old_runtime.into_storage();
+    let mut restarted = create_runtime_with_storage(test_schema(), "restart-sync-test", storage);
+
+    let server_id = ServerId::new();
+    restarted.add_server(server_id);
+    restarted.batched_tick();
+
+    let messages = restarted.sync_sender().take();
+    let synced_row = messages.iter().find(|message| {
+        matches!(
+            &message.payload,
+            SyncPayload::ObjectUpdated { object_id, .. } if *object_id == row_object_id
+        )
+    });
+
+    assert!(
+        synced_row.is_some(),
+        "row visible before restart should replay to a new server after restart; messages: {}",
+        messages
+            .iter()
+            .map(|message| format!("{:?}", message.payload))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+}
+
+#[test]
 fn test_runtime_core_insert_materializes_schema_defaults() {
     let mut core = create_runtime_with_schema(defaulted_todos_schema(), "todos-with-defaults");
 

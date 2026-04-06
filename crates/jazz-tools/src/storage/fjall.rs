@@ -27,8 +27,9 @@ use super::{
         index_lookup_core, index_range_core, index_remove_core, index_scan_all_core,
         load_branch_core, load_catalogue_manifest_core, load_object_metadata_core,
         load_visible_region_row_core, patch_row_region_rows_by_batch_core,
-        scan_history_region_core, scan_visible_region_core, scan_visible_region_row_versions_core,
-        set_branch_tails_core, store_ack_tier_core, upsert_visible_region_rows_core,
+        scan_history_region_core, scan_object_metadata_core, scan_visible_region_core,
+        scan_visible_region_row_versions_core, set_branch_tails_core, store_ack_tier_core,
+        upsert_visible_region_rows_core,
     },
 };
 
@@ -207,6 +208,15 @@ impl Storage for FjallStorage {
         self.with_inner(|inner| {
             let tx = inner.db.read_tx();
             load_object_metadata_core(id, |key| Self::read_get(&tx, &inner.keyspace, key))
+        })
+    }
+
+    fn scan_object_metadata(
+        &self,
+    ) -> Result<Vec<(ObjectId, HashMap<String, String>)>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            scan_object_metadata_core(|prefix| Self::scan_prefix(&tx, &inner.keyspace, prefix))
         })
     }
 

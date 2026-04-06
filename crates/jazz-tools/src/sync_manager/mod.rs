@@ -143,6 +143,17 @@ impl SyncManager {
         self
     }
 
+    pub(crate) fn rehydrate_object_from_storage<H: Storage>(
+        &mut self,
+        storage: &H,
+        object_id: ObjectId,
+        metadata: HashMap<String, String>,
+    ) {
+        self.track_catalogue_object(object_id, &metadata);
+        self.object_manager
+            .hydrate_object_from_storage(storage, object_id, metadata);
+    }
+
     /// Allow authenticated user clients to publish structural schema catalogue
     /// objects directly. Intended for development servers only.
     pub fn with_unprivileged_schema_catalogue_writes(mut self) -> Self {
