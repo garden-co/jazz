@@ -1202,14 +1202,14 @@ impl QueryManager {
         // 8. Settle server-side subscriptions and update scopes
         self.settle_server_subscriptions(storage_ref);
     }
-    /// Load a row's data from a specific branch using LWW (last-writer-wins by timestamp).
+    /// Resolve the LWW winner for a branch.
     /// When timestamps tie, CommitId provides a deterministic secondary ordering.
-    pub(super) fn load_row_from_object_on_branch(
+    fn newest_branch_commit(
         &self,
-        row_id: ObjectId,
+        object_id: ObjectId,
         branch_name: &str,
-    ) -> Option<(Vec<u8>, CommitId)> {
-        let obj = self.sync_manager.object_manager.get(row_id)?;
+    ) -> Option<(&crate::commit::Commit, CommitId)> {
+        let obj = self.sync_manager.object_manager.get(object_id)?;
         let branch = obj.branches.get(&BranchName::new(branch_name))?;
         // Sort tips by (timestamp, CommitId) ascending, take last (newest = LWW winner)
         let mut tips: Vec<_> = branch.tips.iter().copied().collect();
@@ -1221,7 +1221,17 @@ impl QueryManager {
         });
         let tip_id = tips.last()?;
         let commit = branch.commits.get(tip_id)?;
-        Some((commit.content.clone(), *tip_id))
+        Some((commit, *tip_id))
+    }
+
+    /// Load a row's data from a specific branch using LWW (last-writer-wins by timestamp).
+    pub(super) fn load_row_from_object_on_branch(
+        &self,
+        row_id: ObjectId,
+        branch_name: &str,
+    ) -> Option<(Vec<u8>, CommitId)> {
+        self.newest_branch_commit(row_id, branch_name)
+            .map(|(commit, tip_id)| (commit.content.clone(), tip_id))
     }
 
     /// Load a row's data from ObjectManager using the default branch.
@@ -1235,6 +1245,16 @@ impl QueryManager {
     pub(super) fn load_object_content(&self, object_id: ObjectId) -> Option<Vec<u8>> {
         self.load_row_from_object_on_branch(object_id, "main")
             .map(|(content, _)| content)
+    }
+
+    /// Load the winning commit timestamp from a catalogue object's branch.
+    pub(crate) fn load_object_commit_timestamp_on_branch(
+        &self,
+        object_id: ObjectId,
+        branch_name: &str,
+    ) -> Option<u64> {
+        self.newest_branch_commit(object_id, branch_name)
+            .map(|(commit, _)| commit.timestamp)
     }
 
     fn parse_schema_hash_hex(hex_str: &str) -> Option<SchemaHash> {
