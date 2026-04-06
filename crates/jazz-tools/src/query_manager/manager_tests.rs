@@ -7469,14 +7469,14 @@ fn server_join_query_uses_current_permissions_for_joined_provenance() {
     server_qm.process(&mut storage);
 
     let outbox = server_qm.sync_manager_mut().take_outbox();
-    let object_updates: Vec<_> = outbox
+    let row_updates: Vec<_> = outbox
         .iter()
         .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == client_id))
-        .filter(|entry| matches!(entry.payload, SyncPayload::ObjectUpdated { .. }))
+        .filter(|entry| matches!(entry.payload, SyncPayload::RowVersionNeeded { .. }))
         .collect();
 
     assert!(
-        object_updates.is_empty(),
+        row_updates.is_empty(),
         "Joined rows should be filtered when current permissions deny any contributing provenance row"
     );
 }
@@ -8169,36 +8169,25 @@ fn server_builds_query_graph_on_subscription() {
 
     server_qm.process(&mut storage);
 
-    // Server should send ObjectUpdated for matching users (Alice, Charlie)
+    // Server should send RowVersionNeeded for matching users (Alice, Charlie)
     let outbox = server_qm.sync_manager_mut().take_outbox();
 
-    // Filter for ObjectUpdated messages to this client
-    let object_updates: Vec<_> = outbox
+    let row_updates: Vec<_> = outbox
         .iter()
         .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
-        .filter(|e| {
-            matches!(
-                e.payload,
-                SyncPayload::ObjectUpdated { .. } | SyncPayload::RowVersionNeeded { .. }
-            )
+        .filter_map(|e| match &e.payload {
+            SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
+            _ => None,
         })
         .collect();
 
     assert_eq!(
-        object_updates.len(),
+        row_updates.len(),
         2,
-        "Should send 2 ObjectUpdated messages for matching users"
+        "Should send 2 RowVersionNeeded messages for matching users"
     );
 
-    // Verify the correct ObjectIds were sent
-    let sent_ids: std::collections::HashSet<_> = object_updates
-        .iter()
-        .filter_map(|e| match &e.payload {
-            SyncPayload::ObjectUpdated { object_id, .. } => Some(object_id),
-            SyncPayload::RowVersionNeeded { row, .. } => Some(&row.row_id),
-            _ => None,
-        })
-        .collect();
+    let sent_ids: std::collections::HashSet<_> = row_updates.into_iter().collect();
 
     assert!(sent_ids.contains(&handle1.row_id), "Alice should be sent");
     assert!(sent_ids.contains(&handle3.row_id), "Charlie should be sent");
@@ -8252,27 +8241,21 @@ fn server_subscription_reads_visible_region_after_legacy_commit_history_is_remov
     server_qm.process(&mut storage);
 
     let outbox = server_qm.sync_manager_mut().take_outbox();
-    let object_updates: Vec<_> = outbox
+    let row_updates: Vec<_> = outbox
         .iter()
         .filter(|entry| matches!(entry.destination, Destination::Client(id) if id == client_id))
-        .filter(|entry| {
-            matches!(
-                entry.payload,
-                SyncPayload::ObjectUpdated { .. } | SyncPayload::RowVersionNeeded { .. }
-            )
+        .filter_map(|entry| match &entry.payload {
+            SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
+            _ => None,
         })
         .collect();
 
     assert_eq!(
-        object_updates.len(),
+        row_updates.len(),
         1,
         "server subscription should settle from visible row regions without legacy commits"
     );
-    match &object_updates[0].payload {
-        SyncPayload::ObjectUpdated { object_id, .. } => assert_eq!(*object_id, handle.row_id),
-        SyncPayload::RowVersionNeeded { row, .. } => assert_eq!(row.row_id, handle.row_id),
-        payload => panic!("expected row update, got {payload:?}"),
-    }
+    assert_eq!(row_updates[0], handle.row_id);
 }
 
 #[test]
@@ -8508,36 +8491,28 @@ fn server_pushes_new_matches() {
         .unwrap();
     server_qm.process(&mut storage);
 
-    // Should send ObjectUpdated for new matching user
+    // Should send RowVersionNeeded for new matching user
     let outbox = server_qm.sync_manager_mut().take_outbox();
 
-    let object_updates: Vec<_> = outbox
+    let row_updates: Vec<_> = outbox
         .iter()
         .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
-        .filter(|e| {
-            matches!(
-                e.payload,
-                SyncPayload::ObjectUpdated { .. } | SyncPayload::RowVersionNeeded { .. }
-            )
+        .filter_map(|e| match &e.payload {
+            SyncPayload::RowVersionNeeded { row, .. } => Some(row.row_id),
+            _ => None,
         })
         .collect();
 
     assert_eq!(
-        object_updates.len(),
+        row_updates.len(),
         1,
-        "Should send 1 ObjectUpdated for new matching user"
+        "Should send 1 RowVersionNeeded for new matching user"
     );
 
-    // Verify it's Charlie
-    match &object_updates[0].payload {
-        SyncPayload::ObjectUpdated { object_id, .. } => {
-            assert_eq!(*object_id, handle2.row_id, "Should send Charlie's ObjectId");
-        }
-        SyncPayload::RowVersionNeeded { row, .. } => {
-            assert_eq!(row.row_id, handle2.row_id, "Should send Charlie's ObjectId");
-        }
-        payload => panic!("expected row update, got {payload:?}"),
-    }
+    assert_eq!(
+        row_updates[0], handle2.row_id,
+        "Should send Charlie's ObjectId"
+    );
 }
 
 #[test]
@@ -8676,19 +8651,19 @@ fn server_does_not_push_non_matching() {
         .unwrap();
     server_qm.process(&mut storage);
 
-    // Should NOT send ObjectUpdated for non-matching user
+    // Should NOT send RowVersionNeeded for non-matching user
     let outbox = server_qm.sync_manager_mut().take_outbox();
 
-    let object_updates: Vec<_> = outbox
+    let row_updates: Vec<_> = outbox
         .iter()
         .filter(|e| matches!(e.destination, Destination::Client(id) if id == client_id))
-        .filter(|e| matches!(e.payload, SyncPayload::ObjectUpdated { .. }))
+        .filter(|e| matches!(e.payload, SyncPayload::RowVersionNeeded { .. }))
         .collect();
 
     assert_eq!(
-        object_updates.len(),
+        row_updates.len(),
         0,
-        "Should NOT send ObjectUpdated for non-matching user"
+        "Should NOT send RowVersionNeeded for non-matching user"
     );
 }
 
