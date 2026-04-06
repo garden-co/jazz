@@ -122,7 +122,7 @@ impl<S: Storage, Sch: Scheduler, Sy: SyncSender> RuntimeCore<S, Sch, Sy> {
             .schema_manager
             .query_manager_mut()
             .sync_manager_mut()
-            .take_received_acks();
+            .take_received_row_version_acks();
         for (commit_id, acked_tier) in received_acks {
             if let Some(watchers) = self.ack_watchers.remove(&commit_id) {
                 let mut remaining = Vec::new();
