@@ -66,6 +66,61 @@ pub struct StoredRowVersion {
 }
 
 impl StoredRowVersion {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        row_id: ObjectId,
+        branch: impl Into<String>,
+        parents: Vec<CommitId>,
+        data: Vec<u8>,
+        provenance: RowProvenance,
+        metadata: HashMap<String, String>,
+        state: RowState,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Self {
+        let is_deleted = metadata
+            .get(MetadataKey::Delete.as_str())
+            .is_some_and(|value| {
+                value == DeleteKind::Soft.as_str() || value == DeleteKind::Hard.as_str()
+            });
+
+        let mut ack_state = CommitAckState::default();
+        if let Some(tier) = confirmed_tier {
+            ack_state.confirmed_tiers.insert(tier);
+        }
+
+        let commit = Commit {
+            parents: parents.iter().copied().collect(),
+            content: data.clone(),
+            timestamp: provenance.updated_at,
+            author: provenance.updated_by.clone(),
+            metadata: (!metadata.is_empty()).then(|| {
+                metadata
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<BTreeMap<_, _>>()
+            }),
+            stored_state: StoredState::Stored,
+            ack_state,
+        };
+        let version_id = commit.id();
+
+        Self {
+            row_id,
+            branch: branch.into(),
+            parents,
+            updated_at: provenance.updated_at,
+            created_by: provenance.created_by,
+            created_at: provenance.created_at,
+            updated_by: provenance.updated_by,
+            batch_id: BatchId::from_commit_id(version_id),
+            state,
+            confirmed_tier,
+            is_deleted,
+            data,
+            metadata,
+        }
+    }
+
     pub fn from_commit(
         row_id: ObjectId,
         branch: impl Into<String>,

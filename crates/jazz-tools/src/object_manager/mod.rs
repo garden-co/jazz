@@ -381,6 +381,56 @@ impl ObjectManager {
         )
     }
 
+    fn apply_row_version<H: Storage>(
+        &mut self,
+        io: &mut H,
+        object_id: ObjectId,
+        branch_name: BranchName,
+        row: StoredRowVersion,
+    ) -> Result<CommitId, Error> {
+        let object_metadata = self
+            .get(object_id)
+            .ok_or(Error::ObjectNotFound(object_id))?
+            .metadata
+            .clone();
+
+        debug_assert!(
+            Self::is_row_metadata(&object_metadata),
+            "apply_row_version should only be used for row-backed objects"
+        );
+
+        if !row.parents.is_empty() {
+            let branch = self
+                .row_branch(object_id, &branch_name)
+                .ok_or(Error::BranchNotFound(branch_name))?;
+            for parent in &row.parents {
+                if !branch.contains(*parent) {
+                    return Err(Error::ParentNotFound(*parent));
+                }
+            }
+        }
+
+        let version_id = row.version_id();
+        if self.row_version_exists(object_id, &branch_name, version_id) {
+            return Ok(version_id);
+        }
+
+        let previous_row = self.visible_row(object_id, branch_name);
+        let applied = self.remember_row_version(object_id, branch_name, row.clone());
+        tracing::trace!(?version_id, "row version applied");
+        self.notify_subscribers_of_commit(object_id, branch_name);
+        self.notify_row_object_update(
+            io,
+            &object_metadata,
+            previous_row,
+            applied.current_visible,
+            row,
+            applied.visible_changed,
+        );
+
+        Ok(version_id)
+    }
+
     fn persist_row_version<H: Storage>(io: &mut H, table: &str, row: &StoredRowVersion) {
         if let Err(error) = io.append_history_region_rows(table, std::slice::from_ref(row)) {
             tracing::warn!(
@@ -459,6 +509,16 @@ impl ObjectManager {
         row: StoredRowVersion,
     ) {
         let _ = self.remember_row_version(object_id, branch_name, row);
+    }
+
+    pub fn add_row_version<H: Storage>(
+        &mut self,
+        io: &mut H,
+        object_id: ObjectId,
+        branch_name: impl Into<BranchName>,
+        row: StoredRowVersion,
+    ) -> Result<CommitId, Error> {
+        self.apply_row_version(io, object_id, branch_name.into(), row)
     }
 
     pub fn visible_row(
@@ -709,7 +769,7 @@ impl ObjectManager {
 
         // Capture previous state BEFORE mutation for AllObjectUpdate
         // (previous_commit_ids, old_content)
-        let (object_metadata, previous_commit_ids, old_content, previous_row, is_row_object) = {
+        let (_object_metadata, previous_commit_ids, old_content, _previous_row, is_row_object) = {
             let object = self
                 .get(object_id)
                 .ok_or(Error::ObjectNotFound(object_id))?;
@@ -799,6 +859,12 @@ impl ObjectManager {
 
         let commit_id = commit.id();
 
+        if is_row_object {
+            let history_row =
+                Self::row_version_from_commit(object_id, &branch_name, commit_id, &commit);
+            return self.apply_row_version(io, object_id, branch_name, history_row);
+        }
+
         // Sync storage - returns immediately
         if io
             .append_commit(object_id, &branch_name, commit.clone())
@@ -807,21 +873,7 @@ impl ObjectManager {
             commit.stored_state = StoredState::Stored;
         }
 
-        if is_row_object {
-            let history_row =
-                Self::row_version_from_commit(object_id, &branch_name, commit_id, &commit);
-            let applied = self.remember_row_version(object_id, branch_name, history_row.clone());
-            tracing::trace!(?commit_id, "row version applied");
-            self.notify_subscribers_of_commit(object_id, branch_name);
-            self.notify_row_object_update(
-                io,
-                &object_metadata,
-                previous_row,
-                applied.current_visible,
-                history_row,
-                applied.visible_changed,
-            );
-        } else {
+        if !is_row_object {
             // Now mutably borrow and update
             let object = self
                 .get_mut(object_id)
@@ -1024,7 +1076,7 @@ impl ObjectManager {
         let is_row_object = Self::is_row_metadata(&metadata);
 
         // Capture previous state BEFORE mutation for AllObjectUpdate
-        let (previous_commit_ids, old_content, previous_row, already_exists) = {
+        let (previous_commit_ids, old_content, _previous_row, already_exists) = {
             if is_row_object {
                 if self.row_version_exists(object_id, &branch_name, commit_id) {
                     (vec![], None, None, true)
@@ -1073,6 +1125,12 @@ impl ObjectManager {
             return Ok(commit_id);
         }
 
+        if is_row_object {
+            let history_row =
+                Self::row_version_from_commit(object_id, &branch_name, commit_id, &commit);
+            return self.apply_row_version(io, object_id, branch_name, history_row);
+        }
+
         // Sync storage - returns immediately
         let mut commit = commit;
         if io
@@ -1082,46 +1140,31 @@ impl ObjectManager {
             commit.stored_state = StoredState::Stored;
         }
 
-        if is_row_object {
-            let history_row =
-                Self::row_version_from_commit(object_id, &branch_name, commit_id, &commit);
-            let applied = self.remember_row_version(object_id, branch_name, history_row.clone());
-            self.notify_subscribers_of_commit(object_id, branch_name);
-            self.notify_row_object_update(
-                io,
-                &metadata,
-                previous_row,
-                applied.current_visible,
-                history_row,
-                applied.visible_changed,
-            );
-        } else {
-            let object = self.get_mut(object_id).expect("validated above");
+        let object = self.get_mut(object_id).expect("validated above");
 
-            let branch = object
-                .branches
-                .entry(branch_name)
-                .or_insert_with(|| Branch {
-                    loaded_state: BranchLoadedState::AllCommits,
-                    ..Default::default()
-                });
+        let branch = object
+            .branches
+            .entry(branch_name)
+            .or_insert_with(|| Branch {
+                loaded_state: BranchLoadedState::AllCommits,
+                ..Default::default()
+            });
 
-            for parent in &commit.parents {
-                branch.tips.remove(parent);
-            }
-            branch.tips.insert(commit_id);
-
-            branch.commits.insert(commit_id, commit);
-
-            self.notify_subscribers_of_commit(object_id, branch_name);
-            self.notify_all_object_subscribers(
-                object_id,
-                branch_name,
-                false,
-                previous_commit_ids,
-                old_content,
-            );
+        for parent in &commit.parents {
+            branch.tips.remove(parent);
         }
+        branch.tips.insert(commit_id);
+
+        branch.commits.insert(commit_id, commit);
+
+        self.notify_subscribers_of_commit(object_id, branch_name);
+        self.notify_all_object_subscribers(
+            object_id,
+            branch_name,
+            false,
+            previous_commit_ids,
+            old_content,
+        );
 
         Ok(commit_id)
     }

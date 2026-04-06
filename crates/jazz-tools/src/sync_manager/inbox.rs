@@ -260,9 +260,6 @@ impl SyncManager {
             return;
         }
 
-        if let Some(tier) = confirmed_tier {
-            let _ = storage.store_ack_tier(version_id, tier);
-        }
         self.patch_row_region_state(storage, row_id, version_id, state, confirmed_tier);
 
         let row_update = self.object_manager.patch_row_version_state(

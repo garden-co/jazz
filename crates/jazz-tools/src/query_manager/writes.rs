@@ -5,7 +5,7 @@ use crate::metadata::{
     DeleteKind, MetadataKey, RowProvenance, SYSTEM_PRINCIPAL_ID, row_provenance_metadata,
 };
 use crate::object::{BranchName, ObjectId};
-use crate::row_regions::StoredRowVersion;
+use crate::row_regions::{RowState, StoredRowVersion};
 use crate::storage::Storage;
 
 use super::encoding::{decode_column, decode_row, encode_row};
@@ -77,6 +77,28 @@ impl QueryManager {
         row_provenance_metadata(provenance, delete_kind)
     }
 
+    fn authored_row_version(
+        row_id: ObjectId,
+        branch_name: &str,
+        parents: Vec<CommitId>,
+        data: Vec<u8>,
+        provenance: &RowProvenance,
+        delete_kind: Option<DeleteKind>,
+    ) -> StoredRowVersion {
+        StoredRowVersion::new(
+            row_id,
+            branch_name,
+            parents,
+            data,
+            provenance.clone(),
+            Self::row_commit_metadata(provenance, delete_kind)
+                .into_iter()
+                .collect(),
+            RowState::VisibleDirect,
+            None,
+        )
+    }
+
     #[cfg(test)]
     fn stored_row_version_for_tip(
         &self,
@@ -125,22 +147,22 @@ impl QueryManager {
         Some(version)
     }
 
-    fn apply_local_row_commit<H: Storage>(
+    fn apply_local_row_version<H: Storage>(
         &mut self,
         storage: &mut H,
         row_id: ObjectId,
         branch_name: &str,
-        commit_id: CommitId,
+        version_id: CommitId,
     ) -> Result<StoredRowVersion, QueryError> {
         let branch_name = BranchName::new(branch_name);
         let Some(update) = self.sync_manager.object_manager.take_row_object_update_for(
             row_id,
             &branch_name,
-            commit_id,
+            version_id,
         ) else {
             return Err(QueryError::EncodingError(format!(
-                "missing row update for committed row version {:?} on {}",
-                commit_id, row_id
+                "missing row update for local row version {:?} on {}",
+                version_id, row_id
             )));
         };
 
@@ -348,24 +370,24 @@ impl QueryManager {
             .map(|tips| tips.iter().copied().collect())
             .unwrap_or_default();
 
-        let commit_id = self
+        let row = Self::authored_row_version(
+            id,
+            branch,
+            parents,
+            prepared.new_data.clone(),
+            provenance,
+            None,
+        );
+        let version_id = self
             .sync_manager
             .object_manager
-            .add_commit_with_timestamp(
-                storage,
-                id,
-                branch,
-                parents,
-                prepared.new_data.clone(),
-                timestamp,
-                provenance.updated_by.clone(),
-                Some(Self::row_commit_metadata(provenance, None)),
-            )
+            .add_row_version(storage, id, branch, row)
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
-        let _ = self.apply_local_row_commit(storage, id, branch, commit_id)?;
+        let _ = timestamp;
+        let _ = self.apply_local_row_version(storage, id, branch, version_id)?;
 
-        Ok(commit_id)
+        Ok(version_id)
     }
 
     /// Load a row for schema-aware updates.
@@ -529,23 +551,22 @@ impl QueryManager {
 
         // Add commit with row data
         let branch = self.current_branch();
+        let row = Self::authored_row_version(
+            object_id,
+            branch.as_str(),
+            vec![],
+            data.clone(),
+            &provenance,
+            None,
+        );
         let row_commit_id = self
             .sync_manager
             .object_manager
-            .add_commit_with_timestamp(
-                storage,
-                object_id,
-                &branch,
-                vec![],
-                data.clone(),
-                timestamp,
-                provenance.updated_by.clone(),
-                Some(Self::row_commit_metadata(&provenance, None)),
-            )
+            .add_row_version(storage, object_id, &branch, row)
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
 
         tracing::trace!(%object_id, ?row_commit_id, "apply local row insert");
-        let _ = self.apply_local_row_commit(storage, object_id, branch.as_str(), row_commit_id)?;
+        let _ = self.apply_local_row_version(storage, object_id, branch.as_str(), row_commit_id)?;
 
         tracing::debug!(%object_id, ?row_commit_id, branch = self.current_branch(), "row created");
         Ok(InsertResult {
@@ -672,22 +693,15 @@ impl QueryManager {
                 .create_with_id(storage, object_id, Some(metadata));
 
         // Add commit with row data to specified branch
+        let row =
+            Self::authored_row_version(object_id, branch, vec![], data.clone(), &provenance, None);
         let row_commit_id = self
             .sync_manager
             .object_manager
-            .add_commit_with_timestamp(
-                storage,
-                object_id,
-                branch,
-                vec![],
-                data.clone(),
-                timestamp,
-                provenance.updated_by.clone(),
-                Some(Self::row_commit_metadata(&provenance, None)),
-            )
+            .add_row_version(storage, object_id, branch, row)
             .map_err(|_| QueryError::ObjectNotFound(object_id))?;
 
-        let _ = self.apply_local_row_commit(storage, object_id, branch, row_commit_id)?;
+        let _ = self.apply_local_row_version(storage, object_id, branch, row_commit_id)?;
 
         Ok(InsertResult {
             row_id: object_id,
@@ -1483,27 +1497,23 @@ impl QueryManager {
 
         // Add commit with preserved content + delete: soft metadata
         // Content is copied from previous tip so soft-deleted rows can still be read
+        let delete_row = Self::authored_row_version(
+            id,
+            self.current_branch().as_str(),
+            parents,
+            old_data.clone(),
+            &delete_provenance,
+            Some(DeleteKind::Soft),
+        );
         let delete_commit_id = self
             .sync_manager
             .object_manager
-            .add_commit_with_timestamp(
-                storage,
-                id,
-                self.current_branch(),
-                parents,
-                old_data.clone(),
-                timestamp,
-                delete_provenance.updated_by.clone(),
-                Some(Self::row_commit_metadata(
-                    &delete_provenance,
-                    Some(DeleteKind::Soft),
-                )),
-            )
+            .add_row_version(storage, id, self.current_branch(), delete_row)
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         let branch = self.current_branch();
         tracing::trace!(%id, ?delete_commit_id, "apply local soft delete");
-        let _ = self.apply_local_row_commit(storage, id, branch.as_str(), delete_commit_id)?;
+        let _ = self.apply_local_row_version(storage, id, branch.as_str(), delete_commit_id)?;
 
         Ok(DeleteHandle {
             row_id: id,
@@ -1625,27 +1635,23 @@ impl QueryManager {
         let delete_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
 
+        let delete_row = Self::authored_row_version(
+            id,
+            branch,
+            parents,
+            old_data_for_policy.to_vec(),
+            &delete_provenance,
+            Some(DeleteKind::Soft),
+        );
         let delete_commit_id = self
             .sync_manager
             .object_manager
-            .add_commit_with_timestamp(
-                storage,
-                id,
-                branch,
-                parents,
-                old_data_for_policy.to_vec(),
-                timestamp,
-                delete_provenance.updated_by.clone(),
-                Some(Self::row_commit_metadata(
-                    &delete_provenance,
-                    Some(DeleteKind::Soft),
-                )),
-            )
+            .add_row_version(storage, id, branch, delete_row)
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         let _ = old_branch_data;
         let _ = descriptor;
-        let _ = self.apply_local_row_commit(storage, id, branch, delete_commit_id)?;
+        let _ = self.apply_local_row_version(storage, id, branch, delete_commit_id)?;
 
         Ok(DeleteHandle {
             row_id: id,
@@ -1733,22 +1739,21 @@ impl QueryManager {
         let row_provenance = self.row_provenance_for_update(&old_provenance, None, timestamp);
 
         // Add commit with row data (no delete metadata = undelete)
+        let row = Self::authored_row_version(
+            id,
+            self.current_branch().as_str(),
+            parents,
+            new_data.clone(),
+            &row_provenance,
+            None,
+        );
         let row_commit_id = self
             .sync_manager
             .object_manager
-            .add_commit_with_timestamp(
-                storage,
-                id,
-                self.current_branch(),
-                parents,
-                new_data.clone(),
-                timestamp,
-                row_provenance.updated_by.clone(),
-                Some(Self::row_commit_metadata(&row_provenance, None)),
-            )
+            .add_row_version(storage, id, self.current_branch(), row)
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
-        let _ = self.apply_local_row_commit(
+        let _ = self.apply_local_row_version(
             storage,
             id,
             self.current_branch().as_str(),
@@ -1815,22 +1820,18 @@ impl QueryManager {
         let delete_provenance = self.row_provenance_for_update(&old_provenance, None, timestamp);
 
         // Add commit with empty content + delete: hard metadata
+        let delete_row = Self::authored_row_version(
+            id,
+            self.current_branch().as_str(),
+            parents,
+            vec![],
+            &delete_provenance,
+            Some(DeleteKind::Hard),
+        );
         let delete_commit_id = self
             .sync_manager
             .object_manager
-            .add_commit_with_timestamp(
-                storage,
-                id,
-                self.current_branch(),
-                parents,
-                vec![], // Empty content for tombstone
-                timestamp,
-                delete_provenance.updated_by.clone(),
-                Some(Self::row_commit_metadata(
-                    &delete_provenance,
-                    Some(DeleteKind::Hard),
-                )),
-            )
+            .add_row_version(storage, id, self.current_branch(), delete_row)
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
         // Truncate branch: set tails = [delete_commit_id], removing all history
@@ -1847,7 +1848,7 @@ impl QueryManager {
 
         let _ = old_data;
         let _ = descriptor;
-        let _ = self.apply_local_row_commit(
+        let _ = self.apply_local_row_version(
             storage,
             id,
             self.current_branch().as_str(),
