@@ -44,7 +44,7 @@ describe("RowMutationSidebar", () => {
     ]);
   });
 
-  it("renders boolean fields as checkboxes and saves unchecked values as false", () => {
+  it("renders boolean fields as select dropdowns and saves changed values", () => {
     const onSave = vi.fn();
 
     render(
@@ -62,13 +62,13 @@ describe("RowMutationSidebar", () => {
     );
 
     const field = screen.getByLabelText("done field");
-    const checkbox = within(field).getByRole("checkbox", { name: "done" });
+    const select = within(field).getByRole("combobox");
     const sidebar = field.closest("aside");
 
-    expect((checkbox as HTMLInputElement).checked).toBe(true);
+    expect((select as HTMLSelectElement).value).toBe("true");
     expect(sidebar).not.toBeNull();
 
-    fireEvent.click(checkbox);
+    fireEvent.change(select, { target: { value: "false" } });
     fireEvent.click(within(sidebar as HTMLElement).getByRole("button", { name: "Save" }));
 
     expect(onSave).toHaveBeenCalledWith({ done: false });
