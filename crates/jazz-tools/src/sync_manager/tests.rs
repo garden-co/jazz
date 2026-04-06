@@ -2933,6 +2933,84 @@ fn add_server_syncs_visible_row_after_legacy_commit_history_is_removed() {
 }
 
 #[test]
+fn forward_update_to_servers_with_storage_uses_history_when_visible_region_is_missing() {
+    use std::collections::HashMap;
+
+    use crate::metadata::MetadataKey;
+    use crate::row_regions::{BatchId, RowState, StoredRowVersion};
+    use crate::storage::Storage;
+
+    let mut sm = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let server_id = ServerId::new();
+    let object_id = ObjectId::new();
+    let branch_name: BranchName = "main".into();
+
+    sm.add_server(server_id);
+    sm.take_outbox();
+
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    sm.object_manager
+        .create_with_id(&mut io, object_id, Some(metadata.clone()));
+
+    let commit = make_test_commit(b"history-only", vec![]);
+    let commit_id = commit.id();
+    sm.object_manager
+        .receive_commit(&mut io, object_id, branch_name, commit.clone())
+        .unwrap();
+
+    let version = StoredRowVersion {
+        row_id: object_id,
+        branch: branch_name.as_str().to_string(),
+        parents: commit.parents.iter().copied().collect(),
+        updated_at: commit.timestamp,
+        created_by: commit.author.clone(),
+        created_at: commit.timestamp,
+        updated_by: commit.author.clone(),
+        batch_id: BatchId::from_commit_id(commit_id),
+        state: RowState::VisibleDirect,
+        confirmed_tier: None,
+        is_deleted: false,
+        data: commit.content.clone(),
+        metadata: commit
+            .metadata
+            .as_ref()
+            .map(|metadata| {
+                metadata
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    io.append_history_region_rows("users", std::slice::from_ref(&version))
+        .unwrap();
+
+    sm.forward_update_to_servers_with_storage(&io, object_id, branch_name);
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload: SyncPayload::RowVersionCreated { metadata, row },
+        } => {
+            assert_eq!(*id, server_id);
+            assert_eq!(row.row_id, object_id);
+            assert_eq!(row.version_id(), commit_id);
+            assert_eq!(row.data, b"history-only".to_vec());
+            assert!(
+                metadata.is_some(),
+                "storage-backed row sync should still include metadata on first send"
+            );
+        }
+        other => panic!("expected RowVersionCreated to server, got {other:?}"),
+    }
+}
+
+#[test]
 fn add_server_with_storage_syncs_full_row_history_to_server() {
     use std::collections::HashMap;
 

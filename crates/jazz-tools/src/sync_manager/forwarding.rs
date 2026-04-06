@@ -1,11 +1,38 @@
 use super::*;
 use crate::commit::CommitId;
 use crate::object::{BranchName, ObjectId};
-use crate::row_regions::StoredRowVersion;
+use crate::row_regions::{HistoryScan, StoredRowVersion};
 use std::collections::HashSet;
 use uuid::Uuid;
 
 impl SyncManager {
+    pub(super) fn load_current_row_from_storage<H: crate::storage::Storage + ?Sized>(
+        &self,
+        storage: &H,
+        object_id: ObjectId,
+        branch_name: &BranchName,
+        metadata: &HashMap<String, String>,
+    ) -> Option<StoredRowVersion> {
+        let table = metadata.get(crate::metadata::MetadataKey::Table.as_str())?;
+
+        if let Ok(Some(row)) =
+            storage.load_visible_region_row(table, branch_name.as_str(), object_id)
+        {
+            return Some(row);
+        }
+
+        storage
+            .scan_history_region(
+                table,
+                branch_name.as_str(),
+                HistoryScan::Row { row_id: object_id },
+            )
+            .ok()?
+            .into_iter()
+            .filter(|row| row.state.is_visible())
+            .max_by_key(|row| (row.updated_at, row.version_id()))
+    }
+
     /// Forward an update to all servers.
     ///
     /// Call this after local writes to sync changes to connected servers.
@@ -49,11 +76,8 @@ impl SyncManager {
         let Some(object) = self.object_manager.get(object_id) else {
             return;
         };
-        if let Some(table) = object
-            .metadata
-            .get(crate::metadata::MetadataKey::Table.as_str())
-            && let Ok(Some(row)) =
-                storage.load_visible_region_row(table, branch_name.as_str(), object_id)
+        if let Some(row) =
+            self.load_current_row_from_storage(storage, object_id, &branch_name, &object.metadata)
         {
             let metadata = object.metadata.clone();
             for server_id in server_ids {
@@ -194,11 +218,8 @@ impl SyncManager {
         let Some(object) = self.object_manager.get(object_id) else {
             return;
         };
-        if let Some(table) = object
-            .metadata
-            .get(crate::metadata::MetadataKey::Table.as_str())
-            && let Ok(Some(row)) =
-                storage.load_visible_region_row(table, branch_name.as_str(), object_id)
+        if let Some(row) =
+            self.load_current_row_from_storage(storage, object_id, &branch_name, &object.metadata)
         {
             let metadata = object.metadata.clone();
             for client_id in &client_ids {
