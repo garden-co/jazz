@@ -333,7 +333,7 @@ describe("cli validate", () => {
 });
 
 describe("cli schema export", () => {
-  it("prints the compiled schema representation as JSON", async () => {
+  it("prints the compiled schema representation as JSON and writes a snapshot", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
     await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
@@ -355,12 +355,40 @@ describe("cli schema export", () => {
     }
 
     const exported = JSON.parse(writes.join(""));
+    const snapshotFiles = (await readdir(join(root, "migrations", "snapshots"))).filter((name) =>
+      name.endsWith(".json"),
+    );
     expect(exported.projects.columns[0].name).toBe("name");
     expect(exported.todos.columns.map((column: { name: string }) => column.name)).toEqual([
       "title",
       "ownerId",
     ]);
     expect(exported.todos.policies).toBeUndefined();
+    expect(snapshotFiles).toHaveLength(1);
+    expect(snapshotFiles[0]).toMatch(/^\d{8}T\d{6}-[0-9a-f]{64}\.json$/i);
+  });
+
+  it("does not write a duplicate snapshot when exporting the current schema twice", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+
+    const originalWrite = process.stdout.write.bind(process.stdout);
+    const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation((() => {
+      return true;
+    }) as typeof process.stdout.write);
+
+    try {
+      await exportSchema({ schemaDir: root, format: "json" });
+      await exportSchema({ schemaDir: root, format: "json" });
+    } finally {
+      writeSpy.mockRestore();
+      process.stdout.write = originalWrite;
+    }
+
+    const snapshotFiles = (await readdir(join(root, "migrations", "snapshots"))).filter((name) =>
+      name.endsWith(".json"),
+    );
+    expect(snapshotFiles).toHaveLength(1);
   });
 
   it("prints the compiled schema representation from src/schema.ts", async () => {
