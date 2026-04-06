@@ -2967,6 +2967,87 @@ fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
 }
 
 #[test]
+fn local_update_with_check_inherits_uses_visible_row_region_after_legacy_branch_history_is_removed()
+{
+    let mut schema = Schema::new();
+    let folders_descriptor = RowDescriptor::new(vec![
+        ColumnDescriptor::new("owner_id", ColumnType::Text),
+        ColumnDescriptor::new("name", ColumnType::Text),
+        ColumnDescriptor::new("parent_id", ColumnType::Uuid)
+            .nullable()
+            .references("folders"),
+    ]);
+    let folders_policies = TablePolicies::new().with_update(
+        Some(PolicyExpr::eq_session("owner_id", vec!["user_id".into()])),
+        PolicyExpr::Inherits {
+            operation: Operation::Update,
+            via_column: "parent_id".into(),
+            max_depth: Some(10),
+        },
+    );
+    schema.insert(
+        TableName::new("folders"),
+        TableSchema::with_policies(folders_descriptor.clone(), folders_policies),
+    );
+
+    let mut writer_qm = create_query_manager(SyncManager::new(), schema.clone());
+    let branch = get_branch(&writer_qm);
+    let mut storage = MemoryStorage::new();
+
+    let root = writer_qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("alice".into()),
+                Value::Text("Root".into()),
+                Value::Null,
+            ],
+        )
+        .expect("create root");
+    let child = writer_qm
+        .insert(
+            &mut storage,
+            "folders",
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Child".into()),
+                Value::Uuid(root.row_id),
+            ],
+        )
+        .expect("create child");
+
+    crate::storage::Storage::delete_commit(
+        &mut storage,
+        root.row_id,
+        &BranchName::new(&branch),
+        root.row_commit_id,
+    )
+    .unwrap();
+
+    let mut qm = create_query_manager(SyncManager::new(), schema);
+    let update_err = qm
+        .update_with_session(
+            &mut storage,
+            child.row_id,
+            &[
+                Value::Text("bob".into()),
+                Value::Text("Child renamed".into()),
+                Value::Uuid(root.row_id),
+            ],
+            Some(&Session::new("bob")),
+        )
+        .expect_err("update should still evaluate inherited WITH CHECK from visible rows");
+    assert!(matches!(
+        update_err,
+        QueryError::PolicyDenied {
+            table,
+            operation: Operation::Update
+        } if table == TableName::new("folders")
+    ));
+}
+
+#[test]
 fn rebac_select_policy_with_null_literal_filters_query_results() {
     use crate::query_manager::query::QueryBuilder;
 

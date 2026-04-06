@@ -1611,27 +1611,23 @@ impl QueryManager {
         let mut to_approve = Vec::new();
         let mut to_reject = Vec::new();
 
-        // Create row loader for settling
-        let om = &mut self.sync_manager.object_manager;
-        let storage_ref: &dyn Storage = storage;
-
         // Settle each active policy check
         for (pending_id, state) in &mut self.active_policy_checks {
             let branch = state.branch;
             let branches = vec![branch.as_str().to_string()];
             let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                let obj = om.get_or_load(id, storage_ref, &branches)?;
-                let branch_state = obj.branches.get(&branch)?;
-                let tip_id = branch_state.tips.iter().next()?;
-                let commit = branch_state.commits.get(tip_id)?;
-                if commit.content.is_empty() {
+                let (_, row) = Self::load_best_visible_row_version(storage, id, &branches)?;
+                if row.is_hard_deleted() {
                     return None;
                 }
+                let version_id = row.version_id();
+                let provenance = row.row_provenance();
+                let source_branch = BranchName::new(&row.branch);
                 Some(LoadedRow::new(
-                    commit.content.clone(),
-                    *tip_id,
-                    commit.row_provenance()?,
-                    [(id, branch)].into_iter().collect(),
+                    row.data,
+                    version_id,
+                    provenance,
+                    [(id, source_branch)].into_iter().collect(),
                 ))
             };
 
@@ -1639,7 +1635,7 @@ impl QueryManager {
             let all_complete = state
                 .graphs
                 .iter_mut()
-                .all(|g| g.settle(storage_ref, &mut row_loader));
+                .all(|g| g.settle(storage, &mut row_loader));
 
             if all_complete {
                 // All graphs settled - check results
