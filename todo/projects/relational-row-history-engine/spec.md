@@ -11,23 +11,22 @@ That seam is expensive. On `main`, we pay for a git-like object model and then r
 
 The concern behind this spec is not just "can we make `#415` faster?" It is "are we optimizing the wrong boundary?" If the system's real semantic unit is a versioned row in a branch-scoped table, then object DAGs, branch-tip sets, and commit-specific hot paths may be the wrong primitive to optimize around. We may be paying complexity twice: once in the storage/object layer, and again in the query layer that has to turn that back into rows.
 
-This spec explores a radical replacement: make the base substrate of Jazz a lower-level database of tables that contain both user columns and system columns. Branching, staging, durability, and visibility become data expressed in rows and system tables, and the hot read path becomes an explicitly maintained "latest visible" projection rather than a reconstruction from object history.
+This spec explores a radical replacement: make the base substrate of Jazz a lower-level database of tables that contain both user columns and system columns. Branching, staging, durability, and visibility become data expressed directly in row versions, and the hot read path becomes an explicitly maintained "latest visible" projection rather than a reconstruction from object history.
 
 ## Solution
 
 ### Chosen approach
 
-This spec recommends replacing the "row = object with branch DAG history" model with a relational version-storage model built from three first-class storage relations:
+This spec recommends replacing the "row = object with branch DAG history" model with a relational version-storage model built from two first-class storage relations for user data:
 
 1. per-user-table **history tables**
 2. per-user-table **visible tables**
-3. shared **system tables** for batch settlement and other engine metadata
 
 The engine still has version history, staging, transactions, and durability tiers. The difference is where those concepts live:
 
 - not inside object-manager commit graphs
 - not in a separate bespoke metadata structure
-- but in rows, reserved columns, and system tables inside one lower-level table engine
+- but in rows and reserved system columns inside one lower-level table engine
 
 ### Alternatives considered
 
@@ -46,10 +45,12 @@ The engine still has version history, staging, transactions, and durability tier
 ### Design principles
 
 - The hot path for ordinary reads must be **visible-table first**.
+- `__visible` must be authoritative for current reads.
 - History must be **append-friendly** and compress well.
+- `__history` and `__visible` should stay structurally parallel so history/time-travel features can be real product features from the beginning.
 - Visibility and settlement rules should be expressible in table terms, even if the engine materializes optimized projections for speed.
 - We should have one primary data management system to optimize on disk, in memory, and on the wire.
-- Batch-wide facts should live in system tables when duplicating them on every row version would be wasteful.
+- Prefer write-time fan-out over read-time joins on the hot path.
 
 ### Core model
 
@@ -79,11 +80,7 @@ The difference is purpose and clustering:
 - `todos__visible` is the hot read projection: one current visible row version per logical row per branch scope
 - `todos__history` is the append-heavy history log: all staged and visible row versions over time
 
-In addition, the engine stores shared system tables:
-
-- `__batches`
-- `__batch_members` if needed for explicit batch-member bookkeeping
-- existing schema/catalog/index metadata tables, re-expressed in the same lower-level model over time
+The engine may still have shared metadata tables for schema, catalog, and index management, but batch settlement for user rows is not modeled as a required third hot-path relation.
 
 ### Reserved system columns
 
@@ -97,6 +94,9 @@ $created_at       logical row creation timestamp
 $created_by       actor that created the logical row
 $updated_by       actor that produced this row version
 $batch_id         logical batch id
+$batch_mode       direct | transactional
+$settlement       pending | rejected | durable_direct | accepted_transaction
+$confirmed_tier   worker | edge | global
 $visibility       visible | staging
 $is_deleted       tombstone marker
 $metadata         engine/user metadata blob
@@ -106,24 +106,8 @@ Notes:
 
 - `BatchId` remains the single logical write id.
 - We do not overload `$created_at` to carry UUIDv7 identity. Instead, row identity is explicit in `$row_id`, which may itself be UUIDv7-backed.
-- Batch-wide settlement should not be copied blindly into every row version if a single `__batches` row can answer it cheaper.
-
-`__batches` carries the batch-wide facts:
-
-```text
-BatchRow {
-  batch_id,
-  branch_scope,
-  mode,               // direct | transactional
-  settlement,         // pending | rejected | durable_direct | accepted_transaction
-  confirmed_tier,     // worker | edge | global
-  author,
-  created_at,
-  metadata,
-}
-```
-
-This keeps the main user-table rows simple while still making all engine facts relational and queryable.
+- Batch-wide settlement is deliberately denormalized onto row versions and visible rows. That makes write-time fate/tier propagation more expensive, but keeps ordinary reads and ordinary queries one-table only.
+- History rows are append-first, but narrow metadata fields such as `$settlement` and `$confirmed_tier` may be updated in place when fate or durability advances if appending new copies would be too expensive.
 
 ### Breadboards
 
@@ -132,10 +116,10 @@ This keeps the main user-table rows simple while still making all engine facts r
 ```text
 alice updates todo/1
   -> append new row version to todos__history
-     with $visibility = visible, $batch_id = B1
+     with $visibility = visible, $batch_id = B1,
+          $settlement = durable_direct
   -> upsert same row version into todos__visible
   -> update visible-table indices
-  -> upsert __batches[B1] = DurableDirect(tier=worker/edge/global)
 ```
 
 #### Transactional write
@@ -143,19 +127,20 @@ alice updates todo/1
 ```text
 alice starts batch B7 touching todo/1 and project/9
   -> append staging row versions to todos__history and projects__history
-     with $visibility = staging, $batch_id = B7
+     with $visibility = staging, $batch_id = B7,
+          $settlement = pending
   -> no change to todos__visible or projects__visible yet
-  -> upsert __batches[B7] = pending
 ```
 
 #### Transaction accepted
 
 ```text
 authority accepts B7
-  -> update __batches[B7] = AcceptedTransaction(tier=edge, ...)
-  -> publish visible batch members:
-       upsert accepted row versions into todos__visible and projects__visible
-  -> append corresponding visible row versions to history
+  -> fan out fate/tier updates to the affected history rows
+  -> append corresponding accepted visible row versions to history
+       with $visibility = visible,
+            $settlement = accepted_transaction
+  -> upsert those same row versions into todos__visible and projects__visible
   -> update visible-table indices
 ```
 
@@ -163,7 +148,7 @@ authority accepts B7
 
 ```text
 authority rejects B7
-  -> update __batches[B7] = Rejected(code=...)
+  -> fan out $settlement = rejected to the affected history rows
   -> visible tables unchanged
   -> staged history remains available for local rollback/debug/restart
 ```
@@ -176,25 +161,16 @@ Application query
   -> visible-table indices serve hot scans and lookups
   -> visible rows already include system columns needed for ordinary policy/filtering
 
-Transactional / debug / recovery query
-  -> QueryManager reads history tables + __batches
-  -> can inspect staged rows, accepted rows, rejected batches, and replay state
+History / debug / time-travel query
+  -> QueryManager reads history tables with the same row shape
+  -> can inspect staged rows, accepted rows, rejected rows, and older visible states
 ```
 
 ```text
-                    +------------------+
-                    |   __batches      |
-                    | batch settlement |
-                    +---------+--------+
-                              |
-                              |
-         +--------------------+--------------------+
-         |                                         |
-         v                                         v
 +--------------------+                   +--------------------+
 | todos__history     |                   | todos__visible     |
-| all row versions   |                   | latest visible row |
-| clustered for      |                   | clustered for      |
+| all row versions   |                   | current visible    |
+| same row shape     |                   | same row shape     |
 | append/compression |                   | hot reads/indices  |
 +--------------------+                   +--------------------+
 ```
@@ -214,14 +190,14 @@ This means:
 - ordinary secondary indices index `__visible`, not `__history`
 - joins, filters, sorting, and subscriptions all work over the visible projection by default
 
-History-aware or transaction-aware paths may query `__history` and `__batches`, but those are not the default UI path.
+History-aware and time-travel paths may query `__history`, but those are not the default UI path.
 
 ### Visibility and settlement semantics
 
 The visible projection is defined by two rules:
 
 1. only row versions with `$visibility = visible` may appear in `table__visible`
-2. a row version is not visible until its batch row in `__batches` has a visible settlement
+2. only row versions whose own `$settlement` is `durable_direct` or `accepted_transaction` may appear in `table__visible`
 
 Visible settlements are:
 
@@ -236,6 +212,8 @@ Non-visible settlements are:
 `confirmed_tier` is batch-wide. If a logical batch touches many rows, its effective tier is the minimum confirmed tier across all visible batch members in that batch.
 
 This is intentionally batch-wide. If an app wants two updates to become independently visible or independently durable, it should emit two batches.
+
+`table__visible` is authoritative for "what is the current visible state now?" Reads should not have to consult history to answer that question.
 
 ### Storage and locality strategy
 
@@ -262,7 +240,7 @@ Suggested clustering:
 - primary locality by `(branch_scope, row_id, version_at)`
 - secondary access path by `(batch_id, row_id)` when publish/replay needs it
 
-Because both tables share the same row codec, any columnar, dictionary, delta, page, or wire compression work benefits both:
+Because both tables share the same row codec and almost the same row shape, any columnar, dictionary, delta, page, or wire compression work benefits both:
 
 - user columns
 - system columns
@@ -292,13 +270,13 @@ Compression opportunities:
 
 Sync stops shipping commit DAG structure for user rows.
 
-Instead, it ships:
+Instead, it ships row-version rows and row-metadata changes:
 
-- batch rows from `__batches`
-- row-version rows for `__history`
-- visible-projection changes for `__visible` when needed
+- history rows for `__history`
+- visible-row upserts/removals for `__visible`
+- settlement/tier fan-out changes for affected rows when batch fate advances
 
-Downstream correctness comes from the same relational state the local engine uses. Reconnect and restart no longer need to reconstruct write fate from commit IDs and object frontiers; they can re-derive it from persisted batch rows plus history/visible rows.
+Downstream correctness comes from the same relational state the local engine uses. Reconnect and restart no longer need to reconstruct write fate from commit IDs and object frontiers; they can recover it from persisted history/visible rows directly.
 
 ### Query-manager implications
 
@@ -323,7 +301,7 @@ The new lowest layer needs table-oriented operations such as:
 trait Storage {
     fn append_history_rows(&mut self, table: TableId, rows: &[EncodedRow]) -> Result<()>;
     fn upsert_visible_rows(&mut self, table: TableId, rows: &[EncodedRow]) -> Result<()>;
-    fn upsert_batch_rows(&mut self, rows: &[EncodedBatchRow]) -> Result<()>;
+    fn patch_rows_by_batch(&mut self, table: TableId, batch_id: BatchId, patch: RowPatch) -> Result<()>;
     fn scan_visible_index(&self, table: TableId, index: IndexId, cond: ScanCond) -> Result<RowCursor>;
     fn scan_history(&self, table: TableId, cond: HistoryScanCond) -> Result<RowCursor>;
 }
@@ -338,44 +316,52 @@ One write transaction inside one node must be able to update:
 - history rows
 - visible rows
 - visible-table indices
-- batch rows
+- row metadata for affected rows when fate/tier advances
 
 as one atomic storage operation.
 
 If that is not possible, this design will produce visible/history drift and will not be viable.
 
-### Repair path
+### History and time-travel path
 
-The engine needs one authoritative repair operation:
+This design should support user-facing history from the beginning.
 
-```text
-rebuild_visible_projection(table, branch_scope)
-  = recompute visible rows from history rows + batch rows
-```
+The intended shape is:
 
-We should be able to run that in tests, offline repair, and corruption debugging.
+- ordinary queries compile against `table__visible`
+- `query.history()` compiles against `table__history` with the same user-column shape plus reserved system columns
+- `query.as_of(ts)` is implemented as a specialized history execution mode that finds the latest visible row version at or before `ts`
+
+The reason this stays manageable is structural similarity:
+
+- the same table schema
+- the same user columns
+- the same reserved system columns
+- different clustering and default query target
 
 That gives us one critical invariant:
 
-- `table__visible` is a maintained projection
-- but it is always derivable from `table__history` and `__batches`
+- `table__visible` is authoritative for current state
+- `table__history` is authoritative for chronological row history
+- they should be similar enough that time-travel and history features do not require a second query language
 
 ## Rabbit Holes
 
-- The visible projection may quietly become a second system to maintain unless we define crisp repair and atomicity rules.
+- Making `__visible` authoritative means we are choosing not to rely on "just rebuild it from history" as the normal escape hatch. If visible/history drift occurs, that is a serious correctness bug.
 - Row-version duplication may still be too expensive if our compression strategy is weaker in practice than expected.
 - Rewriting the substrate means query compilation, sync scope tracking, schema activation, and policy evaluation all need to lose their `Row = Object` assumptions cleanly rather than through shims.
-- Batch-wide settlement duplicated across many row versions may be too expensive unless `__batches` carries the authoritative copy and row formats only denormalize what the hot path truly needs.
+- Denormalizing batch-wide settlement and tier onto many rows may make fate reception and tier advancement too expensive for wide batches.
+- User-facing `as_of(...)` queries sound structurally simple here, but they still need a fast "latest visible row version before timestamp" execution path or they will be too slow.
 - Deletes, undeletes, and historical tombstone semantics need to stay simple; otherwise we will just rebuild commit semantics under new names.
 - Existing branch semantics include env/schemaHash/userBranch concerns. We need a clean `branch_scope` model that preserves schema/lens behavior without dragging the old branch-name machinery through every hot path.
-- Multi-tier sync currently relies on commit IDs, object metadata, and topological ordering. The replacement protocol needs equally crisp invariants for idempotence and replay.
+- Multi-tier sync currently relies on commit IDs, object metadata, and topological ordering. The replacement protocol needs equally crisp invariants for idempotence, replay, and row-metadata fan-out.
 - The browser worker/main-thread split may react differently to this model: visible scans should get cheaper, but write amplification into visible + history + indices may get worse.
 
 ## No-gos
 
 - No attempt to preserve the current object-manager hot path for user rows.
 - No "hybrid forever" architecture where ordinary user tables can use either object DAGs or relational history indefinitely.
-- No requirement that full end-user SQL can directly query raw history tables in v1.
+- No separate batch-settlement table on the ordinary read path.
 - No attempt to preserve arbitrary commit-graph merge semantics if that reintroduces the very structure this spec is trying to remove.
 - No assumption that duplicated rows are acceptable without proving it in benchmarks.
 - No implicit user write access to reserved system columns.
@@ -386,21 +372,26 @@ Use integration-first tests and benchmark gates. This is not a unit-test-sized c
 
 - Add SchemaManager / RuntimeCore integration tests where `alice` writes direct visible batches and `bob` subscribes, verifying ordinary queries read only `__visible` semantics.
 - Add transaction acceptance/rejection flows where `alice` stages rows, the authority accepts or rejects the batch, and `bob` only sees accepted visible batch members.
-- Add restart tests where a runtime reconstructs visible state and batch settlement from persisted `__history` + `__visible` + `__batches`.
-- Add repair tests that intentionally corrupt or drop visible rows and verify `rebuild_visible_projection(...)` restores the correct current state.
+- Add fate/tier fan-out tests where one batch touches many rows and settlement advancement updates both `__history` and `__visible` metadata correctly.
+- Add restart tests where a runtime reconstructs current reads directly from persisted `__visible`, and history/time-travel queries directly from persisted `__history`.
 - Add deletion tests with realistic actors showing that tombstones do not leak back into ordinary visible queries but remain reconstructible from history.
+- Add history-query tests from the beginning:
+  - `query.history()` returns chronologically ordered row versions with system columns
+  - `query.as_of(ts)` returns the expected past visible state
 - Add benchmark suites comparing `main`, `#415`, and this model for:
   - point read of current row
   - table scan of current visible rows
   - direct-write latency
   - transactional publish latency
+  - batch fate/tier fan-out cost
   - history append throughput
+  - `as_of(ts)` query latency
   - on-disk size
   - sync payload size
-- Treat the idea as viable only if visible reads stay at least competitive with `main`, and history/storage overhead is plausibly recoverable through compression.
+- Treat the idea as viable only if visible reads stay at least competitive with `main`, history/time-travel queries are usable without heroic special cases, and write fan-out costs are plausibly recoverable through compression plus simpler engine boundaries.
 
 ## Confidence
 
 6/10
 
-The conceptual simplification is strong, and the two-table split answers the biggest immediate objection to "just query history directly." The remaining uncertainty is practical: whether we can make visible-projection maintenance and compression strong enough that the rewrite buys real performance instead of aesthetic clarity alone.
+The conceptual simplification is strong, and the two-table split still feels like the right answer. The remaining uncertainty is practical: whether denormalized fate/tier fan-out and authoritative visible-state maintenance are cheap enough that the rewrite buys real performance instead of just cleaner boundaries.
