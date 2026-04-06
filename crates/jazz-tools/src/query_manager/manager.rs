@@ -5,9 +5,10 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::commit::CommitId;
-use crate::metadata::{MetadataKey, ObjectType, RowProvenance};
+use crate::metadata::{MetadataKey, ObjectType};
 use crate::object::{BranchName, ObjectId};
 use crate::object_manager::AllObjectUpdate;
+use crate::row_regions::StoredRowVersion;
 use crate::schema_manager::{LensTransformer, SchemaContext};
 use crate::storage::{CatalogueManifestOp, Storage};
 use crate::sync_manager::{
@@ -915,116 +916,19 @@ impl QueryManager {
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let include_deleted = subscription.query.include_deleted;
 
-            // Row loader returns None for empty content (hard delete tombstones)
-            // Soft deletes have preserved content and can be materialized normally
-            // For single-branch subscriptions, reads from that branch
-            // For multi-branch subscriptions, uses LWW across branches
-            // When schema context is present, applies lens transform for old schema branches
             let delta = {
-                let om = &mut self.sync_manager.object_manager;
                 let row_loader = |id: ObjectId| -> Option<LoadedRow> {
-                    let obj = om.get_or_load(id, storage_ref, &branches);
-                    if obj.is_none() {
-                        tracing::trace!(%id, "row_loader: object not found");
-                        return None;
-                    }
-                    let obj = obj?;
-                    let mut best: Option<(u64, CommitId, Vec<u8>, String, bool, RowProvenance)> =
-                        None;
-
-                    for branch_name in &branches {
-                        if let Some(branch) = obj.branches.get(&BranchName::new(branch_name)) {
-                            for &tip_id in &branch.tips {
-                                if let Some(commit) = branch.commits.get(&tip_id) {
-                                    let Some(row_provenance) = commit.row_provenance() else {
-                                        continue;
-                                    };
-                                    let is_soft_deleted = commit.is_soft_deleted();
-                                    match &best {
-                                        None => {
-                                            best = Some((
-                                                commit.timestamp,
-                                                tip_id,
-                                                commit.content.clone(),
-                                                branch_name.clone(),
-                                                is_soft_deleted,
-                                                row_provenance,
-                                            ));
-                                        }
-                                        Some((best_ts, best_id, _, _, _, _))
-                                            if (commit.timestamp, tip_id)
-                                                > (*best_ts, *best_id) =>
-                                        {
-                                            best = Some((
-                                                commit.timestamp,
-                                                tip_id,
-                                                commit.content.clone(),
-                                                branch_name.clone(),
-                                                is_soft_deleted,
-                                                row_provenance,
-                                            ));
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    let (_, commit_id, content, source_branch, is_soft_deleted, row_provenance) =
-                        best.filter(|(_, _, content, _, _, _)| !content.is_empty())?;
-
-                    if let Some(&source_hash) = branch_schema_map.get(&source_branch)
-                        && source_hash != schema_context.current_hash
-                    {
-                        let transformer = LensTransformer::new(&schema_context, &table);
-                        match transformer.transform(&content, commit_id, source_hash) {
-                            Ok(result) => {
-                                if is_soft_deleted && !include_deleted {
-                                    return None;
-                                }
-                                return Some(LoadedRow::new(
-                                    result.data,
-                                    commit_id,
-                                    row_provenance.clone(),
-                                    [(id, BranchName::new(&source_branch))]
-                                        .into_iter()
-                                        .collect(),
-                                ));
-                            }
-                            Err(err) => {
-                                schema_warnings.record(
-                                    &table,
-                                    source_hash,
-                                    schema_context.current_hash,
-                                );
-                                tracing::debug!(
-                                    sub_id = sub_id.0,
-                                    row_id = %id,
-                                    table = %table,
-                                    source_branch = %source_branch,
-                                    source_schema = %source_hash.short(),
-                                    target_schema = %schema_context.current_hash.short(),
-                                    error = %err,
-                                    "lens transform failed; row will be counted in aggregated schema warning"
-                                );
-                                return None;
-                            }
-                        }
-                    }
-
-                    if is_soft_deleted && !include_deleted {
-                        return None;
-                    }
-
-                    Some(LoadedRow::new(
-                        content,
-                        commit_id,
-                        row_provenance,
-                        [(id, BranchName::new(&source_branch))]
-                            .into_iter()
-                            .collect(),
-                    ))
+                    Self::load_visible_row_for_query(
+                        storage_ref,
+                        id,
+                        &branches,
+                        include_deleted,
+                        &schema_context,
+                        &branch_schema_map,
+                        &table,
+                        sub_id,
+                        &mut schema_warnings,
+                    )
                 };
 
                 subscription.graph.settle(storage_ref, row_loader)
@@ -1653,6 +1557,120 @@ impl QueryManager {
                 server_sub.graph.mark_row_deleted(id);
             }
         }
+    }
+
+    pub(super) fn load_best_visible_row_version(
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        branches: &[String],
+    ) -> Option<(String, StoredRowVersion)> {
+        let table = storage
+            .load_object_metadata(row_id)
+            .ok()
+            .flatten()?
+            .get(MetadataKey::Table.as_str())?
+            .clone();
+
+        let mut best: Option<(CommitId, StoredRowVersion)> = None;
+
+        for branch in branches {
+            let Some(row) = storage
+                .load_visible_region_row(&table, branch, row_id)
+                .ok()
+                .flatten()
+            else {
+                continue;
+            };
+
+            if !row.state.is_visible() {
+                continue;
+            }
+
+            let version_id = row.version_id();
+            match &best {
+                None => best = Some((version_id, row)),
+                Some((best_version_id, best_row))
+                    if (row.updated_at, version_id) > (best_row.updated_at, *best_version_id) =>
+                {
+                    best = Some((version_id, row));
+                }
+                _ => {}
+            }
+        }
+
+        best.map(|(_, row)| (table, row))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn load_visible_row_for_query(
+        storage: &dyn Storage,
+        row_id: ObjectId,
+        branches: &[String],
+        include_deleted: bool,
+        schema_context: &SchemaContext,
+        branch_schema_map: &HashMap<String, SchemaHash>,
+        table_for_warnings: &str,
+        sub_id: QuerySubscriptionId,
+        schema_warnings: &mut SchemaWarningAccumulator,
+    ) -> Option<LoadedRow> {
+        let (table, row) = Self::load_best_visible_row_version(storage, row_id, branches)?;
+
+        if row.is_hard_deleted() {
+            return None;
+        }
+
+        if row.is_soft_deleted() && !include_deleted {
+            return None;
+        }
+
+        let version_id = row.version_id();
+        let row_provenance = row.row_provenance();
+        let source_branch = row.branch.clone();
+
+        if let Some(&source_hash) = branch_schema_map.get(&source_branch)
+            && source_hash != schema_context.current_hash
+        {
+            let transformer = LensTransformer::new(schema_context, &table);
+            match transformer.transform(&row.data, version_id, source_hash) {
+                Ok(result) => {
+                    return Some(LoadedRow::new(
+                        result.data,
+                        result.commit_id,
+                        row_provenance,
+                        [(row_id, BranchName::new(&source_branch))]
+                            .into_iter()
+                            .collect(),
+                    ));
+                }
+                Err(err) => {
+                    schema_warnings.record(
+                        table_for_warnings,
+                        source_hash,
+                        schema_context.current_hash,
+                    );
+                    tracing::debug!(
+                        sub_id = sub_id.0,
+                        row_id = %row_id,
+                        table = %table,
+                        source_branch = %source_branch,
+                        source_schema = %source_hash.short(),
+                        target_schema = %schema_context.current_hash.short(),
+                        error = %err,
+                        "lens transform failed; row will be counted in aggregated schema warning"
+                    );
+                    return None;
+                }
+            }
+        }
+
+        Some(LoadedRow::new(
+            row.data,
+            version_id,
+            row_provenance,
+            [(row_id, BranchName::new(&source_branch))]
+                .into_iter()
+                .collect(),
+        ))
     }
 
     /// Check if a subscription involves a given table (base table, joined table, or array subquery inner table).

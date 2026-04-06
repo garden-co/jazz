@@ -26,8 +26,9 @@ use super::{
         append_history_region_rows_core, create_object_core, delete_commit_core, index_insert_core,
         index_lookup_core, index_range_core, index_remove_core, index_scan_all_core,
         load_branch_core, load_catalogue_manifest_core, load_object_metadata_core,
-        patch_row_region_rows_by_batch_core, scan_history_region_core, scan_visible_region_core,
-        set_branch_tails_core, store_ack_tier_core, upsert_visible_region_rows_core,
+        load_visible_region_row_core, patch_row_region_rows_by_batch_core,
+        scan_history_region_core, scan_visible_region_core, set_branch_tails_core,
+        store_ack_tier_core, upsert_visible_region_rows_core,
     },
 };
 
@@ -404,6 +405,20 @@ impl Storage for FjallStorage {
             let tx = inner.db.read_tx();
             scan_visible_region_core(table, branch, |prefix| {
                 Self::scan_prefix(&tx, &inner.keyspace, prefix)
+            })
+        })
+    }
+
+    fn load_visible_region_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        self.with_inner(|inner| {
+            let tx = inner.db.read_tx();
+            load_visible_region_row_core(table, branch, row_id, |key| {
+                Self::read_get(&tx, &inner.keyspace, key)
             })
         })
     }

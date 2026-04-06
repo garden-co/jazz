@@ -1145,6 +1145,43 @@ fn subscription_updates_after_insert_and_process() {
 }
 
 #[test]
+fn query_reads_visible_region_after_legacy_commit_history_is_removed() {
+    let schema = test_schema();
+    let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
+    let branch = get_branch(&writer_qm);
+
+    let handle = writer_qm
+        .insert(
+            &mut storage,
+            "users",
+            &[Value::Text("Alice".into()), Value::Integer(100)],
+        )
+        .unwrap();
+
+    storage
+        .delete_commit(
+            handle.row_id,
+            &crate::object::BranchName::new(&branch),
+            handle.row_commit_id,
+        )
+        .unwrap();
+
+    let mut reader_qm = QueryManager::new(SyncManager::new());
+    reader_qm.set_current_schema(schema, "dev", "main");
+
+    let query = reader_qm.query("users").build();
+    let rows = execute_query(&mut reader_qm, &mut storage, query)
+        .expect("visible-region query should succeed without legacy commit history");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, handle.row_id);
+    assert_eq!(
+        rows[0].1,
+        vec![Value::Text("Alice".into()), Value::Integer(100)]
+    );
+}
+
+#[test]
 fn sorted_limited_subscription_reorders_when_new_top_row_arrives() {
     let sync_manager = SyncManager::new();
     let schema = test_schema();
@@ -6715,6 +6752,95 @@ fn policy_filters_select_results() {
 }
 
 #[test]
+fn policy_filtered_query_reads_visible_region_after_legacy_commit_history_is_removed() {
+    let schema = policy_schema();
+    let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
+    let branch = get_branch(&writer_qm);
+
+    let handles = vec![
+        writer_qm
+            .insert(
+                &mut storage,
+                "documents",
+                &[
+                    Value::Text("alice".into()),
+                    Value::Text("eng".into()),
+                    Value::Text("Alice's eng doc".into()),
+                ],
+            )
+            .unwrap(),
+        writer_qm
+            .insert(
+                &mut storage,
+                "documents",
+                &[
+                    Value::Text("bob".into()),
+                    Value::Text("eng".into()),
+                    Value::Text("Bob's eng doc".into()),
+                ],
+            )
+            .unwrap(),
+        writer_qm
+            .insert(
+                &mut storage,
+                "documents",
+                &[
+                    Value::Text("bob".into()),
+                    Value::Text("sales".into()),
+                    Value::Text("Bob's sales doc".into()),
+                ],
+            )
+            .unwrap(),
+        writer_qm
+            .insert(
+                &mut storage,
+                "documents",
+                &[
+                    Value::Text("charlie".into()),
+                    Value::Text("design".into()),
+                    Value::Text("Charlie's design doc".into()),
+                ],
+            )
+            .unwrap(),
+    ];
+    writer_qm.process(&mut storage);
+
+    for handle in handles {
+        storage
+            .delete_commit(
+                handle.row_id,
+                &crate::object::BranchName::new(&branch),
+                handle.row_commit_id,
+            )
+            .unwrap();
+    }
+
+    let mut reader_qm = QueryManager::new(SyncManager::new());
+    reader_qm.set_current_schema(schema, "dev", "main");
+
+    let alice_session = PolicySession::new("alice").with_claims(json!({"teams": ["eng"]}));
+    let query = reader_qm.query("documents").build();
+    let sub_id = reader_qm
+        .subscribe_with_session(query, Some(alice_session), None)
+        .unwrap();
+
+    reader_qm.process(&mut storage);
+
+    let results = reader_qm.get_subscription_results(sub_id);
+    assert_eq!(results.len(), 2);
+
+    let titles: Vec<_> = results
+        .iter()
+        .filter_map(|(_, row)| match &row[2] {
+            Value::Text(title) => Some(title.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(titles.contains(&"Alice's eng doc"));
+    assert!(titles.contains(&"Bob's eng doc"));
+}
+
+#[test]
 fn no_session_returns_all_rows() {
     let sync_manager = SyncManager::new();
     let schema = policy_schema();
@@ -10033,9 +10159,7 @@ fn remove_client_cleans_active_policy_checks() {
     // alice disconnects → only bob's policy check remains.
     //
     use crate::query_manager::policy::Operation;
-    use crate::sync_manager::{
-        ClientId, Destination, PendingPermissionCheck, PendingUpdateId, SyncPayload,
-    };
+    use crate::sync_manager::{ClientId, PendingPermissionCheck, PendingUpdateId, SyncPayload};
     use uuid::Uuid;
 
     let sync_manager = SyncManager::new();

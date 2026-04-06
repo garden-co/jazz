@@ -73,17 +73,8 @@ impl QueryManager {
         branch_name: BranchName,
     ) -> Option<RowProvenance> {
         let branches = vec![branch_name.as_str().to_string()];
-        let object = self
-            .sync_manager
-            .object_manager
-            .get_or_load(object_id, storage, &branches)?;
-        let branch = object.branches.get(&branch_name)?;
-        branch
-            .tips
-            .iter()
-            .filter_map(|tip_id| branch.commits.get(tip_id))
-            .max_by_key(|commit| commit.timestamp)
-            .and_then(|commit| commit.row_provenance())
+        let (_, row) = Self::load_best_visible_row_version(storage, object_id, &branches)?;
+        Some(row.row_provenance())
     }
 
     fn payload_tip_provenance(payload: &SyncPayload) -> Option<RowProvenance> {
@@ -275,23 +266,14 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<LoadedRow> {
         let branches = vec![branch_name.as_str().to_string()];
-        let (table, tip_commit_id, tip_content, tip_provenance) = {
-            let object = self
-                .sync_manager
-                .object_manager
-                .get_or_load(object_id, storage, &branches)?;
-            let table = object.metadata.get(MetadataKey::Table.as_str())?.clone();
-            let branch = object.branches.get(&branch_name)?;
-            let tip = branch
-                .tips
-                .iter()
-                .filter_map(|tip_id| branch.commits.get(tip_id).map(|commit| (*tip_id, commit)))
-                .max_by_key(|(_, commit)| commit.timestamp)?;
-            if tip.1.content.is_empty() {
-                return None;
-            }
-            Some((table, tip.0, tip.1.content.clone(), tip.1.row_provenance()?))
-        }?;
+        let (table, row) = Self::load_best_visible_row_version(storage, object_id, &branches)?;
+        if row.is_hard_deleted() {
+            return None;
+        }
+
+        let tip_commit_id = row.version_id();
+        let tip_content = row.data.clone();
+        let tip_provenance = row.row_provenance();
 
         let transformed = self.transform_content_to_authorization_schema(
             &table,
@@ -386,38 +368,16 @@ impl QueryManager {
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
     ) -> bool {
         let branches = vec![branch_name.as_str().to_string()];
-        let Some((table, tip_content, tip_provenance)) = ({
-            let Some(object) = self
-                .sync_manager
-                .object_manager
-                .get_or_load(object_id, storage, &branches)
-            else {
-                return false;
-            };
-            let Some(table) = object.metadata.get(MetadataKey::Table.as_str()).cloned() else {
-                return false;
-            };
-            let Some(branch) = object.branches.get(&branch_name) else {
-                return false;
-            };
-            let Some(tip_commit) = branch
-                .tips
-                .iter()
-                .filter_map(|tip_id| branch.commits.get(tip_id))
-                .max_by_key(|commit| commit.timestamp)
-            else {
-                return false;
-            };
-            if tip_commit.content.is_empty() {
-                return false;
-            }
-            let Some(tip_provenance) = tip_commit.row_provenance() else {
-                return false;
-            };
-            Some((table, tip_commit.content.clone(), tip_provenance))
-        }) else {
+        let Some((table, row)) = Self::load_best_visible_row_version(storage, object_id, &branches)
+        else {
             return false;
         };
+        if row.is_hard_deleted() {
+            return false;
+        }
+
+        let tip_content = row.data.clone();
+        let tip_provenance = row.row_provenance();
 
         let table_name = TableName::new(&table);
         let Some(select_policy) = auth_schema
