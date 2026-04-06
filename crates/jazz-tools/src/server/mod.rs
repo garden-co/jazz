@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{RwLock, mpsc};
 use tokio::time::Instant;
 
 use crate::middleware::AuthConfig;
@@ -23,6 +23,83 @@ pub use external_identity_store::{ExternalIdentityRow, ExternalIdentityStore};
 pub use testing::{TestingJwksServer, TestingServer, TestingServerBuilder};
 
 pub type DynStorage = Box<dyn Storage + Send>;
+
+#[derive(Debug, Clone)]
+pub struct SequencedSyncUpdate {
+    pub seq: u64,
+    pub payload: SyncPayload,
+}
+
+struct ConnectionStreamState {
+    client_id: ClientId,
+    next_sync_seq: u64,
+    sender: mpsc::UnboundedSender<SequencedSyncUpdate>,
+}
+
+#[derive(Default)]
+pub struct ConnectionEventHub {
+    streams: Mutex<HashMap<u64, ConnectionStreamState>>,
+}
+
+impl ConnectionEventHub {
+    pub fn register_connection(
+        &self,
+        connection_id: u64,
+        client_id: ClientId,
+    ) -> (u64, mpsc::UnboundedReceiver<SequencedSyncUpdate>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let mut streams = self.streams.lock().unwrap();
+        streams.insert(
+            connection_id,
+            ConnectionStreamState {
+                client_id,
+                next_sync_seq: 1,
+                sender,
+            },
+        );
+        (1, receiver)
+    }
+
+    pub fn unregister_connection(&self, connection_id: u64) {
+        self.streams.lock().unwrap().remove(&connection_id);
+    }
+
+    pub fn dispatch_payload(&self, client_id: ClientId, payload: SyncPayload) {
+        let mut stale_connection_ids = Vec::new();
+        let mut streams = self.streams.lock().unwrap();
+
+        for (&connection_id, state) in streams.iter_mut() {
+            if state.client_id != client_id {
+                continue;
+            }
+
+            let seq = state.next_sync_seq;
+            let through_seq = seq.saturating_sub(1);
+            let payload = match &payload {
+                SyncPayload::QuerySettled { query_id, tier, .. } => SyncPayload::QuerySettled {
+                    query_id: *query_id,
+                    tier: *tier,
+                    through_seq,
+                },
+                _ => payload.clone(),
+            };
+
+            if state
+                .sender
+                .send(SequencedSyncUpdate { seq, payload })
+                .is_ok()
+            {
+                state.next_sync_seq += 1;
+            } else {
+                stale_connection_ids.push(connection_id);
+            }
+        }
+
+        for connection_id in stale_connection_ids {
+            streams.remove(&connection_id);
+        }
+    }
+}
 
 /// Tracks when a client's last SSE connection closed, pending reap after TTL.
 #[derive(Clone, Copy)]
@@ -60,8 +137,8 @@ pub struct ServerState {
     pub app_id: AppId,
     pub connections: RwLock<HashMap<u64, ConnectionState>>,
     pub next_connection_id: std::sync::atomic::AtomicU64,
-    /// Broadcast channel for sending sync payloads to SSE clients.
-    pub sync_broadcast: broadcast::Sender<(ClientId, SyncPayload)>,
+    /// Per-connection fanout for sequenced stream delivery.
+    pub connection_event_hub: Arc<ConnectionEventHub>,
     /// Authentication configuration.
     pub auth_config: AuthConfig,
     /// Whether catalogue admin requests are handled locally or forwarded to an authority.

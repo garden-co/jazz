@@ -809,6 +809,13 @@ impl QueryManager {
         &mut self.sync_manager
     }
 
+    pub(crate) fn apply_query_settled(&mut self, query_id: QueryId, tier: DurabilityTier) {
+        let sub_id = QuerySubscriptionId(query_id.0);
+        if let Some(sub) = self.subscriptions.get_mut(&sub_id) {
+            sub.achieved_tiers.insert(tier);
+        }
+    }
+
     /// Remove a client and all its server-side state (subscriptions, in-flight policy checks).
     ///
     /// Returns `false` if the client has unprocessed inbox entries.
@@ -875,15 +882,6 @@ impl QueryManager {
 
         // 6. Recompile any subscriptions marked as stale due to schema changes
         self.recompile_stale_subscriptions();
-
-        // 7a. Process incoming QuerySettled notifications
-        let settled_notifications = self.sync_manager.take_pending_query_settled();
-        for (query_id, tier) in settled_notifications {
-            let sub_id = QuerySubscriptionId(query_id.0);
-            if let Some(sub) = self.subscriptions.get_mut(&sub_id) {
-                sub.achieved_tiers.insert(tier);
-            }
-        }
 
         // 7. Settle all subscriptions - row_loader reads from subscription's branches
         // Extract references to avoid borrowing self in the closure

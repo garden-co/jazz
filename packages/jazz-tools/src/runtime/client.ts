@@ -92,9 +92,9 @@ export interface Runtime {
   ): number;
   executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
-  onSyncMessageReceived(payload: Uint8Array | string): void;
+  onSyncMessageReceived(payload: Uint8Array | string, seq?: number | null): void;
   onSyncMessageToSend(callback: RuntimeSyncOutboxCallback): void;
-  addServer(serverCatalogueStateHash?: string | null): void;
+  addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
   addClient(): string;
   getSchema(): any;

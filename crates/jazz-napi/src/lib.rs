@@ -113,6 +113,23 @@ fn parse_tier(tier: &str) -> napi::Result<DurabilityTier> {
     parse_binding_tier(tier).map_err(napi::Error::from_reason)
 }
 
+fn parse_optional_sequence(sequence: Option<f64>) -> napi::Result<Option<u64>> {
+    let Some(sequence) = sequence else {
+        return Ok(None);
+    };
+    if !sequence.is_finite() || sequence < 0.0 || sequence.fract() != 0.0 {
+        return Err(napi::Error::from_reason(
+            "Invalid stream sequence: expected a non-negative integer",
+        ));
+    }
+    if sequence > u64::MAX as f64 {
+        return Err(napi::Error::from_reason(
+            "Invalid stream sequence: value exceeds u64 range",
+        ));
+    }
+    Ok(Some(sequence as u64))
+}
+
 fn parse_query(json: &str) -> napi::Result<Query> {
     parse_query_input(json).map_err(napi::Error::from_reason)
 }
@@ -956,12 +973,26 @@ impl NapiRuntime {
     // =========================================================================
 
     #[napi(js_name = "onSyncMessageReceived")]
-    pub fn on_sync_message_received(&self, message_json: String) -> napi::Result<()> {
+    pub fn on_sync_message_received(
+        &self,
+        message_json: String,
+        sequence: Option<f64>,
+    ) -> napi::Result<()> {
         let payload: SyncPayload = serde_json::from_str(&message_json)
             .map_err(|e| napi::Error::from_reason(format!("Invalid sync message: {}", e)))?;
+        let sequence = parse_optional_sequence(sequence)?;
+        let server_id = (*self
+            .upstream_server_id
+            .lock()
+            .map_err(|_| napi::Error::from_reason("lock"))?)
+        .ok_or_else(|| {
+            napi::Error::from_reason(
+                "No upstream server registered; call addServer() before sync delivery",
+            )
+        })?;
 
         let entry = InboxEntry {
-            source: Source::Server(ServerId::new()),
+            source: Source::Server(server_id),
             payload,
         };
 
@@ -969,7 +1000,11 @@ impl NapiRuntime {
             .core
             .lock()
             .map_err(|_| napi::Error::from_reason("lock"))?;
-        core.park_sync_message(entry);
+        if let Some(sequence) = sequence {
+            core.park_sync_message_with_sequence(entry, sequence);
+        } else {
+            core.park_sync_message(entry);
+        }
         Ok(())
     }
 
@@ -1016,7 +1051,12 @@ impl NapiRuntime {
     }
 
     #[napi(js_name = "addServer")]
-    pub fn add_server(&self, server_catalogue_state_hash: Option<String>) -> napi::Result<()> {
+    pub fn add_server(
+        &self,
+        server_catalogue_state_hash: Option<String>,
+        next_sync_seq: Option<f64>,
+    ) -> napi::Result<()> {
+        let next_sync_seq = parse_optional_sequence(next_sync_seq)?;
         let server_id = {
             let mut slot = self
                 .upstream_server_id
@@ -1041,6 +1081,9 @@ impl NapiRuntime {
             server_id,
             server_catalogue_state_hash.as_deref(),
         );
+        if let Some(next_sync_seq) = next_sync_seq {
+            core.set_next_expected_server_sequence(server_id, next_sync_seq);
+        }
         Ok(())
     }
 

@@ -36,8 +36,12 @@ export interface LinkExternalResponse {
 
 /** Callbacks for stream events. */
 export interface StreamCallbacks {
-  onSyncMessage(payloadJson: string): void;
-  onConnected?(clientId: string, catalogueStateHash?: string | null): void;
+  onSyncMessage(payloadJson: string, seq?: number | null): void;
+  onConnected?(
+    clientId: string,
+    catalogueStateHash?: string | null,
+    nextSyncSeq?: number | null,
+  ): void;
 }
 
 export interface SyncStreamControllerOptions {
@@ -45,18 +49,18 @@ export interface SyncStreamControllerOptions {
   getAuth(): Pick<SyncAuth, "jwtToken" | "localAuthMode" | "localAuthToken" | "backendSecret">;
   getClientId(): string;
   setClientId(clientId: string): void;
-  onConnected(catalogueStateHash?: string | null): void;
+  onConnected(catalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   onDisconnected(): void;
-  onSyncMessage(payloadJson: string): void;
+  onSyncMessage(payloadJson: string, seq?: number | null): void;
 }
 
 /**
  * Minimal runtime surface required for sync stream lifecycle wiring.
  */
 export interface RuntimeSyncTarget {
-  addServer(serverCatalogueStateHash?: string | null): void;
+  addServer(serverCatalogueStateHash?: string | null, nextSyncSeq?: number | null): void;
   removeServer(): void;
-  onSyncMessageReceived(payload: string): void;
+  onSyncMessageReceived(payload: string, seq?: number | null): void;
 }
 
 export interface RuntimeSyncStreamControllerOptions {
@@ -177,11 +181,11 @@ export class SyncStreamController {
     return this.activeServerPathPrefix;
   }
 
-  private attachServer(catalogueStateHash?: string | null): void {
+  private attachServer(catalogueStateHash?: string | null, nextSyncSeq?: number | null): void {
     if (this.streamAttached) {
       this.options.onDisconnected();
     }
-    this.options.onConnected(catalogueStateHash);
+    this.options.onConnected(catalogueStateHash, nextSyncSeq);
     this.streamAttached = true;
     this.reconnectAttempt = 0;
   }
@@ -260,11 +264,11 @@ export class SyncStreamController {
         reader,
         {
           onSyncMessage: this.options.onSyncMessage,
-          onConnected: (clientId, catalogueStateHash) => {
+          onConnected: (clientId, catalogueStateHash, nextSyncSeq) => {
             this.options.setClientId(clientId);
             if (!connected) {
               connected = true;
-              this.attachServer(catalogueStateHash);
+              this.attachServer(catalogueStateHash, nextSyncSeq);
             }
           },
         },
@@ -298,9 +302,10 @@ export function createRuntimeSyncStreamController(
     getAuth: options.getAuth,
     getClientId: options.getClientId,
     setClientId: options.setClientId,
-    onConnected: (catalogueStateHash) => options.getRuntime()?.addServer(catalogueStateHash),
+    onConnected: (catalogueStateHash, nextSyncSeq) =>
+      options.getRuntime()?.addServer(catalogueStateHash, nextSyncSeq),
     onDisconnected: () => options.getRuntime()?.removeServer(),
-    onSyncMessage: (payload) => options.getRuntime()?.onSyncMessageReceived(payload),
+    onSyncMessage: (payload, seq) => options.getRuntime()?.onSyncMessageReceived(payload, seq),
   });
 }
 
@@ -720,10 +725,14 @@ export async function readBinaryFrames(
 
       try {
         if (event.type === "Connected" && event.client_id) {
-          callbacks.onConnected?.(event.client_id, event.catalogue_state_hash ?? null);
+          callbacks.onConnected?.(
+            event.client_id,
+            event.catalogue_state_hash ?? null,
+            event.next_sync_seq ?? null,
+          );
         } else if (event.type === "SyncUpdate") {
           logSchemaWarningPayload(event.payload, logPrefix);
-          callbacks.onSyncMessage(JSON.stringify(event.payload));
+          callbacks.onSyncMessage(JSON.stringify(event.payload), event.seq ?? null);
         }
       } catch (error) {
         console.error(`${logPrefix}Stream callback error:`, error);
