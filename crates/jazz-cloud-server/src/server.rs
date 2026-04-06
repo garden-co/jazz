@@ -665,6 +665,12 @@ struct SequencedSyncUpdate {
     payload: SyncPayload,
 }
 
+struct PreparedSyncDispatch {
+    connection_id: u64,
+    sender: tokio::sync::mpsc::UnboundedSender<SequencedSyncUpdate>,
+    update: SequencedSyncUpdate,
+}
+
 struct ConnectionStreamState {
     client_id: ClientId,
     next_sync_seq: u64,
@@ -710,8 +716,12 @@ impl ConnectionEventHub {
             .remove(&connection_id);
     }
 
-    fn dispatch_payload(&self, client_id: ClientId, payload: SyncPayload) {
-        let mut stale_connection_ids = Vec::new();
+    fn prepare_payload(
+        &self,
+        client_id: ClientId,
+        payload: SyncPayload,
+    ) -> Vec<PreparedSyncDispatch> {
+        let mut prepared = Vec::new();
         let mut streams = self
             .streams
             .lock()
@@ -733,17 +743,34 @@ impl ConnectionEventHub {
                 _ => payload.clone(),
             };
 
-            if state
-                .sender
-                .send(SequencedSyncUpdate { seq, payload })
-                .is_ok()
-            {
-                state.next_sync_seq += 1;
-            } else {
-                stale_connection_ids.push(connection_id);
+            prepared.push(PreparedSyncDispatch {
+                connection_id,
+                sender: state.sender.clone(),
+                update: SequencedSyncUpdate { seq, payload },
+            });
+            state.next_sync_seq += 1;
+        }
+
+        prepared
+    }
+
+    fn dispatch_prepared(&self, prepared: Vec<PreparedSyncDispatch>) {
+        let mut stale_connection_ids = Vec::new();
+
+        for dispatch in prepared {
+            if dispatch.sender.send(dispatch.update).is_err() {
+                stale_connection_ids.push(dispatch.connection_id);
             }
         }
 
+        if stale_connection_ids.is_empty() {
+            return;
+        }
+
+        let mut streams = self
+            .streams
+            .lock()
+            .expect("connection event hub mutex poisoned");
         for connection_id in stale_connection_ids {
             streams.remove(&connection_id);
         }
@@ -1946,14 +1973,16 @@ impl AppRuntime {
         let runtime = TokioRuntime::new(schema_manager, storage, move |entry| {
             if let Destination::Client(client_id) = entry.destination {
                 let payload = entry.payload;
-                if let Some(delay) = test_delay_server_send_object_updated(&payload) {
+                let delay = test_delay_server_send_object_updated(&payload);
+                let prepared = connection_event_hub_clone.prepare_payload(client_id, payload);
+                if let Some(delay) = delay {
                     let connection_event_hub = connection_event_hub_clone.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(delay).await;
-                        connection_event_hub.dispatch_payload(client_id, payload);
+                        connection_event_hub.dispatch_prepared(prepared);
                     });
                 } else {
-                    connection_event_hub_clone.dispatch_payload(client_id, payload);
+                    connection_event_hub_clone.dispatch_prepared(prepared);
                 }
             }
         });
