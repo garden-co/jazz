@@ -2489,6 +2489,7 @@ fn persistence_ack_updates_row_region_confirmed_tier_monotonically() {
     let version = StoredRowVersion {
         row_id: object_id,
         branch: branch_name.as_str().to_string(),
+        parents: Vec::new(),
         updated_at: 1000,
         created_by: object_id.to_string(),
         created_at: 1000,
@@ -2536,6 +2537,106 @@ fn persistence_ack_updates_row_region_confirmed_tier_monotonically() {
     assert_eq!(visible.len(), 1);
     assert_eq!(history[0].confirmed_tier, Some(DurabilityTier::EdgeServer));
     assert_eq!(visible[0].confirmed_tier, Some(DurabilityTier::EdgeServer));
+}
+
+#[test]
+fn add_server_syncs_visible_row_after_legacy_commit_history_is_removed() {
+    use std::collections::HashMap;
+
+    use crate::metadata::MetadataKey;
+    use crate::row_regions::{BatchId, RowState, StoredRowVersion};
+    use crate::storage::Storage;
+
+    let mut bootstrap = SyncManager::new();
+    let mut io = MemoryStorage::new();
+    let object_id = ObjectId::new();
+    let branch_name: BranchName = "main".into();
+    let mut metadata = HashMap::new();
+    metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+
+    bootstrap
+        .object_manager
+        .create_with_id(&mut io, object_id, Some(metadata));
+
+    let commit = make_test_commit(b"hello", vec![]);
+    let commit_id = commit.id();
+    bootstrap
+        .object_manager
+        .receive_commit(&mut io, object_id, branch_name, commit.clone())
+        .unwrap();
+
+    let version = StoredRowVersion {
+        row_id: object_id,
+        branch: "main".to_string(),
+        parents: commit.parents.iter().copied().collect(),
+        updated_at: commit.timestamp,
+        created_by: commit.author.clone(),
+        created_at: commit.timestamp,
+        updated_by: commit.author.clone(),
+        batch_id: BatchId::from_commit_id(commit_id),
+        state: RowState::VisibleDirect,
+        confirmed_tier: None,
+        is_deleted: false,
+        data: commit.content.clone(),
+        metadata: commit
+            .metadata
+            .as_ref()
+            .map(|metadata| {
+                metadata
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    io.append_history_region_rows("users", std::slice::from_ref(&version))
+        .unwrap();
+    io.upsert_visible_region_rows("users", std::slice::from_ref(&version))
+        .unwrap();
+
+    io.delete_commit(object_id, &branch_name, commit_id)
+        .expect("legacy commit history should be removable");
+
+    let mut sm = SyncManager::new();
+    let mut fresh_metadata = HashMap::new();
+    fresh_metadata.insert(MetadataKey::Table.to_string(), "users".to_string());
+    sm.object_manager
+        .receive_object(&mut io, object_id, fresh_metadata);
+
+    let server_id = ServerId::new();
+    sm.add_server(server_id);
+
+    let outbox = sm.take_outbox();
+    assert_eq!(outbox.len(), 1);
+
+    match &outbox[0] {
+        OutboxEntry {
+            destination: Destination::Server(id),
+            payload:
+                SyncPayload::ObjectUpdated {
+                    object_id: synced_object_id,
+                    metadata,
+                    branch_name: synced_branch,
+                    commits,
+                },
+        } => {
+            assert_eq!(*id, server_id);
+            assert_eq!(*synced_object_id, object_id);
+            assert_eq!(synced_branch.as_str(), "main");
+            let metadata = metadata
+                .as_ref()
+                .expect("first sync should still include metadata");
+            assert_eq!(metadata.id, object_id);
+            assert_eq!(commits.len(), 1, "current visible row should still sync");
+            assert_eq!(
+                commits[0].id(),
+                commit_id,
+                "visible-row sync should preserve the original commit identity"
+            );
+            assert_eq!(commits[0].content, b"hello".to_vec());
+        }
+        other => panic!("expected ObjectUpdated to server, got {other:?}"),
+    }
 }
 
 #[test]
