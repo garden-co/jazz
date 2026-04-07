@@ -266,6 +266,10 @@ impl ServerBuilder {
                     })?;
                     Ok(Box::new(storage))
                 }
+                #[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
+                {
+                    Ok(Box::new(MemoryStorage::new()))
+                }
             }
             #[cfg(feature = "sqlite")]
             ServerStorageMode::PersistentSqlite { data_dir } => {
@@ -316,6 +320,10 @@ impl ServerBuilder {
                         format!("failed to open meta storage '{}': {e:?}", db_path.display())
                     })?;
                     ExternalIdentityStore::new_with_storage(Box::new(storage))
+                }
+                #[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
+                {
+                    ExternalIdentityStore::new_with_storage(Box::new(MemoryStorage::new()))
                 }
             }
             #[cfg(feature = "sqlite")]

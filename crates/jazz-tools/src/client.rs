@@ -15,6 +15,8 @@ use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_manifest};
 #[cfg(feature = "rocksdb")]
 use crate::storage::RocksDBStorage;
+#[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
+use crate::storage::SqliteStorage;
 use crate::storage::{MemoryStorage, Storage, StorageError};
 use crate::sync_manager::{
     ClientId, Destination, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
@@ -1197,7 +1199,13 @@ async fn open_persistent_storage(data_dir: &std::path::Path) -> Result<DynStorag
     {
         Ok(Box::new(open_rocksdb_storage(data_dir).await?))
     }
-    #[cfg(not(feature = "rocksdb"))]
+    #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
+    {
+        std::fs::create_dir_all(data_dir)?;
+        let db_path = data_dir.join("jazz.sqlite");
+        Ok(Box::new(SqliteStorage::open(&db_path)?))
+    }
+    #[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
     {
         tracing::warn!("no persistent storage backend enabled, falling back to MemoryStorage");
         Ok(Box::new(MemoryStorage::new()))

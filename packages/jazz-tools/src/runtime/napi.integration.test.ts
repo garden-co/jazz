@@ -1418,7 +1418,7 @@ describe("NAPI integration", () => {
 
   it("reopens persistent backend runtimes cleanly and retains local data", async () => {
     const dataRoot = await createTempDir("jazz-napi-persistent-");
-    const dataPath = join(dataRoot, "runtime.skv");
+    const dataPath = join(dataRoot, "runtime.db");
     const appId = randomUUID();
     let writerContext: {
       db(): Db;
@@ -1497,7 +1497,7 @@ describe("NAPI integration", () => {
 
   it("accepts modern epoch-millisecond timestamps from the TS value converter on backend durable writes", async () => {
     const dataRoot = await createTempDir("jazz-napi-timestamp-");
-    const dataPath = join(dataRoot, "runtime.skv");
+    const dataPath = join(dataRoot, "runtime.db");
     const timestamp = 1773285322816;
     let context: {
       db(): Db;
