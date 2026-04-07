@@ -15,16 +15,16 @@
   display: inline-flex;
   flex-direction: column;
   gap: 4px;
-  color: #9fb0c8;
+  color: #95a4b7;
   font-size: 12px;
 }
 
 .select,
 .input {
   min-width: 140px;
-  border: 1px solid #33445d;
-  border-radius: 6px;
-  background: #1d2735;
+  border: 1px solid #2a3647;
+  border-radius: 4px;
+  background: #151d27;
   color: #d9e2f0;
   padding: 6px 8px;
   font-size: 12px;
@@ -35,10 +35,10 @@
 }
 
 .button {
-  border: 1px solid #344357;
-  background: #202b3b;
+  border: 1px solid #2a3647;
+  background: #161d27;
   color: #d3dceb;
-  border-radius: 6px;
+  border-radius: 4px;
   padding: 6px 10px;
   font-size: 12px;
   cursor: pointer;
@@ -46,7 +46,7 @@
 }
 
 .button:hover {
-  background: #273346;
+  background: #1b2430;
 }
 
 .triggerButton {
@@ -54,29 +54,50 @@
 }
 
 .summaryBox {
-  border: 1px solid #2f3a4b;
-  border-radius: 8px;
-  background: #131b27;
-  padding: 8px 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 12px 8px;
 }
 
-.summary {
-  margin: 0;
-  display: block;
-  color: #d7deea;
-  font-size: 13px;
-  line-height: 1.45;
-  font-family:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
-    monospace;
-  white-space: normal;
-  word-break: break-word;
+.filterTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px 3px 8px;
+  border: 1px solid #232c3a;
+  border-radius: 4px;
+  background: #151d27;
+}
+
+.filterTagText {
+  color: #9fb0c8;
+  font-size: 12px;
+}
+
+.filterTagRemove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  color: #6b7a8d;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.filterTagRemove:hover {
+  color: #d3dceb;
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .modal {
-  border: 1px solid #2f3a4b;
-  border-radius: 8px;
-  background: #131b27;
+  border: 1px solid #232c3a;
+  border-radius: 4px;
+  background: #10161d;
   color: #d9e2f0;
   padding: 10px;
   min-width: 720px;
@@ -111,9 +132,9 @@
   justify-content: space-between;
   gap: 8px;
   padding: 6px 8px;
-  border: 1px solid #2f3a4b;
-  border-radius: 6px;
-  background: #1a2433;
+  border: 1px solid #232c3a;
+  border-radius: 4px;
+  background: #151d27;
 }
 
 .clauseText {
@@ -122,9 +143,9 @@
 }
 
 .removeButton {
-  border: 1px solid #33445d;
-  border-radius: 6px;
-  background: #1d2735;
+  border: 1px solid #2a3647;
+  border-radius: 4px;
+  background: #161d27;
   color: #c7d3e7;
   font-size: 12px;
   padding: 4px 8px;
@@ -132,5 +153,5 @@
 }
 
 .removeButton:hover {
-  background: #253247;
+  background: #1b2430;
 }

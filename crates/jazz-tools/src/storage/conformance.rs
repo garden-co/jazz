@@ -945,9 +945,9 @@ macro_rules! storage_conformance_tests {
 /// Usage:
 /// ```ignore
 /// storage_conformance_tests_persistent!(
-///     fjall,
-///     || Box::new(FjallStorage::open_temp().unwrap()),
-///     |path| Box::new(FjallStorage::open(path).unwrap())
+///     my_backend,
+///     || Box::new(MyStorage::open_temp().unwrap()),
+///     |path| Box::new(MyStorage::open(path).unwrap())
 /// );
 /// ```
 #[macro_export]

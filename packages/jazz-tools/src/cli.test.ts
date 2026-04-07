@@ -579,7 +579,7 @@ describe("cli migrations", () => {
     );
   });
 
-  it("generates a typed migration stub from explicit historical fromHash and toHash values", async () => {
+  it("renders createTables and dropTables when inferring table add/drop steps", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
     const fromHash = "abababababababababababababababababababababababababababababababab";
@@ -642,10 +642,192 @@ describe("cli migrations", () => {
     const generated = await readFile(filePath, "utf8");
     expect(generated).toContain('"todos": {');
     expect(generated).toContain('"notes": s.add.string({ default: null }),');
-    expect(generated).not.toContain("createTable");
-    expect(generated).not.toContain("dropTable");
-    expect(generated).not.toContain('"legacy_users"');
-    expect(generated).not.toContain('"users"');
+    expect(generated).toContain("createTables: {");
+    expect(generated).toContain('"users": true,');
+    expect(generated).toContain("dropTables: {");
+    expect(generated).toContain('"legacy_users": true,');
+  });
+
+  it("suggests renameTables for a single exact table rename", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef";
+    const toHash = "1212121212121212121212121212121212121212121212121212121212121212";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${fromHash}`)) {
+        return new Response(
+          JSON.stringify({
+            users: {
+              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      if (input.endsWith(`/schema/${toHash}`)) {
+        return new Response(
+          JSON.stringify({
+            people: {
+              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const filePath = await createMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    const generated = await readFile(filePath, "utf8");
+    expect(generated).toContain("renameTables: {");
+    expect(generated).toContain('people: s.renameTableFrom("users"),');
+    expect(generated).toContain("from: {");
+    expect(generated).toContain('"users": s.table({');
+    expect(generated).toContain("to: {");
+    expect(generated).toContain('"people": s.table({');
+    expect(generated).not.toContain("migrate: {");
+  });
+
+  it("suggests renameTables for multiple exact unambiguous table renames", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "3434343434343434343434343434343434343434343434343434343434343434";
+    const toHash = "5656565656565656565656565656565656565656565656565656565656565656";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${fromHash}`)) {
+        return new Response(
+          JSON.stringify({
+            users: {
+              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+            },
+            orgs: {
+              columns: [{ name: "slug", column_type: { type: "Text" }, nullable: false }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      if (input.endsWith(`/schema/${toHash}`)) {
+        return new Response(
+          JSON.stringify({
+            companies: {
+              columns: [{ name: "slug", column_type: { type: "Text" }, nullable: false }],
+            },
+            people: {
+              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const filePath = await createMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    const generated = await readFile(filePath, "utf8");
+    expect(generated).toContain("renameTables: {");
+    expect(generated).toContain('companies: s.renameTableFrom("orgs"),');
+    expect(generated).toContain('people: s.renameTableFrom("users"),');
+    expect(generated).not.toContain("createTables: {");
+    expect(generated).not.toContain("dropTables: {");
+    expect(generated).toContain('"orgs": s.table({');
+    expect(generated).toContain('"users": s.table({');
+    expect(generated).toContain('"companies": s.table({');
+    expect(generated).toContain('"people": s.table({');
+    expect(generated).not.toContain("migrate: {");
+  });
+
+  it("keeps duplicate-shape table changes as add/drop instead of guessing a rename", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const fromHash = "7878787878787878787878787878787878787878787878787878787878787878";
+    const toHash = "9090909090909090909090909090909090909090909090909090909090909090";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+
+    const fetchMock = vi.fn(async (input: string) => {
+      if (input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      if (input.endsWith(`/schema/${fromHash}`)) {
+        return new Response(
+          JSON.stringify({
+            archived_users: {
+              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+            },
+            users: {
+              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      if (input.endsWith(`/schema/${toHash}`)) {
+        return new Response(
+          JSON.stringify({
+            people: {
+              columns: [{ name: "email", column_type: { type: "Text" }, nullable: false }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+
+      throw new Error(`Unexpected fetch: ${input}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const filePath = await createMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    const generated = await readFile(filePath, "utf8");
+    expect(generated).not.toContain("renameTables: {");
+    expect(generated).toContain("createTables: {");
+    expect(generated).toContain('"people": true,');
+    expect(generated).toContain("dropTables: {");
+    expect(generated).toContain('"archived_users": true,');
+    expect(generated).toContain('"users": true,');
   });
 
   it("pushes a reviewed migration via the admin migrations endpoint", async () => {
@@ -704,6 +886,169 @@ export default s.defineMigration({
               value: "email_address",
             },
           ],
+        },
+      ]);
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pushMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("pushes explicit table renames via renamedFrom on the admin migrations payload", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+
+    const fromHash = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const toHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+    const migrationPath = join(
+      migrationsDir,
+      `20260318-table-rename-${fromShortHash}-${toShortHash}.ts`,
+    );
+
+    await writeFile(
+      migrationPath,
+      `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export default s.defineMigration({
+  renameTables: {
+    people: s.renameTableFrom("users"),
+  },
+  migrate: {
+    people: {
+      email_address: s.renameFrom("email"),
+    },
+  },
+  fromHash: ${JSON.stringify(fromShortHash)},
+  toHash: ${JSON.stringify(toShortHash)},
+  from: {
+    users: s.table({
+      email: s.string(),
+    }),
+  },
+  to: {
+    people: s.table({
+      email_address: s.string(),
+    }),
+  },
+});
+`,
+    );
+
+    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      if (_input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      const body = JSON.parse(String(init?.body));
+      expect(body.fromHash).toBe(fromHash);
+      expect(body.toHash).toBe(toHash);
+      expect(body.forward).toEqual([
+        {
+          table: "people",
+          renamedFrom: "users",
+          operations: [
+            {
+              type: "rename",
+              column: "email",
+              value: "email_address",
+            },
+          ],
+        },
+      ]);
+      return new Response(JSON.stringify({ ok: true }), { status: 201 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await pushMigration({
+      serverUrl: "http://localhost:1625",
+      adminSecret: "admin-secret",
+      migrationsDir,
+      fromHash: fromShortHash,
+      toHash: toShortHash,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("pushes explicit createTables and dropTables via the admin migrations payload", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await mkdir(migrationsDir, { recursive: true });
+
+    const fromHash = "1111111111111111111111111111111111111111111111111111111111111111";
+    const toHash = "2222222222222222222222222222222222222222222222222222222222222222";
+    const fromShortHash = fromHash.slice(0, 12);
+    const toShortHash = toHash.slice(0, 12);
+    const migrationPath = join(
+      migrationsDir,
+      `20260318-table-add-drop-${fromShortHash}-${toShortHash}.ts`,
+    );
+
+    await writeFile(
+      migrationPath,
+      `
+import { schema as s } from ${JSON.stringify(indexPath)};
+
+export default s.defineMigration({
+  createTables: {
+    profiles: true,
+  },
+  dropTables: {
+    legacy_profiles: true,
+  },
+  fromHash: ${JSON.stringify(fromShortHash)},
+  toHash: ${JSON.stringify(toShortHash)},
+  from: {
+    users: s.table({
+      email: s.string(),
+    }),
+    legacy_profiles: s.table({
+      bio: s.string().optional(),
+    }),
+  },
+  to: {
+    users: s.table({
+      email: s.string(),
+    }),
+    profiles: s.table({
+      bio: s.string().optional(),
+    }),
+  },
+});
+`,
+    );
+
+    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      if (_input.endsWith("/schemas")) {
+        return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
+      }
+
+      const body = JSON.parse(String(init?.body));
+      expect(body.fromHash).toBe(fromHash);
+      expect(body.toHash).toBe(toHash);
+      expect(body.forward).toEqual([
+        {
+          table: "profiles",
+          added: true,
+          operations: [],
+        },
+        {
+          table: "legacy_profiles",
+          removed: true,
+          operations: [],
         },
       ]);
       return new Response(JSON.stringify({ ok: true }), { status: 201 });

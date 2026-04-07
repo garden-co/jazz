@@ -17,12 +17,75 @@ import {
   useReactTable,
 } from "@tanstack/react-table";
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
 import { LiveQueryFilters } from "./LiveQueryFilters.js";
 import styles from "./index.module.css";
 
 const SERVER_SUBSCRIPTIONS_POLL_MS = 20_000;
+
+const IR_OP_TO_FILTER_OP: Record<string, string> = {
+  Eq: "eq",
+  Ne: "ne",
+  Gt: "gt",
+  Gte: "gte",
+  Lt: "lt",
+  Lte: "lte",
+};
+
+interface FilterClause {
+  id: string;
+  column: string;
+  operator: string;
+  value: unknown;
+}
+
+function extractFiltersFromIR(node: unknown): FilterClause[] {
+  if (!node || typeof node !== "object") return [];
+  const obj = node as Record<string, unknown>;
+
+  if ("Cmp" in obj && obj.Cmp && typeof obj.Cmp === "object") {
+    const cmp = obj.Cmp as Record<string, unknown>;
+    const left = cmp.left as Record<string, unknown> | undefined;
+    const right = cmp.right as Record<string, unknown> | undefined;
+    const op = IR_OP_TO_FILTER_OP[cmp.op as string];
+    const column = left?.column as string | undefined;
+    const literal = right?.Literal as Record<string, unknown> | undefined;
+    if (op && column && literal && "value" in literal) {
+      return [{ id: `ir-${column}`, column, operator: op, value: literal.value }];
+    }
+    return [];
+  }
+
+  if ("And" in obj && Array.isArray(obj.And)) {
+    return obj.And.flatMap((child: unknown) => extractFiltersFromIR(child));
+  }
+
+  const filters: FilterClause[] = [];
+  for (const value of Object.values(obj)) {
+    if (value && typeof value === "object") {
+      filters.push(...extractFiltersFromIR(value));
+    }
+  }
+  return filters;
+}
+
+function buildExplorerUrl(table: string, queryJson: string): string {
+  const base = `/data-explorer/${table}/data`;
+  try {
+    const parsed = JSON.parse(queryJson);
+    const filters = extractFiltersFromIR(parsed.relation_ir);
+    if (filters.length > 0) {
+      const params = new URLSearchParams();
+      params.set("filters", JSON.stringify(filters));
+      return `${base}?${params.toString()}`;
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return base;
+}
 
 function getUserStackSummary(stack: string | undefined): string {
   if (!stack) {
@@ -162,7 +225,14 @@ function ExtensionLiveQuery() {
       {
         accessorKey: "table",
         header: "Table",
-        cell: (info) => info.getValue<string>(),
+        cell: ({ row }) => (
+          <Link
+            to={buildExplorerUrl(row.original.table, row.original.query)}
+            className={styles.tableLink}
+          >
+            {row.original.table}
+          </Link>
+        ),
       },
       {
         accessorKey: "tier",
@@ -355,7 +425,14 @@ function StandaloneLiveQuery() {
               {filteredQueries.map((query) => (
                 <tr key={query.groupKey}>
                   <td>{query.count}</td>
-                  <td>{query.table}</td>
+                  <td>
+                    <Link
+                      to={buildExplorerUrl(query.table, query.query)}
+                      className={styles.tableLink}
+                    >
+                      {query.table}
+                    </Link>
+                  </td>
                   <td>{query.propagation}</td>
                   <td>{query.branches.join(", ")}</td>
                   <td>
