@@ -1048,21 +1048,22 @@ fn short_uuid(uuid: &uuid::Uuid) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commit::Commit;
-    use crate::object::BranchName;
+    use crate::metadata::RowProvenance;
+    use crate::row_regions::{RowState, StoredRowVersion};
     use crate::sync_manager::ServerId;
-    use smallvec::smallvec;
 
-    fn make_commit(byte: u8) -> Commit {
-        Commit {
-            parents: smallvec![],
-            content: vec![byte],
-            timestamp: 1000,
-            author: ObjectId::new().to_string(),
-            metadata: None,
-            stored_state: Default::default(),
-            ack_state: Default::default(),
-        }
+    fn make_row(byte: u8) -> StoredRowVersion {
+        let row_id = ObjectId::new();
+        StoredRowVersion::new(
+            row_id,
+            "main",
+            Vec::new(),
+            vec![byte],
+            RowProvenance::for_insert(row_id.to_string(), 1000),
+            Default::default(),
+            RowState::VisibleDirect,
+            None,
+        )
     }
 
     #[test]
@@ -1070,11 +1071,9 @@ mod tests {
         let tracer = SyncTracer::new();
         let server_id = ServerId::default();
 
-        let payload = SyncPayload::ObjectUpdated {
-            object_id: ObjectId::new(),
+        let payload = SyncPayload::RowVersionCreated {
             metadata: None,
-            branch_name: BranchName::from("main"),
-            commits: vec![make_commit(1)],
+            row: make_row(1),
         };
 
         tracer.record_outgoing("alice", &Destination::Server(server_id), &payload);
@@ -1087,8 +1086,8 @@ mod tests {
         assert_eq!(tracer.count(), 2);
         assert_eq!(tracer.from("alice").len(), 1);
         assert_eq!(tracer.from("server").len(), 1);
-        assert_eq!(tracer.of_type("ObjectUpdated").len(), 2);
-        assert_eq!(tracer.of_type("PersistenceAck").len(), 0);
+        assert_eq!(tracer.of_type("RowVersionCreated").len(), 2);
+        assert_eq!(tracer.of_type("RowVersionStateChanged").len(), 0);
     }
 
     #[test]
@@ -1096,18 +1095,17 @@ mod tests {
         let tracer = SyncTracer::new();
         let server_id = ServerId::default();
 
-        let obj_id = ObjectId::new();
-        let outgoing = SyncPayload::ObjectUpdated {
-            object_id: obj_id,
+        let row = make_row(1);
+        let outgoing = SyncPayload::RowVersionCreated {
             metadata: None,
-            branch_name: BranchName::from("main"),
-            commits: vec![make_commit(1)],
+            row: row.clone(),
         };
-        let incoming = SyncPayload::PersistenceAck {
-            object_id: obj_id,
-            branch_name: BranchName::from("main"),
-            confirmed_commits: std::collections::HashSet::new(),
-            tier: crate::sync_manager::DurabilityTier::EdgeServer,
+        let incoming = SyncPayload::RowVersionStateChanged {
+            row_id: row.row_id,
+            branch_name: "main".into(),
+            version_id: row.version_id(),
+            state: None,
+            confirmed_tier: Some(crate::sync_manager::DurabilityTier::EdgeServer),
         };
 
         tracer.record_outgoing("alice", &Destination::Server(server_id), &outgoing);
@@ -1124,11 +1122,9 @@ mod tests {
         let tracer = SyncTracer::new();
         let server_id = ServerId::default();
 
-        let payload = SyncPayload::ObjectUpdated {
-            object_id: ObjectId::new(),
+        let payload = SyncPayload::RowVersionCreated {
             metadata: None,
-            branch_name: BranchName::from("main"),
-            commits: vec![make_commit(1)],
+            row: make_row(1),
         };
 
         tracer.record_outgoing("alice", &Destination::Server(server_id), &payload);
@@ -1136,7 +1132,7 @@ mod tests {
         let dump = tracer.dump();
         assert!(dump.contains("alice"));
         assert!(dump.contains("server"));
-        assert!(dump.contains("ObjectUpdated"));
+        assert!(dump.contains("RowVersionCreated"));
         assert!(dump.contains("branch:main"));
     }
 

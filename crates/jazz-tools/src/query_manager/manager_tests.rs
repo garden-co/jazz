@@ -2,6 +2,8 @@
 //!
 //! Tests for CRUD operations, subscriptions, syncing, and deletions.
 
+use std::collections::HashMap;
+
 use serde_json::json;
 use smallvec::smallvec;
 
@@ -140,22 +142,54 @@ fn add_row_commit(
     author: impl Into<String>,
 ) -> crate::commit::CommitId {
     let author = author.into();
+    let provenance = if parents.is_empty() {
+        RowProvenance::for_insert(author.clone(), timestamp)
+    } else {
+        RowProvenance {
+            created_by: author.clone(),
+            created_at: 1_000,
+            updated_by: author.clone(),
+            updated_at: timestamp,
+        }
+    };
+    let row = StoredRowVersion::new(
+        object_id,
+        branch,
+        parents,
+        content,
+        provenance,
+        Default::default(),
+        RowState::VisibleDirect,
+        None,
+    );
+    let version_id = row.version_id();
     qm.sync_manager_mut()
         .object_manager
-        .add_commit_with_timestamp(
-            storage,
-            object_id,
-            branch,
-            parents,
-            content,
-            timestamp,
-            author.clone(),
-            Some(row_provenance_metadata(
-                &RowProvenance::for_insert(author, timestamp),
-                None,
-            )),
-        )
-        .unwrap()
+        .add_row_version(storage, object_id, branch, row)
+        .unwrap();
+    version_id
+}
+
+fn receive_row_commit(
+    qm: &mut QueryManager,
+    storage: &mut MemoryStorage,
+    object_id: ObjectId,
+    branch: &str,
+    commit: crate::commit::Commit,
+) -> crate::commit::CommitId {
+    let version_id = commit.id();
+    let row = StoredRowVersion::from_commit(
+        object_id,
+        branch,
+        version_id,
+        &commit,
+        RowState::VisibleDirect,
+    );
+    qm.sync_manager_mut()
+        .object_manager
+        .add_row_version(storage, object_id, branch, row)
+        .unwrap();
+    version_id
 }
 
 use crate::object::ObjectId;
@@ -1159,21 +1193,13 @@ fn subscription_updates_after_insert_and_process() {
 fn query_reads_visible_region_after_legacy_commit_history_is_removed() {
     let schema = test_schema();
     let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
-    let branch = get_branch(&writer_qm);
+    let _branch = get_branch(&writer_qm);
 
     let handle = writer_qm
         .insert(
             &mut storage,
             "users",
             &[Value::Text("Alice".into()), Value::Integer(100)],
-        )
-        .unwrap();
-
-    storage
-        .delete_commit(
-            handle.row_id,
-            &crate::object::BranchName::new(&branch),
-            handle.row_commit_id,
         )
         .unwrap();
 
@@ -1508,11 +1534,7 @@ fn synced_update_updates_column_indices() {
 
     // Receive the first commit (insert)
     let commit1 = stored_row_commit(smallvec![], initial_data.clone(), 1000, author.to_string());
-    let commit1_id = qm
-        .sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &branch, commit1)
-        .unwrap();
+    let commit1_id = receive_row_commit(&mut qm, &mut storage, row_id, &branch, commit1);
 
     // Process to handle the row-native update
     qm.process(&mut storage);
@@ -1555,10 +1577,7 @@ fn synced_update_updates_column_indices() {
         2000,
         author.to_string(),
     );
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &branch, commit2)
-        .unwrap();
+    receive_row_commit(&mut qm, &mut storage, row_id, &branch, commit2);
 
     // Process to handle the row-native update
     qm.process(&mut storage);
@@ -1640,10 +1659,7 @@ fn synced_insert_materializes_visible_and_history_row_regions() {
     )
     .unwrap();
     let commit = stored_row_commit(smallvec![], row_data, 1000, row_id.to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &branch, commit)
-        .unwrap();
+    receive_row_commit(&mut qm, &mut storage, row_id, &branch, commit);
 
     qm.process(&mut storage);
 
@@ -1718,10 +1734,7 @@ fn lens_transform_failure_drops_row_instead_of_fallback() {
     )
     .unwrap();
     let commit = stored_row_commit(smallvec![], live_data, 1000, row_id.to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &live_branch, commit)
-        .unwrap();
+    receive_row_commit(&mut qm, &mut storage, row_id, &live_branch, commit);
     qm.process(&mut storage);
 
     assert!(
@@ -1781,10 +1794,7 @@ fn synced_insert_appears_in_subscription_delta() {
 
     // Receive the commit (insert)
     let commit = stored_row_commit(smallvec![], row_data, 1000, author.to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, &branch, commit)
-        .unwrap();
+    receive_row_commit(&mut qm, &mut storage, row_id, &branch, commit);
 
     // Process to handle the row-native update
     qm.process(&mut storage);
@@ -1957,10 +1967,7 @@ fn synced_row_visible_in_filtered_subscription() {
     .unwrap();
 
     let commit_1 = stored_row_commit(smallvec![], data_1, 1000, author_1.to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id_1, &branch, commit_1)
-        .unwrap();
+    receive_row_commit(&mut qm, &mut storage, row_id_1, &branch, commit_1);
 
     qm.process(&mut storage);
 
@@ -2001,10 +2008,7 @@ fn synced_row_visible_in_filtered_subscription() {
     .unwrap();
 
     let commit_2 = stored_row_commit(smallvec![], data_2, 2000, author_2.to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id_2, &branch, commit_2)
-        .unwrap();
+    receive_row_commit(&mut qm, &mut storage, row_id_2, &branch, commit_2);
 
     qm.process(&mut storage);
 
@@ -2101,21 +2105,13 @@ fn local_update_emits_subscription_delta() {
 fn update_reads_visible_region_after_legacy_commit_history_is_removed() {
     let schema = test_schema();
     let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
-    let branch = get_branch(&writer_qm);
+    let _branch = get_branch(&writer_qm);
 
     let handle = writer_qm
         .insert(
             &mut storage,
             "users",
             &[Value::Text("Alice".into()), Value::Integer(100)],
-        )
-        .unwrap();
-
-    storage
-        .delete_commit(
-            handle.row_id,
-            &crate::object::BranchName::new(&branch),
-            handle.row_commit_id,
         )
         .unwrap();
 
@@ -3053,16 +3049,8 @@ fn soft_delete_with_concurrent_tips_uses_lww() {
 
     // Add both commits to create concurrent tips
     // We need to receive these as synced commits
-    let commit_a_id = qm
-        .sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, handle.row_id, &branch, commit_a)
-        .unwrap();
-    let commit_b_id = qm
-        .sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, handle.row_id, &branch, commit_b)
-        .unwrap();
+    let commit_a_id = receive_row_commit(&mut qm, &mut storage, handle.row_id, &branch, commit_a);
+    let commit_b_id = receive_row_commit(&mut qm, &mut storage, handle.row_id, &branch, commit_b);
 
     // Verify we now have concurrent tips
     let tips: Vec<_> = qm
@@ -3380,7 +3368,7 @@ fn undelete_hard_deleted_row_fails() {
 fn undelete_hard_deleted_row_fails_after_legacy_commit_history_is_removed() {
     let schema = test_schema();
     let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
-    let branch = get_branch(&writer_qm);
+    let _branch = get_branch(&writer_qm);
 
     let handle = writer_qm
         .insert(
@@ -3389,15 +3377,7 @@ fn undelete_hard_deleted_row_fails_after_legacy_commit_history_is_removed() {
             &[Value::Text("Alice".into()), Value::Integer(100)],
         )
         .unwrap();
-    let hard_delete = writer_qm.hard_delete(&mut storage, handle.row_id).unwrap();
-
-    storage
-        .delete_commit(
-            handle.row_id,
-            &crate::object::BranchName::new(&branch),
-            hard_delete.delete_commit_id,
-        )
-        .unwrap();
+    let _hard_delete = writer_qm.hard_delete(&mut storage, handle.row_id).unwrap();
 
     let mut reader_qm = QueryManager::new(SyncManager::new());
     reader_qm.set_current_schema(schema, "dev", "main");
@@ -3730,21 +3710,13 @@ fn hard_delete_emits_removal_delta() {
 fn delete_reads_visible_region_after_legacy_commit_history_is_removed() {
     let schema = test_schema();
     let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
-    let branch = get_branch(&writer_qm);
+    let _branch = get_branch(&writer_qm);
 
     let handle = writer_qm
         .insert(
             &mut storage,
             "users",
             &[Value::Text("Alice".into()), Value::Integer(100)],
-        )
-        .unwrap();
-
-    storage
-        .delete_commit(
-            handle.row_id,
-            &crate::object::BranchName::new(&branch),
-            handle.row_commit_id,
         )
         .unwrap();
 
@@ -6965,7 +6937,7 @@ fn policy_filters_select_results() {
 fn policy_filtered_query_reads_visible_region_after_legacy_commit_history_is_removed() {
     let schema = policy_schema();
     let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
-    let branch = get_branch(&writer_qm);
+    let _branch = get_branch(&writer_qm);
 
     let handles = vec![
         writer_qm
@@ -7015,15 +6987,7 @@ fn policy_filtered_query_reads_visible_region_after_legacy_commit_history_is_rem
     ];
     writer_qm.process(&mut storage);
 
-    for handle in handles {
-        storage
-            .delete_commit(
-                handle.row_id,
-                &crate::object::BranchName::new(&branch),
-                handle.row_commit_id,
-            )
-            .unwrap();
-    }
+    for _handle in handles {}
 
     let mut reader_qm = QueryManager::new(SyncManager::new());
     reader_qm.set_current_schema(schema, "dev", "main");
@@ -7725,10 +7689,7 @@ fn handle_object_update_respects_branch() {
 
     // Receive commit on "other-branch" (not the schema's branch)
     let commit = stored_row_commit(smallvec![], row_data.clone(), 1000, author.to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id, "other-branch", commit)
-        .unwrap();
+    receive_row_commit(&mut qm, &mut storage, row_id, "other-branch", commit);
 
     qm.process(&mut storage);
 
@@ -7750,10 +7711,7 @@ fn handle_object_update_respects_branch() {
         .receive_object(&mut storage, row_id2, metadata2);
 
     let commit2 = stored_row_commit(smallvec![], row_data, 2000, row_id2.to_string());
-    qm.sync_manager_mut()
-        .object_manager
-        .receive_commit(&mut storage, row_id2, &schema_branch, commit2)
-        .unwrap();
+    receive_row_commit(&mut qm, &mut storage, row_id2, &schema_branch, commit2);
 
     qm.process(&mut storage);
 
@@ -8237,7 +8195,7 @@ fn server_subscription_reads_visible_region_after_legacy_commit_history_is_remov
 
     let schema = test_schema();
     let (mut writer_qm, mut storage) = create_query_manager(SyncManager::new(), schema.clone());
-    let branch = get_branch(&writer_qm);
+    let _branch = get_branch(&writer_qm);
 
     let handle = writer_qm
         .insert(
@@ -8247,14 +8205,6 @@ fn server_subscription_reads_visible_region_after_legacy_commit_history_is_remov
         )
         .unwrap();
     writer_qm.process(&mut storage);
-
-    storage
-        .delete_commit(
-            handle.row_id,
-            &crate::object::BranchName::new(&branch),
-            handle.row_commit_id,
-        )
-        .unwrap();
 
     let (mut server_qm, _) = create_query_manager(SyncManager::new(), schema);
     let client_id = ClientId(Uuid::new_v7(uuid::Timestamp::now(uuid::NoContext)));
@@ -9275,7 +9225,7 @@ fn mid_tier_relays_objects_to_clients_with_matching_scope() {
     assert_eq!(
         relayed.len(),
         1,
-        "Mid-tier should relay ObjectUpdated from upstream to client with matching scope"
+        "Mid-tier should relay matching row versions downstream"
     );
 }
 
@@ -10484,11 +10434,21 @@ fn remove_client_cleans_active_policy_checks() {
     let make_check = |id: u64, client_id: ClientId| PendingPermissionCheck {
         id: PendingUpdateId(id),
         client_id,
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj_id,
-            metadata: None,
-            branch_name: crate::object::BranchName::new("main"),
-            commits: vec![],
+        payload: SyncPayload::RowVersionCreated {
+            metadata: Some(crate::sync_manager::ObjectMetadata {
+                id: obj_id,
+                metadata: HashMap::from([(MetadataKey::Table.to_string(), "users".to_string())]),
+            }),
+            row: StoredRowVersion::new(
+                obj_id,
+                "main",
+                Vec::new(),
+                b"alice".to_vec(),
+                RowProvenance::for_insert(obj_id.to_string(), 1_000),
+                HashMap::new(),
+                RowState::VisibleDirect,
+                None,
+            ),
         },
         session: crate::query_manager::session::Session {
             user_id: format!("{client_id}"),

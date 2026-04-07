@@ -6,9 +6,7 @@ use crate::query_manager::types::{
     ColumnType, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
 };
 use crate::schema_manager::AppId;
-use crate::storage::{
-    LoadedBranch, MemoryStorage, ObjectMetadataRows, RawTableRows, Storage, StorageError,
-};
+use crate::storage::{MemoryStorage, ObjectMetadataRows, RawTableRows, Storage, StorageError};
 use crate::sync_manager::{
     ClientId, ClientRole, Destination, DurabilityTier, InboxEntry, OutboxEntry, ServerId, Source,
     SyncManager, SyncPayload,
@@ -24,15 +22,11 @@ struct RowRegionReadFailingStorage {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct LegacyStorageCallCounts {
-    load_branch: usize,
-    append_commit: usize,
-    store_ack_tier: usize,
-}
+struct LegacyStorageCallCounts;
 
 struct LegacyPersistenceObservingStorage {
     inner: MemoryStorage,
-    calls: Arc<Mutex<LegacyStorageCallCounts>>,
+    _calls: Arc<Mutex<LegacyStorageCallCounts>>,
 }
 
 impl RowRegionReadFailingStorage {
@@ -47,16 +41,8 @@ impl LegacyPersistenceObservingStorage {
     fn new(calls: Arc<Mutex<LegacyStorageCallCounts>>) -> Self {
         Self {
             inner: MemoryStorage::new(),
-            calls,
+            _calls: calls,
         }
-    }
-
-    fn record<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut LegacyStorageCallCounts) -> R,
-    {
-        let mut calls = self.calls.lock().expect("storage call counts should lock");
-        f(&mut calls)
     }
 }
 
@@ -78,49 +64,6 @@ impl Storage for RowRegionReadFailingStorage {
 
     fn scan_object_metadata(&self) -> Result<ObjectMetadataRows, StorageError> {
         self.inner.scan_object_metadata()
-    }
-
-    fn load_branch(
-        &self,
-        object_id: ObjectId,
-        branch: &crate::object::BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError> {
-        self.inner.load_branch(object_id, branch)
-    }
-
-    fn append_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &crate::object::BranchName,
-        commit: crate::commit::Commit,
-    ) -> Result<(), StorageError> {
-        self.inner.append_commit(object_id, branch, commit)
-    }
-
-    fn delete_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &crate::object::BranchName,
-        commit_id: crate::commit::CommitId,
-    ) -> Result<(), StorageError> {
-        self.inner.delete_commit(object_id, branch, commit_id)
-    }
-
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &crate::object::BranchName,
-        tails: Option<std::collections::HashSet<crate::commit::CommitId>>,
-    ) -> Result<(), StorageError> {
-        self.inner.set_branch_tails(object_id, branch, tails)
-    }
-
-    fn store_ack_tier(
-        &mut self,
-        commit_id: crate::commit::CommitId,
-        tier: DurabilityTier,
-    ) -> Result<(), StorageError> {
-        self.inner.store_ack_tier(commit_id, tier)
     }
 
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
@@ -305,52 +248,6 @@ impl Storage for LegacyPersistenceObservingStorage {
 
     fn scan_object_metadata(&self) -> Result<ObjectMetadataRows, StorageError> {
         self.inner.scan_object_metadata()
-    }
-
-    fn load_branch(
-        &self,
-        object_id: ObjectId,
-        branch: &crate::object::BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError> {
-        self.record(|calls| calls.load_branch += 1);
-        self.inner.load_branch(object_id, branch)
-    }
-
-    fn append_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &crate::object::BranchName,
-        commit: crate::commit::Commit,
-    ) -> Result<(), StorageError> {
-        self.record(|calls| calls.append_commit += 1);
-        self.inner.append_commit(object_id, branch, commit)
-    }
-
-    fn delete_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &crate::object::BranchName,
-        commit_id: crate::commit::CommitId,
-    ) -> Result<(), StorageError> {
-        self.inner.delete_commit(object_id, branch, commit_id)
-    }
-
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &crate::object::BranchName,
-        tails: Option<std::collections::HashSet<crate::commit::CommitId>>,
-    ) -> Result<(), StorageError> {
-        self.inner.set_branch_tails(object_id, branch, tails)
-    }
-
-    fn store_ack_tier(
-        &mut self,
-        commit_id: crate::commit::CommitId,
-        tier: DurabilityTier,
-    ) -> Result<(), StorageError> {
-        self.record(|calls| calls.store_ack_tier += 1);
-        self.inner.store_ack_tier(commit_id, tier)
     }
 
     fn raw_table_put(&mut self, table: &str, key: &str, value: &[u8]) -> Result<(), StorageError> {
@@ -875,10 +772,6 @@ fn outbox_has_object_update_for_client(
             &entry.destination,
             Destination::Client(dest_client_id) if *dest_client_id == client_id
         ) && match &entry.payload {
-            SyncPayload::ObjectUpdated {
-                object_id: payload_object_id,
-                ..
-            } => *payload_object_id == object_id,
             SyncPayload::RowVersionNeeded { row, .. }
             | SyncPayload::RowVersionCreated { row, .. } => row.row_id == object_id,
             _ => false,
@@ -1419,18 +1312,25 @@ fn rc_user_subscription_does_not_forward_rows_to_other_sessions() {
 
 #[test]
 fn test_park_sync_message() {
-    use crate::object::BranchName;
+    use crate::metadata::RowProvenance;
     use crate::sync_manager::{Source, SyncPayload};
 
     let mut core = create_test_runtime();
 
     let message = InboxEntry {
         source: Source::Server(ServerId::new()),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: ObjectId::new(),
+        payload: SyncPayload::RowVersionCreated {
             metadata: None,
-            branch_name: BranchName::new("main"),
-            commits: vec![],
+            row: crate::row_regions::StoredRowVersion::new(
+                ObjectId::new(),
+                "main",
+                Vec::new(),
+                b"alice".to_vec(),
+                RowProvenance::for_insert(ObjectId::new().to_string(), 1_000),
+                HashMap::new(),
+                crate::row_regions::RowState::VisibleDirect,
+                None,
+            ),
         },
     };
     core.park_sync_message(message);
@@ -2088,48 +1988,6 @@ fn rc_insert_persisted_does_not_touch_legacy_ack_storage() {
 }
 
 #[test]
-fn rc_insert_persisted_ignores_legacy_object_ack_with_same_id() {
-    let mut s = create_3tier_rc();
-    let ((row_id, _row_values), mut receiver) =
-        s.a.insert_persisted(
-            "users",
-            user_insert_values(ObjectId::new(), "Alice"),
-            None,
-            DurabilityTier::Worker,
-        )
-        .unwrap();
-
-    let branch_name = s.a.schema_manager().branch_name();
-    let row_commit_id =
-        *s.a.schema_manager()
-            .query_manager()
-            .sync_manager()
-            .object_manager
-            .get_tip_ids(row_id, branch_name)
-            .unwrap()
-            .iter()
-            .next()
-            .expect("insert should create one visible tip");
-
-    s.a.push_sync_inbox(InboxEntry {
-        source: Source::Server(s.b_server_for_a),
-        payload: SyncPayload::PersistenceAck {
-            object_id: ObjectId::new(),
-            branch_name,
-            confirmed_commits: std::iter::once(row_commit_id).collect(),
-            tier: DurabilityTier::Worker,
-        },
-    });
-    s.a.immediate_tick();
-
-    assert_eq!(
-        receiver.try_recv(),
-        Ok(None),
-        "row persisted receivers should ignore legacy object acks, even if the raw id matches"
-    );
-}
-
-#[test]
 fn rc_insert_persisted_ignores_row_state_changed_for_different_row_same_version_id() {
     let mut s = create_3tier_rc();
     let ((row_id, _row_values), mut receiver) =
@@ -2454,7 +2312,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
     s.b.batched_tick();
     let b_out = s.b.sync_sender().take();
 
-    // Force QuerySettled before ObjectUpdated to expose ordering assumptions.
+    // Force QuerySettled before row delivery to expose ordering assumptions.
     let mut settled_to_a = Vec::new();
     let mut updates_to_a = Vec::new();
     for entry in b_out {
@@ -2463,7 +2321,6 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
         }
         match entry.payload {
             payload @ SyncPayload::QuerySettled { .. } => settled_to_a.push(payload),
-            payload @ SyncPayload::ObjectUpdated { .. } => updates_to_a.push(payload),
             payload @ SyncPayload::RowVersionNeeded { .. } => updates_to_a.push(payload),
             _ => {}
         }
@@ -2473,10 +2330,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
         !settled_to_a.is_empty(),
         "Expected QuerySettled notification for A"
     );
-    assert!(
-        !updates_to_a.is_empty(),
-        "Expected ObjectUpdated payload for A"
-    );
+    assert!(!updates_to_a.is_empty(), "Expected row payload for A");
 
     // Mirror connected stream initialization: first expected seq is 1.
     s.a.set_next_expected_server_sequence(s.b_server_for_a, 1);
@@ -2498,7 +2352,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
 
     assert!(
         Pin::new(&mut future).poll(&mut cx).is_pending(),
-        "Query should stay pending until lower sequence ObjectUpdated arrives"
+        "Query should stay pending until lower sequence row payload arrives"
     );
 
     for payload in updates_to_a {
@@ -2524,7 +2378,7 @@ fn rc_query_settled_before_data_should_not_drop_upstream_rows() {
             assert_eq!(results[0].0, row_id);
         }
         Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
-        Poll::Pending => panic!("Query should resolve after ObjectUpdated and QuerySettled"),
+        Poll::Pending => panic!("Query should resolve after row payload and QuerySettled"),
     }
 }
 
@@ -3272,7 +3126,7 @@ fn remove_client_blocked_by_parked_sync_messages() {
     // Sweep tries to reap alice → remove_client returns false because
     // parked_sync_messages contains an entry from alice.
     //
-    use crate::object::BranchName;
+    use crate::metadata::RowProvenance;
 
     let mut core = create_test_runtime();
     let alice = ClientId::new();
@@ -3281,11 +3135,18 @@ fn remove_client_blocked_by_parked_sync_messages() {
     // Park a message from alice (simulates push_sync_inbox before batched_tick)
     core.park_sync_message(InboxEntry {
         source: Source::Client(alice),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: ObjectId::new(),
+        payload: SyncPayload::RowVersionCreated {
             metadata: None,
-            branch_name: BranchName::new("main"),
-            commits: vec![],
+            row: crate::row_regions::StoredRowVersion::new(
+                ObjectId::new(),
+                "main",
+                Vec::new(),
+                b"alice".to_vec(),
+                RowProvenance::for_insert(ObjectId::new().to_string(), 1_000),
+                HashMap::new(),
+                crate::row_regions::RowState::VisibleDirect,
+                None,
+            ),
         },
     });
 
@@ -3310,7 +3171,7 @@ fn remove_client_succeeds_after_parked_messages_drained() {
     //
     // After batched_tick processes the parked message, remove_client succeeds.
     //
-    use crate::object::BranchName;
+    use crate::metadata::RowProvenance;
 
     let mut core = create_test_runtime();
     let alice = ClientId::new();
@@ -3318,11 +3179,18 @@ fn remove_client_succeeds_after_parked_messages_drained() {
 
     core.park_sync_message(InboxEntry {
         source: Source::Client(alice),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: ObjectId::new(),
+        payload: SyncPayload::RowVersionCreated {
             metadata: None,
-            branch_name: BranchName::new("main"),
-            commits: vec![],
+            row: crate::row_regions::StoredRowVersion::new(
+                ObjectId::new(),
+                "main",
+                Vec::new(),
+                b"alice".to_vec(),
+                RowProvenance::for_insert(ObjectId::new().to_string(), 1_000),
+                HashMap::new(),
+                crate::row_regions::RowState::VisibleDirect,
+                None,
+            ),
         },
     });
 
@@ -3350,7 +3218,7 @@ fn remove_client_ignores_parked_messages_from_other_clients() {
     // alice disconnects → remove_client(alice) succeeds because
     // the parked message is from bob, not alice.
     //
-    use crate::object::BranchName;
+    use crate::metadata::RowProvenance;
 
     let mut core = create_test_runtime();
     let alice = ClientId::new();
@@ -3361,11 +3229,18 @@ fn remove_client_ignores_parked_messages_from_other_clients() {
     // Park a message from bob
     core.park_sync_message(InboxEntry {
         source: Source::Client(bob),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: ObjectId::new(),
+        payload: SyncPayload::RowVersionCreated {
             metadata: None,
-            branch_name: BranchName::new("main"),
-            commits: vec![],
+            row: crate::row_regions::StoredRowVersion::new(
+                ObjectId::new(),
+                "main",
+                Vec::new(),
+                b"bob".to_vec(),
+                RowProvenance::for_insert(ObjectId::new().to_string(), 1_000),
+                HashMap::new(),
+                crate::row_regions::RowState::VisibleDirect,
+                None,
+            ),
         },
     });
 

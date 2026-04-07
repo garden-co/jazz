@@ -98,22 +98,32 @@ fn add_row_commit(
     author: impl Into<String>,
 ) -> crate::commit::CommitId {
     let author = author.into();
+    let provenance = if parents.is_empty() {
+        RowProvenance::for_insert(author.clone(), timestamp)
+    } else {
+        RowProvenance {
+            created_by: author.clone(),
+            created_at: 1_000,
+            updated_by: author.clone(),
+            updated_at: timestamp,
+        }
+    };
+    let row = StoredRowVersion::new(
+        object_id,
+        branch,
+        parents,
+        content,
+        provenance,
+        Default::default(),
+        RowState::VisibleDirect,
+        None,
+    );
+    let version_id = row.version_id();
     qm.sync_manager_mut()
         .object_manager
-        .add_commit_with_timestamp(
-            storage,
-            object_id,
-            branch,
-            parents,
-            content,
-            timestamp,
-            author.clone(),
-            Some(row_provenance_metadata(
-                &RowProvenance::for_insert(author, timestamp),
-                None,
-            )),
-        )
-        .unwrap()
+        .add_row_version(storage, object_id, branch, row)
+        .unwrap();
+    version_id
 }
 
 /// Schema for ReBAC tests: documents with owner_id policy + folders for INHERITS
@@ -1052,7 +1062,7 @@ fn rebac_inherited_insert_uses_visible_row_region_after_legacy_branch_history_is
         &folders_descriptor,
     );
 
-    let folder_commit_id = *seed_qm
+    let _folder_commit_id = *seed_qm
         .sync_manager_mut()
         .object_manager
         .get_tip_ids(folder_id, &branch)
@@ -1060,14 +1070,6 @@ fn rebac_inherited_insert_uses_visible_row_region_after_legacy_branch_history_is
         .iter()
         .next()
         .expect("seed folder should have one tip");
-    crate::storage::Storage::delete_commit(
-        &mut storage,
-        folder_id,
-        &BranchName::new(&branch),
-        folder_commit_id,
-    )
-    .unwrap();
-
     let mut qm = create_server_mode_query_manager(schema, schema_hash);
     let client_id = ClientId::new();
     qm.sync_manager_mut().add_client(client_id);
@@ -1612,137 +1614,6 @@ fn rebac_table_without_policy_allows_all_writes() {
     assert!(
         tips.contains(&commit.id()),
         "Table without policy should allow all writes"
-    );
-}
-
-#[test]
-fn rebac_non_row_object_allowed() {
-    // Setup
-    let sync_manager = SyncManager::new();
-    let schema = rebac_test_schema();
-    let mut qm = create_query_manager(sync_manager, schema);
-    let mut storage = MemoryStorage::new();
-
-    // Add a client with session
-    let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
-    qm.sync_manager_mut()
-        .set_client_session(client_id, Session::new("alice"));
-
-    // Create an object WITHOUT table metadata (not a row)
-    let obj_id = qm
-        .sync_manager_mut()
-        .object_manager
-        .create(&mut storage, None);
-
-    // Register a query scope
-    let mut scope = HashSet::new();
-    scope.insert((obj_id, "main".into()));
-    qm.sync_manager_mut()
-        .set_client_query_scope(client_id, QueryId(1), scope, None);
-    qm.sync_manager_mut().take_outbox();
-
-    // Client sends update
-    let commit = Commit {
-        parents: smallvec![],
-        content: b"some data".to_vec(),
-        timestamp: 1000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
-
-    qm.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Client(client_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj_id,
-            metadata: None, // No metadata = not a row
-            branch_name: "main".into(),
-            commits: vec![commit.clone()],
-        },
-    });
-
-    // Process - non-row objects should be allowed
-    qm.process(&mut storage);
-
-    // Commit should be applied
-    let tips = qm
-        .sync_manager_mut()
-        .object_manager
-        .get_tip_ids(obj_id, "main")
-        .unwrap();
-    assert!(
-        tips.contains(&commit.id()),
-        "Non-row objects should be allowed without policy check"
-    );
-}
-
-#[test]
-fn rebac_non_row_object_allowed_in_server_mode() {
-    let schema = rebac_test_schema();
-    let schema_hash = SchemaHash::compute(&schema);
-    let branch = ComposedBranchName::new("dev", schema_hash, "main")
-        .to_branch_name()
-        .as_str()
-        .to_string();
-
-    // Server mode: schema is available through known_schemas only.
-    let sync_manager = SyncManager::new();
-    let mut qm = QueryManager::new(sync_manager);
-    let mut known_schemas = HashMap::new();
-    known_schemas.insert(schema_hash, schema);
-    qm.set_known_schemas(Arc::new(known_schemas));
-
-    let mut storage = MemoryStorage::new();
-
-    let client_id = ClientId::new();
-    qm.sync_manager_mut().add_client(client_id);
-    qm.sync_manager_mut()
-        .set_client_session(client_id, Session::new("alice"));
-
-    // Non-row object: no table metadata.
-    let obj_id = qm
-        .sync_manager_mut()
-        .object_manager
-        .create(&mut storage, None);
-
-    let mut scope = HashSet::new();
-    scope.insert((obj_id, branch.clone().into()));
-    qm.sync_manager_mut()
-        .set_client_query_scope(client_id, QueryId(1), scope, None);
-    qm.sync_manager_mut().take_outbox();
-
-    let commit = Commit {
-        parents: smallvec![],
-        content: b"some data".to_vec(),
-        timestamp: 1000,
-        author: ObjectId::new().to_string(),
-        metadata: None,
-        stored_state: crate::commit::StoredState::Stored,
-        ack_state: Default::default(),
-    };
-
-    qm.sync_manager_mut().push_inbox(InboxEntry {
-        source: Source::Client(client_id),
-        payload: SyncPayload::ObjectUpdated {
-            object_id: obj_id,
-            metadata: None,
-            branch_name: branch.clone().into(),
-            commits: vec![commit.clone()],
-        },
-    });
-
-    qm.process(&mut storage);
-
-    let tips = qm
-        .sync_manager_mut()
-        .object_manager
-        .get_tip_ids(obj_id, &branch)
-        .unwrap();
-    assert!(
-        tips.contains(&commit.id()),
-        "Non-row objects should remain writable in server mode"
     );
 }
 
@@ -3007,7 +2878,7 @@ fn local_update_with_check_inherits_uses_visible_row_region_after_legacy_branch_
     );
 
     let mut writer_qm = create_query_manager(SyncManager::new(), schema.clone());
-    let branch = get_branch(&writer_qm);
+    let _branch = get_branch(&writer_qm);
     let mut storage = MemoryStorage::new();
 
     let root = writer_qm
@@ -3032,14 +2903,6 @@ fn local_update_with_check_inherits_uses_visible_row_region_after_legacy_branch_
             ],
         )
         .expect("create child");
-
-    crate::storage::Storage::delete_commit(
-        &mut storage,
-        root.row_id,
-        &BranchName::new(&branch),
-        root.row_commit_id,
-    )
-    .unwrap();
 
     let mut qm = create_query_manager(SyncManager::new(), schema);
     let update_err = qm

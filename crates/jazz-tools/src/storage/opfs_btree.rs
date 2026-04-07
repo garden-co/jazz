@@ -27,13 +27,19 @@ use opfs_btree::StdFile;
 use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, OpfsBTree, SyncFile};
 
 use crate::object::ObjectId;
+use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
+use crate::sync_manager::DurabilityTier;
 
 use super::{
     Storage, StorageError,
     key_codec::increment_bytes,
     storage_core::{
-        create_object_core, load_object_metadata_core, raw_table_delete_core, raw_table_get_core,
-        raw_table_put_core, raw_table_scan_prefix_core, raw_table_scan_range_core,
+        append_history_region_rows_core, create_object_core, load_object_metadata_core,
+        load_visible_region_row_core, patch_row_region_rows_by_batch_core, raw_table_delete_core,
+        raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
+        raw_table_scan_range_core, scan_history_region_core, scan_history_row_versions_core,
+        scan_visible_region_core, scan_visible_region_row_versions_core,
+        upsert_visible_region_rows_core,
     },
 };
 
@@ -264,6 +270,81 @@ impl Storage for OpfsBTreeStorage {
         })
     }
 
+    fn append_history_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        append_history_region_rows_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
+    }
+
+    fn upsert_visible_region_rows(
+        &mut self,
+        table: &str,
+        rows: &[StoredRowVersion],
+    ) -> Result<(), StorageError> {
+        upsert_visible_region_rows_core(table, rows, |key, bytes| self.tree_insert(key, bytes))
+    }
+
+    fn patch_row_region_rows_by_batch(
+        &mut self,
+        table: &str,
+        batch_id: crate::row_regions::BatchId,
+        state: Option<RowState>,
+        confirmed_tier: Option<DurabilityTier>,
+    ) -> Result<(), StorageError> {
+        patch_row_region_rows_by_batch_core(
+            table,
+            batch_id,
+            state,
+            confirmed_tier,
+            |prefix| self.tree_scan_prefix(prefix),
+            |key, bytes| self.tree_insert(key, bytes),
+        )
+    }
+
+    fn scan_visible_region(
+        &self,
+        table: &str,
+        branch: &str,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        scan_visible_region_core(table, branch, |prefix| self.tree_scan_prefix(prefix))
+    }
+
+    fn load_visible_region_row(
+        &self,
+        table: &str,
+        branch: &str,
+        row_id: ObjectId,
+    ) -> Result<Option<StoredRowVersion>, StorageError> {
+        load_visible_region_row_core(table, branch, row_id, |key| self.tree_read(key))
+    }
+
+    fn scan_visible_region_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        scan_visible_region_row_versions_core(table, row_id, |prefix| self.tree_scan_prefix(prefix))
+    }
+
+    fn scan_history_row_versions(
+        &self,
+        table: &str,
+        row_id: ObjectId,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        scan_history_row_versions_core(table, row_id, |prefix| self.tree_scan_prefix(prefix))
+    }
+
+    fn scan_history_region(
+        &self,
+        table: &str,
+        branch: &str,
+        scan: HistoryScan,
+    ) -> Result<Vec<StoredRowVersion>, StorageError> {
+        scan_history_region_core(table, branch, scan, |prefix| self.tree_scan_prefix(prefix))
+    }
+
     fn flush(&self) {
         let _span = tracing::debug_span!("OpfsBTreeStorage::flush").entered();
         if let Err(error) = self.with_tree_mut(|tree| tree.checkpoint().map_err(map_storage_err)) {
@@ -284,23 +365,32 @@ fn map_storage_err(error: BTreeError) -> StorageError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::ops::Bound;
 
     use super::*;
     use crate::catalogue::CatalogueEntry;
+    use crate::metadata::RowProvenance;
     use crate::query_manager::types::Value;
-    use smallvec::smallvec;
+    use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
+    use crate::sync_manager::DurabilityTier;
 
-    fn make_commit(content: &[u8]) -> Commit {
-        Commit {
-            parents: smallvec![],
-            content: content.to_vec(),
-            timestamp: 12345,
-            author: ObjectId::new().to_string(),
-            metadata: None,
-            stored_state: Default::default(),
-            ack_state: Default::default(),
-        }
+    fn make_row_version(
+        row_id: ObjectId,
+        branch: &str,
+        updated_at: u64,
+        value: &[u8],
+    ) -> StoredRowVersion {
+        StoredRowVersion::new(
+            row_id,
+            branch,
+            Vec::new(),
+            value.to_vec(),
+            RowProvenance::for_insert(row_id.to_string(), updated_at),
+            HashMap::new(),
+            RowState::VisibleDirect,
+            None,
+        )
     }
 
     fn test_storage() -> OpfsBTreeStorage {
@@ -329,38 +419,31 @@ mod tests {
     }
 
     #[test]
-    fn opfs_btree_commit_roundtrip() {
+    fn opfs_btree_row_region_roundtrip() {
         let mut storage = test_storage();
 
-        let id = ObjectId::new();
-        let branch = BranchName::new("main");
-        storage.create_object(id, HashMap::new()).unwrap();
+        let row_id = ObjectId::new();
+        let row = make_row_version(row_id, "main", 12345, b"first");
 
-        assert_eq!(storage.load_branch(id, &branch).unwrap(), None);
+        storage
+            .append_history_region_rows("users", std::slice::from_ref(&row))
+            .unwrap();
+        storage
+            .upsert_visible_region_rows("users", std::slice::from_ref(&row))
+            .unwrap();
 
-        let commit = make_commit(b"first");
-        let commit_id = commit.id();
-        storage.append_commit(id, &branch, commit).unwrap();
-
-        let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
-        assert_eq!(loaded.commits.len(), 1);
-        assert!(loaded.tails.contains(&commit_id));
-        assert_eq!(loaded.commits[0].content, b"first");
-
-        let mut commit2 = make_commit(b"second");
-        commit2.parents = smallvec![commit_id];
-        let commit2_id = commit2.id();
-        storage.append_commit(id, &branch, commit2).unwrap();
-
-        let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
-        assert_eq!(loaded.commits.len(), 2);
-        assert!(!loaded.tails.contains(&commit_id));
-        assert!(loaded.tails.contains(&commit2_id));
-
-        storage.delete_commit(id, &branch, commit_id).unwrap();
-        let loaded = storage.load_branch(id, &branch).unwrap().unwrap();
-        assert_eq!(loaded.commits.len(), 1);
-        assert_eq!(loaded.commits[0].content, b"second");
+        assert_eq!(
+            storage
+                .load_visible_region_row("users", "main", row_id)
+                .unwrap(),
+            Some(row.clone())
+        );
+        assert_eq!(
+            storage
+                .scan_history_region("users", "main", HistoryScan::Row { row_id })
+                .unwrap(),
+            vec![row]
+        );
     }
 
     #[test]
@@ -461,23 +544,33 @@ mod tests {
     }
 
     #[test]
-    fn opfs_btree_ack_tier_roundtrip() {
+    fn opfs_btree_row_region_patch_roundtrip() {
         let mut storage = test_storage();
-
-        let commit_id = CommitId([99u8; 32]);
+        let row_id = ObjectId::new();
+        let row = make_row_version(row_id, "main", 12345, b"first");
 
         storage
-            .store_ack_tier(commit_id, DurabilityTier::Worker)
+            .append_history_region_rows("users", std::slice::from_ref(&row))
             .unwrap();
         storage
-            .store_ack_tier(commit_id, DurabilityTier::EdgeServer)
+            .upsert_visible_region_rows("users", std::slice::from_ref(&row))
+            .unwrap();
+        storage
+            .patch_row_region_rows_by_batch(
+                "users",
+                row.batch_id,
+                None,
+                Some(DurabilityTier::EdgeServer),
+            )
             .unwrap();
 
-        let key = super::super::key_codec::ack_key(commit_id);
-        let data = storage.tree_read(&key).unwrap().unwrap();
-        let tiers: HashSet<DurabilityTier> = serde_json::from_slice(&data).unwrap();
-        assert!(tiers.contains(&DurabilityTier::Worker));
-        assert!(tiers.contains(&DurabilityTier::EdgeServer));
+        assert_eq!(
+            storage
+                .load_visible_region_row("users", "main", row_id)
+                .unwrap()
+                .and_then(|row| row.confirmed_tier),
+            Some(DurabilityTier::EdgeServer)
+        );
     }
 
     #[test]
@@ -486,21 +579,22 @@ mod tests {
         let db_path = temp_dir.path().join("test.opfsbtree");
 
         let id = ObjectId::new();
+        let row = make_row_version(id, "main", 12345, b"persistent data");
         let mut metadata = HashMap::new();
         metadata.insert(
             crate::metadata::MetadataKey::Table.to_string(),
             "users".to_string(),
         );
 
-        let commit_content = b"persistent data";
-        let branch = BranchName::new("main");
-
         {
             let mut storage = OpfsBTreeStorage::open(&db_path, 4 * 1024 * 1024).unwrap();
             storage.create_object(id, metadata.clone()).unwrap();
-
-            let commit = make_commit(commit_content);
-            storage.append_commit(id, &branch, commit).unwrap();
+            storage
+                .append_history_region_rows("users", std::slice::from_ref(&row))
+                .unwrap();
+            storage
+                .upsert_visible_region_rows("users", std::slice::from_ref(&row))
+                .unwrap();
 
             storage
                 .index_insert(
@@ -520,10 +614,12 @@ mod tests {
 
             let loaded_meta = storage.load_object_metadata(id).unwrap();
             assert_eq!(loaded_meta, Some(metadata));
-
-            let loaded_branch = storage.load_branch(id, &branch).unwrap().unwrap();
-            assert_eq!(loaded_branch.commits.len(), 1);
-            assert_eq!(loaded_branch.commits[0].content, commit_content);
+            assert_eq!(
+                storage
+                    .load_visible_region_row("users", "main", id)
+                    .unwrap(),
+                Some(row)
+            );
 
             let results =
                 storage.index_lookup("users", "name", "main", &Value::Text("Alice".to_string()));

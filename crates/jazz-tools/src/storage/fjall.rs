@@ -4,7 +4,7 @@
 //! UTF-8 key encoding scheme as the other native backends.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use fjall::{
@@ -12,21 +12,19 @@ use fjall::{
     SingleWriterWriteTx,
 };
 
-use crate::commit::{Commit, CommitId};
-use crate::object::{BranchName, ObjectId};
+use crate::object::ObjectId;
 use crate::row_regions::{HistoryScan, RowState, StoredRowVersion};
 use crate::sync_manager::DurabilityTier;
 
 use super::{
-    LoadedBranch, Storage, StorageError,
+    Storage, StorageError,
     storage_core::{
-        append_commit_core, append_history_region_rows_core, create_object_core,
-        delete_commit_core, load_branch_core, load_object_metadata_core,
+        append_history_region_rows_core, create_object_core, load_object_metadata_core,
         load_visible_region_row_core, patch_row_region_rows_by_batch_core, raw_table_delete_core,
         raw_table_get_core, raw_table_put_core, raw_table_scan_prefix_core,
         raw_table_scan_range_core, scan_history_region_core, scan_history_row_versions_core,
         scan_object_metadata_core, scan_visible_region_core, scan_visible_region_row_versions_core,
-        set_branch_tails_core, store_ack_tier_core, upsert_visible_region_rows_core,
+        upsert_visible_region_rows_core,
     },
 };
 
@@ -197,97 +195,6 @@ impl Storage for FjallStorage {
         self.with_inner(|inner| {
             let tx = inner.db.read_tx();
             scan_object_metadata_core(|prefix| Self::scan_prefix(&tx, &inner.keyspace, prefix))
-        })
-    }
-
-    fn load_branch(
-        &self,
-        object_id: ObjectId,
-        branch: &BranchName,
-    ) -> Result<Option<LoadedBranch>, StorageError> {
-        self.with_inner(|inner| {
-            let tx = inner.db.read_tx();
-            load_branch_core(
-                object_id,
-                branch,
-                |key| Self::read_get(&tx, &inner.keyspace, key),
-                |prefix| Self::scan_prefix(&tx, &inner.keyspace, prefix),
-            )
-        })
-    }
-
-    fn append_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit: Commit,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let tx = RefCell::new(inner.db.write_tx());
-            append_commit_core(
-                object_id,
-                branch,
-                commit,
-                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
-                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
-            )?;
-            Self::commit_tx(tx.into_inner())
-        })
-    }
-
-    fn delete_commit(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        commit_id: CommitId,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let tx = RefCell::new(inner.db.write_tx());
-            delete_commit_core(
-                object_id,
-                branch,
-                commit_id,
-                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
-                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
-                |key| Self::delete_on_cell(&tx, &inner.keyspace, key),
-            )?;
-            Self::commit_tx(tx.into_inner())
-        })
-    }
-
-    fn set_branch_tails(
-        &mut self,
-        object_id: ObjectId,
-        branch: &BranchName,
-        tails: Option<HashSet<CommitId>>,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let tx = RefCell::new(inner.db.write_tx());
-            set_branch_tails_core(
-                object_id,
-                branch,
-                tails,
-                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
-                |key| Self::delete_on_cell(&tx, &inner.keyspace, key),
-            )?;
-            Self::commit_tx(tx.into_inner())
-        })
-    }
-
-    fn store_ack_tier(
-        &mut self,
-        commit_id: CommitId,
-        tier: DurabilityTier,
-    ) -> Result<(), StorageError> {
-        self.with_inner(|inner| {
-            let tx = RefCell::new(inner.db.write_tx());
-            store_ack_tier_core(
-                commit_id,
-                tier,
-                |key| Self::read_get_cell(&tx, &inner.keyspace, key),
-                |key, value| Self::set_on_cell(&tx, &inner.keyspace, key, value),
-            )?;
-            Self::commit_tx(tx.into_inner())
         })
     }
 
