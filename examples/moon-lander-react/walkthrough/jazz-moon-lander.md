@@ -49,7 +49,7 @@ Jazz is a **local-first** sync framework. Every client runs a full database in a
 
 ## The schema
 
-Three tables define the entire multiplayer state. Written in a TypeScript DSL in [`schema/current.ts`](../schema/current.ts); `jazz build` generates a SQL migration and typed interfaces.
+Three tables define the entire multiplayer state. Written in a TypeScript DSL in [`schema.ts`](../schema.ts); `jazz build` generates a SQL migration and typed interfaces.
 
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:0.5rem">
 <div>

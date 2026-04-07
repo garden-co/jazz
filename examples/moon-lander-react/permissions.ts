@@ -1,5 +1,5 @@
 import { definePermissions } from "jazz-tools/permissions";
-import { app } from "./app.js";
+import { app } from "./schema/app.js";
 
 // All three tables are shared world state — every authenticated player can
 // read and write. Identity is used for filtering (e.g. whose row is whose)
