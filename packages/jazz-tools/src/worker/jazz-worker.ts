@@ -34,6 +34,12 @@ declare const self: {
   location?: { origin?: string; href?: string };
 };
 
+type RuntimeImport = (specifier: string) => Promise<unknown>;
+
+// Keep the worker's jazz-wasm import opaque to Vitest browser mode so the
+// worker can boot without the page-only browser runner shim.
+const runtimeImportModule = new Function("specifier", "return import(specifier)") as RuntimeImport;
+
 let runtime: any = null; // WasmRuntime instance
 let mainClientId: string | null = null;
 let jwtToken: string | undefined;
@@ -216,7 +222,7 @@ function collectPayloadTransferables(payloads: (Uint8Array | string)[]): Transfe
 
 async function startup(): Promise<void> {
   try {
-    const wasmModule: any = await import("jazz-wasm");
+    const wasmModule: any = await runtimeImportModule("jazz-wasm");
     // Eager init only when the worker URL already carries an explicit wasm URL.
     // Otherwise wait for init so runtimeSources.wasmSource/wasmModule can win.
     if (readWorkerRuntimeWasmUrl(self.location?.href)) {
@@ -234,7 +240,7 @@ async function startup(): Promise<void> {
 
 async function handleInit(msg: InitMessage): Promise<void> {
   try {
-    const wasmModule: any = await import("jazz-wasm");
+    const wasmModule: any = await runtimeImportModule("jazz-wasm");
     (globalThis as any).__JAZZ_WASM_LOG_LEVEL = msg.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
     await ensureWorkerWasmInitialized(wasmModule, msg);
     const schemaJson = normalizeRuntimeSchemaJson(msg.schemaJson);
