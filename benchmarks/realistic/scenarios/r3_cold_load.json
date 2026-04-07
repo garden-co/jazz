@@ -1,0 +1,8 @@
+{
+  "id": "R3",
+  "name": "cold_open_and_first_query",
+  "seed": 20260222,
+  "profile_path": "benchmarks/realistic/profiles/s.json",
+  "cache_size_bytes": 67108864,
+  "target_project_index": 0
+}

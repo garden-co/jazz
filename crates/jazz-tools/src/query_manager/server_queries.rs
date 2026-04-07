@@ -6,7 +6,10 @@ use crate::commit::CommitId;
 use crate::metadata::{MetadataKey, RowProvenance};
 use crate::object::{BranchName, ObjectId};
 use crate::query_manager::graph_nodes::policy_eval::PolicyContextEvaluator;
-use crate::schema_manager::LensTransformer;
+use crate::schema_manager::{
+    LensTransformer, origin_schema_hash_from_metadata, resolve_current_table_name,
+    translate_table_name_to_schema,
+};
 use crate::storage::Storage;
 use crate::sync_manager::{ClientId, ClientRole, PendingPermissionCheck, QueryId, SyncPayload};
 
@@ -34,8 +37,35 @@ pub(super) struct ResolvedSchemaRow {
 
 const SCHEMA_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
 
+fn resolve_current_table_for_context(
+    schema_context: &crate::schema_manager::SchemaContext,
+    original_table_name: &str,
+    origin_schema_hash: Option<&SchemaHash>,
+) -> TableName {
+    resolve_current_table_name(schema_context, original_table_name, origin_schema_hash)
+        .map(|name| TableName::new(&name))
+        .unwrap_or_else(|| TableName::new(original_table_name))
+}
+
+fn translate_current_table_for_schema(
+    schema_context: &crate::schema_manager::SchemaContext,
+    current_table: TableName,
+    original_schema_hash: SchemaHash,
+) -> TableName {
+    if original_schema_hash == schema_context.current_hash {
+        return current_table;
+    }
+
+    translate_table_name_to_schema(
+        schema_context,
+        current_table.as_str(),
+        &original_schema_hash,
+    )
+    .map(|name| TableName::new(&name))
+    .unwrap_or(current_table)
+}
+
 pub(super) struct RowTransformContext<'a> {
-    pub(super) table: &'a str,
     pub(super) branch_schema_map:
         &'a std::collections::HashMap<String, crate::query_manager::types::SchemaHash>,
     pub(super) schema_context: &'a crate::schema_manager::SchemaContext,
@@ -275,12 +305,13 @@ impl QueryManager {
         auth_context: &crate::schema_manager::SchemaContext,
     ) -> Option<LoadedRow> {
         let branches = vec![branch_name.as_str().to_string()];
-        let (table, tip_commit_id, tip_content, tip_provenance) = {
+        let (original_table, origin_schema_hash, tip_commit_id, tip_content, tip_provenance) = {
             let object = self
                 .sync_manager
                 .object_manager
                 .get_or_load(object_id, storage, &branches)?;
-            let table = object.metadata.get(MetadataKey::Table.as_str())?.clone();
+            let table = object.original_table_name();
+            let origin_schema_hash = origin_schema_hash_from_metadata(&object.metadata);
             let branch = object.branches.get(&branch_name)?;
             let tip = branch
                 .tips
@@ -290,11 +321,22 @@ impl QueryManager {
             if tip.1.content.is_empty() {
                 return None;
             }
-            Some((table, tip.0, tip.1.content.clone(), tip.1.row_provenance()?))
+            Some((
+                table,
+                origin_schema_hash,
+                tip.0,
+                tip.1.content.clone(),
+                tip.1.row_provenance()?,
+            ))
         }?;
 
+        let current_table = resolve_current_table_for_context(
+            auth_context,
+            original_table,
+            origin_schema_hash.as_ref(),
+        );
         let transformed = self.transform_content_to_authorization_schema(
-            &table,
+            current_table.as_str(),
             &tip_content,
             tip_commit_id,
             branch_name,
@@ -386,7 +428,7 @@ impl QueryManager {
         source_branch_schema_map: &std::collections::HashMap<String, SchemaHash>,
     ) -> bool {
         let branches = vec![branch_name.as_str().to_string()];
-        let Some((table, tip_content, tip_provenance)) = ({
+        let Some((original_table, origin_schema_hash, tip_content, tip_provenance)) = ({
             let Some(object) = self
                 .sync_manager
                 .object_manager
@@ -394,9 +436,8 @@ impl QueryManager {
             else {
                 return false;
             };
-            let Some(table) = object.metadata.get(MetadataKey::Table.as_str()).cloned() else {
-                return false;
-            };
+            let table = object.original_table_name();
+            let origin_schema_hash = origin_schema_hash_from_metadata(&object.metadata);
             let Some(branch) = object.branches.get(&branch_name) else {
                 return false;
             };
@@ -414,12 +455,21 @@ impl QueryManager {
             let Some(tip_provenance) = tip_commit.row_provenance() else {
                 return false;
             };
-            Some((table, tip_commit.content.clone(), tip_provenance))
+            Some((
+                table,
+                origin_schema_hash,
+                tip_commit.content.clone(),
+                tip_provenance,
+            ))
         }) else {
             return false;
         };
 
-        let table_name = TableName::new(&table);
+        let table_name = resolve_current_table_for_context(
+            auth_context,
+            original_table,
+            origin_schema_hash.as_ref(),
+        );
         let Some(select_policy) = auth_schema
             .get(&table_name)
             .and_then(|table_schema| table_schema.policies.select.using.as_ref())
@@ -640,8 +690,15 @@ impl QueryManager {
         if content.is_empty() {
             return None;
         }
+        let origin_schema_hash = origin_schema_hash_from_metadata(&obj.metadata);
+        let current_table = resolve_current_table_for_context(
+            context.schema_context,
+            obj.original_table_name(),
+            origin_schema_hash.as_ref(),
+        );
         Self::transform_row_with_schema(
             id,
+            current_table.as_str(),
             content,
             commit_id,
             branch_name,
@@ -652,6 +709,7 @@ impl QueryManager {
 
     pub(super) fn transform_row_with_schema(
         id: ObjectId,
+        current_table: &str,
         content: Vec<u8>,
         commit_id: CommitId,
         branch_name: BranchName,
@@ -663,7 +721,7 @@ impl QueryManager {
         if let Some(source_hash) = source_hash
             && source_hash != context.schema_context.current_hash
         {
-            let transformer = LensTransformer::new(context.schema_context, context.table);
+            let transformer = LensTransformer::new(context.schema_context, current_table);
             match transformer.transform(&content, commit_id, source_hash) {
                 Ok(result) => {
                     return Some(ResolvedSchemaRow {
@@ -675,13 +733,13 @@ impl QueryManager {
                 }
                 Err(err) => {
                     context.schema_warnings.record(
-                        context.table,
+                        current_table,
                         source_hash,
                         context.schema_context.current_hash,
                     );
                     tracing::debug!(
                         row_id = %id,
-                        table = context.table,
+                        table = current_table,
                         source_branch = %branch_name,
                         source_schema = %source_hash.short(),
                         target_schema = %context.schema_context.current_hash.short(),
@@ -732,6 +790,7 @@ impl QueryManager {
         graph: &super::graph::QueryGraph,
         branches: &[String],
         object_manager: &crate::object_manager::ObjectManager,
+        schema_context: &crate::schema_manager::SchemaContext,
     ) -> HashSet<(ObjectId, BranchName)> {
         let mut scope = base_scope.clone();
 
@@ -746,13 +805,14 @@ impl QueryManager {
 
         let branch_names: Vec<BranchName> = branches.iter().map(BranchName::new).collect();
         for (object_id, object) in &object_manager.objects {
-            let Some(table_name) = object.metadata.get(MetadataKey::Table.as_str()) else {
-                continue;
-            };
-            if !policy_tables
-                .iter()
-                .any(|table| table.as_str() == table_name)
-            {
+            let original_table = object.original_table_name();
+            let origin_schema_hash = origin_schema_hash_from_metadata(&object.metadata);
+            let current_table = resolve_current_table_for_context(
+                schema_context,
+                original_table,
+                origin_schema_hash.as_ref(),
+            );
+            if !policy_tables.iter().any(|table| *table == current_table) {
                 continue;
             }
 
@@ -847,11 +907,9 @@ impl QueryManager {
 
             let branches =
                 Self::resolved_server_query_branches(&query_for_compile, &subscription_context);
-            let table = sub.query.table.as_str().to_string();
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let include_deleted = sub.query.include_deleted;
             let mut transform_context = RowTransformContext {
-                table: &table,
                 branch_schema_map: &branch_schema_map,
                 schema_context: &subscription_context,
                 schema_warnings: &mut schema_warnings,
@@ -915,6 +973,7 @@ impl QueryManager {
                     &graph,
                     &branches,
                     om,
+                    &subscription_context,
                 )
             } else {
                 result_scope
@@ -1015,12 +1074,10 @@ impl QueryManager {
                 continue;
             };
             let branches = &sub.branches;
-            let table = sub.query.table.as_str().to_string();
             let include_deleted = sub.query.include_deleted;
             let branch_schema_map = Self::branch_schema_map_for_context(&sub.schema_context);
             let mut schema_warnings = SchemaWarningAccumulator::default();
             let mut transform_context = RowTransformContext {
-                table: &table,
                 branch_schema_map: &branch_schema_map,
                 schema_context: &sub.schema_context,
                 schema_warnings: &mut schema_warnings,
@@ -1090,6 +1147,7 @@ impl QueryManager {
                         &sub.graph,
                         branches,
                         om,
+                        &sub.schema_context,
                     )
                 } else {
                     result_scope
@@ -1140,8 +1198,9 @@ impl QueryManager {
 
     fn resolve_write_table_schema(
         &mut self,
-        table_name: TableName,
+        current_table_name: TableName,
         branch_name: BranchName,
+        schema_context: &crate::schema_manager::SchemaContext,
     ) -> WriteSchemaResolution {
         let parsed_branch = ComposedBranchName::parse(&branch_name);
         let schema_hash = self
@@ -1162,8 +1221,11 @@ impl QueryManager {
                 return WriteSchemaResolution::PendingSchema;
             };
 
+            let branch_table_name =
+                translate_current_table_for_schema(schema_context, current_table_name, schema_hash);
+
             return schema
-                .get(&table_name)
+                .get(&branch_table_name)
                 .cloned()
                 .map(Box::new)
                 .map(WriteSchemaResolution::Resolved)
@@ -1176,7 +1238,7 @@ impl QueryManager {
         {
             return self
                 .schema
-                .get(&table_name)
+                .get(&current_table_name)
                 .cloned()
                 .map(Box::new)
                 .map(WriteSchemaResolution::Resolved)
@@ -1188,7 +1250,7 @@ impl QueryManager {
         if self.known_schemas.is_empty() && !self.schema.is_empty() {
             return self
                 .schema
-                .get(&table_name)
+                .get(&current_table_name)
                 .cloned()
                 .map(Box::new)
                 .map(WriteSchemaResolution::Resolved)
@@ -1208,8 +1270,8 @@ impl QueryManager {
         storage: &mut H,
         mut check: PendingPermissionCheck,
     ) {
-        let table_name = match check.metadata.get(MetadataKey::Table.as_str()) {
-            Some(t) => TableName::new(t),
+        let original_table = match check.metadata.get(MetadataKey::Table.as_str()) {
+            Some(t) => t.clone(),
             None => {
                 tracing::trace!(
                     operation = ?check.operation,
@@ -1220,6 +1282,7 @@ impl QueryManager {
                 return;
             }
         };
+        let origin_schema_hash = origin_schema_hash_from_metadata(&check.metadata);
 
         let branch_name = match &check.payload {
             SyncPayload::ObjectUpdated { branch_name, .. } => *branch_name,
@@ -1232,7 +1295,36 @@ impl QueryManager {
             _ => ObjectId::new(),
         };
 
-        let branch_table_schema = match self.resolve_write_table_schema(table_name, branch_name) {
+        let authorization_parts = self.authorization_schema_for_branch(&branch_name);
+        let table_name = authorization_parts
+            .as_ref()
+            .map(|(_, auth_context)| {
+                resolve_current_table_for_context(
+                    auth_context,
+                    &original_table,
+                    origin_schema_hash.as_ref(),
+                )
+            })
+            .or_else(|| {
+                self.schema_context.is_initialized().then(|| {
+                    resolve_current_table_for_context(
+                        &self.schema_context,
+                        &original_table,
+                        origin_schema_hash.as_ref(),
+                    )
+                })
+            })
+            .unwrap_or_else(|| TableName::new(&original_table));
+        let write_schema_context = authorization_parts
+            .as_ref()
+            .map(|(_, auth_context)| auth_context.clone())
+            .unwrap_or_else(|| self.schema_context.clone());
+
+        let branch_table_schema = match self.resolve_write_table_schema(
+            table_name,
+            branch_name,
+            &write_schema_context,
+        ) {
             WriteSchemaResolution::Resolved(schema) => *schema,
             WriteSchemaResolution::PendingSchema => {
                 let wait_started_at = check
@@ -1296,7 +1388,7 @@ impl QueryManager {
             return;
         }
 
-        let (auth_schema, auth_context) = match self.authorization_schema_for_branch(&branch_name) {
+        let (auth_schema, auth_context) = match authorization_parts {
             Some(parts) => parts,
             None => {
                 if !self.authorization_schema_required {
