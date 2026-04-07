@@ -33,8 +33,6 @@ pub mod ws_native;
 
 #[cfg(feature = "client")]
 mod client;
-#[cfg(feature = "client")]
-mod transport;
 
 #[cfg(feature = "client")]
 use std::path::PathBuf;

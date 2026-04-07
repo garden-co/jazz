@@ -643,10 +643,10 @@ impl TokioTickNotifier {
                     let flag_inner = flag.clone();
                     tokio::spawn(async move {
                         flag_inner.store(false, Ordering::SeqCst);
-                        if let Some(core_arc) = core_ref.upgrade() {
-                            if let Ok(mut core) = core_arc.lock() {
-                                core.batched_tick();
-                            }
+                        if let Some(core_arc) = core_ref.upgrade()
+                            && let Ok(mut core) = core_arc.lock()
+                        {
+                            core.batched_tick();
                         }
                     });
                 }

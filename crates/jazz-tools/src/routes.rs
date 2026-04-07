@@ -1,6 +1,5 @@
 //! HTTP routes for the Jazz server.
 
-use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,7 +13,6 @@ use axum::{
     response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -36,30 +34,9 @@ use crate::schema_manager::{AppId, Lens, LensOp, LensTransform};
 use crate::server::{CatalogueAuthorityMode, ConnectionState, ServerState};
 use crate::sync_manager::ClientId;
 
-/// Runs an async closure when this guard is dropped.
-///
-/// Bridges sync `Drop` to async cleanup — useful when an `async_stream`
-/// generator is cancelled on client disconnect, making code after the
-/// yield loop unreachable.
-struct AsyncDropGuard {
-    _tx: tokio::sync::oneshot::Sender<()>,
-}
-
-impl AsyncDropGuard {
-    fn new(cleanup: impl Future<Output = ()> + Send + 'static) -> Self {
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        tokio::spawn(async move {
-            let _ = rx.await;
-            cleanup.await;
-        });
-        Self { _tx: tx }
-    }
-}
-
 /// Create the router with all routes.
 pub fn create_router(state: Arc<ServerState>) -> Router {
     let traced_routes = Router::new()
-        .route("/sync", post(sync_handler))
         .route("/schema/:hash", get(schema_handler))
         .route("/schemas", get(schema_hashes_handler))
         .route("/admin/schemas", post(publish_schema_handler))
@@ -70,6 +47,8 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             "/admin/introspection/subscriptions",
             get(admin_subscription_introspection_handler),
         )
+        // Unified sync endpoint for all SyncPayload variants.
+        .route("/sync", post(sync_handler))
         // Link a local anonymous/demo principal to an external identity.
         .route("/auth/link-external", post(link_external_handler))
         // Health check
@@ -77,18 +56,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .layer(TraceLayer::new_for_http());
 
     Router::new()
-        .route("/events", get(events_handler))
         .route("/ws", get(ws_handler))
         .merge(traced_routes)
         .layer(CorsLayer::permissive())
         .with_state(state)
-}
-
-/// Query parameters for events endpoint.
-#[derive(Debug, Deserialize)]
-struct EventsParams {
-    /// Client-provided ID for reconnect support.
-    client_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -289,60 +260,85 @@ fn authority_endpoint_url(base_url: &str, path: &str) -> Result<String, String> 
     Ok(origin.to_string())
 }
 
-/// Encode a ServerEvent as a length-prefixed binary frame.
-///
-/// Format: [4 bytes: u32 big-endian length][N bytes: JSON]
-fn encode_frame(event: &ServerEvent) -> Bytes {
-    let json = serde_json::to_vec(event).unwrap_or_default();
-    let len = (json.len() as u32).to_be_bytes();
-    let mut buf = Vec::with_capacity(4 + json.len());
-    buf.extend_from_slice(&len);
-    buf.extend_from_slice(&json);
-    Bytes::from(buf)
-}
+// ============================================================================
+// Sync handler (HTTP POST)
+// ============================================================================
 
-/// Binary streaming events endpoint - clients connect here for all updates.
+/// HTTP POST `/sync` handler — unified sync endpoint for all SyncPayload variants.
 ///
-/// Uses length-prefixed binary frames over a chunked HTTP response.
-/// Auth via Authorization header (JWT) or X-Jazz-Backend-Secret.
-async fn events_handler(
+/// Auth is carried via HTTP headers:
+/// - `X-Jazz-Admin-Secret`: admin authentication (catalogue sync)
+/// - `X-Jazz-Backend-Secret` + `X-Jazz-Session`: backend impersonation
+/// - `Authorization: Bearer <jwt>`: frontend JWT auth
+async fn sync_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-    Query(params): Query<EventsParams>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    // Parse client_id from query param - error if malformed, generate if missing
-    let client_id = match params.client_id {
-        Some(s) => ClientId::parse(&s)
-            .ok_or((StatusCode::BAD_REQUEST, format!("Invalid client_id: {}", s)))?,
-        None => ClientId::new(),
+    Json(request): Json<SyncBatchRequest>,
+) -> Response {
+    let client_id = request.client_id;
+
+    // Check admin secret header
+    let admin_secret_header = headers
+        .get("X-Jazz-Admin-Secret")
+        .and_then(|v| v.to_str().ok());
+    let is_admin = if let Some(secret) = admin_secret_header {
+        match validate_admin_secret(Some(secret), &state.auth_config) {
+            Ok(()) => true,
+            Err((status, msg)) => {
+                return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
+            }
+        }
+    } else {
+        false
     };
 
-    {
-        let _span = tracing::debug_span!("events_handler", %client_id).entered();
-        tracing::info!(%client_id, "events stream connecting");
+    // Check if any payload targets a catalogue object — require admin auth
+    let has_catalogue_payload = request.payloads.iter().any(is_catalogue_payload);
+    if has_catalogue_payload && !is_admin {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse::unauthorized(
+                "Admin secret required for catalogue sync",
+            )),
+        )
+            .into_response();
     }
 
-    let backend_secret = headers
+    // Authenticate: backend secret > JWT > local auth > admin-only
+    let backend_secret_header = headers
         .get("X-Jazz-Backend-Secret")
         .and_then(|v| v.to_str().ok());
     let has_session_header = headers.get("X-Jazz-Session").is_some();
 
-    // Resolve auth first (can fail with early return, no side effects yet).
-    // Then insert connection before creating ClientState — this closes the
-    // TOCTOU window where a sweep could see freshly created ClientState but
-    // no connection yet, and reap it.
-    enum ClientSetup {
-        Backend,
-        Session(crate::query_manager::session::Session),
-    }
-
-    let setup = if backend_secret.is_some() && !has_session_header {
-        if let Err((status, msg)) = validate_backend_secret(backend_secret, &state.auth_config) {
-            return Err((status, msg.to_string()));
+    if let Some(secret) = backend_secret_header {
+        // Backend impersonation path
+        if let Err((status, msg)) = validate_backend_secret(Some(secret), &state.auth_config) {
+            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
         }
-        ClientSetup::Backend
-    } else {
-        // Extract session from headers (JWT, local auth, or backend impersonation)
+        // If there's also a session header, extract it
+        if has_session_header {
+            let external_identities = state.external_identities.read().await;
+            match extract_session(
+                &headers,
+                state.app_id,
+                &state.auth_config,
+                Some(&external_identities),
+                state.jwks_cache.as_ref(),
+            )
+            .await
+            {
+                Ok(Some(session)) => {
+                    let _ = state.runtime.ensure_client_with_session(client_id, session);
+                }
+                _ => {
+                    let _ = state.runtime.ensure_client_as_backend(client_id);
+                }
+            }
+        } else {
+            let _ = state.runtime.ensure_client_as_backend(client_id);
+        }
+    } else if headers.get(AUTHORIZATION).is_some() {
+        // JWT auth path
         let session = {
             let external_identities = state.external_identities.read().await;
             match extract_session(
@@ -354,140 +350,100 @@ async fn events_handler(
             )
             .await
             {
-                Ok(s) => s,
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(ErrorResponse::unauthorized("Invalid JWT token")),
+                    )
+                        .into_response();
+                }
                 Err((status, msg)) => {
-                    return Err((status, msg.to_string()));
+                    return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
                 }
             }
         };
-
-        // Require a valid session — reject connections without authentication.
-        let session = match session {
-            Some(s) => s,
-            None => {
-                tracing::error!(
-                    "Stream connection rejected: no session (client_id={}). Client must send auth headers.",
-                    client_id
-                );
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    "Session required for event stream. Provide JWT, local auth headers, or backend secret."
-                        .to_string(),
-                ));
-            }
-        };
-
-        ClientSetup::Session(session)
-    };
-
-    // Connection is visible before ClientState is created — sweep will see
-    // the connection and skip reaping even if it runs during setup.
-    let connection_id = state
-        .next_connection_id
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = state.runtime.ensure_client_with_session(client_id, session);
+    } else if headers
+        .get("X-Jazz-Local-Mode")
+        .and_then(|v| v.to_str().ok())
+        .is_some()
     {
-        let mut connections = state.connections.write().await;
-        connections.insert(connection_id, ConnectionState { client_id });
-    }
-    state.on_client_connected(client_id).await;
-
-    match setup {
-        ClientSetup::Backend => {
-            let _ = state.runtime.ensure_client_as_backend(client_id);
-        }
-        ClientSetup::Session(session) => {
-            let _ = state.runtime.ensure_client_with_session(client_id, session);
-        }
-    }
-
-    // Subscribe to broadcast channel for this client's events
-    let mut sync_rx = state.sync_broadcast.subscribe();
-
-    // Clone state for cleanup on drop
-    let state_cleanup = state.clone();
-    let connection_id_cleanup = connection_id;
-
-    // Capture client_id string for stream
-    let client_id_str = client_id.to_string();
-    let catalogue_state_hash = state.runtime.catalogue_state_hash().ok();
-
-    let cleanup_guard = AsyncDropGuard::new(async move {
-        let closed_client_id = {
-            let mut connections = state_cleanup.connections.write().await;
-            let conn = connections.remove(&connection_id_cleanup);
-            conn.map(|c| c.client_id)
-        };
-        if let Some(closed_client_id) = closed_client_id {
-            state_cleanup.on_connection_closed(closed_client_id).await;
-            tracing::debug!(
-                connection_id = connection_id_cleanup,
-                %closed_client_id,
-                "SSE stream closed, client state retained pending TTL"
-            );
-        }
-    });
-
-    // Create stream that emits length-prefixed binary frames
-    let stream = async_stream::stream! {
-        let _cleanup_guard = cleanup_guard;
-
-        // Send Connected frame
-        let connected = ServerEvent::Connected {
-            connection_id: ConnectionId(connection_id),
-            client_id: client_id_str.clone(),
-            next_sync_seq: None,
-            catalogue_state_hash: catalogue_state_hash.clone(),
-        };
-        yield Ok::<Bytes, std::convert::Infallible>(encode_frame(&connected));
-
-        // Heartbeat interval
-        let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
-
-        loop {
-            tokio::select! {
-                // Check for sync updates for this client
-                result = sync_rx.recv() => {
-                    match result {
-                        Ok((target_client_id, payload)) => {
-                            // Only emit if this is for our client
-                            if target_client_id == client_id {
-                                let event = ServerEvent::SyncUpdate {
-                                    seq: None,
-                                    payload: Box::new(payload),
-                                };
-                                yield Ok(encode_frame(&event));
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            // We fell behind, continue
-                            tracing::warn!("Stream client {} lagged behind on sync updates", connection_id);
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            // Channel closed, exit
-                            break;
-                        }
-                    }
-                }
-                // Send periodic heartbeat
-                _ = heartbeat_interval.tick() => {
-                    let heartbeat = ServerEvent::Heartbeat;
-                    yield Ok(encode_frame(&heartbeat));
-                }
+        // Local auth path
+        match parse_local_auth_headers(&headers) {
+            Ok(Some((local_mode, local_token))) => {
+                let user_id = derive_local_principal_id(state.app_id, local_mode, &local_token);
+                let session = crate::query_manager::session::Session {
+                    user_id,
+                    claims: serde_json::Value::Object(Default::default()),
+                };
+                let _ = state.runtime.ensure_client_with_session(client_id, session);
+            }
+            _ => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(ErrorResponse::unauthorized("Invalid local auth")),
+                )
+                    .into_response();
             }
         }
-    };
+    } else if is_admin {
+        // Admin-only (no session auth, just admin secret)
+        let _ = state.runtime.ensure_client_as_admin(client_id);
+    } else {
+        // No auth at all
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse::unauthorized("Authentication required")),
+        )
+            .into_response();
+    }
 
-    axum::response::Response::builder()
-        .header("Content-Type", "application/octet-stream")
-        .header("Transfer-Encoding", "chunked")
-        .header("Cache-Control", "no-cache")
-        .body(axum::body::Body::from_stream(stream))
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to build SSE response: {e}"),
-            )
-        })
+    // Promote to admin if admin_secret was valid
+    if is_admin {
+        let _ = state.runtime.ensure_client_as_admin(client_id);
+    }
+
+    // Apply each payload sequentially
+    let mut results = Vec::with_capacity(request.payloads.len());
+    for payload in request.payloads {
+        let entry = crate::sync_manager::InboxEntry {
+            source: crate::sync_manager::Source::Client(client_id),
+            payload,
+        };
+        match state.runtime.push_sync_inbox(entry) {
+            Ok(()) => results.push(SyncPayloadResult {
+                ok: true,
+                error: None,
+            }),
+            Err(e) => {
+                tracing::warn!(error = %e, "sync push_sync_inbox failed");
+                results.push(SyncPayloadResult {
+                    ok: false,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    Json(SyncBatchResponse { results }).into_response()
+}
+
+/// Check if a sync payload targets a catalogue object.
+fn is_catalogue_payload(payload: &crate::sync_manager::SyncPayload) -> bool {
+    match payload {
+        crate::sync_manager::SyncPayload::ObjectUpdated { metadata, .. } => {
+            if let Some(meta) = metadata
+                && let Some(type_str) = meta
+                    .metadata
+                    .get(crate::metadata::MetadataKey::Type.as_str())
+            {
+                return crate::metadata::ObjectType::is_catalogue_type_str(type_str);
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 // ============================================================================
@@ -784,137 +740,6 @@ async fn read_auth_handshake(socket: &mut WebSocket) -> Result<AuthHandshake, St
 async fn send_server_event(socket: &mut WebSocket, event: &ServerEvent) -> Result<(), axum::Error> {
     let json = serde_json::to_vec(event).unwrap_or_default();
     socket.send(Message::Binary(json)).await
-}
-
-// ============================================================================
-// HTTP POST sync handler (legacy — coexists with /ws during transition)
-// ============================================================================
-
-/// Push an ordered batch of sync payloads to the server's inbox.
-///
-/// Auth is checked once per request. Payloads are applied sequentially and
-/// a per-payload result is returned for each entry in the batch.
-async fn sync_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    Json(request): Json<SyncBatchRequest>,
-) -> impl IntoResponse {
-    use crate::sync_manager::{InboxEntry, Source};
-
-    tracing::debug!(
-        client_id = %request.client_id,
-        payload_count = request.payloads.len(),
-        "sync batch request",
-    );
-
-    // Check admin secret — if present and valid, promote client to Admin role
-    let is_admin = {
-        let admin_secret = headers
-            .get("X-Jazz-Admin-Secret")
-            .and_then(|v| v.to_str().ok());
-
-        if admin_secret.is_some() {
-            if let Err((status, msg)) = validate_admin_secret(admin_secret, &state.auth_config) {
-                return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-            }
-            true
-        } else {
-            false
-        }
-    };
-
-    // Admin-authenticated requests (server-to-server catalogue sync) don't need a session.
-    // Regular clients must provide JWT or backend secret.
-    if is_admin {
-        if let Err(e) = state.runtime.ensure_client_as_admin(request.client_id) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(e.to_string())),
-            )
-                .into_response();
-        }
-    } else if headers.get("X-Jazz-Backend-Secret").is_some()
-        && headers.get("X-Jazz-Session").is_none()
-    {
-        let backend_secret = headers
-            .get("X-Jazz-Backend-Secret")
-            .and_then(|v| v.to_str().ok());
-        if let Err((status, msg)) = validate_backend_secret(backend_secret, &state.auth_config) {
-            return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-        }
-        if let Err(e) = state.runtime.ensure_client_as_backend(request.client_id) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(e.to_string())),
-            )
-                .into_response();
-        }
-    } else {
-        // Extract session from headers (JWT or backend impersonation)
-        let session = {
-            let external_identities = state.external_identities.read().await;
-            match extract_session(
-                &headers,
-                state.app_id,
-                &state.auth_config,
-                Some(&external_identities),
-                state.jwks_cache.as_ref(),
-            )
-            .await
-            {
-                Ok(Some(s)) => s,
-                Ok(None) => {
-                    tracing::error!(
-                        "Sync request rejected: no session (client_id={}). Client must send auth headers.",
-                        request.client_id
-                    );
-                    return (
-                        StatusCode::UNAUTHORIZED,
-                        Json(ErrorResponse::unauthorized(
-                            "Session required for sync. Provide JWT, local auth headers, or backend secret.",
-                        )),
-                    )
-                        .into_response();
-                }
-                Err((status, msg)) => {
-                    return (status, Json(ErrorResponse::unauthorized(msg))).into_response();
-                }
-            }
-        };
-
-        // Ensure client is registered with session bound
-        if let Err(e) = state
-            .runtime
-            .ensure_client_with_session(request.client_id, session)
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::internal(e.to_string())),
-            )
-                .into_response();
-        }
-    }
-
-    // Apply each payload in order, collecting per-payload results.
-    let mut results = Vec::with_capacity(request.payloads.len());
-    for payload in request.payloads {
-        let entry = InboxEntry {
-            source: Source::Client(request.client_id),
-            payload,
-        };
-        match state.runtime.push_sync_inbox(entry) {
-            Ok(()) => results.push(SyncPayloadResult {
-                ok: true,
-                error: None,
-            }),
-            Err(e) => results.push(SyncPayloadResult {
-                ok: false,
-                error: Some(e.to_string()),
-            }),
-        }
-    }
-
-    Json(SyncBatchResponse { results }).into_response()
 }
 
 /// Return the catalogue schema for the given hash.
@@ -1846,27 +1671,6 @@ mod tests {
         }
     }
 
-    /// Spin up the full router backed by an in-process runtime.
-    /// `backend_secret` is wired into `AuthConfig` so tests can authenticate
-    /// via the `X-Jazz-Backend-Secret` header without needing JWT setup.
-    async fn make_sync_test_app(backend_secret: &str) -> axum::Router {
-        let auth_config = AuthConfig {
-            backend_secret: Some(backend_secret.to_string()),
-            admin_secret: None,
-            allow_anonymous: true,
-            allow_demo: true,
-            jwks_url: None,
-        };
-
-        ServerBuilder::new(AppId::from_name("test-app"))
-            .with_auth_config(auth_config)
-            .with_in_memory_storage()
-            .build()
-            .await
-            .expect("build sync test app")
-            .app
-    }
-
     async fn make_state_with_schema(
         schema: crate::query_manager::types::Schema,
     ) -> Arc<ServerState> {
@@ -1910,152 +1714,12 @@ mod tests {
             .with_state(state)
     }
 
-    /// A minimal valid `SyncPayload::ObjectUpdated` as a `serde_json::Value`,
-    /// suitable for embedding in batch request bodies.
-    fn object_updated_payload(object_id: &str) -> Value {
-        serde_json::json!({
-            "ObjectUpdated": {
-                "object_id": object_id,
-                "metadata": null,
-                "branch_name": "main",
-                "commits": []
-            }
-        })
-    }
-
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct ForwardedAdminRequest {
         method: String,
         path: String,
         admin_secret: Option<String>,
         body: Option<Value>,
-    }
-
-    // -------------------------------------------------------------------------
-    // Batch sync handler tests
-    //
-    // These are RED: the /sync endpoint currently expects
-    // {"payload":…,"client_id":…} (singular). Sending the new always-array
-    // {"payloads":[…],"client_id":…} body currently returns 422. These tests
-    // will go green once SyncPayloadRequest is replaced with SyncBatchRequest
-    // and sync_handler returns {"results":[…]}.
-    // -------------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn sync_batch_accepts_two_payloads_and_returns_ok_results() {
-        // alice fires two position updates in the same tick — they should land
-        // in a single POST and both be acknowledged
-        //
-        //  alice (client)          server
-        //    ──[p1, p2]──────────► /sync
-        //                          apply p1 → ok
-        //                          apply p2 → ok
-        //    ◄────────────────── {results:[ok,ok]}
-
-        let app = make_sync_test_app("test-backend-secret").await;
-        let client_id = ClientId::new();
-
-        let body = serde_json::json!({
-            "payloads": [
-                object_updated_payload("00000000-0000-0000-0000-000000000001"),
-                object_updated_payload("00000000-0000-0000-0000-000000000002"),
-            ],
-            "client_id": client_id,
-        });
-
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri("/sync")
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Backend-Secret", "test-backend-secret")
-                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let bytes = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let json: Value = serde_json::from_slice(&bytes).unwrap();
-
-        let results = json["results"].as_array().expect("results array");
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0]["ok"], true);
-        assert_eq!(results[1]["ok"], true);
-    }
-
-    #[tokio::test]
-    async fn sync_batch_requires_auth() {
-        // No auth headers → 401 before any payloads are applied
-        let app = make_sync_test_app("test-backend-secret").await;
-
-        let body = serde_json::json!({
-            "payloads": [object_updated_payload("00000000-0000-0000-0000-000000000001")],
-            "client_id": ClientId::new(),
-        });
-
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri("/sync")
-                    .header("Content-Type", "application/json")
-                    // deliberately no X-Jazz-Backend-Secret
-                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn sync_batch_returns_one_result_per_payload() {
-        // bob sends 60 position updates in one tick — server must return
-        // exactly 60 results, one per payload, in order
-        let app = make_sync_test_app("test-backend-secret").await;
-        let client_id = ClientId::new();
-
-        let payloads: Vec<Value> = (0..60)
-            .map(|i| object_updated_payload(&format!("00000000-0000-0000-0000-{:012}", i)))
-            .collect();
-
-        let body = serde_json::json!({
-            "payloads": payloads,
-            "client_id": client_id,
-        });
-
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri("/sync")
-                    .header("Content-Type", "application/json")
-                    .header("X-Jazz-Backend-Secret", "test-backend-secret")
-                    .body(axum::body::Body::from(serde_json::to_vec(&body).unwrap()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let bytes = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let json: Value = serde_json::from_slice(&bytes).unwrap();
-
-        let results = json["results"].as_array().expect("results array");
-        assert_eq!(results.len(), 60);
-        for result in results {
-            assert_eq!(result["ok"], true);
-        }
     }
 
     #[tokio::test]

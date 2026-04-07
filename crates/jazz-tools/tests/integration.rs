@@ -9,8 +9,6 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use bytes::BytesMut;
-use futures::StreamExt;
 use jazz_tools::jazz_transport::ServerEvent;
 use reqwest::Client;
 use tempfile::TempDir;
@@ -161,31 +159,6 @@ fn get_free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Read the next complete ServerEvent from a binary stream.
-async fn read_next_event(
-    body: &mut (impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Unpin),
-    buffer: &mut BytesMut,
-) -> Option<ServerEvent> {
-    loop {
-        // Try to decode a frame from the buffer
-        if buffer.len() >= 4 {
-            let len = u32::from_be_bytes(buffer[..4].try_into().unwrap()) as usize;
-            if buffer.len() >= 4 + len {
-                let json = &buffer[4..4 + len];
-                let event: ServerEvent = serde_json::from_slice(json).ok()?;
-                let _ = buffer.split_to(4 + len);
-                return Some(event);
-            }
-        }
-
-        // Need more data
-        match body.next().await {
-            Some(Ok(chunk)) => buffer.extend_from_slice(&chunk),
-            _ => return None,
-        }
-    }
-}
-
 #[tokio::test]
 async fn test_server_health_check() {
     let port = get_free_port();
@@ -225,31 +198,46 @@ async fn test_server_health_check_in_memory_does_not_create_data_dir() {
 
 #[tokio::test]
 async fn test_stream_connection_receives_connected_event() {
+    use futures_util::{SinkExt, StreamExt};
+    use jazz_tools::transport_protocol::{AuthHandshake, AuthHandshakePayload};
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
     let port = get_free_port();
     let server = TestServer::start(port).await;
 
-    // Connect to events endpoint with local auth headers.
-    let response = Client::new()
-        .get(format!("{}/events", server.base_url()))
-        .header("X-Jazz-Local-Mode", "anonymous")
-        .header("X-Jazz-Local-Token", "stream-test-user")
-        .send()
-        .await
-        .expect("connect to events");
+    // Connect to WebSocket endpoint
+    let ws_url = format!("ws://127.0.0.1:{}/ws", port);
+    let (mut ws, _) = connect_async(&ws_url).await.expect("ws connect");
 
-    assert!(response.status().is_success());
-
-    let mut body = response.bytes_stream();
-    let mut buffer = BytesMut::new();
+    // Send auth handshake
+    let handshake = AuthHandshake {
+        client_id: None,
+        auth: AuthHandshakePayload::Local {
+            mode: "anonymous".into(),
+            token: Some("stream-test-user".into()),
+        },
+        admin_secret: None,
+        catalogue_state_hash: None,
+    };
+    ws.send(Message::Binary(
+        serde_json::to_vec(&handshake).unwrap().into(),
+    ))
+    .await
+    .expect("send handshake");
 
     // First event should be Connected
-    let event = tokio::time::timeout(
-        Duration::from_secs(5),
-        read_next_event(&mut body, &mut buffer),
-    )
-    .await
-    .expect("timeout waiting for event")
-    .expect("no event received");
+    let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("ws error");
+
+    let data = match msg {
+        Message::Binary(d) => d.to_vec(),
+        Message::Text(t) => t.into_bytes(),
+        other => panic!("unexpected message type: {:?}", other),
+    };
+    let event: ServerEvent = serde_json::from_slice(&data).expect("parse event");
 
     match event {
         ServerEvent::Connected {
@@ -271,64 +259,91 @@ async fn test_stream_connection_receives_connected_event() {
 
 #[tokio::test]
 async fn test_stream_heartbeat() {
+    use futures_util::{SinkExt, StreamExt};
+    use jazz_tools::transport_protocol::{AuthHandshake, AuthHandshakePayload};
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
     let port = get_free_port();
     let server = TestServer::start(port).await;
 
-    let response = Client::new()
-        .get(format!("{}/events", server.base_url()))
-        .header("X-Jazz-Local-Mode", "anonymous")
-        .header("X-Jazz-Local-Token", "stream-heartbeat-user")
-        .send()
-        .await
-        .expect("connect to events");
+    let ws_url = format!("ws://127.0.0.1:{}/ws", port);
+    let (mut ws, _) = connect_async(&ws_url).await.expect("ws connect");
 
-    assert!(response.status().is_success());
-
-    let mut body = response.bytes_stream();
-    let mut buffer = BytesMut::new();
+    let handshake = AuthHandshake {
+        client_id: None,
+        auth: AuthHandshakePayload::Local {
+            mode: "anonymous".into(),
+            token: Some("stream-heartbeat-user".into()),
+        },
+        admin_secret: None,
+        catalogue_state_hash: None,
+    };
+    ws.send(Message::Binary(
+        serde_json::to_vec(&handshake).unwrap().into(),
+    ))
+    .await
+    .expect("send handshake");
 
     // Read the Connected event
-    let event = tokio::time::timeout(
-        Duration::from_secs(5),
-        read_next_event(&mut body, &mut buffer),
-    )
-    .await
-    .expect("timeout")
-    .expect("no event");
+    let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("ws error");
 
+    let data = match msg {
+        Message::Binary(d) => d.to_vec(),
+        Message::Text(t) => t.into_bytes(),
+        other => panic!("unexpected message type: {:?}", other),
+    };
+    let event: ServerEvent = serde_json::from_slice(&data).expect("parse event");
     assert!(matches!(event, ServerEvent::Connected { .. }));
 
-    // The heartbeat interval is 30s which is too long for a test.
-    // Verify the Connected event was received and the stream stays open.
+    // WebSocket ping/pong handles keepalive — no explicit heartbeat event needed.
+    // Verify the Connected event was received and the connection is alive.
 }
 
 #[tokio::test]
 async fn test_sync_payload_broadcast_to_stream_client() {
+    use futures_util::{SinkExt, StreamExt};
+    use jazz_tools::transport_protocol::{AuthHandshake, AuthHandshakePayload};
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
     let port = get_free_port();
     let server = TestServer::start(port).await;
 
-    // Connect to binary stream with local auth headers.
-    let response = Client::new()
-        .get(format!("{}/events", server.base_url()))
-        .header("X-Jazz-Local-Mode", "anonymous")
-        .header("X-Jazz-Local-Token", "stream-broadcast-user")
-        .send()
-        .await
-        .expect("connect to events");
+    // Connect to WebSocket
+    let ws_url = format!("ws://127.0.0.1:{}/ws", port);
+    let (mut ws, _) = connect_async(&ws_url).await.expect("ws connect");
 
-    assert!(response.status().is_success());
-
-    let mut body = response.bytes_stream();
-    let mut buffer = BytesMut::new();
-
-    // Wait for Connected event to verify connection works
-    let event = tokio::time::timeout(
-        Duration::from_secs(5),
-        read_next_event(&mut body, &mut buffer),
-    )
+    let handshake = AuthHandshake {
+        client_id: None,
+        auth: AuthHandshakePayload::Local {
+            mode: "anonymous".into(),
+            token: Some("stream-broadcast-user".into()),
+        },
+        admin_secret: None,
+        catalogue_state_hash: None,
+    };
+    ws.send(Message::Binary(
+        serde_json::to_vec(&handshake).unwrap().into(),
+    ))
     .await
-    .expect("timeout waiting for Connected")
-    .expect("no event");
+    .expect("send handshake");
+
+    // Wait for Connected event
+    let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("timeout waiting for Connected")
+        .expect("stream ended")
+        .expect("ws error");
+
+    let data = match msg {
+        Message::Binary(d) => d.to_vec(),
+        Message::Text(t) => t.into_bytes(),
+        other => panic!("unexpected message type: {:?}", other),
+    };
+    let event: ServerEvent = serde_json::from_slice(&data).expect("parse event");
 
     match event {
         ServerEvent::Connected { connection_id, .. } => {
