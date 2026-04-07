@@ -1519,11 +1519,16 @@ type NodeWasmInitModule = {
   tryReadPackagedWasmBinary(moduleUrl: string): Uint8Array | null;
 };
 
+type RuntimeImport = (specifier: string) => Promise<unknown>;
+
+// Keep the Node-only helper import opaque to Metro/Vite so browser bundles
+// do not try to statically transform or validate a Node-targeted module path.
+const runtimeImportModule = new Function("specifier", "return import(specifier)") as RuntimeImport;
+
 async function tryLoadNodePackagedWasmBinary(): Promise<Uint8Array | null> {
   const helperSpecifier = new URL("./node-wasm-init.js", import.meta.url).href;
-  const { tryReadPackagedWasmBinary } = (await import(
-    /* @vite-ignore */
-    helperSpecifier
+  const { tryReadPackagedWasmBinary } = (await runtimeImportModule(
+    helperSpecifier,
   )) as NodeWasmInitModule;
   return tryReadPackagedWasmBinary(import.meta.url);
 }
