@@ -13,11 +13,11 @@ use crate::query_manager::session::Session;
 use crate::query_manager::types::{OrderedRowDelta, RowDescriptor, Schema, TableName, Value};
 use crate::runtime_core::ReadDurabilityOptions;
 use crate::schema_manager::{SchemaManager, rehydrate_schema_manager_from_manifest};
-#[cfg(feature = "rocksdb")]
-use crate::storage::RocksDBStorage;
 #[cfg(all(feature = "sqlite", not(feature = "rocksdb")))]
 use crate::storage::SqliteStorage;
-use crate::storage::{MemoryStorage, Storage, StorageError};
+use crate::storage::{MemoryStorage, Storage};
+#[cfg(feature = "rocksdb")]
+use crate::storage::{RocksDBStorage, StorageError};
 use crate::sync_manager::{
     ClientId, Destination, DurabilityTier, InboxEntry, ServerId, Source, SyncManager, SyncPayload,
 };
@@ -1203,7 +1203,14 @@ async fn open_persistent_storage(data_dir: &std::path::Path) -> Result<DynStorag
     {
         std::fs::create_dir_all(data_dir)?;
         let db_path = data_dir.join("jazz.sqlite");
-        Ok(Box::new(SqliteStorage::open(&db_path)?))
+        SqliteStorage::open(&db_path)
+            .map(|s| Box::new(s) as DynStorage)
+            .map_err(|e| {
+                JazzError::Connection(format!(
+                    "failed to open sqlite storage '{}': {e:?}",
+                    db_path.display()
+                ))
+            })
     }
     #[cfg(not(any(feature = "rocksdb", feature = "sqlite")))]
     {
