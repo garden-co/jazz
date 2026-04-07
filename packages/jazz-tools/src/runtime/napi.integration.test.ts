@@ -1175,11 +1175,20 @@ describe("NAPI integration", () => {
         userBranch: "main",
         tier: "worker",
       });
-      await settleAsyncSyncWork();
 
       const bobWriter = bobContext.db();
       const carolWriter = carolContext.db();
       const aliceWriter = aliceContext.db();
+      const readerBackend = readerContext.asBackend();
+
+      // Warm the lazy NAPI contexts via real edge reads so the assertions below
+      // measure session-scoped sync visibility instead of first-use startup time.
+      await Promise.all([
+        waitForQueryRows(bobWriter, allPolicyTodosQuery, (rows) => rows.length === 0),
+        waitForQueryRows(carolWriter, allPolicyTodosQuery, (rows) => rows.length === 0),
+        waitForQueryRows(aliceWriter, allPolicyTodosQuery, (rows) => rows.length === 0),
+        waitForQueryRows(readerBackend, allPolicyTodosQuery, (rows) => rows.length === 0),
+      ]);
 
       await withTimeout(
         bobWriter.insertDurable(
@@ -1224,7 +1233,6 @@ describe("NAPI integration", () => {
         "alice writer create timed out",
       );
 
-      const readerBackend = readerContext.asBackend();
       const aliceSessionDb = readerContext.forSession({
         user_id: "alice",
         claims: {},
