@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import {
   createServer as createHttpServer,
@@ -580,13 +580,6 @@ function toBase64Url(value: unknown): string {
 
 function makeJwt(payload: Record<string, unknown>): string {
   return `${toBase64Url({ alg: "HS256", typ: "JWT" })}.${toBase64Url(payload)}.signature`;
-}
-
-function signJwt(payload: Record<string, unknown>, secret: string): string {
-  const header = { alg: "HS256", typ: "JWT", kid: JWT_KID };
-  const signedPart = `${toBase64Url(header)}.${toBase64Url(payload)}`;
-  const signature = createHmac("sha256", secret).update(signedPart).digest();
-  return `${signedPart}.${base64Url(signature)}`;
 }
 
 function buildClientQuerySubscriptionPayload(queryJson: string, queryId = 1): string {
