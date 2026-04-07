@@ -18,6 +18,11 @@ import {
   OutboxDestinationKind,
 } from "../runtime/sync-transport.js";
 import { normalizeRuntimeSchemaJson } from "../drivers/schema-wire.js";
+import {
+  readWorkerRuntimeWasmUrl,
+  resolveRuntimeConfigSyncInitInput,
+  resolveRuntimeConfigWasmUrl,
+} from "../runtime/runtime-config.js";
 import { ServerPayloadBatcher } from "./server-payload-batcher.js";
 
 // Worker globals — minimal type for DedicatedWorkerGlobalScope
@@ -26,7 +31,7 @@ declare const self: {
   postMessage(msg: unknown, transfer?: Transferable[]): void;
   onmessage: ((event: MessageEvent) => void) | null;
   close(): void;
-  location?: { origin?: string };
+  location?: { origin?: string; href?: string };
 };
 
 let runtime: any = null; // WasmRuntime instance
@@ -50,6 +55,7 @@ let pendingPeerSyncMessages: Array<{ peerId: string; term: number; payload: Uint
 let pendingSyncPayloadsForMain: (Uint8Array | string)[] = [];
 let syncBatchFlushQueued = false;
 let initComplete = false;
+let wasmInitialized = false;
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 let bootstrapCatalogueForwarding = false;
 
@@ -128,6 +134,50 @@ async function runWithRootRelativeFetchSupport<T>(operation: () => Promise<T>): 
   }
 }
 
+async function ensureWorkerWasmInitialized(
+  wasmModule: any,
+  msg: Pick<InitMessage, "runtime"> | undefined,
+): Promise<void> {
+  if (wasmInitialized) {
+    return;
+  }
+
+  const syncInitInput = resolveRuntimeConfigSyncInitInput(msg?.runtime);
+  if (syncInitInput) {
+    wasmModule.initSync(syncInitInput);
+    wasmInitialized = true;
+    return;
+  }
+
+  if (typeof wasmModule.default !== "function") {
+    wasmInitialized = true;
+    return;
+  }
+
+  const locationHref = self.location?.href;
+  const wasmUrl =
+    resolveRuntimeConfigWasmUrl(import.meta.url, locationHref, msg?.runtime) ??
+    readWorkerRuntimeWasmUrl(locationHref);
+
+  if (wasmUrl) {
+    await wasmModule.default({ module_or_path: wasmUrl });
+    wasmInitialized = true;
+    return;
+  }
+
+  try {
+    await runWithRootRelativeFetchSupport(() => wasmModule.default());
+  } catch (error) {
+    const absoluteWasmUrl = resolveAbsoluteWasmUrlFromInitError(error);
+    if (!absoluteWasmUrl) {
+      throw error;
+    }
+    await wasmModule.default({ module_or_path: absoluteWasmUrl });
+  }
+
+  wasmInitialized = true;
+}
+
 function enqueueSyncMessageForMain(payload: Uint8Array | string): void {
   pendingSyncPayloadsForMain.push(payload);
   if (syncBatchFlushQueued) return;
@@ -167,18 +217,10 @@ function collectPayloadTransferables(payloads: (Uint8Array | string)[]): Transfe
 async function startup(): Promise<void> {
   try {
     const wasmModule: any = await import("jazz-wasm");
-    // With vite-plugin-wasm, init happens at import time and default is not a function.
-    // Without it, default is the init function that must be called.
-    if (typeof wasmModule.default === "function") {
-      try {
-        await runWithRootRelativeFetchSupport(() => wasmModule.default());
-      } catch (error) {
-        const absoluteWasmUrl = resolveAbsoluteWasmUrlFromInitError(error);
-        if (!absoluteWasmUrl) {
-          throw error;
-        }
-        await wasmModule.default({ module_or_path: absoluteWasmUrl });
-      }
+    // Eager init only when the worker URL already carries an explicit wasm URL.
+    // Otherwise wait for init so runtime.wasmSource/wasmModule can win.
+    if (readWorkerRuntimeWasmUrl(self.location?.href)) {
+      await ensureWorkerWasmInitialized(wasmModule, undefined);
     }
     post({ type: "ready" });
   } catch (e: any) {
@@ -194,6 +236,7 @@ async function handleInit(msg: InitMessage): Promise<void> {
   try {
     const wasmModule: any = await import("jazz-wasm");
     (globalThis as any).__JAZZ_WASM_LOG_LEVEL = msg.logLevel ?? DEFAULT_WASM_LOG_LEVEL;
+    await ensureWorkerWasmInitialized(wasmModule, msg);
     const schemaJson = normalizeRuntimeSchemaJson(msg.schemaJson);
     initComplete = false;
     isShuttingDown = false;

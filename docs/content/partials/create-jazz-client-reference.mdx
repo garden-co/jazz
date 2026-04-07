@@ -6,6 +6,7 @@
 | `localAuthToken` | no       | Explicit local synthetic token override.                                    |
 | `jwtToken`       | no       | External auth bearer JWT. Requires server-side JWKS configuration.          |
 | `adminSecret`    | no       | Admin secret for schema catalog sync.                                       |
+| `runtime`        | no       | Runtime bootstrap overrides for browser workers, Wasm URLs, or Wasm input.  |
 | `driver`         | no       | Storage driver: `{ type: "persistent" }` (default) or `{ type: "memory" }`. |
 | `dbName`         | no       | Local database name. Defaults to `appId`.                                   |
 | `env`            | no       | Environment label (for example `"dev"`, `"prod"`).                          |
