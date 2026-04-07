@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -269,6 +270,15 @@ fn basic_auth_header(username: &str, password: &str) -> String {
     )
 }
 
+fn parse_allow_headers(value: &str) -> HashSet<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_ascii_lowercase())
+        .collect()
+}
+
 fn sync_body() -> Value {
     json!({
         "client_id": "01234567-89ab-cdef-0123-456789abcdef",
@@ -305,6 +315,62 @@ async fn internal_api_secret_is_required_for_provisioning_routes() {
         .expect("request without secret");
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn sync_preflight_explicitly_allows_authorization_and_jazz_headers() {
+    let temp_dir = TempDir::new().expect("temp dir");
+    let server = ServerProcess::start(temp_dir.path()).await;
+    let app = server
+        .create_app(
+            "cors-preflight-app",
+            "http://example.invalid/jwks",
+            Some("backend-secret"),
+            Some("admin-secret"),
+        )
+        .await;
+
+    let response = server
+        .client
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("{}/apps/{}/sync", server.base_url(), app.app_id),
+        )
+        .header("Origin", "http://localhost:3000")
+        .header("Access-Control-Request-Method", "POST")
+        .header(
+            "Access-Control-Request-Headers",
+            "Authorization, Content-Type, X-Jazz-Admin-Secret, X-Jazz-Backend-Secret, X-Jazz-Session, X-Jazz-Local-Mode, X-Jazz-Local-Token, Last-Event-ID",
+        )
+        .send()
+        .await
+        .expect("cors preflight request");
+
+    assert!(response.status().is_success());
+
+    let allow_headers = response
+        .headers()
+        .get("access-control-allow-headers")
+        .expect("preflight should include access-control-allow-headers")
+        .to_str()
+        .expect("header should be valid ascii");
+    let allow_headers = parse_allow_headers(allow_headers);
+
+    for expected in [
+        "authorization",
+        "content-type",
+        "x-jazz-admin-secret",
+        "x-jazz-backend-secret",
+        "x-jazz-session",
+        "x-jazz-local-mode",
+        "x-jazz-local-token",
+        "last-event-id",
+    ] {
+        assert!(
+            allow_headers.contains(expected),
+            "expected {expected} in access-control-allow-headers, got {allow_headers:?}",
+        );
+    }
 }
 
 #[tokio::test]
