@@ -25,10 +25,16 @@ Scope 3 assumes the storage model and transaction semantics are both stable.
 
 ## Row-Region Engine Replacement — replace today's engine with row regions
 
-- [ ] Add row-region storage primitives and key layout to `Storage`, with one physical keyed table space per user table and separate visible/history regions
+- [ ] Add row-region storage primitives and key layout to `Storage`, with one physical keyed table space per user table, a visible region keyed by `($branch, $row_id)`, and a history region keyed by `($row_id, $version_id)`
 - [ ] Reuse the existing row encoding and fast reproject machinery so system columns and user columns share one canonical encoded row format
 - [ ] Define the reserved system columns for encoded row versions:
-      `$row_id`, `$branch`, `$updated_at`, `$created_by`, `$updated_by`, `$batch_id`, `$state`, `$confirmed_tier`, `$is_deleted`, `$metadata`
+      `$row_id`, `$branch`, `$version_id`, `$created_by`, `$updated_by`, `$parents`, `$generation`, optional history-only `$tx_id`, `$state`, `$confirmed_tier`, `$is_deleted`, `$metadata`
+- [ ] Derive `$updated_at` from `$version_id` rather than keeping a separate required hot-path timestamp column
+- [ ] Preserve one DAG per logical row in the history region, with parent pointers referencing only version ids and generation numbers available for ancestor/MRCA work
+- [ ] Introduce a compact visible-entry shape with one `current_version_id`, optional tier winner ids for `worker` / `edge` / `global`, and one `current_data` payload instead of duplicating full visible rows per durability tier
+- [ ] Make those tier winner pointers sparse by defaulting `worker -> current`, `edge -> worker`, and `global -> edge`
+- [ ] Treat better optional-column encoding as part of Slice 1 so nullable `$tx_id` and sparse tier pointers do not silently add avoidable entropy
+- [ ] Keep branch-oriented history scans available through raw-table access paths or indexes without making branch-local ancestry the semantic model
 - [ ] Implement the new row-region storage path in `MemoryStorage`
 - [ ] Implement the same row-region storage path in `FjallStorage`
 - [ ] Get the full `MemoryStorage` and `FjallStorage` test surface green on the new engine before touching the other durable backends
@@ -44,21 +50,23 @@ Scope 3 assumes the storage model and transaction semantics are both stable.
 - [ ] Add SchemaManager and RuntimeCore integration tests covering current reads, writes, restart, multi-tier sync, and deletion semantics on the new engine
 - [ ] Add benchmark comparisons against `main` for point reads, visible scans, direct writes, restart cost, sync payload size, and on-disk size
 
-## Transactions, Authorities, and Fate — add staging and accepted/rejected batch semantics
+## Transactions, Authorities, and Fate — add staging and accepted/rejected transaction semantics
 
-- [ ] Introduce logical batches as the write unit across multiple rows while keeping the row-region storage model unchanged
+- [ ] Introduce cross-row transactions as the write unit across multiple rows while keeping the row-region storage model unchanged
 - [ ] Add opt-in transactional writes that append staging row versions into history without touching visible state
-- [ ] Introduce authority handling for transaction validation and exactly-one terminal fate per batch, assuming one global authority identity for now
+- [ ] Introduce authority handling for transaction validation and exactly-one terminal fate per transaction, assuming one global authority identity for now
 - [ ] Treat the central server as both the global durability tier owner and the global transaction authority in this scope
+- [ ] Reuse the optional `$tx_id` placeholder from Scope 1 as the real shared transaction identity for every row version participating in one transaction
 - [ ] Add accepted/rejected fate as row-metadata state transitions rather than as a second bespoke mechanism
 - [ ] Patch accepted transactional history rows in place and publish the corresponding visible rows
 - [ ] Patch rejected transactional history rows in place while leaving visible state unchanged
 - [ ] Add replayable reconnect semantics for pending and settled transactional work
-- [ ] Add transaction-aware durability semantics on top of batch-level confirmed tier
+- [ ] Add transaction-aware durability semantics on top of transaction-level confirmed tier
+- [ ] Preserve the row-level version DAG semantics so accepted transactional publishes still have precise per-row merge meaning and ancestor structure
 - [ ] Expose transaction outcomes through runtime/subscription semantics without yet introducing the public historical query APIs
 - [ ] Keep Slice 1 direct-write behavior working cleanly beside the new transactional path
 - [ ] Add SchemaManager and RuntimeCore integration tests for accepted/rejected multi-row writes, replay, restart, and durability/fate behavior
-- [ ] Add benchmarks for wide-batch acceptance/rejection fan-out and tier advancement costs
+- [ ] Add benchmarks for wide-transaction acceptance/rejection fan-out and tier advancement costs
 
 ## Public History, As-Of, and Branch Views — expose the historical query surface
 
