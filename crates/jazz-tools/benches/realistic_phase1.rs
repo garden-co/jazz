@@ -2081,7 +2081,7 @@ fn realistic_r8_many_branches_scan_heads(c: &mut Criterion) {
         |b, dataset| {
             b.iter(|| {
                 let scan = scan_branch_heads(
-                    &manager,
+                    &storage,
                     dataset.object_id,
                     &dataset.branch_names,
                     &dataset.prefix,
@@ -2116,7 +2116,7 @@ fn realistic_r8_many_branches_scan_leaf_heads(c: &mut Criterion) {
         |b, dataset| {
             b.iter(|| {
                 let scan = scan_leaf_like_branch_heads(
-                    &manager,
+                    &storage,
                     dataset.object_id,
                     &dataset.branch_names,
                     &dataset.prefix,
@@ -2155,7 +2155,7 @@ fn realistic_r8_many_branches_cold_load_rocksdb(c: &mut Criterion) {
                     .get_or_load(seeded.object_id, &storage, &seeded.branch_names)
                     .expect("cold-load many-branches object");
                 let scan = scan_branch_heads(
-                    &manager,
+                    &storage,
                     seeded.object_id,
                     &seeded.branch_names,
                     &seeded.prefix,
@@ -2201,7 +2201,7 @@ fn realistic_r8_many_branches_cold_load_sqlite(c: &mut Criterion) {
                     .get_or_load(seeded.object_id, &storage, &seeded.branch_names)
                     .expect("cold-load many-branches object");
                 let scan = scan_branch_heads(
-                    &manager,
+                    &storage,
                     seeded.object_id,
                     &seeded.branch_names,
                     &seeded.prefix,
@@ -2481,7 +2481,7 @@ fn many_branches_payload(scenario: &R8Scenario, branch_idx: usize, commit_idx: u
 }
 
 fn scan_branch_heads(
-    manager: &ObjectManager,
+    storage: &impl Storage,
     object_id: ObjectId,
     branch_names: &[String],
     prefix: &str,
@@ -2497,10 +2497,10 @@ fn scan_branch_heads(
             continue;
         }
         scan.branches_scanned += 1;
-        let tips = manager
-            .get_tip_ids(object_id, branch_name.as_str())
+        let tips = storage
+            .scan_row_branch_tip_ids("users", branch_name.as_str(), object_id)
             .expect("branch tips should be present for seeded benchmark data");
-        for head_id in tips {
+        for head_id in &tips {
             scan.heads_found += 1;
             scan.checksum ^= branch_head_checksum(branch_name, *head_id);
         }
@@ -2510,7 +2510,7 @@ fn scan_branch_heads(
 }
 
 fn scan_leaf_like_branch_heads(
-    manager: &ObjectManager,
+    storage: &impl Storage,
     object_id: ObjectId,
     branch_names: &[String],
     prefix: &str,
@@ -2530,10 +2530,10 @@ fn scan_leaf_like_branch_heads(
         if !leaf_branch_names.contains(branch_name.as_str()) {
             continue;
         }
-        let tips = manager
-            .get_tip_ids(object_id, branch_name.as_str())
+        let tips = storage
+            .scan_row_branch_tip_ids("users", branch_name.as_str(), object_id)
             .expect("branch tips should be present for seeded benchmark data");
-        for head_id in tips {
+        for head_id in &tips {
             scan.heads_found += 1;
             scan.checksum ^= branch_head_checksum(branch_name, *head_id);
         }

@@ -236,7 +236,7 @@ impl QueryManager {
         branch_name: &str,
     ) -> Option<(String, StoredRowVersion)> {
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
-        Self::load_best_visible_row_version(
+        self.load_best_visible_row_version(
             storage,
             row_id,
             &[branch_name.to_string()],
@@ -254,6 +254,18 @@ impl QueryManager {
     ) -> Option<RowProvenance> {
         let (_, row) = self.load_visible_row_on_branch(storage, row_id, branch_name)?;
         Some(row.row_provenance())
+    }
+
+    fn load_branch_tip_ids<H: Storage>(
+        &self,
+        storage: &H,
+        table: &str,
+        row_id: ObjectId,
+        branch: &str,
+    ) -> Vec<CommitId> {
+        storage
+            .scan_row_branch_tip_ids(table, branch, row_id)
+            .unwrap_or_default()
     }
 
     fn prepare_update_write<H: Storage>(
@@ -406,18 +418,13 @@ impl QueryManager {
     fn commit_prepared_update_write<H: Storage>(
         &mut self,
         storage: &mut H,
+        table: &str,
         branch: &str,
         id: ObjectId,
         prepared: &PreparedUpdateWrite,
-        timestamp: u64,
         provenance: &RowProvenance,
     ) -> Result<CommitId, QueryError> {
-        let parents = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, branch)
-            .map(|tips| tips.iter().copied().collect())
-            .unwrap_or_default();
+        let parents = self.load_branch_tip_ids(storage, table, id, branch);
 
         let row = self.authored_row_version(
             id,
@@ -433,7 +440,6 @@ impl QueryManager {
             .add_row_version(storage, id, branch, row)
             .map_err(|_| QueryError::ObjectNotFound(id))?;
 
-        let _ = timestamp;
         let _ = self.apply_local_row_version(storage, id, branch, version_id)?;
 
         Ok(version_id)
@@ -454,7 +460,7 @@ impl QueryManager {
             .object_manager
             .get_or_load(id, storage, branches)?;
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
-        let (table, row) = Self::load_best_visible_row_version(
+        let (table, row) = self.load_best_visible_row_version(
             storage,
             id,
             branches,
@@ -1054,7 +1060,7 @@ impl QueryManager {
         let storage_ref: &dyn Storage = storage;
         let branch_schema_map = Self::branch_schema_map_for_context(&self.schema_context);
         let mut row_loader = |id: ObjectId| -> Option<LoadedRow> {
-            let (_, row) = Self::load_best_visible_row_version(
+            let (_, row) = self.load_best_visible_row_version(
                 storage_ref,
                 id,
                 &[branch.to_string()],
@@ -1346,10 +1352,10 @@ impl QueryManager {
         )?;
         let version_id = self.commit_prepared_update_write(
             storage,
+            &table,
             branch.as_str(),
             id,
             &prepared,
-            timestamp,
             &new_provenance,
         )?;
 
@@ -1398,10 +1404,10 @@ impl QueryManager {
         let was_soft_deleted = self.row_is_deleted_on_branch(storage, table, branch, id);
         let version_id = self.commit_prepared_update_write(
             storage,
+            table,
             branch,
             id,
             &prepared,
-            timestamp,
             &new_provenance,
         )?;
 
@@ -1545,14 +1551,7 @@ impl QueryManager {
         }
 
         // Get parent commit
-        let tips = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, self.current_branch())
-            .map(|tips| tips.iter().copied().collect::<Vec<_>>())
-            .unwrap_or_default();
-
-        let parents = tips;
+        let parents = self.load_branch_tip_ids(storage, &table, id, self.current_branch().as_str());
         let timestamp = self.reserve_write_timestamp();
         let delete_provenance =
             self.row_provenance_for_update(&old_provenance, write_context, timestamp);
@@ -1687,12 +1686,7 @@ impl QueryManager {
             .load_visible_row_on_branch(storage, id, branch)
             .map(|(_, row)| row.data)
             .filter(|data| !data.is_empty());
-        let parents = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, branch)
-            .map(|tips| tips.iter().copied().collect())
-            .unwrap_or_default();
+        let parents = self.load_branch_tip_ids(storage, table, id, branch);
         let timestamp = self.reserve_write_timestamp();
         let delete_provenance =
             self.row_provenance_for_update(old_provenance_for_policy, write_context, timestamp);
@@ -1784,14 +1778,7 @@ impl QueryManager {
             .map_err(|e| QueryError::EncodingError(e.to_string()))?;
 
         // Get parent commit
-        let tips = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, self.current_branch())
-            .map(|tips| tips.iter().copied().collect::<Vec<_>>())
-            .unwrap_or_default();
-
-        let parents = tips;
+        let parents = self.load_branch_tip_ids(storage, &table, id, self.current_branch().as_str());
         let old_provenance = self
             .load_row_provenance_on_branch(storage, id, self.current_branch().as_str())
             .ok_or_else(|| {
@@ -1865,14 +1852,7 @@ impl QueryManager {
             .ok_or(QueryError::TableNotFound(table_name))?;
         let descriptor = table_schema.columns.clone();
         // Get parent commit
-        let tips = self
-            .sync_manager
-            .object_manager
-            .get_tip_ids(id, self.current_branch())
-            .map(|tips| tips.iter().copied().collect::<Vec<_>>())
-            .unwrap_or_default();
-
-        let parents = tips;
+        let parents = self.load_branch_tip_ids(storage, &table, id, self.current_branch().as_str());
         let old_provenance = self
             .load_row_provenance_on_branch(storage, id, self.current_branch().as_str())
             .ok_or_else(|| {

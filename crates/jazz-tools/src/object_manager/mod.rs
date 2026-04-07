@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+#[cfg(test)]
 use smolset::SmolSet;
 use web_time::{SystemTime, UNIX_EPOCH};
 
@@ -47,6 +48,7 @@ struct RowVersionApply {
 pub struct ObjectManager {
     pub metadata_by_id: HashMap<ObjectId, HashMap<String, String>>,
     row_visible_entries: HashMap<(ObjectId, BranchName), VisibleRowEntry>,
+    #[cfg(test)]
     row_branch_tips: HashMap<(ObjectId, BranchName), SmolSet<[CommitId; 2]>>,
     /// Outbox for visible row changes.
     pub visible_row_updates: Vec<VisibleRowUpdate>,
@@ -139,6 +141,7 @@ impl ObjectManager {
             .insert((object_id, branch_name), entry);
     }
 
+    #[cfg(test)]
     fn cache_tips(&mut self, object_id: ObjectId, branch_name: BranchName, tips: &[CommitId]) {
         self.row_branch_tips
             .insert((object_id, branch_name), tips.iter().copied().collect());
@@ -395,6 +398,7 @@ impl ObjectManager {
         })
     }
 
+    #[cfg(test)]
     fn next_tips_after_append<H: Storage>(
         &self,
         io: &H,
@@ -489,9 +493,12 @@ impl ObjectManager {
             self.cache_visible_entry(object_id, branch_name, entry);
         }
 
-        let tips = self.next_tips_after_append(io, &table, object_id, &branch_name, &row)?;
-        self.row_branch_tips
-            .insert((object_id, branch_name), tips.clone());
+        #[cfg(test)]
+        {
+            let tips = self.next_tips_after_append(io, &table, object_id, &branch_name, &row)?;
+            self.row_branch_tips
+                .insert((object_id, branch_name), tips.clone());
+        }
 
         Ok(RowVersionApply {
             version_id,
@@ -560,6 +567,7 @@ impl ObjectManager {
         }))
     }
 
+    #[cfg(test)]
     pub fn remember_remote_row_version(
         &mut self,
         object_id: ObjectId,
@@ -765,6 +773,7 @@ impl ObjectManager {
                     storage.load_visible_region_entry(&table, branch_name.as_str(), id)
                 {
                     self.cache_visible_entry(id, branch_name, entry);
+                    #[cfg(test)]
                     if let Ok(tips) =
                         storage.scan_row_branch_tip_ids(&table, branch_name.as_str(), id)
                     {
@@ -778,6 +787,7 @@ impl ObjectManager {
     }
 
     /// Get current DAG tips for a row branch from storage-backed history.
+    #[cfg(test)]
     pub fn get_tip_ids(
         &self,
         object_id: ObjectId,

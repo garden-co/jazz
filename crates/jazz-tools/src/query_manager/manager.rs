@@ -952,7 +952,7 @@ impl QueryManager {
                         == LocalUpdates::Immediate)
                         .then(|| self.pending_local_row_versions.get(&id).copied())
                         .flatten();
-                    Self::load_visible_row_for_query(
+                    self.load_visible_row_for_query(
                         storage_ref,
                         id,
                         &branches,
@@ -1515,7 +1515,19 @@ impl QueryManager {
         }
     }
 
+    fn load_row_metadata_with_cache(
+        storage: &dyn Storage,
+        metadata_by_id: &HashMap<ObjectId, HashMap<String, String>>,
+        row_id: ObjectId,
+    ) -> Option<HashMap<String, String>> {
+        metadata_by_id
+            .get(&row_id)
+            .cloned()
+            .or_else(|| storage.load_metadata(row_id).ok().flatten())
+    }
+
     pub(super) fn load_best_visible_row_version(
+        &self,
         storage: &dyn Storage,
         row_id: ObjectId,
         branches: &[String],
@@ -1523,7 +1535,27 @@ impl QueryManager {
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
     ) -> Option<(String, StoredRowVersion)> {
-        let metadata = storage.load_metadata(row_id).ok().flatten()?;
+        Self::load_best_visible_row_version_with_cache(
+            storage,
+            &self.sync_manager.object_manager.metadata_by_id,
+            row_id,
+            branches,
+            durability_tier,
+            schema_context,
+            branch_schema_map,
+        )
+    }
+
+    pub(super) fn load_best_visible_row_version_with_cache(
+        storage: &dyn Storage,
+        metadata_by_id: &HashMap<ObjectId, HashMap<String, String>>,
+        row_id: ObjectId,
+        branches: &[String],
+        durability_tier: Option<DurabilityTier>,
+        schema_context: &SchemaContext,
+        branch_schema_map: &HashMap<String, SchemaHash>,
+    ) -> Option<(String, StoredRowVersion)> {
+        let metadata = Self::load_row_metadata_with_cache(storage, metadata_by_id, row_id)?;
         let original_table = metadata.get(MetadataKey::Table.as_str())?.clone();
         let origin_schema_hash = origin_schema_hash_from_metadata(&metadata);
         let current_table = resolve_current_table_name(
@@ -1611,6 +1643,7 @@ impl QueryManager {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn load_visible_row_for_query(
+        &self,
         storage: &dyn Storage,
         row_id: ObjectId,
         branches: &[String],
@@ -1623,26 +1656,27 @@ impl QueryManager {
         sub_id: QuerySubscriptionId,
         schema_warnings: &mut SchemaWarningAccumulator,
     ) -> Option<LoadedRow> {
-        let resolved = Self::load_best_visible_row_version(
-            storage,
-            row_id,
-            branches,
-            durability_tier,
-            schema_context,
-            branch_schema_map,
-        )
-        .or_else(|| {
-            let pending_version_id = local_pending_version?;
-            let (table, row) = Self::load_best_visible_row_version(
+        let resolved = self
+            .load_best_visible_row_version(
                 storage,
                 row_id,
                 branches,
-                None,
+                durability_tier,
                 schema_context,
                 branch_schema_map,
-            )?;
-            (row.version_id() == pending_version_id).then_some((table, row))
-        })?;
+            )
+            .or_else(|| {
+                let pending_version_id = local_pending_version?;
+                let (table, row) = self.load_best_visible_row_version(
+                    storage,
+                    row_id,
+                    branches,
+                    None,
+                    schema_context,
+                    branch_schema_map,
+                )?;
+                (row.version_id() == pending_version_id).then_some((table, row))
+            })?;
         let (table, row) = resolved;
 
         if row.is_hard_deleted() {

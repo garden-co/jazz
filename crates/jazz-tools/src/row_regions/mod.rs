@@ -141,6 +141,7 @@ fn stored_row_version_descriptor() -> &'static RowDescriptor {
     DESCRIPTOR.get_or_init(|| {
         RowDescriptor::new(vec![
             ColumnDescriptor::new("row_id", ColumnType::Uuid),
+            ColumnDescriptor::new("version_id", ColumnType::Bytea),
             ColumnDescriptor::new("branch", ColumnType::Text),
             ColumnDescriptor::new(
                 "parents",
@@ -381,6 +382,7 @@ fn expect_bytea(value: &Value, label: &str) -> Result<Vec<u8>, EncodingError> {
 fn stored_row_version_values(row: &StoredRowVersion) -> Vec<Value> {
     vec![
         Value::Uuid(row.row_id),
+        commit_id_to_value(row.version_id),
         Value::Text(row.branch.clone()),
         Value::Array(
             row.parents
@@ -413,7 +415,7 @@ fn stored_row_version_from_values(values: &[Value]) -> Result<StoredRowVersion, 
         )));
     }
 
-    let parents = match &values[2] {
+    let parents = match &values[3] {
         Value::Array(values) => values
             .iter()
             .map(commit_id_from_value)
@@ -425,18 +427,19 @@ fn stored_row_version_from_values(values: &[Value]) -> Result<StoredRowVersion, 
 
     Ok(StoredRowVersion {
         row_id: expect_uuid(&values[0], "row_id")?,
-        branch: expect_text(&values[1], "branch")?,
+        version_id: commit_id_from_value(&values[1])?,
+        branch: expect_text(&values[2], "branch")?,
         parents,
-        updated_at: expect_timestamp(&values[3], "updated_at")?,
-        created_by: expect_text(&values[4], "created_by")?,
-        created_at: expect_timestamp(&values[5], "created_at")?,
-        updated_by: expect_text(&values[6], "updated_by")?,
-        batch_id: batch_id_from_value(&values[7])?,
-        state: row_state_from_value(&values[8])?,
-        confirmed_tier: durability_tier_from_value(&values[9])?,
-        is_deleted: expect_bool(&values[10], "is_deleted")?,
-        data: expect_bytea(&values[11], "data")?,
-        metadata: metadata_from_value(&values[12])?,
+        updated_at: expect_timestamp(&values[4], "updated_at")?,
+        created_by: expect_text(&values[5], "created_by")?,
+        created_at: expect_timestamp(&values[6], "created_at")?,
+        updated_by: expect_text(&values[7], "updated_by")?,
+        batch_id: batch_id_from_value(&values[8])?,
+        state: row_state_from_value(&values[9])?,
+        confirmed_tier: durability_tier_from_value(&values[10])?,
+        is_deleted: expect_bool(&values[11], "is_deleted")?,
+        data: expect_bytea(&values[12], "data")?,
+        metadata: metadata_from_value(&values[13])?,
     })
 }
 
@@ -502,6 +505,7 @@ pub(crate) fn decode_visible_row_entry(data: &[u8]) -> Result<VisibleRowEntry, E
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredRowVersion {
     pub row_id: ObjectId,
+    pub version_id: CommitId,
     pub branch: String,
     pub parents: Vec<crate::commit::CommitId>,
     pub updated_at: u64,
@@ -517,15 +521,6 @@ pub struct StoredRowVersion {
 }
 
 impl StoredRowVersion {
-    fn commit_metadata(&self) -> Option<BTreeMap<String, String>> {
-        (!self.metadata.is_empty()).then(|| {
-            self.metadata
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect::<BTreeMap<_, _>>()
-        })
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         row_id: ObjectId,
@@ -560,6 +555,7 @@ impl StoredRowVersion {
 
         Self {
             row_id,
+            version_id,
             branch,
             parents,
             updated_at: provenance.updated_at,
@@ -614,6 +610,7 @@ impl StoredRowVersion {
 
         Self {
             row_id,
+            version_id,
             branch,
             parents: commit.parents.iter().copied().collect(),
             updated_at: provenance.updated_at,
@@ -639,14 +636,7 @@ impl StoredRowVersion {
     }
 
     pub fn version_id(&self) -> CommitId {
-        compute_row_version_id(
-            &self.branch,
-            &self.parents,
-            &self.data,
-            self.updated_at,
-            &self.updated_by,
-            self.commit_metadata().as_ref(),
-        )
+        self.version_id
     }
 
     pub fn is_soft_deleted(&self) -> bool {
@@ -751,24 +741,24 @@ mod tests {
 
     #[test]
     fn stored_row_version_binary_roundtrips() {
-        let row = StoredRowVersion {
-            row_id: ObjectId::from_uuid(Uuid::from_u128(7)),
-            branch: "main".to_string(),
-            parents: vec![CommitId([1; 32]), CommitId([2; 32])],
-            updated_at: 123,
-            created_by: "alice".to_string(),
-            created_at: 100,
-            updated_by: "bob".to_string(),
-            batch_id: BatchId(Uuid::from_u128(42)),
-            state: RowState::VisibleTransactional,
-            confirmed_tier: Some(DurabilityTier::EdgeServer),
-            is_deleted: false,
-            data: vec![1, 2, 3, 4],
-            metadata: HashMap::from([
+        let row = StoredRowVersion::new(
+            ObjectId::from_uuid(Uuid::from_u128(7)),
+            "main",
+            vec![CommitId([1; 32]), CommitId([2; 32])],
+            vec![1, 2, 3, 4],
+            RowProvenance {
+                created_by: "alice".to_string(),
+                created_at: 100,
+                updated_by: "bob".to_string(),
+                updated_at: 123,
+            },
+            HashMap::from([
                 ("role".to_string(), "admin".to_string()),
                 ("source".to_string(), "test".to_string()),
             ]),
-        };
+            RowState::VisibleTransactional,
+            Some(DurabilityTier::EdgeServer),
+        );
 
         let encoded = encode_stored_row_version(&row).expect("encode row version");
         let decoded = decode_stored_row_version(&encoded).expect("decode row version");
