@@ -3966,11 +3966,10 @@ When older rows are no longer reachable from the current schema graph, Jazz logs
 
 ```text
 [client] Detected 3 rows of todos with differing schema versions.
-[client] To ensure data visibility and forward/backward compatibility please create
-         a new migration with:
-         npx jazz-tools migrations create \
-           a01f5c72ec47 \
-           311995e9a178
+[client] To ensure data visibility and forward/backward compatibility, run
+         npx jazz-tools schema export --schema-hash a01f5c72ec47
+         Then generate a migration with
+         npx jazz-tools migrations create --fromHash a01f5c72ec47 --toHash <targetHash>
 ```
 
 That warning is the handoff from day-to-day schema editing to reviewed compatibility work.

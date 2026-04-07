@@ -109,12 +109,13 @@ function logSchemaWarningPayload(payload: any, logPrefix = ""): void {
   const shortHash = (hash: string) =>
     typeof hash === "string" && /^[0-9a-f]{12,}$/i.test(hash) ? hash.slice(0, 12) : hash;
 
+  const sourceHash = shortHash(fromHash);
   console.warn(
-    `${logPrefix}Detected ${rowCount} rows of ${tableName} with schema versions not reachable from the current schema. ` +
-      `To materialize the missing schema locally, run ` +
-      `\`npx jazz-tools schema export --schema-hash ${shortHash(fromHash)}\`. ` +
+    `${logPrefix}Detected ${rowCount} rows of ${tableName} with differing schema versions. ` +
+      `To ensure data visibility and forward/backward compatibility, run ` +
+      `\`npx jazz-tools@alpha schema export --schema-hash ${sourceHash}\`. ` +
       `Then generate a migration with ` +
-      `\`npx jazz-tools migrations create --fromHash ${shortHash(fromHash)}\``,
+      `\`npx jazz-tools@alpha migrations create --fromHash ${sourceHash} --toHash <targetHash>\``,
   );
 }
 
