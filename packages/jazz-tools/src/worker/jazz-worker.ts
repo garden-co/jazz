@@ -360,13 +360,9 @@ async function sendToServer(
   );
 }
 
-function attachServer(): void {
+function attachServer(catalogueStateHash?: string | null, nextSyncSeq?: number | null): void {
   if (!runtime) return;
-  // Re-attach every time the stream reconnects so query subscriptions replay.
-  if (streamAttached) {
-    runtime.removeServer();
-  }
-  runtime.addServer();
+  runtime.addServer(catalogueStateHash ?? null, nextSyncSeq ?? null);
   streamAttached = true;
   reconnectAttempt = 0;
 }
@@ -447,13 +443,13 @@ async function connectStream(): Promise<void> {
     await readBinaryFrames(
       reader,
       {
-        onSyncMessage: (payload) => runtime?.onSyncMessageReceived(payload),
-        onConnected: (clientId) => {
-          console.log("[worker] Stream connected", { clientId });
+        onSyncMessage: (payload, seq) => runtime?.onSyncMessageReceived(payload, seq ?? null),
+        onConnected: (clientId, catalogueStateHash, nextSyncSeq) => {
+          console.log("[worker] Stream connected", { clientId, nextSyncSeq });
           serverClientId = clientId;
           if (!connected) {
             connected = true;
-            attachServer();
+            attachServer(catalogueStateHash, nextSyncSeq);
           }
         },
       },
