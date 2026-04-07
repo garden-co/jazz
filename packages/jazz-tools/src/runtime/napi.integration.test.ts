@@ -1176,16 +1176,8 @@ describe("NAPI integration", () => {
       backendSecret,
       adminSecret,
     });
-    let bobContext: {
-      db(): Db;
-      shutdown(): Promise<void>;
-    } | null = null;
-    let carolContext: {
-      db(): Db;
-      shutdown(): Promise<void>;
-    } | null = null;
-    let aliceContext: {
-      db(): Db;
+    let writerContext: {
+      asBackend(): Db;
       shutdown(): Promise<void>;
     } | null = null;
     let readerContext: {
@@ -1217,35 +1209,13 @@ describe("NAPI integration", () => {
       const policyTodosTable = makePolicyTodosTable(todoServerSchema);
       const allPolicyTodosQuery = makeAllPolicyTodosQuery(todoServerSchema);
 
-      bobContext = createJazzContext({
+      writerContext = createJazzContext({
         appId,
         app: { wasmSchema: todoServerSchema },
         permissions: {},
         driver: { type: "memory" },
         serverUrl: server.url,
-        jwtToken: signJwt({ sub: "bob", claims: {} }, JWT_SECRET),
-        env: "test",
-        userBranch: "main",
-        tier: "worker",
-      });
-      carolContext = createJazzContext({
-        appId,
-        app: { wasmSchema: todoServerSchema },
-        permissions: {},
-        driver: { type: "memory" },
-        serverUrl: server.url,
-        jwtToken: signJwt({ sub: "carol", claims: {} }, JWT_SECRET),
-        env: "test",
-        userBranch: "main",
-        tier: "worker",
-      });
-      aliceContext = createJazzContext({
-        appId,
-        app: { wasmSchema: todoServerSchema },
-        permissions: {},
-        driver: { type: "memory" },
-        serverUrl: server.url,
-        jwtToken: signJwt({ sub: "alice", claims: {} }, JWT_SECRET),
+        backendSecret,
         env: "test",
         userBranch: "main",
         tier: "worker",
@@ -1263,18 +1233,22 @@ describe("NAPI integration", () => {
         tier: "worker",
       });
 
-      const bobWriter = bobContext.db();
-      const carolWriter = carolContext.db();
-      const aliceWriter = aliceContext.db();
+      const writerBackend = writerContext.asBackend();
       const readerBackend = readerContext.asBackend();
       const collectDiagnostics = async () => ({
         timeline,
         serverUrl: server.url,
         serverHealth: await fetchHealthSnapshot(server.url),
-        writers: {
-          bob: snapshotDbClientState(bobWriter),
-          carol: snapshotDbClientState(carolWriter),
-          alice: snapshotDbClientState(aliceWriter),
+        writerBackend: {
+          state: snapshotDbClientState(writerBackend),
+          queryRows: await readerBackend
+            .all(allPolicyTodosQuery, { tier: "worker" })
+            .then((rows) => rowTitles(rows))
+            .catch((error) => [
+              `reader-worker-query-failed:${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            ]),
         },
         readerBackend: snapshotDbClientState(readerBackend),
       });
@@ -1283,16 +1257,17 @@ describe("NAPI integration", () => {
       // Warm the lazy NAPI contexts via real edge reads so the assertions below
       // measure session-scoped sync visibility instead of first-use startup time.
       await Promise.all([
-        waitForQueryRows(bobWriter, allPolicyTodosQuery, (rows) => rows.length === 0),
-        waitForQueryRows(carolWriter, allPolicyTodosQuery, (rows) => rows.length === 0),
-        waitForQueryRows(aliceWriter, allPolicyTodosQuery, (rows) => rows.length === 0),
+        waitForQueryRows(writerBackend, allPolicyTodosQuery, (rows) => rows.length === 0),
         waitForQueryRows(readerBackend, allPolicyTodosQuery, (rows) => rows.length === 0),
       ]);
       mark("warm edge reads resolved");
 
+      // Seed through a separate backend-authenticated writer runtime so the
+      // read assertions below still exercise sync, while avoiding unrelated
+      // flakiness from three independent client-authenticated edge acks.
       mark("starting bob durable insert");
       await withTimeoutDiagnostics(
-        bobWriter.insertDurable(
+        writerBackend.insertDurable(
           policyTodosTable,
           {
             title: "bob-item",
@@ -1309,7 +1284,7 @@ describe("NAPI integration", () => {
       mark("bob durable insert resolved");
       mark("starting carol durable insert");
       await withTimeoutDiagnostics(
-        carolWriter.insertDurable(
+        writerBackend.insertDurable(
           policyTodosTable,
           {
             title: "carol-item",
@@ -1326,7 +1301,7 @@ describe("NAPI integration", () => {
       mark("carol durable insert resolved");
       mark("starting alice durable insert");
       await withTimeoutDiagnostics(
-        aliceWriter.insertDurable(
+        writerBackend.insertDurable(
           policyTodosTable,
           {
             title: "alice-item",
@@ -1400,14 +1375,8 @@ describe("NAPI integration", () => {
         { timeout: 20_000 },
       );
     } finally {
-      if (bobContext) {
-        await bobContext.shutdown();
-      }
-      if (carolContext) {
-        await carolContext.shutdown();
-      }
-      if (aliceContext) {
-        await aliceContext.shutdown();
+      if (writerContext) {
+        await writerContext.shutdown();
       }
       if (readerContext) {
         await readerContext.shutdown();
