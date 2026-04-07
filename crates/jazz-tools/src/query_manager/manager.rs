@@ -382,6 +382,13 @@ pub struct QueryManager {
     /// These are retried when new schemas activate via try_activate_pending().
     pub(super) pending_row_updates: Vec<VisibleRowUpdate>,
 
+    /// Latest locally-authored row version per row id.
+    ///
+    /// Used to let `local_updates = Immediate` queries fall back to the current
+    /// local row version when the requested remote durability tier has not been
+    /// reached yet.
+    pub(super) pending_local_row_versions: HashMap<ObjectId, CommitId>,
+
     /// Known schemas (for server-mode operation).
     /// Synced from SchemaManager's known_schemas to enable lazy branch activation.
     /// When a row arrives with unknown branch, we parse the branch name to extract
@@ -477,6 +484,7 @@ impl QueryManager {
             schema_context: SchemaContext::empty(),
             branch_schema_map: HashMap::new(),
             pending_row_updates: Vec::new(),
+            pending_local_row_versions: HashMap::new(),
             known_schemas: Arc::new(HashMap::new()),
         }
     }
@@ -890,7 +898,7 @@ impl QueryManager {
 
         // 7a. Process incoming QuerySettled notifications
         let settled_notifications = self.sync_manager.take_pending_query_settled();
-        for (query_id, _) in settled_notifications {
+        for query_id in settled_notifications {
             let sub_id = QuerySubscriptionId(query_id.0);
             if let Some(sub) = self.subscriptions.get_mut(&sub_id) {
                 sub.query_frontier_complete = true;
@@ -937,11 +945,16 @@ impl QueryManager {
                     } else {
                         subscription.durability_tier
                     };
+                    let local_pending_version = (subscription.local_updates
+                        == LocalUpdates::Immediate)
+                        .then(|| self.pending_local_row_versions.get(&id).copied())
+                        .flatten();
                     Self::load_visible_row_for_query(
                         storage_ref,
                         id,
                         &branches,
                         durability_tier,
+                        local_pending_version,
                         include_deleted,
                         &schema_context,
                         &branch_schema_map,
@@ -1215,6 +1228,20 @@ impl QueryManager {
 
         let descriptor = table_schema.columns.clone();
         let old_row = update.previous_row.as_ref();
+        let current_version_id = update.row.version_id();
+
+        if local_update {
+            self.pending_local_row_versions
+                .insert(update.object_id, current_version_id);
+        } else if let Some(pending_version_id) = self
+            .pending_local_row_versions
+            .get(&update.object_id)
+            .copied()
+            && (pending_version_id != current_version_id
+                || update.row.confirmed_tier == Some(DurabilityTier::GlobalServer))
+        {
+            self.pending_local_row_versions.remove(&update.object_id);
+        }
 
         if self.is_hard_deleted(update.object_id) && !update.row.is_hard_deleted() {
             return;
@@ -1523,6 +1550,7 @@ impl QueryManager {
         row_id: ObjectId,
         branches: &[String],
         durability_tier: Option<DurabilityTier>,
+        local_pending_version: Option<CommitId>,
         include_deleted: bool,
         schema_context: &SchemaContext,
         branch_schema_map: &HashMap<String, SchemaHash>,
@@ -1530,8 +1558,15 @@ impl QueryManager {
         sub_id: QuerySubscriptionId,
         schema_warnings: &mut SchemaWarningAccumulator,
     ) -> Option<LoadedRow> {
-        let (table, row) =
-            Self::load_best_visible_row_version(storage, row_id, branches, durability_tier)?;
+        let resolved =
+            Self::load_best_visible_row_version(storage, row_id, branches, durability_tier)
+                .or_else(|| {
+                    let pending_version_id = local_pending_version?;
+                    let (table, row) =
+                        Self::load_best_visible_row_version(storage, row_id, branches, None)?;
+                    (row.version_id() == pending_version_id).then_some((table, row))
+                })?;
+        let (table, row) = resolved;
 
         if row.is_hard_deleted() {
             return None;

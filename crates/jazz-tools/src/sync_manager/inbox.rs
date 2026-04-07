@@ -85,8 +85,15 @@ impl SyncManager {
         &mut self,
         storage: &mut H,
         metadata: Option<RowMetadata>,
-        row: StoredRowVersion,
+        mut row: StoredRowVersion,
     ) -> Option<AppliedRowVersion> {
+        if let Some(local_tier) = self.max_local_durability_tier() {
+            row.confirmed_tier = Some(match row.confirmed_tier {
+                Some(existing) => existing.max(local_tier),
+                None => local_tier,
+            });
+        }
+
         let metadata = self.row_metadata_from_payload(storage, &row, metadata.as_ref())?;
         let table = metadata.get(MetadataKey::Table.as_str())?.clone();
         let branch_name = row.branch.clone();
@@ -336,12 +343,11 @@ impl SyncManager {
             }
             SyncPayload::QuerySettled {
                 query_id,
-                tier,
                 through_seq,
             } => {
-                tracing::debug!(?query_id, ?tier, "server→QuerySettled");
+                tracing::debug!(?query_id, "server→QuerySettled");
                 // Queue for local QueryManager to process
-                self.pending_query_settled.push((query_id, tier));
+                self.pending_query_settled.push(query_id);
 
                 // Relay to interested clients
                 if let Some(clients) = self.query_origin.get(&query_id) {
@@ -350,7 +356,6 @@ impl SyncManager {
                             destination: Destination::Client(cid),
                             payload: SyncPayload::QuerySettled {
                                 query_id,
-                                tier,
                                 through_seq,
                             },
                         });
@@ -643,11 +648,10 @@ impl SyncManager {
             }
             SyncPayload::QuerySettled {
                 query_id,
-                tier,
                 through_seq: _,
             } => {
                 // Client relaying a QuerySettled from downstream
-                self.pending_query_settled.push((*query_id, *tier));
+                self.pending_query_settled.push(*query_id);
             }
             SyncPayload::SchemaWarning(warning) => {
                 tracing::warn!(

@@ -903,13 +903,9 @@ impl<'a> Normalizer<'a> {
             }
             SyncPayload::QuerySettled {
                 query_id,
-                tier,
                 through_seq,
             } => {
-                format!(
-                    "query:{} tier:{:?} through_seq:{}",
-                    query_id.0, tier, through_seq
-                )
+                format!("query:{} through_seq:{}", query_id.0, through_seq)
             }
             SyncPayload::SchemaWarning(w) => {
                 format!("query:{} table:{}", w.query_id.0, w.table_name)
@@ -1007,13 +1003,9 @@ fn format_payload_details(payload: &SyncPayload, names: &Names<'_>) -> String {
         }
         SyncPayload::QuerySettled {
             query_id,
-            tier,
             through_seq,
         } => {
-            format!(
-                "query:{} tier:{:?} through_seq:{}",
-                query_id.0, tier, through_seq,
-            )
+            format!("query:{} through_seq:{}", query_id.0, through_seq)
         }
         SyncPayload::SchemaWarning(w) => {
             format!("query:{} table:{}", w.query_id.0, w.table_name)

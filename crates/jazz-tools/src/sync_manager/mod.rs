@@ -61,7 +61,7 @@ pub struct SyncManager {
     /// Tracks which clients originated each query (for relaying QuerySettled).
     pub(super) query_origin: HashMap<QueryId, HashSet<ClientId>>,
     /// Pending QuerySettled notifications for QueryManager to process.
-    pub(super) pending_query_settled: Vec<(QueryId, DurabilityTier)>,
+    pub(super) pending_query_settled: Vec<QueryId>,
 
     /// Row-version state acks received during inbox processing.
     pub(super) received_row_version_acks: Vec<(RowVersionKey, DurabilityTier)>,
@@ -587,7 +587,7 @@ impl SyncManager {
     }
 
     /// Take pending QuerySettled notifications for QueryManager to process.
-    pub fn take_pending_query_settled(&mut self) -> Vec<(QueryId, DurabilityTier)> {
+    pub fn take_pending_query_settled(&mut self) -> Vec<QueryId> {
         std::mem::take(&mut self.pending_query_settled)
     }
 
@@ -618,17 +618,10 @@ impl SyncManager {
     ///
     /// Called by QueryManager when a server subscription settles for the first time.
     pub fn emit_query_settled(&mut self, client_id: ClientId, query_id: QueryId) {
-        let tier = self
-            .my_tiers
-            .iter()
-            .copied()
-            .max()
-            .unwrap_or(DurabilityTier::Worker);
         self.outbox.push(OutboxEntry {
             destination: Destination::Client(client_id),
             payload: SyncPayload::QuerySettled {
                 query_id,
-                tier,
                 through_seq: 0,
             },
         });
