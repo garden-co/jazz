@@ -931,6 +931,69 @@ describe("permissions DSL", () => {
     ).toThrow(/where condition bound to current/i);
   });
 
+  it("resolves allowedTo without Id suffix to the FK column", () => {
+    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
+      policy.todos.allowRead.where(allowedTo.read("project")),
+    ]);
+
+    expect(compiled.todos!.select?.using).toEqual({
+      type: "Inherits",
+      operation: "Select",
+      via_column: "projectId",
+    });
+  });
+
+  it("resolves allowedTo without Id suffix for insert/update/delete", () => {
+    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
+      policy.todos.allowInsert.where(allowedTo.insert("project")),
+      policy.todos.allowDelete.where(allowedTo.delete("project")),
+      policy.todos.allowUpdate
+        .whereOld(allowedTo.update("project"))
+        .whereNew(allowedTo.update("project")),
+    ]);
+
+    expect(compiled.todos!.insert?.with_check).toEqual({
+      type: "Inherits",
+      operation: "Insert",
+      via_column: "projectId",
+    });
+    expect(compiled.todos!.delete?.using).toEqual({
+      type: "Inherits",
+      operation: "Delete",
+      via_column: "projectId",
+    });
+    expect(compiled.todos!.update?.using).toEqual({
+      type: "Inherits",
+      operation: "Update",
+      via_column: "projectId",
+    });
+  });
+
+  it("resolves readReferencing without Id suffix", () => {
+    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
+      policy.projects.allowRead.where(allowedTo.readReferencing(policy.todos, "project")),
+    ]);
+
+    expect(compiled.projects!.select?.using).toEqual({
+      type: "InheritsReferencing",
+      operation: "Select",
+      source_table: "todos",
+      via_column: "projectId",
+    });
+  });
+
+  it("still accepts the full FK column name with Id suffix", () => {
+    const compiled = definePermissions(app, ({ policy, allowedTo }) => [
+      policy.todos.allowRead.where(allowedTo.read("projectId")),
+    ]);
+
+    expect(compiled.todos!.select?.using).toEqual({
+      type: "Inherits",
+      operation: "Select",
+      via_column: "projectId",
+    });
+  });
+
   it("rejects allowedTo when column is not a foreign key", () => {
     expect(() =>
       definePermissions(app, ({ policy, allowedTo }) => [
