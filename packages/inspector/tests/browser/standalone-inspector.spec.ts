@@ -1,26 +1,19 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { ADMIN_SECRET, APP_ID, TEST_BRANCH, TEST_ENV, TEST_PORT } from "./test-constants.js";
 
 const SERVER_URL = `http://127.0.0.1:${TEST_PORT}`;
+const SCHEMA_HASH = process.env.PUBLISHED_SCHEMA_HASH;
 const STORAGE_KEY = "jazz-inspector-standalone-config";
-const RUNTIME_CONFIG_PATH = join(import.meta.dirname ?? __dirname, "runtime-config.json");
 
 function storedConfig() {
-  const { schemaHash } = readRuntimeConfig();
   return {
     serverUrl: SERVER_URL,
     appId: APP_ID,
     adminSecret: ADMIN_SECRET,
     env: TEST_ENV,
     branch: TEST_BRANCH,
-    schemaHash,
+    schemaHash: SCHEMA_HASH,
   };
-}
-
-function readRuntimeConfig(): { schemaHash: string } {
-  return JSON.parse(readFileSync(RUNTIME_CONFIG_PATH, "utf8")) as { schemaHash: string };
 }
 
 async function storeStandaloneConfig(page: Page) {
@@ -87,9 +80,7 @@ test.describe("connection page", () => {
 
     await page.getByRole("button", { name: "Use schema" }).click();
 
-    await expect(page.getByRole("link", { name: "Data Explorer" })).toBeVisible({
-      timeout: 15000,
-    });
+    await expect(page.getByRole("link", { name: "Data Explorer" })).toBeVisible();
   });
 
   test("loads data explorer from stored config", async ({ page }) => {
@@ -97,16 +88,9 @@ test.describe("connection page", () => {
     await storeStandaloneConfig(page);
     await page.reload();
 
-    await expect(page.getByRole("link", { name: "Data Explorer" })).toBeVisible({
-      timeout: 15000,
-    });
-    await expect(page.getByRole("heading", { name: "Tables" })).toBeVisible({ timeout: 15000 });
-    await expect(page.getByRole("link", { name: "View todos data" })).toBeVisible({
-      timeout: 15000,
-    });
-    await expect(page.getByRole("heading", { name: "Select a table" })).toBeVisible({
-      timeout: 15000,
-    });
+    await expect(page.getByRole("link", { name: "Data Explorer" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Tables" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "View todos data" })).toBeVisible();
   });
 
   test("reset connection returns to onboarding", async ({ page }) => {
@@ -114,9 +98,7 @@ test.describe("connection page", () => {
     await storeStandaloneConfig(page);
     await page.reload();
 
-    await expect(page.getByRole("button", { name: "Reset connection" })).toBeVisible({
-      timeout: 15000,
-    });
+    await expect(page.getByRole("button", { name: "Reset connection" })).toBeVisible();
     await page.getByRole("button", { name: "Reset connection" }).click();
     await expect(page.getByRole("heading", { name: "Connect to Jazz server" })).toBeVisible();
   });

@@ -39,10 +39,8 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
   if (!publishedSchemaHash) {
     throw new Error("No schema hashes were published during inspector browser global setup.");
   }
-  await writeFile(
-    RUNTIME_CONFIG_PATH,
-    JSON.stringify({ schemaHash: publishedSchemaHash }, null, 2),
-  );
+
+  process.env.PUBLISHED_SCHEMA_HASH = publishedSchemaHash;
 
   const client = await JazzClient.connect({
     appId: APP_ID,

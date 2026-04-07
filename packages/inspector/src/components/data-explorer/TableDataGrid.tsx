@@ -12,15 +12,7 @@ import {
 import { Group, Panel, Separator } from "react-resizable-panels";
 import type { ColumnDescriptor, ColumnType, DynamicTableRow, TableProxy } from "jazz-tools";
 import { useAll, useDb } from "jazz-tools/react";
-import {
-  Profiler,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type Dispatch,
-  type SetStateAction,
-} from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { Link, Navigate, useParams, useSearchParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
@@ -71,50 +63,6 @@ interface MutationState {
   mode: "insert";
 }
 
-interface TableDataGridProfilerEntry {
-  id: string;
-  phase: "mount" | "update" | "nested-update";
-  actualDuration: number;
-  baseDuration: number;
-  startTime: number;
-  commitTime: number;
-  table: string;
-  pageIndex: number;
-  pageSize: number;
-  sortColumn: string;
-  sortDirection: "asc" | "desc";
-  filterCount: number;
-  rowCount: number;
-  visibleRowCount: number;
-  queryOffset: number;
-  queryLimit: number;
-  hasNextPage: boolean;
-  query: string;
-}
-
-interface TableDataGridDebugEvent {
-  type: string;
-  timestampMs: number;
-  table: string;
-  pageIndex: number;
-  pageSize: number;
-  sortColumn: string;
-  sortDirection: "asc" | "desc";
-  filterCount: number;
-  rowCount: number;
-  visibleRowCount: number;
-  queryOffset: number;
-  queryLimit: number;
-  hasNextPage: boolean;
-  query: string;
-  details?: Record<string, unknown>;
-}
-
-type TableDataGridInspectorWindow = Window & {
-  __inspectorProfiler?: TableDataGridProfilerEntry[];
-  __inspectorGridEvents?: TableDataGridDebugEvent[];
-};
-
 interface GridColumn {
   id: string;
   accessorKey: string;
@@ -156,14 +104,6 @@ function isColumnSortable(columnType: ColumnType): boolean {
     default:
       return false;
   }
-}
-
-function recordTableDataGridProfilerEntry(entry: TableDataGridProfilerEntry): void {
-  const profilerWindow = globalThis.window as TableDataGridInspectorWindow | undefined;
-  if (!profilerWindow?.__inspectorProfiler) {
-    return;
-  }
-  profilerWindow.__inspectorProfiler.push(entry);
 }
 
 function getGridRowId(row: DynamicTableRow): string {
@@ -738,43 +678,13 @@ export function TableDataGrid() {
   );
   const startRow = pageIndex * pageSize;
   const endRow = startRow + visibleRows.length;
-  const profileEntryBase = {
-    table,
-    pageIndex,
-    pageSize,
-    sortColumn,
-    sortDirection,
-    filterCount: filters.length,
-    rowCount: rows.length,
-    visibleRowCount: visibleRows.length,
-    queryOffset,
-    queryLimit,
-    hasNextPage,
-    query: builtQuery,
-  } as const;
-  const recordGridEvent = (type: string, details?: Record<string, unknown>): void => {
-    const inspectorWindow = globalThis.window as TableDataGridInspectorWindow | undefined;
-    if (!inspectorWindow?.__inspectorGridEvents) {
-      return;
-    }
-    const event = {
-      type,
-      timestampMs: globalThis.performance?.now?.() ?? Date.now(),
-      ...profileEntryBase,
-      details,
-    };
-    inspectorWindow.__inspectorGridEvents.push(event);
-    globalThis.console?.debug?.("[inspector-grid]", JSON.stringify(event));
-  };
+
   const handleSortColumnsChange = (nextSortColumns: SortColumn[]): void => {
     const nextSort =
       nextSortColumns.length === 0
         ? [{ columnKey: "id", direction: "ASC" as const }]
         : [nextSortColumns.at(-1)!];
-    recordGridEvent("sort-click", {
-      columnId: nextSort[0]?.columnKey,
-      nextSortDirection: nextSort[0]?.direction === "DESC" ? "desc" : "asc",
-    });
+
     setSearchParams(
       (prev) => {
         const p = new URLSearchParams(prev);
@@ -872,23 +782,6 @@ export function TableDataGrid() {
   };
 
   useEffect(() => {
-    recordGridEvent("state-commit");
-  }, [
-    table,
-    pageIndex,
-    pageSize,
-    sortColumn,
-    sortDirection,
-    filters.length,
-    rows.length,
-    visibleRows.length,
-    queryOffset,
-    queryLimit,
-    hasNextPage,
-    builtQuery,
-  ]);
-
-  useEffect(() => {
     if (selectedRowId && !rowById.has(selectedRowId)) {
       setSelectedRowId(null);
     }
@@ -908,245 +801,222 @@ export function TableDataGrid() {
   }, [mutationState, selectedRowId]);
 
   return (
-    <Profiler
-      id="TableDataGrid"
-      onRender={(id, phase, actualDuration, baseDuration, startTime, commitTime) => {
-        recordTableDataGridProfilerEntry({
-          id,
-          phase,
-          actualDuration,
-          baseDuration,
-          startTime,
-          commitTime,
-          ...profileEntryBase,
-        });
-      }}
-    >
-      <section className={styles.container}>
-        <header className={styles.header}>
-          <h2 className={styles.title}>{table}</h2>
-          <div className={styles.headerActions}>
-            <Link to={`/data-explorer/${table}/schema`} className={styles.secondaryButton}>
-              Schema
-            </Link>
-            <button
-              type="button"
-              className={styles.secondaryButton}
-              onClick={() => {
-                filterBuilderRef.current?.open();
-              }}
-            >
-              {filterButtonLabel}
-            </button>
-            <button
-              type="button"
-              className={styles.secondaryButton}
-              onClick={() => {
-                setMutationState({ mode: "insert" });
-              }}
-              disabled={hasQueuedChanges || isAnyMutationPending}
-            >
-              Insert
-            </button>
-          </div>
-        </header>
-        <TableFilterBuilder
-          ref={filterBuilderRef}
-          schemaColumns={schemaColumns}
-          clauses={filters}
-          showTrigger={false}
-          onClausesChange={(nextFilters) => {
-            recordGridEvent("filters-change", { nextFilterCount: nextFilters.length });
-            setFilters(nextFilters);
-          }}
-        />
-        <div className={styles.contentArea}>
-          <Group className={styles.contentPanels} orientation="horizontal">
-            <Panel className={styles.gridPanel} defaultSize="68%" minSize="35%">
-              <div className={styles.gridFrame}>
-                <PlainTableView
-                  rows={visibleRows}
-                  gridColumns={gridColumns}
-                  sorting={sorting}
-                  schema={schema}
-                  queryOptions={queryOptions}
-                  schemaColumnById={schemaColumnById}
-                  queuedEdits={queuedEdits}
-                  queuedDeletes={queuedDeletes}
-                  animationScopeKey={gridAnimationScopeKey}
-                  onSortColumnsChange={handleSortColumnsChange}
-                  onQueuedEditsChange={setQueuedEdits}
-                  onQueuedSaveErrorChange={setQueuedSaveError}
-                  onSelectedRowIdChange={setSelectedRowId}
-                  onQueuedDeletesChange={setQueuedDeletes}
-                />
-              </div>
-            </Panel>
-            <Separator className={styles.resizeHandle} />
-            <Panel className={styles.detailsPanel} defaultSize="32%" minSize="22%" maxSize="45%">
-              <RowMutationSidebar
-                key={`edit:${selectedRowId ?? "empty"}`}
-                mode="edit"
-                tableName={table}
-                schemaColumns={schemaColumns}
-                targetRowId={selectedRowId}
-                rowValues={selectedRowValues}
-                onSave={handleSaveSelectedRow}
-                onDelete={async () => {
-                  if (!selectedRowId) {
-                    return;
-                  }
-                  await db.deleteDurable(tableProxy, selectedRowId, {
-                    tier: mutationDurabilityTier,
-                  });
-                  setSelectedRowId(null);
-                }}
-              />
-            </Panel>
-          </Group>
-        </div>
-        <div className={styles.bottomRail}>
-          {hasQueuedChanges || queuedSaveError ? (
-            <div
-              className={styles.queuedBanner}
-              role={queuedSaveError ? "alert" : "status"}
-              aria-live="polite"
-            >
-              <div className={styles.queuedBannerCopy}>
-                <span className={styles.queuedBannerLabel}>Queued</span>
-                {hasQueuedEdits ? (
-                  <span>
-                    {queuedEditCount} edit{queuedEditCount === 1 ? "" : "s"} across{" "}
-                    {queuedEditedRowCount} row{queuedEditedRowCount === 1 ? "" : "s"}
-                  </span>
-                ) : null}
-                {queuedDeletes.size > 0 ? (
-                  <span>
-                    {queuedDeletes.size} row{queuedDeletes.size === 1 ? "" : "s"} will be deleted
-                  </span>
-                ) : null}
-                {queuedSaveError ? (
-                  <span className={styles.queuedBannerError}>{queuedSaveError}</span>
-                ) : null}
-              </div>
-              <div className={styles.queuedBannerActions}>
-                <button
-                  type="button"
-                  className={`${styles.secondaryButton} ${styles.queuedBannerButton}`}
-                  onClick={handleDiscardQueuedEdits}
-                  disabled={isQueuedSavePending}
-                >
-                  Discard
-                </button>
-                <button
-                  type="button"
-                  className={`${styles.primaryButton} ${styles.queuedBannerButton}`}
-                  onClick={() => {
-                    void handleSaveQueuedEdits();
-                  }}
-                  disabled={isQueuedSavePending}
-                >
-                  {isQueuedSavePending ? "Saving..." : "Save changes"}
-                </button>
-              </div>
-            </div>
-          ) : null}
-          <footer className={styles.footer}>
-            <div className={styles.paginationInfo}>
-              Showing {visibleRows.length === 0 ? 0 : startRow + 1}-{endRow}
-            </div>
-            <div className={styles.paginationControls}>
-              <label className={styles.pageSizeLabel}>
-                Rows per page
-                <select
-                  className={styles.pageSizeSelect}
-                  value={pageSize}
-                  onChange={(event) => {
-                    const nextPageSize = Number(event.target.value);
-                    recordGridEvent("page-size-change", { nextPageSize });
-                    setPageSize(nextPageSize);
-                  }}
-                >
-                  {PAGE_SIZE_OPTIONS.map((sizeOption) => (
-                    <option key={sizeOption} value={sizeOption}>
-                      {sizeOption}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <span className={styles.pageIndicator}>Page {pageIndex + 1}</span>
-              <button
-                type="button"
-                className={styles.secondaryButton}
-                onClick={() => {
-                  recordGridEvent("previous-page-click", {
-                    nextPageIndex: Math.max(0, pageIndex - 1),
-                  });
-                  setPageIndex((current) => Math.max(0, current - 1));
-                }}
-                disabled={pageIndex === 0}
-              >
-                Previous
-              </button>
-              <button
-                type="button"
-                className={styles.secondaryButton}
-                onClick={() => {
-                  recordGridEvent("next-page-click", {
-                    nextPageIndex: pageIndex + 1,
-                  });
-                  setPageIndex((current) => current + 1);
-                }}
-                disabled={!hasNextPage}
-              >
-                Next
-              </button>
-            </div>
-          </footer>
-        </div>
-        {mutationState ? (
-          <div
-            className={styles.sidebarOverlay}
-            data-testid="row-mutation-overlay"
+    <section className={styles.container}>
+      <header className={styles.header}>
+        <h2 className={styles.title}>{table}</h2>
+        <div className={styles.headerActions}>
+          <Link to={`/data-explorer/${table}/schema`} className={styles.secondaryButton}>
+            Schema
+          </Link>
+          <button
+            type="button"
+            className={styles.secondaryButton}
             onClick={() => {
-              if (isSidebarMutationPending) return;
-              setMutationState(null);
+              filterBuilderRef.current?.open();
             }}
           >
-            <div
-              className={styles.sidebarPanel}
-              onClick={(event) => {
-                event.stopPropagation();
-              }}
-            >
-              <RowMutationSidebar
-                key="insert:new"
-                mode="insert"
-                tableName={table}
-                schemaColumns={schemaColumns}
-                targetRowId={null}
-                rowValues={insertRowValues}
-                onCancel={() => {
-                  if (isSidebarMutationPending) return;
-                  setMutationState(null);
-                }}
-                onSave={async (updates) => {
-                  try {
-                    setIsSidebarMutationPending(true);
-                    await db.insertDurable(tableProxy, updates, {
-                      tier: mutationDurabilityTier,
-                    });
-                    setMutationState(null);
-                  } finally {
-                    setIsSidebarMutationPending(false);
-                  }
-                }}
+            {filterButtonLabel}
+          </button>
+          <button
+            type="button"
+            className={styles.secondaryButton}
+            onClick={() => {
+              setMutationState({ mode: "insert" });
+            }}
+            disabled={hasQueuedChanges || isAnyMutationPending}
+          >
+            Insert
+          </button>
+        </div>
+      </header>
+      <TableFilterBuilder
+        ref={filterBuilderRef}
+        schemaColumns={schemaColumns}
+        clauses={filters}
+        showTrigger={false}
+        onClausesChange={(nextFilters) => {
+          setFilters(nextFilters);
+        }}
+      />
+      <div className={styles.contentArea}>
+        <Group className={styles.contentPanels} orientation="horizontal">
+          <Panel className={styles.gridPanel} defaultSize="68%" minSize="35%">
+            <div className={styles.gridFrame}>
+              <PlainTableView
+                rows={visibleRows}
+                gridColumns={gridColumns}
+                sorting={sorting}
+                schema={schema}
+                queryOptions={queryOptions}
+                schemaColumnById={schemaColumnById}
+                queuedEdits={queuedEdits}
+                queuedDeletes={queuedDeletes}
+                animationScopeKey={gridAnimationScopeKey}
+                onSortColumnsChange={handleSortColumnsChange}
+                onQueuedEditsChange={setQueuedEdits}
+                onQueuedSaveErrorChange={setQueuedSaveError}
+                onSelectedRowIdChange={setSelectedRowId}
+                onQueuedDeletesChange={setQueuedDeletes}
               />
+            </div>
+          </Panel>
+          <Separator className={styles.resizeHandle} />
+          <Panel className={styles.detailsPanel} defaultSize="32%" minSize="22%" maxSize="45%">
+            <RowMutationSidebar
+              key={`edit:${selectedRowId ?? "empty"}`}
+              mode="edit"
+              tableName={table}
+              schemaColumns={schemaColumns}
+              targetRowId={selectedRowId}
+              rowValues={selectedRowValues}
+              onSave={handleSaveSelectedRow}
+              onDelete={async () => {
+                if (!selectedRowId) {
+                  return;
+                }
+                await db.deleteDurable(tableProxy, selectedRowId, {
+                  tier: mutationDurabilityTier,
+                });
+                setSelectedRowId(null);
+              }}
+            />
+          </Panel>
+        </Group>
+      </div>
+      <div className={styles.bottomRail}>
+        {hasQueuedChanges || queuedSaveError ? (
+          <div
+            className={styles.queuedBanner}
+            role={queuedSaveError ? "alert" : "status"}
+            aria-live="polite"
+          >
+            <div className={styles.queuedBannerCopy}>
+              <span className={styles.queuedBannerLabel}>Queued</span>
+              {hasQueuedEdits ? (
+                <span>
+                  {queuedEditCount} edit{queuedEditCount === 1 ? "" : "s"} across{" "}
+                  {queuedEditedRowCount} row{queuedEditedRowCount === 1 ? "" : "s"}
+                </span>
+              ) : null}
+              {queuedDeletes.size > 0 ? (
+                <span>
+                  {queuedDeletes.size} row{queuedDeletes.size === 1 ? "" : "s"} will be deleted
+                </span>
+              ) : null}
+              {queuedSaveError ? (
+                <span className={styles.queuedBannerError}>{queuedSaveError}</span>
+              ) : null}
+            </div>
+            <div className={styles.queuedBannerActions}>
+              <button
+                type="button"
+                className={`${styles.secondaryButton} ${styles.queuedBannerButton}`}
+                onClick={handleDiscardQueuedEdits}
+                disabled={isQueuedSavePending}
+              >
+                Discard
+              </button>
+              <button
+                type="button"
+                className={`${styles.primaryButton} ${styles.queuedBannerButton}`}
+                onClick={() => {
+                  void handleSaveQueuedEdits();
+                }}
+                disabled={isQueuedSavePending}
+              >
+                {isQueuedSavePending ? "Saving..." : "Save changes"}
+              </button>
             </div>
           </div>
         ) : null}
-      </section>
-    </Profiler>
+        <footer className={styles.footer}>
+          <div className={styles.paginationInfo}>
+            Showing {visibleRows.length === 0 ? 0 : startRow + 1}-{endRow}
+          </div>
+          <div className={styles.paginationControls}>
+            <label className={styles.pageSizeLabel}>
+              Rows per page
+              <select
+                className={styles.pageSizeSelect}
+                value={pageSize}
+                onChange={(event) => {
+                  const nextPageSize = Number(event.target.value);
+                  setPageSize(nextPageSize);
+                }}
+              >
+                {PAGE_SIZE_OPTIONS.map((sizeOption) => (
+                  <option key={sizeOption} value={sizeOption}>
+                    {sizeOption}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span className={styles.pageIndicator}>Page {pageIndex + 1}</span>
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              onClick={() => {
+                setPageIndex((current) => Math.max(0, current - 1));
+              }}
+              disabled={pageIndex === 0}
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              onClick={() => {
+                setPageIndex((current) => current + 1);
+              }}
+              disabled={!hasNextPage}
+            >
+              Next
+            </button>
+          </div>
+        </footer>
+      </div>
+      {mutationState ? (
+        <div
+          className={styles.sidebarOverlay}
+          data-testid="row-mutation-overlay"
+          onClick={() => {
+            if (isSidebarMutationPending) return;
+            setMutationState(null);
+          }}
+        >
+          <div
+            className={styles.sidebarPanel}
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <RowMutationSidebar
+              key="insert:new"
+              mode="insert"
+              tableName={table}
+              schemaColumns={schemaColumns}
+              targetRowId={null}
+              rowValues={insertRowValues}
+              onCancel={() => {
+                if (isSidebarMutationPending) return;
+                setMutationState(null);
+              }}
+              onSave={async (updates) => {
+                try {
+                  setIsSidebarMutationPending(true);
+                  await db.insertDurable(tableProxy, updates, {
+                    tier: mutationDurabilityTier,
+                  });
+                  setMutationState(null);
+                } finally {
+                  setIsSidebarMutationPending(false);
+                }
+              }}
+            />
+          </div>
+        </div>
+      ) : null}
+    </section>
   );
 }
 

@@ -15,7 +15,7 @@ type UseAllStatefulfilledData<T> = {
   error: null;
 };
 
-type UseAllStateError = {
+type UseAllStateError<T> = {
   status: "rejected";
   data: undefined;
   error: unknown;
@@ -24,7 +24,7 @@ type UseAllStateError = {
 export type UseAllState<T extends { id: string }> =
   | UseAllStatePending<T>
   | UseAllStatefulfilledData<T>
-  | UseAllStateError;
+  | UseAllStateError<T>;
 
 export type QueryEntryCallbacks<T extends { id: string }> = {
   onfulfilled?: (data: T[]) => void;
@@ -152,27 +152,6 @@ interface DbLike {
   ): () => void;
 }
 
-interface InspectorSubscriptionEvent {
-  type: string;
-  timestampMs: number;
-  key: string;
-  table: string;
-  query: string;
-  options: string;
-  listenerCount: number;
-  status: UseAllState<any>["status"];
-  dataLength: number;
-  details?: Record<string, unknown>;
-}
-
-type SubscriptionDebugWindow = Window & {
-  __inspectorSubscriptionEvents?: InspectorSubscriptionEvent[];
-};
-
-function getSubscriptionDebugWindow(): SubscriptionDebugWindow | undefined {
-  return (globalThis as { window?: SubscriptionDebugWindow }).window;
-}
-
 export class SubscriptionsOrchestrator {
   private readonly cleanupDelayMs = 30_000;
   private readonly entries = new Map<string, InternalCacheEntry<any>>();
@@ -199,9 +178,7 @@ export class SubscriptionsOrchestrator {
     options?: QueryOptions,
     snapshot?: T[],
   ): string {
-    const serializedOptions = serializeQueryOptions(options);
-    const serializedQuery = query._build();
-    const key = `${this.config.appId}:${serializedOptions}:${serializedQuery}`;
+    const key = `${this.config.appId}:${serializeQueryOptions(options)}:${query._build()}`;
     this.queryDefinitions.set(key, {
       query,
       options,
@@ -214,20 +191,6 @@ export class SubscriptionsOrchestrator {
       existing.resolvefulfilled(snapshot);
     }
 
-    this.recordEvent("make-query-key", {
-      key,
-      query,
-      options,
-      state: existing?.state,
-      listeners: existing?.listeners,
-      details: {
-        hasSnapshot: snapshot !== undefined,
-        reusedPendingEntry: Boolean(existing),
-        serializedOptions,
-        serializedQuery,
-      },
-    });
-
     return key;
   }
 
@@ -238,13 +201,6 @@ export class SubscriptionsOrchestrator {
   private ensureEntryForKey<T extends { id: string }>(key: string): InternalCacheEntry<T> {
     const existing = this.entries.get(key);
     if (existing) {
-      this.recordEvent("reuse-entry", {
-        key,
-        query: existing.query,
-        options: existing.options,
-        listeners: existing.listeners,
-        state: existing.state,
-      });
       return existing as InternalCacheEntry<T>;
     }
 
@@ -281,13 +237,6 @@ export class SubscriptionsOrchestrator {
       subscribe: (callbacks) => {
         this.cancelCleanup(entry);
         entry.listeners.add(callbacks);
-        this.recordEvent("listener-subscribed", {
-          key: entry.key,
-          query: entry.query,
-          options: entry.options,
-          listeners: entry.listeners,
-          state: entry.state,
-        });
 
         if (entry.state.status === "rejected") {
           callbacks.onError?.(entry.state.error);
@@ -301,13 +250,6 @@ export class SubscriptionsOrchestrator {
           if (!entry.listeners.delete(callbacks)) {
             return;
           }
-          this.recordEvent("listener-unsubscribed", {
-            key: entry.key,
-            query: entry.query,
-            options: entry.options,
-            listeners: entry.listeners,
-            state: entry.state,
-          });
           if (entry.listeners.size === 0) {
             this.scheduleCleanup(entry);
           }
@@ -324,27 +266,9 @@ export class SubscriptionsOrchestrator {
       },
     } as InternalCacheEntry<T>;
 
-    this.recordEvent("create-entry", {
-      key,
-      query: entry.query,
-      options: entry.options,
-      listeners: entry.listeners,
-      state: entry.state,
-      details: {
-        hasSnapshot,
-      },
-    });
-
     try {
       const subscriptionManager = new SubscriptionManager<T>();
       entry.subscriptionManager = subscriptionManager;
-      this.recordEvent("subscribe-all-start", {
-        key: entry.key,
-        query: entry.query,
-        options: entry.options,
-        listeners: entry.listeners,
-        state: entry.state,
-      });
 
       entry.unsubscribe = this.db.subscribeAll<T>(
         entry.query,
@@ -371,18 +295,6 @@ export class SubscriptionsOrchestrator {
           if (entry.listeners.size === 0) {
             this.scheduleCleanup(entry);
           }
-
-          this.recordEvent("delta", {
-            key: entry.key,
-            query: entry.query,
-            options: entry.options,
-            listeners: entry.listeners,
-            state: entry.state,
-            details: {
-              wasPending,
-              deltaLength: delta.all.length,
-            },
-          });
         },
         entry.options,
         this.session ?? undefined,
@@ -393,21 +305,6 @@ export class SubscriptionsOrchestrator {
       for (const listener of Array.from(entry.listeners)) {
         listener.onError?.(error);
       }
-      this.recordEvent("subscribe-error", {
-        key: entry.key,
-        query: entry.query,
-        options: entry.options,
-        listeners: entry.listeners,
-        state: entry.state,
-        details: {
-          error:
-            error instanceof Error && error.stack
-              ? error.stack
-              : error instanceof Error
-                ? error.message
-                : String(error),
-        },
-      });
       this.scheduleCleanup(entry);
     }
 
@@ -417,16 +314,6 @@ export class SubscriptionsOrchestrator {
 
   private scheduleCleanup(entry: InternalCacheEntry<any>): void {
     this.cancelCleanup(entry);
-    this.recordEvent("schedule-cleanup", {
-      key: entry.key,
-      query: entry.query,
-      options: entry.options,
-      listeners: entry.listeners,
-      state: entry.state,
-      details: {
-        cleanupDelayMs: this.cleanupDelayMs,
-      },
-    });
     entry.cleanupTimeoutId = setTimeout(() => {
       if (entry.listeners.size === 0) {
         this.destroyEntry(entry);
@@ -438,23 +325,9 @@ export class SubscriptionsOrchestrator {
     if (!entry.cleanupTimeoutId) return;
     clearTimeout(entry.cleanupTimeoutId);
     entry.cleanupTimeoutId = null;
-    this.recordEvent("cancel-cleanup", {
-      key: entry.key,
-      query: entry.query,
-      options: entry.options,
-      listeners: entry.listeners,
-      state: entry.state,
-    });
   }
 
   private destroyEntry(entry: InternalCacheEntry<any>): void {
-    this.recordEvent("destroy-entry", {
-      key: entry.key,
-      query: entry.query,
-      options: entry.options,
-      listeners: entry.listeners,
-      state: entry.state,
-    });
     if (entry.unsubscribe) {
       entry.unsubscribe();
     }
@@ -465,45 +338,6 @@ export class SubscriptionsOrchestrator {
     this.cancelCleanup(entry);
     this.entries.delete(entry.key);
     this.queryDefinitions.delete(entry.key);
-  }
-
-  private recordEvent<T extends { id: string }>(
-    type: string,
-    {
-      key,
-      query,
-      options,
-      listeners,
-      state,
-      details,
-    }: {
-      key: string;
-      query: QueryBuilder<T>;
-      options?: QueryOptions;
-      listeners?: Set<QueryEntryCallbacks<T>>;
-      state?: UseAllState<T>;
-      details?: Record<string, unknown>;
-    },
-  ): void {
-    const inspectorWindow = getSubscriptionDebugWindow();
-    if (!inspectorWindow?.__inspectorSubscriptionEvents) {
-      return;
-    }
-
-    const event = {
-      type,
-      timestampMs: globalThis.performance?.now?.() ?? Date.now(),
-      key,
-      table: query._table,
-      query: query._build(),
-      options: serializeQueryOptions(options),
-      listenerCount: listeners?.size ?? 0,
-      status: state?.status ?? "pending",
-      dataLength: state?.status === "fulfilled" ? state.data.length : 0,
-      details,
-    };
-    inspectorWindow.__inspectorSubscriptionEvents.push(event);
-    globalThis.console?.debug?.("[inspector-subscription]", JSON.stringify(event));
   }
 }
 
