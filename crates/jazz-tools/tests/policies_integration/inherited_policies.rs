@@ -198,7 +198,7 @@ fn folder_document_values(
         Value::Text(owner_id.to_string()),
         Value::Text(title.to_string()),
         Value::Boolean(archived),
-        folder_id.map(Value::Uuid).unwrap_or(Value::Null),
+        folder_id.into(),
     ]
 }
 
@@ -212,10 +212,7 @@ fn folder_document_input(
         ("owner_id".to_string(), Value::Text(owner_id.to_string())),
         ("title".to_string(), Value::Text(title.to_string())),
         ("archived".to_string(), Value::Boolean(archived)),
-        (
-            "folder_id".to_string(),
-            folder_id.map(Value::Uuid).unwrap_or(Value::Null),
-        ),
+        ("folder_id".to_string(), folder_id.into()),
     ])
 }
 
@@ -230,8 +227,8 @@ fn multi_folder_document_values(
         Value::Text(owner_id.to_string()),
         Value::Text(title.to_string()),
         Value::Boolean(archived),
-        primary_folder_id.map(Value::Uuid).unwrap_or(Value::Null),
-        secondary_folder_id.map(Value::Uuid).unwrap_or(Value::Null),
+        primary_folder_id.into(),
+        secondary_folder_id.into(),
     ]
 }
 
@@ -246,13 +243,10 @@ fn multi_folder_document_input(
         ("owner_id".to_string(), Value::Text(owner_id.to_string())),
         ("title".to_string(), Value::Text(title.to_string())),
         ("archived".to_string(), Value::Boolean(archived)),
-        (
-            "primary_folder_id".to_string(),
-            primary_folder_id.map(Value::Uuid).unwrap_or(Value::Null),
-        ),
+        ("primary_folder_id".to_string(), primary_folder_id.into()),
         (
             "secondary_folder_id".to_string(),
-            secondary_folder_id.map(Value::Uuid).unwrap_or(Value::Null),
+            secondary_folder_id.into(),
         ),
     ])
 }
@@ -279,10 +273,7 @@ fn todo_scalar_ref_input(
     HashMap::from([
         ("owner_id".to_string(), Value::Text(owner_id.to_string())),
         ("title".to_string(), Value::Text(title.to_string())),
-        (
-            "image".to_string(),
-            image.map(Value::Uuid).unwrap_or(Value::Null),
-        ),
+        ("image".to_string(), image.into()),
     ])
 }
 

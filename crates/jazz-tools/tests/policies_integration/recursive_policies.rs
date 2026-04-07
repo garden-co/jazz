@@ -211,7 +211,7 @@ fn recursive_folder_values(owner_id: &str, name: &str, parent_id: Option<ObjectI
     vec![
         Value::Text(owner_id.to_string()),
         Value::Text(name.to_string()),
-        parent_id.map(Value::Uuid).unwrap_or(Value::Null),
+        parent_id.into(),
     ]
 }
 
@@ -223,10 +223,7 @@ fn recursive_folder_input(
     HashMap::from([
         ("owner_id".to_string(), Value::Text(owner_id.to_string())),
         ("name".to_string(), Value::Text(name.to_string())),
-        (
-            "parent_id".to_string(),
-            parent_id.map(Value::Uuid).unwrap_or(Value::Null),
-        ),
+        ("parent_id".to_string(), parent_id.into()),
     ])
 }
 
@@ -259,13 +256,7 @@ async fn update_recursive_folder_parent(
     parent_id: Option<ObjectId>,
 ) {
     client
-        .update(
-            folder_id,
-            vec![(
-                "parent_id".to_string(),
-                parent_id.map(Value::Uuid).unwrap_or(Value::Null),
-            )],
-        )
+        .update(folder_id, vec![("parent_id".to_string(), parent_id.into())])
         .await
         .expect("update recursive folder parent");
 }
