@@ -563,13 +563,24 @@ async fn jazz_tools_sender_side_objectupdated_delay_should_not_return_stale_sett
         .await
         .expect("client a create todo");
 
+    let seed_reader_dir = TempDir::new().expect("seed reader dir");
+    let seed_reader = JazzClient::connect(make_context(
+        app_id,
+        seed_server.base_url(),
+        seed_reader_dir.path().to_path_buf(),
+        make_jwt("sender-delay-seed-reader"),
+    ))
+    .await
+    .expect("connect seed reader");
+
     let _ = wait_for_todos_count(
-        &client_a,
+        &seed_reader,
         1,
         Duration::from_secs(20),
         Some(DurabilityTier::EdgeServer),
     )
     .await;
+    seed_reader.shutdown().await.expect("shutdown seed reader");
     client_a.shutdown().await.expect("shutdown client a");
     drop(seed_server);
 

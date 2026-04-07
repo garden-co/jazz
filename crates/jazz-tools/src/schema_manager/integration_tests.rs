@@ -3469,7 +3469,9 @@ mod tests {
     }
 
     /// Test 5: One-shot query() with settled_tier via subscribe_with_sync.
-    /// The subscription should not deliver until the required tier confirms.
+    /// With `local_updates = Immediate`, the subscription should deliver the
+    /// locally pending row once the initial frontier is complete, before the
+    /// requested tier confirms.
     #[test]
     fn query_one_shot_settled_tier() {
         let schema = SchemaBuilder::new()
@@ -3509,16 +3511,19 @@ mod tests {
             .unwrap();
         client.process(&mut storage);
 
-        // First process: no delivery (waiting for Worker tier)
+        // First process: local pending row is already visible because one-shot
+        // queries use immediate local updates by default.
         let updates = client.query_manager_mut().take_updates();
         let matching: Vec<_> = updates
             .iter()
             .filter(|u| u.subscription_id == sub_id)
             .collect();
         assert!(
-            matching.is_empty() || matching.iter().all(|u| u.delta.is_empty()),
-            "One-shot with settled_tier should not resolve on first local settle"
+            !matching.is_empty(),
+            "One-shot should resolve on first local settle"
         );
+        let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
+        assert_eq!(total_added, 1, "Should contain the one local row");
 
         let server_id = ServerId::new();
         let visible_row = storage
@@ -3542,18 +3547,17 @@ mod tests {
             });
         client.process(&mut storage);
 
-        // Now should resolve with correct data
+        // Worker durability arriving later should not emit another visible
+        // delta because the row is already present.
         let updates = client.query_manager_mut().take_updates();
         let matching: Vec<_> = updates
             .iter()
             .filter(|u| u.subscription_id == sub_id)
             .collect();
         assert!(
-            !matching.is_empty(),
-            "Should deliver after row reaches Worker"
+            matching.is_empty() || matching.iter().all(|u| u.delta.is_empty()),
+            "Worker promotion should not emit a second visible delta"
         );
-        let total_added: usize = matching.iter().map(|u| u.delta.added.len()).sum();
-        assert_eq!(total_added, 1, "Should contain the one row");
     }
 
     /// Test 6: One-shot query() with settled_tier resolves to empty snapshot after tier settle.

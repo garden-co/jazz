@@ -83,9 +83,9 @@ async fn alice_write_bob_read() {
     bob      -> server  : QuerySubscription (1), QueryUnsubscription (1)
     bob      => server  : QuerySubscription (1), QueryUnsubscription (1)
     server   -> alice   : RowVersionStateChanged (2)
-    server   -> bob     : QuerySettled (2), RowVersionNeeded (1)
+    server   -> bob     : QuerySettled (1), RowVersionNeeded (1)
     server   => alice   : RowVersionStateChanged (2)
-    server   => bob     : QuerySettled (2), RowVersionNeeded (1)
+    server   => bob     : QuerySettled (1), RowVersionNeeded (1)
     ");
 
     alice.shutdown().await.expect("shutdown alice");

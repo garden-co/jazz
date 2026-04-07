@@ -2241,6 +2241,47 @@ fn rc_query_settled_tier_holds() {
 }
 
 #[test]
+fn rc_query_remote_tier_immediate_local_updates_falls_back_to_local_pending_row() {
+    let mut s = create_3tier_rc();
+
+    let (id, _row_values) =
+        s.a.insert("users", user_insert_values(ObjectId::new(), "Alice"), None)
+            .unwrap();
+
+    let mut future = s.a.query_with_propagation(
+        Query::new("users"),
+        None,
+        ReadDurabilityOptions {
+            tier: Some(DurabilityTier::EdgeServer),
+            local_updates: crate::query_manager::manager::LocalUpdates::Immediate,
+        },
+        crate::sync_manager::QueryPropagation::Full,
+    );
+
+    let waker = noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    assert!(
+        Pin::new(&mut future).poll(&mut cx).is_pending(),
+        "Query should wait for the initial remote frontier"
+    );
+
+    // Worker frontier completion is enough to unblock the first snapshot. With
+    // immediate local updates, the locally-authored row should still be visible
+    // even though it has not reached EdgeServer durability yet.
+    pump_a_to_b(&mut s);
+    pump_b_to_a(&mut s);
+
+    match Pin::new(&mut future).poll(&mut cx) {
+        Poll::Ready(Ok(results)) => {
+            assert_eq!(results.len(), 1, "Should have one locally pending row");
+            assert_eq!(results[0].0, id);
+        }
+        Poll::Ready(Err(e)) => panic!("Query failed: {:?}", e),
+        Poll::Pending => panic!("Query should resolve once the initial frontier is complete"),
+    }
+}
+
+#[test]
 fn rc_query_settled_tier_empty_resolves() {
     let mut s = create_3tier_rc();
 
@@ -2570,8 +2611,9 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
     );
     drop(calls);
 
-    // Worker frontier completion is enough to unblock the first snapshot, but
-    // the row still does not satisfy the requested EdgeServer tier.
+    // Worker frontier completion is enough to unblock the first snapshot. With
+    // immediate local updates, the locally-authored row is shown immediately
+    // while its EdgeServer durability is still pending.
     pump_a_to_b(&mut s);
     pump_b_to_a(&mut s);
     let calls = received.lock().unwrap();
@@ -2580,28 +2622,26 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
         1,
         "First callback should happen after frontier completion"
     );
-    assert!(
-        calls[0].is_empty(),
-        "EdgeServer query should still hide rows that are only worker-settled"
+    assert_eq!(
+        calls[0].len(),
+        1,
+        "First callback should contain the local row"
     );
+    assert_eq!(calls[0][0].0, first_id);
     drop(calls);
 
-    // Reach EdgeServer settlement for the first row.
+    // Reach EdgeServer settlement for the first row. This should not emit a
+    // second visible delta because the row is already on screen via the local
+    // pending overlay.
     pump_b_to_c(&mut s);
     pump_c_to_b_to_a(&mut s);
 
     let calls = received.lock().unwrap();
-    assert!(
-        calls.len() >= 2,
-        "Row should appear once its settled tier reaches EdgeServer"
-    );
-    let first_delivery = &calls[1];
     assert_eq!(
-        first_delivery.len(),
+        calls.len(),
         1,
-        "EdgeServer-settled delivery should include one row"
+        "Tier promotion should not emit a second visible delta for the same row"
     );
-    assert_eq!(first_delivery[0].0, first_id);
     drop(calls);
 
     // After initial delivery, local updates should callback immediately.
@@ -2617,10 +2657,10 @@ fn rc_subscribe_remote_tier_immediate_local_updates() {
     let calls = received.lock().unwrap();
     assert_eq!(
         calls.len(),
-        3,
+        2,
         "Second local write should trigger immediate callback"
     );
-    let second_delivery = &calls[2];
+    let second_delivery = &calls[1];
     assert_eq!(
         second_delivery.len(),
         1,

@@ -256,21 +256,15 @@ impl JazzClient {
 
                                             match serde_json::from_slice::<ServerEvent>(json) {
                                                 Ok(event) => {
-                                                    if matches!(
-                                                        &event,
-                                                        ServerEvent::Connected { .. }
-                                                    ) && let Some(tx) =
-                                                        initial_stream_ready_tx.take()
-                                                    {
-                                                        let catalogue_state_hash = match &event {
+                                                    let connected_catalogue_state_hash =
+                                                        match &event {
                                                             ServerEvent::Connected {
                                                                 catalogue_state_hash,
                                                                 ..
-                                                            } => catalogue_state_hash.clone(),
+                                                            } => Some(catalogue_state_hash.clone()),
                                                             _ => None,
                                                         };
-                                                        let _ = tx.send(catalogue_state_hash);
-                                                    }
+
                                                     if let Err(e) = handle_server_event(
                                                         event,
                                                         &runtime_for_stream,
@@ -281,6 +275,12 @@ impl JazzClient {
                                                             "Error handling server event: {}",
                                                             e
                                                         );
+                                                    } else if let Some(catalogue_state_hash) =
+                                                        connected_catalogue_state_hash
+                                                        && let Some(tx) =
+                                                            initial_stream_ready_tx.take()
+                                                    {
+                                                        let _ = tx.send(catalogue_state_hash);
                                                     }
                                                 }
                                                 Err(e) => {

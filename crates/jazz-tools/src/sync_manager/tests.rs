@@ -212,6 +212,50 @@ fn row_version_created_emits_row_version_state_changed_to_source() {
 }
 
 #[test]
+fn row_version_created_stamps_local_durability_into_storage() {
+    let mut sm = SyncManager::new().with_durability_tier(DurabilityTier::EdgeServer);
+    let mut io = MemoryStorage::new();
+    let server_id = ServerId::new();
+    let row_id = ObjectId::new();
+    let row = visible_row(row_id, "main", Vec::new(), 1_000, b"alice");
+
+    sm.process_from_server(
+        &mut io,
+        server_id,
+        SyncPayload::RowVersionCreated {
+            metadata: Some(RowMetadata {
+                id: row_id,
+                metadata: row_metadata("users"),
+            }),
+            row,
+        },
+    );
+
+    let visible = io
+        .load_visible_region_row("users", "main", row_id)
+        .unwrap()
+        .expect("visible row");
+    let history = io
+        .scan_history_region(
+            "users",
+            "main",
+            crate::row_regions::HistoryScan::Row { row_id },
+        )
+        .unwrap();
+
+    assert_eq!(visible.confirmed_tier, Some(DurabilityTier::EdgeServer));
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].confirmed_tier, Some(DurabilityTier::EdgeServer));
+    assert_eq!(
+        sm.object_manager
+            .visible_row(row_id, BranchName::new("main"))
+            .expect("in-memory visible row")
+            .confirmed_tier,
+        Some(DurabilityTier::EdgeServer)
+    );
+}
+
+#[test]
 fn row_version_state_changed_updates_row_region_confirmed_tier_monotonically() {
     let mut sm = SyncManager::new();
     let mut io = MemoryStorage::new();

@@ -275,10 +275,13 @@ pub enum SyncPayload {
     /// Unsubscribe from a query (client to server).
     QueryUnsubscription { query_id: QueryId },
 
-    /// Query settlement notification — a query has settled at a given persistence tier.
+    /// Query frontier settlement notification.
+    ///
+    /// This means the upstream server has reached a complete first frontier for the
+    /// subscription. Per-row durability remains encoded and replayed on the rows
+    /// themselves via `RowVersionStateChanged`.
     QuerySettled {
         query_id: QueryId,
-        tier: DurabilityTier,
         /// Highest stream sequence known to be emitted before this notification.
         through_seq: u64,
     },
