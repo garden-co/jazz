@@ -330,3 +330,143 @@ impl Value {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // ── From<bool> ──────────────────────────────────────────────────
+
+    #[test]
+    fn from_bool_true() {
+        let v: Value = true.into();
+        assert_eq!(v, Value::Boolean(true));
+    }
+
+    #[test]
+    fn from_bool_false() {
+        let v: Value = false.into();
+        assert_eq!(v, Value::Boolean(false));
+    }
+
+    // ── From<i32> ───────────────────────────────────────────────────
+
+    #[test]
+    fn from_i32() {
+        let v: Value = 42i32.into();
+        assert_eq!(v, Value::Integer(42));
+    }
+
+    #[test]
+    fn from_i32_negative() {
+        let v: Value = (-1i32).into();
+        assert_eq!(v, Value::Integer(-1));
+    }
+
+    // ── From<i64> ───────────────────────────────────────────────────
+
+    #[test]
+    fn from_i64() {
+        let v: Value = 1_000_000_000_000i64.into();
+        assert_eq!(v, Value::BigInt(1_000_000_000_000));
+    }
+
+    // ── From<f64> ───────────────────────────────────────────────────
+
+    #[test]
+    fn from_f64() {
+        let v: Value = 3.14f64.into();
+        assert_eq!(v, Value::Double(3.14));
+    }
+
+    // ── From<&str> ──────────────────────────────────────────────────
+
+    #[test]
+    fn from_str_ref() {
+        let v: Value = "hello".into();
+        assert_eq!(v, Value::Text("hello".to_string()));
+    }
+
+    // ── From<String> ────────────────────────────────────────────────
+
+    #[test]
+    fn from_string() {
+        let v: Value = String::from("world").into();
+        assert_eq!(v, Value::Text("world".to_string()));
+    }
+
+    // ── From<ObjectId> ──────────────────────────────────────────────
+
+    #[test]
+    fn from_object_id() {
+        let oid = ObjectId::new();
+        let v: Value = oid.into();
+        assert_eq!(v, Value::Uuid(oid));
+    }
+
+    // ── From<Vec<u8>> ───────────────────────────────────────────────
+
+    #[test]
+    fn from_vec_u8() {
+        let bytes = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let v: Value = bytes.clone().into();
+        assert_eq!(v, Value::Bytea(bytes));
+    }
+
+    // ── From<Vec<Value>> ────────────────────────────────────────────
+
+    #[test]
+    fn from_vec_value() {
+        let arr = vec![Value::Integer(1), Value::Integer(2)];
+        let v: Value = arr.clone().into();
+        assert_eq!(v, Value::Array(arr));
+    }
+
+    // ── From<Option<T>> ─────────────────────────────────────────────
+
+    #[test]
+    fn from_option_some() {
+        let v: Value = Some(42i32).into();
+        assert_eq!(v, Value::Integer(42));
+    }
+
+    #[test]
+    fn from_option_none() {
+        let v: Value = Option::<i32>::None.into();
+        assert_eq!(v, Value::Null);
+    }
+
+    #[test]
+    fn from_option_some_string() {
+        let v: Value = Some("hey".to_string()).into();
+        assert_eq!(v, Value::Text("hey".to_string()));
+    }
+
+    // ── row_input ───────────────────────────────────────────────────
+
+    #[test]
+    fn row_input_builds_hashmap() {
+        let map = row_input([("name", "Alice"), ("age", 30i32)]);
+
+        let mut expected = HashMap::new();
+        expected.insert("name".to_string(), Value::Text("Alice".to_string()));
+        expected.insert("age".to_string(), Value::Integer(30));
+
+        assert_eq!(map, expected);
+    }
+
+    #[test]
+    fn row_input_empty() {
+        let map: HashMap<String, Value> = row_input([]);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn row_input_with_option_null() {
+        let map = row_input([("present", Some("yes")), ("absent", None)]);
+
+        assert_eq!(map["present"], Value::Text("yes".to_string()));
+        assert_eq!(map["absent"], Value::Null);
+    }
+}
